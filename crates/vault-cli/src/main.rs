@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
-use vault_core::{GraphIndex, Link, LinkStatus};
+use vault_core::{Document, GraphIndex, Link, LinkStatus};
 use vault_index::{build_index, concise_diagnostics, has_errors};
 
 #[derive(Debug, Parser)]
@@ -30,6 +30,7 @@ enum GraphSubcommand {
     Links(GraphArgs),
     Unresolved(GraphArgs),
     Backlinks(TargetGraphArgs),
+    Inspect(TargetGraphArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -57,6 +58,14 @@ struct TargetGraphArgs {
 enum OutputFormat {
     Json,
     Jsonl,
+}
+
+#[derive(Debug, Serialize)]
+struct InspectOutput {
+    document: Document,
+    incoming_links: Vec<Link>,
+    outgoing_links: Vec<Link>,
+    unresolved_outgoing_links: Vec<Link>,
 }
 
 fn main() -> Result<()> {
@@ -94,6 +103,14 @@ fn run(cli: Cli) -> Result<i32> {
                 let target_path = resolve_target_path(&index, &args.target)?;
                 let links = backlinks(&index, &target_path);
                 write_output(&links, args.format)?;
+                Ok(exit_code_for(&index))
+            }
+            GraphSubcommand::Inspect(args) => {
+                let mut index = build_index(&args.root)?;
+                trim_diagnostics(&mut index, args.verbose);
+                let target_path = resolve_target_path(&index, &args.target)?;
+                let output = inspect_document(&index, &target_path)?;
+                write_item_output(&output, args.format)?;
                 Ok(exit_code_for(&index))
             }
         },
@@ -165,6 +182,34 @@ fn resolve_target_path(index: &GraphIndex, target: &str) -> Result<Utf8PathBuf> 
     }
 }
 
+fn inspect_document(index: &GraphIndex, target_path: &Utf8PathBuf) -> Result<InspectOutput> {
+    let document = index
+        .documents
+        .iter()
+        .find(|document| &document.path == target_path)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("document not found after resolution: {target_path}"))?;
+
+    let incoming_links = backlinks(index, target_path)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let outgoing_links = document.links.clone();
+    let unresolved_outgoing_links = document
+        .links
+        .iter()
+        .filter(|link| link.status != LinkStatus::Resolved)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(InspectOutput {
+        document,
+        incoming_links,
+        outgoing_links,
+        unresolved_outgoing_links,
+    })
+}
+
 fn write_output<T: Serialize>(items: &[T], format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => {
@@ -174,6 +219,18 @@ fn write_output<T: Serialize>(items: &[T], format: OutputFormat) -> Result<()> {
             for item in items {
                 println!("{}", serde_json::to_string(item)?);
             }
+        }
+    }
+    Ok(())
+}
+
+fn write_item_output<T: Serialize>(item: &T, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(item)?);
+        }
+        OutputFormat::Jsonl => {
+            println!("{}", serde_json::to_string(item)?);
         }
     }
     Ok(())

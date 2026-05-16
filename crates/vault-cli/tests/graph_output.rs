@@ -193,3 +193,53 @@ fn graph_backlinks_rejects_ambiguous_stem() {
     assert!(stderr.contains("duplicate.md"));
     assert!(stderr.contains("other/duplicate.md"));
 }
+
+#[test]
+fn graph_inspect_json_contract() {
+    let root = fixture_root();
+    let output = vault(&[
+        "graph",
+        "inspect",
+        "alpha.md",
+        "--root",
+        root.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+
+    let value = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(value["document"]["path"], "alpha.md");
+    assert_eq!(value["document"]["frontmatter"]["title"], "Alpha");
+    assert_eq!(value["incoming_links"].as_array().unwrap().len(), 1);
+    assert_eq!(value["incoming_links"][0]["source_path"], "beta.md");
+    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        value["unresolved_outgoing_links"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(value["unresolved_outgoing_links"][0]["target"], "missing");
+    assert_eq!(value["unresolved_outgoing_links"][1]["target"], "duplicate");
+}
+
+#[test]
+fn graph_inspect_accepts_unique_stem() {
+    let root = fixture_root();
+    let output = vault(&[
+        "graph",
+        "inspect",
+        "beta",
+        "--root",
+        root.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+
+    let value = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(value["document"]["path"], "beta.md");
+    assert_eq!(value["incoming_links"].as_array().unwrap().len(), 1);
+    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["outgoing_links"][0]["resolved_path"],
+        serde_json::json!("alpha.md")
+    );
+}
