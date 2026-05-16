@@ -152,11 +152,47 @@ fn graph_build_writes_sqlite_cache() {
             |row| row.get(0),
         )
         .unwrap();
+    let schema_version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(document_count, 7);
     assert_eq!(link_count, 9);
     assert_eq!(missing_reason, "target-missing");
+    assert_eq!(schema_version, "1");
 
     std::fs::remove_dir_all(cache_dir).ok();
+}
+
+#[test]
+fn graph_build_accepts_sqlite_file_path() {
+    let root = fixture_root();
+    let cache_path = temp_cache_dir().with_extension("sqlite");
+    let output = vault(&[
+        "graph",
+        "build",
+        "--root",
+        root.to_str().unwrap(),
+        "--cache",
+        cache_path.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+
+    let value = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(value["cache_path"], cache_path.to_str().unwrap());
+    assert!(cache_path.exists());
+
+    let connection = Connection::open(&cache_path).expect("cache should open");
+    let document_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(document_count, 7);
+
+    std::fs::remove_file(cache_path).ok();
 }
 
 #[test]

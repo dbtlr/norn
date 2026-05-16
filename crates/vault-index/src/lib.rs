@@ -14,6 +14,8 @@ use vault_core::{
 };
 use walkdir::WalkDir;
 
+const CACHE_SCHEMA_VERSION: &str = "1";
+
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     #[error("vault root does not exist: {0}")]
@@ -672,6 +674,11 @@ fn initialize_cache_schema(connection: &Connection) -> rusqlite::Result<()> {
             message TEXT NOT NULL,
             detail TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL
+        );
         "#,
     )
 }
@@ -680,6 +687,7 @@ fn clear_cache(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         r#"
         DELETE FROM diagnostics;
+        DELETE FROM metadata;
         DELETE FROM links;
         DELETE FROM block_ids;
         DELETE FROM headings;
@@ -690,6 +698,11 @@ fn clear_cache(connection: &Connection) -> rusqlite::Result<()> {
 }
 
 fn insert_index(connection: &Connection, index: &GraphIndex) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO metadata (key, value) VALUES ('schema_version', ?1)",
+        params![CACHE_SCHEMA_VERSION],
+    )?;
+
     for document in &index.documents {
         connection.execute(
             "INSERT INTO files (path, hash) VALUES (?1, ?2)",
