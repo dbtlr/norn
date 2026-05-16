@@ -7,6 +7,7 @@ use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 use regex::Regex;
 use vault_core::{
     Diagnostic, Document, GraphIndex, Heading, Link, LinkKind, LinkStatus, Severity, SourceSpan,
+    UnresolvedReason,
 };
 use walkdir::WalkDir;
 
@@ -69,6 +70,7 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
                 hash: String::new(),
                 frontmatter: None,
                 headings: Vec::new(),
+                block_ids: Vec::new(),
                 links: Vec::new(),
                 diagnostics: vec![Diagnostic::error("read-failed", "failed to read document")
                     .with_detail(error.to_string())],
@@ -80,6 +82,7 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
     let (frontmatter, body, body_start) = extract_frontmatter(&content, &mut diagnostics);
     let (headings, mut links) = parse_commonmark(&path, &content, body, body_start);
     links.extend(parse_wikilinks(&path, &content, body, body_start));
+    let block_ids = parse_block_ids(body);
 
     Document {
         path,
@@ -87,6 +90,7 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
         hash,
         frontmatter,
         headings,
+        block_ids,
         links,
         diagnostics,
     }
@@ -196,6 +200,7 @@ fn parse_commonmark(
                         block_ref: None,
                         source_span: Some(source_span(content, body_start + range.start)),
                         resolved_path: None,
+                        unresolved_reason: None,
                         candidates: Vec::new(),
                         status: LinkStatus::Unresolved,
                     });
@@ -242,6 +247,7 @@ fn parse_wikilinks(
                 block_ref,
                 source_span: Some(source_span(content, body_start + captures.get(0)?.start())),
                 resolved_path: None,
+                unresolved_reason: None,
                 candidates: Vec::new(),
                 status: LinkStatus::Unresolved,
             })
@@ -249,9 +255,22 @@ fn parse_wikilinks(
         .collect()
 }
 
+fn parse_block_ids(body: &str) -> Vec<String> {
+    let block_re = Regex::new(r"(?:^|\s)\^([A-Za-z0-9_-]+)\s*$").expect("valid block id regex");
+    body.lines()
+        .filter_map(|line| {
+            block_re
+                .captures(line)
+                .and_then(|captures| captures.get(1))
+                .map(|block_id| block_id.as_str().to_string())
+        })
+        .collect()
+}
+
 fn resolve_links(documents: &mut [Document]) {
     let mut by_path: HashMap<String, Utf8PathBuf> = HashMap::new();
     let mut by_stem: HashMap<String, Vec<Utf8PathBuf>> = HashMap::new();
+    let mut facts_by_path: HashMap<Utf8PathBuf, DocumentFacts> = HashMap::new();
 
     for document in documents.iter() {
         by_path.insert(document.path.as_str().to_string(), document.path.clone());
@@ -259,6 +278,17 @@ fn resolve_links(documents: &mut [Document]) {
             .entry(document.stem.to_lowercase())
             .or_default()
             .push(document.path.clone());
+        facts_by_path.insert(
+            document.path.clone(),
+            DocumentFacts {
+                heading_slugs: document
+                    .headings
+                    .iter()
+                    .map(|heading| heading.slug.clone())
+                    .collect(),
+                block_ids: document.block_ids.clone(),
+            },
+        );
     }
 
     for document in documents.iter_mut() {
@@ -272,23 +302,63 @@ fn resolve_links(documents: &mut [Document]) {
 
             match candidates.as_slice() {
                 [single] => {
-                    link.status = LinkStatus::Resolved;
                     link.resolved_path = Some(single.clone());
                     link.candidates = Vec::new();
+                    validate_resolved_reference(link, single, &facts_by_path);
                 }
                 [] => {
                     link.status = LinkStatus::Unresolved;
                     link.resolved_path = None;
+                    link.unresolved_reason = Some(UnresolvedReason::TargetMissing);
                     link.candidates = Vec::new();
                 }
                 many => {
                     link.status = LinkStatus::Ambiguous;
                     link.resolved_path = None;
+                    link.unresolved_reason = None;
                     link.candidates = many.to_vec();
                 }
             }
         }
     }
+}
+
+#[derive(Clone)]
+struct DocumentFacts {
+    heading_slugs: Vec<String>,
+    block_ids: Vec<String>,
+}
+
+fn validate_resolved_reference(
+    link: &mut Link,
+    target_path: &Utf8PathBuf,
+    facts_by_path: &HashMap<Utf8PathBuf, DocumentFacts>,
+) {
+    let Some(facts) = facts_by_path.get(target_path) else {
+        link.status = LinkStatus::Resolved;
+        link.unresolved_reason = None;
+        return;
+    };
+
+    if let Some(anchor) = &link.anchor {
+        let anchor_slug = slugify(anchor);
+        if !facts.heading_slugs.iter().any(|slug| slug == &anchor_slug) {
+            link.status = LinkStatus::Unresolved;
+            link.unresolved_reason = Some(UnresolvedReason::AnchorMissing);
+            return;
+        }
+    }
+
+    if let Some(block_ref) = &link.block_ref {
+        if !facts.block_ids.iter().any(|block_id| block_id == block_ref) {
+            link.status = LinkStatus::Unresolved;
+            link.unresolved_reason = Some(UnresolvedReason::BlockRefMissing);
+            return;
+        }
+    }
+
+    link.status = LinkStatus::Resolved;
+    link.unresolved_reason = None;
 }
 
 fn resolve_markdown_link(

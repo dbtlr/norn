@@ -76,6 +76,14 @@ pub enum LinkStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnresolvedReason {
+    TargetMissing,
+    AnchorMissing,
+    BlockRefMissing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Link {
     pub source_path: Utf8PathBuf,
     pub raw: String,
@@ -91,6 +99,8 @@ pub struct Link {
     pub source_span: Option<SourceSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_path: Option<Utf8PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved_reason: Option<UnresolvedReason>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub candidates: Vec<Utf8PathBuf>,
     pub status: LinkStatus,
@@ -105,6 +115,8 @@ pub struct Document {
     pub frontmatter: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub headings: Vec<Heading>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub block_ids: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub links: Vec<Link>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
