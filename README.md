@@ -6,6 +6,12 @@ The current binary name is `vault`.
 
 ## Build
 
+Install repo tools with `mise`:
+
+```bash
+mise install
+```
+
 ```bash
 cargo build -p vault-cli
 ```
