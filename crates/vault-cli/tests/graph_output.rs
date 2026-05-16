@@ -52,6 +52,33 @@ fn temp_cache_dir() -> PathBuf {
 }
 
 #[test]
+fn vault_version_reports_package_version() {
+    let output = vault(&["--version"]);
+    assert!(output.contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn graph_help_describes_contracts() {
+    let output = vault(&["graph", "--help"]);
+    assert!(output.contains("Query and cache derived Markdown vault graph facts"));
+    assert!(output.contains("Emit parsed Markdown documents"));
+    assert!(output.contains("Write a SQLite graph cache"));
+}
+
+#[test]
+fn graph_documents_help_documents_frontmatter_filter() {
+    let output = vault(&["graph", "documents", "--help"]);
+    assert!(output.contains("Frontmatter-only field:value filter"));
+}
+
+#[test]
+fn graph_build_help_documents_cache_semantics() {
+    let output = vault(&["graph", "build", "--help"]);
+    assert!(output.contains("SQLite cache file path or directory"));
+    assert!(output.contains("--format only controls stdout"));
+}
+
+#[test]
 fn graph_documents_jsonl_contract() {
     let root = fixture_root();
     let output = vault(&[

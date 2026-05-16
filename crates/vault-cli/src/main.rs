@@ -8,6 +8,7 @@ use vault_index::{build_index, concise_diagnostics, has_errors, write_sqlite_cac
 #[derive(Debug, Parser)]
 #[command(name = "vault")]
 #[command(about = "Deterministic Markdown vault graph tools")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -15,10 +16,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Query and cache derived Markdown vault graph facts")]
     Graph(GraphCommand),
 }
 
 #[derive(Debug, Parser)]
+#[command(about = "Read-only graph/index commands for Markdown vaults")]
 struct GraphCommand {
     #[command(subcommand)]
     command: GraphSubcommand,
@@ -26,46 +29,71 @@ struct GraphCommand {
 
 #[derive(Debug, Subcommand)]
 enum GraphSubcommand {
+    #[command(about = "Write a SQLite graph cache and emit a build summary")]
     Build(BuildArgs),
-    Documents(GraphArgs),
+    #[command(
+        about = "Emit parsed Markdown documents with frontmatter, headings, links, and diagnostics"
+    )]
+    Documents(DocumentsArgs),
+    #[command(about = "Emit all parsed link facts")]
     Links(GraphArgs),
+    #[command(about = "Emit unresolved and ambiguous link facts")]
     Unresolved(GraphArgs),
+    #[command(about = "Emit incoming links for an exact path or unique stem")]
     Backlinks(TargetGraphArgs),
+    #[command(about = "Emit one document plus incoming, outgoing, and unresolved outgoing links")]
     Inspect(TargetGraphArgs),
 }
 
 #[derive(Debug, Parser)]
 struct BuildArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "SQLite cache file path or directory. Directories receive graph.sqlite; --format only controls stdout"
+    )]
     cache: Utf8PathBuf,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json, help = "Stdout format")]
     format: OutputFormat,
-    #[arg(long)]
+    #[arg(long, help = "Include verbose diagnostic details")]
+    verbose: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DocumentsArgs {
+    #[arg(long, default_value = ".", help = "Vault root to index")]
+    root: Utf8PathBuf,
+    #[arg(
+        long = "filter",
+        help = "Frontmatter-only field:value filter. Repeat to require multiple fields"
+    )]
+    filters: Vec<String>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl, help = "Stdout format")]
+    format: OutputFormat,
+    #[arg(long, help = "Include verbose diagnostic details")]
     verbose: bool,
 }
 
 #[derive(Debug, Parser)]
 struct GraphArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
-    #[arg(long = "filter")]
-    filters: Vec<String>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl, help = "Stdout format")]
     format: OutputFormat,
-    #[arg(long)]
+    #[arg(long, help = "Include verbose diagnostic details")]
     verbose: bool,
 }
 
 #[derive(Debug, Parser)]
 struct TargetGraphArgs {
+    #[arg(help = "Exact vault-relative path or unique document stem")]
     target: String,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl, help = "Stdout format")]
     format: OutputFormat,
-    #[arg(long)]
+    #[arg(long, help = "Include verbose diagnostic details")]
     verbose: bool,
 }
 
