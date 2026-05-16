@@ -16,3 +16,9 @@ These references should report missing anchors [[beta#Missing Heading]] and miss
 This embeds ![[gamma]] and points at [Delta](folder/delta.md#Delta-Heading).
 
 This ambiguous link points at [[duplicate]].
+
+Inline code should not create a graph edge: `[[inline-example]]`.
+
+```markdown
+[[fenced-example]]
+```

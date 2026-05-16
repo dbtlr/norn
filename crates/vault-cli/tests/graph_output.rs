@@ -250,6 +250,8 @@ fn graph_links_jsonl_contract() {
     assert_eq!(links[4]["unresolved_reason"], "anchor-missing");
     assert_eq!(links[5]["unresolved_reason"], "block-ref-missing");
     assert_eq!(links[7]["status"], "ambiguous");
+    assert!(!links.iter().any(|link| link["target"] == "inline-example"));
+    assert!(!links.iter().any(|link| link["target"] == "fenced-example"));
 }
 
 #[test]

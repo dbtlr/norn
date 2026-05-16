@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::ops::Range;
 use std::path::{Component, Path};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -272,9 +273,18 @@ fn parse_wikilinks(
     body_start: usize,
 ) -> Vec<Link> {
     let wikilink_re = Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex");
+    let ignored_ranges = ignored_wikilink_ranges(body);
     wikilink_re
         .captures_iter(body)
         .filter_map(|captures| {
+            let full_match = captures.get(0)?;
+            if ignored_ranges
+                .iter()
+                .any(|range| ranges_overlap(range, &(full_match.start()..full_match.end())))
+            {
+                return None;
+            }
+
             let raw = captures.get(0)?.as_str().to_string();
             let is_embed = captures.get(1).is_some_and(|m| m.as_str() == "!");
             let inner = captures.get(2)?.as_str();
@@ -297,7 +307,7 @@ fn parse_wikilinks(
                 label,
                 anchor,
                 block_ref,
-                source_span: Some(source_span(content, body_start + captures.get(0)?.start())),
+                source_span: Some(source_span(content, body_start + full_match.start())),
                 resolved_path: None,
                 unresolved_reason: None,
                 candidates: Vec::new(),
@@ -305,6 +315,31 @@ fn parse_wikilinks(
             })
         })
         .collect()
+}
+
+fn ignored_wikilink_ranges(body: &str) -> Vec<Range<usize>> {
+    let parser = Parser::new(body).into_offset_iter();
+    let mut ignored_ranges = Vec::new();
+    let mut active_code_block_start = None;
+
+    for (event, range) in parser {
+        match event {
+            Event::Code(_) => ignored_ranges.push(range),
+            Event::Start(Tag::CodeBlock(_)) => active_code_block_start = Some(range.start),
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(start) = active_code_block_start.take() {
+                    ignored_ranges.push(start..range.end);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ignored_ranges
+}
+
+fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
+    left.start < right.end && right.start < left.end
 }
 
 fn parse_block_ids(body: &str) -> Vec<String> {
