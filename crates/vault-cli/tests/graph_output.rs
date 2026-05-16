@@ -350,6 +350,44 @@ fn graph_backlinks_accepts_exact_path() {
 }
 
 #[test]
+fn graph_backlinks_accepts_case_insensitive_stem() {
+    let root = fixture_root();
+    let output = vault(&[
+        "graph",
+        "backlinks",
+        "BETA",
+        "--root",
+        root.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+
+    let links = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(links.len(), 4);
+    assert_eq!(links[0]["resolved_path"], "beta.md");
+}
+
+#[test]
+fn graph_inspect_accepts_case_insensitive_stem() {
+    let root = fixture_root();
+    let output = vault(&[
+        "graph",
+        "inspect",
+        "ALPHA",
+        "--root",
+        root.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+
+    let value = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(value["document"]["path"], "alpha.md");
+}
+
+#[test]
 fn graph_backlinks_rejects_ambiguous_stem() {
     let root = fixture_root();
     let stderr = vault_error(&[

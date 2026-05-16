@@ -89,7 +89,9 @@ struct GraphArgs {
 
 #[derive(Debug, Parser)]
 struct TargetGraphArgs {
-    #[arg(help = "Exact vault-relative path or unique document stem")]
+    #[arg(
+        help = "Exact vault-relative path or unique document stem. Stem matching is case-insensitive"
+    )]
     target: String,
     #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
@@ -248,7 +250,7 @@ fn resolve_target_path(index: &GraphIndex, target: &str) -> Result<Utf8PathBuf> 
     let matches = index
         .documents
         .iter()
-        .filter(|document| document.stem == target)
+        .filter(|document| document.stem.eq_ignore_ascii_case(target))
         .map(|document| document.path.clone())
         .collect::<Vec<_>>();
 
