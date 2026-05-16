@@ -25,6 +25,22 @@ fn vault(args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout should be UTF-8")
 }
 
+fn vault_error(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_vault"))
+        .args(args)
+        .output()
+        .expect("vault command should run");
+
+    assert!(
+        !output.status.success(),
+        "vault command succeeded unexpectedly\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stderr).expect("stderr should be UTF-8")
+}
+
 #[test]
 fn graph_documents_jsonl_contract() {
     let root = fixture_root();
@@ -120,4 +136,60 @@ fn graph_unresolved_json_contract() {
             "]\n",
         )
     );
+}
+
+#[test]
+fn graph_backlinks_jsonl_contract() {
+    let root = fixture_root();
+    let output = vault(&[
+        "graph",
+        "backlinks",
+        "beta",
+        "--root",
+        root.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+
+    assert_eq!(
+        output,
+        "{\"source_path\":\"alpha.md\",\"raw\":\"[[beta]]\",\"kind\":\"wikilink\",\"target\":\"beta\",\"resolved_path\":\"beta.md\",\"status\":\"resolved\"}\n"
+    );
+}
+
+#[test]
+fn graph_backlinks_accepts_exact_path() {
+    let root = fixture_root();
+    let output = vault(&[
+        "graph",
+        "backlinks",
+        "folder/delta.md",
+        "--root",
+        root.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+
+    assert_eq!(
+        output,
+        "{\"source_path\":\"alpha.md\",\"raw\":\"folder/delta.md#Delta-Heading\",\"kind\":\"markdown\",\"target\":\"folder/delta.md\",\"anchor\":\"Delta-Heading\",\"resolved_path\":\"folder/delta.md\",\"status\":\"resolved\"}\n"
+    );
+}
+
+#[test]
+fn graph_backlinks_rejects_ambiguous_stem() {
+    let root = fixture_root();
+    let stderr = vault_error(&[
+        "graph",
+        "backlinks",
+        "duplicate",
+        "--root",
+        root.to_str().unwrap(),
+        "--format",
+        "jsonl",
+    ]);
+
+    assert!(stderr.contains("ambiguous document stem: duplicate"));
+    assert!(stderr.contains("duplicate.md"));
+    assert!(stderr.contains("other/duplicate.md"));
 }
