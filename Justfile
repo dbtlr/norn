@@ -38,6 +38,9 @@ fixture-links root="fixtures/basic":
 fixture-unresolved root="fixtures/basic":
     cargo run -q -p vault-cli -- graph unresolved --root '{{root}}' --format json
 
+fixture-diagnostics root="fixtures/basic":
+    cargo run -q -p vault-cli -- graph diagnostics --root '{{root}}' --format jsonl
+
 fixture-backlinks target="beta" root="fixtures/basic":
     cargo run -q -p vault-cli -- graph backlinks '{{target}}' --root '{{root}}' --format jsonl
 
