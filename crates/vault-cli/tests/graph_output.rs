@@ -62,7 +62,10 @@ fn graph_documents_jsonl_contract() {
     assert_eq!(documents[0]["path"], "alpha.md");
     assert_eq!(documents[0]["frontmatter"]["title"], "Alpha");
     assert_eq!(documents[0]["headings"][0]["slug"], "alpha");
-    assert_eq!(documents[0]["links"].as_array().unwrap().len(), 5);
+    assert_eq!(documents[0]["headings"][0]["source_span"]["line"], 8);
+    assert_eq!(documents[0]["links"].as_array().unwrap().len(), 6);
+    assert_eq!(documents[0]["links"][1]["label"], "Beta Note");
+    assert_eq!(documents[0]["links"][3]["block_ref"], "block-a");
     assert_eq!(documents[2]["path"], "broken-frontmatter.md");
     assert_eq!(
         documents[2]["diagnostics"][0],
@@ -86,17 +89,20 @@ fn graph_links_jsonl_contract() {
         "jsonl",
     ]);
 
-    assert_eq!(
-        output,
-        concat!(
-            "{\"source_path\":\"alpha.md\",\"raw\":\"folder/delta.md#Delta-Heading\",\"kind\":\"markdown\",\"target\":\"folder/delta.md\",\"anchor\":\"Delta-Heading\",\"resolved_path\":\"folder/delta.md\",\"status\":\"resolved\"}\n",
-            "{\"source_path\":\"alpha.md\",\"raw\":\"[[beta]]\",\"kind\":\"wikilink\",\"target\":\"beta\",\"resolved_path\":\"beta.md\",\"status\":\"resolved\"}\n",
-            "{\"source_path\":\"alpha.md\",\"raw\":\"[[missing]]\",\"kind\":\"wikilink\",\"target\":\"missing\",\"status\":\"unresolved\"}\n",
-            "{\"source_path\":\"alpha.md\",\"raw\":\"![[gamma]]\",\"kind\":\"embed\",\"target\":\"gamma\",\"resolved_path\":\"folder/gamma.md\",\"status\":\"resolved\"}\n",
-            "{\"source_path\":\"alpha.md\",\"raw\":\"[[duplicate]]\",\"kind\":\"wikilink\",\"target\":\"duplicate\",\"candidates\":[\"duplicate.md\",\"other/duplicate.md\"],\"status\":\"ambiguous\"}\n",
-            "{\"source_path\":\"beta.md\",\"raw\":\"[[alpha#Alpha]]\",\"kind\":\"wikilink\",\"target\":\"alpha\",\"anchor\":\"Alpha\",\"resolved_path\":\"alpha.md\",\"status\":\"resolved\"}\n",
-        )
-    );
+    let links = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(links.len(), 7);
+    assert_eq!(links[0]["kind"], "markdown");
+    assert_eq!(links[0]["source_span"]["line"], 14);
+    assert_eq!(links[1]["raw"], "[[beta|Beta Note]]");
+    assert_eq!(links[1]["label"], "Beta Note");
+    assert_eq!(links[1]["resolved_path"], "beta.md");
+    assert_eq!(links[3]["raw"], "[[beta#^block-a]]");
+    assert_eq!(links[3]["block_ref"], "block-a");
+    assert_eq!(links[5]["status"], "ambiguous");
 }
 
 #[test]
@@ -111,31 +117,14 @@ fn graph_unresolved_json_contract() {
         "json",
     ]);
 
-    assert_eq!(
-        output,
-        concat!(
-            "[\n",
-            "  {\n",
-            "    \"source_path\": \"alpha.md\",\n",
-            "    \"raw\": \"[[missing]]\",\n",
-            "    \"kind\": \"wikilink\",\n",
-            "    \"target\": \"missing\",\n",
-            "    \"status\": \"unresolved\"\n",
-            "  },\n",
-            "  {\n",
-            "    \"source_path\": \"alpha.md\",\n",
-            "    \"raw\": \"[[duplicate]]\",\n",
-            "    \"kind\": \"wikilink\",\n",
-            "    \"target\": \"duplicate\",\n",
-            "    \"candidates\": [\n",
-            "      \"duplicate.md\",\n",
-            "      \"other/duplicate.md\"\n",
-            "    ],\n",
-            "    \"status\": \"ambiguous\"\n",
-            "  }\n",
-            "]\n",
-        )
-    );
+    let links = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(links.as_array().unwrap().len(), 2);
+    assert_eq!(links[0]["raw"], "[[missing]]");
+    assert_eq!(links[0]["source_span"]["line"], 10);
+    assert_eq!(links[0]["status"], "unresolved");
+    assert_eq!(links[1]["raw"], "[[duplicate]]");
+    assert_eq!(links[1]["source_span"]["line"], 16);
+    assert_eq!(links[1]["status"], "ambiguous");
 }
 
 #[test]
@@ -151,10 +140,15 @@ fn graph_backlinks_jsonl_contract() {
         "jsonl",
     ]);
 
-    assert_eq!(
-        output,
-        "{\"source_path\":\"alpha.md\",\"raw\":\"[[beta]]\",\"kind\":\"wikilink\",\"target\":\"beta\",\"resolved_path\":\"beta.md\",\"status\":\"resolved\"}\n"
-    );
+    let links = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0]["raw"], "[[beta|Beta Note]]");
+    assert_eq!(links[0]["label"], "Beta Note");
+    assert_eq!(links[1]["raw"], "[[beta#^block-a]]");
+    assert_eq!(links[1]["block_ref"], "block-a");
 }
 
 #[test]
@@ -170,10 +164,10 @@ fn graph_backlinks_accepts_exact_path() {
         "jsonl",
     ]);
 
-    assert_eq!(
-        output,
-        "{\"source_path\":\"alpha.md\",\"raw\":\"folder/delta.md#Delta-Heading\",\"kind\":\"markdown\",\"target\":\"folder/delta.md\",\"anchor\":\"Delta-Heading\",\"resolved_path\":\"folder/delta.md\",\"status\":\"resolved\"}\n"
-    );
+    let link = serde_json::from_str::<Value>(output.trim()).expect("output should be JSON");
+    assert_eq!(link["kind"], "markdown");
+    assert_eq!(link["anchor"], "Delta-Heading");
+    assert_eq!(link["source_span"]["line"], 14);
 }
 
 #[test]
@@ -212,7 +206,7 @@ fn graph_inspect_json_contract() {
     assert_eq!(value["document"]["frontmatter"]["title"], "Alpha");
     assert_eq!(value["incoming_links"].as_array().unwrap().len(), 1);
     assert_eq!(value["incoming_links"][0]["source_path"], "beta.md");
-    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 5);
+    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 6);
     assert_eq!(
         value["unresolved_outgoing_links"].as_array().unwrap().len(),
         2
@@ -236,7 +230,7 @@ fn graph_inspect_accepts_unique_stem() {
 
     let value = serde_json::from_str::<Value>(&output).expect("output should be JSON");
     assert_eq!(value["document"]["path"], "beta.md");
-    assert_eq!(value["incoming_links"].as_array().unwrap().len(), 1);
+    assert_eq!(value["incoming_links"].as_array().unwrap().len(), 2);
     assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 1);
     assert_eq!(
         value["outgoing_links"][0]["resolved_path"],

@@ -5,7 +5,9 @@ use std::path::{Component, Path};
 use camino::{Utf8Path, Utf8PathBuf};
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 use regex::Regex;
-use vault_core::{Diagnostic, Document, GraphIndex, Heading, Link, LinkKind, LinkStatus, Severity};
+use vault_core::{
+    Diagnostic, Document, GraphIndex, Heading, Link, LinkKind, LinkStatus, Severity, SourceSpan,
+};
 use walkdir::WalkDir;
 
 #[derive(Debug, thiserror::Error)]
@@ -75,9 +77,9 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
     };
 
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-    let (frontmatter, body) = extract_frontmatter(&content, &mut diagnostics);
-    let (headings, mut links) = parse_commonmark(&path, body);
-    links.extend(parse_wikilinks(&path, body));
+    let (frontmatter, body, body_start) = extract_frontmatter(&content, &mut diagnostics);
+    let (headings, mut links) = parse_commonmark(&path, &content, body, body_start);
+    links.extend(parse_wikilinks(&path, &content, body, body_start));
 
     Document {
         path,
@@ -93,12 +95,12 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
 fn extract_frontmatter<'a>(
     content: &'a str,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (Option<serde_json::Value>, &'a str) {
+) -> (Option<serde_json::Value>, &'a str, usize) {
     let Some(after_open) = content
         .strip_prefix("---\n")
         .or_else(|| content.strip_prefix("---\r\n"))
     else {
-        return (None, content);
+        return (None, content, 0);
     };
 
     let mut offset = content.len() - after_open.len();
@@ -106,10 +108,11 @@ fn extract_frontmatter<'a>(
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed == "---" {
             let yaml = &content[4..offset];
-            let body = &content[offset + line.len()..];
+            let body_start = offset + line.len();
+            let body = &content[body_start..];
             return match serde_yaml::from_str::<serde_yaml::Value>(yaml) {
                 Ok(value) => match serde_json::to_value(value) {
-                    Ok(value) => (Some(value), body),
+                    Ok(value) => (Some(value), body, body_start),
                     Err(error) => {
                         diagnostics.push(
                             Diagnostic::warning(
@@ -118,7 +121,7 @@ fn extract_frontmatter<'a>(
                             )
                             .with_detail(error.to_string()),
                         );
-                        (None, body)
+                        (None, body, body_start)
                     }
                 },
                 Err(error) => {
@@ -129,7 +132,7 @@ fn extract_frontmatter<'a>(
                         )
                         .with_detail(error.to_string()),
                     );
-                    (None, body)
+                    (None, body, body_start)
                 }
             };
         }
@@ -140,32 +143,42 @@ fn extract_frontmatter<'a>(
         "frontmatter-unclosed",
         "frontmatter opening delimiter has no closing delimiter",
     ));
-    (None, content)
+    (None, content, 0)
 }
 
-fn parse_commonmark(source_path: &Utf8Path, body: &str) -> (Vec<Heading>, Vec<Link>) {
-    let parser = Parser::new(body);
+fn parse_commonmark(
+    source_path: &Utf8Path,
+    content: &str,
+    body: &str,
+    body_start: usize,
+) -> (Vec<Heading>, Vec<Link>) {
+    let parser = Parser::new(body).into_offset_iter();
     let mut headings = Vec::new();
     let mut links = Vec::new();
-    let mut active_heading: Option<(u8, String)> = None;
+    let mut active_heading: Option<(u8, String, usize)> = None;
 
-    for event in parser {
+    for (event, range) in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                active_heading = Some((heading_level(level), String::new()));
+                active_heading = Some((
+                    heading_level(level),
+                    String::new(),
+                    body_start + range.start,
+                ));
             }
             Event::End(TagEnd::Heading(_)) => {
-                if let Some((level, text)) = active_heading.take() {
+                if let Some((level, text, start)) = active_heading.take() {
                     let text = text.trim().to_string();
                     headings.push(Heading {
                         level,
                         slug: slugify(&text),
                         text,
+                        source_span: Some(source_span(content, start)),
                     });
                 }
             }
             Event::Text(text) | Event::Code(text) => {
-                if let Some((_, heading_text)) = active_heading.as_mut() {
+                if let Some((_, heading_text, _)) = active_heading.as_mut() {
                     heading_text.push_str(&text);
                 }
             }
@@ -178,7 +191,10 @@ fn parse_commonmark(source_path: &Utf8Path, body: &str) -> (Vec<Heading>, Vec<Li
                         raw,
                         kind: LinkKind::Markdown,
                         target,
+                        label: None,
                         anchor,
+                        block_ref: None,
+                        source_span: Some(source_span(content, body_start + range.start)),
                         resolved_path: None,
                         candidates: Vec::new(),
                         status: LinkStatus::Unresolved,
@@ -192,7 +208,12 @@ fn parse_commonmark(source_path: &Utf8Path, body: &str) -> (Vec<Heading>, Vec<Li
     (headings, links)
 }
 
-fn parse_wikilinks(source_path: &Utf8Path, body: &str) -> Vec<Link> {
+fn parse_wikilinks(
+    source_path: &Utf8Path,
+    content: &str,
+    body: &str,
+    body_start: usize,
+) -> Vec<Link> {
     let wikilink_re = Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex");
     wikilink_re
         .captures_iter(body)
@@ -200,8 +221,12 @@ fn parse_wikilinks(source_path: &Utf8Path, body: &str) -> Vec<Link> {
             let raw = captures.get(0)?.as_str().to_string();
             let is_embed = captures.get(1).is_some_and(|m| m.as_str() == "!");
             let inner = captures.get(2)?.as_str();
-            let target_part = inner.split_once('|').map_or(inner, |(target, _)| target);
-            let (target, anchor) = split_anchor(target_part.trim());
+            let (target_part, label) = inner
+                .split_once('|')
+                .map_or((inner, None), |(target, label)| {
+                    (target, Some(label.trim().to_string()))
+                });
+            let (target, anchor, block_ref) = split_anchor_or_block_ref(target_part.trim());
 
             Some(Link {
                 source_path: source_path.to_path_buf(),
@@ -212,7 +237,10 @@ fn parse_wikilinks(source_path: &Utf8Path, body: &str) -> Vec<Link> {
                     LinkKind::Wikilink
                 },
                 target,
+                label,
                 anchor,
+                block_ref,
+                source_span: Some(source_span(content, body_start + captures.get(0)?.start())),
                 resolved_path: None,
                 candidates: Vec::new(),
                 status: LinkStatus::Unresolved,
@@ -304,6 +332,30 @@ fn split_anchor(raw: &str) -> (String, Option<String>) {
     match raw.split_once('#') {
         Some((target, anchor)) => (target.to_string(), Some(anchor.to_string())),
         None => (raw.to_string(), None),
+    }
+}
+
+fn split_anchor_or_block_ref(raw: &str) -> (String, Option<String>, Option<String>) {
+    match raw.split_once('#') {
+        Some((target, reference)) if reference.starts_with('^') => {
+            (target.to_string(), None, Some(reference[1..].to_string()))
+        }
+        Some((target, anchor)) => (target.to_string(), Some(anchor.to_string()), None),
+        None => (raw.to_string(), None, None),
+    }
+}
+
+fn source_span(content: &str, byte_offset: usize) -> SourceSpan {
+    let prefix = &content[..byte_offset.min(content.len())];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map_or(prefix.len() + 1, |(_, tail)| tail.len() + 1);
+
+    SourceSpan {
+        line,
+        column,
+        byte_offset,
     }
 }
 

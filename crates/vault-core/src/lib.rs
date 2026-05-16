@@ -18,6 +18,13 @@ pub struct Diagnostic {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub line: usize,
+    pub column: usize,
+    pub byte_offset: usize,
+}
+
 impl Diagnostic {
     pub fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -48,6 +55,8 @@ pub struct Heading {
     pub level: u8,
     pub text: String,
     pub slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,7 +82,13 @@ pub struct Link {
     pub kind: LinkKind,
     pub target: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<SourceSpan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_path: Option<Utf8PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
