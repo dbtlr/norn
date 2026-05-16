@@ -4,6 +4,33 @@ Experimental Rust CLI for deterministic Markdown vault graph indexing.
 
 The current binary name is `vault`.
 
+## Build
+
+```bash
+cargo build -p vault-cli
+```
+
+The debug binary is written to:
+
+```bash
+target/debug/vault
+```
+
+To install it onto your Cargo bin path:
+
+```bash
+cargo install --path crates/vault-cli
+```
+
+With `just` installed, common commands are available as:
+
+```bash
+just build
+just test
+just verify
+just run graph documents --root fixtures/basic --format jsonl
+```
+
 ## v0 Scope
 
 ```bash
