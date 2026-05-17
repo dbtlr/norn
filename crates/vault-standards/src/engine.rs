@@ -1,12 +1,9 @@
-use vault_core::{Document, GraphIndex, LinkStatus};
+use vault_core::{Document, GraphIndex};
 use vault_graph::pattern_matches_path;
 
 use crate::config::{ValidateConfig, ValidateRule};
 use crate::findings::Finding;
-use crate::predicates::{
-    document_frontmatter_field, document_has_frontmatter_field, frontmatter_predicates_match,
-    frontmatter_type_matches, frontmatter_value_matches,
-};
+use crate::predicates::frontmatter_predicates_match;
 
 pub fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -58,20 +55,7 @@ pub fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
             ));
         }
 
-        for link in &document.links {
-            match link.status {
-                LinkStatus::Resolved => {}
-                LinkStatus::Unresolved => {
-                    findings.push(Finding::link_unresolved(
-                        document.path.clone(),
-                        link.clone(),
-                    ));
-                }
-                LinkStatus::Ambiguous => {
-                    findings.push(Finding::link_ambiguous(document.path.clone(), link.clone()));
-                }
-            }
-        }
+        findings.extend(crate::checks::check_links(document));
     }
 
     findings

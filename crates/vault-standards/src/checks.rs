@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use vault_core::Document;
+use vault_core::{Document, LinkStatus};
 use vault_graph::pattern_matches_path;
 
 use crate::findings::Finding;
@@ -121,4 +121,21 @@ pub(crate) fn check_allowed_paths(
         rule.map(str::to_string),
         paths.to_vec(),
     ))
+}
+
+pub(crate) fn check_links(document: &Document) -> Vec<Finding> {
+    document
+        .links
+        .iter()
+        .filter_map(|link| match link.status {
+            LinkStatus::Resolved => None,
+            LinkStatus::Unresolved => Some(Finding::link_unresolved(
+                document.path.clone(),
+                link.clone(),
+            )),
+            LinkStatus::Ambiguous => {
+                Some(Finding::link_ambiguous(document.path.clone(), link.clone()))
+            }
+        })
+        .collect()
 }
