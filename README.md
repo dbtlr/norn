@@ -216,6 +216,49 @@ vault validate --code frontmatter-invalid-type --field created --format jsonl
 vault validate --summary --format json
 ```
 
+## Validation Recipes
+
+Use filtered summaries to size a cleanup queue before reading raw findings:
+
+```bash
+vault validate --summary --code frontmatter-invalid-type --field created --format table
+vault validate --summary --code frontmatter-disallowed-value --field status --format json
+vault validate --summary --path "Workspaces/**/tasks/*.md" --field description --format json
+```
+
+Use raw JSONL when an agent or script needs one finding per line:
+
+```bash
+vault validate --code frontmatter-invalid-type --field created --format jsonl
+vault validate --code frontmatter-disallowed-value --field status --format jsonl
+vault validate --rule note-description --path "Workspaces/**/notes/*.md" --format jsonl
+```
+
+Use link filters to split link cleanup by failure mode:
+
+```bash
+vault validate --code link-unresolved --reason target-missing --format jsonl
+vault validate --code link-unresolved --reason anchor-missing,block-ref-missing --format jsonl
+vault validate --code link-ambiguous --summary --format table
+```
+
+`--target` matches the raw parsed link target string, not a fuzzy note stem, a
+resolved path, or a normalized candidate. For example, filtering with
+`--target "duplicate"` matches findings whose link target text is exactly
+`duplicate`.
+
+Filters are applied before raw output and before `--summary`, so the same filter
+set can produce either a scoped planning count or the concrete cleanup queue:
+
+```bash
+vault validate --code frontmatter-invalid-type --field modified --summary --format json
+vault validate --code frontmatter-invalid-type --field modified --format jsonl
+```
+
+These recipes are intentionally just command combinations. Config-defined saved
+filters or presets may be worth adding later, but the current surface avoids a
+new query language while repair planning is still being designed.
+
 `vault docs list` supports small inventory filters: `--path <glob>` for
 vault-relative paths, repeatable `--filter field:value` for frontmatter scalar
 or list values, comma-separated value sets such as `status:backlog,completed`,

@@ -11,6 +11,7 @@ Human inspection and workflow documentation release.
 - Added `table` and `paths` output formats for document inventory inspection.
 - Added `table` output for validation summaries.
 - Commands with human renderers now default to table output on terminals and JSON output when stdout is piped or captured.
+- Documented validation cleanup recipes for filtered summaries, JSONL queues, link failure modes, and raw `--target` matching.
 
 ### Changed
 
