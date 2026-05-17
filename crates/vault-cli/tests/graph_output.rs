@@ -117,9 +117,28 @@ fn graph_documents_jsonl_contract() {
     assert_eq!(alpha["frontmatter"]["title"], "Alpha");
     assert_eq!(alpha["headings"][0]["slug"], "alpha");
     assert_eq!(alpha["headings"][0]["source_span"]["line"], 8);
-    assert_eq!(alpha["links"].as_array().unwrap().len(), 13);
+    assert_eq!(alpha["links"].as_array().unwrap().len(), 17);
     assert_eq!(alpha["links"][4]["label"], "Beta Note");
-    assert_eq!(alpha["links"][6]["block_ref"], "block-a");
+    assert!(alpha["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|link| link["raw"] == "[[#Alpha]]"
+            && link["resolved_path"] == "alpha.md"
+            && link["status"] == "resolved"));
+    assert!(alpha["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|link| link["raw"] == "[[#^alpha-block]]"
+            && link["resolved_path"] == "alpha.md"
+            && link["status"] == "resolved"));
+    assert!(alpha["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|link| link["raw"] == "[[beta#^block-a]]" && link["block_ref"] == "block-a"));
+    assert_eq!(alpha["block_ids"][0], "alpha-block");
     assert_eq!(beta["block_ids"][0], "block-a");
     assert_eq!(frontmatter_source["links"].as_array().unwrap().len(), 4);
     assert_eq!(
@@ -160,7 +179,7 @@ fn graph_build_writes_sqlite_cache() {
     assert_eq!(value["cache_path"], cache_path.to_str().unwrap());
     assert_eq!(value["documents"], 10);
     assert_eq!(value["files"], 11);
-    assert_eq!(value["links"], 18);
+    assert_eq!(value["links"], 22);
     assert!(cache_path.exists());
 
     let connection = Connection::open(&cache_path).expect("cache should open");
@@ -189,7 +208,7 @@ fn graph_build_writes_sqlite_cache() {
         .unwrap();
     assert_eq!(document_count, 10);
     assert_eq!(file_count, 11);
-    assert_eq!(link_count, 18);
+    assert_eq!(link_count, 22);
     assert_eq!(missing_reason, "target-missing");
     assert_eq!(schema_version, "2");
 
@@ -304,9 +323,9 @@ fn graph_links_jsonl_contract() {
         .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
         .collect::<Vec<_>>();
 
-    assert_eq!(links.len(), 18);
+    assert_eq!(links.len(), 22);
     assert_eq!(links[0]["kind"], "markdown");
-    assert_eq!(links[0]["source_span"]["line"], 16);
+    assert_eq!(links[0]["source_span"]["line"], 20);
     let encoded_with_ext = links
         .iter()
         .find(|link| link["raw"] == "Markdown%20Target.md")
@@ -326,6 +345,22 @@ fn graph_links_jsonl_contract() {
     let block_ref = links
         .iter()
         .find(|link| link["raw"] == "[[beta#^block-a]]")
+        .unwrap();
+    let same_note_anchor = links
+        .iter()
+        .find(|link| link["raw"] == "[[#Alpha]]")
+        .unwrap();
+    let same_note_block = links
+        .iter()
+        .find(|link| link["raw"] == "[[#^alpha-block]]")
+        .unwrap();
+    let missing_same_note_anchor = links
+        .iter()
+        .find(|link| link["raw"] == "[[#Missing Same Heading]]")
+        .unwrap();
+    let missing_same_note_block = links
+        .iter()
+        .find(|link| link["raw"] == "[[#^missing-same-block]]")
         .unwrap();
     let missing_anchor = links
         .iter()
@@ -361,6 +396,22 @@ fn graph_links_jsonl_contract() {
     assert_eq!(beta_alias["label"], "Beta Note");
     assert_eq!(beta_alias["resolved_path"], "beta.md");
     assert_eq!(block_ref["block_ref"], "block-a");
+    assert_eq!(same_note_anchor["target"], "");
+    assert_eq!(same_note_anchor["anchor"], "Alpha");
+    assert_eq!(same_note_anchor["resolved_path"], "alpha.md");
+    assert_eq!(same_note_anchor["status"], "resolved");
+    assert_eq!(same_note_block["target"], "");
+    assert_eq!(same_note_block["block_ref"], "alpha-block");
+    assert_eq!(same_note_block["resolved_path"], "alpha.md");
+    assert_eq!(same_note_block["status"], "resolved");
+    assert_eq!(
+        missing_same_note_anchor["unresolved_reason"],
+        "anchor-missing"
+    );
+    assert_eq!(
+        missing_same_note_block["unresolved_reason"],
+        "block-ref-missing"
+    );
     assert_eq!(missing_anchor["unresolved_reason"], "anchor-missing");
     assert_eq!(missing_block["unresolved_reason"], "block-ref-missing");
     assert_eq!(ambiguous["status"], "ambiguous");
@@ -394,18 +445,22 @@ fn graph_unresolved_json_contract() {
     ]);
 
     let links = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(links.as_array().unwrap().len(), 4);
+    assert_eq!(links.as_array().unwrap().len(), 6);
     assert_eq!(links[0]["raw"], "[[missing]]");
     assert_eq!(links[0]["source_span"]["line"], 10);
     assert_eq!(links[0]["unresolved_reason"], "target-missing");
     assert_eq!(links[0]["status"], "unresolved");
-    assert_eq!(links[1]["raw"], "[[beta#Missing Heading]]");
+    assert_eq!(links[1]["raw"], "[[#Missing Same Heading]]");
     assert_eq!(links[1]["unresolved_reason"], "anchor-missing");
-    assert_eq!(links[2]["raw"], "[[beta#^missing-block]]");
+    assert_eq!(links[2]["raw"], "[[#^missing-same-block]]");
     assert_eq!(links[2]["unresolved_reason"], "block-ref-missing");
-    assert_eq!(links[3]["raw"], "[[duplicate]]");
-    assert_eq!(links[3]["source_span"]["line"], 20);
-    assert_eq!(links[3]["status"], "ambiguous");
+    assert_eq!(links[3]["raw"], "[[beta#Missing Heading]]");
+    assert_eq!(links[3]["unresolved_reason"], "anchor-missing");
+    assert_eq!(links[4]["raw"], "[[beta#^missing-block]]");
+    assert_eq!(links[4]["unresolved_reason"], "block-ref-missing");
+    assert_eq!(links[5]["raw"], "[[duplicate]]");
+    assert_eq!(links[5]["source_span"]["line"], 24);
+    assert_eq!(links[5]["status"], "ambiguous");
 }
 
 #[test]
@@ -477,7 +532,7 @@ fn graph_backlinks_accepts_exact_path() {
     let link = serde_json::from_str::<Value>(output.trim()).expect("output should be JSON");
     assert_eq!(link["kind"], "markdown");
     assert_eq!(link["anchor"], "Delta-Heading");
-    assert_eq!(link["source_span"]["line"], 16);
+    assert_eq!(link["source_span"]["line"], 20);
 }
 
 #[test]
@@ -552,12 +607,21 @@ fn graph_inspect_json_contract() {
     let value = serde_json::from_str::<Value>(&output).expect("output should be JSON");
     assert_eq!(value["document"]["path"], "alpha.md");
     assert_eq!(value["document"]["frontmatter"]["title"], "Alpha");
-    assert_eq!(value["incoming_links"].as_array().unwrap().len(), 2);
-    assert_eq!(value["incoming_links"][0]["source_path"], "beta.md");
-    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 13);
+    assert_eq!(value["incoming_links"].as_array().unwrap().len(), 6);
+    assert!(value["incoming_links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|link| link["raw"] == "[[#Alpha]]" && link["status"] == "resolved"));
+    assert!(value["incoming_links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|link| link["source_path"] == "beta.md"));
+    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 17);
     assert_eq!(
         value["unresolved_outgoing_links"].as_array().unwrap().len(),
-        4
+        6
     );
     assert_eq!(value["unresolved_outgoing_links"][0]["target"], "missing");
     assert_eq!(
@@ -568,7 +632,15 @@ fn graph_inspect_json_contract() {
         value["unresolved_outgoing_links"][2]["unresolved_reason"],
         "block-ref-missing"
     );
-    assert_eq!(value["unresolved_outgoing_links"][3]["target"], "duplicate");
+    assert_eq!(
+        value["unresolved_outgoing_links"][3]["unresolved_reason"],
+        "anchor-missing"
+    );
+    assert_eq!(
+        value["unresolved_outgoing_links"][4]["unresolved_reason"],
+        "block-ref-missing"
+    );
+    assert_eq!(value["unresolved_outgoing_links"][5]["target"], "duplicate");
 }
 
 #[test]

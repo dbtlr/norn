@@ -9,6 +9,10 @@ status: draft
 
 This links to [[beta|Beta Note]] and [[missing]].
 
+Same-note references should resolve headings [[#Alpha]] and blocks [[#^alpha-block]].
+
+Same-note missing references should report missing anchors [[#Missing Same Heading]] and missing blocks [[#^missing-same-block]].
+
 This also links to a block [[beta#^block-a]].
 
 These references should report missing anchors [[beta#Missing Heading]] and missing blocks [[beta#^missing-block]].
@@ -28,3 +32,5 @@ Inline code should not create a graph edge: `[[inline-example]]`.
 ```markdown
 [[fenced-example]]
 ```
+
+Local block target. ^alpha-block

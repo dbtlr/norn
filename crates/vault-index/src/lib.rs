@@ -487,7 +487,12 @@ fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
                     resolve_markdown_link(&document.path, &link.target, &by_path, &by_path_lower)
                 }
                 LinkKind::Wikilink | LinkKind::Embed => {
-                    resolve_wikilink(&link.target, &by_path, &by_path_lower, &by_stem)
+                    if link.target.is_empty() && (link.anchor.is_some() || link.block_ref.is_some())
+                    {
+                        vec![document.path.clone()]
+                    } else {
+                        resolve_wikilink(&link.target, &by_path, &by_path_lower, &by_stem)
+                    }
                 }
             };
 
