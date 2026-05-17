@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VaultConfig {
-    #[serde(default, rename = "graph")]
+    #[serde(default)]
     pub files: FilesConfig,
     #[serde(default)]
     pub validate: ValidateConfig,

@@ -6,14 +6,27 @@ pub fn validate_config_yaml(config_path: &Utf8PathBuf, value: &serde_yaml::Value
         anyhow::bail!("invalid config {config_path}: root must be a mapping");
     };
 
-    if let Some(graph) = mapping_get(root, "graph") {
-        let Some(graph) = graph.as_mapping() else {
-            anyhow::bail!("invalid config {config_path}: graph must be a mapping");
+    if let Some(files) = mapping_get(root, "files") {
+        let Some(files) = files.as_mapping() else {
+            anyhow::bail!("invalid config {config_path}: files must be a mapping");
         };
 
-        if let Some(ignore) = mapping_get(graph, "ignore") {
-            validate_string_sequence(config_path, "graph.ignore", ignore)?;
+        if let Some(ignore) = mapping_get(files, "ignore") {
+            validate_string_sequence(config_path, "files.ignore", ignore)?;
         }
+    }
+
+    if let Some(graph) = mapping_get(root, "graph") {
+        if let Some(graph) = graph.as_mapping() {
+            if mapping_get(graph, "ignore").is_some() {
+                anyhow::bail!(
+                    "invalid config {config_path}: 'graph.ignore' was renamed to 'files.ignore' in v0.16"
+                );
+            }
+        }
+        anyhow::bail!(
+            "invalid config {config_path}: 'graph.ignore' was renamed to 'files.ignore' in v0.16"
+        );
     }
 
     if let Some(validate) = mapping_get(root, "validate") {

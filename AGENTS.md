@@ -35,7 +35,7 @@ Useful commands:
 mise exec -- just build
 mise exec -- just test
 mise exec -- just verify
-mise exec -- just run -C fixtures/basic graph documents --format jsonl
+mise exec -- just run -C fixtures/basic docs list --format jsonl
 ```
 
 If `just` is not on PATH, use `mise exec -- just ...`. Direct Cargo commands also work:
@@ -54,18 +54,17 @@ Build outputs:
 
 ## Current CLI Surface
 
-Core graph commands:
+Core commands:
 
 ```bash
-vault graph documents --format jsonl
-vault graph documents --filter status:draft --format jsonl
-vault graph links --format jsonl
-vault graph files --format jsonl
-vault graph unresolved --format jsonl
-vault graph diagnostics --format jsonl
-vault graph backlinks <path-or-stem-or-file> --format jsonl
-vault graph inspect <path-or-stem> --format json
-vault graph build --cache .vault/cache --format json
+vault docs list --format jsonl
+vault docs list --filter status:draft --format jsonl
+vault links list --format jsonl
+vault files --format jsonl
+vault links unresolved --format jsonl
+vault links backlinks <path-or-stem-or-file> --format jsonl
+vault docs inspect <path-or-stem> --format json
+vault cache build --cache .vault/cache --format json
 vault validate --format jsonl
 vault validate --summary --format json
 vault -C <path> validate --summary --format json
@@ -73,10 +72,10 @@ vault -C <path> validate --summary --format json
 
 Commands run against the current directory by default. Use global `-C, --cwd <dir>` to run against another vault directory. When `--config` is omitted, `vault` discovers `<cwd>/.vault/config.yaml` if it exists; missing discovered config is fine and uses defaults. Explicit relative `--config` paths and relative `--cache` paths resolve against the effective cwd.
 
-All graph and validate commands accept `--config <path>` for explicit YAML configuration. Current config shape:
+All commands accept global `--config <path>` for explicit YAML configuration. Current config shape:
 
 ```yaml
-graph:
+files:
   ignore:
     - "**/__pycache__/**"
     - "**/*.pyc"
@@ -143,7 +142,7 @@ Ignored targets remain outside the graph. If an indexed Markdown document links 
 Lookup rules:
 
 - exact vault-relative paths are case-sensitive
-- exact file paths are accepted by `graph backlinks`, including non-Markdown attachments
+- exact file paths are accepted by `links backlinks`, including non-Markdown attachments
 - unique stem lookup is case-insensitive
 - stem lookup only applies to Markdown documents
 - ambiguous stem lookup exits with an error listing candidates
@@ -195,7 +194,7 @@ It intentionally covers:
 - non-Markdown attachments
 - ignored wikilinks in inline code and fenced code
 
-When changing output schemas or parsing behavior, update `crates/vault-cli/tests/graph_output.rs` and run:
+When changing output schemas or parsing behavior, update `crates/vault-cli/tests/cli_output.rs` and run:
 
 ```bash
 mise exec -- just verify
@@ -203,7 +202,7 @@ mise exec -- just verify
 
 ## SQLite Cache
 
-`vault graph build` writes a SQLite projection. The cache is an implementation detail during v0.x; CLI commands should remain the primary query surface.
+`vault cache build` writes a SQLite projection. The cache is an implementation detail during v0.x; CLI commands should remain the primary query surface.
 
 Cache behavior:
 

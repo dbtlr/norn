@@ -34,21 +34,20 @@ With `just` installed, common commands are available as:
 just build
 just test
 just verify
-just run -C fixtures/basic graph documents --format jsonl
+just run -C fixtures/basic docs list --format jsonl
 ```
 
 ## v0 Scope
 
 ```bash
-vault graph documents --format jsonl
-vault graph documents --filter status:draft --format jsonl
-vault graph build --cache .vault/cache --format json
-vault graph links --format jsonl
-vault graph files --format jsonl
-vault graph unresolved --format jsonl
-vault graph diagnostics --format jsonl
-vault graph backlinks <path-or-stem-or-file> --format jsonl
-vault graph inspect <path-or-stem> --format json
+vault docs list --format jsonl
+vault docs list --filter status:draft --format jsonl
+vault cache build --cache .vault/cache --format json
+vault links list --format jsonl
+vault files --format jsonl
+vault links unresolved --format jsonl
+vault links backlinks <path-or-stem-or-file> --format jsonl
+vault docs inspect <path-or-stem> --format json
 vault validate --format jsonl
 vault validate --summary --format json
 vault -C <path> validate --summary --format json
@@ -60,11 +59,11 @@ Commands run against the current directory by default. Use global `-C, --cwd
 config is fine and uses defaults. Explicit relative `--config` paths and
 relative `--cache` paths resolve against the effective cwd.
 
-Every graph and validate command accepts `--config <path>` for explicit YAML
-configuration. The current config shape is:
+All commands accept global `--config <path>` for explicit YAML configuration.
+The current config shape is:
 
 ```yaml
-graph:
+files:
   ignore:
     - "**/__pycache__/**"
     - "**/*.pyc"
@@ -132,7 +131,7 @@ The raw graph aims to follow Obsidian-style internal link behavior before applyi
 
 Frontmatter link extraction is intentionally shallow in v0.x: it scans top-level scalar string properties and top-level lists of strings. Nested YAML object/list leaves are not graph links until the schema layer or a real vault need makes that boundary worth expanding.
 
-Use `source_context.area` and `source_context.property` to distinguish body links from frontmatter/property links. Frontmatter links now include `source_span` for the shallow extraction cases. `vault graph files` emits the file inventory, and `vault graph backlinks <exact-file-path>` can query incoming links to non-Markdown attachment targets.
+Use `source_context.area` and `source_context.property` to distinguish body links from frontmatter/property links. Frontmatter links now include `source_span` for the shallow extraction cases. `vault files` emits the file inventory, and `vault links backlinks <exact-file-path>` can query incoming links to non-Markdown attachment targets.
 
 `vault validate` is read-only. It reports unresolved links, ambiguous links,
 document diagnostics, configured missing frontmatter fields, invalid

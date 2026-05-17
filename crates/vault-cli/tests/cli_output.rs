@@ -17,6 +17,10 @@ fn fixture_root() -> PathBuf {
 }
 
 fn vault(args: &[&str]) -> String {
+    vault_success(args).0
+}
+
+fn vault_success(args: &[&str]) -> (String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_vault"))
         .args(args)
         .output()
@@ -29,7 +33,10 @@ fn vault(args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    String::from_utf8(output.stdout).expect("stdout should be UTF-8")
+    (
+        String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
+        String::from_utf8(output.stderr).expect("stderr should be UTF-8"),
+    )
 }
 
 fn vault_error(args: &[&str]) -> String {
@@ -85,35 +92,46 @@ fn vault_version_reports_package_version() {
 fn vault_help_documents_global_cwd() {
     let output = vault(&["--help"]);
     assert!(output.contains("-C, --cwd"));
+    assert!(output.contains("--config"));
+    assert!(output.contains("--verbose"));
+    assert!(output.contains("docs"));
+    assert!(output.contains("files"));
+    assert!(output.contains("links"));
+    assert!(output.contains("cache"));
 }
 
 #[test]
-fn graph_help_describes_contracts() {
-    let output = vault(&["graph", "--help"]);
-    assert!(output.contains("deterministic, read-only view of raw Markdown vault structure"));
-    assert!(output.contains("without applying standards-pack semantics or mutating files"));
-    assert!(output.contains("Emit parsed Markdown documents"));
-    assert!(output.contains("Emit inventoried vault files"));
-    assert!(output.contains("Write a SQLite graph cache"));
-    assert!(output.contains("Emit document parse diagnostics"));
+fn graph_umbrella_is_removed() {
+    let error = vault_error(&["graph", "--help"]);
+    assert!(error.contains("unrecognized subcommand 'graph'"));
 }
 
 #[test]
-fn graph_short_help_stays_compact() {
-    let output = vault(&["graph", "-h"]);
-    assert!(output.contains("Query and cache derived Markdown vault graph facts"));
-    assert!(!output.contains("without applying standards-pack semantics or mutating files"));
+fn grouped_help_lists_new_surfaces() {
+    let output = vault(&["docs", "--help"]);
+    assert!(output.contains("Parsed Markdown documents"));
+    assert!(output.contains("list"));
+    assert!(output.contains("inspect"));
+
+    let output = vault(&["links", "--help"]);
+    assert!(output.contains("Link facts across the vault"));
+    assert!(output.contains("unresolved"));
+    assert!(output.contains("backlinks"));
+
+    let output = vault(&["cache", "--help"]);
+    assert!(output.contains("Local SQLite projection of the graph"));
+    assert!(output.contains("build"));
 }
 
 #[test]
 fn graph_documents_help_documents_frontmatter_filter() {
-    let output = vault(&["graph", "documents", "--help"]);
+    let output = vault(&["docs", "list", "--help"]);
     assert!(output.contains("Frontmatter-only field:value filter"));
 }
 
 #[test]
 fn graph_build_help_documents_cache_semantics() {
-    let output = vault(&["graph", "build", "--help"]);
+    let output = vault(&["cache", "build", "--help"]);
     assert!(output.contains("SQLite cache file path or directory"));
     assert!(output.contains("--format only controls stdout"));
     assert!(output.contains("inventoried files"));
@@ -121,7 +139,7 @@ fn graph_build_help_documents_cache_semantics() {
 
 #[test]
 fn graph_links_help_documents_obsidian_semantics() {
-    let output = vault(&["graph", "links", "--help"]);
+    let output = vault(&["links", "list", "--help"]);
     assert!(output.contains("frontmatter/property wikilinks"));
     assert!(output.contains("same-note heading/block references"));
     assert!(output.contains("Markdown image links to local files"));
@@ -130,7 +148,7 @@ fn graph_links_help_documents_obsidian_semantics() {
 
 #[test]
 fn graph_unresolved_help_documents_reasons() {
-    let output = vault(&["graph", "unresolved", "--help"]);
+    let output = vault(&["links", "unresolved", "--help"]);
     assert!(output.contains("target-missing"));
     assert!(output.contains("anchor-missing"));
     assert!(output.contains("block-ref-missing"));
@@ -139,7 +157,7 @@ fn graph_unresolved_help_documents_reasons() {
 
 #[test]
 fn graph_backlinks_help_documents_file_targets() {
-    let output = vault(&["graph", "backlinks", "--help"]);
+    let output = vault(&["links", "backlinks", "--help"]);
     assert!(output.contains("non-Markdown files"));
     assert!(output.contains("Stem matching only applies to Markdown documents"));
 }
@@ -265,7 +283,7 @@ fn commands_default_to_process_current_directory() {
     fs::create_dir_all(&root).expect("temp dir should be created");
     fs::write(root.join("note.md"), "# Note\n").expect("note should write");
 
-    let output = vault_in_dir(&["graph", "documents", "--format", "json"], &root);
+    let output = vault_in_dir(&["docs", "list", "--format", "json"], &root);
 
     let documents = serde_json::from_str::<Value>(&output).expect("output should be JSON");
     assert_eq!(documents.as_array().unwrap().len(), 1);
@@ -290,8 +308,8 @@ fn graph_jsonl_tolerates_early_closing_stdout_consumers() {
         .args([
             "-C",
             root.to_str().unwrap(),
-            "graph",
-            "documents",
+            "docs",
+            "list",
             "--format",
             "jsonl",
         ])
@@ -843,8 +861,8 @@ fn validate_ignore_skips_validation_without_graph_ignore() {
     assert_eq!(findings[0]["path"], "active.md");
 
     let graph_output = vault(&[
-        "graph",
-        "documents",
+        "docs",
+        "list",
         "-C",
         root.to_str().unwrap(),
         "--config",
@@ -1001,8 +1019,8 @@ fn validate_reports_forbidden_frontmatter_and_path_violations() {
 fn graph_documents_jsonl_contract() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
-        "documents",
+        "docs",
+        "list",
         "-C",
         root.to_str().unwrap(),
         "--format",
@@ -1090,7 +1108,7 @@ fn graph_build_writes_sqlite_cache() {
     let root = fixture_root();
     let cache_dir = temp_cache_dir();
     let output = vault(&[
-        "graph",
+        "cache",
         "build",
         "-C",
         root.to_str().unwrap(),
@@ -1159,7 +1177,7 @@ fn graph_build_resolves_relative_cache_against_cwd() {
     let output = vault(&[
         "-C",
         root.to_str().unwrap(),
-        "graph",
+        "cache",
         "build",
         "--cache",
         ".vault/cache",
@@ -1184,13 +1202,13 @@ fn graph_config_ignores_files_before_indexing() {
     fs::write(root.join("__pycache__/ignored.pyc"), "compiled").expect("ignored file should write");
     fs::write(
         root.join("vault.yaml"),
-        "graph:\n  ignore:\n    - ignored.md\n    - __pycache__/**\n",
+        "files:\n  ignore:\n    - ignored.md\n    - __pycache__/**\n",
     )
     .expect("config should write");
 
     let documents = vault(&[
-        "graph",
-        "documents",
+        "docs",
+        "list",
         "-C",
         root.to_str().unwrap(),
         "--config",
@@ -1203,7 +1221,6 @@ fn graph_config_ignores_files_before_indexing() {
     assert_eq!(documents[0]["path"], "kept.md");
 
     let files = vault(&[
-        "graph",
         "files",
         "-C",
         root.to_str().unwrap(),
@@ -1226,7 +1243,7 @@ fn graph_config_ignores_files_before_indexing() {
         .any(|file| file["path"] == "vault.yaml"));
 
     let build = vault(&[
-        "graph",
+        "cache",
         "build",
         "-C",
         root.to_str().unwrap(),
@@ -1246,11 +1263,36 @@ fn graph_config_ignores_files_before_indexing() {
 }
 
 #[test]
+fn graph_ignore_config_key_reports_v0_16_rename() {
+    let root = temp_cache_dir();
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(root.join("note.md"), "# Note\n").expect("note should write");
+    fs::write(
+        root.join("vault.yaml"),
+        "graph:\n  ignore:\n    - ignored.md\n",
+    )
+    .expect("config should write");
+
+    let error = vault_error(&[
+        "docs",
+        "list",
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        root.join("vault.yaml").to_str().unwrap(),
+    ]);
+
+    assert!(error.contains("'graph.ignore' was renamed to 'files.ignore' in v0.16"));
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn graph_build_accepts_sqlite_file_path() {
     let root = fixture_root();
     let cache_path = temp_cache_dir().with_extension("sqlite");
     let output = vault(&[
-        "graph",
+        "cache",
         "build",
         "-C",
         root.to_str().unwrap(),
@@ -1277,8 +1319,8 @@ fn graph_build_accepts_sqlite_file_path() {
 fn graph_documents_filters_frontmatter_scalars() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
-        "documents",
+        "docs",
+        "list",
         "-C",
         root.to_str().unwrap(),
         "--filter",
@@ -1300,8 +1342,8 @@ fn graph_documents_filters_frontmatter_scalars() {
 fn graph_documents_filters_frontmatter_lists() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
-        "documents",
+        "docs",
+        "list",
         "-C",
         root.to_str().unwrap(),
         "--filter",
@@ -1320,11 +1362,32 @@ fn graph_documents_filters_frontmatter_lists() {
 }
 
 #[test]
+fn graph_documents_warns_when_filter_field_is_absent_everywhere() {
+    let root = fixture_root();
+    let (stdout, stderr) = vault_success(&[
+        "docs",
+        "list",
+        "-C",
+        root.to_str().unwrap(),
+        "--filter",
+        "path:alpha.md",
+        "--format",
+        "json",
+    ]);
+
+    let documents = serde_json::from_str::<Value>(&stdout).expect("output should be JSON");
+    assert_eq!(documents.as_array().unwrap().len(), 0);
+    assert!(stderr.contains(
+        "warning: filter field 'path' is not a frontmatter key in any document; returning empty result"
+    ));
+}
+
+#[test]
 fn graph_documents_rejects_invalid_filters() {
     let root = fixture_root();
     let stderr = vault_error(&[
-        "graph",
-        "documents",
+        "docs",
+        "list",
         "-C",
         root.to_str().unwrap(),
         "--filter",
@@ -1339,14 +1402,7 @@ fn graph_documents_rejects_invalid_filters() {
 #[test]
 fn graph_files_jsonl_contract() {
     let root = fixture_root();
-    let output = vault(&[
-        "graph",
-        "files",
-        "-C",
-        root.to_str().unwrap(),
-        "--format",
-        "jsonl",
-    ]);
+    let output = vault(&["files", "-C", root.to_str().unwrap(), "--format", "jsonl"]);
 
     let files = output
         .lines()
@@ -1366,8 +1422,8 @@ fn graph_files_jsonl_contract() {
 fn graph_links_jsonl_contract() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
         "links",
+        "list",
         "-C",
         root.to_str().unwrap(),
         "--format",
@@ -1501,7 +1557,7 @@ fn graph_links_jsonl_contract() {
 fn graph_unresolved_json_contract() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "links",
         "unresolved",
         "-C",
         root.to_str().unwrap(),
@@ -1530,35 +1586,10 @@ fn graph_unresolved_json_contract() {
 }
 
 #[test]
-fn graph_diagnostics_jsonl_contract() {
-    let root = fixture_root();
-    let output = vault(&[
-        "graph",
-        "diagnostics",
-        "-C",
-        root.to_str().unwrap(),
-        "--format",
-        "jsonl",
-    ]);
-
-    let diagnostics = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0]["path"], "broken-frontmatter.md");
-    assert_eq!(
-        diagnostics[0]["diagnostic"]["code"],
-        "frontmatter-parse-failed"
-    );
-}
-
-#[test]
 fn graph_backlinks_jsonl_contract() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "links",
         "backlinks",
         "beta",
         "-C",
@@ -1586,7 +1617,7 @@ fn graph_backlinks_jsonl_contract() {
 fn graph_backlinks_accepts_exact_path() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "links",
         "backlinks",
         "folder/delta.md",
         "-C",
@@ -1605,7 +1636,7 @@ fn graph_backlinks_accepts_exact_path() {
 fn graph_backlinks_accepts_file_path() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "links",
         "backlinks",
         "Assets/pic.png",
         "-C",
@@ -1624,7 +1655,7 @@ fn graph_backlinks_accepts_file_path() {
 fn graph_backlinks_accepts_case_insensitive_stem() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "links",
         "backlinks",
         "BETA",
         "-C",
@@ -1645,7 +1676,7 @@ fn graph_backlinks_accepts_case_insensitive_stem() {
 fn graph_inspect_accepts_case_insensitive_stem() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "docs",
         "inspect",
         "ALPHA",
         "-C",
@@ -1662,7 +1693,7 @@ fn graph_inspect_accepts_case_insensitive_stem() {
 fn graph_backlinks_rejects_ambiguous_stem() {
     let root = fixture_root();
     let stderr = vault_error(&[
-        "graph",
+        "links",
         "backlinks",
         "duplicate",
         "-C",
@@ -1680,7 +1711,7 @@ fn graph_backlinks_rejects_ambiguous_stem() {
 fn graph_inspect_json_contract() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "docs",
         "inspect",
         "alpha.md",
         "-C",
@@ -1736,7 +1767,7 @@ fn graph_inspect_json_contract() {
 fn graph_inspect_accepts_unique_stem() {
     let root = fixture_root();
     let output = vault(&[
-        "graph",
+        "docs",
         "inspect",
         "beta",
         "-C",

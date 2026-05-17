@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here.
 
+## v0.16.0 - 2026-05-17
+
+CLI surface regroup release. **Breaking command paths and config key rename.**
+
+### Changed
+
+- Replaced the `vault graph` umbrella with top-level command groups:
+  - `vault docs list`
+  - `vault docs inspect <target>`
+  - `vault files`
+  - `vault links list`
+  - `vault links unresolved`
+  - `vault links backlinks <target>`
+  - `vault cache build`
+- Promoted `--config` and `--verbose` to global flags.
+- Renamed config key `graph.ignore` to `files.ignore`.
+- Renamed the CLI integration test file from `graph_output.rs` to `cli_output.rs`.
+
+### Added
+
+- `vault docs list --filter <field:value>` now warns on stderr when a filter field is not present in any document frontmatter.
+- Legacy `graph.ignore` configs now fail with a clear v0.16 rename error.
+
+### Removed
+
+- Removed `vault graph ...` command paths.
+- Removed `vault graph diagnostics`; use `vault validate --format jsonl` to surface graph diagnostics as validation findings.
+
 ## v0.15.0 - 2026-05-17
 
 Internal restructure release. **Breaking JSONL output schema for validate findings.**
