@@ -247,7 +247,7 @@ fn parse_commonmark(
             Event::Start(Tag::Link { dest_url, .. }) => {
                 let raw = dest_url.to_string();
                 if is_local_markdown_target(&raw) {
-                    let (target, anchor) = split_anchor(&raw);
+                    let (target, anchor) = split_anchor(&decode_percent_escapes(&raw));
                     links.push(Link {
                         source_path: source_path.to_path_buf(),
                         raw,
@@ -525,12 +525,7 @@ fn resolve_markdown_link(
     by_path: &HashMap<String, Utf8PathBuf>,
 ) -> Vec<Utf8PathBuf> {
     let base = source_path.parent().unwrap_or_else(|| Utf8Path::new(""));
-    let candidate = normalize_relative(base, target);
-    by_path
-        .get(candidate.as_str())
-        .cloned()
-        .into_iter()
-        .collect()
+    resolve_path_like_target(base, target, by_path)
 }
 
 fn resolve_wikilink(
@@ -597,7 +592,59 @@ fn is_local_markdown_target(target: &str) -> bool {
     }
 
     let (target, _) = split_anchor(target);
-    target.ends_with(".md")
+    !target.is_empty()
+}
+
+fn decode_percent_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                output.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+
+        output.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn resolve_path_like_target(
+    base: &Utf8Path,
+    target: &str,
+    by_path: &HashMap<String, Utf8PathBuf>,
+) -> Vec<Utf8PathBuf> {
+    let candidate = normalize_relative(base, target);
+    if let Some(path) = by_path.get(candidate.as_str()) {
+        return vec![path.clone()];
+    }
+
+    if candidate.extension().is_none() {
+        let with_markdown_extension = candidate.with_extension("md");
+        if let Some(path) = by_path.get(with_markdown_extension.as_str()) {
+            return vec![path.clone()];
+        }
+    }
+
+    Vec::new()
 }
 
 fn normalize_relative(base: &Utf8Path, target: &str) -> Utf8PathBuf {
@@ -918,7 +965,7 @@ mod tests {
     #[test]
     fn indexes_documents_and_resolves_links() {
         let index = build_index(Utf8Path::new("../../fixtures/basic")).unwrap();
-        assert_eq!(index.documents.len(), 9);
+        assert_eq!(index.documents.len(), 10);
 
         let alpha = index
             .documents

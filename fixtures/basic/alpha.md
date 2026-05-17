@@ -17,6 +17,8 @@ This embeds ![[gamma]] and points at [Delta](folder/delta.md#Delta-Heading).
 
 This ambiguous link points at [[duplicate]].
 
+Markdown links can be encoded [with ext](Markdown%20Target.md), [without ext](Markdown%20Target), and [with anchor](Markdown%20Target.md#Encoded%20Heading).
+
 Inline code should not create a graph edge: `[[inline-example]]`.
 
 ```markdown

@@ -96,7 +96,7 @@ fn graph_documents_jsonl_contract() {
         .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
         .collect::<Vec<_>>();
 
-    assert_eq!(documents.len(), 9);
+    assert_eq!(documents.len(), 10);
     let alpha = documents
         .iter()
         .find(|document| document["path"] == "alpha.md")
@@ -117,9 +117,9 @@ fn graph_documents_jsonl_contract() {
     assert_eq!(alpha["frontmatter"]["title"], "Alpha");
     assert_eq!(alpha["headings"][0]["slug"], "alpha");
     assert_eq!(alpha["headings"][0]["source_span"]["line"], 8);
-    assert_eq!(alpha["links"].as_array().unwrap().len(), 8);
-    assert_eq!(alpha["links"][1]["label"], "Beta Note");
-    assert_eq!(alpha["links"][3]["block_ref"], "block-a");
+    assert_eq!(alpha["links"].as_array().unwrap().len(), 11);
+    assert_eq!(alpha["links"][4]["label"], "Beta Note");
+    assert_eq!(alpha["links"][6]["block_ref"], "block-a");
     assert_eq!(beta["block_ids"][0], "block-a");
     assert_eq!(frontmatter_source["links"].as_array().unwrap().len(), 4);
     assert_eq!(
@@ -158,8 +158,8 @@ fn graph_build_writes_sqlite_cache() {
     let value = serde_json::from_str::<Value>(&output).expect("output should be JSON");
     let cache_path = cache_dir.join("graph.sqlite");
     assert_eq!(value["cache_path"], cache_path.to_str().unwrap());
-    assert_eq!(value["documents"], 9);
-    assert_eq!(value["links"], 13);
+    assert_eq!(value["documents"], 10);
+    assert_eq!(value["links"], 16);
     assert!(cache_path.exists());
 
     let connection = Connection::open(&cache_path).expect("cache should open");
@@ -183,8 +183,8 @@ fn graph_build_writes_sqlite_cache() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(document_count, 9);
-    assert_eq!(link_count, 13);
+    assert_eq!(document_count, 10);
+    assert_eq!(link_count, 16);
     assert_eq!(missing_reason, "target-missing");
     assert_eq!(schema_version, "1");
 
@@ -214,7 +214,7 @@ fn graph_build_accepts_sqlite_file_path() {
     let document_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(document_count, 9);
+    assert_eq!(document_count, 10);
 
     std::fs::remove_file(cache_path).ok();
 }
@@ -299,24 +299,67 @@ fn graph_links_jsonl_contract() {
         .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
         .collect::<Vec<_>>();
 
-    assert_eq!(links.len(), 13);
+    assert_eq!(links.len(), 16);
     assert_eq!(links[0]["kind"], "markdown");
     assert_eq!(links[0]["source_span"]["line"], 16);
-    assert_eq!(links[1]["raw"], "[[beta|Beta Note]]");
-    assert_eq!(links[1]["label"], "Beta Note");
-    assert_eq!(links[1]["resolved_path"], "beta.md");
-    assert_eq!(links[3]["raw"], "[[beta#^block-a]]");
-    assert_eq!(links[3]["block_ref"], "block-a");
-    assert_eq!(links[4]["unresolved_reason"], "anchor-missing");
-    assert_eq!(links[5]["unresolved_reason"], "block-ref-missing");
-    assert_eq!(links[7]["status"], "ambiguous");
-    assert_eq!(links[10]["raw"], "[[Front Target]]");
+    let encoded_with_ext = links
+        .iter()
+        .find(|link| link["raw"] == "Markdown%20Target.md")
+        .unwrap();
+    let encoded_without_ext = links
+        .iter()
+        .find(|link| link["raw"] == "Markdown%20Target")
+        .unwrap();
+    let encoded_anchor = links
+        .iter()
+        .find(|link| link["raw"] == "Markdown%20Target.md#Encoded%20Heading")
+        .unwrap();
+    let beta_alias = links
+        .iter()
+        .find(|link| link["raw"] == "[[beta|Beta Note]]")
+        .unwrap();
+    let block_ref = links
+        .iter()
+        .find(|link| link["raw"] == "[[beta#^block-a]]")
+        .unwrap();
+    let missing_anchor = links
+        .iter()
+        .find(|link| link["raw"] == "[[beta#Missing Heading]]")
+        .unwrap();
+    let missing_block = links
+        .iter()
+        .find(|link| link["raw"] == "[[beta#^missing-block]]")
+        .unwrap();
+    let ambiguous = links
+        .iter()
+        .find(|link| link["raw"] == "[[duplicate]]")
+        .unwrap();
+    let property_target = links
+        .iter()
+        .find(|link| link["raw"] == "[[Front Target]]")
+        .unwrap();
+
+    assert_eq!(encoded_with_ext["target"], "Markdown Target.md");
+    assert_eq!(encoded_with_ext["resolved_path"], "Markdown Target.md");
+    assert_eq!(encoded_without_ext["target"], "Markdown Target");
+    assert_eq!(encoded_without_ext["resolved_path"], "Markdown Target.md");
+    assert_eq!(encoded_anchor["anchor"], "Encoded Heading");
+    assert_eq!(encoded_anchor["resolved_path"], "Markdown Target.md");
+    assert_eq!(beta_alias["label"], "Beta Note");
+    assert_eq!(beta_alias["resolved_path"], "beta.md");
+    assert_eq!(block_ref["block_ref"], "block-a");
+    assert_eq!(missing_anchor["unresolved_reason"], "anchor-missing");
+    assert_eq!(missing_block["unresolved_reason"], "block-ref-missing");
+    assert_eq!(ambiguous["status"], "ambiguous");
+    assert_eq!(property_target["raw"], "[[Front Target]]");
     assert_eq!(
-        links[10]["source_context"],
+        property_target["source_context"],
         serde_json::json!({"area": "frontmatter", "property": "related"})
     );
-    assert_eq!(links[10]["resolved_path"], "Front Target.md");
-    assert_eq!(links[12]["label"], "Displayed in property");
+    assert_eq!(property_target["resolved_path"], "Front Target.md");
+    assert!(links
+        .iter()
+        .any(|link| link["label"] == "Displayed in property"));
     assert!(!links.iter().any(|link| link["target"] == "inline-example"));
     assert!(!links.iter().any(|link| link["target"] == "fenced-example"));
 }
@@ -494,7 +537,7 @@ fn graph_inspect_json_contract() {
     assert_eq!(value["document"]["frontmatter"]["title"], "Alpha");
     assert_eq!(value["incoming_links"].as_array().unwrap().len(), 2);
     assert_eq!(value["incoming_links"][0]["source_path"], "beta.md");
-    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 8);
+    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 11);
     assert_eq!(
         value["unresolved_outgoing_links"].as_array().unwrap().len(),
         4
