@@ -31,19 +31,11 @@ pub fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
                 rule.name.as_deref(),
             ));
 
-            for (field, expected_type) in &rule.field_types {
-                if let Some(actual) = document_frontmatter_field(document, field) {
-                    if !frontmatter_type_matches(actual, expected_type) {
-                        findings.push(Finding::frontmatter_invalid_type(
-                            document.path.clone(),
-                            rule.name.clone(),
-                            field.clone(),
-                            actual.clone(),
-                            expected_type.clone(),
-                        ));
-                    }
-                }
-            }
+            findings.extend(crate::checks::check_field_types(
+                document,
+                &rule.field_types,
+                rule.name.as_deref(),
+            ));
 
             for field in &rule.forbidden_frontmatter {
                 if let Some(actual) = document_frontmatter_field(document, field) {
