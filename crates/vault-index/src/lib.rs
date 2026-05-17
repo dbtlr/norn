@@ -10,7 +10,7 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use vault_core::{
     Diagnostic, Document, GraphIndex, Heading, Link, LinkKind, LinkSourceArea, LinkSourceContext,
-    LinkStatus, Severity, SourceSpan, UnresolvedReason,
+    LinkStatus, Severity, SourceSpan, UnresolvedReason, VaultFile,
 };
 use walkdir::WalkDir;
 
@@ -36,6 +36,7 @@ pub enum IndexError {
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheSummary {
     pub cache_path: Utf8PathBuf,
+    pub files: usize,
     pub documents: usize,
     pub links: usize,
     pub diagnostics: usize,
@@ -50,6 +51,7 @@ pub fn build_index(root: impl AsRef<Utf8Path>) -> Result<GraphIndex, IndexError>
         return Err(IndexError::RootNotDirectory(root));
     }
 
+    let mut files = Vec::new();
     let mut documents = Vec::new();
 
     for entry in WalkDir::new(&root)
@@ -58,19 +60,23 @@ pub fn build_index(root: impl AsRef<Utf8Path>) -> Result<GraphIndex, IndexError>
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
     {
-        if !is_markdown(entry.path()) {
-            continue;
-        }
-
         let path = Utf8PathBuf::from_path_buf(entry.path().to_path_buf())
             .map_err(|path| IndexError::NonUtf8Path(path.display().to_string()))?;
-        documents.push(parse_document(&root, &path));
+        files.push(parse_file(&root, &path));
+        if is_markdown(entry.path()) {
+            documents.push(parse_document(&root, &path));
+        }
     }
 
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     documents.sort_by(|a, b| a.path.cmp(&b.path));
-    resolve_links(&mut documents);
+    resolve_links(&files, &mut documents);
 
-    Ok(GraphIndex { root, documents })
+    Ok(GraphIndex {
+        root,
+        files,
+        documents,
+    })
 }
 
 pub fn write_sqlite_cache(
@@ -94,6 +100,7 @@ pub fn write_sqlite_cache(
 
     Ok(CacheSummary {
         cache_path,
+        files: index.files.len(),
         documents: index.documents.len(),
         links: index
             .documents
@@ -106,6 +113,25 @@ pub fn write_sqlite_cache(
             .map(|document| document.diagnostics.len())
             .sum(),
     })
+}
+
+fn parse_file(root: &Utf8Path, absolute_path: &Utf8Path) -> VaultFile {
+    let path = absolute_path
+        .strip_prefix(root)
+        .unwrap_or(absolute_path)
+        .to_path_buf();
+    let stem = path.file_stem().unwrap_or_default().to_string();
+    let extension = path.extension().map(ToString::to_string);
+    let hash = fs::read(absolute_path)
+        .map(|content| blake3::hash(&content).to_hex().to_string())
+        .unwrap_or_default();
+
+    VaultFile {
+        path,
+        stem,
+        extension,
+        hash,
+    }
 }
 
 fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
@@ -425,15 +451,18 @@ fn parse_block_ids(body: &str) -> Vec<String> {
         .collect()
 }
 
-fn resolve_links(documents: &mut [Document]) {
+fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
     let mut by_path: HashMap<String, Utf8PathBuf> = HashMap::new();
     let mut by_path_lower: HashMap<String, Utf8PathBuf> = HashMap::new();
     let mut by_stem: HashMap<String, Vec<Utf8PathBuf>> = HashMap::new();
     let mut facts_by_path: HashMap<Utf8PathBuf, DocumentFacts> = HashMap::new();
 
+    for file in files {
+        by_path.insert(file.path.as_str().to_string(), file.path.clone());
+        by_path_lower.insert(file.path.as_str().to_lowercase(), file.path.clone());
+    }
+
     for document in documents.iter() {
-        by_path.insert(document.path.as_str().to_string(), document.path.clone());
-        by_path_lower.insert(document.path.as_str().to_lowercase(), document.path.clone());
         by_stem
             .entry(document.stem.to_lowercase())
             .or_default()
@@ -839,11 +868,14 @@ fn insert_index(connection: &Connection, index: &GraphIndex) -> rusqlite::Result
         params![CACHE_SCHEMA_VERSION],
     )?;
 
-    for document in &index.documents {
+    for file in &index.files {
         connection.execute(
             "INSERT INTO files (path, hash) VALUES (?1, ?2)",
-            params![document.path.as_str(), document.hash],
+            params![file.path.as_str(), file.hash],
         )?;
+    }
+
+    for document in &index.documents {
         connection.execute(
             "INSERT INTO documents (path, stem, frontmatter_json) VALUES (?1, ?2, ?3)",
             params![

@@ -123,6 +123,15 @@ pub struct Link {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultFile {
+    pub path: Utf8PathBuf,
+    pub stem: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     pub path: Utf8PathBuf,
     pub stem: String,
@@ -142,5 +151,6 @@ pub struct Document {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphIndex {
     pub root: Utf8PathBuf,
+    pub files: Vec<VaultFile>,
     pub documents: Vec<Document>,
 }

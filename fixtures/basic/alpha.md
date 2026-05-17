@@ -15,6 +15,8 @@ These references should report missing anchors [[beta#Missing Heading]] and miss
 
 This embeds ![[gamma]] and points at [Delta](folder/delta.md#Delta-Heading).
 
+Attachment embeds should resolve when files exist ![[Assets/diagram.png]].
+
 This ambiguous link points at [[duplicate]].
 
 This path-qualified link should ignore case [[Other/Duplicate]].
