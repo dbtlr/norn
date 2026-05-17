@@ -3,9 +3,7 @@ use std::fs;
 use anyhow::Result;
 use camino::Utf8PathBuf;
 use vault_graph::IndexOptions;
-use vault_standards::{ValidateConfig, VaultConfig};
-
-use crate::validate::validate_config_value;
+use vault_standards::{validate_config_yaml, ValidateConfig, VaultConfig};
 
 pub struct LoadedConfig {
     pub index_options: IndexOptions,
@@ -49,7 +47,7 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
                 serde_yaml::from_str::<serde_yaml::Value>(&config_text).map_err(|error| {
                     anyhow::anyhow!("failed to parse config {config_path}: {error}")
                 })?;
-            validate_config_value(&config_path, &config_value)?;
+            validate_config_yaml(&config_path, &config_value)?;
             serde_yaml::from_value::<VaultConfig>(config_value)
                 .map_err(|error| anyhow::anyhow!("failed to parse config {config_path}: {error}"))?
         }

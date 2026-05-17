@@ -1,7 +1,7 @@
 use anyhow::Result;
 use camino::Utf8PathBuf;
 
-pub fn validate_config_value(config_path: &Utf8PathBuf, value: &serde_yaml::Value) -> Result<()> {
+pub fn validate_config_yaml(config_path: &Utf8PathBuf, value: &serde_yaml::Value) -> Result<()> {
     let Some(root) = value.as_mapping() else {
         anyhow::bail!("invalid config {config_path}: root must be a mapping");
     };
@@ -302,8 +302,8 @@ fn mapping_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a se
 }
 
 #[cfg(test)]
-mod config_validation_tests {
-    use crate::config::load_config;
+mod tests {
+    use super::validate_config_yaml;
     use camino::Utf8PathBuf;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -313,14 +313,12 @@ mod config_validation_tests {
         let config_path = write_temp_config(
             "validate:\n  rules:\n    - name: bad\n      match:\n        path: 123\n      required_frontmatter:\n        - type\n",
         );
-
-        let cwd =
-            Utf8PathBuf::from_path_buf(std::env::temp_dir()).expect("temp path should be utf8");
-        let message = match load_config(&cwd, Some(&config_path)) {
+        let config_text = fs::read_to_string(&config_path).unwrap();
+        let config_value: serde_yaml::Value = serde_yaml::from_str(&config_text).unwrap();
+        let message = match validate_config_yaml(&config_path, &config_value) {
             Ok(_) => panic!("config should fail validation"),
             Err(error) => error.to_string(),
         };
-
         assert!(message.contains("invalid config"));
         assert!(message.contains("validate.rules[0].match.path must be a string"));
     }
@@ -330,14 +328,12 @@ mod config_validation_tests {
         let config_path = write_temp_config(
             "validate:\n  rules:\n    - name: bad\n      match:\n        path: Workspaces/**/*.md\n      required_frontmatter:\n        - 123\n",
         );
-
-        let cwd =
-            Utf8PathBuf::from_path_buf(std::env::temp_dir()).expect("temp path should be utf8");
-        let message = match load_config(&cwd, Some(&config_path)) {
+        let config_text = fs::read_to_string(&config_path).unwrap();
+        let config_value: serde_yaml::Value = serde_yaml::from_str(&config_text).unwrap();
+        let message = match validate_config_yaml(&config_path, &config_value) {
             Ok(_) => panic!("config should fail validation"),
             Err(error) => error.to_string(),
         };
-
         assert!(message.contains("invalid config"));
         assert!(message.contains("validate.rules[0].required_frontmatter[0] must be a string"));
     }

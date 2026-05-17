@@ -3,7 +3,6 @@ mod config;
 mod filter;
 mod output;
 mod target;
-mod validate;
 
 use std::process;
 
