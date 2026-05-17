@@ -10,7 +10,8 @@ Workspace crates:
 - `crates/vault-frontmatter` — YAML frontmatter extraction and shallow property/offset utilities.
 - `crates/vault-links` — CommonMark link parsing, wikilink parsing, block IDs, anchor helpers, and link resolution.
 - `crates/vault-graph` — vault walking, build/index entry points, SQLite cache, and pattern matching. Depends on vault-frontmatter and vault-links.
-- `crates/vault-cli` — `clap` command surface for the `vault` binary. Depends on vault-graph.
+- `crates/vault-standards` — validate engine, config types, findings (`Finding` sum type), summary, predicates, and YAML config-schema validator. Depends on vault-graph.
+- `crates/vault-cli` — `clap` command surface for the `vault` binary. Depends on vault-graph and vault-standards.
 
 The binary package is `vault-cli`; the installed command is `vault`.
 
