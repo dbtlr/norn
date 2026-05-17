@@ -21,7 +21,10 @@ enum Command {
 }
 
 #[derive(Debug, Parser)]
-#[command(about = "Read-only graph/index commands for Markdown vaults")]
+#[command(
+    about = "Read-only graph/index commands for Markdown vaults",
+    long_about = "Read-only graph/index commands for Markdown vaults.\n\nThe graph surface is a deterministic, read-only view of raw Markdown vault structure. It emits Obsidian-compatible link facts, document metadata, file inventory, diagnostics, and cache projections without applying standards-pack semantics or mutating files."
+)]
 struct GraphCommand {
     #[command(subcommand)]
     command: GraphSubcommand,

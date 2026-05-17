@@ -60,11 +60,19 @@ fn vault_version_reports_package_version() {
 #[test]
 fn graph_help_describes_contracts() {
     let output = vault(&["graph", "--help"]);
-    assert!(output.contains("Query and cache derived Markdown vault graph facts"));
+    assert!(output.contains("deterministic, read-only view of raw Markdown vault structure"));
+    assert!(output.contains("without applying standards-pack semantics or mutating files"));
     assert!(output.contains("Emit parsed Markdown documents"));
     assert!(output.contains("Emit inventoried vault files"));
     assert!(output.contains("Write a SQLite graph cache"));
     assert!(output.contains("Emit document parse diagnostics"));
+}
+
+#[test]
+fn graph_short_help_stays_compact() {
+    let output = vault(&["graph", "-h"]);
+    assert!(output.contains("Query and cache derived Markdown vault graph facts"));
+    assert!(!output.contains("without applying standards-pack semantics or mutating files"));
 }
 
 #[test]
