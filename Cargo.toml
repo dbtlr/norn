@@ -2,6 +2,7 @@
 members = [
     "crates/vault-core",
     "crates/vault-frontmatter",
+    "crates/vault-links",
     "crates/vault-index",
     "crates/vault-cli",
 ]

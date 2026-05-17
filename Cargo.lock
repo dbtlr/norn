@@ -602,7 +602,20 @@ dependencies = [
  "thiserror",
  "vault-core",
  "vault-frontmatter",
+ "vault-links",
  "walkdir",
+]
+
+[[package]]
+name = "vault-links"
+version = "0.14.0"
+dependencies = [
+ "camino",
+ "pulldown-cmark",
+ "regex",
+ "serde_json",
+ "vault-core",
+ "vault-frontmatter",
 ]
 
 [[package]]
