@@ -529,6 +529,41 @@ fn validate_summary_reports_disallowed_value_counts() {
 }
 
 #[test]
+fn validate_summary_reports_invalid_type_counts() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n      field_types:\n        created: datetime\n        date: date\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("note.md"),
+        "---\ncreated: not-a-date\ndate: also-not\n---\n# Note\n",
+    )
+    .expect("note should write");
+
+    let output = vault(&[
+        "validate",
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--summary",
+        "--format",
+        "json",
+    ]);
+
+    let summary = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(summary["invalid_types"]["created"]["datetime"], 1);
+    assert_eq!(summary["invalid_types"]["date"]["date"], 1);
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
 fn validate_reports_allowed_value_findings() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");

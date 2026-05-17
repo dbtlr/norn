@@ -15,6 +15,7 @@ pub struct Summary {
     pub rules: BTreeMap<String, usize>,
     pub fields: BTreeMap<String, usize>,
     pub disallowed_values: BTreeMap<String, BTreeMap<String, usize>>,
+    pub invalid_types: BTreeMap<String, BTreeMap<String, usize>>,
     pub path_prefixes: BTreeMap<String, usize>,
 }
 
@@ -26,6 +27,7 @@ pub fn summarize(findings: &[Finding]) -> Summary {
         rules: BTreeMap::new(),
         fields: BTreeMap::new(),
         disallowed_values: BTreeMap::new(),
+        invalid_types: BTreeMap::new(),
         path_prefixes: BTreeMap::new(),
     };
 
@@ -53,11 +55,18 @@ pub fn summarize(findings: &[Finding]) -> Summary {
                 let value_counts = summary.disallowed_values.entry(field.clone()).or_default();
                 increment(value_counts, summary_value_key(actual_value));
             }
-            FindingBody::InvalidFieldType { rule, field, .. } => {
+            FindingBody::InvalidFieldType {
+                rule,
+                field,
+                expected_type,
+                ..
+            } => {
                 if let Some(rule) = rule {
                     increment(&mut summary.rules, rule);
                 }
                 increment(&mut summary.fields, field);
+                let type_counts = summary.invalid_types.entry(field.clone()).or_default();
+                increment(type_counts, expected_type);
             }
             FindingBody::ForbiddenField { rule, field, .. } => {
                 if let Some(rule) = rule {
