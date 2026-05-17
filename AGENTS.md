@@ -63,6 +63,7 @@ vault graph diagnostics --root <path> --format jsonl
 vault graph backlinks <path-or-stem-or-file> --root <path> --format jsonl
 vault graph inspect <path-or-stem> --root <path> --format json
 vault graph build --root <path> --cache .vault/cache --format json
+vault doctor --root <path> --config <path> --format jsonl
 ```
 
 All graph commands accept `--config <path>` for explicit YAML configuration. Current config shape:
@@ -72,9 +73,16 @@ graph:
   ignore:
     - __pycache__/**
     - "*.pyc"
+doctor:
+  required_frontmatter:
+    - title
 ```
 
-Ignore patterns are applied before file inventory and document parsing. Supported v0.5 patterns are exact vault-relative paths, directory prefixes ending in `/**`, and simple `*` wildcards. Build summaries include `ignored_files` so count changes are visible.
+Ignore patterns are applied before file inventory and document parsing. Supported v0.x patterns are exact vault-relative paths, directory prefixes ending in `/**`, and simple `*` wildcards. Build summaries include `ignored_files` so count changes are visible.
+
+Ignored targets remain outside the graph. If an indexed Markdown document links to an ignored file, that link is reported as unresolved rather than hidden.
+
+`vault doctor` is read-only. It reports unresolved links, ambiguous links, document diagnostics, and configured missing frontmatter fields. Do not add mutation behavior to doctor; use future plan/apply commands for edits.
 
 Lookup rules:
 
