@@ -37,16 +37,11 @@ pub fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
                 rule.name.as_deref(),
             ));
 
-            for field in &rule.forbidden_frontmatter {
-                if let Some(actual) = document_frontmatter_field(document, field) {
-                    findings.push(Finding::frontmatter_forbidden_field(
-                        document.path.clone(),
-                        rule.name.clone(),
-                        field.clone(),
-                        actual.clone(),
-                    ));
-                }
-            }
+            findings.extend(crate::checks::check_forbidden_frontmatter(
+                document,
+                &rule.forbidden_frontmatter,
+                rule.name.as_deref(),
+            ));
 
             if !rule.allowed_paths.is_empty()
                 && !rule

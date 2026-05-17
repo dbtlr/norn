@@ -53,3 +53,22 @@ pub(crate) fn check_field_types(
         })
         .collect()
 }
+
+pub(crate) fn check_forbidden_frontmatter(
+    document: &Document,
+    fields: &[String],
+    rule: Option<&str>,
+) -> Vec<Finding> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            let actual = crate::predicates::document_frontmatter_field(document, field)?;
+            Some(Finding::frontmatter_forbidden_field(
+                document.path.clone(),
+                rule.map(str::to_string),
+                field.clone(),
+                actual.clone(),
+            ))
+        })
+        .collect()
+}
