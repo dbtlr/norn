@@ -3,10 +3,11 @@ mod config;
 mod filter;
 mod output;
 mod registry;
+mod repair_apply;
 mod target;
 mod validate_filter;
 
-use std::{fs, process};
+use std::{collections::BTreeMap, fs, process};
 
 use anyhow::Result;
 use clap::Parser;
@@ -26,6 +27,7 @@ use crate::output::{
     is_broken_pipe, resolve_format, write_document_summary, write_documents, write_files,
     write_findings, write_item_output, write_links, write_output, write_validate_summary,
 };
+use crate::repair_apply::{apply_repair_plan, with_verification};
 use crate::target::{
     backlinks, inspect_document, resolve_backlink_target_path, resolve_target_path,
 };
@@ -166,8 +168,32 @@ fn run(cli: Cli) -> Result<i32> {
                     repair_plan_filters(&args),
                     findings,
                     &loaded_config.repair,
+                    &document_hashes(&index),
                 );
                 write_item_output(&plan, args.format)?;
+                Ok(exit_code_for(&index))
+            }
+            RepairSubcommand::Apply(args) => {
+                let plan_path = resolve_path(&cwd, &args.plan);
+                let plan_text = fs::read_to_string(&plan_path).map_err(|error| {
+                    anyhow::anyhow!("failed to read repair plan {plan_path}: {error}")
+                })?;
+                let plan = serde_json::from_str::<vault_standards::RepairPlan>(&plan_text)
+                    .map_err(|error| {
+                        anyhow::anyhow!("failed to parse repair plan {plan_path}: {error}")
+                    })?;
+                let loaded_config = load_config(&cwd, config_path.as_ref())?;
+                let mut index = build_index_with_options(&cwd, &loaded_config.index_options)?;
+                trim_diagnostics(&mut index, verbose);
+                let mut report = apply_repair_plan(&cwd, &index, &plan, args.dry_run)?;
+                if args.verify {
+                    let mut verify_index =
+                        build_index_with_options(&cwd, &loaded_config.index_options)?;
+                    trim_diagnostics(&mut verify_index, verbose);
+                    let findings = validate(&verify_index, &loaded_config.validate);
+                    report = with_verification(report, &findings);
+                }
+                write_item_output(&report, args.format)?;
                 Ok(exit_code_for(&index))
             }
         },
@@ -230,6 +256,14 @@ fn repair_plan_filters(args: &crate::cli::RepairPlanArgs) -> RepairPlanFilters {
         target: args.target.clone(),
         reason: args.reason.clone(),
     }
+}
+
+fn document_hashes(index: &GraphIndex) -> BTreeMap<camino::Utf8PathBuf, String> {
+    index
+        .documents
+        .iter()
+        .map(|document| (document.path.clone(), document.hash.clone()))
+        .collect()
 }
 
 fn filter_documents_by_text<'a>(

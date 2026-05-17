@@ -85,6 +85,7 @@ vault registry add atlas /path/to/atlas
 vault registry list --format table
 vault --vault atlas validate --summary --format json
 vault --vault atlas repair plan --code frontmatter-disallowed-value --field status --format json
+vault --vault atlas repair apply repair.json --verify --format json
 vault cache build --cache .vault/cache --format json
 vault links list --format jsonl
 vault files --format jsonl
@@ -298,6 +299,10 @@ The plan schema includes:
 - `unsupported_findings`
 - `manual_decisions`
 
+Each planned change includes the target path, document hash precondition,
+finding context, operation, field, expected old value when available, and new
+value when applicable.
+
 The first supported repair actions are frontmatter-only:
 
 ```yaml
@@ -341,9 +346,20 @@ vault --vault atlas validate --rule task-status --summary --format table
 vault --vault atlas repair plan --rule task-status --format json
 ```
 
-Repair planning does not apply changes. Apply behavior is a separate explicit
-step planned for a later release and must reject stale or unsupported plans
-rather than guessing.
+`vault repair apply <plan>` applies frontmatter-only plans. Apply writes by
+default because the command is explicit; pass `--dry-run` to preview without
+writing. Apply rejects unsupported plan schema versions, plans for a different
+vault root, plans containing unsupported/manual findings, stale document hashes,
+conflicting field changes, and expected-old-value mismatches.
+
+```bash
+vault --vault atlas repair apply repair.json --dry-run --format json
+vault --vault atlas repair apply repair.json --verify --format json
+```
+
+Frontmatter apply preserves Markdown body content exactly. YAML frontmatter is
+rewritten through the YAML serializer, so comments and exact frontmatter styling
+are not guaranteed in the v1 apply boundary.
 
 `vault docs list` supports small inventory filters: `--path <glob>` for
 vault-relative paths, repeatable `--filter field:value` for frontmatter scalar

@@ -157,6 +157,11 @@ pub enum RepairSubcommand {
         long_about = "Generate an explicit repair plan from validation findings.\n\nRepair planning is read-only. It uses configured deterministic repair rules and reports unsupported or manual-decision findings explicitly."
     )]
     Plan(RepairPlanArgs),
+    #[command(
+        about = "Apply a frontmatter-only repair plan",
+        long_about = "Apply a frontmatter-only repair plan.\n\nApply writes by default, checks plan schema and stale file preconditions, preserves Markdown body content, and rejects plans with unsupported or manual-decision findings."
+    )]
+    Apply(RepairApplyArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -183,6 +188,20 @@ pub struct RepairPlanArgs {
     pub target: Vec<String>,
     #[arg(long, help = "Filter link findings by unresolved reason")]
     pub reason: Vec<String>,
+}
+
+#[derive(Debug, Parser)]
+pub struct RepairApplyArgs {
+    pub plan: Utf8PathBuf,
+    #[arg(long, help = "Preview changes without writing files")]
+    pub dry_run: bool,
+    #[arg(
+        long,
+        help = "Run validation after apply and report remaining finding counts"
+    )]
+    pub verify: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json, help = "Stdout format")]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Subcommand)]

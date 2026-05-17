@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
+
 use camino::Utf8PathBuf;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vault_core::Severity;
 
@@ -8,7 +10,7 @@ use crate::findings::{Finding, FindingBody};
 
 const REPAIR_PLAN_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RepairPlanFilters {
     pub code: Vec<String>,
     pub severity: Vec<String>,
@@ -19,7 +21,7 @@ pub struct RepairPlanFilters {
     pub reason: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepairPlan {
     pub schema_version: u32,
     pub vault_root: Utf8PathBuf,
@@ -30,7 +32,7 @@ pub struct RepairPlan {
     pub manual_decisions: Vec<RepairPlanFinding>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepairPlanSummary {
     pub findings: usize,
     pub planned_changes: usize,
@@ -38,9 +40,10 @@ pub struct RepairPlanSummary {
     pub manual_decisions: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlannedChange {
     pub path: Utf8PathBuf,
+    pub document_hash: String,
     pub finding_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finding_rule: Option<String>,
@@ -53,7 +56,7 @@ pub struct PlannedChange {
     pub new_value: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepairPlanFinding {
     pub path: Utf8PathBuf,
     pub code: String,
@@ -73,6 +76,7 @@ pub fn plan_repairs(
     filters: RepairPlanFilters,
     findings: Vec<Finding>,
     config: &RepairConfig,
+    document_hashes: &BTreeMap<Utf8PathBuf, String>,
 ) -> RepairPlan {
     let mut changes = Vec::new();
     let mut unsupported_findings = Vec::new();
@@ -80,7 +84,7 @@ pub fn plan_repairs(
 
     for finding in &findings {
         if let Some((rule, action)) = matching_repair_rule(finding, &config.rules) {
-            match planned_change(finding, rule, action) {
+            match planned_change(finding, rule, action, document_hashes) {
                 Some(change) => changes.push(change),
                 None => unsupported_findings.push(plan_finding(
                     finding,
@@ -149,14 +153,17 @@ fn planned_change(
     finding: &Finding,
     rule: &RepairRule,
     action: &RepairAction,
+    document_hashes: &BTreeMap<Utf8PathBuf, String>,
 ) -> Option<PlannedChange> {
     let repair_rule = rule
         .name
         .clone()
         .unwrap_or_else(|| "unnamed-repair-rule".to_string());
+    let document_hash = document_hashes.get(&finding.path)?.clone();
     match action {
         RepairAction::SetFrontmatter { field, value } => Some(PlannedChange {
             path: finding.path.clone(),
+            document_hash: document_hash.clone(),
             finding_code: finding.code.clone(),
             finding_rule: finding_rule(finding),
             repair_rule,
@@ -167,6 +174,7 @@ fn planned_change(
         }),
         RepairAction::RemoveFrontmatter { field } => Some(PlannedChange {
             path: finding.path.clone(),
+            document_hash,
             finding_code: finding.code.clone(),
             finding_rule: finding_rule(finding),
             repair_rule,

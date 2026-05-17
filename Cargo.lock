@@ -565,6 +565,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "vault-core",
+ "vault-frontmatter",
  "vault-graph",
  "vault-standards",
 ]

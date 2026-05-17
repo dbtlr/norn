@@ -219,11 +219,164 @@ fn repair_plan_generates_configured_frontmatter_change() {
     assert_eq!(plan["summary"]["planned_changes"], 1);
     assert_eq!(plan["summary"]["unsupported_findings"], 0);
     assert_eq!(plan["changes"][0]["path"], "task.md");
+    assert!(plan["changes"][0]["document_hash"].as_str().unwrap().len() > 20);
     assert_eq!(plan["changes"][0]["repair_rule"], "map-someday-status");
     assert_eq!(plan["changes"][0]["operation"], "set_frontmatter");
     assert_eq!(plan["changes"][0]["field"], "status");
     assert_eq!(plan["changes"][0]["expected_old_value"], "someday");
     assert_eq!(plan["changes"][0]["new_value"], "backlog");
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn repair_apply_writes_frontmatter_plan_and_verifies() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("task.md"),
+        "---\ntype: task\nstatus: someday\n---\n# Task\n\nBody stays.\n",
+    )
+    .expect("task should write");
+
+    let plan = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--code",
+        "frontmatter-disallowed-value",
+        "--field",
+        "status",
+    ]);
+    let plan_path = root.join("repair.json");
+    fs::write(&plan_path, plan).expect("plan should write");
+
+    let output = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+        "--verify",
+    ]);
+
+    let report = serde_json::from_str::<Value>(&output).expect("apply report should be JSON");
+    assert_eq!(report["dry_run"], false);
+    assert_eq!(report["applied_changes"], 1);
+    assert_eq!(report["changed_files"][0], "task.md");
+    assert_eq!(report["verification"]["remaining_findings"], 0);
+
+    let updated = fs::read_to_string(root.join("task.md")).expect("task should read");
+    assert!(updated.contains("status: backlog"));
+    assert!(updated.contains("# Task\n\nBody stays.\n"));
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn repair_apply_dry_run_does_not_write() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("task.md"),
+        "---\ntype: task\nstatus: someday\n---\n# Task\n",
+    )
+    .expect("task should write");
+
+    let plan = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+    ]);
+    let plan_path = root.join("repair.json");
+    fs::write(&plan_path, plan).expect("plan should write");
+
+    let output = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    let report = serde_json::from_str::<Value>(&output).expect("apply report should be JSON");
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["changed_files"][0], "task.md");
+    let unchanged = fs::read_to_string(root.join("task.md")).expect("task should read");
+    assert!(unchanged.contains("status: someday"));
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn repair_apply_rejects_stale_plan() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("task.md"),
+        "---\ntype: task\nstatus: someday\n---\n# Task\n",
+    )
+    .expect("task should write");
+
+    let plan = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+    ]);
+    let plan_path = root.join("repair.json");
+    fs::write(&plan_path, plan).expect("plan should write");
+    fs::write(
+        root.join("task.md"),
+        "---\ntype: task\nstatus: later\n---\n# Task\n",
+    )
+    .expect("task should write");
+
+    let error = vault_error(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+    ]);
+
+    assert!(error.contains("stale repair plan"));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
