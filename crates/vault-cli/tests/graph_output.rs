@@ -185,10 +185,14 @@ fn graph_documents_jsonl_contract() {
         frontmatter_source["links"][1]["source_context"],
         serde_json::json!({"area": "frontmatter", "property": "related"})
     );
+    assert_eq!(frontmatter_source["links"][1]["source_span"]["line"], 3);
+    assert_eq!(frontmatter_source["links"][1]["source_span"]["column"], 11);
     assert_eq!(
         frontmatter_source["links"][2]["source_context"],
         serde_json::json!({"area": "frontmatter", "property": "related_list"})
     );
+    assert_eq!(frontmatter_source["links"][2]["source_span"]["line"], 5);
+    assert_eq!(frontmatter_source["links"][2]["source_span"]["column"], 6);
     assert_eq!(
         broken["diagnostics"][0],
         serde_json::json!({
@@ -240,6 +244,13 @@ fn graph_build_writes_sqlite_cache() {
             |row| row.get(0),
         )
         .unwrap();
+    let frontmatter_line: i64 = connection
+        .query_row(
+            "SELECT line FROM links WHERE raw = '[[Front Target]]'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let schema_version: String = connection
         .query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
@@ -251,6 +262,7 @@ fn graph_build_writes_sqlite_cache() {
     assert_eq!(file_count, 12);
     assert_eq!(link_count, 23);
     assert_eq!(missing_reason, "target-missing");
+    assert_eq!(frontmatter_line, 3);
     assert_eq!(schema_version, "2");
 
     std::fs::remove_dir_all(cache_dir).ok();

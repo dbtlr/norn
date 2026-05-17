@@ -194,11 +194,17 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
     };
 
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-    let (frontmatter, body, body_start) = extract_frontmatter(&content, &mut diagnostics);
+    let (frontmatter, frontmatter_range, body, body_start) =
+        extract_frontmatter(&content, &mut diagnostics);
     let (headings, mut links) = parse_commonmark(&path, &content, body, body_start);
     links.extend(parse_wikilinks(&path, &content, body, body_start));
     if let Some(frontmatter) = &frontmatter {
-        links.extend(parse_frontmatter_wikilinks(&path, frontmatter));
+        links.extend(parse_frontmatter_wikilinks(
+            &path,
+            &content,
+            frontmatter_range,
+            frontmatter,
+        ));
     }
     let block_ids = parse_block_ids(body);
 
@@ -217,24 +223,31 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
 fn extract_frontmatter<'a>(
     content: &'a str,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (Option<serde_json::Value>, &'a str, usize) {
+) -> (
+    Option<serde_json::Value>,
+    Option<Range<usize>>,
+    &'a str,
+    usize,
+) {
     let Some(after_open) = content
         .strip_prefix("---\n")
         .or_else(|| content.strip_prefix("---\r\n"))
     else {
-        return (None, content, 0);
+        return (None, None, content, 0);
     };
 
     let mut offset = content.len() - after_open.len();
+    let yaml_start = offset;
     for line in after_open.split_inclusive('\n') {
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed == "---" {
-            let yaml = &content[4..offset];
+            let yaml = &content[yaml_start..offset];
+            let yaml_range = yaml_start..offset;
             let body_start = offset + line.len();
             let body = &content[body_start..];
             return match serde_yaml::from_str::<serde_yaml::Value>(yaml) {
                 Ok(value) => match serde_json::to_value(value) {
-                    Ok(value) => (Some(value), body, body_start),
+                    Ok(value) => (Some(value), Some(yaml_range), body, body_start),
                     Err(error) => {
                         diagnostics.push(
                             Diagnostic::warning(
@@ -243,7 +256,7 @@ fn extract_frontmatter<'a>(
                             )
                             .with_detail(error.to_string()),
                         );
-                        (None, body, body_start)
+                        (None, Some(yaml_range), body, body_start)
                     }
                 },
                 Err(error) => {
@@ -254,7 +267,7 @@ fn extract_frontmatter<'a>(
                         )
                         .with_detail(error.to_string()),
                     );
-                    (None, body, body_start)
+                    (None, Some(yaml_range), body, body_start)
                 }
             };
         }
@@ -265,7 +278,7 @@ fn extract_frontmatter<'a>(
         "frontmatter-unclosed",
         "frontmatter opening delimiter has no closing delimiter",
     ));
-    (None, content, 0)
+    (None, None, content, 0)
 }
 
 fn parse_commonmark(
@@ -435,41 +448,130 @@ fn parse_wikilinks_in_text(
 
 fn parse_frontmatter_wikilinks(
     source_path: &Utf8Path,
+    content: &str,
+    frontmatter_range: Option<Range<usize>>,
     frontmatter: &serde_json::Value,
 ) -> Vec<Link> {
     let Some(object) = frontmatter.as_object() else {
         return Vec::new();
     };
 
-    object
-        .iter()
-        .flat_map(|(property, value)| {
-            frontmatter_property_strings(value)
-                .into_iter()
-                .map(move |text| (property, text))
-        })
-        .flat_map(|(property, text)| {
+    frontmatter_property_strings(object, content, frontmatter_range)
+        .into_iter()
+        .flat_map(|property_string| {
             parse_wikilinks_in_text(
                 source_path,
-                text,
-                None,
+                property_string.text,
+                property_string
+                    .offset
+                    .map(|offset| (content, offset, Vec::new())),
                 Some(LinkSourceContext {
                     area: LinkSourceArea::Frontmatter,
-                    property: Some(property.to_string()),
+                    property: Some(property_string.property),
                 }),
             )
         })
         .collect()
 }
 
-fn frontmatter_property_strings(value: &serde_json::Value) -> Vec<&str> {
-    match value {
-        serde_json::Value::String(text) => vec![text],
-        serde_json::Value::Array(values) => {
-            values.iter().filter_map(|value| value.as_str()).collect()
+struct FrontmatterPropertyString<'a> {
+    property: String,
+    text: &'a str,
+    offset: Option<usize>,
+}
+
+fn frontmatter_property_strings<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    content: &str,
+    frontmatter_range: Option<Range<usize>>,
+) -> Vec<FrontmatterPropertyString<'a>> {
+    let mut strings = Vec::new();
+
+    for (property, value) in object {
+        match value {
+            serde_json::Value::String(text) => strings.push(FrontmatterPropertyString {
+                property: property.to_string(),
+                text,
+                offset: frontmatter_scalar_offset(
+                    content,
+                    frontmatter_range.clone(),
+                    property,
+                    text,
+                ),
+            }),
+            serde_json::Value::Array(values) => {
+                for text in values.iter().filter_map(|value| value.as_str()) {
+                    strings.push(FrontmatterPropertyString {
+                        property: property.to_string(),
+                        text,
+                        offset: frontmatter_list_item_offset(
+                            content,
+                            frontmatter_range.clone(),
+                            property,
+                            text,
+                        ),
+                    });
+                }
+            }
+            _ => {}
         }
-        _ => Vec::new(),
     }
+
+    strings
+}
+
+fn frontmatter_scalar_offset(
+    content: &str,
+    frontmatter_range: Option<Range<usize>>,
+    property: &str,
+    text: &str,
+) -> Option<usize> {
+    let range = frontmatter_range?;
+    let yaml = &content[range.clone()];
+    let property_prefix = format!("{property}:");
+    let mut line_start = range.start;
+
+    for line in yaml.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if !line.starts_with([' ', '\t']) && trimmed.starts_with(&property_prefix) {
+            return line.find(text).map(|offset| line_start + offset);
+        }
+        line_start += line.len();
+    }
+
+    None
+}
+
+fn frontmatter_list_item_offset(
+    content: &str,
+    frontmatter_range: Option<Range<usize>>,
+    property: &str,
+    text: &str,
+) -> Option<usize> {
+    let range = frontmatter_range?;
+    let yaml = &content[range.clone()];
+    let property_prefix = format!("{property}:");
+    let mut in_property = false;
+    let mut line_start = range.start;
+
+    for line in yaml.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if !line.starts_with([' ', '\t']) {
+            in_property = trimmed.starts_with(&property_prefix);
+            line_start += line.len();
+            continue;
+        }
+
+        if in_property && trimmed.starts_with('-') {
+            if let Some(offset) = line.find(text) {
+                return Some(line_start + offset);
+            }
+        }
+
+        line_start += line.len();
+    }
+
+    None
 }
 
 fn ignored_wikilink_ranges(body: &str) -> Vec<Range<usize>> {
