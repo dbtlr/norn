@@ -16,12 +16,7 @@ pub fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
             continue;
         }
 
-        for diagnostic in &document.diagnostics {
-            findings.push(Finding::from_graph_diagnostic(
-                document.path.clone(),
-                diagnostic.clone(),
-            ));
-        }
+        findings.extend(crate::checks::check_graph_diagnostics(document));
 
         for field in &config.required_frontmatter {
             if !document_has_frontmatter_field(document, field) {
