@@ -7,7 +7,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 use regex::Regex;
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use vault_core::{
     Diagnostic, Document, GraphIndex, Heading, Link, LinkKind, LinkSourceArea, LinkSourceContext,
     LinkStatus, Severity, SourceSpan, UnresolvedReason, VaultFile,
@@ -37,12 +37,37 @@ pub enum IndexError {
 pub struct CacheSummary {
     pub cache_path: Utf8PathBuf,
     pub files: usize,
+    pub ignored_files: usize,
     pub documents: usize,
     pub links: usize,
     pub diagnostics: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct IndexOptions {
+    pub ignore: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VaultConfig {
+    #[serde(default)]
+    pub graph: GraphConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GraphConfig {
+    #[serde(default)]
+    pub ignore: Vec<String>,
+}
+
 pub fn build_index(root: impl AsRef<Utf8Path>) -> Result<GraphIndex, IndexError> {
+    build_index_with_options(root, &IndexOptions::default())
+}
+
+pub fn build_index_with_options(
+    root: impl AsRef<Utf8Path>,
+    options: &IndexOptions,
+) -> Result<GraphIndex, IndexError> {
     let root = root.as_ref().to_path_buf();
     if !root.exists() {
         return Err(IndexError::MissingRoot(root));
@@ -52,6 +77,7 @@ pub fn build_index(root: impl AsRef<Utf8Path>) -> Result<GraphIndex, IndexError>
     }
 
     let mut files = Vec::new();
+    let mut ignored_files = Vec::new();
     let mut documents = Vec::new();
 
     for entry in WalkDir::new(&root)
@@ -62,6 +88,11 @@ pub fn build_index(root: impl AsRef<Utf8Path>) -> Result<GraphIndex, IndexError>
     {
         let path = Utf8PathBuf::from_path_buf(entry.path().to_path_buf())
             .map_err(|path| IndexError::NonUtf8Path(path.display().to_string()))?;
+        let relative_path = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+        if is_ignored(&relative_path, &options.ignore) {
+            ignored_files.push(relative_path);
+            continue;
+        }
         files.push(parse_file(&root, &path));
         if is_markdown(entry.path()) {
             documents.push(parse_document(&root, &path));
@@ -69,12 +100,14 @@ pub fn build_index(root: impl AsRef<Utf8Path>) -> Result<GraphIndex, IndexError>
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
+    ignored_files.sort();
     documents.sort_by(|a, b| a.path.cmp(&b.path));
     resolve_links(&files, &mut documents);
 
     Ok(GraphIndex {
         root,
         files,
+        ignored_files,
         documents,
     })
 }
@@ -101,6 +134,7 @@ pub fn write_sqlite_cache(
     Ok(CacheSummary {
         cache_path,
         files: index.files.len(),
+        ignored_files: index.ignored_files.len(),
         documents: index.documents.len(),
         links: index
             .documents
@@ -784,6 +818,65 @@ fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with('.'))
+}
+
+fn is_ignored(path: &Utf8Path, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .map(|pattern| pattern.trim())
+        .filter(|pattern| !pattern.is_empty())
+        .any(|pattern| pattern_matches_path(pattern, path))
+}
+
+fn pattern_matches_path(pattern: &str, path: &Utf8Path) -> bool {
+    let path = path.as_str();
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+
+    if let Some(extension) = pattern.strip_prefix("*.") {
+        return path
+            .rsplit_once('.')
+            .is_some_and(|(_, path_extension)| path_extension == extension);
+    }
+
+    if pattern.contains('*') {
+        return glob_star_matches(pattern, path);
+    }
+
+    path == pattern
+}
+
+fn glob_star_matches(pattern: &str, path: &str) -> bool {
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    let mut remainder = path;
+
+    if let Some(first) = parts.first() {
+        if !first.is_empty() {
+            let Some(after_prefix) = remainder.strip_prefix(first) else {
+                return false;
+            };
+            remainder = after_prefix;
+        }
+    }
+
+    for part in parts.iter().skip(1).take(parts.len().saturating_sub(2)) {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(index) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[index + part.len()..];
+    }
+
+    if let Some(last) = parts.last() {
+        if !last.is_empty() {
+            return remainder.ends_with(last);
+        }
+    }
+
+    true
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {

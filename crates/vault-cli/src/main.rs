@@ -1,9 +1,14 @@
+use std::fs;
+
 use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use vault_core::{Diagnostic, Document, GraphIndex, Link, LinkStatus, VaultFile};
-use vault_index::{build_index, concise_diagnostics, has_errors, write_sqlite_cache};
+use vault_index::{
+    build_index_with_options, concise_diagnostics, has_errors, write_sqlite_cache, IndexOptions,
+    VaultConfig,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "vault")]
@@ -71,6 +76,8 @@ enum GraphSubcommand {
 struct BuildArgs {
     #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
+    #[arg(long, help = "YAML config file with graph.ignore patterns")]
+    config: Option<Utf8PathBuf>,
     #[arg(
         long,
         help = "SQLite cache file path or directory. Directories receive graph.sqlite; --format only controls stdout"
@@ -86,6 +93,8 @@ struct BuildArgs {
 struct DocumentsArgs {
     #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
+    #[arg(long, help = "YAML config file with graph.ignore patterns")]
+    config: Option<Utf8PathBuf>,
     #[arg(
         long = "filter",
         help = "Frontmatter-only field:value filter. Repeat to require multiple fields"
@@ -101,6 +110,8 @@ struct DocumentsArgs {
 struct GraphArgs {
     #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
+    #[arg(long, help = "YAML config file with graph.ignore patterns")]
+    config: Option<Utf8PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl, help = "Stdout format")]
     format: OutputFormat,
     #[arg(long, help = "Include verbose diagnostic details")]
@@ -115,6 +126,8 @@ struct TargetGraphArgs {
     target: String,
     #[arg(long, default_value = ".", help = "Vault root to index")]
     root: Utf8PathBuf,
+    #[arg(long, help = "YAML config file with graph.ignore patterns")]
+    config: Option<Utf8PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl, help = "Stdout format")]
     format: OutputFormat,
     #[arg(long, help = "Include verbose diagnostic details")]
@@ -151,49 +164,49 @@ fn run(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::Graph(graph) => match graph.command {
             GraphSubcommand::Build(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let summary = write_sqlite_cache(&index, &args.cache)?;
                 write_item_output(&summary, args.format)?;
                 Ok(exit_code_for(&index))
             }
             GraphSubcommand::Documents(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let documents = filter_documents(&index, &args.filters)?;
                 write_output(&documents, args.format)?;
                 Ok(exit_code_for(&index))
             }
             GraphSubcommand::Links(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let links = all_links(&index);
                 write_output(&links, args.format)?;
                 Ok(exit_code_for(&index))
             }
             GraphSubcommand::Files(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let files = all_files(&index);
                 write_output(&files, args.format)?;
                 Ok(exit_code_for(&index))
             }
             GraphSubcommand::Unresolved(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let links = unresolved_links(&index);
                 write_output(&links, args.format)?;
                 Ok(exit_code_for(&index))
             }
             GraphSubcommand::Diagnostics(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let diagnostics = all_diagnostics(&index);
                 write_output(&diagnostics, args.format)?;
                 Ok(exit_code_for(&index))
             }
             GraphSubcommand::Backlinks(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let target_path = resolve_backlink_target_path(&index, &args.target)?;
                 let links = backlinks(&index, &target_path);
@@ -201,7 +214,7 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(exit_code_for(&index))
             }
             GraphSubcommand::Inspect(args) => {
-                let mut index = build_index(&args.root)?;
+                let mut index = build_index_for(&args.root, args.config.as_ref())?;
                 trim_diagnostics(&mut index, args.verbose);
                 let target_path = resolve_target_path(&index, &args.target)?;
                 let output = inspect_document(&index, &target_path)?;
@@ -210,6 +223,24 @@ fn run(cli: Cli) -> Result<i32> {
             }
         },
     }
+}
+
+fn build_index_for(root: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Result<GraphIndex> {
+    let options = match config_path {
+        Some(config_path) => {
+            let config_text = fs::read_to_string(config_path)
+                .map_err(|error| anyhow::anyhow!("failed to read config {config_path}: {error}"))?;
+            let config = serde_yaml::from_str::<VaultConfig>(&config_text).map_err(|error| {
+                anyhow::anyhow!("failed to parse config {config_path}: {error}")
+            })?;
+            IndexOptions {
+                ignore: config.graph.ignore,
+            }
+        }
+        None => IndexOptions::default(),
+    };
+
+    Ok(build_index_with_options(root, &options)?)
 }
 
 fn trim_diagnostics(index: &mut GraphIndex, verbose: bool) {

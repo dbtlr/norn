@@ -153,5 +153,7 @@ pub struct Document {
 pub struct GraphIndex {
     pub root: Utf8PathBuf,
     pub files: Vec<VaultFile>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub ignored_files: Vec<Utf8PathBuf>,
     pub documents: Vec<Document>,
 }

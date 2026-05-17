@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -218,6 +219,7 @@ fn graph_build_writes_sqlite_cache() {
     assert_eq!(value["cache_path"], cache_path.to_str().unwrap());
     assert_eq!(value["documents"], 10);
     assert_eq!(value["files"], 12);
+    assert_eq!(value["ignored_files"], 0);
     assert_eq!(value["links"], 23);
     assert!(cache_path.exists());
 
@@ -252,6 +254,76 @@ fn graph_build_writes_sqlite_cache() {
     assert_eq!(schema_version, "2");
 
     std::fs::remove_dir_all(cache_dir).ok();
+}
+
+#[test]
+fn graph_config_ignores_files_before_indexing() {
+    let root = temp_cache_dir();
+    fs::create_dir_all(root.join("__pycache__")).expect("temp dirs should be created");
+    fs::write(root.join("kept.md"), "# Kept\n\n[[ignored]]\n").expect("kept note should write");
+    fs::write(root.join("ignored.md"), "# Ignored\n").expect("ignored note should write");
+    fs::write(root.join("__pycache__/ignored.pyc"), "compiled").expect("ignored file should write");
+    fs::write(
+        root.join("vault.yaml"),
+        "graph:\n  ignore:\n    - ignored.md\n    - __pycache__/**\n",
+    )
+    .expect("config should write");
+
+    let documents = vault(&[
+        "graph",
+        "documents",
+        "--root",
+        root.to_str().unwrap(),
+        "--config",
+        root.join("vault.yaml").to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    let documents = serde_json::from_str::<Value>(&documents).expect("output should be JSON");
+    assert_eq!(documents.as_array().unwrap().len(), 1);
+    assert_eq!(documents[0]["path"], "kept.md");
+
+    let files = vault(&[
+        "graph",
+        "files",
+        "--root",
+        root.to_str().unwrap(),
+        "--config",
+        root.join("vault.yaml").to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    let files = serde_json::from_str::<Value>(&files).expect("output should be JSON");
+    assert_eq!(files.as_array().unwrap().len(), 2);
+    assert!(files
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == "kept.md"));
+    assert!(files
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["path"] == "vault.yaml"));
+
+    let build = vault(&[
+        "graph",
+        "build",
+        "--root",
+        root.to_str().unwrap(),
+        "--config",
+        root.join("vault.yaml").to_str().unwrap(),
+        "--cache",
+        root.join("cache.sqlite").to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    let build = serde_json::from_str::<Value>(&build).expect("output should be JSON");
+    assert_eq!(build["files"], 2);
+    assert_eq!(build["ignored_files"], 2);
+    assert_eq!(build["documents"], 1);
+
+    fs::remove_dir_all(root).ok();
 }
 
 #[test]
