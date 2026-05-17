@@ -1,8 +1,36 @@
 # vault-cli
 
-Experimental Rust CLI for deterministic Markdown vault graph indexing.
+Experimental Rust CLI for deterministic Markdown vault graph indexing and
+drift healing.
 
 The current binary name is `vault`.
+
+## Product Direction
+
+`vault` is being shaped as a deterministic drift-healing surface for Markdown
+vaults. The product loop is:
+
+1. Detect drift with graph facts and configured validation rules.
+2. Plan supported repairs as explicit, inspectable artifacts.
+3. Apply supported plans only through an explicit apply command.
+4. Verify the vault after changes and report what remains.
+
+The current `validate` command is the detection layer for this loop. It is
+read-only and intentionally does not guess repairs or mutate files. Future
+repair commands should preserve that boundary: no hidden writes, no
+LLM-required fixes inside the CLI, and no apply behavior without an explicit
+plan/apply step.
+
+Machine-facing workflows should prefer stable JSON and JSONL contracts. Human
+review workflows should prefer table, path-list, or Markdown-style output where
+available, while preserving the machine-readable schemas that agents and
+scripts consume.
+
+The core workflow should not depend on QMD, embeddings, or semantic retrieval.
+Those can remain useful adjacent layers, but `vault` should provide deterministic
+path, frontmatter, graph, validation, search, repair-plan, and apply surfaces
+directly. Atlas-specific doctrine belongs in `.vault/config.yaml`, docs, and
+recipes rather than hardcoded generic CLI behavior.
 
 ## Build
 
@@ -129,7 +157,11 @@ Configured ignores are applied before file inventory and document parsing. With 
 
 Ignored targets remain outside the graph. If an indexed Markdown document links to an ignored file, that link is reported as unresolved rather than hidden.
 
-The first pass is stateless and read-only. It walks Markdown files, parses generic frontmatter, extracts headings, extracts Markdown links and wikilinks, and resolves links against vault-relative paths or unique note stems. Exact path lookup is case-sensitive; stem lookup is case-insensitive.
+The current graph and validation passes are stateless and read-only. They walk
+Markdown files, parse generic frontmatter, extract headings, extract Markdown
+links and wikilinks, and resolve links against vault-relative paths or unique
+note stems. Exact path lookup is case-sensitive; stem lookup is
+case-insensitive.
 
 The raw graph aims to follow Obsidian-style internal link behavior before applying any future standards-pack semantics. It includes body wikilinks, embeds, frontmatter/property wikilinks, URL-decoded Markdown internal links, extensionless Markdown note links, same-note heading/block references, Markdown image links to local files, and existing non-Markdown attachment targets.
 
