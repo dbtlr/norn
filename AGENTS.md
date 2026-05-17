@@ -146,6 +146,7 @@ Use semver-style tags for milestones:
 - `v0.1.0` — initial graph CLI baseline
 - `v0.2.0` — contract polish and diagnostics
 - `v0.3.0` — Obsidian-compatible graph semantics
+- `v0.4.0` — same-note references, Markdown image links, file queries, and graph contract polish
 
 For a release bump:
 
