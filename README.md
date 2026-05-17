@@ -51,6 +51,8 @@ vault links unresolved --format jsonl
 vault links backlinks <path-or-stem-or-file> --format jsonl
 vault docs inspect <path-or-stem> --format json
 vault validate --format jsonl
+vault validate --code frontmatter-invalid-type --field created --format jsonl
+vault validate --rule note-base --path "Workspaces/**" --summary --format json
 vault validate --summary --format json
 vault -C <path> validate --summary --format json
 ```
@@ -151,6 +153,13 @@ findings. Summary output includes total findings plus counts by `code`,
 `severity`, `rule`, frontmatter `field`, disallowed field value, and top-level
 path prefix.
 
+`vault validate` supports triage filters for cleanup queues: `--code`,
+`--severity`, `--field`, `--rule`, `--path`, `--target`, and `--reason`.
+Comma-separated values are ORed within a filter dimension, and different
+dimensions are ANDed. Filters apply before both raw output and `--summary`, and
+filtered summaries keep the same JSON schema while counting only the filtered
+finding set.
+
 `vault docs list` supports small inventory filters: `--path <glob>` for
 vault-relative paths, repeatable `--filter field:value` for frontmatter scalar
 or list values, comma-separated value sets such as `status:backlog,completed`,
@@ -161,8 +170,8 @@ field.
 
 ## Glob Matching
 
-Config path patterns and `docs list --path` patterns are matched against
-vault-relative paths using path-segment semantics:
+Config path patterns, `docs list --path`, and `validate --path` patterns are
+matched against vault-relative paths using path-segment semantics:
 
 - `*` matches within one path segment only.
 - `**` matches zero or more complete path segments.

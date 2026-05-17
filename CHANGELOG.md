@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## v0.18.0 - 2026-05-17
+
+Validation triage ergonomics release.
+
+### Added
+
+- Added `vault validate` filters: `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, and `--reason`.
+- Added comma-separated value sets for validate filters, such as `--code link-unresolved,link-ambiguous`.
+- Filtered `vault validate --summary` now summarizes the filtered finding set while preserving the existing summary schema.
+
+### Changed
+
+- Unknown `docs list --has` / `--missing` warnings now name the operator instead of using generic filter wording.
+
 ## v0.17.1 - 2026-05-17
 
 Date/datetime validation polish release.

@@ -68,6 +68,8 @@ vault links backlinks <path-or-stem-or-file> --format jsonl
 vault docs inspect <path-or-stem> --format json
 vault cache build --cache .vault/cache --format json
 vault validate --format jsonl
+vault validate --code frontmatter-invalid-type --field created --format jsonl
+vault validate --rule note-base --path "Workspaces/**" --summary --format json
 vault validate --summary --format json
 vault -C <path> validate --summary --format json
 ```
@@ -135,11 +137,11 @@ validate:
 
 For the conceptual model of validate rules, see [docs/rule-shape.md](docs/rule-shape.md).
 
-Ignore patterns, docs `--path` filters, validate-only ignore patterns, scoped validate `match.path` / `match.path_not` values, `exclude.path`, and `allowed_paths` are applied to vault-relative paths. `*` matches within one path segment only, and `**` matches zero or more complete path segments. Build summaries include `ignored_files` so count changes are visible.
+Ignore patterns, docs `--path` filters, validate `--path` filters, validate-only ignore patterns, scoped validate `match.path` / `match.path_not` values, `exclude.path`, and `allowed_paths` are applied to vault-relative paths. `*` matches within one path segment only, and `**` matches zero or more complete path segments. Build summaries include `ignored_files` so count changes are visible.
 
 Ignored targets remain outside the graph. If an indexed Markdown document links to an ignored file, that link is reported as unresolved rather than hidden.
 
-`vault validate` is read-only. It reports unresolved links, ambiguous links, document diagnostics, configured missing frontmatter fields, invalid frontmatter field types, forbidden frontmatter fields, path-location violations, and configured disallowed frontmatter values. Global `validate.required_frontmatter` applies to every document not skipped by `validate.ignore`. Scoped `validate.rules` apply additional requirements only to documents matched by `match.path`, `match.path_not`, and `match.frontmatter`; findings include `rule` when a scoped rule produced them. Frontmatter predicates and `allowed_values` are top-level, exact, and type-sensitive; missing fields do not match allowed-value checks. `field_types` checks only run when a field is present and supports `datetime`, `date`, `list_of_strings`, `wikilink`, and `wikilink_or_list`. `forbidden_frontmatter` reports present forbidden fields. `allowed_paths` reports matching documents outside permitted path patterns. Rule-level `exclude.path` skips a path subset for that rule without removing files from the graph. Unknown `match.*` keys should remain config errors so typoed rules do not broaden silently. `vault validate --summary` emits grouped counts by code, severity, rule, frontmatter field, disallowed field value, and top-level path prefix instead of raw findings. Do not add mutation behavior to validate; use future plan/apply commands for edits.
+`vault validate` is read-only. It reports unresolved links, ambiguous links, document diagnostics, configured missing frontmatter fields, invalid frontmatter field types, forbidden frontmatter fields, path-location violations, and configured disallowed frontmatter values. Global `validate.required_frontmatter` applies to every document not skipped by `validate.ignore`. Scoped `validate.rules` apply additional requirements only to documents matched by `match.path`, `match.path_not`, and `match.frontmatter`; findings include `rule` when a scoped rule produced them. Frontmatter predicates and `allowed_values` are top-level, exact, and type-sensitive; missing fields do not match allowed-value checks. `field_types` checks only run when a field is present and supports `datetime`, `date`, `list_of_strings`, `wikilink`, and `wikilink_or_list`. `forbidden_frontmatter` reports present forbidden fields. `allowed_paths` reports matching documents outside permitted path patterns. Rule-level `exclude.path` skips a path subset for that rule without removing files from the graph. Unknown `match.*` keys should remain config errors so typoed rules do not broaden silently. `vault validate --summary` emits grouped counts by code, severity, rule, frontmatter field, disallowed field value, and top-level path prefix instead of raw findings. `vault validate` filters (`--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason`) apply before raw output and summary output; filtered summaries keep the same schema. Do not add mutation behavior to validate; use future plan/apply commands for edits.
 
 Lookup rules:
 
@@ -237,6 +239,7 @@ Use semver-style tags for milestones:
 - `v0.16.0` — top-level docs/files/links/cache command surface
 - `v0.17.0` — focused docs query ergonomics
 - `v0.17.1` — date/datetime field-type polish
+- `v0.18.0` — validate triage filters
 
 For a release bump:
 

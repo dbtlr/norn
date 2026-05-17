@@ -3,6 +3,7 @@ mod config;
 mod filter;
 mod output;
 mod target;
+mod validate_filter;
 
 use std::process;
 
@@ -21,6 +22,7 @@ use crate::output::{is_broken_pipe, write_item_output, write_output};
 use crate::target::{
     backlinks, inspect_document, resolve_backlink_target_path, resolve_target_path,
 };
+use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 
 fn main() {
     let cli = Cli::parse();
@@ -133,6 +135,8 @@ fn run(cli: Cli) -> Result<i32> {
             let mut index = build_index_with_options(&cwd, &loaded_config.index_options)?;
             trim_diagnostics(&mut index, verbose);
             let findings = validate(&index, &loaded_config.validate);
+            let filters = ValidateFilterOptions::from(&args);
+            let findings = filter_findings(findings, &filters)?;
             if args.summary {
                 let summary = summarize(&findings);
                 write_item_output(&summary, args.format)?;

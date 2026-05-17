@@ -515,6 +515,125 @@ fn validate_summary_reports_grouped_counts() {
 }
 
 #[test]
+fn validate_filters_raw_findings_for_triage() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n      field_types:\n        created: datetime\n    - name: note-description\n      match:\n        path: \"Notes/**\"\n      required_frontmatter:\n        - description\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(root.join("Notes")).expect("notes dir should be created");
+    fs::write(
+        root.join("Notes/bad-created.md"),
+        "---\ncreated: 2026-05-17\n---\n# Bad\n",
+    )
+    .expect("note should write");
+    fs::write(
+        root.join("Notes/missing-description.md"),
+        "---\ncreated: 2026-05-17T10:00\n---\n# Missing\n",
+    )
+    .expect("note should write");
+
+    let output = vault(&[
+        "validate",
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--code",
+        "frontmatter-invalid-type",
+        "--field",
+        "created",
+        "--rule",
+        "typed-note",
+        "--path",
+        "Notes/**",
+        "--severity",
+        "warning",
+        "--format",
+        "json",
+    ]);
+
+    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(findings.as_array().unwrap().len(), 1);
+    assert_eq!(findings[0]["path"], "Notes/bad-created.md");
+    assert_eq!(findings[0]["code"], "frontmatter-invalid-type");
+    assert_eq!(findings[0]["field"], "created");
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn validate_filters_summary_before_grouping() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n      field_types:\n        created: datetime\n        modified: datetime\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("one.md"),
+        "---\ncreated: nope\nmodified: also-nope\n---\n# One\n",
+    )
+    .expect("note should write");
+
+    let output = vault(&[
+        "validate",
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--code",
+        "frontmatter-invalid-type",
+        "--field",
+        "created",
+        "--summary",
+        "--format",
+        "json",
+    ]);
+
+    let summary = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(summary["findings"], 1);
+    assert_eq!(summary["fields"]["created"], 1);
+    assert_eq!(summary["invalid_types"]["created"]["datetime"], 1);
+    assert!(summary["fields"].get("modified").is_none());
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn validate_filters_link_findings_by_target_and_reason() {
+    let root = fixture_root();
+    let output = vault(&[
+        "validate",
+        "-C",
+        root.to_str().unwrap(),
+        "--code",
+        "link-unresolved,link-ambiguous",
+        "--target",
+        "duplicate",
+        "--reason",
+        "ambiguous",
+        "--format",
+        "jsonl",
+    ]);
+
+    let findings = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["code"], "link-ambiguous");
+    assert_eq!(findings[0]["link"]["target"], "duplicate");
+    assert_eq!(findings[0]["link"]["unresolved_reason"], "ambiguous");
+}
+
+#[test]
 fn validate_summary_reports_disallowed_value_counts() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
@@ -1496,7 +1615,7 @@ fn graph_documents_warns_when_filter_field_is_absent_everywhere() {
     let documents = serde_json::from_str::<Value>(&stdout).expect("output should be JSON");
     assert_eq!(documents.as_array().unwrap().len(), 0);
     assert!(stderr.contains(
-        "warning: filter field 'path' is not a frontmatter key in any document; returning empty result"
+        "warning: --filter field 'path' is not a frontmatter key in any document; returning empty result"
     ));
 }
 
@@ -1517,7 +1636,7 @@ fn graph_documents_warns_when_missing_field_is_absent_everywhere() {
     let documents = serde_json::from_str::<Value>(&stdout).expect("output should be JSON");
     assert_eq!(documents.as_array().unwrap().len(), 0);
     assert!(stderr.contains(
-        "warning: filter field 'nosuch' is not a frontmatter key in any document; returning empty result"
+        "warning: --missing field 'nosuch' is not a frontmatter key in any document; returning empty result"
     ));
 }
 

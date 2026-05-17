@@ -197,6 +197,26 @@ pub struct ValidateArgs {
         help = "Emit grouped validation finding counts instead of raw findings"
     )]
     pub summary: bool,
+    #[arg(
+        long,
+        help = "Filter findings by code. Comma-separated values match any listed code"
+    )]
+    pub code: Vec<String>,
+    #[arg(long, help = "Filter findings by severity")]
+    pub severity: Vec<String>,
+    #[arg(long, help = "Filter findings by frontmatter field")]
+    pub field: Vec<String>,
+    #[arg(long, help = "Filter findings by validate rule name")]
+    pub rule: Vec<String>,
+    #[arg(
+        long,
+        help = "Filter findings by vault-relative path glob using config glob semantics"
+    )]
+    pub path: Vec<String>,
+    #[arg(long, help = "Filter link findings by link target")]
+    pub target: Vec<String>,
+    #[arg(long, help = "Filter link findings by unresolved reason")]
+    pub reason: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

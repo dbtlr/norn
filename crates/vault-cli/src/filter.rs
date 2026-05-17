@@ -114,17 +114,21 @@ fn warn_for_absent_filter_fields(
     missing_fields: &[String],
 ) {
     let mut warned_fields = BTreeSet::new();
-    for field in filters
+    for (operator, field) in filters
         .iter()
-        .map(|filter| filter.field.as_str())
-        .chain(has_fields.iter().map(String::as_str))
-        .chain(missing_fields.iter().map(String::as_str))
+        .map(|filter| ("--filter", filter.field.as_str()))
+        .chain(has_fields.iter().map(|field| ("--has", field.as_str())))
+        .chain(
+            missing_fields
+                .iter()
+                .map(|field| ("--missing", field.as_str())),
+        )
     {
         if known_fields.contains(field) || !warned_fields.insert(field.to_string()) {
             continue;
         }
         eprintln!(
-            "warning: filter field '{field}' is not a frontmatter key in any document; returning empty result"
+            "warning: {operator} field '{field}' is not a frontmatter key in any document; returning empty result"
         );
     }
 }
