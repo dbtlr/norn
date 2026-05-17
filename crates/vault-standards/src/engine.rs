@@ -18,26 +18,18 @@ pub fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
 
         findings.extend(crate::checks::check_graph_diagnostics(document));
 
-        for field in &config.required_frontmatter {
-            if !document_has_frontmatter_field(document, field) {
-                findings.push(Finding::frontmatter_required_missing(
-                    document.path.clone(),
-                    None,
-                    field.clone(),
-                ));
-            }
-        }
+        findings.extend(crate::checks::check_required_frontmatter(
+            document,
+            &config.required_frontmatter,
+            None,
+        ));
 
         for rule in matching_rules(document, &config.rules) {
-            for field in &rule.required_frontmatter {
-                if !document_has_frontmatter_field(document, field) {
-                    findings.push(Finding::frontmatter_required_missing(
-                        document.path.clone(),
-                        rule.name.clone(),
-                        field.clone(),
-                    ));
-                }
-            }
+            findings.extend(crate::checks::check_required_frontmatter(
+                document,
+                &rule.required_frontmatter,
+                rule.name.as_deref(),
+            ));
 
             for (field, expected_type) in &rule.field_types {
                 if let Some(actual) = document_frontmatter_field(document, field) {
