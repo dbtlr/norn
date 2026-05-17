@@ -114,7 +114,7 @@ Ignore patterns and scoped validate `match.path` values are applied to vault-rel
 
 Ignored targets remain outside the graph. If an indexed Markdown document links to an ignored file, that link is reported as unresolved rather than hidden.
 
-`vault validate` is read-only. It reports unresolved links, ambiguous links, document diagnostics, configured missing frontmatter fields, and configured disallowed frontmatter values. Global `validate.required_frontmatter` applies to every document. Scoped `validate.rules` apply additional requirements only to documents matched by `match.path` and `match.frontmatter`; findings include `rule` when a scoped rule produced them. Frontmatter predicates and `allowed_values` are top-level, exact, and type-sensitive; missing fields do not match allowed-value checks. Unknown `match.*` keys should remain config errors so typoed rules do not broaden silently. `vault validate --summary` emits grouped counts by code, severity, rule, and top-level path prefix instead of raw findings. Do not add mutation behavior to validate; use future plan/apply commands for edits.
+`vault validate` is read-only. It reports unresolved links, ambiguous links, document diagnostics, configured missing frontmatter fields, and configured disallowed frontmatter values. Global `validate.required_frontmatter` applies to every document. Scoped `validate.rules` apply additional requirements only to documents matched by `match.path` and `match.frontmatter`; findings include `rule` when a scoped rule produced them. Frontmatter predicates and `allowed_values` are top-level, exact, and type-sensitive; missing fields do not match allowed-value checks. Unknown `match.*` keys should remain config errors so typoed rules do not broaden silently. `vault validate --summary` emits grouped counts by code, severity, rule, frontmatter field, disallowed field value, and top-level path prefix instead of raw findings. Do not add mutation behavior to validate; use future plan/apply commands for edits.
 
 Lookup rules:
 
@@ -206,6 +206,7 @@ Use semver-style tags for milestones:
 - `v0.10.0` — validate command rename and summary output
 - `v0.11.0` — allowed frontmatter value validation
 - `v0.12.0` — global cwd and default config discovery
+- `v0.13.0` — broken-pipe handling and richer validate summaries
 
 For a release bump:
 

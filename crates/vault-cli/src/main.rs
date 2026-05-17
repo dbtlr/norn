@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Write};
+use std::process;
 
 use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
@@ -201,6 +203,8 @@ struct ValidateSummary {
     codes: BTreeMap<String, usize>,
     severities: BTreeMap<String, usize>,
     rules: BTreeMap<String, usize>,
+    fields: BTreeMap<String, usize>,
+    disallowed_values: BTreeMap<String, BTreeMap<String, usize>>,
     path_prefixes: BTreeMap<String, usize>,
 }
 
@@ -209,10 +213,16 @@ struct LoadedConfig {
     validate: ValidateConfig,
 }
 
-fn main() -> Result<()> {
+fn main() {
     let cli = Cli::parse();
-    let exit_code = run(cli)?;
-    std::process::exit(exit_code);
+    match run(cli) {
+        Ok(exit_code) => process::exit(exit_code),
+        Err(error) if is_broken_pipe(&error) => process::exit(0),
+        Err(error) => {
+            eprintln!("{error:#}");
+            process::exit(1);
+        }
+    }
 }
 
 fn run(cli: Cli) -> Result<i32> {
@@ -788,6 +798,8 @@ fn validate_summary(findings: &[ValidateFinding]) -> ValidateSummary {
         codes: BTreeMap::new(),
         severities: BTreeMap::new(),
         rules: BTreeMap::new(),
+        fields: BTreeMap::new(),
+        disallowed_values: BTreeMap::new(),
         path_prefixes: BTreeMap::new(),
     };
 
@@ -796,6 +808,15 @@ fn validate_summary(findings: &[ValidateFinding]) -> ValidateSummary {
         increment(&mut summary.severities, severity_key(&finding.severity));
         if let Some(rule) = &finding.rule {
             increment(&mut summary.rules, rule);
+        }
+        if let Some(field) = &finding.field {
+            increment(&mut summary.fields, field);
+        }
+        if finding.code == "frontmatter-field-value-not-allowed" {
+            if let (Some(field), Some(actual_value)) = (&finding.field, &finding.actual_value) {
+                let value_counts = summary.disallowed_values.entry(field.clone()).or_default();
+                increment(value_counts, summary_value_key(actual_value));
+            }
         }
         increment(&mut summary.path_prefixes, &path_prefix_key(&finding.path));
     }
@@ -819,6 +840,18 @@ fn path_prefix_key(path: &Utf8PathBuf) -> String {
     match path.split_once('/') {
         Some((prefix, _)) if !prefix.is_empty() => prefix.to_string(),
         _ => "root".to_string(),
+    }
+}
+
+fn summary_value_key(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+        }
     }
 }
 
@@ -1020,13 +1053,16 @@ fn scalar_value_matches(value: &serde_json::Value, expected: &str) -> bool {
 }
 
 fn write_output<T: Serialize>(items: &[T], format: OutputFormat) -> Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(items)?);
+            write_json_line(&mut stdout, &serde_json::to_string_pretty(items)?)?;
         }
         OutputFormat::Jsonl => {
             for item in items {
-                println!("{}", serde_json::to_string(item)?);
+                write_json_line(&mut stdout, &serde_json::to_string(item)?)?;
             }
         }
     }
@@ -1034,15 +1070,32 @@ fn write_output<T: Serialize>(items: &[T], format: OutputFormat) -> Result<()> {
 }
 
 fn write_item_output<T: Serialize>(item: &T, format: OutputFormat) -> Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(item)?);
+            write_json_line(&mut stdout, &serde_json::to_string_pretty(item)?)?;
         }
         OutputFormat::Jsonl => {
-            println!("{}", serde_json::to_string(item)?);
+            write_json_line(&mut stdout, &serde_json::to_string(item)?)?;
         }
     }
     Ok(())
+}
+
+fn write_json_line(stdout: &mut impl Write, json: &str) -> Result<()> {
+    stdout.write_all(json.as_bytes())?;
+    stdout.write_all(b"\n")?;
+    Ok(())
+}
+
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn exit_code_for(index: &GraphIndex) -> i32 {

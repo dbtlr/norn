@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -274,6 +275,53 @@ fn commands_default_to_process_current_directory() {
 }
 
 #[test]
+fn graph_jsonl_tolerates_early_closing_stdout_consumers() {
+    let root = temp_cache_dir();
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    for index in 0..2_000 {
+        fs::write(
+            root.join(format!("note-{index}.md")),
+            format!("---\ntitle: Note {index}\n---\n# Note {index}\n"),
+        )
+        .expect("note should write");
+    }
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vault"))
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "graph",
+            "documents",
+            "--format",
+            "jsonl",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("vault command should spawn");
+
+    let stdout = child.stdout.take().expect("stdout should be piped");
+    let mut reader = BufReader::new(stdout);
+    let mut first_line = String::new();
+    reader
+        .read_line(&mut first_line)
+        .expect("first JSONL row should be readable");
+    assert!(serde_json::from_str::<Value>(&first_line).is_ok());
+    drop(reader);
+
+    let output = child.wait_with_output().expect("vault command should exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "vault command failed after closed pipe\nstderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("panicked"));
+    assert!(!stderr.contains("Broken pipe"));
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn validate_invalid_discovered_config_fails() {
     let root = temp_cache_dir();
     fs::create_dir_all(root.join(".vault")).expect("config dir should be created");
@@ -422,9 +470,59 @@ fn validate_summary_reports_grouped_counts() {
     assert_eq!(summary["severities"]["warning"], 3);
     assert_eq!(summary["rules"]["note-kind"], 1);
     assert_eq!(summary["rules"]["task-status"], 1);
+    assert_eq!(summary["fields"]["title"], 1);
+    assert_eq!(summary["fields"]["kind"], 1);
+    assert_eq!(summary["fields"]["status"], 1);
     assert_eq!(summary["path_prefixes"]["root"], 1);
     assert_eq!(summary["path_prefixes"]["Notes"], 1);
     assert_eq!(summary["path_prefixes"]["Tasks"], 1);
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn validate_summary_reports_disallowed_value_counts() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: task-status-values\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\n          - completed\n          - wont_do\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("task-one.md"),
+        "---\ntype: task\nstatus: someday\n---\n# Task\n",
+    )
+    .expect("task should write");
+    fs::write(
+        root.join("task-two.md"),
+        "---\ntype: task\nstatus: someday\n---\n# Task\n",
+    )
+    .expect("task should write");
+    fs::write(
+        root.join("task-three.md"),
+        "---\ntype: task\nstatus: later\n---\n# Task\n",
+    )
+    .expect("task should write");
+
+    let output = vault(&[
+        "validate",
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--summary",
+        "--format",
+        "json",
+    ]);
+
+    let summary = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(summary["findings"], 3);
+    assert_eq!(summary["fields"]["status"], 3);
+    assert_eq!(summary["disallowed_values"]["status"]["someday"], 2);
+    assert_eq!(summary["disallowed_values"]["status"]["later"], 1);
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();

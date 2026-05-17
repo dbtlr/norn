@@ -117,7 +117,8 @@ Use `source_context.area` and `source_context.property` to distinguish body link
 
 Use `vault validate --summary` to emit grouped finding counts instead of raw
 findings. Summary output includes total findings plus counts by `code`,
-`severity`, `rule`, and top-level path prefix.
+`severity`, `rule`, frontmatter `field`, disallowed field value, and top-level
+path prefix.
 
 ## Glob Matching
 

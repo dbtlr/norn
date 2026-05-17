@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## v0.13.0 - 2026-05-17
+
+- Handled closed stdout pipes gracefully so JSON/JSONL output can be piped into early-exit consumers such as `head` without panic text.
+- Added `fields` counts to `vault validate --summary`.
+- Added `disallowed_values` counts to `vault validate --summary` for configured allowed-value findings.
+- Kept raw validation finding JSON/JSONL output unchanged.
+
 ## v0.12.0 - 2026-05-17
 
 - Added global `-C, --cwd <dir>` and made commands default to the process current directory.
