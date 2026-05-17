@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 
 use anyhow::{bail, Result};
@@ -7,7 +8,7 @@ use serde::Serialize;
 use vault_core::{Diagnostic, Document, GraphIndex, Link, LinkStatus, Severity, VaultFile};
 use vault_index::{
     build_index_with_options, concise_diagnostics, has_errors, pattern_matches_path,
-    write_sqlite_cache, DoctorConfig, DoctorRuleConfig, IndexOptions, VaultConfig,
+    write_sqlite_cache, IndexOptions, ValidateConfig, ValidateRuleConfig, VaultConfig,
 };
 
 #[derive(Debug, Parser)]
@@ -24,10 +25,10 @@ enum Command {
     #[command(about = "Query and cache derived Markdown vault graph facts")]
     Graph(GraphCommand),
     #[command(
-        about = "Emit read-only vault health findings",
-        long_about = "Emit read-only vault health findings.\n\nDoctor reports reuse graph/index facts to surface unresolved links, ambiguous links, document diagnostics, and configured frontmatter requirements. Doctor does not mutate files."
+        about = "Validate vault graph facts and configured frontmatter rules",
+        long_about = "Validate vault graph facts and configured frontmatter rules.\n\nValidation reuses graph/index facts to surface unresolved links, ambiguous links, document diagnostics, and configured frontmatter requirements. Validate does not mutate files."
     )]
-    Doctor(DoctorArgs),
+    Validate(ValidateArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -140,13 +141,18 @@ struct TargetGraphArgs {
 }
 
 #[derive(Debug, Parser)]
-struct DoctorArgs {
-    #[arg(long, default_value = ".", help = "Vault root to inspect")]
+struct ValidateArgs {
+    #[arg(long, default_value = ".", help = "Vault root to validate")]
     root: Utf8PathBuf,
-    #[arg(long, help = "YAML config file with graph.ignore and doctor rules")]
+    #[arg(long, help = "YAML config file with graph.ignore and validate rules")]
     config: Option<Utf8PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Jsonl, help = "Stdout format")]
     format: OutputFormat,
+    #[arg(
+        long,
+        help = "Emit grouped validation finding counts instead of raw findings"
+    )]
+    summary: bool,
     #[arg(long, help = "Include verbose diagnostic details")]
     verbose: bool,
 }
@@ -172,7 +178,7 @@ struct DocumentDiagnostic {
 }
 
 #[derive(Debug, Serialize)]
-struct DoctorFinding {
+struct ValidateFinding {
     code: String,
     severity: Severity,
     path: Utf8PathBuf,
@@ -187,9 +193,18 @@ struct DoctorFinding {
     diagnostic: Option<Diagnostic>,
 }
 
+#[derive(Debug, Serialize)]
+struct ValidateSummary {
+    findings: usize,
+    codes: BTreeMap<String, usize>,
+    severities: BTreeMap<String, usize>,
+    rules: BTreeMap<String, usize>,
+    path_prefixes: BTreeMap<String, usize>,
+}
+
 struct LoadedConfig {
     index_options: IndexOptions,
-    doctor: DoctorConfig,
+    validate: ValidateConfig,
 }
 
 fn main() -> Result<()> {
@@ -260,12 +275,17 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(exit_code_for(&index))
             }
         },
-        Command::Doctor(args) => {
+        Command::Validate(args) => {
             let loaded_config = load_config(args.config.as_ref())?;
             let mut index = build_index_with_options(&args.root, &loaded_config.index_options)?;
             trim_diagnostics(&mut index, args.verbose);
-            let findings = doctor_findings(&index, &loaded_config.doctor);
-            write_output(&findings, args.format)?;
+            let findings = validate_findings(&index, &loaded_config.validate);
+            if args.summary {
+                let summary = validate_summary(&findings);
+                write_item_output(&summary, args.format)?;
+            } else {
+                write_output(&findings, args.format)?;
+            }
             Ok(exit_code_for(&index))
         }
     }
@@ -299,7 +319,7 @@ fn load_config(config_path: Option<&Utf8PathBuf>) -> Result<LoadedConfig> {
         index_options: IndexOptions {
             ignore: config.graph.ignore,
         },
-        doctor: config.doctor,
+        validate: config.validate,
     })
 }
 
@@ -318,27 +338,27 @@ fn validate_config_value(config_path: &Utf8PathBuf, value: &serde_yaml::Value) -
         }
     }
 
-    if let Some(doctor) = mapping_get(root, "doctor") {
-        let Some(doctor) = doctor.as_mapping() else {
-            anyhow::bail!("invalid config {config_path}: doctor must be a mapping");
+    if let Some(validate) = mapping_get(root, "validate") {
+        let Some(validate) = validate.as_mapping() else {
+            anyhow::bail!("invalid config {config_path}: validate must be a mapping");
         };
 
-        if let Some(required_frontmatter) = mapping_get(doctor, "required_frontmatter") {
+        if let Some(required_frontmatter) = mapping_get(validate, "required_frontmatter") {
             validate_string_sequence(
                 config_path,
-                "doctor.required_frontmatter",
+                "validate.required_frontmatter",
                 required_frontmatter,
             )?;
         }
 
-        if let Some(rules) = mapping_get(doctor, "rules") {
+        if let Some(rules) = mapping_get(validate, "rules") {
             let Some(rules) = rules.as_sequence() else {
-                anyhow::bail!("invalid config {config_path}: doctor.rules must be a sequence");
+                anyhow::bail!("invalid config {config_path}: validate.rules must be a sequence");
             };
 
             for (index, rule) in rules.iter().enumerate() {
-                let rule_path = format!("doctor.rules[{index}]");
-                validate_doctor_rule_value(config_path, &rule_path, rule)?;
+                let rule_path = format!("validate.rules[{index}]");
+                validate_rule_value(config_path, &rule_path, rule)?;
             }
         }
     }
@@ -346,7 +366,7 @@ fn validate_config_value(config_path: &Utf8PathBuf, value: &serde_yaml::Value) -
     Ok(())
 }
 
-fn validate_doctor_rule_value(
+fn validate_rule_value(
     config_path: &Utf8PathBuf,
     rule_path: &str,
     value: &serde_yaml::Value,
@@ -481,9 +501,9 @@ mod config_validation_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn rejects_malformed_doctor_rule_match_path() {
+    fn rejects_malformed_validate_rule_match_path() {
         let config_path = write_temp_config(
-            "doctor:\n  rules:\n    - name: bad\n      match:\n        path: 123\n      required_frontmatter:\n        - type\n",
+            "validate:\n  rules:\n    - name: bad\n      match:\n        path: 123\n      required_frontmatter:\n        - type\n",
         );
 
         let message = match load_config(Some(&config_path)) {
@@ -492,13 +512,13 @@ mod config_validation_tests {
         };
 
         assert!(message.contains("invalid config"));
-        assert!(message.contains("doctor.rules[0].match.path must be a string"));
+        assert!(message.contains("validate.rules[0].match.path must be a string"));
     }
 
     #[test]
     fn rejects_malformed_scoped_required_frontmatter() {
         let config_path = write_temp_config(
-            "doctor:\n  rules:\n    - name: bad\n      match:\n        path: Workspaces/**/*.md\n      required_frontmatter:\n        - 123\n",
+            "validate:\n  rules:\n    - name: bad\n      match:\n        path: Workspaces/**/*.md\n      required_frontmatter:\n        - 123\n",
         );
 
         let message = match load_config(Some(&config_path)) {
@@ -507,7 +527,7 @@ mod config_validation_tests {
         };
 
         assert!(message.contains("invalid config"));
-        assert!(message.contains("doctor.rules[0].required_frontmatter[0] must be a string"));
+        assert!(message.contains("validate.rules[0].required_frontmatter[0] must be a string"));
     }
 
     fn write_temp_config(contents: &str) -> Utf8PathBuf {
@@ -570,12 +590,12 @@ fn all_diagnostics(index: &GraphIndex) -> Vec<DocumentDiagnostic> {
         .collect()
 }
 
-fn doctor_findings(index: &GraphIndex, config: &DoctorConfig) -> Vec<DoctorFinding> {
+fn validate_findings(index: &GraphIndex, config: &ValidateConfig) -> Vec<ValidateFinding> {
     let mut findings = Vec::new();
 
     for document in &index.documents {
         for diagnostic in &document.diagnostics {
-            findings.push(DoctorFinding {
+            findings.push(ValidateFinding {
                 code: diagnostic.code.clone(),
                 severity: diagnostic.severity.clone(),
                 path: document.path.clone(),
@@ -589,7 +609,7 @@ fn doctor_findings(index: &GraphIndex, config: &DoctorConfig) -> Vec<DoctorFindi
 
         for field in &config.required_frontmatter {
             if !document_has_frontmatter_field(document, field) {
-                findings.push(DoctorFinding {
+                findings.push(ValidateFinding {
                     code: "frontmatter-required-field-missing".to_string(),
                     severity: Severity::Warning,
                     path: document.path.clone(),
@@ -602,11 +622,11 @@ fn doctor_findings(index: &GraphIndex, config: &DoctorConfig) -> Vec<DoctorFindi
             }
         }
 
-        for rule in matching_doctor_rules(document, &config.rules) {
+        for rule in matching_validate_rules(document, &config.rules) {
             let rule_name = rule.name.clone();
             for field in &rule.required_frontmatter {
                 if !document_has_frontmatter_field(document, field) {
-                    findings.push(DoctorFinding {
+                    findings.push(ValidateFinding {
                         code: "frontmatter-required-field-missing".to_string(),
                         severity: Severity::Warning,
                         path: document.path.clone(),
@@ -624,7 +644,7 @@ fn doctor_findings(index: &GraphIndex, config: &DoctorConfig) -> Vec<DoctorFindi
             match link.status {
                 LinkStatus::Resolved => {}
                 LinkStatus::Unresolved => {
-                    findings.push(DoctorFinding {
+                    findings.push(ValidateFinding {
                         code: "link-unresolved".to_string(),
                         severity: Severity::Warning,
                         path: document.path.clone(),
@@ -636,7 +656,7 @@ fn doctor_findings(index: &GraphIndex, config: &DoctorConfig) -> Vec<DoctorFindi
                     });
                 }
                 LinkStatus::Ambiguous => {
-                    findings.push(DoctorFinding {
+                    findings.push(ValidateFinding {
                         code: "link-ambiguous".to_string(),
                         severity: Severity::Warning,
                         path: document.path.clone(),
@@ -654,17 +674,57 @@ fn doctor_findings(index: &GraphIndex, config: &DoctorConfig) -> Vec<DoctorFindi
     findings
 }
 
-fn matching_doctor_rules<'a>(
+fn validate_summary(findings: &[ValidateFinding]) -> ValidateSummary {
+    let mut summary = ValidateSummary {
+        findings: findings.len(),
+        codes: BTreeMap::new(),
+        severities: BTreeMap::new(),
+        rules: BTreeMap::new(),
+        path_prefixes: BTreeMap::new(),
+    };
+
+    for finding in findings {
+        increment(&mut summary.codes, &finding.code);
+        increment(&mut summary.severities, severity_key(&finding.severity));
+        if let Some(rule) = &finding.rule {
+            increment(&mut summary.rules, rule);
+        }
+        increment(&mut summary.path_prefixes, &path_prefix_key(&finding.path));
+    }
+
+    summary
+}
+
+fn increment(counts: &mut BTreeMap<String, usize>, key: impl AsRef<str>) {
+    *counts.entry(key.as_ref().to_string()).or_insert(0) += 1;
+}
+
+fn severity_key(severity: &Severity) -> &'static str {
+    match severity {
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
+
+fn path_prefix_key(path: &Utf8PathBuf) -> String {
+    let path = path.as_str();
+    match path.split_once('/') {
+        Some((prefix, _)) if !prefix.is_empty() => prefix.to_string(),
+        _ => ".".to_string(),
+    }
+}
+
+fn matching_validate_rules<'a>(
     document: &Document,
-    rules: &'a [DoctorRuleConfig],
-) -> Vec<&'a DoctorRuleConfig> {
+    rules: &'a [ValidateRuleConfig],
+) -> Vec<&'a ValidateRuleConfig> {
     rules
         .iter()
-        .filter(|rule| doctor_rule_matches(document, rule))
+        .filter(|rule| validate_rule_matches(document, rule))
         .collect()
 }
 
-fn doctor_rule_matches(document: &Document, rule: &DoctorRuleConfig) -> bool {
+fn validate_rule_matches(document: &Document, rule: &ValidateRuleConfig) -> bool {
     if let Some(path_pattern) = &rule.r#match.path {
         if !pattern_matches_path(path_pattern, &document.path) {
             return false;

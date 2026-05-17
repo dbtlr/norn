@@ -53,7 +53,7 @@ pub struct VaultConfig {
     #[serde(default)]
     pub graph: GraphConfig,
     #[serde(default)]
-    pub doctor: DoctorConfig,
+    pub validate: ValidateConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -63,24 +63,24 @@ pub struct GraphConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct DoctorConfig {
+pub struct ValidateConfig {
     #[serde(default)]
     pub required_frontmatter: Vec<String>,
     #[serde(default)]
-    pub rules: Vec<DoctorRuleConfig>,
+    pub rules: Vec<ValidateRuleConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct DoctorRuleConfig {
+pub struct ValidateRuleConfig {
     pub name: Option<String>,
     #[serde(default)]
-    pub r#match: DoctorRuleMatchConfig,
+    pub r#match: ValidateRuleMatchConfig,
     #[serde(default)]
     pub required_frontmatter: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct DoctorRuleMatchConfig {
+pub struct ValidateRuleMatchConfig {
     pub path: Option<String>,
     #[serde(default)]
     pub frontmatter: HashMap<String, serde_json::Value>,

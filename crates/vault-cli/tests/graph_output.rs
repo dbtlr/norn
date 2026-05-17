@@ -121,18 +121,19 @@ fn graph_backlinks_help_documents_file_targets() {
 }
 
 #[test]
-fn doctor_help_documents_read_only_contract() {
-    let output = vault(&["doctor", "--help"]);
-    assert!(output.contains("Emit read-only vault health findings"));
-    assert!(output.contains("Doctor does not mutate files"));
+fn validate_help_documents_read_only_contract() {
+    let output = vault(&["validate", "--help"]);
+    assert!(output.contains("Validate vault graph facts and configured frontmatter rules"));
+    assert!(output.contains("Validate does not mutate files"));
+    assert!(output.contains("--summary"));
     assert!(output.contains("--config"));
 }
 
 #[test]
-fn doctor_jsonl_reports_graph_findings_and_diagnostics() {
+fn validate_jsonl_reports_graph_findings_and_diagnostics() {
     let root = fixture_root();
     let output = vault(&[
-        "doctor",
+        "validate",
         "--root",
         root.to_str().unwrap(),
         "--format",
@@ -163,11 +164,11 @@ fn doctor_jsonl_reports_graph_findings_and_diagnostics() {
 }
 
 #[test]
-fn doctor_reports_required_frontmatter_from_config() {
+fn validate_reports_required_frontmatter_from_config() {
     let root = temp_cache_dir();
     fs::write(
         root.with_extension("yaml"),
-        "doctor:\n  required_frontmatter:\n    - title\n",
+        "validate:\n  required_frontmatter:\n    - title\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -180,7 +181,7 @@ fn doctor_reports_required_frontmatter_from_config() {
 
     let config_path = root.with_extension("yaml");
     let output = vault(&[
-        "doctor",
+        "validate",
         "--root",
         root.to_str().unwrap(),
         "--config",
@@ -200,12 +201,12 @@ fn doctor_reports_required_frontmatter_from_config() {
 }
 
 #[test]
-fn doctor_reports_scoped_required_frontmatter_from_config() {
+fn validate_reports_scoped_required_frontmatter_from_config() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "doctor:\n  required_frontmatter:\n    - title\n  rules:\n    - name: workspace-notes\n      match:\n        path: \"Workspaces/**/notes/*.md\"\n      required_frontmatter:\n        - type\n        - workspace\n    - name: workspace-tasks\n      match:\n        path: \"Workspaces/**/tasks/*.md\"\n      required_frontmatter:\n        - status\n",
+        "validate:\n  required_frontmatter:\n    - title\n  rules:\n    - name: workspace-notes\n      match:\n        path: \"Workspaces/**/notes/*.md\"\n      required_frontmatter:\n        - type\n        - workspace\n    - name: workspace-tasks\n      match:\n        path: \"Workspaces/**/tasks/*.md\"\n      required_frontmatter:\n        - status\n",
     )
     .expect("config should write");
     fs::create_dir_all(root.join("Workspaces/demo/notes")).expect("note dirs should be created");
@@ -224,7 +225,7 @@ fn doctor_reports_scoped_required_frontmatter_from_config() {
         .expect("loose note should write");
 
     let output = vault(&[
-        "doctor",
+        "validate",
         "--root",
         root.to_str().unwrap(),
         "--config",
@@ -261,12 +262,60 @@ fn doctor_reports_scoped_required_frontmatter_from_config() {
 }
 
 #[test]
-fn doctor_rules_match_frontmatter_predicates() {
+fn validate_summary_reports_grouped_counts() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "doctor:\n  rules:\n    - name: note-kind\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n    - name: task-status\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: task\n      required_frontmatter:\n        - status\n    - name: published-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n          published: true\n      required_frontmatter:\n        - published_at\n",
+        "validate:\n  required_frontmatter:\n    - title\n  rules:\n    - name: note-kind\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n    - name: task-status\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: task\n      required_frontmatter:\n        - status\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(root.join("Notes")).expect("notes dir should be created");
+    fs::create_dir_all(root.join("Tasks")).expect("tasks dir should be created");
+    fs::write(root.join("missing-title.md"), "# Missing\n").expect("note should write");
+    fs::write(
+        root.join("Notes/note.md"),
+        "---\ntitle: Note\ntype: note\n---\n# Note\n",
+    )
+    .expect("note should write");
+    fs::write(
+        root.join("Tasks/task.md"),
+        "---\ntitle: Task\ntype: task\n---\n# Task\n",
+    )
+    .expect("task should write");
+
+    let output = vault(&[
+        "validate",
+        "--root",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--summary",
+        "--format",
+        "json",
+    ]);
+
+    let summary = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(summary["findings"], 3);
+    assert_eq!(summary["codes"]["frontmatter-required-field-missing"], 3);
+    assert_eq!(summary["severities"]["warning"], 3);
+    assert_eq!(summary["rules"]["note-kind"], 1);
+    assert_eq!(summary["rules"]["task-status"], 1);
+    assert_eq!(summary["path_prefixes"]["."], 1);
+    assert_eq!(summary["path_prefixes"]["Notes"], 1);
+    assert_eq!(summary["path_prefixes"]["Tasks"], 1);
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn validate_rules_match_frontmatter_predicates() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: note-kind\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n    - name: task-status\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: task\n      required_frontmatter:\n        - status\n    - name: published-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n          published: true\n      required_frontmatter:\n        - published_at\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -284,7 +333,7 @@ fn doctor_rules_match_frontmatter_predicates() {
     .expect("artifact should write");
 
     let output = vault(&[
-        "doctor",
+        "validate",
         "--root",
         root.to_str().unwrap(),
         "--config",
@@ -319,12 +368,12 @@ fn doctor_rules_match_frontmatter_predicates() {
 }
 
 #[test]
-fn doctor_rules_do_not_coerce_frontmatter_predicate_types() {
+fn validate_rules_do_not_coerce_frontmatter_predicate_types() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "doctor:\n  rules:\n    - name: string-one\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          priority: \"1\"\n      required_frontmatter:\n        - status\n",
+        "validate:\n  rules:\n    - name: string-one\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          priority: \"1\"\n      required_frontmatter:\n        - status\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -332,7 +381,7 @@ fn doctor_rules_do_not_coerce_frontmatter_predicate_types() {
         .expect("note should write");
 
     let output = vault(&[
-        "doctor",
+        "validate",
         "--root",
         root.to_str().unwrap(),
         "--config",
@@ -349,19 +398,19 @@ fn doctor_rules_do_not_coerce_frontmatter_predicate_types() {
 }
 
 #[test]
-fn doctor_rejects_unknown_match_keys() {
+fn validate_rejects_unknown_match_keys() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "doctor:\n  rules:\n    - name: typo\n      match:\n        fronmatter:\n          type: note\n      required_frontmatter:\n        - kind\n",
+        "validate:\n  rules:\n    - name: typo\n      match:\n        fronmatter:\n          type: note\n      required_frontmatter:\n        - kind\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
     fs::write(root.join("note.md"), "---\ntype: note\n---\n# Note\n").expect("note should write");
 
     let error = vault_error(&[
-        "doctor",
+        "validate",
         "--root",
         root.to_str().unwrap(),
         "--config",
@@ -369,26 +418,26 @@ fn doctor_rejects_unknown_match_keys() {
     ]);
 
     assert!(error.contains("invalid config"));
-    assert!(error.contains("unknown key doctor.rules[0].match.fronmatter"));
+    assert!(error.contains("unknown key validate.rules[0].match.fronmatter"));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
 }
 
 #[test]
-fn doctor_rejects_non_scalar_frontmatter_predicates() {
+fn validate_rejects_non_scalar_frontmatter_predicates() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "doctor:\n  rules:\n    - name: list\n      match:\n        frontmatter:\n          type:\n            - note\n      required_frontmatter:\n        - kind\n",
+        "validate:\n  rules:\n    - name: list\n      match:\n        frontmatter:\n          type:\n            - note\n      required_frontmatter:\n        - kind\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
     fs::write(root.join("note.md"), "---\ntype: note\n---\n# Note\n").expect("note should write");
 
     let error = vault_error(&[
-        "doctor",
+        "validate",
         "--root",
         root.to_str().unwrap(),
         "--config",
@@ -396,7 +445,7 @@ fn doctor_rejects_non_scalar_frontmatter_predicates() {
     ]);
 
     assert!(error.contains("invalid config"));
-    assert!(error.contains("doctor.rules[0].match.frontmatter.type"));
+    assert!(error.contains("validate.rules[0].match.frontmatter.type"));
     assert!(error.contains("must be a string, boolean, or number"));
 
     fs::remove_dir_all(root).ok();

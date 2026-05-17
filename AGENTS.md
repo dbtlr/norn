@@ -63,7 +63,8 @@ vault graph diagnostics --root <path> --format jsonl
 vault graph backlinks <path-or-stem-or-file> --root <path> --format jsonl
 vault graph inspect <path-or-stem> --root <path> --format json
 vault graph build --root <path> --cache .vault/cache --format json
-vault doctor --root <path> --config <path> --format jsonl
+vault validate --root <path> --config <path> --format jsonl
+vault validate --root <path> --config <path> --summary --format json
 ```
 
 All graph commands accept `--config <path>` for explicit YAML configuration. Current config shape:
@@ -73,7 +74,7 @@ graph:
   ignore:
     - "**/__pycache__/**"
     - "**/*.pyc"
-doctor:
+validate:
   required_frontmatter:
     - title
   rules:
@@ -93,11 +94,11 @@ doctor:
         - kind
 ```
 
-Ignore patterns and scoped doctor `match.path` values are applied to vault-relative paths. `*` matches within one path segment only, and `**` matches zero or more complete path segments. Build summaries include `ignored_files` so count changes are visible.
+Ignore patterns and scoped validate `match.path` values are applied to vault-relative paths. `*` matches within one path segment only, and `**` matches zero or more complete path segments. Build summaries include `ignored_files` so count changes are visible.
 
 Ignored targets remain outside the graph. If an indexed Markdown document links to an ignored file, that link is reported as unresolved rather than hidden.
 
-`vault doctor` is read-only. It reports unresolved links, ambiguous links, document diagnostics, and configured missing frontmatter fields. Global `doctor.required_frontmatter` applies to every document. Scoped `doctor.rules` apply additional requirements only to documents matched by `match.path` and `match.frontmatter`; findings include `rule` when a scoped rule produced them. Frontmatter predicates are top-level, exact, and type-sensitive; missing fields do not match. Unknown `match.*` keys should remain config errors so typoed rules do not broaden silently. Do not add mutation behavior to doctor; use future plan/apply commands for edits.
+`vault validate` is read-only. It reports unresolved links, ambiguous links, document diagnostics, and configured missing frontmatter fields. Global `validate.required_frontmatter` applies to every document. Scoped `validate.rules` apply additional requirements only to documents matched by `match.path` and `match.frontmatter`; findings include `rule` when a scoped rule produced them. Frontmatter predicates are top-level, exact, and type-sensitive; missing fields do not match. Unknown `match.*` keys should remain config errors so typoed rules do not broaden silently. `vault validate --summary` emits grouped counts by code, severity, rule, and top-level path prefix instead of raw findings. Do not add mutation behavior to validate; use future plan/apply commands for edits.
 
 Lookup rules:
 
@@ -182,10 +183,10 @@ Use semver-style tags for milestones:
 - `v0.3.0` — Obsidian-compatible graph semantics
 - `v0.4.0` — same-note references, Markdown image links, file queries, and graph contract polish
 - `v0.5.0` — explicit graph ignore config and mutation-ready frontmatter spans
-- `v0.6.0` — read-only doctor reports
-- `v0.7.0` — scoped doctor rules
+- `v0.6.0` — read-only validate reports
+- `v0.7.0` — scoped validate rules
 - `v0.8.0` — path-segment glob semantics and config validation
-- `v0.9.0` — frontmatter-aware doctor rule matching
+- `v0.9.0` — frontmatter-aware validate rule matching
 
 For a release bump:
 

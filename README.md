@@ -49,7 +49,8 @@ vault graph unresolved --root <path> --format jsonl
 vault graph diagnostics --root <path> --format jsonl
 vault graph backlinks <path-or-stem-or-file> --root <path> --format jsonl
 vault graph inspect <path-or-stem> --root <path> --format json
-vault doctor --root <path> --config <path> --format jsonl
+vault validate --root <path> --config <path> --format jsonl
+vault validate --root <path> --config <path> --summary --format json
 ```
 
 Every graph command accepts `--config <path>` for explicit YAML configuration. The current config shape is:
@@ -59,7 +60,7 @@ graph:
   ignore:
     - "**/__pycache__/**"
     - "**/*.pyc"
-doctor:
+validate:
   required_frontmatter:
     - title
   rules:
@@ -91,7 +92,11 @@ Frontmatter link extraction is intentionally shallow in v0.x: it scans top-level
 
 Use `source_context.area` and `source_context.property` to distinguish body links from frontmatter/property links. Frontmatter links now include `source_span` for the shallow extraction cases. `vault graph files` emits the file inventory, and `vault graph backlinks <exact-file-path>` can query incoming links to non-Markdown attachment targets.
 
-`vault doctor` is read-only. It reports unresolved links, ambiguous links, document diagnostics, and configured missing frontmatter fields without mutating files. Global `doctor.required_frontmatter` applies to every document. Scoped `doctor.rules` apply additional requirements only to documents matched by `match.path` and `match.frontmatter`; findings include `rule` when a scoped rule produced them.
+`vault validate` is read-only. It reports unresolved links, ambiguous links, document diagnostics, and configured missing frontmatter fields without mutating files. Global `validate.required_frontmatter` applies to every document. Scoped `validate.rules` apply additional requirements only to documents matched by `match.path` and `match.frontmatter`; findings include `rule` when a scoped rule produced them.
+
+Use `vault validate --summary` to emit grouped finding counts instead of raw
+findings. Summary output includes total findings plus counts by `code`,
+`severity`, `rule`, and top-level path prefix.
 
 ## Glob Matching
 
@@ -107,14 +112,14 @@ semantics:
   including nested workspace paths, but not files in subdirectories below
   `notes`.
 
-## Doctor Rule Matching
+## Validate Rule Matching
 
-Scoped doctor rules support path and frontmatter predicates. All predicates are
+Scoped validate rules support path and frontmatter predicates. All predicates are
 ANDed. Missing frontmatter fields do not match. Frontmatter predicates use exact,
 type-sensitive equality for strings, booleans, and numbers.
 
 ```yaml
-doctor:
+validate:
   rules:
     - name: note-kind
       match:
