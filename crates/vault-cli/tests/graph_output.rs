@@ -117,8 +117,12 @@ fn graph_documents_jsonl_contract() {
     assert_eq!(alpha["frontmatter"]["title"], "Alpha");
     assert_eq!(alpha["headings"][0]["slug"], "alpha");
     assert_eq!(alpha["headings"][0]["source_span"]["line"], 8);
-    assert_eq!(alpha["links"].as_array().unwrap().len(), 17);
-    assert_eq!(alpha["links"][4]["label"], "Beta Note");
+    assert_eq!(alpha["links"].as_array().unwrap().len(), 18);
+    assert!(alpha["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|link| link["raw"] == "[[beta|Beta Note]]" && link["label"] == "Beta Note"));
     assert!(alpha["links"]
         .as_array()
         .unwrap()
@@ -178,8 +182,8 @@ fn graph_build_writes_sqlite_cache() {
     let cache_path = cache_dir.join("graph.sqlite");
     assert_eq!(value["cache_path"], cache_path.to_str().unwrap());
     assert_eq!(value["documents"], 10);
-    assert_eq!(value["files"], 11);
-    assert_eq!(value["links"], 22);
+    assert_eq!(value["files"], 12);
+    assert_eq!(value["links"], 23);
     assert!(cache_path.exists());
 
     let connection = Connection::open(&cache_path).expect("cache should open");
@@ -207,8 +211,8 @@ fn graph_build_writes_sqlite_cache() {
         )
         .unwrap();
     assert_eq!(document_count, 10);
-    assert_eq!(file_count, 11);
-    assert_eq!(link_count, 22);
+    assert_eq!(file_count, 12);
+    assert_eq!(link_count, 23);
     assert_eq!(missing_reason, "target-missing");
     assert_eq!(schema_version, "2");
 
@@ -323,7 +327,7 @@ fn graph_links_jsonl_contract() {
         .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
         .collect::<Vec<_>>();
 
-    assert_eq!(links.len(), 22);
+    assert_eq!(links.len(), 23);
     assert_eq!(links[0]["kind"], "markdown");
     assert_eq!(links[0]["source_span"]["line"], 20);
     let encoded_with_ext = links
@@ -382,6 +386,10 @@ fn graph_links_jsonl_contract() {
         .iter()
         .find(|link| link["raw"] == "![[Assets/diagram.png]]")
         .unwrap();
+    let markdown_image = links
+        .iter()
+        .find(|link| link["raw"] == "Assets/pic.png")
+        .unwrap();
     let property_target = links
         .iter()
         .find(|link| link["raw"] == "[[Front Target]]")
@@ -419,6 +427,10 @@ fn graph_links_jsonl_contract() {
     assert_eq!(path_qualified_case["status"], "resolved");
     assert_eq!(attachment_embed["resolved_path"], "Assets/diagram.png");
     assert_eq!(attachment_embed["status"], "resolved");
+    assert_eq!(markdown_image["kind"], "embed");
+    assert_eq!(markdown_image["target"], "Assets/pic.png");
+    assert_eq!(markdown_image["resolved_path"], "Assets/pic.png");
+    assert_eq!(markdown_image["status"], "resolved");
     assert_eq!(property_target["raw"], "[[Front Target]]");
     assert_eq!(
         property_target["source_context"],
@@ -459,7 +471,7 @@ fn graph_unresolved_json_contract() {
     assert_eq!(links[4]["raw"], "[[beta#^missing-block]]");
     assert_eq!(links[4]["unresolved_reason"], "block-ref-missing");
     assert_eq!(links[5]["raw"], "[[duplicate]]");
-    assert_eq!(links[5]["source_span"]["line"], 24);
+    assert_eq!(links[5]["source_span"]["line"], 26);
     assert_eq!(links[5]["status"], "ambiguous");
 }
 
@@ -618,7 +630,7 @@ fn graph_inspect_json_contract() {
         .unwrap()
         .iter()
         .any(|link| link["source_path"] == "beta.md"));
-    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 17);
+    assert_eq!(value["outgoing_links"].as_array().unwrap().len(), 18);
     assert_eq!(
         value["unresolved_outgoing_links"].as_array().unwrap().len(),
         6

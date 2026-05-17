@@ -294,6 +294,30 @@ fn parse_commonmark(
                     });
                 }
             }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                let raw = dest_url.to_string();
+                if is_local_file_target(&raw) {
+                    let (target, anchor) = split_anchor(&decode_percent_escapes(&raw));
+                    links.push(Link {
+                        source_path: source_path.to_path_buf(),
+                        raw,
+                        kind: LinkKind::Embed,
+                        target,
+                        label: None,
+                        anchor,
+                        block_ref: None,
+                        source_span: Some(source_span(content, body_start + range.start)),
+                        source_context: Some(LinkSourceContext {
+                            area: LinkSourceArea::Body,
+                            property: None,
+                        }),
+                        resolved_path: None,
+                        unresolved_reason: None,
+                        candidates: Vec::new(),
+                        status: LinkStatus::Unresolved,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -486,7 +510,21 @@ fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
                 LinkKind::Markdown => {
                     resolve_markdown_link(&document.path, &link.target, &by_path, &by_path_lower)
                 }
-                LinkKind::Wikilink | LinkKind::Embed => {
+                LinkKind::Embed => {
+                    if link.target.is_empty() && (link.anchor.is_some() || link.block_ref.is_some())
+                    {
+                        vec![document.path.clone()]
+                    } else {
+                        resolve_embed_link(
+                            &document.path,
+                            &link.target,
+                            &by_path,
+                            &by_path_lower,
+                            &by_stem,
+                        )
+                    }
+                }
+                LinkKind::Wikilink => {
                     if link.target.is_empty() && (link.anchor.is_some() || link.block_ref.is_some())
                     {
                         vec![document.path.clone()]
@@ -567,6 +605,27 @@ fn resolve_markdown_link(
     resolve_path_like_target(base, target, by_path, by_path_lower)
 }
 
+fn resolve_embed_link(
+    source_path: &Utf8Path,
+    target: &str,
+    by_path: &HashMap<String, Utf8PathBuf>,
+    by_path_lower: &HashMap<String, Utf8PathBuf>,
+    by_stem: &HashMap<String, Vec<Utf8PathBuf>>,
+) -> Vec<Utf8PathBuf> {
+    let base = source_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+    let base_matches = resolve_path_like_target(base, target, by_path, by_path_lower);
+    if !base_matches.is_empty() {
+        return base_matches;
+    }
+
+    let root_matches = resolve_path_like_target(Utf8Path::new(""), target, by_path, by_path_lower);
+    if !root_matches.is_empty() {
+        return root_matches;
+    }
+
+    resolve_wikilink(target, by_path, by_path_lower, by_stem)
+}
+
 fn resolve_wikilink(
     target: &str,
     by_path: &HashMap<String, Utf8PathBuf>,
@@ -620,6 +679,15 @@ fn source_span(content: &str, byte_offset: usize) -> SourceSpan {
 }
 
 fn is_local_markdown_target(target: &str) -> bool {
+    if !is_local_file_target(target) {
+        return false;
+    }
+
+    let (target, _) = split_anchor(target);
+    !target.is_empty()
+}
+
+fn is_local_file_target(target: &str) -> bool {
     if target.starts_with("http://")
         || target.starts_with("https://")
         || target.starts_with("mailto:")
@@ -628,8 +696,7 @@ fn is_local_markdown_target(target: &str) -> bool {
         return false;
     }
 
-    let (target, _) = split_anchor(target);
-    !target.is_empty()
+    true
 }
 
 fn decode_percent_escapes(value: &str) -> String {
