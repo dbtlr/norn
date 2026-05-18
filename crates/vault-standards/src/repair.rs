@@ -326,3 +326,223 @@ fn finding_candidates(finding: &Finding) -> Vec<Utf8PathBuf> {
         _ => Vec::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{RepairAction, RepairRule, RepairRuleMatch};
+    use crate::findings::{Finding, FindingBody};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use vault_core::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
+
+    fn vault_root() -> Utf8PathBuf {
+        "/vault".into()
+    }
+
+    fn finding_disallowed_value(path: &str, field: &str, value: serde_json::Value) -> Finding {
+        Finding {
+            code: "frontmatter-disallowed-value".into(),
+            severity: Severity::Warning,
+            path: path.into(),
+            message: format!("frontmatter field has a disallowed value: {field}"),
+            body: FindingBody::DisallowedValue {
+                rule: Some("task-status".into()),
+                field: field.into(),
+                actual_value: value,
+                allowed_values: vec![
+                    json!("backlog"),
+                    json!("completed"),
+                ],
+            },
+        }
+    }
+
+    fn finding_link_ambiguous(path: &str, target: &str, candidates: Vec<&str>) -> Finding {
+        let link = Link {
+            source_path: path.into(),
+            raw: format!("[[{target}]]"),
+            kind: LinkKind::Wikilink,
+            target: target.into(),
+            label: None,
+            anchor: None,
+            block_ref: None,
+            source_span: None,
+            source_context: None,
+            resolved_path: None,
+            unresolved_reason: Some(UnresolvedReason::Ambiguous),
+            candidates: candidates.into_iter().map(Into::into).collect(),
+            status: LinkStatus::Ambiguous,
+        };
+        Finding {
+            code: "link-ambiguous".into(),
+            severity: Severity::Warning,
+            path: path.into(),
+            message: "ambiguous link target".into(),
+            body: FindingBody::LinkIssue { link },
+        }
+    }
+
+    fn finding_link_unresolved(path: &str, target: &str) -> Finding {
+        let link = Link {
+            source_path: path.into(),
+            raw: format!("[[{target}]]"),
+            kind: LinkKind::Wikilink,
+            target: target.into(),
+            label: None,
+            anchor: None,
+            block_ref: None,
+            source_span: None,
+            source_context: None,
+            resolved_path: None,
+            unresolved_reason: Some(UnresolvedReason::TargetMissing),
+            candidates: vec![],
+            status: LinkStatus::Unresolved,
+        };
+        Finding {
+            code: "link-unresolved".into(),
+            severity: Severity::Warning,
+            path: path.into(),
+            message: "unresolved link target".into(),
+            body: FindingBody::LinkIssue { link },
+        }
+    }
+
+    fn make_rule(name: &str, match_code: &str, match_field: Option<&str>, match_actual: Option<serde_json::Value>, action: RepairAction) -> RepairRule {
+        RepairRule {
+            name: Some(name.into()),
+            r#match: RepairRuleMatch {
+                code: Some(match_code.into()),
+                rule: None,
+                field: match_field.map(Into::into),
+                actual_value: match_actual,
+            },
+            action,
+        }
+    }
+
+    fn document_hashes_for(paths: &[&str]) -> BTreeMap<Utf8PathBuf, String> {
+        paths.iter().map(|p| (Utf8PathBuf::from(*p), format!("hash-{p}"))).collect()
+    }
+
+    #[test]
+    fn matching_rule_produces_planned_change() {
+        let finding = finding_disallowed_value("task.md", "status", json!("someday"));
+        let config = RepairConfig {
+            rules: vec![make_rule(
+                "fix-someday",
+                "frontmatter-disallowed-value",
+                Some("status"),
+                Some(json!("someday")),
+                RepairAction::SetFrontmatter {
+                    field: "status".into(),
+                    value: json!("backlog"),
+                },
+            )],
+        };
+        let hashes = document_hashes_for(&["task.md"]);
+        let plan = plan_repairs(vault_root(), RepairPlanFilters::default(), vec![finding], &config, &hashes);
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.skipped_findings.len(), 0);
+        assert_eq!(plan.changes[0].operation, "set_frontmatter");
+        assert_eq!(plan.changes[0].field, "status");
+        assert_eq!(plan.changes[0].new_value, Some(json!("backlog")));
+        assert_eq!(plan.changes[0].expected_old_value, Some(json!("someday")));
+        assert_eq!(plan.changes[0].document_hash, "hash-task.md");
+    }
+
+    #[test]
+    fn unmatched_finding_routes_to_skipped_and_unsupported() {
+        let finding = finding_disallowed_value("task.md", "status", json!("someday"));
+        let config = RepairConfig { rules: vec![] };
+        let hashes = document_hashes_for(&["task.md"]);
+        let plan = plan_repairs(vault_root(), RepairPlanFilters::default(), vec![finding], &config, &hashes);
+        assert_eq!(plan.changes.len(), 0);
+        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(plan.unsupported_findings.len(), 1);
+        assert_eq!(plan.ambiguous_findings.len(), 0);
+    }
+
+    #[test]
+    fn ambiguous_link_finding_routes_to_skipped_and_ambiguous() {
+        let finding = finding_link_ambiguous("note.md", "Daily", vec!["Calendar/Daily.md", "Templates/Daily.md"]);
+        let config = RepairConfig { rules: vec![] };
+        let hashes = document_hashes_for(&["note.md"]);
+        let plan = plan_repairs(vault_root(), RepairPlanFilters::default(), vec![finding], &config, &hashes);
+        assert_eq!(plan.changes.len(), 0);
+        assert_eq!(plan.skipped_findings.len(), 1);
+        // Current implementation puts ambiguous findings into BOTH skipped_findings AND ambiguous_findings.
+        assert_eq!(plan.ambiguous_findings.len(), 1);
+        assert_eq!(plan.unsupported_findings.len(), 0);
+        let skipped = &plan.skipped_findings[0];
+        assert_eq!(skipped.candidates.len(), 2);
+        assert!(skipped.reason.contains("ambiguous"));
+    }
+
+    #[test]
+    fn unresolved_link_finding_routes_to_skipped_and_unsupported() {
+        let finding = finding_link_unresolved("note.md", "missing");
+        let config = RepairConfig { rules: vec![] };
+        let hashes = document_hashes_for(&["note.md"]);
+        let plan = plan_repairs(vault_root(), RepairPlanFilters::default(), vec![finding], &config, &hashes);
+        assert_eq!(plan.changes.len(), 0);
+        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(plan.unsupported_findings.len(), 1);
+        assert_eq!(plan.ambiguous_findings.len(), 0);
+    }
+
+    #[test]
+    fn missing_document_hash_routes_to_skipped() {
+        // Current behavior: a rule matches but document_hashes lacks the path; planned_change
+        // returns None, which routes the finding to skipped with the misleading "inspect the
+        // repair rule" message. Pin this behavior so Slice 3 can verify the new SkipReason
+        // enum produces a clearer reason.
+        let finding = finding_disallowed_value("task.md", "status", json!("someday"));
+        let config = RepairConfig {
+            rules: vec![make_rule(
+                "fix-someday",
+                "frontmatter-disallowed-value",
+                Some("status"),
+                Some(json!("someday")),
+                RepairAction::SetFrontmatter {
+                    field: "status".into(),
+                    value: json!("backlog"),
+                },
+            )],
+        };
+        let hashes: BTreeMap<Utf8PathBuf, String> = BTreeMap::new(); // empty
+        let plan = plan_repairs(vault_root(), RepairPlanFilters::default(), vec![finding], &config, &hashes);
+        assert_eq!(plan.changes.len(), 0);
+        assert_eq!(plan.skipped_findings.len(), 1);
+        // Current reason is "matched repair rule cannot repair this finding"
+        assert!(plan.skipped_findings[0].reason.contains("matched repair rule"));
+    }
+
+    #[test]
+    fn summary_counts_match_vectors() {
+        let findings = vec![
+            finding_disallowed_value("task1.md", "status", json!("someday")),
+            finding_link_ambiguous("note.md", "Daily", vec!["a.md", "b.md"]),
+            finding_link_unresolved("note.md", "missing"),
+        ];
+        let config = RepairConfig {
+            rules: vec![make_rule(
+                "fix-someday",
+                "frontmatter-disallowed-value",
+                Some("status"),
+                Some(json!("someday")),
+                RepairAction::SetFrontmatter {
+                    field: "status".into(),
+                    value: json!("backlog"),
+                },
+            )],
+        };
+        let hashes = document_hashes_for(&["task1.md", "note.md"]);
+        let plan = plan_repairs(vault_root(), RepairPlanFilters::default(), findings, &config, &hashes);
+        assert_eq!(plan.summary.findings, 3);
+        assert_eq!(plan.summary.planned_changes, 1);
+        assert_eq!(plan.summary.skipped_findings, 2);
+        assert_eq!(plan.summary.unsupported_findings, 1);
+        assert_eq!(plan.summary.ambiguous_findings, 1);
+    }
+}
