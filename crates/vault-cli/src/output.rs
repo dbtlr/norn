@@ -5,7 +5,8 @@ use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
-use vault_core::{Document, Link, LinkKind, LinkStatus, Severity, VaultFile};
+use vault_core::display;
+use vault_core::{Document, Link, VaultFile};
 use vault_standards::{Finding, FindingBody, RepairPlan, Summary};
 
 use crate::cli::OutputFormat;
@@ -129,9 +130,9 @@ pub fn write_links(links: &[&Link], format: OutputFormat) -> Result<()> {
                 .map(|link| {
                     vec![
                         link.source_path.to_string(),
-                        link_kind(&link.kind).to_string(),
+                        display::link_kind_str(&link.kind).to_string(),
                         link.target.clone(),
-                        link_status(&link.status).to_string(),
+                        display::link_status_str(&link.status).to_string(),
                         link.resolved_path
                             .as_ref()
                             .map(ToString::to_string)
@@ -162,7 +163,7 @@ pub fn write_findings(findings: &[Finding], format: OutputFormat) -> Result<()> 
                     vec![
                         finding.path.to_string(),
                         finding.code.clone(),
-                        severity_key(&finding.severity).to_string(),
+                        display::severity_str(&finding.severity).to_string(),
                         rule,
                         field,
                         target,
@@ -576,29 +577,6 @@ fn display_value(value: &Value) -> String {
 
 fn short_hash(hash: &str) -> String {
     hash.chars().take(12).collect()
-}
-
-fn link_kind(kind: &LinkKind) -> &'static str {
-    match kind {
-        LinkKind::Markdown => "markdown",
-        LinkKind::Wikilink => "wikilink",
-        LinkKind::Embed => "embed",
-    }
-}
-
-fn link_status(status: &LinkStatus) -> &'static str {
-    match status {
-        LinkStatus::Resolved => "resolved",
-        LinkStatus::Unresolved => "unresolved",
-        LinkStatus::Ambiguous => "ambiguous",
-    }
-}
-
-fn severity_key(severity: &Severity) -> &'static str {
-    match severity {
-        Severity::Warning => "warning",
-        Severity::Error => "error",
-    }
 }
 
 fn finding_context(finding: &Finding) -> (String, String, String) {

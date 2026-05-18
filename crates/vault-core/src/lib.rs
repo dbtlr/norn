@@ -1,3 +1,5 @@
+pub mod display;
+
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
