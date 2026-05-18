@@ -1,3 +1,5 @@
+pub mod destination;
+
 use std::collections::BTreeMap;
 
 use camino::Utf8PathBuf;
