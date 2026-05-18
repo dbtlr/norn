@@ -110,12 +110,10 @@ pub fn plan_repairs(
 
     for finding in &findings {
         match matching_repair_rule(finding, &config.rules) {
-            Some((rule, action)) => {
-                match planned_change(finding, rule, &action, document_hashes) {
-                    Ok(change) => changes.push(change),
-                    Err(skip) => skipped.push(skipped_finding(finding, skip)),
-                }
-            }
+            Some((rule, action)) => match planned_change(finding, rule, &action, document_hashes) {
+                Ok(change) => changes.push(change),
+                Err(skip) => skipped.push(skipped_finding(finding, skip)),
+            },
             None => {
                 let skip = if matches!(
                     &finding.body,
@@ -601,9 +599,7 @@ mod tests {
             SkipReason::MissingHash
         );
         // The reason text reflects the new clearer message.
-        assert!(plan.skipped_findings[0]
-            .reason
-            .contains("hash not present"));
+        assert!(plan.skipped_findings[0].reason.contains("hash not present"));
         assert_eq!(plan.summary.skipped.missing_hash, 1);
     }
 
