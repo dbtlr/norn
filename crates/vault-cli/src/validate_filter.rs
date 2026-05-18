@@ -20,13 +20,13 @@ pub struct ValidateFilterOptions<'a> {
 impl<'a> From<&'a ValidateArgs> for ValidateFilterOptions<'a> {
     fn from(args: &'a ValidateArgs) -> Self {
         Self {
-            codes: &args.code,
-            severities: &args.severity,
-            fields: &args.field,
-            rules: &args.rule,
-            paths: &args.path,
-            targets: &args.target,
-            reasons: &args.reason,
+            codes: &args.triage.code,
+            severities: &args.triage.severity,
+            fields: &args.triage.field,
+            rules: &args.triage.rule,
+            paths: &args.triage.path,
+            targets: &args.triage.target,
+            reasons: &args.triage.reason,
         }
     }
 }
@@ -34,13 +34,13 @@ impl<'a> From<&'a ValidateArgs> for ValidateFilterOptions<'a> {
 impl<'a> From<&'a RepairPlanArgs> for ValidateFilterOptions<'a> {
     fn from(args: &'a RepairPlanArgs) -> Self {
         Self {
-            codes: &args.code,
-            severities: &args.severity,
-            fields: &args.field,
-            rules: &args.rule,
-            paths: &args.path,
-            targets: &args.target,
-            reasons: &args.reason,
+            codes: &args.triage.code,
+            severities: &args.triage.severity,
+            fields: &args.triage.field,
+            rules: &args.triage.rule,
+            paths: &args.triage.path,
+            targets: &args.triage.target,
+            reasons: &args.triage.reason,
         }
     }
 }

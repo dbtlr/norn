@@ -71,10 +71,10 @@ fn run(cli: Cli) -> Result<i32> {
                 let mut index = build_index_for(&cwd, config_path.as_ref())?;
                 trim_diagnostics(&mut index, verbose);
                 let options = DocumentFilterOptions {
-                    filters: &args.filters,
-                    paths: &args.paths,
-                    has: &args.has,
-                    missing: &args.missing,
+                    filters: &args.filters.filters,
+                    paths: &args.filters.paths,
+                    has: &args.filters.has,
+                    missing: &args.filters.missing,
                 };
                 let documents = filter_documents(&index, &options)?;
                 write_documents(&documents, resolve_format(args.format))?;
@@ -84,10 +84,10 @@ fn run(cli: Cli) -> Result<i32> {
                 let mut index = build_index_for(&cwd, config_path.as_ref())?;
                 trim_diagnostics(&mut index, verbose);
                 let options = DocumentFilterOptions {
-                    filters: &args.filters,
-                    paths: &args.paths,
-                    has: &args.has,
-                    missing: &args.missing,
+                    filters: &args.filters.filters,
+                    paths: &args.filters.paths,
+                    has: &args.filters.has,
+                    missing: &args.filters.missing,
                 };
                 let known_fields = index_frontmatter_keys(&index);
                 let documents = filter_documents(&index, &options)?;
@@ -148,10 +148,10 @@ fn run(cli: Cli) -> Result<i32> {
             let mut index = build_index_for(&cwd, config_path.as_ref())?;
             trim_diagnostics(&mut index, verbose);
             let options = DocumentFilterOptions {
-                filters: &args.filters,
-                paths: &args.paths,
-                has: &args.has,
-                missing: &args.missing,
+                filters: &args.filters.filters,
+                paths: &args.filters.paths,
+                has: &args.filters.has,
+                missing: &args.filters.missing,
             };
             let documents = filter_documents(&index, &options)?;
             let documents = filter_documents_by_text(&cwd, documents, &args.text)?;
@@ -261,13 +261,13 @@ fn run_registry(command: RegistrySubcommand) -> Result<i32> {
 
 fn repair_plan_filters(args: &crate::cli::RepairPlanArgs) -> RepairPlanFilters {
     RepairPlanFilters {
-        code: normalized_filter_values(&args.code),
-        severity: normalized_filter_values(&args.severity),
-        field: normalized_filter_values(&args.field),
-        rule: normalized_filter_values(&args.rule),
-        path: normalized_filter_values(&args.path),
-        target: normalized_filter_values(&args.target),
-        reason: normalized_filter_values(&args.reason),
+        code: normalized_filter_values(&args.triage.code),
+        severity: normalized_filter_values(&args.triage.severity),
+        field: normalized_filter_values(&args.triage.field),
+        rule: normalized_filter_values(&args.triage.rule),
+        path: normalized_filter_values(&args.triage.path),
+        target: normalized_filter_values(&args.triage.target),
+        reason: normalized_filter_values(&args.triage.reason),
     }
 }
 
