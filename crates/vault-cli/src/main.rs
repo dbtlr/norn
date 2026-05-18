@@ -13,12 +13,12 @@ use std::{collections::BTreeMap, fs, process};
 use anyhow::{bail, Result};
 use clap::Parser;
 use vault_core::{GraphIndex, LinkStatus};
-use vault_graph::{build_index_with_options, concise_diagnostics, has_errors, write_sqlite_cache};
+use vault_graph::{build_index_with_options, concise_diagnostics, has_errors};
 use vault_standards::{plan_repairs, summarize, validate, RepairPlanFilters};
 
 use crate::cli::{
-    CacheSubcommand, Cli, Command, DocsSubcommand, LinksSubcommand, RegistrySubcommand,
-    RepairOutputFormat, RepairSubcommand,
+    Cli, Command, DocsSubcommand, LinksSubcommand, RegistrySubcommand, RepairOutputFormat,
+    RepairSubcommand,
 };
 use crate::config::{effective_cwd, load_config, resolve_path};
 use crate::filter::{
@@ -217,16 +217,6 @@ fn run(cli: Cli) -> Result<i32> {
                 trim_diagnostics(&mut index, verbose);
                 let report = plan_link_repairs(&index, args.target.as_deref())?;
                 write_link_repair_report(&report, args.format.into())?;
-                Ok(exit_code_for(&index))
-            }
-        },
-        Command::Cache(cache) => match cache.command {
-            CacheSubcommand::Build(args) => {
-                let mut index = build_index_for(&cwd, config_path.as_ref())?;
-                trim_diagnostics(&mut index, verbose);
-                let cache_path = resolve_path(&cwd, &args.cache);
-                let summary = write_sqlite_cache(&index, &cache_path)?;
-                write_item_output(&summary, resolve_format(args.format))?;
                 Ok(exit_code_for(&index))
             }
         },

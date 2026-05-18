@@ -53,8 +53,6 @@ pub enum Command {
     Registry(RegistryCommand),
     #[command(about = "Plan and apply deterministic vault repairs")]
     Repair(RepairCommand),
-    #[command(about = "Local SQLite projection of the graph")]
-    Cache(CacheCommand),
     #[command(
         about = "Validate vault graph facts and configured frontmatter rules",
         long_about = "Validate vault graph facts and configured frontmatter rules.\n\nValidation reuses graph/index facts to surface unresolved links, ambiguous links, document diagnostics, and configured frontmatter requirements. Validate does not mutate files."
@@ -103,12 +101,6 @@ pub enum LinksSubcommand {
         long_about = "Emit incoming links for an exact vault-relative file path or unique document stem.\n\nExact paths may target Markdown documents or non-Markdown files. Stem matching only applies to Markdown documents and is case-insensitive."
     )]
     Backlinks(TargetGraphArgs),
-}
-
-#[derive(Debug, Parser)]
-pub struct CacheCommand {
-    #[command(subcommand)]
-    pub command: CacheSubcommand,
 }
 
 #[derive(Debug, Parser)]
@@ -223,26 +215,6 @@ pub struct RepairApplyArgs {
     pub verify: bool,
     #[arg(long, value_enum, default_value_t = RepairOutputFormat::Json, help = "Stdout format")]
     pub format: RepairOutputFormat,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CacheSubcommand {
-    #[command(
-        about = "Write a SQLite graph cache and emit a build summary",
-        long_about = "Write a SQLite graph cache and emit a build summary.\n\nThe cache includes inventoried files, parsed Markdown documents, headings, block IDs, graph link facts, and diagnostics. --format only controls stdout; the cache is always SQLite."
-    )]
-    Build(BuildArgs),
-}
-
-#[derive(Debug, Parser)]
-pub struct BuildArgs {
-    #[arg(
-        long,
-        help = "SQLite cache file path or directory. Directories receive graph.sqlite; --format only controls stdout"
-    )]
-    pub cache: Utf8PathBuf,
-    #[arg(long, value_enum, help = "Stdout format")]
-    pub format: Option<OutputFormat>,
 }
 
 #[derive(Debug, Parser)]

@@ -9,9 +9,6 @@ blake3.workspace = true
 camino.workspace = true
 pulldown-cmark.workspace = true
 regex.workspace = true
-rusqlite.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 vault-core = { path = "../vault-core" }
 vault-frontmatter = { path = "../vault-frontmatter" }

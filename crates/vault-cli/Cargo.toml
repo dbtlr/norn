@@ -19,6 +19,3 @@ vault-core = { path = "../vault-core" }
 vault-frontmatter = { path = "../vault-frontmatter" }
 vault-graph = { path = "../vault-graph" }
 vault-standards = { path = "../vault-standards" }
-
-[dev-dependencies]
-rusqlite.workspace = true

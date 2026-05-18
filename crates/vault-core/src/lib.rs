@@ -129,7 +129,8 @@ pub struct VaultFile {
     pub stem: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
-    pub hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

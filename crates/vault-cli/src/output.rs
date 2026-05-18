@@ -110,7 +110,7 @@ pub fn write_files(files: &[&VaultFile], format: OutputFormat) -> Result<()> {
                     vec![
                         file.path.to_string(),
                         file.extension.clone().unwrap_or_default(),
-                        short_hash(&file.hash),
+                        file.hash.as_deref().map(short_hash).unwrap_or_default(),
                     ]
                 })
                 .collect::<Vec<_>>();

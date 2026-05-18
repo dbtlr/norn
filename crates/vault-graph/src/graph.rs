@@ -71,9 +71,15 @@ fn parse_file(root: &Utf8Path, absolute_path: &Utf8Path) -> VaultFile {
         .to_path_buf();
     let stem = path.file_stem().unwrap_or_default().to_string();
     let extension = path.extension().map(ToString::to_string);
-    let hash = fs::read(absolute_path)
-        .map(|content| blake3::hash(&content).to_hex().to_string())
-        .unwrap_or_default();
+    // Only Markdown documents need a content hash (used by repair preconditions).
+    // Non-Markdown files are tracked by path identity alone.
+    let hash = if is_markdown(absolute_path.as_std_path()) {
+        fs::read(absolute_path)
+            .ok()
+            .map(|content| blake3::hash(&content).to_hex().to_string())
+    } else {
+        None
+    };
 
     VaultFile {
         path,
