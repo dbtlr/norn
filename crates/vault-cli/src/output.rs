@@ -123,7 +123,13 @@ pub fn write_files(files: &[&VaultFile], format: OutputFormat) -> Result<()> {
 pub fn write_links(links: &[&Link], format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json | OutputFormat::Jsonl => write_output(links, format),
-        OutputFormat::Paths => write_paths(links.iter().map(|link| &link.source_path)),
+        OutputFormat::Paths => {
+            let paths = links
+                .iter()
+                .map(|link| link.source_path.clone())
+                .collect::<BTreeSet<_>>();
+            write_paths(paths.iter())
+        }
         OutputFormat::Table => {
             let rows = links
                 .iter()
