@@ -19,7 +19,3 @@ install-updater = false
 include = ["target/completions/vault.bash", "target/completions/_vault", "target/completions/vault.fish", "target/man/vault.1"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
-# Allow manual edits to generated CI files (we bumped actions/checkout and
-# actions/upload-artifact to v5 to silence Node.js 20 deprecation warnings;
-# remove this once cargo-dist itself ships v5 actions in its generators).
-allow-dirty = ["ci"]
