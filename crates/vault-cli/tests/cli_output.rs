@@ -2764,7 +2764,7 @@ fn graph_inspect_accepts_unique_stem() {
 
 #[test]
 fn completions_bash_subcommand_emits_non_empty_script() {
-    let (stdout, _stderr) = vault_success(&["completions", "bash"]);
+    let (stdout, _stderr) = vault_success(&["completions", "init", "bash"]);
     assert!(
         !stdout.is_empty(),
         "expected non-empty bash completion script, got empty stdout"
@@ -2778,7 +2778,7 @@ fn completions_bash_subcommand_emits_non_empty_script() {
 
 #[test]
 fn completions_zsh_subcommand_emits_non_empty_script() {
-    let (stdout, _stderr) = vault_success(&["completions", "zsh"]);
+    let (stdout, _stderr) = vault_success(&["completions", "init", "zsh"]);
     assert!(
         !stdout.is_empty(),
         "expected non-empty zsh completion script"
@@ -2791,7 +2791,7 @@ fn completions_zsh_subcommand_emits_non_empty_script() {
 
 #[test]
 fn completions_fish_subcommand_emits_non_empty_script() {
-    let (stdout, _stderr) = vault_success(&["completions", "fish"]);
+    let (stdout, _stderr) = vault_success(&["completions", "init", "fish"]);
     assert!(
         !stdout.is_empty(),
         "expected non-empty fish completion script"
@@ -2819,46 +2819,35 @@ fn manpage_subcommand_emits_non_empty_roff() {
 }
 
 #[test]
-fn completions_and_manpage_are_hidden_from_top_level_help() {
+fn manpage_is_hidden_from_top_level_help() {
     let output = vault(&["--help"]);
-    // The user-facing top-level help should not advertise these subcommands.
-    // They exist for installers and packaging, not daily use.
     assert!(
-        !output.contains("completions"),
-        "expected `completions` to be hidden from top-level --help, got:\n{output}"
+        output.contains("completions"),
+        "completions should be visible in top-level help; got:\n{output}"
     );
     assert!(
         !output.contains("manpage"),
-        "expected `manpage` to be hidden from top-level --help, got:\n{output}"
+        "manpage should remain hidden from top-level help; got:\n{output}"
     );
 }
 
 #[test]
-fn completions_subcommand_help_documents_supported_shells() {
-    // `vault completions --help` is reachable even though the subcommand is
-    // hidden from the top-level listing. The shell argument's possible values
-    // must include at least bash, zsh, and fish.
-    let output = vault(&["completions", "--help"]);
-    assert!(
-        output.contains("bash"),
-        "expected bash in --help, got:\n{output}"
-    );
-    assert!(
-        output.contains("zsh"),
-        "expected zsh in --help, got:\n{output}"
-    );
-    assert!(
-        output.contains("fish"),
-        "expected fish in --help, got:\n{output}"
-    );
+fn completions_init_subcommand_help_documents_supported_shells() {
+    let output = vault(&["completions", "init", "--help"]);
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish", "nushell"] {
+        assert!(
+            output.contains(shell),
+            "completions init --help should list {shell}; got:\n{output}"
+        );
+    }
 }
 
 #[test]
 fn completions_bash_writes_clean_stderr() {
-    let (_stdout, stderr) = vault_success(&["completions", "bash"]);
+    let (_stdout, stderr) = vault_success(&["completions", "init", "bash"]);
     assert!(
         stderr.is_empty(),
-        "expected `vault completions bash` to write nothing to stderr, got:\n{stderr}"
+        "expected `vault completions init bash` to write nothing to stderr, got:\n{stderr}"
     );
 }
 
@@ -2886,7 +2875,7 @@ fn completions_runs_without_a_vault_root() {
     fs::create_dir_all(&scratch).expect("create scratch dir");
     let output = Command::new(env!("CARGO_BIN_EXE_vault"))
         .current_dir(&scratch)
-        .args(["completions", "bash"])
+        .args(["completions", "init", "bash"])
         .output()
         .expect("vault command should run");
     let _ = fs::remove_dir_all(&scratch);
@@ -2927,7 +2916,7 @@ fn manpage_runs_without_a_vault_root() {
 
 #[test]
 fn completions_rejects_unknown_shell() {
-    let stderr = vault_error(&["completions", "tcsh"]);
+    let stderr = vault_error(&["completions", "init", "tcsh"]);
     // clap's standard "invalid value" message includes the offending value.
     assert!(
         stderr.contains("tcsh") || stderr.contains("invalid value"),
