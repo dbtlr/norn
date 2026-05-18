@@ -292,22 +292,25 @@ reported as skipped planning fallout instead of blocking apply.
 
 The plan schema includes:
 
-- `schema_version`
+- `schema_version` (currently `3`)
 - `vault_root`
 - `source_filters`
-- `summary`
+- `summary` with `findings`, `planned_changes`, and a nested `skipped` object
+  containing per-reason counts (`unsupported`, `ambiguous`, `missing_hash`,
+  `precondition_failed`, `total`).
 - `changes`
-- `skipped_findings`
-- `unsupported_findings`
-- `ambiguous_findings`
+- `skipped_findings` — single canonical list. Each entry carries a
+  `skip_reason` (`unsupported` | `ambiguous` | `missing_hash` |
+  `precondition_failed`) identifying why the finding was not planned.
 
 Each planned change includes the target path, document hash precondition,
 finding context, operation, field, expected old value when available, and new
 value when applicable.
 
 Skipped findings include the path, code, field/target context when available,
-reason, candidates for ambiguous links, and suggested next actions. Fix the
-repairability problem, then rerun `repair plan`.
+`skip_reason`, free-form `reason`, candidates for ambiguous links, and
+suggested next actions. Fix the repairability problem, then rerun
+`repair plan`.
 
 The first supported repair actions are frontmatter-only:
 
@@ -403,9 +406,13 @@ they apply deterministic changes:
 ```json
 {
   "plan_context": {
-    "skipped_findings": 1,
-    "unsupported_findings": 1,
-    "ambiguous_findings": 0
+    "skipped": {
+      "unsupported": 1,
+      "ambiguous": 0,
+      "missing_hash": 0,
+      "precondition_failed": 0,
+      "total": 1
+    }
   }
 }
 ```

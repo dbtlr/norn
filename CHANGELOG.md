@@ -63,6 +63,43 @@ Apply migration and minimal-edit YAML preservation. Breaking change in `vault-st
 - Apply now returns `ApplyError::CannotMinimalEdit` for `set_frontmatter` against block-style or flow-style values. The current repair action set only configures scalar targets, so this is a guard for future expansion.
 - The expected-old-value check still treats YAML null as equivalent to absent for the purpose of matching a `None` expected value.
 
+## Unreleased (v0.26 Slice 3)
+
+Repair plan schema bump to v3 with new SkipReason taxonomy.
+
+### Breaking changes
+
+- Repair plan JSON schema bumps from v2 to v3.
+- `RepairPlan` removes the separate `unsupported_findings` and `ambiguous_findings` top-level arrays. Use `skipped_findings` (single canonical list) and filter by `skip_reason` (`unsupported` | `ambiguous` | `missing_hash` | `precondition_failed`).
+- `RepairPlanSummary` removes flat `skipped_findings` / `unsupported_findings` / `ambiguous_findings` count fields. Use `summary.skipped.{unsupported,ambiguous,missing_hash,precondition_failed,total}`.
+- `RepairApplyReport.plan_context` restructures from three flat counts to nest a `skipped` object matching the plan's summary shape.
+- `vault repair apply` rejects v2 plans with `unsupported repair plan schema version: expected 3, got 2`.
+
+Agents reading these fields need to update accordingly. Migration:
+
+```text
+old: plan.unsupported_findings.length
+new: plan.skipped_findings.filter(f => f.skip_reason === "unsupported").length
+
+old: plan.summary.unsupported_findings
+new: plan.summary.skipped.unsupported
+
+old: apply.plan_context.unsupported_findings
+new: apply.plan_context.skipped.unsupported
+```
+
+### Added
+
+- `SkipReason` enum (`unsupported`, `ambiguous`, `missing_hash`, `precondition_failed`) tagging each `SkippedFinding` at construction time.
+- `SkippedSummary` with per-reason counts plus `total`.
+- `MissingHash` reason now produces a clearer message ("document hash not present in index — file may have been removed or renamed") instead of the previous misleading "inspect the repair rule".
+
+### Internal
+
+- `planned_change` returns `Result<PlannedChange, SkipReason>` instead of `Option<PlannedChange>`.
+- `is_ambiguous_skipped` string heuristic removed.
+- `REPAIR_PLAN_SCHEMA_VERSION` is now a single `pub const` in `vault-standards::repair`; `vault-standards::apply::validate_plan_for_apply` references it.
+
 ## v0.25.1 - 2026-05-18
 
 Repair workflow documentation polish.
