@@ -586,6 +586,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "thiserror",
  "vault-core",
 ]
 
@@ -628,7 +629,9 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "thiserror",
  "vault-core",
+ "vault-frontmatter",
  "vault-graph",
 ]
 
