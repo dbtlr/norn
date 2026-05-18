@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased (GitHub readiness Slice 3)
+
+### Added
+
+- `.github/workflows/ci.yml` — matrix CI on ubuntu-latest and macos-latest.
+  Runs `cargo fmt --check`, `cargo test --workspace --locked`,
+  `cargo build -p vault-cli --release --locked`, `cargo install --path
+  crates/vault-cli --locked`, `vault --help`, fixture validation, repo
+  self-validation, `cargo audit`, `cargo deny check`, and
+  `shellcheck examples/repair-recipe.sh`. Triggers on push to main,
+  pull_request, and a weekly cron (Monday 04:17 UTC).
+- `deny.toml` — conservative supply-chain policy. Denies yanked
+  advisories, restricts licenses to an explicit permissive allow list
+  (MIT, Apache-2.0, BSD-2/3-Clause, ISC, Unicode-DFS-2016, Unicode-3.0,
+  Zlib), denies unknown registries and unknown git sources. Warns on
+  multiple-versions and unmaintained crates; wildcards warn-only until
+  the workspace publish posture is decided.
+- `.vault/config.yaml` — repo-root dogfood config. `files.ignore`
+  excludes `target/`, `.github/`, `fixtures/`, and `.claude/`. A
+  `docs-page-base` validate rule requires `title` and `description`
+  frontmatter on `docs/**/*.md`. CI asserts zero findings.
+- `examples/repair-recipe.sh` — placeholder repair walkthrough script
+  used by the CI shellcheck gate. Slice 2 will replace this with the
+  full detect → plan → dry-run → apply → verify recipe.
+- `title` + `description` frontmatter backfilled on `docs/rule-shape.md`
+  so the new self-validation rule passes against the pre-Slice-2 docs.
+
 ## v0.26.0 - 2026-05-18
 
 Structural cleanup release: apply migration to vault-standards, minimal-edit YAML preservation, repair plan schema v3 with SkipReason taxonomy, config schema serde rewrite, SQLite cache deletion, foundation tests across pure-parsing crates, and bundled CLI polish. Four-slice cleanup, four merged branches, 193 tests passing.
