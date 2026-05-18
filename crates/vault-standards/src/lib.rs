@@ -1,6 +1,5 @@
 mod checks;
 mod config;
-mod config_schema;
 mod engine;
 mod findings;
 mod predicates;
