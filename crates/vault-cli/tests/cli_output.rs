@@ -3688,3 +3688,56 @@ repair:
     fs::remove_dir_all(&root).ok();
     fs::remove_file(&config_path).ok();
 }
+
+#[test]
+fn repair_links_move_to_reports_risk_without_plan() {
+    let root = temp_cache_dir();
+    fs::create_dir_all(root.join("Inbox")).expect("inbox dir should be created");
+    fs::write(
+        root.join("Inbox/task.md"),
+        "---\ntype: task\n---\n# Body\n",
+    )
+    .expect("task should write");
+    fs::write(
+        root.join("Inbox/index.md"),
+        "---\ntitle: Index\n---\n- [[Inbox/task]]\n- [task](task.md)\n",
+    )
+    .expect("index should write");
+
+    let output = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "repair",
+        "links",
+        "--target",
+        "Inbox/task.md",
+        "--move-to",
+        "Workspaces/demo/tasks/task.md",
+        "--format",
+        "json",
+    ]);
+    let report = serde_json::from_str::<Value>(&output).expect("link report should be JSON");
+
+    assert!(
+        !report["link_risk"]["path_qualified_wikilinks"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected at least one path-qualified wikilink in link_risk; got: {report}"
+    );
+    assert!(
+        !report["link_risk"]["markdown_links"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected at least one markdown link in link_risk; got: {report}"
+    );
+    assert_eq!(report["link_risk"]["directory_changed"], true);
+    assert_eq!(report["link_risk"]["stem_changed"], false);
+    assert!(
+        report.get("planned_changes").is_none(),
+        "report should not include a planned move; got: {report}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+}

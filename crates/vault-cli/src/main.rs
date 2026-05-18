@@ -218,7 +218,11 @@ fn run(cli: Cli) -> Result<i32> {
             RepairSubcommand::Links(args) => {
                 let mut index = build_index_for(&cwd, config_path.as_ref())?;
                 trim_diagnostics(&mut index, verbose);
-                let report = plan_link_repairs(&index, args.target.as_deref())?;
+                let report = plan_link_repairs(
+                    &index,
+                    args.target.as_deref(),
+                    args.move_to.as_deref(),
+                )?;
                 write_link_repair_report(&report, args.format.into())?;
                 Ok(exit_code_for(&index))
             }

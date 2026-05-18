@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use vault_core::display;
 use vault_core::{GraphIndex, Link, LinkKind, LinkStatus, UnresolvedReason};
+use vault_standards::{
+    classify_link_risk, detect_stem_collision, LinkRisk, PlanWarning,
+};
 
 use crate::target::{backlinks, resolve_backlink_target_path};
 
@@ -19,6 +22,10 @@ pub struct LinkRepairReport {
     pub affected_files: Vec<Utf8PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_risk: Option<TargetPathRisk>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_risk: Option<LinkRisk>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<PlanWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,7 +70,11 @@ pub struct TargetPathRisk {
     pub move_risk: String,
 }
 
-pub fn plan_link_repairs(index: &GraphIndex, target: Option<&str>) -> Result<LinkRepairReport> {
+pub fn plan_link_repairs(
+    index: &GraphIndex,
+    target: Option<&str>,
+    move_to: Option<&Utf8Path>,
+) -> Result<LinkRepairReport> {
     let all_links = index
         .documents
         .iter()
@@ -91,6 +102,21 @@ pub fn plan_link_repairs(index: &GraphIndex, target: Option<&str>) -> Result<Lin
     let target_risk = target
         .map(|target| target_path_risk(index, target))
         .transpose()?;
+    let (link_risk, warnings) = match (target, move_to) {
+        (Some(target), Some(move_to)) => {
+            let target_path = resolve_backlink_target_path(index, target)?;
+            let risk =
+                classify_link_risk(&target_path, move_to, &index.documents, &index.files);
+            let mut warnings = Vec::new();
+            if let Some(warning) =
+                detect_stem_collision(&target_path, move_to, &index.documents)
+            {
+                warnings.push(warning);
+            }
+            (Some(risk), warnings)
+        }
+        _ => (None, Vec::new()),
+    };
     let affected_files = affected_files(
         &unresolved_links,
         &ambiguous_links,
@@ -113,6 +139,8 @@ pub fn plan_link_repairs(index: &GraphIndex, target: Option<&str>) -> Result<Lin
         duplicate_stem_risks,
         affected_files,
         target_risk,
+        link_risk,
+        warnings,
     })
 }
 
