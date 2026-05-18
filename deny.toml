@@ -1,0 +1,31 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "workspace"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+# Workspace-internal crates use path-only dependencies (no version),
+# which cargo-deny reports as wildcards. allow-wildcard-paths does not
+# apply here because the crates are not marked `publish = false`.
+# Keep wildcards at "warn" until Slice 1 (Cargo metadata work) decides
+# the publish posture for the inter-crate deps.
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
