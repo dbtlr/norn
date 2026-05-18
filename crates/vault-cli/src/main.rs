@@ -1,4 +1,5 @@
 mod cli;
+mod completions;
 mod config;
 mod filter;
 mod link_repair;
@@ -59,6 +60,8 @@ fn run(cli: Cli) -> Result<i32> {
 
     let command = match command {
         Command::Registry(registry_command) => return run_registry(registry_command.command),
+        Command::Completions(args) => return run_completions_command(args),
+        Command::Manpage => return run_manpage_command(),
         command => command,
     };
 
@@ -238,7 +241,23 @@ fn run(cli: Cli) -> Result<i32> {
         Command::Registry(_) => {
             unreachable!("registry commands are handled before vault targeting")
         }
+        Command::Completions(_) => {
+            unreachable!("completions are handled before vault targeting")
+        }
+        Command::Manpage => {
+            unreachable!("manpage is handled before vault targeting")
+        }
     }
+}
+
+fn run_completions_command(args: crate::cli::CompletionsArgs) -> Result<i32> {
+    completions::run_completions(args.shell)?;
+    Ok(0)
+}
+
+fn run_manpage_command() -> Result<i32> {
+    completions::run_manpage()?;
+    Ok(0)
 }
 
 fn run_registry(command: RegistrySubcommand) -> Result<i32> {

@@ -44,6 +44,18 @@ jobs:
       - name: vault --help
         run: vault --help
 
+      - name: completions bash smoke
+        run: vault completions bash > /tmp/vault.bash && test -s /tmp/vault.bash
+
+      - name: completions zsh smoke
+        run: vault completions zsh > /tmp/_vault && test -s /tmp/_vault
+
+      - name: completions fish smoke
+        run: vault completions fish > /tmp/vault.fish && test -s /tmp/vault.fish
+
+      - name: manpage smoke
+        run: vault manpage > /tmp/vault.1 && test -s /tmp/vault.1
+
       - name: fixture validate
         run: vault -C fixtures/basic validate --summary --format json
 

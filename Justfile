@@ -59,3 +59,13 @@ release version:
     git add Cargo.toml Cargo.lock
     git commit -m "Bump workspace version to {{version}}"
     git tag -a v{{version}} -m "vault-cli v{{version}}"
+
+completions:
+    mkdir -p target/completions
+    cargo run -q -p vault-cli -- completions bash > target/completions/vault.bash
+    cargo run -q -p vault-cli -- completions zsh  > target/completions/_vault
+    cargo run -q -p vault-cli -- completions fish > target/completions/vault.fish
+
+manpage:
+    mkdir -p target/man
+    cargo run -q -p vault-cli -- manpage > target/man/vault.1

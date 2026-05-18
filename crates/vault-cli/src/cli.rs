@@ -66,6 +66,10 @@ pub enum Command {
         long_about = "Validate vault graph facts and configured frontmatter rules.\n\nValidation reuses graph/index facts to surface unresolved links, ambiguous links, document diagnostics, and configured frontmatter requirements. Validate does not mutate files."
     )]
     Validate(ValidateArgs),
+    #[command(hide = true, about = "Emit shell completion script to stdout")]
+    Completions(CompletionsArgs),
+    #[command(hide = true, about = "Emit roff-format man page to stdout")]
+    Manpage,
 }
 
 #[derive(Debug, Parser)]
@@ -343,6 +347,12 @@ pub struct SearchArgs {
     pub text: Vec<String>,
     #[arg(long, value_enum, help = "Stdout format")]
     pub format: Option<OutputFormat>,
+}
+
+#[derive(Debug, Parser)]
+pub struct CompletionsArgs {
+    #[arg(value_enum, help = "Shell to generate the completion script for")]
+    pub shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Parser)]
