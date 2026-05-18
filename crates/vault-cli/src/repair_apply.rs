@@ -15,8 +15,16 @@ pub struct RepairApplyReport {
     pub dry_run: bool,
     pub changed_files: Vec<Utf8PathBuf>,
     pub applied_changes: usize,
+    pub plan_context: RepairApplyPlanContext,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<RepairApplyVerification>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepairApplyPlanContext {
+    pub skipped_findings: usize,
+    pub unsupported_findings: usize,
+    pub ambiguous_findings: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +75,11 @@ pub fn apply_repair_plan(
         dry_run,
         changed_files,
         applied_changes: plan.changes.len(),
+        plan_context: RepairApplyPlanContext {
+            skipped_findings: plan.skipped_findings.len(),
+            unsupported_findings: plan.unsupported_findings.len(),
+            ambiguous_findings: plan.ambiguous_findings.len(),
+        },
         verification: None,
     })
 }

@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## v0.24.0 - 2026-05-18
+
+Repair workflow polish release.
+
+### Added
+
+- Added `plan_context` counts to `vault repair apply` output for skipped, unsupported, and ambiguous findings from the source plan.
+- Documented the stable repair workflow loop: validate summary, repair plan, dry-run apply, verified apply.
+
+### Changed
+
+- Updated `vault repair plan` and `vault repair apply` help text to match the applyable-plan contract.
+- Changed `vault repair links` decision wording to use `skipped:` reasons instead of manual-decision language.
+
 ## v0.23.0 - 2026-05-18
 
 Repair plan usability release.

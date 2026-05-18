@@ -201,21 +201,19 @@ fn link_decision(link: &Link) -> LinkDecision {
 
 fn decision_for(link: &Link) -> String {
     match link.status {
-        LinkStatus::Ambiguous => {
-            "manual decision required: choose one candidate target".to_string()
-        }
+        LinkStatus::Ambiguous => "skipped: choose one candidate target".to_string(),
         LinkStatus::Unresolved => match link.unresolved_reason {
             Some(UnresolvedReason::AnchorMissing) => {
-                "manual decision required: update heading anchor or target heading".to_string()
+                "skipped: update heading anchor or target heading".to_string()
             }
             Some(UnresolvedReason::BlockRefMissing) => {
-                "manual decision required: update block reference or target block id".to_string()
+                "skipped: update block reference or target block id".to_string()
             }
             Some(UnresolvedReason::TargetMissing) => {
-                "manual decision required: create target or rewrite link".to_string()
+                "skipped: create target or rewrite link".to_string()
             }
             Some(UnresolvedReason::Ambiguous) | None => {
-                "manual decision required: inspect unresolved link".to_string()
+                "skipped: inspect unresolved link".to_string()
             }
         },
         LinkStatus::Resolved => {

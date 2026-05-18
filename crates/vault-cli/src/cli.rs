@@ -154,7 +154,7 @@ pub struct RepairCommand {
 pub enum RepairSubcommand {
     #[command(
         about = "Generate an explicit repair plan from validation findings",
-        long_about = "Generate an explicit repair plan from validation findings.\n\nRepair planning is read-only. It uses configured deterministic repair rules and reports unsupported or manual-decision findings explicitly."
+        long_about = "Generate an explicit repair plan from validation findings.\n\nRepair planning is read-only. It uses configured deterministic repair rules to produce applyable changes, and reports skipped, unsupported, and ambiguous findings as non-blocking planning fallout."
     )]
     Plan(RepairPlanArgs),
     #[command(
@@ -164,7 +164,7 @@ pub enum RepairSubcommand {
     Links(RepairLinksArgs),
     #[command(
         about = "Apply a frontmatter-only repair plan",
-        long_about = "Apply a frontmatter-only repair plan.\n\nApply writes by default, checks plan schema and stale file preconditions, preserves Markdown body content, and rejects plans with unsupported or manual-decision findings."
+        long_about = "Apply a frontmatter-only repair plan.\n\nApply writes by default, executes deterministic changes, reports skipped fallout as context, preserves Markdown body content, and rejects unsupported schemas, stale hashes, expected-old-value mismatches, conflicting changes, and unsupported operations."
     )]
     Apply(RepairApplyArgs),
 }

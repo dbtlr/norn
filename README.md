@@ -344,6 +344,15 @@ vault --vault atlas validate --code frontmatter-disallowed-value --field status 
 vault --vault atlas repair plan --code frontmatter-disallowed-value --field status --format json > repair.json
 ```
 
+Stable repair loop:
+
+```bash
+vault --vault atlas validate --summary --format json
+vault --vault atlas repair plan --format json > repair.json
+vault --vault atlas repair apply repair.json --dry-run --format json
+vault --vault atlas repair apply repair.json --verify --format json
+```
+
 Example search-assisted workflow:
 
 ```bash
@@ -362,6 +371,19 @@ expected-old-value mismatches.
 ```bash
 vault --vault atlas repair apply repair.json --dry-run --format json
 vault --vault atlas repair apply repair.json --verify --format json
+```
+
+Apply output includes `plan_context` so broad plans remain explainable after
+they apply deterministic changes:
+
+```json
+{
+  "plan_context": {
+    "skipped_findings": 1,
+    "unsupported_findings": 1,
+    "ambiguous_findings": 0
+  }
+}
 ```
 
 Frontmatter apply preserves Markdown body content exactly. YAML frontmatter is

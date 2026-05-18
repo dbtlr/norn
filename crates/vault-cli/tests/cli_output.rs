@@ -178,7 +178,13 @@ fn grouped_help_lists_new_surfaces() {
 
     let output = vault(&["repair", "plan", "--help"]);
     assert!(output.contains("[possible values: json, jsonl, table]"));
+    assert!(output.contains("skipped, unsupported, and ambiguous findings"));
     assert!(!output.contains("paths"));
+
+    let output = vault(&["repair", "apply", "--help"]);
+    assert!(output.contains("reports skipped fallout as context"));
+    assert!(output.contains("stale hashes"));
+    assert!(!output.contains("manual-decision"));
 
     let output = vault(&["search", "--help"]);
     assert!(output.contains("Deterministic document search"));
@@ -211,6 +217,10 @@ fn repair_links_reports_link_drift_and_duplicate_stems() {
         report["ambiguous_links"][0]["candidates"][0],
         "duplicate.md"
     );
+    assert!(report["ambiguous_links"][0]["decision"]
+        .as_str()
+        .unwrap()
+        .starts_with("skipped:"));
     assert_eq!(report["duplicate_stem_risks"][0]["stem"], "duplicate");
     assert!(report["unresolved_links"]
         .as_array()
@@ -225,6 +235,10 @@ fn repair_links_reports_link_drift_and_duplicate_stems() {
         .unwrap()
         .iter()
         .any(|link| link["target"] == "folder/delta.md"));
+    assert!(report["unresolved_links"][0]["decision"]
+        .as_str()
+        .unwrap()
+        .starts_with("skipped:"));
 }
 
 #[test]
@@ -280,6 +294,8 @@ fn repair_links_table_is_row_oriented() {
     assert!(output.contains("path-style"));
     assert!(output.contains("target_path"));
     assert!(output.contains("incoming_sources"));
+    assert!(output.contains("skipped:"));
+    assert!(!output.contains("manual decision required"));
     assert!(!output.contains("\"unresolved_links\""));
 }
 
@@ -387,6 +403,9 @@ fn broad_repair_plan_with_skipped_findings_still_applies_changes() {
     let report = serde_json::from_str::<Value>(&output).expect("apply report should be JSON");
     assert_eq!(report["applied_changes"], 1);
     assert_eq!(report["changed_files"][0], "task.md");
+    assert_eq!(report["plan_context"]["skipped_findings"], 1);
+    assert_eq!(report["plan_context"]["unsupported_findings"], 1);
+    assert_eq!(report["plan_context"]["ambiguous_findings"], 0);
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
@@ -476,6 +495,9 @@ fn repair_apply_writes_frontmatter_plan_and_verifies() {
     assert_eq!(report["dry_run"], false);
     assert_eq!(report["applied_changes"], 1);
     assert_eq!(report["changed_files"][0], "task.md");
+    assert_eq!(report["plan_context"]["skipped_findings"], 0);
+    assert_eq!(report["plan_context"]["unsupported_findings"], 0);
+    assert_eq!(report["plan_context"]["ambiguous_findings"], 0);
     assert_eq!(report["verification"]["remaining_findings"], 0);
 
     let updated = fs::read_to_string(root.join("task.md")).expect("task should read");

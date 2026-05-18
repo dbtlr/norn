@@ -375,6 +375,18 @@ pub fn write_repair_apply_report(report: &RepairApplyReport, format: OutputForma
                         .collect::<Vec<_>>()
                         .join(","),
                 ],
+                vec![
+                    "skipped_findings".to_string(),
+                    report.plan_context.skipped_findings.to_string(),
+                ],
+                vec![
+                    "unsupported_findings".to_string(),
+                    report.plan_context.unsupported_findings.to_string(),
+                ],
+                vec![
+                    "ambiguous_findings".to_string(),
+                    report.plan_context.ambiguous_findings.to_string(),
+                ],
             ];
             if let Some(verification) = &report.verification {
                 rows.push(vec![
