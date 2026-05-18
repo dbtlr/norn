@@ -3141,6 +3141,40 @@ fn completions_install_force_replaces_marker_block() {
 }
 
 #[test]
+fn completions_install_powershell_writes_marker_block() {
+    let (dir, output) = install_in_tempdir("powershell", &[]);
+    assert!(
+        output.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Default fallback path: $HOME/.config/powershell/Microsoft.PowerShell_profile.ps1
+    let profile = dir
+        .path()
+        .join(".config/powershell/Microsoft.PowerShell_profile.ps1");
+    let content = fs::read_to_string(&profile).unwrap();
+    assert!(content.contains("# >>> vault completions"));
+    assert!(content.contains("vault completions init powershell"));
+    assert!(content.contains("Invoke-Expression"));
+}
+
+#[test]
+fn completions_install_powershell_honors_profile_env() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let custom_profile = dir.path().join("custom_profile.ps1");
+    let output = Command::new(env!("CARGO_BIN_EXE_vault"))
+        .args(["completions", "install", "powershell"])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("POWERSHELL_PROFILE", &custom_profile)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let content = fs::read_to_string(&custom_profile).unwrap();
+    assert!(content.contains("# >>> vault completions"));
+}
+
+#[test]
 fn completions_install_print_does_not_write() {
     let dir = tempfile::TempDir::new().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_vault"))
