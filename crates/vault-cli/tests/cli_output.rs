@@ -900,6 +900,36 @@ fn graph_backlinks_help_documents_file_targets() {
 }
 
 #[test]
+fn links_list_paths_dedupes_source_paths() {
+    let root = temp_cache_dir();
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(root.join("multi.md"), "[[a]]\n[[b]]\n[[c]]\n").expect("multi.md should write");
+    fs::write(root.join("a.md"), "").expect("a.md should write");
+    fs::write(root.join("b.md"), "").expect("b.md should write");
+    fs::write(root.join("c.md"), "").expect("c.md should write");
+
+    let stdout = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "links",
+        "list",
+        "--format",
+        "paths",
+    ]);
+    let original: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    let mut deduped: Vec<&str> = original.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(
+        original.len(),
+        deduped.len(),
+        "expected unique source paths; got: {original:?}"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn validate_help_documents_read_only_contract() {
     let output = vault(&["validate", "--help"]);
     assert!(output.contains("Validate vault graph facts and configured frontmatter rules"));

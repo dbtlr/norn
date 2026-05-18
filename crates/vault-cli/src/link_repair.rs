@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use camino::Utf8PathBuf;
 use serde::Serialize;
+use vault_core::display;
 use vault_core::{GraphIndex, Link, LinkKind, LinkStatus, UnresolvedReason};
 
 use crate::target::{backlinks, resolve_backlink_target_path};
@@ -189,11 +190,14 @@ fn link_decision(link: &Link) -> LinkDecision {
     LinkDecision {
         source_path: link.source_path.clone(),
         raw: link.raw.clone(),
-        kind: link_kind(&link.kind).to_string(),
+        kind: display::link_kind_str(&link.kind).to_string(),
         target: link.target.clone(),
         anchor: link.anchor.clone(),
         block_ref: link.block_ref.clone(),
-        unresolved_reason: link.unresolved_reason.as_ref().map(unresolved_reason),
+        unresolved_reason: link
+            .unresolved_reason
+            .as_ref()
+            .map(|reason| display::unresolved_reason_str(reason).to_string()),
         candidates: link.candidates.clone(),
         decision: decision_for(link),
     }
@@ -224,22 +228,4 @@ fn decision_for(link: &Link) -> String {
             }
         }
     }
-}
-
-fn link_kind(kind: &LinkKind) -> &'static str {
-    match kind {
-        LinkKind::Markdown => "markdown",
-        LinkKind::Wikilink => "wikilink",
-        LinkKind::Embed => "embed",
-    }
-}
-
-fn unresolved_reason(reason: &UnresolvedReason) -> String {
-    match reason {
-        UnresolvedReason::TargetMissing => "target-missing",
-        UnresolvedReason::AnchorMissing => "anchor-missing",
-        UnresolvedReason::BlockRefMissing => "block-ref-missing",
-        UnresolvedReason::Ambiguous => "ambiguous",
-    }
-    .to_string()
 }

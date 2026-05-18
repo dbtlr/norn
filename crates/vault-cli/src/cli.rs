@@ -12,22 +12,30 @@ pub struct Cli {
         short = 'C',
         long,
         global = true,
+        help_heading = "Global options",
         help = "Run as if vault started in this directory"
     )]
     pub cwd: Option<Utf8PathBuf>,
     #[arg(
         long,
         global = true,
+        help_heading = "Global options",
         help = "Run against a named vault from the user registry"
     )]
     pub vault: Option<String>,
     #[arg(
         long,
         global = true,
+        help_heading = "Global options",
         help = "YAML config file. Defaults to <cwd>/.vault/config.yaml when present"
     )]
     pub config: Option<Utf8PathBuf>,
-    #[arg(long, global = true, help = "Include full diagnostic detail in output")]
+    #[arg(
+        long,
+        global = true,
+        help_heading = "Global options",
+        help = "Include full diagnostic detail in output"
+    )]
     pub verbose: bool,
     #[command(subcommand)]
     pub command: Command,
@@ -90,17 +98,17 @@ pub struct LinksCommand {
 pub enum LinksSubcommand {
     #[command(
         about = "Emit all parsed link facts",
-        long_about = "Emit all parsed link facts.\n\nIncludes body wikilinks, embeds, frontmatter/property wikilinks, URL-decoded Markdown internal links, extensionless Markdown note links, same-note heading/block references, Markdown image links to local files, and links to existing attachments. Use source_context.area and source_context.property to distinguish body links from frontmatter links."
+        long_about = "Emit all parsed link facts.\n\nIncludes body wikilinks, embeds, frontmatter/property wikilinks, URL-decoded Markdown internal links, extensionless Markdown note links, same-note heading/block references, Markdown image links to local files, and links to existing attachments. Use source_context.area and source_context.property to distinguish body links from frontmatter links.\n\n--format paths emits unique source paths; multiple links from the same source appear once."
     )]
     List(GraphArgs),
     #[command(
         about = "Emit unresolved and ambiguous link facts",
-        long_about = "Emit unresolved and ambiguous link facts.\n\nRows include target-missing, anchor-missing, block-ref-missing, and ambiguous reasons. Ambiguous rows include candidate document paths."
+        long_about = "Emit unresolved and ambiguous link facts.\n\nRows include target-missing, anchor-missing, block-ref-missing, and ambiguous reasons. Ambiguous rows include candidate document paths.\n\n--format paths emits unique source paths."
     )]
     Unresolved(GraphArgs),
     #[command(
         about = "Emit incoming links for an exact path or unique stem",
-        long_about = "Emit incoming links for an exact vault-relative file path or unique document stem.\n\nExact paths may target Markdown documents or non-Markdown files. Stem matching only applies to Markdown documents and is case-insensitive."
+        long_about = "Emit incoming links for an exact vault-relative file path or unique document stem.\n\nExact paths may target Markdown documents or non-Markdown files. Stem matching only applies to Markdown documents and is case-insensitive.\n\n--format paths emits unique source paths."
     )]
     Backlinks(TargetGraphArgs),
 }
@@ -129,7 +137,9 @@ pub enum RegistrySubcommand {
 
 #[derive(Debug, Parser)]
 pub struct RegistryAddArgs {
+    #[arg(help = "Vault name. Must not be empty, contain whitespace, or contain '/' or '\\\\'")]
     pub name: String,
+    #[arg(help = "Absolute or relative path to the vault root directory")]
     pub path: Utf8PathBuf,
 }
 
@@ -141,6 +151,7 @@ pub struct RegistryListArgs {
 
 #[derive(Debug, Parser)]
 pub struct RegistryRemoveArgs {
+    #[arg(help = "Vault name registered via `vault registry add`")]
     pub name: String,
 }
 
@@ -213,6 +224,7 @@ pub struct RepairLinksArgs {
 
 #[derive(Debug, Parser)]
 pub struct RepairApplyArgs {
+    #[arg(help = "Path to a JSON repair plan artifact produced by `vault repair plan --out`")]
     pub plan: Utf8PathBuf,
     #[arg(long, help = "Preview changes without writing files")]
     pub dry_run: bool,

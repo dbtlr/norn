@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased (v0.26 Slice 1)
+
+Foundation tests and quick wins toward the v0.26 cleanup. No public API or output schema changes.
+
+### Added
+
+- Unit tests in `vault-core`, `vault-frontmatter`, `vault-links`, and `vault-standards` covering parsing rules, link resolution, frontmatter offsets, repair classification, and validate engine smoke paths.
+- `vault_core::display` module exposing `link_kind_str`, `link_status_str`, `severity_str`, `unresolved_reason_str` — one source of truth for enum-to-string mappings used by CLI output.
+- `--format paths` integration test pinning the unique-source-path contract for `vault links list`.
+
+### Changed
+
+- Wikilink and block-id regexes now compile once per process via `std::sync::LazyLock` instead of once per call.
+- `vault links list --format paths` (and `links unresolved` / `links backlinks`) now emit unique source paths — previously a document with N links contributed N rows.
+- Subcommand `--help` groups global flags under "Global options" via clap `help_heading`.
+- `repair apply <PLAN>`, `registry add <NAME> <PATH>`, and `registry remove <NAME>` positional arguments now have help text.
+
 ## v0.25.1 - 2026-05-18
 
 Repair workflow documentation polish.

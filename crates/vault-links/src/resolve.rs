@@ -220,3 +220,150 @@ fn normalize_relative(base: &Utf8Path, target: &str) -> Utf8PathBuf {
     }
     normalized
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vault_core::{Document, Link, LinkKind, LinkStatus, VaultFile};
+
+    fn make_file(path: &str) -> VaultFile {
+        VaultFile {
+            path: path.into(),
+            stem: Utf8Path::new(path).file_stem().unwrap().to_string(),
+            extension: Utf8Path::new(path).extension().map(str::to_string),
+            hash: String::new(),
+        }
+    }
+
+    fn make_document(path: &str) -> Document {
+        Document {
+            path: path.into(),
+            stem: Utf8Path::new(path).file_stem().unwrap().to_string(),
+            hash: String::new(),
+            frontmatter: None,
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+        }
+    }
+
+    fn make_wikilink(source: &str, target: &str) -> Link {
+        Link {
+            source_path: source.into(),
+            raw: format!("[[{target}]]"),
+            kind: LinkKind::Wikilink,
+            target: target.to_string(),
+            label: None,
+            anchor: None,
+            block_ref: None,
+            source_span: None,
+            source_context: None,
+            resolved_path: None,
+            unresolved_reason: None,
+            candidates: vec![],
+            status: LinkStatus::Unresolved,
+        }
+    }
+
+    #[test]
+    fn unique_stem_wikilink_resolves() {
+        let files = vec![make_file("a.md"), make_file("b.md")];
+        let mut documents = vec![make_document("a.md"), make_document("b.md")];
+        documents[0].links.push(make_wikilink("a.md", "b"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("b.md".into()));
+    }
+
+    #[test]
+    fn ambiguous_stem_wikilink_returns_ambiguous_with_candidates() {
+        let files = vec![
+            make_file("a.md"),
+            make_file("dir/a.md"),
+            make_file("src.md"),
+        ];
+        let mut documents = vec![
+            make_document("a.md"),
+            make_document("dir/a.md"),
+            make_document("src.md"),
+        ];
+        documents[2].links.push(make_wikilink("src.md", "a"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[2].links[0];
+        assert_eq!(link.status, LinkStatus::Ambiguous);
+        assert_eq!(link.candidates.len(), 2);
+    }
+
+    #[test]
+    fn missing_target_wikilink_returns_target_missing() {
+        let files = vec![make_file("a.md")];
+        let mut documents = vec![make_document("a.md")];
+        documents[0].links.push(make_wikilink("a.md", "missing"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Unresolved);
+        assert_eq!(
+            link.unresolved_reason,
+            Some(vault_core::UnresolvedReason::TargetMissing)
+        );
+    }
+
+    #[test]
+    fn case_only_duplicate_filenames_silently_overwrite_in_path_lower() {
+        // Documents the known fragility: by_path_lower has only one entry for two paths
+        // that differ only in case. The second insert wins. This test pins the current
+        // behavior; future work might emit a diagnostic.
+        let files = vec![make_file("Foo.md"), make_file("foo.md")];
+        let mut documents = vec![make_document("Foo.md"), make_document("foo.md")];
+        // Try a case-insensitive match via a wikilink against "FOO".
+        documents[0].links.push(make_wikilink("Foo.md", "FOO"));
+        resolve_links(&files, &mut documents);
+        // Either Foo.md or foo.md would be a valid lower-case match. Just confirm
+        // the link did not stay Unresolved with TargetMissing — it should resolve
+        // to something via the stem map (which collects both as candidates).
+        let link = &documents[0].links[0];
+        assert!(matches!(
+            link.status,
+            LinkStatus::Resolved | LinkStatus::Ambiguous
+        ));
+    }
+
+    #[test]
+    fn embed_same_note_block_ref_resolves_to_self() {
+        let files = vec![make_file("a.md")];
+        let mut documents = vec![make_document("a.md")];
+        documents[0].block_ids.push("block-1".to_string());
+        let mut link = make_wikilink("a.md", "");
+        link.kind = LinkKind::Embed;
+        link.block_ref = Some("block-1".to_string());
+        documents[0].links.push(link);
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("a.md".into()));
+    }
+
+    #[test]
+    fn wikilink_with_missing_anchor_returns_anchor_missing() {
+        let files = vec![make_file("a.md"), make_file("b.md")];
+        let mut documents = vec![make_document("a.md"), make_document("b.md")];
+        documents[1].headings.push(vault_core::Heading {
+            level: 1,
+            text: "Existing".into(),
+            slug: "existing".into(),
+            source_span: None,
+        });
+        let mut link = make_wikilink("a.md", "b");
+        link.anchor = Some("Missing".to_string());
+        documents[0].links.push(link);
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Unresolved);
+        assert_eq!(
+            link.unresolved_reason,
+            Some(vault_core::UnresolvedReason::AnchorMissing)
+        );
+    }
+}

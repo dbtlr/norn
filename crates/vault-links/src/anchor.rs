@@ -112,3 +112,102 @@ pub(crate) fn heading_level(level: HeadingLevel) -> u8 {
         HeadingLevel::H6 => 6,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_lowercases_and_dasherizes() {
+        assert_eq!(slugify("Hello World"), "hello-world");
+        assert_eq!(slugify("HELLO   WORLD"), "hello-world");
+    }
+
+    #[test]
+    fn slugify_strips_non_ascii_alphanumeric() {
+        // Documented divergence from GitHub-style slugs: ASCII-only.
+        assert_eq!(slugify("Café"), "caf");
+        assert_eq!(slugify("日本語"), "");
+    }
+
+    #[test]
+    fn slugify_trims_trailing_dashes_and_collapses_internal_runs() {
+        assert_eq!(slugify("hello!!! world!!!"), "hello-world");
+        assert_eq!(slugify("---"), "");
+    }
+
+    #[test]
+    fn slugify_preserves_digits() {
+        assert_eq!(slugify("Heading 1.2.3"), "heading-1-2-3");
+    }
+
+    #[test]
+    fn decode_percent_escapes_decodes_valid_sequences() {
+        assert_eq!(decode_percent_escapes("Hello%20World"), "Hello World");
+        assert_eq!(decode_percent_escapes("a%2Bb"), "a+b");
+    }
+
+    #[test]
+    fn decode_percent_escapes_leaves_invalid_sequences_intact() {
+        assert_eq!(decode_percent_escapes("a%ZZb"), "a%ZZb");
+        // Single trailing % is not enough hex digits
+        assert_eq!(decode_percent_escapes("a%"), "a%");
+        assert_eq!(decode_percent_escapes("a%X"), "a%X");
+    }
+
+    #[test]
+    fn decode_percent_escapes_handles_multibyte_utf8_sequences() {
+        // %C3%A9 is é
+        assert_eq!(decode_percent_escapes("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn split_anchor_separates_target_and_anchor() {
+        assert_eq!(
+            split_anchor("Note#Heading"),
+            ("Note".into(), Some("Heading".into()))
+        );
+        assert_eq!(split_anchor("Note"), ("Note".into(), None));
+        assert_eq!(
+            split_anchor("#Heading"),
+            ("".into(), Some("Heading".into()))
+        );
+    }
+
+    #[test]
+    fn split_anchor_or_block_ref_distinguishes_block_refs() {
+        assert_eq!(
+            split_anchor_or_block_ref("Note#^block-id"),
+            ("Note".into(), None, Some("block-id".into()))
+        );
+        assert_eq!(
+            split_anchor_or_block_ref("Note#Heading"),
+            ("Note".into(), Some("Heading".into()), None)
+        );
+        assert_eq!(
+            split_anchor_or_block_ref("Note"),
+            ("Note".into(), None, None)
+        );
+    }
+
+    #[test]
+    fn split_anchor_or_block_ref_handles_empty_target_for_same_note_refs() {
+        assert_eq!(
+            split_anchor_or_block_ref("#Heading"),
+            ("".into(), Some("Heading".into()), None)
+        );
+        assert_eq!(
+            split_anchor_or_block_ref("#^block"),
+            ("".into(), None, Some("block".into()))
+        );
+    }
+
+    #[test]
+    fn split_anchor_keeps_extra_hashes_inside_anchor() {
+        // split_once('#') only splits on the first '#'; extra hashes stay in the anchor.
+        let (target, anchor, block) = split_anchor_or_block_ref("Note#Heading#With#Hashes");
+        assert_eq!(target, "Note");
+        assert_eq!(anchor, Some("Heading#With#Hashes".into()));
+        assert_eq!(block, None);
+    }
+}

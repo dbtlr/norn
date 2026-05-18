@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::LazyLock;
 
 use camino::Utf8Path;
 use regex::Regex;
@@ -8,6 +9,9 @@ use vault_frontmatter::frontmatter_property_strings;
 
 use crate::anchor::{source_span, split_anchor_or_block_ref};
 use crate::commonmark::ignored_wikilink_ranges;
+
+static WIKILINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex"));
 
 pub fn parse_wikilinks(
     source_path: &Utf8Path,
@@ -33,7 +37,7 @@ fn parse_wikilinks_in_text(
     source: Option<(&str, usize, Vec<Range<usize>>)>,
     source_context: Option<LinkSourceContext>,
 ) -> Vec<Link> {
-    let wikilink_re = Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex");
+    let wikilink_re = &*WIKILINK_RE;
     wikilink_re
         .captures_iter(text)
         .filter_map(|captures| {

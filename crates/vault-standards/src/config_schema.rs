@@ -466,7 +466,7 @@ fn validate_string_sequence(
 }
 
 fn mapping_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
-    mapping.get(&serde_yaml::Value::String(key.to_string()))
+    mapping.get(serde_yaml::Value::String(key.to_string()))
 }
 
 #[cfg(test)]

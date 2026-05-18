@@ -82,7 +82,7 @@ pub fn summarize(findings: &[Finding]) -> Summary {
             FindingBody::LinkIssue { .. } | FindingBody::GraphDiagnostic { .. } => {}
         }
 
-        increment(&mut summary.path_prefixes, &path_prefix_key(&finding.path));
+        increment(&mut summary.path_prefixes, path_prefix_key(&finding.path));
     }
 
     summary

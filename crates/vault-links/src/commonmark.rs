@@ -120,3 +120,39 @@ pub(crate) fn ignored_wikilink_ranges(body: &str) -> Vec<Range<usize>> {
 
     ignored_ranges
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignored_ranges_cover_inline_code_spans() {
+        let body = "before `[[ignored]]` after [[real]]\n";
+        let ranges = ignored_wikilink_ranges(body);
+        // The inline code span range should cover "[[ignored]]" but not "[[real]]".
+        assert!(ranges
+            .iter()
+            .any(|r| body[r.clone()].contains("[[ignored]]")));
+        assert!(!ranges.iter().any(|r| body[r.clone()].contains("[[real]]")));
+    }
+
+    #[test]
+    fn ignored_ranges_cover_fenced_code_blocks() {
+        let body = "outside [[real]]\n\n```\n[[in code]]\n```\n\nafter [[real2]]\n";
+        let ranges = ignored_wikilink_ranges(body);
+        // The fenced code block range covers "[[in code]]".
+        assert!(ranges
+            .iter()
+            .any(|r| body[r.clone()].contains("[[in code]]")));
+        // The outside wikilinks are not in any ignored range.
+        let real_start = body.find("[[real]]").unwrap();
+        assert!(!ranges.iter().any(|r| r.contains(&real_start)));
+    }
+
+    #[test]
+    fn ignored_ranges_empty_when_no_code() {
+        let body = "just [[a]] and [[b]] and prose.\n";
+        let ranges = ignored_wikilink_ranges(body);
+        assert!(ranges.is_empty());
+    }
+}

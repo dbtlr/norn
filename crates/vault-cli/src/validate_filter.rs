@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{bail, Result};
+use vault_core::display;
 use vault_graph::pattern_matches_path;
 use vault_standards::{Finding, FindingBody};
 
@@ -175,10 +176,5 @@ fn finding_reason(finding: &Finding) -> Option<&'static str> {
         _ => return None,
     };
 
-    Some(match reason {
-        vault_core::UnresolvedReason::TargetMissing => "target-missing",
-        vault_core::UnresolvedReason::AnchorMissing => "anchor-missing",
-        vault_core::UnresolvedReason::BlockRefMissing => "block-ref-missing",
-        vault_core::UnresolvedReason::Ambiguous => "ambiguous",
-    })
+    Some(display::unresolved_reason_str(reason))
 }
