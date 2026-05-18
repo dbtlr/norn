@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased (v0.26 Slice 2)
+
+Apply migration and minimal-edit YAML preservation. Breaking change in `vault-standards` public surface; no JSON output schema break in Slice 2 (Slice 3 will introduce the v3 plan schema).
+
+### Added
+
+- `vault-standards::apply` module with `ApplyError`, `RepairApplyReport`, `validate_plan_for_apply`, `changes_by_path`, `apply_file_changes`. Apply contract logic now lives in the engine crate.
+- `vault-frontmatter::top_level_property_spans` returning `PropertySpan { name, line_range, value_range, style }` for byte-range YAML editing.
+- `vault-frontmatter::serialize_value_preserving_style` preserving original quote style when possible, upgrading when necessary, never downgrading.
+
+### Changed
+
+- `vault repair apply` now performs minimal-edit YAML rewriting. Untouched lines (including comments, quote style, and key ordering) are preserved byte-for-byte. Touched values preserve the original style when the new value can be expressed in it; double-quoted stays double-quoted, single-quoted stays single-quoted.
+- `crates/vault-cli/src/repair_apply.rs` reduced from ~230 lines to ~75 lines of orchestration. All apply contract checks moved to `vault-standards::apply`.
+
+### Notes
+
+- Apply now returns `ApplyError::CannotMinimalEdit` for `set_frontmatter` against block-style or flow-style values. The current repair action set only configures scalar targets, so this is a guard for future expansion.
+- The expected-old-value check still treats YAML null as equivalent to absent for the purpose of matching a `None` expected value.
+
 ## v0.25.1 - 2026-05-18
 
 Repair workflow documentation polish.

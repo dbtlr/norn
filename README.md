@@ -410,10 +410,15 @@ they apply deterministic changes:
 }
 ```
 
-Frontmatter apply preserves Markdown body content exactly. YAML frontmatter is
-rewritten through the YAML serializer, so comments, quote style, and exact
-frontmatter styling are not guaranteed in the v1 apply boundary. For example, an
-untouched scalar may normalize from double quotes to single quotes.
+Frontmatter apply preserves Markdown body content exactly. YAML lines untouched
+by a repair are preserved byte-for-byte, including comments, quote style, and
+key ordering. YAML lines touched by a repair preserve the original quote style
+when the new value is representable in that style; otherwise apply upgrades to
+the minimum sufficient style and never downgrades.
+
+A `set_frontmatter` change targeting a block-style value (block sequence, block
+mapping, block literal, block folded, or flow sequence/mapping) returns
+`cannot minimal-edit` rather than silently rewriting the structure.
 
 ## Link And Path Planning
 
