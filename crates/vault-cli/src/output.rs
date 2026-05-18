@@ -6,10 +6,12 @@ use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
 use vault_core::{Document, Link, LinkKind, LinkStatus, Severity, VaultFile};
-use vault_standards::{Finding, FindingBody, Summary};
+use vault_standards::{Finding, FindingBody, RepairPlan, Summary};
 
 use crate::cli::OutputFormat;
 use crate::filter::DocumentSummary;
+use crate::link_repair::LinkRepairReport;
+use crate::repair_apply::RepairApplyReport;
 
 pub fn resolve_format(format: Option<OutputFormat>) -> OutputFormat {
     format.unwrap_or_else(|| {
@@ -203,10 +205,202 @@ pub fn write_validate_summary(summary: &Summary, format: OutputFormat) -> Result
     }
 }
 
+pub fn write_repair_plan(plan: &RepairPlan, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => write_item_output(plan, format),
+        OutputFormat::Paths => bail!("paths format is not supported for repair plans"),
+        OutputFormat::Table => {
+            let summary = vec![
+                vec!["findings".to_string(), plan.summary.findings.to_string()],
+                vec![
+                    "planned_changes".to_string(),
+                    plan.summary.planned_changes.to_string(),
+                ],
+                vec![
+                    "skipped_findings".to_string(),
+                    plan.summary.skipped_findings.to_string(),
+                ],
+                vec![
+                    "unsupported_findings".to_string(),
+                    plan.summary.unsupported_findings.to_string(),
+                ],
+                vec![
+                    "ambiguous_findings".to_string(),
+                    plan.summary.ambiguous_findings.to_string(),
+                ],
+            ];
+            write_table(&["metric", "count"], &summary)?;
+            if !plan.changes.is_empty() {
+                write_blank_line()?;
+                let rows = plan
+                    .changes
+                    .iter()
+                    .map(|change| {
+                        vec![
+                            change.path.to_string(),
+                            change.operation.clone(),
+                            change.field.clone(),
+                            change
+                                .expected_old_value
+                                .as_ref()
+                                .map(display_value)
+                                .unwrap_or_default(),
+                            change
+                                .new_value
+                                .as_ref()
+                                .map(display_value)
+                                .unwrap_or_default(),
+                            change.repair_rule.clone(),
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                write_table(
+                    &["path", "operation", "field", "old", "new", "repair_rule"],
+                    &rows,
+                )?;
+            }
+            if !plan.skipped_findings.is_empty() {
+                write_blank_line()?;
+                let rows = plan
+                    .skipped_findings
+                    .iter()
+                    .map(|finding| {
+                        vec![
+                            finding.path.to_string(),
+                            finding.code.clone(),
+                            finding.field.clone().unwrap_or_default(),
+                            finding.target.clone().unwrap_or_default(),
+                            finding.reason.clone(),
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                write_table(&["path", "code", "field", "target", "reason"], &rows)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+pub fn write_link_repair_report(report: &LinkRepairReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => write_item_output(report, format),
+        OutputFormat::Paths => bail!("paths format is not supported for link repair reports"),
+        OutputFormat::Table => {
+            let summary = vec![
+                vec![
+                    "unresolved_links".to_string(),
+                    report.summary.unresolved_links.to_string(),
+                ],
+                vec![
+                    "ambiguous_links".to_string(),
+                    report.summary.ambiguous_links.to_string(),
+                ],
+                vec![
+                    "path_style_markdown_links".to_string(),
+                    report.summary.path_style_markdown_links.to_string(),
+                ],
+                vec![
+                    "duplicate_stem_risks".to_string(),
+                    report.summary.duplicate_stem_risks.to_string(),
+                ],
+                vec![
+                    "affected_files".to_string(),
+                    report.summary.affected_files.to_string(),
+                ],
+            ];
+            write_table(&["metric", "count"], &summary)?;
+
+            let mut rows = Vec::new();
+            for link in &report.unresolved_links {
+                rows.push(link_repair_row("unresolved", link));
+            }
+            for link in &report.ambiguous_links {
+                rows.push(link_repair_row("ambiguous", link));
+            }
+            for link in &report.path_style_markdown_links {
+                rows.push(link_repair_row("path-style", link));
+            }
+            if !rows.is_empty() {
+                write_blank_line()?;
+                write_table(
+                    &["category", "source", "target", "reason", "decision"],
+                    &rows,
+                )?;
+            }
+            if let Some(target_risk) = &report.target_risk {
+                write_blank_line()?;
+                let rows = vec![
+                    vec![
+                        "target_path".to_string(),
+                        target_risk.target_path.to_string(),
+                    ],
+                    vec![
+                        "incoming_link_count".to_string(),
+                        target_risk.incoming_link_count.to_string(),
+                    ],
+                    vec![
+                        "incoming_sources".to_string(),
+                        target_risk
+                            .incoming_links
+                            .iter()
+                            .map(|link| link.source_path.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ],
+                ];
+                write_table(&["target_risk", "value"], &rows)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+pub fn write_repair_apply_report(report: &RepairApplyReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => write_item_output(report, format),
+        OutputFormat::Paths => bail!("paths format is not supported for repair apply reports"),
+        OutputFormat::Table => {
+            let mut rows = vec![
+                vec!["dry_run".to_string(), report.dry_run.to_string()],
+                vec![
+                    "applied_changes".to_string(),
+                    report.applied_changes.to_string(),
+                ],
+                vec![
+                    "changed_files".to_string(),
+                    report
+                        .changed_files
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ],
+            ];
+            if let Some(verification) = &report.verification {
+                rows.push(vec![
+                    "remaining_findings".to_string(),
+                    verification.remaining_findings.to_string(),
+                ]);
+            }
+            write_table(&["metric", "value"], &rows)
+        }
+    }
+}
+
 fn write_json_line(stdout: &mut impl Write, json: &str) -> Result<()> {
     stdout.write_all(json.as_bytes())?;
     stdout.write_all(b"\n")?;
     Ok(())
+}
+
+fn link_repair_row(category: &str, link: &crate::link_repair::LinkDecision) -> Vec<String> {
+    vec![
+        category.to_string(),
+        link.source_path.to_string(),
+        link.target.clone(),
+        link.unresolved_reason.clone().unwrap_or_default(),
+        link.decision.clone(),
+    ]
 }
 
 fn write_paths<'a>(paths: impl IntoIterator<Item = &'a Utf8PathBuf>) -> Result<()> {

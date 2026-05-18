@@ -8,7 +8,7 @@ use vault_core::Severity;
 use crate::config::{RepairAction, RepairConfig, RepairRule, RepairRuleMatch};
 use crate::findings::{Finding, FindingBody};
 
-const REPAIR_PLAN_SCHEMA_VERSION: u32 = 1;
+const REPAIR_PLAN_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RepairPlanFilters {
@@ -28,16 +28,18 @@ pub struct RepairPlan {
     pub source_filters: RepairPlanFilters,
     pub summary: RepairPlanSummary,
     pub changes: Vec<PlannedChange>,
+    pub skipped_findings: Vec<RepairPlanFinding>,
     pub unsupported_findings: Vec<RepairPlanFinding>,
-    pub manual_decisions: Vec<RepairPlanFinding>,
+    pub ambiguous_findings: Vec<RepairPlanFinding>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepairPlanSummary {
     pub findings: usize,
     pub planned_changes: usize,
+    pub skipped_findings: usize,
     pub unsupported_findings: usize,
-    pub manual_decisions: usize,
+    pub ambiguous_findings: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -68,7 +70,11 @@ pub struct RepairPlanFinding {
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub candidates: Vec<Utf8PathBuf>,
     pub reason: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub next_actions: Vec<String>,
 }
 
 pub fn plan_repairs(
@@ -79,30 +85,32 @@ pub fn plan_repairs(
     document_hashes: &BTreeMap<Utf8PathBuf, String>,
 ) -> RepairPlan {
     let mut changes = Vec::new();
-    let mut unsupported_findings = Vec::new();
-    let mut manual_decisions = Vec::new();
+    let mut skipped_findings = Vec::new();
 
     for finding in &findings {
         if let Some((rule, action)) = matching_repair_rule(finding, &config.rules) {
             match planned_change(finding, rule, action, document_hashes) {
                 Some(change) => changes.push(change),
-                None => unsupported_findings.push(plan_finding(
+                None => skipped_findings.push(plan_finding(
                     finding,
                     "matched repair rule cannot repair this finding",
+                    vec!["inspect the repair rule and rerun repair plan".to_string()],
                 )),
             }
-        } else if requires_manual_decision(finding) {
-            manual_decisions.push(plan_finding(
-                finding,
-                "finding requires a manual decision or a future planner",
-            ));
         } else {
-            unsupported_findings.push(plan_finding(
-                finding,
-                "no configured deterministic repair rule matched",
-            ));
+            skipped_findings.push(skipped_finding(finding));
         }
     }
+    let unsupported_findings = skipped_findings
+        .iter()
+        .filter(|finding| !is_ambiguous_skipped(finding))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ambiguous_findings = skipped_findings
+        .iter()
+        .filter(|finding| is_ambiguous_skipped(finding))
+        .cloned()
+        .collect::<Vec<_>>();
 
     RepairPlan {
         schema_version: REPAIR_PLAN_SCHEMA_VERSION,
@@ -111,12 +119,14 @@ pub fn plan_repairs(
         summary: RepairPlanSummary {
             findings: findings.len(),
             planned_changes: changes.len(),
+            skipped_findings: skipped_findings.len(),
             unsupported_findings: unsupported_findings.len(),
-            manual_decisions: manual_decisions.len(),
+            ambiguous_findings: ambiguous_findings.len(),
         },
         changes,
+        skipped_findings,
         unsupported_findings,
-        manual_decisions,
+        ambiguous_findings,
     }
 }
 
@@ -186,17 +196,70 @@ fn planned_change(
     }
 }
 
-fn requires_manual_decision(finding: &Finding) -> bool {
-    matches!(
-        finding.body,
-        FindingBody::LinkIssue { .. }
-            | FindingBody::RequiredFrontmatterMissing { .. }
-            | FindingBody::DocumentMisrouted { .. }
-            | FindingBody::GraphDiagnostic { .. }
-    )
+fn skipped_finding(finding: &Finding) -> RepairPlanFinding {
+    match &finding.body {
+        FindingBody::LinkIssue { link } => {
+            let reason = if link.status == vault_core::LinkStatus::Ambiguous {
+                "ambiguous link target"
+            } else {
+                "link repair requires an explicit path/link decision"
+            };
+            let next_actions = if link.status == vault_core::LinkStatus::Ambiguous {
+                vec![
+                    "change the link to an explicit path".to_string(),
+                    "rename one duplicate candidate".to_string(),
+                    "rerun repair plan after disambiguation".to_string(),
+                ]
+            } else {
+                vec![
+                    "create the missing target or target anchor".to_string(),
+                    "rewrite the link manually".to_string(),
+                    "rerun validate after resolving the link".to_string(),
+                ]
+            };
+            let mut finding = plan_finding(finding, reason, Vec::new());
+            finding.candidates = link.candidates.clone();
+            finding.next_actions = next_actions;
+            finding
+        }
+        FindingBody::RequiredFrontmatterMissing { field, .. } => plan_finding(
+            finding,
+            "missing field has no configured deterministic default",
+            vec![
+                format!("add a repair rule that sets {field} when safe"),
+                "fill the field manually and rerun validate".to_string(),
+            ],
+        ),
+        FindingBody::DisallowedValue { field, .. }
+        | FindingBody::InvalidFieldType { field, .. }
+        | FindingBody::ForbiddenField { field, .. } => plan_finding(
+            finding,
+            "no configured deterministic repair rule matched",
+            vec![
+                format!("add a repair rule for field {field}"),
+                "rerun repair plan after updating config".to_string(),
+            ],
+        ),
+        FindingBody::DocumentMisrouted { .. } => plan_finding(
+            finding,
+            "path repair is planning-only in this release",
+            vec![
+                "review allowed_paths and current document location".to_string(),
+                "move files manually or use a future path apply command".to_string(),
+            ],
+        ),
+        FindingBody::GraphDiagnostic { .. } => plan_finding(
+            finding,
+            "graph diagnostic cannot be repaired deterministically",
+            vec![
+                "inspect the diagnostic detail".to_string(),
+                "fix the document manually and rerun validate".to_string(),
+            ],
+        ),
+    }
 }
 
-fn plan_finding(finding: &Finding, reason: &str) -> RepairPlanFinding {
+fn plan_finding(finding: &Finding, reason: &str, next_actions: Vec<String>) -> RepairPlanFinding {
     RepairPlanFinding {
         path: finding.path.clone(),
         code: finding.code.clone(),
@@ -205,8 +268,14 @@ fn plan_finding(finding: &Finding, reason: &str) -> RepairPlanFinding {
         rule: finding_rule(finding),
         field: finding_field(finding),
         target: finding_target(finding),
+        candidates: finding_candidates(finding),
         reason: reason.to_string(),
+        next_actions,
     }
+}
+
+fn is_ambiguous_skipped(finding: &RepairPlanFinding) -> bool {
+    finding.code == "link-ambiguous" || finding.reason.contains("ambiguous")
 }
 
 fn finding_rule(finding: &Finding) -> Option<String> {
@@ -248,5 +317,12 @@ fn finding_target(finding: &Finding) -> Option<String> {
     match &finding.body {
         FindingBody::LinkIssue { link } => Some(link.target.clone()),
         _ => None,
+    }
+}
+
+fn finding_candidates(finding: &Finding) -> Vec<Utf8PathBuf> {
+    match &finding.body {
+        FindingBody::LinkIssue { link } => link.candidates.clone(),
+        _ => Vec::new(),
     }
 }

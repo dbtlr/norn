@@ -286,9 +286,9 @@ new query language while repair planning is still being designed.
 
 `vault repair plan` is read-only. It runs validation, applies the same triage
 filters as `vault validate`, and converts findings matched by configured
-`repair.rules` into an explicit JSON repair plan. Findings without a matching
-deterministic rule are reported as `unsupported_findings` or
-`manual_decisions`; they are not silently dropped.
+`repair.rules` into an explicit JSON repair plan. The executable `changes`
+section is always applyable; findings without a matching deterministic rule are
+reported as skipped planning fallout instead of blocking apply.
 
 The plan schema includes:
 
@@ -297,12 +297,17 @@ The plan schema includes:
 - `source_filters`
 - `summary`
 - `changes`
+- `skipped_findings`
 - `unsupported_findings`
-- `manual_decisions`
+- `ambiguous_findings`
 
 Each planned change includes the target path, document hash precondition,
 finding context, operation, field, expected old value when available, and new
 value when applicable.
+
+Skipped findings include the path, code, field/target context when available,
+reason, candidates for ambiguous links, and suggested next actions. Fix the
+repairability problem, then rerun `repair plan`.
 
 The first supported repair actions are frontmatter-only:
 
@@ -349,9 +354,10 @@ vault --vault atlas repair plan --rule task-status --format json
 
 `vault repair apply <plan>` applies frontmatter-only plans. Apply writes by
 default because the command is explicit; pass `--dry-run` to preview without
-writing. Apply rejects unsupported plan schema versions, plans for a different
-vault root, plans containing unsupported/manual findings, stale document hashes,
-conflicting field changes, and expected-old-value mismatches.
+writing. Apply consumes only `changes` and reports skipped fallout as plan
+context. Apply rejects unsupported plan schema versions, plans for a different
+vault root, stale document hashes, conflicting field changes, and
+expected-old-value mismatches.
 
 ```bash
 vault --vault atlas repair apply repair.json --dry-run --format json

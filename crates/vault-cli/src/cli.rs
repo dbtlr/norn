@@ -171,8 +171,8 @@ pub enum RepairSubcommand {
 
 #[derive(Debug, Parser)]
 pub struct RepairPlanArgs {
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json, help = "Stdout format")]
-    pub format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = RepairOutputFormat::Json, help = "Stdout format")]
+    pub format: RepairOutputFormat,
     #[arg(
         long,
         help = "Filter findings by code. Comma-separated values match any listed code"
@@ -202,8 +202,8 @@ pub struct RepairLinksArgs {
         help = "Exact vault-relative path or unique document stem to analyze for move/delete risk"
     )]
     pub target: Option<String>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json, help = "Stdout format")]
-    pub format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = RepairOutputFormat::Json, help = "Stdout format")]
+    pub format: RepairOutputFormat,
 }
 
 #[derive(Debug, Parser)]
@@ -216,8 +216,8 @@ pub struct RepairApplyArgs {
         help = "Run validation after apply and report remaining finding counts"
     )]
     pub verify: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json, help = "Stdout format")]
-    pub format: OutputFormat,
+    #[arg(long, value_enum, default_value_t = RepairOutputFormat::Json, help = "Stdout format")]
+    pub format: RepairOutputFormat,
 }
 
 #[derive(Debug, Subcommand)]
@@ -373,6 +373,23 @@ pub enum OutputFormat {
     Jsonl,
     Table,
     Paths,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum RepairOutputFormat {
+    Json,
+    Jsonl,
+    Table,
+}
+
+impl From<RepairOutputFormat> for OutputFormat {
+    fn from(format: RepairOutputFormat) -> Self {
+        match format {
+            RepairOutputFormat::Json => OutputFormat::Json,
+            RepairOutputFormat::Jsonl => OutputFormat::Jsonl,
+            RepairOutputFormat::Table => OutputFormat::Table,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

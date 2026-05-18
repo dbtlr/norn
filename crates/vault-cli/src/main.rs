@@ -27,7 +27,8 @@ use crate::filter::{
 use crate::link_repair::plan_link_repairs;
 use crate::output::{
     is_broken_pipe, resolve_format, write_document_summary, write_documents, write_files,
-    write_findings, write_item_output, write_links, write_output, write_validate_summary,
+    write_findings, write_item_output, write_link_repair_report, write_links, write_output,
+    write_repair_apply_report, write_repair_plan, write_validate_summary,
 };
 use crate::repair_apply::{apply_repair_plan, with_verification};
 use crate::target::{
@@ -172,7 +173,7 @@ fn run(cli: Cli) -> Result<i32> {
                     &loaded_config.repair,
                     &document_hashes(&index),
                 );
-                write_item_output(&plan, args.format)?;
+                write_repair_plan(&plan, args.format.into())?;
                 Ok(exit_code_for(&index))
             }
             RepairSubcommand::Apply(args) => {
@@ -195,14 +196,14 @@ fn run(cli: Cli) -> Result<i32> {
                     let findings = validate(&verify_index, &loaded_config.validate);
                     report = with_verification(report, &findings);
                 }
-                write_item_output(&report, args.format)?;
+                write_repair_apply_report(&report, args.format.into())?;
                 Ok(exit_code_for(&index))
             }
             RepairSubcommand::Links(args) => {
                 let mut index = build_index_for(&cwd, config_path.as_ref())?;
                 trim_diagnostics(&mut index, verbose);
                 let report = plan_link_repairs(&index, args.target.as_deref())?;
-                write_item_output(&report, args.format)?;
+                write_link_repair_report(&report, args.format.into())?;
                 Ok(exit_code_for(&index))
             }
         },
@@ -257,14 +258,24 @@ fn run_registry(command: RegistrySubcommand) -> Result<i32> {
 
 fn repair_plan_filters(args: &crate::cli::RepairPlanArgs) -> RepairPlanFilters {
     RepairPlanFilters {
-        code: args.code.clone(),
-        severity: args.severity.clone(),
-        field: args.field.clone(),
-        rule: args.rule.clone(),
-        path: args.path.clone(),
-        target: args.target.clone(),
-        reason: args.reason.clone(),
+        code: normalized_filter_values(&args.code),
+        severity: normalized_filter_values(&args.severity),
+        field: normalized_filter_values(&args.field),
+        rule: normalized_filter_values(&args.rule),
+        path: normalized_filter_values(&args.path),
+        target: normalized_filter_values(&args.target),
+        reason: normalized_filter_values(&args.reason),
     }
+}
+
+fn normalized_filter_values(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn document_hashes(index: &GraphIndex) -> BTreeMap<camino::Utf8PathBuf, String> {

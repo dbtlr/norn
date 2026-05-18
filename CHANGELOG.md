@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## v0.23.0 - 2026-05-18
+
+Repair plan usability release.
+
+### Added
+
+- Added `skipped_findings` repair plan fallout with reasons, candidates, and next actions for findings that cannot be planned deterministically.
+- Added row-oriented table output for `vault repair plan --format table` and `vault repair links --format table`.
+
+### Changed
+
+- `vault repair plan` now keeps executable `changes` applyable by moving non-executable findings into skipped/unsupported/ambiguous fallout.
+- `vault repair apply` now applies deterministic changes from broad plans without rejecting skipped fallout.
+- `repair plan` source filters now record normalized comma-separated values.
+- Repair commands now expose only supported `json`, `jsonl`, and `table` formats.
+
 ## v0.22.0 - 2026-05-17
 
 Safe apply and link/path planning release.

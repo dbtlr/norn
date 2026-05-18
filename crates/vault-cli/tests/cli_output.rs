@@ -176,6 +176,10 @@ fn grouped_help_lists_new_surfaces() {
     assert!(output.contains("plan"));
     assert!(output.contains("links"));
 
+    let output = vault(&["repair", "plan", "--help"]);
+    assert!(output.contains("[possible values: json, jsonl, table]"));
+    assert!(!output.contains("paths"));
+
     let output = vault(&["search", "--help"]);
     assert!(output.contains("Deterministic document search"));
     assert!(output.contains("--filter"));
@@ -257,6 +261,29 @@ fn repair_links_reports_target_move_and_delete_risk() {
 }
 
 #[test]
+fn repair_links_table_is_row_oriented() {
+    let root = fixture_root();
+    let output = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "repair",
+        "links",
+        "--target",
+        "alpha",
+        "--format",
+        "table",
+    ]);
+
+    assert!(output.contains("unresolved_links"));
+    assert!(output.contains("category"));
+    assert!(output.contains("ambiguous"));
+    assert!(output.contains("path-style"));
+    assert!(output.contains("target_path"));
+    assert!(output.contains("incoming_sources"));
+    assert!(!output.contains("\"unresolved_links\""));
+}
+
+#[test]
 fn repair_plan_generates_configured_frontmatter_change() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
@@ -280,16 +307,24 @@ fn repair_plan_generates_configured_frontmatter_change() {
         "repair",
         "plan",
         "--code",
-        "frontmatter-disallowed-value",
+        "frontmatter-disallowed-value,frontmatter-forbidden-field",
         "--field",
         "status",
     ]);
 
     let plan = serde_json::from_str::<Value>(&output).expect("repair plan should be JSON");
-    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["schema_version"], 2);
     assert_eq!(plan["summary"]["findings"], 1);
     assert_eq!(plan["summary"]["planned_changes"], 1);
+    assert_eq!(plan["summary"]["skipped_findings"], 0);
     assert_eq!(plan["summary"]["unsupported_findings"], 0);
+    assert_eq!(
+        plan["source_filters"]["code"],
+        serde_json::json!([
+            "frontmatter-disallowed-value",
+            "frontmatter-forbidden-field"
+        ])
+    );
     assert_eq!(plan["changes"][0]["path"], "task.md");
     assert!(plan["changes"][0]["document_hash"].as_str().unwrap().len() > 20);
     assert_eq!(plan["changes"][0]["repair_rule"], "map-someday-status");
@@ -297,6 +332,99 @@ fn repair_plan_generates_configured_frontmatter_change() {
     assert_eq!(plan["changes"][0]["field"], "status");
     assert_eq!(plan["changes"][0]["expected_old_value"], "someday");
     assert_eq!(plan["changes"][0]["new_value"], "backlog");
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn broad_repair_plan_with_skipped_findings_still_applies_changes() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("task.md"),
+        "---\ntype: task\nstatus: someday\n---\n# Task\n\n[[missing]]\n",
+    )
+    .expect("task should write");
+
+    let plan = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+    ]);
+    let plan_json = serde_json::from_str::<Value>(&plan).expect("repair plan should be JSON");
+    assert_eq!(plan_json["summary"]["planned_changes"], 1);
+    assert_eq!(plan_json["summary"]["skipped_findings"], 1);
+    assert_eq!(plan_json["skipped_findings"][0]["code"], "link-unresolved");
+    assert!(plan_json["skipped_findings"][0]["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action.as_str().unwrap().contains("rewrite")));
+
+    let plan_path = root.join("repair.json");
+    fs::write(&plan_path, plan).expect("plan should write");
+    let output = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+        "--dry-run",
+    ]);
+
+    let report = serde_json::from_str::<Value>(&output).expect("apply report should be JSON");
+    assert_eq!(report["applied_changes"], 1);
+    assert_eq!(report["changed_files"][0], "task.md");
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn repair_plan_table_is_row_oriented() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("task.md"),
+        "---\ntype: task\nstatus: someday\n---\n# Task\n\n[[missing]]\n",
+    )
+    .expect("task should write");
+
+    let output = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--format",
+        "table",
+    ]);
+
+    assert!(output.contains("planned_changes"));
+    assert!(output.contains("skipped_findings"));
+    assert!(output.contains("task.md"));
+    assert!(output.contains("set_frontmatter"));
+    assert!(output.contains("link-unresolved"));
+    assert!(!output.contains("\"changes\""));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();

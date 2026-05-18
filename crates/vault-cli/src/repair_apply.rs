@@ -84,7 +84,7 @@ pub fn with_verification(
 }
 
 fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &RepairPlan) -> Result<()> {
-    if plan.schema_version != 1 {
+    if plan.schema_version != 2 {
         bail!(
             "unsupported repair plan schema version: {}",
             plan.schema_version
@@ -96,12 +96,6 @@ fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &RepairPlan) -> Result<()> {
             plan.vault_root,
             cwd
         );
-    }
-    if !plan.unsupported_findings.is_empty() {
-        bail!("repair plan contains unsupported findings; refusing to apply");
-    }
-    if !plan.manual_decisions.is_empty() {
-        bail!("repair plan contains manual decisions; refusing to apply");
     }
     Ok(())
 }

@@ -244,6 +244,7 @@ Use semver-style tags for milestones:
 - `v0.20.0` — native retrieval and vault targeting
 - `v0.21.0` — repair planning MVP
 - `v0.22.0` — safe apply and link/path planning
+- `v0.23.0` — applyable repair plans and repair report usability
 
 For a release bump:
 
