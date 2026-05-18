@@ -10,5 +10,7 @@ camino = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+thiserror = { workspace = true }
 vault-core = { path = "../vault-core" }
+vault-frontmatter = { path = "../vault-frontmatter" }
 vault-graph = { path = "../vault-graph" }
