@@ -3603,6 +3603,14 @@ repair:
         !index_content.contains("[[Inbox/task]]"),
         "old wikilink should be gone; got: {index_content}"
     );
+    assert!(
+        index_content.contains("../Workspaces/demo/tasks/task.md"),
+        "markdown link should be rewritten to new relative path; got: {index_content}"
+    );
+    assert!(
+        !index_content.contains("[task](task.md)"),
+        "old markdown link should be gone; got: {index_content}"
+    );
 
     fs::remove_dir_all(&root).ok();
     fs::remove_file(&config_path).ok();

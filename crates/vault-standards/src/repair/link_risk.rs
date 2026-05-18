@@ -155,6 +155,9 @@ fn rewrite_markdown_link(raw: &str, source_file: &Utf8Path, new: &Utf8Path) -> S
     let source_dir = source_file.parent().unwrap_or(Utf8Path::new(""));
     let new_relative = compute_relative_path(source_dir, new);
 
+    // Case 1: full bracketed form (`[text](url)`). Some callers (and the
+    // legacy unit tests) pass `raw` as the entire link. Handle that shape
+    // first so we don't accidentally treat it as a bare URL.
     if let Some(bracket_close) = raw.find("](") {
         let text_part = &raw[..bracket_close + 2];
         let path_and_anchor = &raw[bracket_close + 2..];
@@ -167,7 +170,15 @@ fn rewrite_markdown_link(raw: &str, source_file: &Utf8Path, new: &Utf8Path) -> S
             return format!("{text_part}{new_relative}{anchor})");
         }
     }
-    raw.to_string()
+
+    // Case 2: bare URL form. This is what `vault-links` actually stores for
+    // CommonMark links (`Link.raw = dest_url`). Preserve any `#anchor`
+    // segment so heading targets aren't dropped on move.
+    let (_url_part, anchor) = match raw.find('#') {
+        Some(i) => raw.split_at(i),
+        None => (raw, ""),
+    };
+    format!("{new_relative}{anchor}")
 }
 
 fn compute_relative_path(from: &Utf8Path, to: &Utf8Path) -> String {
@@ -341,6 +352,31 @@ mod tests {
         let risk = classify(&old, &new, &documents, &files);
 
         assert_eq!(risk.markdown_links.len(), 2);
+    }
+
+    #[test]
+    fn markdown_link_with_bare_url_raw_rewrites_correctly() {
+        // Simulates vault-links' actual production behavior: raw == bare URL,
+        // not the full [label](url) form. This is what apply_link_rewrites
+        // will substring-match against the source file's content.
+        let raw = "task.md";
+        let rewritten = rewrite_markdown_link(
+            raw,
+            Utf8Path::new("Inbox/index.md"),
+            Utf8Path::new("Workspaces/demo/tasks/task.md"),
+        );
+        assert_eq!(rewritten, "../Workspaces/demo/tasks/task.md");
+    }
+
+    #[test]
+    fn markdown_link_bare_url_preserves_anchor() {
+        let raw = "task.md#heading";
+        let rewritten = rewrite_markdown_link(
+            raw,
+            Utf8Path::new("Inbox/index.md"),
+            Utf8Path::new("Workspaces/demo/tasks/task.md"),
+        );
+        assert_eq!(rewritten, "../Workspaces/demo/tasks/task.md#heading");
     }
 
     #[test]
