@@ -1,3 +1,8 @@
+---
+title: Validate rule shape
+description: The conceptual model for vault-cli validate rules — selectors that pick documents and constraints that check them, with worked examples.
+---
+
 # Validate Rule Shape
 
 A validate rule has two parts: a **selector** that picks documents, and one
