@@ -3293,6 +3293,72 @@ fn completions_install_print_for_nushell_shows_both_targets() {
 }
 
 #[test]
+fn repair_apply_adds_missing_required_field() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\nrepair:\n  rules:\n    - name: ensure-research-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: research\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("note.md"),
+        "---\ntype: note\ntitle: Sample\n---\n# Body\n",
+    )
+    .expect("note should write");
+
+    let plan_path = root.join("repair.json");
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--out",
+        plan_path.to_str().unwrap(),
+    ]);
+    let plan_text = fs::read_to_string(&plan_path).expect("plan should write");
+    let plan_json = serde_json::from_str::<Value>(&plan_text).expect("repair plan should be JSON");
+    assert_eq!(plan_json["summary"]["planned_changes"], 1);
+    assert_eq!(plan_json["changes"][0]["operation"], "add_frontmatter");
+    assert_eq!(plan_json["changes"][0]["field"], "kind");
+    assert_eq!(plan_json["changes"][0]["new_value"], "research");
+
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+    ]);
+
+    let result = fs::read_to_string(root.join("note.md")).expect("note should read");
+    assert!(
+        result.contains("type: note"),
+        "existing type field should be preserved: {result}"
+    );
+    assert!(
+        result.contains("title: Sample"),
+        "existing title field should be preserved: {result}"
+    );
+    assert!(
+        result.contains("kind: research"),
+        "new kind field should be added: {result}"
+    );
+    assert!(
+        result.contains("# Body"),
+        "body should be preserved: {result}"
+    );
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
 fn completions_install_print_does_not_write() {
     let dir = tempfile::TempDir::new().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_vault"))

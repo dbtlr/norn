@@ -670,6 +670,52 @@ mod tests {
         assert_eq!(plan.summary.skipped.missing_hash, 1);
     }
 
+    fn finding_required_missing(path: &str, field: &str, rule: Option<&str>) -> Finding {
+        Finding {
+            code: "frontmatter-required-field-missing".into(),
+            severity: Severity::Warning,
+            path: path.into(),
+            message: format!("required frontmatter field is missing: {field}"),
+            body: FindingBody::RequiredFrontmatterMissing {
+                rule: rule.map(Into::into),
+                field: field.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn add_frontmatter_rule_produces_planned_change_for_missing_field() {
+        let finding = finding_required_missing("task.md", "kind", Some("typed-note"));
+        let config = RepairConfig {
+            rules: vec![make_rule(
+                "ensure-kind",
+                "frontmatter-required-field-missing",
+                Some("kind"),
+                None,
+                RepairAction::AddFrontmatter {
+                    field: "kind".into(),
+                    value: json!("research"),
+                },
+            )],
+        };
+        let hashes = document_hashes_for(&["task.md"]);
+        let plan = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &hashes,
+        );
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.skipped_findings.len(), 0);
+        let change = &plan.changes[0];
+        assert_eq!(change.operation, "add_frontmatter");
+        assert_eq!(change.field.as_deref(), Some("kind"));
+        assert_eq!(change.new_value, Some(json!("research")));
+        assert_eq!(change.expected_old_value, None);
+        assert_eq!(change.document_hash, "hash-task.md");
+    }
+
     #[test]
     fn summary_counts_match_skip_reason_partition() {
         let findings = vec![
