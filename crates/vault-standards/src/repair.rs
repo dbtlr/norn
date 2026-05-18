@@ -288,19 +288,13 @@ fn planned_change(
                 }
             };
 
-            let link_risk = crate::repair::link_risk::classify(
-                &finding.path,
-                &new_path,
-                documents,
-                &[],
-            );
+            let link_risk =
+                crate::repair::link_risk::classify(&finding.path, &new_path, documents, &[]);
 
             let mut warnings = Vec::new();
-            if let Some(w) = crate::repair::warnings::detect_stem_collision(
-                &finding.path,
-                &new_path,
-                documents,
-            ) {
+            if let Some(w) =
+                crate::repair::warnings::detect_stem_collision(&finding.path, &new_path, documents)
+            {
                 warnings.push(w);
             }
 
@@ -593,10 +587,7 @@ mod tests {
     fn doc(path: &str, hash: &str) -> vault_core::Document {
         vault_core::Document {
             path: path.into(),
-            stem: camino::Utf8Path::new(path)
-                .file_stem()
-                .unwrap()
-                .to_string(),
+            stem: camino::Utf8Path::new(path).file_stem().unwrap().to_string(),
             hash: hash.to_string(),
             frontmatter: None,
             headings: vec![],
@@ -607,10 +598,7 @@ mod tests {
     }
 
     fn index_for(paths: &[&str]) -> vault_core::GraphIndex {
-        let documents = paths
-            .iter()
-            .map(|p| doc(p, &format!("hash-{p}")))
-            .collect();
+        let documents = paths.iter().map(|p| doc(p, &format!("hash-{p}"))).collect();
         vault_core::GraphIndex {
             root: vault_root(),
             files: vec![],

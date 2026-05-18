@@ -420,8 +420,7 @@ pub fn append_frontmatter_field(
     field: &str,
     value: &serde_json::Value,
 ) -> Result<String, crate::quote::QuoteError> {
-    let rendered_value =
-        crate::quote::serialize_value_preserving_style(value, ValueStyle::Plain)?;
+    let rendered_value = crate::quote::serialize_value_preserving_style(value, ValueStyle::Plain)?;
 
     let new_line = format!("{field}: {rendered_value}\n");
 
@@ -691,13 +690,9 @@ mod span_tests {
     fn append_field_numeric_value_plain() {
         let content = "---\ntitle: hi\n---\n";
         let frontmatter_range = 4..14;
-        let result = append_frontmatter_field(
-            content,
-            frontmatter_range,
-            "count",
-            &serde_json::json!(42),
-        )
-        .unwrap();
+        let result =
+            append_frontmatter_field(content, frontmatter_range, "count", &serde_json::json!(42))
+                .unwrap();
         assert!(result.contains("count: 42"));
     }
 }

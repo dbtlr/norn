@@ -22,7 +22,9 @@ pub enum SubstitutionError {
     UnknownPlaceholder { placeholder: String },
     #[error("placeholder substitution failed: frontmatter field '{field}' is missing on source")]
     MissingFrontmatterField { field: String },
-    #[error("placeholder substitution failed: frontmatter field '{field}' is not a scalar (got {kind})")]
+    #[error(
+        "placeholder substitution failed: frontmatter field '{field}' is not a scalar (got {kind})"
+    )]
     NonScalarFrontmatterField { field: String, kind: String },
     #[error("placeholder substitution failed: malformed placeholder syntax in '{template}'")]
     MalformedTemplate { template: String },
@@ -44,11 +46,12 @@ pub fn resolve_destination(
     let mut result = Utf8PathBuf::from(substituted);
     // For Directory variant, append the original filename to the substituted dir.
     if matches!(spec, DestinationSpec::Directory { .. }) {
-        let filename = source_path
-            .file_name()
-            .ok_or_else(|| SubstitutionError::MalformedTemplate {
-                template: raw_template.to_string(),
-            })?;
+        let filename =
+            source_path
+                .file_name()
+                .ok_or_else(|| SubstitutionError::MalformedTemplate {
+                    template: raw_template.to_string(),
+                })?;
         result = result.join(filename);
     }
     Ok(result)
@@ -108,16 +111,17 @@ fn resolve_placeholder(
         "filename" => Ok(filename.to_string()),
         other if other.starts_with("frontmatter.") => {
             let field = other.strip_prefix("frontmatter.").unwrap();
-            let object = frontmatter
-                .and_then(|v| v.as_object())
-                .ok_or_else(|| SubstitutionError::MissingFrontmatterField {
+            let object = frontmatter.and_then(|v| v.as_object()).ok_or_else(|| {
+                SubstitutionError::MissingFrontmatterField {
                     field: field.to_string(),
-                })?;
-            let value = object
-                .get(field)
-                .ok_or_else(|| SubstitutionError::MissingFrontmatterField {
-                    field: field.to_string(),
-                })?;
+                }
+            })?;
+            let value =
+                object
+                    .get(field)
+                    .ok_or_else(|| SubstitutionError::MissingFrontmatterField {
+                        field: field.to_string(),
+                    })?;
             scalar_to_string(value, field)
         }
         _ => Err(SubstitutionError::UnknownPlaceholder {
@@ -156,8 +160,7 @@ mod tests {
         let spec = DestinationSpec::Directory {
             to_directory: "Workspaces/demo/tasks/".into(),
         };
-        let result =
-            resolve_destination(&spec, Utf8Path::new("Inbox/task.md"), None).unwrap();
+        let result = resolve_destination(&spec, Utf8Path::new("Inbox/task.md"), None).unwrap();
         assert_eq!(result, Utf8PathBuf::from("Workspaces/demo/tasks/task.md"));
     }
 
@@ -186,7 +189,10 @@ mod tests {
             to_path: "Workspaces/demo/notes/next-task.md".into(),
         };
         let result = resolve_destination(&spec, Utf8Path::new("Inbox/task.md"), None).unwrap();
-        assert_eq!(result, Utf8PathBuf::from("Workspaces/demo/notes/next-task.md"));
+        assert_eq!(
+            result,
+            Utf8PathBuf::from("Workspaces/demo/notes/next-task.md")
+        );
     }
 
     #[test]
@@ -197,7 +203,10 @@ mod tests {
         let fm = json!({"other": "x"});
         let err =
             resolve_destination(&spec, Utf8Path::new("Inbox/task.md"), Some(&fm)).unwrap_err();
-        assert!(matches!(err, SubstitutionError::MissingFrontmatterField { .. }));
+        assert!(matches!(
+            err,
+            SubstitutionError::MissingFrontmatterField { .. }
+        ));
     }
 
     #[test]
@@ -206,7 +215,10 @@ mod tests {
             to_path: "Workspaces/{frontmatter.workspace}/{stem}.md".into(),
         };
         let err = resolve_destination(&spec, Utf8Path::new("Inbox/task.md"), None).unwrap_err();
-        assert!(matches!(err, SubstitutionError::MissingFrontmatterField { .. }));
+        assert!(matches!(
+            err,
+            SubstitutionError::MissingFrontmatterField { .. }
+        ));
     }
 
     #[test]

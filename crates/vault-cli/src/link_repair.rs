@@ -5,9 +5,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use vault_core::display;
 use vault_core::{GraphIndex, Link, LinkKind, LinkStatus, UnresolvedReason};
-use vault_standards::{
-    classify_link_risk, detect_stem_collision, LinkRisk, PlanWarning,
-};
+use vault_standards::{classify_link_risk, detect_stem_collision, LinkRisk, PlanWarning};
 
 use crate::target::{backlinks, resolve_backlink_target_path};
 
@@ -105,12 +103,9 @@ pub fn plan_link_repairs(
     let (link_risk, warnings) = match (target, move_to) {
         (Some(target), Some(move_to)) => {
             let target_path = resolve_backlink_target_path(index, target)?;
-            let risk =
-                classify_link_risk(&target_path, move_to, &index.documents, &index.files);
+            let risk = classify_link_risk(&target_path, move_to, &index.documents, &index.files);
             let mut warnings = Vec::new();
-            if let Some(warning) =
-                detect_stem_collision(&target_path, move_to, &index.documents)
-            {
+            if let Some(warning) = detect_stem_collision(&target_path, move_to, &index.documents) {
                 warnings.push(warning);
             }
             (Some(risk), warnings)

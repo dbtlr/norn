@@ -100,11 +100,7 @@ pub fn classify(
                         raw: link.raw.clone(),
                         kind: link.kind.clone(),
                         source_span: link.source_span.clone(),
-                        rewritten: rewrite_markdown_link(
-                            &link.raw,
-                            &link.source_path,
-                            new_path,
-                        ),
+                        rewritten: rewrite_markdown_link(&link.raw, &link.source_path, new_path),
                     });
                 }
             }
@@ -214,10 +210,7 @@ mod tests {
     fn make_doc(path: &str) -> Document {
         Document {
             path: path.into(),
-            stem: camino::Utf8Path::new(path)
-                .file_stem()
-                .unwrap()
-                .to_string(),
+            stem: camino::Utf8Path::new(path).file_stem().unwrap().to_string(),
             hash: format!("h-{}", path),
             frontmatter: None,
             headings: vec![],

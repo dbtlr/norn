@@ -3593,8 +3593,7 @@ repair:
         "destination path should exist after apply"
     );
 
-    let index_content =
-        fs::read_to_string(root.join("Inbox/index.md")).expect("index should read");
+    let index_content = fs::read_to_string(root.join("Inbox/index.md")).expect("index should read");
     assert!(
         index_content.contains("[[Workspaces/demo/tasks/task]]"),
         "wikilink should be rewritten to new path; got: {index_content}"
@@ -3693,11 +3692,8 @@ repair:
 fn repair_links_move_to_reports_risk_without_plan() {
     let root = temp_cache_dir();
     fs::create_dir_all(root.join("Inbox")).expect("inbox dir should be created");
-    fs::write(
-        root.join("Inbox/task.md"),
-        "---\ntype: task\n---\n# Body\n",
-    )
-    .expect("task should write");
+    fs::write(root.join("Inbox/task.md"), "---\ntype: task\n---\n# Body\n")
+        .expect("task should write");
     fs::write(
         root.join("Inbox/index.md"),
         "---\ntitle: Index\n---\n- [[Inbox/task]]\n- [task](task.md)\n",

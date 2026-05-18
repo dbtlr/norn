@@ -107,10 +107,7 @@ mod tests {
     fn no_warning_when_new_stem_is_unique() {
         let old = Utf8PathBuf::from("Inbox/task.md");
         let new = Utf8PathBuf::from("Inbox/unique-name.md");
-        let documents = vec![
-            make_doc("Inbox/task.md"),
-            make_doc("Other/elsewhere.md"),
-        ];
+        let documents = vec![make_doc("Inbox/task.md"), make_doc("Other/elsewhere.md")];
         let warning = detect_stem_collision(&old, &new, &documents);
         assert!(warning.is_none());
     }

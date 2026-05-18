@@ -8,9 +8,9 @@ mod repair;
 mod summary;
 
 pub use apply::{
-    apply_file_changes, apply_link_rewrites, apply_move, changes_by_path,
-    validate_plan_for_apply, ApplyError, LinkRewriteResult, MoveResult, RepairApplyPlanContext,
-    RepairApplyReport, RepairApplyVerification, RepairApplyWarning,
+    apply_file_changes, apply_link_rewrites, apply_move, changes_by_path, validate_plan_for_apply,
+    ApplyError, LinkRewriteResult, MoveResult, RepairApplyPlanContext, RepairApplyReport,
+    RepairApplyVerification, RepairApplyWarning,
 };
 pub use config::{
     parse_config, ConfigError, FilesConfig, RemoveFrontmatterAction, RepairAction, RepairConfig,

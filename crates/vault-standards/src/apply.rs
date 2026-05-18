@@ -192,12 +192,13 @@ pub fn changes_by_path(
                 operation: change.operation.clone(),
             });
         }
-        let field = change.field.as_deref().ok_or_else(|| {
-            ApplyError::UnsupportedOperation {
+        let field = change
+            .field
+            .as_deref()
+            .ok_or_else(|| ApplyError::UnsupportedOperation {
                 path: change.path.clone(),
                 operation: format!("{} without field", change.operation),
-            }
-        })?;
+            })?;
         let key = (change.path.clone(), field.to_string());
         if !seen_fields.insert(key) {
             return Err(ApplyError::ConflictingFieldChange {
@@ -261,12 +262,13 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
 
     for change in changes {
-        let field = change.field.as_deref().ok_or_else(|| {
-            ApplyError::UnsupportedOperation {
+        let field = change
+            .field
+            .as_deref()
+            .ok_or_else(|| ApplyError::UnsupportedOperation {
                 path: path.clone(),
                 operation: format!("{} without field", change.operation),
-            }
-        })?;
+            })?;
         let current_value = current_object.get(field);
 
         let span = spans.iter().find(|s| s.name == field);
@@ -358,13 +360,12 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 // the final newline of the YAML, so we can splice a new line
                 // here without disturbing the closing `---`.
                 let insertion = frontmatter_range.end;
-                let leading_newline = if insertion == 0
-                    || content.as_bytes().get(insertion - 1) == Some(&b'\n')
-                {
-                    ""
-                } else {
-                    "\n"
-                };
+                let leading_newline =
+                    if insertion == 0 || content.as_bytes().get(insertion - 1) == Some(&b'\n') {
+                        ""
+                    } else {
+                        "\n"
+                    };
                 let line_to_insert = format!("{leading_newline}{field}: {rendered}\n");
                 edits.push((insertion..insertion, line_to_insert));
             }
@@ -430,14 +431,13 @@ fn check_expected_old_value(
 /// (typically cross-device).
 pub fn apply_move(cwd: &Utf8Path, change: &PlannedChange) -> Result<MoveResult, ApplyError> {
     let source_rel = &change.path;
-    let dest_rel =
-        change
-            .destination
-            .as_ref()
-            .ok_or_else(|| ApplyError::UnsupportedOperation {
-                path: source_rel.clone(),
-                operation: "move_document missing destination".to_string(),
-            })?;
+    let dest_rel = change
+        .destination
+        .as_ref()
+        .ok_or_else(|| ApplyError::UnsupportedOperation {
+            path: source_rel.clone(),
+            operation: "move_document missing destination".to_string(),
+        })?;
 
     let source_abs = cwd.join(source_rel);
     let dest_abs = cwd.join(dest_rel);
@@ -516,12 +516,11 @@ pub fn apply_link_rewrites(
         .chain(risk.markdown_links.iter());
     for affected in all {
         let abs = cwd.join(&affected.source_path);
-        let original = fs::read_to_string(abs.as_std_path()).map_err(|e| {
-            ApplyError::CannotMinimalEdit {
+        let original =
+            fs::read_to_string(abs.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
                 path: affected.source_path.clone(),
                 reason: format!("read backlinker failed: {e}"),
-            }
-        })?;
+            })?;
         let updated = original.replacen(&affected.raw, &affected.rewritten, 1);
         if updated == original {
             continue;
