@@ -18,7 +18,7 @@ test:
 build:
     cargo build -p vault-cli
 
-release:
+build-release:
     cargo build -p vault-cli --release
 
 install:
@@ -47,5 +47,15 @@ fixture-backlinks target="beta" root="fixtures/basic":
 fixture-inspect target="alpha.md" root="fixtures/basic":
     cargo run -q -p vault-cli -- -C '{{root}}' docs inspect '{{target}}' --format json
 
-fixture-build-cache cache="/tmp/vault-cli-cache" root="fixtures/basic":
-    cargo run -q -p vault-cli -- -C '{{root}}' cache build --cache '{{cache}}' --format json
+dist-plan:
+    cargo dist plan
+
+dist-build-local:
+    cargo dist build
+
+release version:
+    sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm Cargo.toml.bak
+    cargo check
+    git add Cargo.toml Cargo.lock
+    git commit -m "Bump workspace version to {{version}}"
+    git tag -a v{{version}} -m "vault-cli v{{version}}"
