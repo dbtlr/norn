@@ -240,6 +240,10 @@ Use semver-style tags for milestones:
 - `v0.17.0` — focused docs query ergonomics
 - `v0.17.1` — date/datetime field-type polish
 - `v0.18.0` — validate triage filters
+- `v0.19.0` — direction, human output, and workflow recipes
+- `v0.20.0` — native retrieval and vault targeting
+- `v0.21.0` — repair planning MVP
+- `v0.22.0` — safe apply and link/path planning
 
 For a release bump:
 
@@ -248,6 +252,11 @@ For a release bump:
 3. Run `mise exec -- just verify`.
 4. Commit `Cargo.toml` and `Cargo.lock`.
 5. Tag with `git tag -a vX.Y.Z -m "vault-cli vX.Y.Z"`.
+
+Every versioned feature/release change must update `CHANGELOG.md` in the same
+work slice. Do not leave new behavior under an older release heading, and do not
+forget to bump the workspace version in `Cargo.toml` plus `Cargo.lock` when the
+implemented work advances the advertised CLI version.
 
 ## Git Practice
 
