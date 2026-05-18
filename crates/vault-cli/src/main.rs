@@ -250,9 +250,17 @@ fn run(cli: Cli) -> Result<i32> {
     }
 }
 
-fn run_completions_command(args: crate::cli::CompletionsArgs) -> Result<i32> {
-    completions::run_completions(args.shell)?;
-    Ok(0)
+fn run_completions_command(cmd: crate::cli::CompletionsCommand) -> Result<i32> {
+    match cmd.command {
+        crate::cli::CompletionsSubcommand::Init(args) => {
+            completions::run_init(args.shell)?;
+            Ok(0)
+        }
+        crate::cli::CompletionsSubcommand::Install(args) => {
+            completions::run_install(args)?;
+            Ok(0)
+        }
+    }
 }
 
 fn run_manpage_command() -> Result<i32> {

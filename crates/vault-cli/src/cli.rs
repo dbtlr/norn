@@ -64,8 +64,8 @@ pub enum Command {
         long_about = "Validate vault graph facts and configured frontmatter rules.\n\nValidation reuses graph/index facts to surface unresolved links, ambiguous links, document diagnostics, and configured frontmatter requirements. Validate does not mutate files."
     )]
     Validate(ValidateArgs),
-    #[command(hide = true, about = "Emit shell completion script to stdout")]
-    Completions(CompletionsArgs),
+    #[command(about = "Shell completion installation and script emission")]
+    Completions(CompletionsCommand),
     #[command(hide = true, about = "Emit roff-format man page to stdout")]
     Manpage,
 }
@@ -348,9 +348,49 @@ pub struct SearchArgs {
 }
 
 #[derive(Debug, Parser)]
-pub struct CompletionsArgs {
-    #[arg(value_enum, help = "Shell to generate the completion script for")]
-    pub shell: clap_complete::Shell,
+pub struct CompletionsCommand {
+    #[command(subcommand)]
+    pub command: CompletionsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CompletionsSubcommand {
+    #[command(
+        about = "Emit a shell completion script to stdout",
+        long_about = "Emit a shell completion script to stdout.\n\nMeant to be sourced or eval'd by the user's shell at startup. For one-command setup, prefer `vault completions install [shell]`."
+    )]
+    Init(CompletionsInitArgs),
+    #[command(
+        about = "Install completions into the user's shell config",
+        long_about = "Install completions into the user's shell config.\n\nAuto-detects the target shell from $SHELL if no argument is given. Idempotent via a marker comment block; pass --force to overwrite an existing install. Pass --print to preview without writing."
+    )]
+    Install(CompletionsInstallArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct CompletionsInitArgs {
+    #[arg(value_enum, help = "Target shell")]
+    pub shell: SupportedShell,
+}
+
+#[derive(Debug, Parser)]
+pub struct CompletionsInstallArgs {
+    #[arg(value_enum, help = "Target shell. Auto-detected from $SHELL if omitted")]
+    pub shell: Option<SupportedShell>,
+    #[arg(long, help = "Preview what would be written; do not modify any files")]
+    pub print: bool,
+    #[arg(long, help = "Overwrite an existing install marker block")]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SupportedShell {
+    Bash,
+    Zsh,
+    Fish,
+    Powershell,
+    Elvish,
+    Nushell,
 }
 
 #[derive(Debug, Parser)]

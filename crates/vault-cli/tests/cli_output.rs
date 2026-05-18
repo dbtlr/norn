@@ -2974,3 +2974,14 @@ fn build_script_emits_release_artifacts() {
         man_path.display()
     );
 }
+
+#[test]
+fn completions_init_supports_all_six_shells() {
+    for shell in &["bash", "zsh", "fish", "powershell", "elvish", "nushell"] {
+        let (stdout, _stderr) = vault_success(&["completions", "init", shell]);
+        assert!(
+            !stdout.trim().is_empty(),
+            "completions init {shell} should emit non-empty script; got empty stdout"
+        );
+    }
+}
