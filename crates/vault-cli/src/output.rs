@@ -535,12 +535,7 @@ fn table_headers(values: &[Value]) -> Vec<String> {
 fn table_row_for(value: &Value, headers: &[String]) -> Vec<String> {
     headers
         .iter()
-        .map(|header| {
-            value
-                .get(header)
-                .map(display_value)
-                .unwrap_or_else(String::new)
-        })
+        .map(|header| value.get(header).map(display_value).unwrap_or_default())
         .collect()
 }
 

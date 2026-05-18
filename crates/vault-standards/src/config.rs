@@ -197,9 +197,7 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             if values.is_empty() {
                 return Err(ConfigError::Invalid {
                     source_path: source_path.to_owned(),
-                    message: format!(
-                        "rule {rule_label}: allowed_values for '{field}' is empty"
-                    ),
+                    message: format!("rule {rule_label}: allowed_values for '{field}' is empty"),
                 });
             }
             for v in values {
@@ -352,8 +350,8 @@ mod tests {
 
     #[test]
     fn repair_rule_with_no_action_is_rejected() {
-        let err = parse("repair:\n  rules:\n    - name: r\n      match:\n        code: x\n")
-            .unwrap_err();
+        let err =
+            parse("repair:\n  rules:\n    - name: r\n      match:\n        code: x\n").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("declares no action"), "got: {msg}");
     }

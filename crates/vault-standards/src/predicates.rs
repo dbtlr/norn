@@ -14,9 +14,7 @@ pub(crate) fn frontmatter_value_matches(actual: &Value, expected: &Value) -> boo
 
 pub(crate) fn frontmatter_type_matches(value: &Value, expected_type: &str) -> bool {
     match expected_type {
-        "datetime" => value
-            .as_str()
-            .is_some_and(|value| is_datetime_string(value)),
+        "datetime" => value.as_str().is_some_and(is_datetime_string),
         "date" => value.as_str().is_some_and(is_date_string),
         "list_of_strings" => value
             .as_array()
