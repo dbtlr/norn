@@ -374,6 +374,9 @@ git diff --check
 git diff
 ```
 
+Use a temp path for one-off maintenance, or commit the plan artifact only when
+you want an auditable repair record.
+
 Example search-assisted workflow:
 
 ```bash

@@ -400,7 +400,8 @@ fn repair_plan_out_writes_json_artifact_without_stdout() {
         "--out",
         plan_path.to_str().unwrap(),
     ]);
-    assert!(error.contains("repair plan --out only supports --format json"));
+    assert!(error.contains("repair plan --out writes JSON artifacts"));
+    assert!(error.contains("omit --out for table output"));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();

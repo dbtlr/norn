@@ -247,6 +247,7 @@ Use semver-style tags for milestones:
 - `v0.23.0` — applyable repair plans and repair report usability
 - `v0.24.0` — repair workflow help and apply reporting polish
 - `v0.25.0` — repair workflow ergonomics
+- `v0.25.1` — repair workflow documentation polish
 
 For a release bump:
 

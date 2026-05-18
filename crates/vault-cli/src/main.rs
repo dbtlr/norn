@@ -175,7 +175,9 @@ fn run(cli: Cli) -> Result<i32> {
                 );
                 if let Some(out) = &args.out {
                     if args.format != RepairOutputFormat::Json {
-                        bail!("repair plan --out only supports --format json");
+                        let message = "repair plan --out writes JSON artifacts; \
+                            omit --out for table output";
+                        bail!(message);
                     }
                     let out_path = resolve_path(&cwd, out);
                     let plan_text = serde_json::to_string_pretty(&plan)?;

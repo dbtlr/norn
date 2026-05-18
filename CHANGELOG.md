@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## v0.25.1 - 2026-05-18
+
+Repair workflow documentation polish.
+
+### Changed
+
+- Clarified the `repair plan --out` unsupported format error.
+- Documented when to use temp paths versus committed repair plan artifacts.
+
 ## v0.25.0 - 2026-05-18
 
 Repair workflow ergonomics release.
