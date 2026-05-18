@@ -24,9 +24,10 @@ fn main() -> std::io::Result<()> {
     // CARGO_MANIFEST_DIR is crates/vault-cli/; walk two levels up to the
     // workspace root so the generated paths match cargo-dist's `include`
     // entries declared from the same root.
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect(
-        "CARGO_MANIFEST_DIR must be set by cargo when running build.rs",
-    ));
+    let manifest_dir = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR must be set by cargo when running build.rs"),
+    );
     let workspace_root = manifest_dir
         .parent()
         .and_then(|crates_dir| crates_dir.parent())
