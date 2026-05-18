@@ -13,8 +13,8 @@ just verify
 
 ## Filing issues
 
-- Bug reports go in [`.github/ISSUE_TEMPLATE/bug.md`](.github/ISSUE_TEMPLATE/bug.md). Include `vault --version`, your platform, a minimal reproducer (a few files in a temp directory is ideal), the command you ran, and the output you got versus what you expected.
-- Feature requests go in [`.github/ISSUE_TEMPLATE/feature.md`](.github/ISSUE_TEMPLATE/feature.md). Describe the user problem, then the proposed shape of the solution.
+- Bug reports: [open a new bug issue](https://github.com/dbtlr/vault-cli/issues/new?template=bug.md). Include `vault --version`, your platform, a minimal reproducer (a few files in a temp directory is ideal), the command you ran, and the output you got versus what you expected.
+- Feature requests: [open a new feature issue](https://github.com/dbtlr/vault-cli/issues/new?template=feature.md). Describe the user problem, then the proposed shape of the solution.
 
 ## Pull requests
 

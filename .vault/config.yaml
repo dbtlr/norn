@@ -1,7 +1,6 @@
 files:
   ignore:
     - "target/**"
-    - ".github/**"
     - "fixtures/**"
     - ".claude/**"
 validate:

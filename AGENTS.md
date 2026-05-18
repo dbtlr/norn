@@ -21,7 +21,7 @@
 - [docs/agent-workflows.md](docs/agent-workflows.md)
 - [docs/validation.md](docs/validation.md)
 - [docs/rule-shape.md](docs/rule-shape.md)
-- [integrations/agent-skill/](integrations/agent-skill/)
+- [integrations/agent-skill/README.md](integrations/agent-skill/README.md)
 
 ## Developer guide
 

@@ -86,7 +86,7 @@ Every command accepts `--format table|json|jsonl|paths` where applicable. JSON a
 - **Filterable triage.** `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason` apply to both raw output and `--summary`, so an agent can size a queue before reading it.
 - **Vault targeting.** Use `-C <path>` for ad-hoc invocations or `vault registry add <name> <path>` once and target with `--vault <name>`.
 
-For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-workflows.md). To install the agent skill into your coding agent of choice, see [integrations/agent-skill/](integrations/agent-skill/).
+For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-workflows.md). To install the agent skill into your coding agent of choice, see [integrations/agent-skill/README.md](integrations/agent-skill/README.md).
 
 ## Documentation
 
@@ -103,7 +103,7 @@ For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-wor
 | Development | [docs/development.md](docs/development.md) |
 | Releases and versioning | [docs/releases.md](docs/releases.md) |
 
-Worked examples live under [examples/](examples/).
+Worked examples live under [examples/README.md](examples/README.md).
 
 ## Project status
 
