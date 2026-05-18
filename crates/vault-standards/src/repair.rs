@@ -1,4 +1,6 @@
 pub mod destination;
+pub mod link_risk;
+pub mod warnings;
 
 use std::collections::BTreeMap;
 
@@ -93,11 +95,18 @@ pub struct PlannedChange {
     pub finding_rule: Option<String>,
     pub repair_rule: String,
     pub operation: String,
-    pub field: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_old_value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_value: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Utf8PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_risk: Option<crate::repair::link_risk::LinkRisk>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<crate::repair::warnings::PlanWarning>,
 }
 
 pub fn plan_repairs(
@@ -218,9 +227,12 @@ fn planned_change(
             finding_rule: finding_rule(finding),
             repair_rule,
             operation: "set_frontmatter".to_string(),
-            field: field.clone(),
+            field: Some(field.clone()),
             expected_old_value: finding_actual_value(finding).cloned(),
             new_value: Some(value.clone()),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
         },
         RepairAction::RemoveFrontmatter { field } => PlannedChange {
             path: finding.path.clone(),
@@ -229,14 +241,31 @@ fn planned_change(
             finding_rule: finding_rule(finding),
             repair_rule,
             operation: "remove_frontmatter".to_string(),
-            field: field.clone(),
+            field: Some(field.clone()),
             expected_old_value: finding_actual_value(finding).cloned(),
             new_value: None,
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
         },
-        // Planner wiring for AddFrontmatter and MoveDocument lands in
-        // subsequent commits (Tasks 5 and 8). Until then, rules that match a
-        // finding via these actions fall through to the skipped path.
-        RepairAction::AddFrontmatter { .. } | RepairAction::MoveDocument { .. } => {
+        RepairAction::AddFrontmatter { field, value } => PlannedChange {
+            path: finding.path.clone(),
+            document_hash,
+            finding_code: finding.code.clone(),
+            finding_rule: finding_rule(finding),
+            repair_rule,
+            operation: "add_frontmatter".to_string(),
+            field: Some(field.clone()),
+            expected_old_value: None,
+            new_value: Some(value.clone()),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+        },
+        // Planner wiring for MoveDocument lands in a subsequent commit
+        // (Task 8). Until then, rules that match a finding via this action
+        // fall through to the skipped path.
+        RepairAction::MoveDocument { .. } => {
             return Err(SkipReason::PreconditionFailed);
         }
     })
@@ -537,7 +566,7 @@ mod tests {
         assert_eq!(plan.changes.len(), 1);
         assert_eq!(plan.skipped_findings.len(), 0);
         assert_eq!(plan.changes[0].operation, "set_frontmatter");
-        assert_eq!(plan.changes[0].field, "status");
+        assert_eq!(plan.changes[0].field.as_deref(), Some("status"));
         assert_eq!(plan.changes[0].new_value, Some(json!("backlog")));
         assert_eq!(plan.changes[0].expected_old_value, Some(json!("someday")));
         assert_eq!(plan.changes[0].document_hash, "hash-task.md");
