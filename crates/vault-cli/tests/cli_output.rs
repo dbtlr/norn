@@ -2998,3 +2998,161 @@ fn completions_install_no_arg_and_no_shell_env_errors() {
         "expected error about $SHELL detection; got:\n{stderr}"
     );
 }
+
+fn install_in_tempdir(
+    shell: &str,
+    env_overrides: &[(&str, &str)],
+) -> (tempfile::TempDir, std::process::Output) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vault"));
+    cmd.args(["completions", "install", shell]);
+    cmd.env("HOME", dir.path());
+    cmd.env("XDG_CONFIG_HOME", dir.path().join(".config"));
+    for (k, v) in env_overrides {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().unwrap();
+    (dir, output)
+}
+
+#[test]
+fn completions_install_bash_writes_marker_block_to_bashrc() {
+    let (dir, output) = install_in_tempdir("bash", &[]);
+    assert!(
+        output.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bashrc = fs::read_to_string(dir.path().join(".bashrc")).unwrap();
+    assert!(
+        bashrc.contains("# >>> vault completions"),
+        "missing marker: {bashrc}"
+    );
+    assert!(
+        bashrc.contains("eval \"$(vault completions init bash)\""),
+        "missing eval line: {bashrc}"
+    );
+    assert!(
+        bashrc.contains("# <<< vault completions <<<"),
+        "missing end marker: {bashrc}"
+    );
+}
+
+#[test]
+fn completions_install_zsh_writes_marker_block_to_zshrc() {
+    let (dir, output) = install_in_tempdir("zsh", &[]);
+    assert!(
+        output.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let zshrc = fs::read_to_string(dir.path().join(".zshrc")).unwrap();
+    assert!(zshrc.contains("# >>> vault completions"));
+    assert!(zshrc.contains("eval \"$(vault completions init zsh)\""));
+}
+
+#[test]
+fn completions_install_zsh_honors_zdotdir() {
+    let zdir = tempfile::TempDir::new().unwrap();
+    let (_home, output) = install_in_tempdir(
+        "zsh",
+        &[("ZDOTDIR", zdir.path().to_str().unwrap())],
+    );
+    assert!(output.status.success());
+    let zshrc = fs::read_to_string(zdir.path().join(".zshrc")).unwrap();
+    assert!(zshrc.contains("# >>> vault completions"));
+}
+
+#[test]
+fn completions_install_elvish_writes_marker_block_to_rc_elv() {
+    let (dir, output) = install_in_tempdir("elvish", &[]);
+    assert!(
+        output.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = fs::read_to_string(dir.path().join(".config/elvish/rc.elv")).unwrap();
+    assert!(rc.contains("# >>> vault completions"));
+    assert!(rc.contains("vault completions init elvish"));
+}
+
+#[test]
+fn completions_install_is_idempotent() {
+    let (dir, output1) = install_in_tempdir("bash", &[]);
+    assert!(output1.status.success());
+    let bashrc_first = fs::read_to_string(dir.path().join(".bashrc")).unwrap();
+    let count_first = bashrc_first.matches("# >>> vault completions").count();
+    assert_eq!(count_first, 1);
+
+    // Re-run install
+    let output2 = Command::new(env!("CARGO_BIN_EXE_vault"))
+        .args(["completions", "install", "bash"])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .output()
+        .unwrap();
+    assert!(output2.status.success());
+    let stdout2 = String::from_utf8(output2.stdout).unwrap();
+    assert!(
+        stdout2.contains("Already installed"),
+        "expected idempotent skip: {stdout2}"
+    );
+    let bashrc_second = fs::read_to_string(dir.path().join(".bashrc")).unwrap();
+    assert_eq!(
+        bashrc_first, bashrc_second,
+        "second run should not modify the file"
+    );
+}
+
+#[test]
+fn completions_install_force_replaces_marker_block() {
+    let (dir, _output) = install_in_tempdir("bash", &[]);
+    // Tamper with the marker block contents to simulate drift
+    let bashrc_path = dir.path().join(".bashrc");
+    let original = fs::read_to_string(&bashrc_path).unwrap();
+    let tampered = original.replace("vault completions init bash", "OLD_COMMAND");
+    fs::write(&bashrc_path, &tampered).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vault"))
+        .args(["completions", "install", "bash", "--force"])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "force install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let final_bashrc = fs::read_to_string(&bashrc_path).unwrap();
+    assert!(
+        final_bashrc.contains("vault completions init bash"),
+        "force should restore current line: {final_bashrc}"
+    );
+    assert!(
+        !final_bashrc.contains("OLD_COMMAND"),
+        "force should remove old content"
+    );
+    let backup_path = format!("{}.bak", bashrc_path.display());
+    assert!(
+        PathBuf::from(&backup_path).exists(),
+        "expected backup at {backup_path}"
+    );
+}
+
+#[test]
+fn completions_install_print_does_not_write() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_vault"))
+        .args(["completions", "install", "bash", "--print"])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Would write to"));
+    assert!(stdout.contains("# >>> vault completions"));
+    // No file should have been created.
+    assert!(!dir.path().join(".bashrc").exists());
+}
