@@ -6,7 +6,7 @@ use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
 use vault_core::display;
-use vault_core::{Document, Link, VaultFile};
+use vault_core::{Link, VaultFile};
 use vault_standards::{Finding, FindingBody, RepairPlan, Summary};
 
 use crate::cli::OutputFormat;
@@ -58,28 +58,6 @@ pub fn write_item_output<T: Serialize>(item: &T, format: OutputFormat) -> Result
         OutputFormat::Paths => bail!("paths format is not supported for this command"),
     }
     Ok(())
-}
-
-pub fn write_documents(documents: &[&Document], format: OutputFormat) -> Result<()> {
-    match format {
-        OutputFormat::Json | OutputFormat::Jsonl => write_output(documents, format),
-        OutputFormat::Paths => write_paths(documents.iter().map(|document| &document.path)),
-        OutputFormat::Table => {
-            let rows = documents
-                .iter()
-                .map(|document| {
-                    vec![
-                        document.path.to_string(),
-                        frontmatter_scalar(document, "title").unwrap_or_default(),
-                        frontmatter_scalar(document, "type").unwrap_or_default(),
-                        document.links.len().to_string(),
-                        document.diagnostics.len().to_string(),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            write_table(&["path", "title", "type", "links", "diagnostics"], &rows)
-        }
-    }
 }
 
 pub fn write_document_summary(summary: &DocsSummaryReport, format: OutputFormat) -> Result<()> {
@@ -575,11 +553,6 @@ fn column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
                 .max(header.chars().count())
         })
         .collect()
-}
-
-fn frontmatter_scalar(document: &Document, field: &str) -> Option<String> {
-    let value = document.frontmatter.as_ref()?.get(field)?;
-    Some(display_value(value))
 }
 
 fn display_value(value: &Value) -> String {

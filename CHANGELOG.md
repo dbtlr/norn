@@ -10,8 +10,15 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Breaking changes
+
+- **`vault search` removed.** Replaced by `vault find`. No alias. Scripts and skills that called `vault search --text X` should call `vault find --text X`. Pre-release; no migration shim.
+- **`vault docs query` (the `docs query` List subcommand) removed.** Replaced by `vault find`. `vault docs summary` and `vault docs inspect` are unaffected.
+
 ### Added
 
+- **`vault find`** — unified find/search command. Consolidates full-text search + metadata filtering with sort, limit, paging, column selection, and four output formats. Replaces `vault search` and `vault docs query`. Operators: `--text "needle"` (case-insensitive substring); `--eq field:value`, `--in field:v1,v2,...`, `--not-in field:v1,v2,...`, `--has field`, `--missing field`; `--before/--after/--on field:date` (ISO 8601; `today` keyword); `--path GLOB`. Composition: ALL-of across flags; ANY-of inside `--in`. `--sort field [--desc]`. `--limit N` default 10, `--no-limit` for everything. `--starts-at N` (1-indexed) for paging. `--col field,field` narrows visible frontmatter fields. `--format paths|records|json|jsonl`; auto-detects TTY (records) vs. piped (paths). `--color always|auto|never`; honors `NO_COLOR` and `CLICOLOR_FORCE`. Records mode pipes through `$PAGER` (default `less -FRX`) on TTY when output exceeds screen height; `--no-pager` bypass.
+- **Cache query API extensions** (in `vault_cache`): `DocumentQuery` gains `frontmatter_in`, `frontmatter_not_in`, `date_before`, `date_after`, `date_on`, `body_text_contains` fields. New types `FindQuery`, `SortClause`, `SortDirection`, `FindResult`. New method `Cache::find_documents(&FindQuery) -> Result<FindResult, CacheError>` with ORDER BY / LIMIT / OFFSET / COUNT support and accurate total-count signaling.
 - **SQLite cache as the read path for query commands** (v1). Reintroduces a cache surface that was removed in v0.26.0 — this time, query commands actually consume it. Closes the "every command does a full filesystem rescan" performance gap.
   - Cache lives at `~/.cache/vault/<sha256(canonical-vault-root)>/cache.db` (honors `$XDG_CACHE_HOME`). Directory is `0700`, database file is `0600`. Identity hash uses the canonical vault-root path so symlinked roots, `--vault registry-name`, and direct cwd-discovery all resolve to the same cache.
   - New `vault cache` subcommand: `index` (incremental, default), `rebuild` (full from scratch), `clear` (delete the cache file), `status` (path, size, doc/file/link counts, schema version, last full rebuild). `index --rebuild` and `index --force-hash` flags; `status --format json|text`. New global flag `--no-cache-refresh` skips the implicit refresh before query commands.
@@ -40,6 +47,17 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 - Query commands no longer rebuild the in-memory `GraphIndex` from a full filesystem scan on every invocation. They open the cache, optionally refresh it, and reconstruct `GraphIndex` from rows. Existing query logic is unchanged — only the source of the index moved from "filesystem walk" to "cache read".
 - Content hashing in the cache uses blake3 throughout (matches `vault_graph`'s existing hash; the implementation plan's SHA-256 specification was corrected to blake3 during execution to avoid mismatches with parser-emitted hashes).
 - `vault_cli::filter::DocumentSummary` renamed to `DocsSummaryReport`. The renamed struct is the aggregation report from `summarize_documents` — the new name reflects what it actually is, and frees the `DocumentSummary` name for the new `vault_core` projection. Internal rename; no command behavior change.
+
+### Performance
+
+- Atlas dogfood (780 docs, 2673 links): `vault find --eq type:note` < 10ms wall; `vault find --text "typescript" --limit 10` < 10ms wall; `vault find --eq type:note --sort created --desc --limit 10` < 10ms wall. Cache rebuild 198ms. Well under the 50ms spec target. `EXPLAIN QUERY PLAN` confirms `find_documents` runs as a single SCAN/SEARCH against the `documents` table.
+
+### Internal
+
+- v1 text-substring implementation uses `LOWER(body_text) LIKE '%...%'`. FTS5 native search is tracked as a separate task and will swap the SQL clause without changing `DocumentQuery::body_text_contains` or the `--text` CLI surface.
+- Nested frontmatter keys (`schema.version` as a dotted JSON path) are not supported in v1 of find. Tracked as a backlog task; v3 surface treats all `--col` / `--eq` / etc. field arguments as flat keys.
+- New workspace dependencies: `terminal_size 0.4` (TTY column-width detection), `chrono 0.4` (date keyword resolution for `--on today`). `anstyle 1` added as a direct dep (was transitive via clap).
+- `find/` module split by concern: `query.rs` (args → FindQuery), `render.rs` (paths/records/json/jsonl renderers + records wrapping), `pager.rs` (subprocess), `color.rs` (anstyle palette).
 
 ### Notes
 

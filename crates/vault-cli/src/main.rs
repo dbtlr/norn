@@ -3,6 +3,7 @@ mod cli;
 mod completions;
 mod config;
 mod filter;
+mod find;
 mod link_repair;
 mod output;
 mod query;
@@ -29,8 +30,8 @@ use crate::filter::{
 };
 use crate::link_repair::plan_link_repairs;
 use crate::output::{
-    is_broken_pipe, resolve_format, write_document_summary, write_documents, write_files,
-    write_findings, write_item_output, write_link_repair_report, write_links, write_output,
+    is_broken_pipe, resolve_format, write_document_summary, write_files, write_findings,
+    write_item_output, write_link_repair_report, write_links, write_output,
     write_repair_apply_report, write_repair_plan, write_validate_summary,
 };
 use crate::repair_apply::{apply_repair_plan, with_verification};
@@ -73,19 +74,6 @@ fn run(cli: Cli) -> Result<i32> {
 
     match command {
         Command::Docs(docs) => match docs.command {
-            DocsSubcommand::List(args) => {
-                let mut index = build_index_for(&cwd, config_path.as_ref(), no_cache_refresh)?;
-                trim_diagnostics(&mut index, verbose);
-                let options = DocumentFilterOptions {
-                    filters: &args.filters.filters,
-                    paths: &args.filters.paths,
-                    has: &args.filters.has,
-                    missing: &args.filters.missing,
-                };
-                let documents = filter_documents(&index, &options)?;
-                write_documents(&documents, resolve_format(args.format))?;
-                Ok(exit_code_for(&index))
-            }
             DocsSubcommand::Summary(args) => {
                 let mut index = build_index_for(&cwd, config_path.as_ref(), no_cache_refresh)?;
                 trim_diagnostics(&mut index, verbose);
@@ -150,20 +138,6 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(exit_code_for(&index))
             }
         },
-        Command::Search(args) => {
-            let mut index = build_index_for(&cwd, config_path.as_ref(), no_cache_refresh)?;
-            trim_diagnostics(&mut index, verbose);
-            let options = DocumentFilterOptions {
-                filters: &args.filters.filters,
-                paths: &args.filters.paths,
-                has: &args.filters.has,
-                missing: &args.filters.missing,
-            };
-            let documents = filter_documents(&index, &options)?;
-            let documents = filter_documents_by_text(&cwd, documents, &args.text)?;
-            write_documents(&documents, resolve_format(args.format))?;
-            Ok(exit_code_for(&index))
-        }
         Command::Repair(repair_command) => match repair_command.command {
             RepairSubcommand::Plan(args) => {
                 let loaded_config = load_config(&cwd, config_path.as_ref())?;
@@ -266,6 +240,7 @@ fn run(cli: Cli) -> Result<i32> {
             }
             Ok(exit_code_for(&index))
         }
+        Command::Find(args) => find::run(args, &cwd, no_cache_refresh),
         Command::Registry(_) => {
             unreachable!("registry commands are handled before vault targeting")
         }
@@ -333,30 +308,6 @@ fn normalized_filter_values(values: &[String]) -> Vec<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .collect()
-}
-
-fn filter_documents_by_text<'a>(
-    cwd: &camino::Utf8PathBuf,
-    documents: Vec<&'a vault_core::Document>,
-    text_filters: &[String],
-) -> Result<Vec<&'a vault_core::Document>> {
-    if text_filters.is_empty() {
-        return Ok(documents);
-    }
-
-    documents
-        .into_iter()
-        .map(|document| {
-            let path = cwd.join(&document.path);
-            let contents = fs::read_to_string(&path)
-                .map_err(|error| anyhow::anyhow!("failed to read document {path}: {error}"))?;
-            Ok(text_filters
-                .iter()
-                .all(|needle| contents.contains(needle))
-                .then_some(document))
-        })
-        .filter_map(Result::transpose)
         .collect()
 }
 

@@ -17,8 +17,10 @@ name = "vault"
 path = "src/main.rs"
 
 [dependencies]
+anstyle = "1"
 anyhow.workspace = true
 camino.workspace = true
+chrono = { workspace = true }
 clap.workspace = true
 clap_complete.workspace = true
 clap_complete_nushell.workspace = true
@@ -26,6 +28,7 @@ clap_mangen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+terminal_size = { workspace = true }
 vault-cache = { path = "../vault-cache" }
 vault-core = { path = "../vault-core" }
 vault-frontmatter = { path = "../vault-frontmatter" }

@@ -1,5 +1,5 @@
 use camino::Utf8PathBuf;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "vault")]
@@ -55,13 +55,12 @@ pub enum Command {
         long_about = "Emit inventoried vault files.\n\nFiles include Markdown documents and non-Markdown attachments. File records can be used with exact-path backlink queries for resolved attachment targets."
     )]
     Files(GraphArgs),
+    #[command(
+        about = "Find documents in the vault — full-text + metadata filters with sort/limit/paging"
+    )]
+    Find(FindArgs),
     #[command(about = "Link facts across the vault")]
     Links(LinksCommand),
-    #[command(
-        about = "Deterministic document search",
-        long_about = "Deterministic document search.\n\nSearch reuses document path and frontmatter filters, and adds literal text matching over Markdown file contents. It does not perform semantic, fuzzy, regex, or embedding search."
-    )]
-    Search(SearchArgs),
     #[command(about = "Manage named vault roots")]
     Registry(RegistryCommand),
     #[command(about = "Plan and apply deterministic vault repairs")]
@@ -140,10 +139,6 @@ pub struct DocsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum DocsSubcommand {
-    #[command(
-        about = "Emit parsed Markdown documents with frontmatter, headings, links, and diagnostics"
-    )]
-    List(DocumentsArgs),
     #[command(about = "Emit grouped document counts")]
     Summary(DocsSummaryArgs),
     #[command(about = "Emit one document plus incoming, outgoing, and unresolved outgoing links")]
@@ -355,14 +350,6 @@ pub struct RepairApplyArgs {
 }
 
 #[derive(Debug, Parser)]
-pub struct DocumentsArgs {
-    #[command(flatten)]
-    pub filters: FrontmatterFilterArgs,
-    #[arg(long, value_enum, help = "Stdout format")]
-    pub format: Option<OutputFormat>,
-}
-
-#[derive(Debug, Parser)]
 pub struct GraphArgs {
     #[arg(long, value_enum, help = "Stdout format")]
     pub format: Option<OutputFormat>,
@@ -401,17 +388,112 @@ pub struct DocsSummaryArgs {
     pub format: Option<OutputFormat>,
 }
 
-#[derive(Debug, Parser)]
-pub struct SearchArgs {
-    #[command(flatten)]
-    pub filters: FrontmatterFilterArgs,
+#[derive(Args, Debug)]
+pub struct FindArgs {
+    // ── Predicate operators ─────────────────────────────────────────────
+    /// Full-text body substring. Case-insensitive. Empty string is a no-op.
+    #[arg(long, value_name = "NEEDLE")]
+    pub text: Option<String>,
+
+    /// Frontmatter equality predicate `field:value`. JSON-typed (e.g.
+    /// `--eq published:true` for bool, `--eq priority:5` for number).
+    /// Repeat for multiple predicates; ALL-of across repeats.
+    #[arg(long = "eq", value_name = "FIELD:VALUE")]
+    pub eq: Vec<String>,
+
+    /// Frontmatter `field` is one of the comma-separated values (ANY-of).
+    /// E.g. `--in status:backlog,active`. Repeat for multiple fields;
+    /// ALL-of across repeats.
+    #[arg(long = "in", value_name = "FIELD:V1,V2,...")]
+    pub r#in: Vec<String>,
+
+    /// Frontmatter `field` is NOT one of the comma-separated values.
+    #[arg(long = "not-in", value_name = "FIELD:V1,V2,...")]
+    pub not_in: Vec<String>,
+
+    /// Frontmatter `field` is present (non-null). Repeat for multiple fields.
+    #[arg(long = "has", value_name = "FIELD")]
+    pub has: Vec<String>,
+
+    /// Frontmatter `field` is absent or null. Repeat for multiple fields.
+    #[arg(long = "missing", value_name = "FIELD")]
+    pub missing: Vec<String>,
+
+    /// Frontmatter `field` (a date) is before `DATE`. ISO 8601 expected.
+    /// E.g. `--before created:2026-05-01`.
+    #[arg(long = "before", value_name = "FIELD:DATE")]
+    pub before: Vec<String>,
+
+    /// Frontmatter `field` (a date) is after `DATE`.
+    #[arg(long = "after", value_name = "FIELD:DATE")]
+    pub after: Vec<String>,
+
+    /// Frontmatter `field` (a date) is exactly `DATE`. Accepts `today`.
+    #[arg(long = "on", value_name = "FIELD:DATE")]
+    pub on: Vec<String>,
+
+    /// Path glob pattern. Repeat for multiple patterns (ANY-of).
+    #[arg(long = "path", value_name = "GLOB")]
+    pub path: Vec<String>,
+
+    // ── Sort / limit / paging ───────────────────────────────────────────
+    /// Sort by field (frontmatter key, `path`, or `stem`). Ascending by default.
+    #[arg(long, value_name = "FIELD")]
+    pub sort: Option<String>,
+
+    /// Sort descending (only meaningful with --sort).
+    #[arg(long)]
+    pub desc: bool,
+
+    /// Maximum number of matches to return. Default 10.
     #[arg(
         long,
-        help = "Require an exact literal substring in the Markdown file contents. Repeat to require multiple substrings"
+        value_name = "N",
+        default_value = "10",
+        conflicts_with = "no_limit"
     )]
-    pub text: Vec<String>,
-    #[arg(long, value_enum, help = "Stdout format")]
-    pub format: Option<OutputFormat>,
+    pub limit: usize,
+
+    /// Return all matches; no limit. Overrides --limit.
+    #[arg(long = "no-limit")]
+    pub no_limit: bool,
+
+    /// 1-indexed starting offset for paging. Default 1.
+    #[arg(long = "starts-at", value_name = "N", default_value = "1")]
+    pub starts_at: usize,
+
+    // ── Output ───────────────────────────────────────────────────────────
+    /// Output format. Default auto-detects: TTY → records, piped → paths.
+    #[arg(long, value_enum)]
+    pub format: Option<FindFormat>,
+
+    /// Comma-separated list of frontmatter fields to include in output.
+    /// Default: all (records/json/jsonl). Ignored with warning on paths format.
+    #[arg(long, value_name = "FIELD1,FIELD2,...", value_delimiter = ',')]
+    pub col: Vec<String>,
+
+    /// Color output. Default auto (TTY-detect). Honors NO_COLOR / CLICOLOR_FORCE.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub color: ColorWhen,
+
+    /// Skip the pager even when stdout is a TTY.
+    #[arg(long = "no-pager")]
+    pub no_pager: bool,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindFormat {
+    Paths,
+    Records,
+    Json,
+    Jsonl,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorWhen {
+    Always,
+    Auto,
+    Never,
 }
 
 #[derive(Debug, Parser)]

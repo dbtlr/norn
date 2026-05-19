@@ -337,3 +337,253 @@ fn has_diagnostic_errors_true_when_read_error_present() {
 
     assert!(cache.has_diagnostic_errors().unwrap());
 }
+
+#[test]
+fn frontmatter_in_set_any_of() {
+    let (_tmp, root) = synth_vault();
+    let cache = populate_cache(&root);
+
+    let query = DocumentQuery {
+        frontmatter_in: vec![(
+            "kind".to_string(),
+            vec![serde_json::json!("log"), serde_json::json!("meeting")],
+        )],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    // synth_vault has note-a.md (kind=log) and note-b.md (kind=meeting);
+    // workspace.md has no kind; untyped.md has no frontmatter.
+    assert_eq!(paths(&result), vec!["note-a.md", "note-b.md"]);
+}
+
+#[test]
+fn frontmatter_in_single_value_matches_eq() {
+    let (_tmp, root) = synth_vault();
+    let cache = populate_cache(&root);
+
+    // `--in kind:log` with a single-element list should behave like `--eq kind:log`.
+    let in_query = DocumentQuery {
+        frontmatter_in: vec![("kind".to_string(), vec![serde_json::json!("log")])],
+        ..Default::default()
+    };
+    let eq_query = DocumentQuery {
+        frontmatter_eq: vec![("kind".to_string(), serde_json::json!("log"))],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        paths(&cache.documents_matching(&in_query).unwrap()),
+        paths(&cache.documents_matching(&eq_query).unwrap())
+    );
+}
+
+#[test]
+fn frontmatter_not_in_set_excludes_listed_values() {
+    let (_tmp, root) = synth_vault();
+    let cache = populate_cache(&root);
+
+    let query = DocumentQuery {
+        frontmatter_not_in: vec![("type".to_string(), vec![serde_json::json!("workspace")])],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    // type=workspace excluded; everything else (including docs without `type`) kept.
+    // SQLite IN/NOT IN semantics with NULL: NULL is neither in nor not in any list.
+    // Docs without `type` will have json_extract → NULL; NOT IN returns NULL (not TRUE).
+    // So docs without `type` are excluded. Document this in the round-trip test.
+    assert_eq!(paths(&result), vec!["note-a.md", "note-b.md"]);
+}
+
+#[test]
+fn frontmatter_in_combined_with_eq() {
+    let (_tmp, root) = synth_vault();
+    let cache = populate_cache(&root);
+
+    let query = DocumentQuery {
+        frontmatter_eq: vec![("type".to_string(), serde_json::json!("note"))],
+        frontmatter_in: vec![(
+            "kind".to_string(),
+            vec![serde_json::json!("log"), serde_json::json!("meeting")],
+        )],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    assert_eq!(paths(&result), vec!["note-a.md", "note-b.md"]);
+}
+
+fn synth_dated_vault() -> (TempDir, Utf8PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+        .unwrap()
+        .join("vault");
+    std::fs::create_dir(root.as_std_path()).unwrap();
+    std::fs::write(
+        root.join("old.md").as_std_path(),
+        "---\ncreated: 2025-01-15\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("mid.md").as_std_path(),
+        "---\ncreated: 2026-05-19\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("new.md").as_std_path(),
+        "---\ncreated: 2026-12-01\n---\n",
+    )
+    .unwrap();
+    (tmp, root)
+}
+
+#[test]
+fn date_before_filters_chronologically() {
+    let (_tmp, root) = synth_dated_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    let query = DocumentQuery {
+        date_before: vec![("created".to_string(), "2026-01-01".to_string())],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    assert_eq!(paths(&result), vec!["old.md"]);
+}
+
+#[test]
+fn date_after_filters_chronologically() {
+    let (_tmp, root) = synth_dated_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    let query = DocumentQuery {
+        date_after: vec![("created".to_string(), "2026-01-01".to_string())],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    assert_eq!(paths(&result), vec!["mid.md", "new.md"]);
+}
+
+#[test]
+fn date_on_filters_exact_match() {
+    let (_tmp, root) = synth_dated_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    let query = DocumentQuery {
+        date_on: vec![("created".to_string(), "2026-05-19".to_string())],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    assert_eq!(paths(&result), vec!["mid.md"]);
+}
+
+#[test]
+fn date_predicates_compose_to_range() {
+    let (_tmp, root) = synth_dated_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    // 2026 only: after 2026-01-01 AND before 2026-12-31
+    // mid.md=2026-05-19, new.md=2026-12-01 — both fall within the range.
+    let query = DocumentQuery {
+        date_after: vec![("created".to_string(), "2026-01-01".to_string())],
+        date_before: vec![("created".to_string(), "2026-12-31".to_string())],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    assert_eq!(paths(&result), vec!["mid.md", "new.md"]);
+}
+
+fn synth_text_vault() -> (TempDir, Utf8PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+        .unwrap()
+        .join("vault");
+    std::fs::create_dir(root.as_std_path()).unwrap();
+    std::fs::write(
+        root.join("sqlite.md").as_std_path(),
+        "---\ntype: note\n---\nThis note discusses SQLite cache design.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("rust.md").as_std_path(),
+        "---\ntype: note\n---\nThis note is about Rust generics.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("both.md").as_std_path(),
+        "---\ntype: note\n---\nThis note covers both Rust AND sqlite topics.\n",
+    )
+    .unwrap();
+    (tmp, root)
+}
+
+#[test]
+fn body_text_substring_matches() {
+    let (_tmp, root) = synth_text_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    let query = DocumentQuery {
+        body_text_contains: Some("SQLite".to_string()),
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    // Case-insensitive — both "SQLite" (sqlite.md) and "sqlite" (both.md) match.
+    assert_eq!(paths(&result), vec!["both.md", "sqlite.md"]);
+}
+
+#[test]
+fn body_text_case_insensitive_lowercase_needle() {
+    let (_tmp, root) = synth_text_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    let query = DocumentQuery {
+        body_text_contains: Some("sqlite".to_string()),
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    // Lowercase needle matches both casings.
+    assert_eq!(paths(&result), vec!["both.md", "sqlite.md"]);
+}
+
+#[test]
+fn body_text_combined_with_metadata() {
+    let (_tmp, root) = synth_text_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    let query = DocumentQuery {
+        frontmatter_eq: vec![("type".to_string(), serde_json::json!("note"))],
+        body_text_contains: Some("Rust".to_string()),
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    assert_eq!(paths(&result), vec!["both.md", "rust.md"]);
+}
+
+#[test]
+fn body_text_no_matches_returns_empty() {
+    let (_tmp, root) = synth_text_vault();
+    let mut cache = Cache::open(&root).unwrap();
+    cache.rebuild(&root).unwrap();
+
+    let query = DocumentQuery {
+        body_text_contains: Some("nonexistent-keyword-xyzzy".to_string()),
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+
+    assert_eq!(result.len(), 0);
+}

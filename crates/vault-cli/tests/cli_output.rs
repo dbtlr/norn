@@ -1,7 +1,6 @@
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -112,22 +111,6 @@ fn vault_error_env(args: &[&str], envs: &[(&str, &str)]) -> String {
     String::from_utf8(output.stderr).expect("stderr should be UTF-8")
 }
 
-fn vault_in_dir(args: &[&str], current_dir: &PathBuf) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
-    command.current_dir(current_dir).args(args);
-    let _cache_dir = isolate_cache(&mut command);
-    let output = command.output().expect("vault command should run");
-
-    assert!(
-        output.status.success(),
-        "vault command failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    String::from_utf8(output.stdout).expect("stdout should be UTF-8")
-}
-
 fn temp_cache_dir() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -154,7 +137,6 @@ fn vault_help_documents_global_cwd() {
     assert!(output.contains("docs"));
     assert!(output.contains("files"));
     assert!(output.contains("links"));
-    assert!(output.contains("search"));
     assert!(output.contains("registry"));
     assert!(output.contains("repair"));
     assert!(output.contains("cache"));
@@ -170,7 +152,7 @@ fn graph_umbrella_is_removed() {
 fn grouped_help_lists_new_surfaces() {
     let output = vault(&["docs", "--help"]);
     assert!(output.contains("Parsed Markdown documents"));
-    assert!(output.contains("list"));
+    assert!(output.contains("summary"));
     assert!(output.contains("inspect"));
 
     let output = vault(&["links", "--help"]);
@@ -206,14 +188,6 @@ fn grouped_help_lists_new_surfaces() {
     assert!(output.contains("reports skipped fallout as context"));
     assert!(output.contains("stale hashes"));
     assert!(!output.contains("manual-decision"));
-
-    let output = vault(&["search", "--help"]);
-    assert!(output.contains("Deterministic document search"));
-    assert!(output.contains("--filter"));
-    assert!(output.contains("--path"));
-    assert!(output.contains("--has"));
-    assert!(output.contains("--missing"));
-    assert!(output.contains("--text"));
 }
 
 #[test]
@@ -784,11 +758,7 @@ fn registry_add_list_target_and_remove_are_isolated_by_xdg_config_home() {
     assert_eq!(entries[0]["name"], "basic");
     assert_eq!(entries[0]["path"], fixture_string);
 
-    let docs = vault_success_env(
-        &["--vault", "basic", "docs", "list", "--format", "paths"],
-        &envs,
-    )
-    .0;
+    let docs = vault_success_env(&["--vault", "basic", "files", "--format", "paths"], &envs).0;
     assert!(docs.lines().any(|line| line == "alpha.md"));
 
     vault_success_env(&["registry", "remove", "basic"], &envs);
@@ -812,30 +782,13 @@ fn vault_targeting_rejects_vault_and_cwd_together() {
         &envs,
     );
     let error = vault_error_env(
-        &[
-            "--vault",
-            "basic",
-            "-C",
-            fixture_string.as_str(),
-            "docs",
-            "list",
-        ],
+        &["--vault", "basic", "-C", fixture_string.as_str(), "files"],
         &envs,
     );
 
     assert!(error.contains("--vault and -C/--cwd cannot be used together"));
 
     fs::remove_dir_all(config_home).ok();
-}
-
-#[test]
-fn graph_documents_help_documents_frontmatter_filter() {
-    let output = vault(&["docs", "list", "--help"]);
-    assert!(output.contains("Frontmatter field:value filter"));
-    assert!(output.contains("--path"));
-    assert!(output.contains("--has"));
-    assert!(output.contains("--missing"));
-    assert!(output.contains("[possible values: json, jsonl, table, paths]"));
 }
 
 #[test]
@@ -848,101 +801,6 @@ fn docs_summary_help_documents_count_by() {
 fn docs_inspect_defaults_to_json() {
     let output = vault(&["docs", "inspect", "--help"]);
     assert!(output.contains("[default: json]"));
-}
-
-#[test]
-fn omitted_list_format_defaults_to_json_when_stdout_is_piped() {
-    let root = fixture_root();
-    let output = vault(&["-C", root.to_str().unwrap(), "docs", "list"]);
-
-    let documents = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert!(documents.as_array().unwrap().iter().any(|document| {
-        document["path"] == "alpha.md" && document["frontmatter"]["title"] == "Alpha"
-    }));
-}
-
-#[test]
-fn docs_list_supports_table_and_paths_formats() {
-    let root = fixture_root();
-    let table = vault(&[
-        "-C",
-        root.to_str().unwrap(),
-        "docs",
-        "list",
-        "--format",
-        "table",
-    ]);
-
-    assert!(table.contains("path"));
-    assert!(table.contains("title"));
-    assert!(table.contains("diagnostics"));
-    assert!(table.contains("alpha.md"));
-    assert!(table.contains("Alpha"));
-
-    let paths = vault(&[
-        "-C",
-        root.to_str().unwrap(),
-        "docs",
-        "list",
-        "--format",
-        "paths",
-    ]);
-
-    assert!(paths.lines().any(|line| line == "alpha.md"));
-    assert!(paths.lines().any(|line| line == "folder/gamma.md"));
-    assert!(!paths.contains('{'));
-}
-
-#[test]
-fn search_filters_metadata_and_literal_text() {
-    let root = fixture_root();
-    let output = vault(&[
-        "-C",
-        root.to_str().unwrap(),
-        "search",
-        "--filter",
-        "status:draft",
-        "--text",
-        "ambiguous link",
-        "--format",
-        "json",
-    ]);
-
-    let documents = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(documents.as_array().unwrap().len(), 1);
-    assert_eq!(documents[0]["path"], "alpha.md");
-}
-
-#[test]
-fn search_supports_path_presence_table_and_paths_formats() {
-    let root = fixture_root();
-    let paths = vault(&[
-        "-C",
-        root.to_str().unwrap(),
-        "search",
-        "--path",
-        "folder/**",
-        "--text",
-        "Delta Heading",
-        "--format",
-        "paths",
-    ]);
-
-    assert_eq!(paths, "folder/delta.md\n");
-
-    let table = vault(&[
-        "-C",
-        root.to_str().unwrap(),
-        "search",
-        "--has",
-        "status",
-        "--format",
-        "table",
-    ]);
-
-    assert!(table.contains("path"));
-    assert!(table.contains("alpha.md"));
-    assert!(table.contains("Alpha"));
 }
 
 #[test]
@@ -1111,68 +969,6 @@ fn validate_missing_default_config_uses_defaults() {
 
     let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
     assert_eq!(findings.as_array().unwrap().len(), 0);
-
-    fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn commands_default_to_process_current_directory() {
-    let root = temp_cache_dir();
-    fs::create_dir_all(&root).expect("temp dir should be created");
-    fs::write(root.join("note.md"), "# Note\n").expect("note should write");
-
-    let output = vault_in_dir(&["docs", "list", "--format", "json"], &root);
-
-    let documents = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(documents.as_array().unwrap().len(), 1);
-    assert_eq!(documents[0]["path"], "note.md");
-
-    fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn graph_jsonl_tolerates_early_closing_stdout_consumers() {
-    let root = temp_cache_dir();
-    fs::create_dir_all(&root).expect("temp dir should be created");
-    for index in 0..2_000 {
-        fs::write(
-            root.join(format!("note-{index}.md")),
-            format!("---\ntitle: Note {index}\n---\n# Note {index}\n"),
-        )
-        .expect("note should write");
-    }
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vault"))
-        .args([
-            "-C",
-            root.to_str().unwrap(),
-            "docs",
-            "list",
-            "--format",
-            "jsonl",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("vault command should spawn");
-
-    let stdout = child.stdout.take().expect("stdout should be piped");
-    let mut reader = BufReader::new(stdout);
-    let mut first_line = String::new();
-    reader
-        .read_line(&mut first_line)
-        .expect("first JSONL row should be readable");
-    assert!(serde_json::from_str::<Value>(&first_line).is_ok());
-    drop(reader);
-
-    let output = child.wait_with_output().expect("vault command should exit");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "vault command failed after closed pipe\nstderr:\n{stderr}"
-    );
-    assert!(!stderr.contains("panicked"));
-    assert!(!stderr.contains("Broken pipe"));
 
     fs::remove_dir_all(root).ok();
 }
@@ -1848,9 +1644,8 @@ fn validate_ignore_skips_validation_without_graph_ignore() {
     assert_eq!(findings.as_array().unwrap().len(), 1);
     assert_eq!(findings[0]["path"], "active.md");
 
-    let graph_output = vault(&[
-        "docs",
-        "list",
+    let files_output = vault(&[
+        "files",
         "-C",
         root.to_str().unwrap(),
         "--config",
@@ -1858,12 +1653,12 @@ fn validate_ignore_skips_validation_without_graph_ignore() {
         "--format",
         "json",
     ]);
-    let documents = serde_json::from_str::<Value>(&graph_output).expect("output should be JSON");
-    assert!(documents
+    let files = serde_json::from_str::<Value>(&files_output).expect("output should be JSON");
+    assert!(files
         .as_array()
         .unwrap()
         .iter()
-        .any(|document| document["path"] == "Templates/template.md"));
+        .any(|file| file["path"] == "Templates/template.md"));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
@@ -2014,352 +1809,6 @@ fn validate_reports_forbidden_frontmatter_and_path_violations() {
 }
 
 #[test]
-fn graph_documents_jsonl_contract() {
-    let root = fixture_root();
-    let output = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--format",
-        "jsonl",
-    ]);
-
-    let documents = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(documents.len(), 10);
-    let alpha = documents
-        .iter()
-        .find(|document| document["path"] == "alpha.md")
-        .unwrap();
-    let beta = documents
-        .iter()
-        .find(|document| document["path"] == "beta.md")
-        .unwrap();
-    let broken = documents
-        .iter()
-        .find(|document| document["path"] == "broken-frontmatter.md")
-        .unwrap();
-    let frontmatter_source = documents
-        .iter()
-        .find(|document| document["path"] == "frontmatter-source.md")
-        .unwrap();
-
-    assert_eq!(alpha["frontmatter"]["title"], "Alpha");
-    assert_eq!(alpha["headings"][0]["slug"], "alpha");
-    assert_eq!(alpha["headings"][0]["source_span"]["line"], 8);
-    assert_eq!(alpha["links"].as_array().unwrap().len(), 18);
-    assert!(alpha["links"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|link| link["raw"] == "[[beta|Beta Note]]" && link["label"] == "Beta Note"));
-    assert!(alpha["links"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|link| link["raw"] == "[[#Alpha]]"
-            && link["resolved_path"] == "alpha.md"
-            && link["status"] == "resolved"));
-    assert!(alpha["links"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|link| link["raw"] == "[[#^alpha-block]]"
-            && link["resolved_path"] == "alpha.md"
-            && link["status"] == "resolved"));
-    assert!(alpha["links"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|link| link["raw"] == "[[beta#^block-a]]" && link["block_ref"] == "block-a"));
-    assert_eq!(alpha["block_ids"][0], "alpha-block");
-    assert_eq!(beta["block_ids"][0], "block-a");
-    assert_eq!(frontmatter_source["links"].as_array().unwrap().len(), 4);
-    assert_eq!(
-        frontmatter_source["links"][1]["source_context"],
-        serde_json::json!({"area": "frontmatter", "property": "related"})
-    );
-    assert_eq!(frontmatter_source["links"][1]["source_span"]["line"], 3);
-    assert_eq!(frontmatter_source["links"][1]["source_span"]["column"], 11);
-    assert_eq!(
-        frontmatter_source["links"][2]["source_context"],
-        serde_json::json!({"area": "frontmatter", "property": "related_list"})
-    );
-    assert_eq!(frontmatter_source["links"][2]["source_span"]["line"], 5);
-    assert_eq!(frontmatter_source["links"][2]["source_span"]["column"], 6);
-    assert_eq!(
-        broken["diagnostics"][0],
-        serde_json::json!({
-            "severity": "warning",
-            "code": "frontmatter-parse-failed",
-            "message": "frontmatter could not be parsed"
-        })
-    );
-}
-
-#[test]
-fn graph_config_ignores_files_before_indexing() {
-    let root = temp_cache_dir();
-    fs::create_dir_all(root.join("__pycache__")).expect("temp dirs should be created");
-    fs::write(root.join("kept.md"), "# Kept\n\n[[ignored]]\n").expect("kept note should write");
-    fs::write(root.join("ignored.md"), "# Ignored\n").expect("ignored note should write");
-    fs::write(root.join("__pycache__/ignored.pyc"), "compiled").expect("ignored file should write");
-    fs::write(
-        root.join("vault.yaml"),
-        "files:\n  ignore:\n    - ignored.md\n    - __pycache__/**\n",
-    )
-    .expect("config should write");
-
-    let documents = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--config",
-        root.join("vault.yaml").to_str().unwrap(),
-        "--format",
-        "json",
-    ]);
-    let documents = serde_json::from_str::<Value>(&documents).expect("output should be JSON");
-    assert_eq!(documents.as_array().unwrap().len(), 1);
-    assert_eq!(documents[0]["path"], "kept.md");
-
-    let files = vault(&[
-        "files",
-        "-C",
-        root.to_str().unwrap(),
-        "--config",
-        root.join("vault.yaml").to_str().unwrap(),
-        "--format",
-        "json",
-    ]);
-    let files = serde_json::from_str::<Value>(&files).expect("output should be JSON");
-    assert_eq!(files.as_array().unwrap().len(), 2);
-    assert!(files
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|file| file["path"] == "kept.md"));
-    assert!(files
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|file| file["path"] == "vault.yaml"));
-
-    fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn graph_ignore_config_key_reports_v0_16_rename() {
-    let root = temp_cache_dir();
-    fs::create_dir_all(&root).expect("temp dir should be created");
-    fs::write(root.join("note.md"), "# Note\n").expect("note should write");
-    fs::write(
-        root.join("vault.yaml"),
-        "graph:\n  ignore:\n    - ignored.md\n",
-    )
-    .expect("config should write");
-
-    let error = vault_error(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--config",
-        root.join("vault.yaml").to_str().unwrap(),
-    ]);
-
-    assert!(error.contains("'graph.ignore' was renamed to 'files.ignore' in v0.16"));
-
-    fs::remove_dir_all(root).ok();
-}
-
-#[test]
-fn graph_documents_filters_frontmatter_scalars() {
-    let root = fixture_root();
-    let output = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--filter",
-        "status:draft",
-        "--format",
-        "jsonl",
-    ]);
-
-    let documents = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0]["path"], "alpha.md");
-}
-
-#[test]
-fn graph_documents_filters_frontmatter_lists() {
-    let root = fixture_root();
-    let output = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--filter",
-        "aliases:First Note",
-        "--format",
-        "jsonl",
-    ]);
-
-    let documents = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0]["path"], "alpha.md");
-}
-
-#[test]
-fn graph_documents_filters_frontmatter_value_sets() {
-    let root = fixture_root();
-    let output = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--filter",
-        "title:Alpha,Frontmatter Source",
-        "--format",
-        "jsonl",
-    ]);
-
-    let documents = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    let paths = documents
-        .iter()
-        .map(|document| document["path"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(paths, vec!["alpha.md", "frontmatter-source.md"]);
-}
-
-#[test]
-fn graph_documents_filters_by_path_glob() {
-    let root = fixture_root();
-    let output = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--path",
-        "other/*.md",
-        "--format",
-        "jsonl",
-    ]);
-
-    let documents = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0]["path"], "other/duplicate.md");
-}
-
-#[test]
-fn graph_documents_filters_by_frontmatter_existence() {
-    let root = fixture_root();
-    let output = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--has",
-        "aliases",
-        "--format",
-        "jsonl",
-    ]);
-
-    let documents = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0]["path"], "alpha.md");
-
-    let output = vault(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--missing",
-        "aliases",
-        "--format",
-        "jsonl",
-    ]);
-
-    let documents = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(documents.len(), 9);
-    assert!(!documents
-        .iter()
-        .any(|document| document["path"] == "alpha.md"));
-}
-
-#[test]
-fn graph_documents_warns_when_filter_field_is_absent_everywhere() {
-    let root = fixture_root();
-    let (stdout, stderr) = vault_success(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--filter",
-        "path:alpha.md",
-        "--format",
-        "json",
-    ]);
-
-    let documents = serde_json::from_str::<Value>(&stdout).expect("output should be JSON");
-    assert_eq!(documents.as_array().unwrap().len(), 0);
-    assert!(stderr.contains(
-        "warning: --filter field 'path' is not a frontmatter key in any document; returning empty result"
-    ));
-}
-
-#[test]
-fn graph_documents_warns_when_missing_field_is_absent_everywhere() {
-    let root = fixture_root();
-    let (stdout, stderr) = vault_success(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--missing",
-        "nosuch",
-        "--format",
-        "json",
-    ]);
-
-    let documents = serde_json::from_str::<Value>(&stdout).expect("output should be JSON");
-    assert_eq!(documents.as_array().unwrap().len(), 0);
-    assert!(stderr.contains(
-        "warning: --missing field 'nosuch' is not a frontmatter key in any document; returning empty result"
-    ));
-}
-
-#[test]
 fn docs_summary_counts_frontmatter_values() {
     let root = fixture_root();
     let output = vault(&[
@@ -2378,23 +1827,6 @@ fn docs_summary_counts_frontmatter_values() {
     assert_eq!(summary["total"], 10);
     assert_eq!(summary["counts"]["Alpha"], 1);
     assert_eq!(summary["counts"]["Frontmatter Source"], 1);
-}
-
-#[test]
-fn graph_documents_rejects_invalid_filters() {
-    let root = fixture_root();
-    let stderr = vault_error(&[
-        "docs",
-        "list",
-        "-C",
-        root.to_str().unwrap(),
-        "--filter",
-        "status",
-        "--format",
-        "jsonl",
-    ]);
-
-    assert!(stderr.contains("invalid filter, expected field:value"));
 }
 
 #[test]

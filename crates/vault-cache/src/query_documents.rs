@@ -114,29 +114,7 @@ impl crate::Cache {
 }
 
 fn build_documents_matching_sql(query: &DocumentQuery) -> (String, Vec<SqlValue>) {
-    let mut where_clauses: Vec<&'static str> = Vec::new();
-    let mut binds: Vec<SqlValue> = Vec::new();
-
-    for (field, value) in &query.frontmatter_eq {
-        where_clauses.push("json_extract(frontmatter_json, ?) = ?");
-        binds.push(SqlValue::Text(json_path_for(field)));
-        binds.push(json_value_to_sql(value));
-    }
-    for field in &query.frontmatter_has {
-        where_clauses.push("json_extract(frontmatter_json, ?) IS NOT NULL");
-        binds.push(SqlValue::Text(json_path_for(field)));
-    }
-    for field in &query.frontmatter_missing {
-        where_clauses.push("json_extract(frontmatter_json, ?) IS NULL");
-        binds.push(SqlValue::Text(json_path_for(field)));
-    }
-
-    let where_sql = if where_clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", where_clauses.join(" AND "))
-    };
-
+    let (where_sql, binds) = build_documents_matching_sql_parts(query);
     let sql = format!(
         "SELECT path, stem, hash, frontmatter_json, body_text \
          FROM documents{} ORDER BY path",
@@ -145,13 +123,106 @@ fn build_documents_matching_sql(query: &DocumentQuery) -> (String, Vec<SqlValue>
     (sql, binds)
 }
 
+pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (String, Vec<SqlValue>) {
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut binds: Vec<SqlValue> = Vec::new();
+
+    for (field, value) in &query.frontmatter_eq {
+        where_clauses.push("json_extract(frontmatter_json, ?) = ?".to_string());
+        binds.push(SqlValue::Text(json_path_for(field)));
+        binds.push(json_value_to_sql(value));
+    }
+    for field in &query.frontmatter_has {
+        where_clauses.push("json_extract(frontmatter_json, ?) IS NOT NULL".to_string());
+        binds.push(SqlValue::Text(json_path_for(field)));
+    }
+    for field in &query.frontmatter_missing {
+        where_clauses.push("json_extract(frontmatter_json, ?) IS NULL".to_string());
+        binds.push(SqlValue::Text(json_path_for(field)));
+    }
+
+    // --in field:v1,v2,...
+    for (field, values) in &query.frontmatter_in {
+        if values.is_empty() {
+            // `--in field:` with no values matches nothing.
+            where_clauses.push("0".to_string());
+            continue;
+        }
+        let placeholders = std::iter::repeat_n("?", values.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        where_clauses.push(format!(
+            "json_extract(frontmatter_json, ?) IN ({})",
+            placeholders
+        ));
+        binds.push(SqlValue::Text(json_path_for(field)));
+        for v in values {
+            binds.push(json_value_to_sql(v));
+        }
+    }
+
+    // --not-in field:v1,v2,...
+    for (field, values) in &query.frontmatter_not_in {
+        if values.is_empty() {
+            // `--not-in field:` with no values is a no-op.
+            continue;
+        }
+        let placeholders = std::iter::repeat_n("?", values.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        where_clauses.push(format!(
+            "json_extract(frontmatter_json, ?) NOT IN ({})",
+            placeholders
+        ));
+        binds.push(SqlValue::Text(json_path_for(field)));
+        for v in values {
+            binds.push(json_value_to_sql(v));
+        }
+    }
+
+    // --before field:DATE
+    for (field, date) in &query.date_before {
+        where_clauses.push("json_extract(frontmatter_json, ?) < ?".to_string());
+        binds.push(SqlValue::Text(json_path_for(field)));
+        binds.push(SqlValue::Text(date.clone()));
+    }
+
+    // --after field:DATE
+    for (field, date) in &query.date_after {
+        where_clauses.push("json_extract(frontmatter_json, ?) > ?".to_string());
+        binds.push(SqlValue::Text(json_path_for(field)));
+        binds.push(SqlValue::Text(date.clone()));
+    }
+
+    // --on field:DATE
+    for (field, date) in &query.date_on {
+        where_clauses.push("json_extract(frontmatter_json, ?) = ?".to_string());
+        binds.push(SqlValue::Text(json_path_for(field)));
+        binds.push(SqlValue::Text(date.clone()));
+    }
+
+    // body_text_contains: case-insensitive substring on body_text.
+    if let Some(needle) = &query.body_text_contains {
+        where_clauses.push("LOWER(body_text) LIKE '%' || LOWER(?) || '%'".to_string());
+        binds.push(SqlValue::Text(needle.clone()));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clauses.join(" AND "))
+    };
+
+    (where_sql, binds)
+}
+
 /// Convert a `serde_json::Value` scalar to the native SQLite type that
 /// `json_extract` returns for that same value.  This lets the `= ?` predicate
 /// compare apples-to-apples: `json_extract` strips JSON encoding and returns
 /// TEXT for strings, INTEGER for integers/booleans, REAL for floats, and NULL
 /// for JSON null.  Objects and arrays are left JSON-encoded (TEXT) because
 /// `json_extract` on an object/array column also returns JSON text.
-fn json_value_to_sql(v: &serde_json::Value) -> SqlValue {
+pub(crate) fn json_value_to_sql(v: &serde_json::Value) -> SqlValue {
     match v {
         serde_json::Value::Null => SqlValue::Null,
         serde_json::Value::Bool(b) => SqlValue::Integer(if *b { 1 } else { 0 }),

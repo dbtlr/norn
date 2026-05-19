@@ -11,10 +11,12 @@ pub mod error;
 pub mod query;
 
 pub use error::CacheError;
+pub use find::{FindQuery, FindResult, SortClause, SortDirection};
 pub use query::{json_path_for, DocumentQuery};
 pub use vault_core::DocumentSummary;
 
 mod change_detection;
+mod find;
 mod identity;
 mod invalidation;
 mod lock;
@@ -69,5 +71,14 @@ impl Cache {
         let _ = std::fs::remove_file(wal.as_std_path());
         let _ = std::fs::remove_file(shm.as_std_path());
         Ok(())
+    }
+
+    /// Expose the underlying connection for query-plan tests.
+    ///
+    /// Only compiled when the `test-utils` feature is enabled or during
+    /// `cargo test` (integration tests need it via the crate's public API).
+    #[doc(hidden)]
+    pub fn conn_for_test(&self) -> &rusqlite::Connection {
+        &self.conn
     }
 }
