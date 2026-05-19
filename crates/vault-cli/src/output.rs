@@ -254,7 +254,7 @@ pub fn write_repair_plan(plan: &RepairPlan, format: OutputFormat) -> Result<()> 
                         vec![
                             change.path.to_string(),
                             change.operation.clone(),
-                            change.field.clone(),
+                            change.field.clone().unwrap_or_default(),
                             change
                                 .expected_old_value
                                 .as_ref()

@@ -6,7 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it ships v1.0. Pre-1.0 versions may include breaking changes in minor releases.
 
-## Unreleased (v0.27.0)
+## v0.28.0 - 2026-05-18
+
+Closes the validate → plan → apply → verify loop for `frontmatter-required-field-missing` and `document-misrouted` findings by adding two new repair actions. Bumps the repair plan JSON schema to v4.
+
+### Breaking changes
+
+- **Repair plan JSON schema bumps from v3 to v4.** `vault repair apply` rejects v3 plans with `unsupported repair plan schema version: expected 4, got 3`. No migration shim. Regenerate any persisted plans with `vault repair plan` against v0.28.0+.
+- **`PlannedChange` adds new top-level fields** (`destination`, `link_risk`, `warnings`). The `field` field changes from `String` to `Option<String>` (`None` for `move_document` changes). Any tooling consuming the plan JSON must handle the new fields (or ignore them) and the optional field shape; strict-schema consumers will need updates.
+- **`vault repair apply`'s default blast radius is wider when a plan contains `move_document` actions.** Apply now writes to every file containing a classifiable backlink to a moved file, not just the moved file itself. Agents and scripts that assumed `repair apply` only touches files named in `changes[].path` should now also expect writes to the files named in each move change's `link_risk.*.source_path` entries. The apply output's `moved_files` and `rewritten_links` reflect all written paths.
+
+### Added
+
+- `add_frontmatter` repair action — inserts a missing frontmatter field with a literal value. Refuses if the field already exists (use `set_frontmatter` for replacement). Same minimal-edit YAML preservation as set/remove.
+- `move_document` repair action — moves or renames a file. Accepts `to_directory` (sugar: file moves into the directory, filename preserved) or `to_path` (full destination including filename for rename or move+rename). Both support `{stem}`, `{filename}`, `{frontmatter.<field>}` placeholder substitution.
+- Automatic backlink rewriting on move. `vault repair apply` rewrites all classifiable backlinks (path-qualified wikilinks, Markdown links, and stem-only wikilinks when the stem changes) alongside the move. No flag required.
+- `PlanWarning::StemCollisionAfterMove` — informational warning attached to a planned move when the new stem already exists elsewhere in the vault. Non-blocking; reported in both plan and apply output.
+- `vault repair links --move-to <path>` — read-only analysis showing the link risk and warnings a proposed move would produce, without authoring a repair rule.
+- New `ApplyError` variants: `FieldAlreadyPresent`, `MoveDestinationExists`, `MoveSourceMissing`, `MoveSourceIsSymlink`.
+
+### Changed
+
+- The validate → plan → apply → verify loop now closes for `frontmatter-required-field-missing` and `document-misrouted` findings when a matching repair rule supplies the deterministic detail.
+- Substitution failures (missing frontmatter field, non-scalar value) skip the finding with `skip_reason: precondition_failed` and a specific reason string surfaced in the plan's `skipped_findings`.
+
+### Known limitations
+
+- When a backlinking file contains multiple identical link occurrences pointing at a moved file, `repair apply` rewrites only the first occurrence. Subsequent occurrences will flag as unresolved on the next `vault validate`. To be addressed in a follow-up by adopting byte-span-precise edits.
+
+## v0.27.0 - 2026-05-18
 
 Shell completion install UX.
 

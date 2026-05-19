@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use vault_core::GraphIndex;
 use vault_standards::apply::{
-    apply_file_changes, changes_by_path, validate_plan_for_apply, ApplyError,
+    apply_file_changes, apply_link_rewrites, apply_move, changes_by_path, validate_plan_for_apply,
+    ApplyError, LinkRewriteResult, MoveResult, RepairApplyWarning,
 };
-use vault_standards::{Finding, RepairPlan};
+use vault_standards::{Finding, PlannedChange, RepairPlan};
 
 #[allow(unused_imports)]
 pub use vault_standards::apply::{
@@ -21,6 +22,9 @@ pub fn apply_repair_plan(
 ) -> Result<RepairApplyReport> {
     validate_plan_for_apply(cwd, plan)?;
 
+    // Pass 1: per-file frontmatter edits. changes_by_path skips
+    // move_document, so the grouped map only contains set/remove/add
+    // frontmatter changes.
     let grouped = changes_by_path(plan)?;
 
     let mut report = RepairApplyReport::new(plan, dry_run);
@@ -59,6 +63,65 @@ pub fn apply_repair_plan(
             }
         }
     }
+
+    // Collect move_document changes for passes 2 and 3.
+    let move_changes: Vec<&PlannedChange> = plan
+        .changes
+        .iter()
+        .filter(|c| c.operation == "move_document")
+        .collect();
+
+    // Pass 2: filesystem moves.
+    let mut moves: Vec<MoveResult> = Vec::new();
+    for change in &move_changes {
+        if dry_run {
+            if let Some(destination) = change.destination.as_ref() {
+                moves.push(MoveResult {
+                    from: change.path.clone(),
+                    to: destination.clone(),
+                });
+            }
+        } else {
+            moves.push(apply_move(cwd, change)?);
+        }
+    }
+
+    // Pass 3: link rewrites (only after every move succeeded).
+    let mut rewrites: Vec<LinkRewriteResult> = Vec::new();
+    for change in &move_changes {
+        if dry_run {
+            if let Some(risk) = &change.link_risk {
+                for affected in risk
+                    .stem_links
+                    .iter()
+                    .chain(risk.path_qualified_wikilinks.iter())
+                    .chain(risk.markdown_links.iter())
+                {
+                    rewrites.push(LinkRewriteResult {
+                        file: affected.source_path.clone(),
+                        from: affected.raw.clone(),
+                        to: affected.rewritten.clone(),
+                    });
+                }
+            }
+        } else {
+            rewrites.extend(apply_link_rewrites(cwd, change)?);
+        }
+    }
+
+    let warnings: Vec<RepairApplyWarning> = move_changes
+        .iter()
+        .flat_map(|c| {
+            c.warnings.iter().map(|w| RepairApplyWarning {
+                path: c.path.clone(),
+                warning: w.clone(),
+            })
+        })
+        .collect();
+
+    report.moved_files = moves;
+    report.rewritten_links = rewrites;
+    report.warnings = warnings;
 
     Ok(report)
 }

@@ -99,6 +99,10 @@ pub struct RepairRule {
     pub set_frontmatter: Option<SetFrontmatterAction>,
     #[serde(default)]
     pub remove_frontmatter: Option<RemoveFrontmatterAction>,
+    #[serde(default)]
+    pub add_frontmatter: Option<AddFrontmatterAction>,
+    #[serde(default)]
+    pub move_document: Option<MoveDocumentAction>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -123,9 +127,41 @@ pub struct RemoveFrontmatterAction {
     pub field: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddFrontmatterAction {
+    pub field: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveDocumentAction {
+    #[serde(default)]
+    pub to_directory: Option<String>,
+    #[serde(default)]
+    pub to_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum DestinationSpec {
+    Directory { to_directory: String },
+    Path { to_path: String },
+}
+
+impl DestinationSpec {
+    pub fn raw(&self) -> &str {
+        match self {
+            DestinationSpec::Directory { to_directory } => to_directory,
+            DestinationSpec::Path { to_path } => to_path,
+        }
+    }
+}
+
 /// Repair rule action — derived from RepairRule by `action(...)` after
-/// post_validate ensures exactly one of `set_frontmatter` / `remove_frontmatter`
-/// is set. The existing engine code consumes this via the `action` accessor.
+/// post_validate ensures exactly one action field is set. The existing engine
+/// code consumes this via the `action` accessor.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepairAction {
@@ -136,19 +172,46 @@ pub enum RepairAction {
     RemoveFrontmatter {
         field: String,
     },
+    AddFrontmatter {
+        field: String,
+        value: serde_json::Value,
+    },
+    MoveDocument {
+        destination: DestinationSpec,
+    },
 }
 
 impl RepairRule {
     /// Returns the rule's action after post_validate has guaranteed exactly one is set.
     /// Panics if post_validate didn't run or didn't catch the invariant violation.
     pub fn action(&self) -> RepairAction {
-        match (&self.set_frontmatter, &self.remove_frontmatter) {
-            (Some(set), None) => RepairAction::SetFrontmatter {
+        match (
+            &self.set_frontmatter,
+            &self.remove_frontmatter,
+            &self.add_frontmatter,
+            &self.move_document,
+        ) {
+            (Some(set), None, None, None) => RepairAction::SetFrontmatter {
                 field: set.field.clone(),
                 value: set.value.clone(),
             },
-            (None, Some(remove)) => RepairAction::RemoveFrontmatter {
+            (None, Some(remove), None, None) => RepairAction::RemoveFrontmatter {
                 field: remove.field.clone(),
+            },
+            (None, None, Some(add), None) => RepairAction::AddFrontmatter {
+                field: add.field.clone(),
+                value: add.value.clone(),
+            },
+            (None, None, None, Some(mv)) => RepairAction::MoveDocument {
+                destination: match (&mv.to_directory, &mv.to_path) {
+                    (Some(dir), None) => DestinationSpec::Directory {
+                        to_directory: dir.clone(),
+                    },
+                    (None, Some(path)) => DestinationSpec::Path {
+                        to_path: path.clone(),
+                    },
+                    _ => unreachable!("post_validate ensures exactly one destination"),
+                },
             },
             _ => unreachable!("post_validate ensures exactly one repair action"),
         }
@@ -225,30 +288,57 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         }
     }
 
-    // Repair rules: exactly one of set_frontmatter / remove_frontmatter.
+    // Repair rules: exactly one of the four action fields.
     for rule in &cfg.repair.rules {
         let rule_label = rule
             .name
             .clone()
             .unwrap_or_else(|| "unnamed repair rule".into());
-        match (&rule.set_frontmatter, &rule.remove_frontmatter) {
-            (Some(_), Some(_)) => {
-                return Err(ConfigError::Invalid {
-                    source_path: source_path.to_owned(),
-                    message: format!(
-                        "repair rule {rule_label} declares both set_frontmatter and remove_frontmatter; pick one"
-                    ),
-                });
+        let action_count = [
+            rule.set_frontmatter.is_some(),
+            rule.remove_frontmatter.is_some(),
+            rule.add_frontmatter.is_some(),
+            rule.move_document.is_some(),
+        ]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+        if action_count > 1 {
+            return Err(ConfigError::Invalid {
+                source_path: source_path.to_owned(),
+                message: format!(
+                    "repair rule {rule_label} declares multiple actions; pick one of set_frontmatter, remove_frontmatter, add_frontmatter, move_document"
+                ),
+            });
+        }
+        if action_count == 0 {
+            return Err(ConfigError::Invalid {
+                source_path: source_path.to_owned(),
+                message: format!(
+                    "repair rule {rule_label} declares no action (need set_frontmatter, remove_frontmatter, add_frontmatter, or move_document)"
+                ),
+            });
+        }
+        if let Some(mv) = &rule.move_document {
+            match (&mv.to_directory, &mv.to_path) {
+                (Some(_), Some(_)) => {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "repair rule {rule_label} move_document declares both to_directory and to_path; pick exactly one"
+                        ),
+                    });
+                }
+                (None, None) => {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "repair rule {rule_label} move_document declares neither to_directory nor to_path"
+                        ),
+                    });
+                }
+                _ => {}
             }
-            (None, None) => {
-                return Err(ConfigError::Invalid {
-                    source_path: source_path.to_owned(),
-                    message: format!(
-                        "repair rule {rule_label} declares no action (need set_frontmatter or remove_frontmatter)"
-                    ),
-                });
-            }
-            _ => {}
         }
     }
 
@@ -345,7 +435,7 @@ mod tests {
         )
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("declares both"), "got: {msg}");
+        assert!(msg.contains("declares multiple actions"), "got: {msg}");
     }
 
     #[test]
@@ -354,6 +444,114 @@ mod tests {
             parse("repair:\n  rules:\n    - name: r\n      match:\n        code: x\n").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("declares no action"), "got: {msg}");
+    }
+
+    #[test]
+    fn add_frontmatter_action_parses() {
+        let yaml = r#"
+repair:
+  rules:
+    - name: ensure-kind
+      match:
+        code: frontmatter-required-field-missing
+        field: kind
+      add_frontmatter:
+        field: kind
+        value: research
+"#;
+        let cfg = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap();
+        assert_eq!(cfg.repair.rules.len(), 1);
+        let action = cfg.repair.rules[0].action();
+        match action {
+            RepairAction::AddFrontmatter { field, value } => {
+                assert_eq!(field, "kind");
+                assert_eq!(value, serde_json::json!("research"));
+            }
+            _ => panic!("expected AddFrontmatter"),
+        }
+    }
+
+    #[test]
+    fn move_document_with_to_directory_parses() {
+        let yaml = r#"
+repair:
+  rules:
+    - name: route-tasks
+      match:
+        code: document-misrouted
+      move_document:
+        to_directory: "Workspaces/demo/tasks/"
+"#;
+        let cfg = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap();
+        let action = cfg.repair.rules[0].action();
+        match action {
+            RepairAction::MoveDocument { destination } => match destination {
+                DestinationSpec::Directory { to_directory } => {
+                    assert_eq!(to_directory, "Workspaces/demo/tasks/");
+                }
+                _ => panic!("expected DestinationSpec::Directory"),
+            },
+            _ => panic!("expected MoveDocument"),
+        }
+    }
+
+    #[test]
+    fn move_document_with_to_path_parses() {
+        let yaml = r#"
+repair:
+  rules:
+    - name: route-tasks
+      match:
+        code: document-misrouted
+      move_document:
+        to_path: "Workspaces/demo/tasks/{stem}.md"
+"#;
+        let cfg = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap();
+        let action = cfg.repair.rules[0].action();
+        match action {
+            RepairAction::MoveDocument { destination } => match destination {
+                DestinationSpec::Path { to_path } => {
+                    assert_eq!(to_path, "Workspaces/demo/tasks/{stem}.md");
+                }
+                _ => panic!("expected DestinationSpec::Path"),
+            },
+            _ => panic!("expected MoveDocument"),
+        }
+    }
+
+    #[test]
+    fn move_document_with_both_to_directory_and_to_path_rejects() {
+        let yaml = r#"
+repair:
+  rules:
+    - name: bad
+      match:
+        code: document-misrouted
+      move_document:
+        to_directory: "x/"
+        to_path: "y/{stem}.md"
+"#;
+        let err = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap_err();
+        assert!(format!("{err}").contains("exactly one"), "got: {err}");
+    }
+
+    #[test]
+    fn repair_rule_with_multiple_actions_rejects() {
+        let yaml = r#"
+repair:
+  rules:
+    - name: bad
+      match:
+        code: x
+      set_frontmatter:
+        field: a
+        value: 1
+      add_frontmatter:
+        field: a
+        value: 2
+"#;
+        let err = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap_err();
+        assert!(format!("{err}").contains("declares") && format!("{err}").contains("pick one"));
     }
 
     #[test]

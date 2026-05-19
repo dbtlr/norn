@@ -84,6 +84,12 @@ For tags:
 - Restrict tag creation to admins.
 - Require the `release` workflow to pass before the release is marked latest.
 
+## Recent schema breaks
+
+### v0.28.0 schema break
+
+The repair plan JSON schema bumps from v3 to v4 in v0.28.0. `vault repair apply` rejects v3 plans with `unsupported repair plan schema version: expected 4, got 3`. No migration shim. Regenerate any persisted plans with `vault repair plan` against v0.28.0+.
+
 ## Post-release verification
 
 After tagging, verify the release on a clean machine:

@@ -9,7 +9,7 @@ mod repair_apply;
 mod target;
 mod validate_filter;
 
-use std::{collections::BTreeMap, fs, process};
+use std::{fs, process};
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -174,7 +174,7 @@ fn run(cli: Cli) -> Result<i32> {
                     repair_plan_filters(&args),
                     findings,
                     &loaded_config.repair,
-                    &document_hashes(&index),
+                    &index,
                 );
                 if let Some(out) = &args.out {
                     if args.format != RepairOutputFormat::Json {
@@ -218,7 +218,8 @@ fn run(cli: Cli) -> Result<i32> {
             RepairSubcommand::Links(args) => {
                 let mut index = build_index_for(&cwd, config_path.as_ref())?;
                 trim_diagnostics(&mut index, verbose);
-                let report = plan_link_repairs(&index, args.target.as_deref())?;
+                let report =
+                    plan_link_repairs(&index, args.target.as_deref(), args.move_to.as_deref())?;
                 write_link_repair_report(&report, args.format.into())?;
                 Ok(exit_code_for(&index))
             }
@@ -305,14 +306,6 @@ fn normalized_filter_values(values: &[String]) -> Vec<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .collect()
-}
-
-fn document_hashes(index: &GraphIndex) -> BTreeMap<camino::Utf8PathBuf, String> {
-    index
-        .documents
-        .iter()
-        .map(|document| (document.path.clone(), document.hash.clone()))
         .collect()
 }
 

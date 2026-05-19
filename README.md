@@ -81,7 +81,7 @@ Every command accepts `--format table|json|jsonl|paths` where applicable. JSON a
 
 `vault` is designed to be a first-class tool for coding agents:
 
-- **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned repair plan (`schema_version: 3`).
+- **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned repair plan (`schema_version: 4`).
 - **Plan/apply boundary.** Mutation is always two steps: produce a plan artifact, then apply it. Apply rejects mismatched vault roots, stale document hashes, and unsupported schema versions.
 - **Filterable triage.** `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason` apply to both raw output and `--summary`, so an agent can size a queue before reading it.
 - **Vault targeting.** Use `-C <path>` for ad-hoc invocations or `vault registry add <name> <path>` once and target with `--vault <name>`.

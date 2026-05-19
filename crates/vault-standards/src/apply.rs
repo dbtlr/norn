@@ -1,15 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::ops::Range;
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use vault_frontmatter::{
     extract_frontmatter, serialize_value_preserving_style, top_level_property_spans, QuoteError,
+    ValueStyle,
 };
 
 use crate::findings::Finding;
+use crate::repair::warnings::PlanWarning;
 use crate::repair::{PlannedChange, RepairPlan, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION};
 use crate::summarize;
 use crate::summary::Summary;
@@ -60,6 +63,40 @@ pub enum ApplyError {
 
     #[error("set_frontmatter change missing new_value for {path}")]
     MissingNewValue { path: Utf8PathBuf },
+
+    #[error(
+        "field '{field}' already present in {path}; add_frontmatter refuses to overwrite (use set_frontmatter)"
+    )]
+    FieldAlreadyPresent { path: Utf8PathBuf, field: String },
+
+    #[error("move source missing in filesystem: {path}")]
+    MoveSourceMissing { path: Utf8PathBuf },
+
+    #[error("move source is a symlink, not a regular file: {path}")]
+    MoveSourceIsSymlink { path: Utf8PathBuf },
+
+    #[error("move destination already exists: {destination}")]
+    MoveDestinationExists { destination: Utf8PathBuf },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MoveResult {
+    pub from: Utf8PathBuf,
+    pub to: Utf8PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkRewriteResult {
+    pub file: Utf8PathBuf,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepairApplyWarning {
+    pub path: Utf8PathBuf,
+    #[serde(flatten)]
+    pub warning: PlanWarning,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +105,12 @@ pub struct RepairApplyReport {
     pub dry_run: bool,
     pub changed_files: Vec<Utf8PathBuf>,
     pub applied_changes: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub moved_files: Vec<MoveResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub rewritten_links: Vec<LinkRewriteResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<RepairApplyWarning>,
     pub plan_context: RepairApplyPlanContext,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<RepairApplyVerification>,
@@ -91,6 +134,9 @@ impl RepairApplyReport {
             dry_run,
             changed_files: Vec::new(),
             applied_changes: plan.changes.len(),
+            moved_files: Vec::new(),
+            rewritten_links: Vec::new(),
+            warnings: Vec::new(),
             plan_context: RepairApplyPlanContext {
                 skipped: plan.summary.skipped.clone(),
             },
@@ -131,20 +177,33 @@ pub fn changes_by_path(
     let mut seen_fields = BTreeSet::new();
 
     for change in &plan.changes {
+        // move_document is handled by the orchestrator via apply_move /
+        // apply_link_rewrites — it is not a per-file frontmatter edit, so
+        // it's skipped here rather than rejected.
+        if change.operation == "move_document" {
+            continue;
+        }
         if !matches!(
             change.operation.as_str(),
-            "set_frontmatter" | "remove_frontmatter"
+            "set_frontmatter" | "remove_frontmatter" | "add_frontmatter"
         ) {
             return Err(ApplyError::UnsupportedOperation {
                 path: change.path.clone(),
                 operation: change.operation.clone(),
             });
         }
-        let key = (change.path.clone(), change.field.clone());
+        let field = change
+            .field
+            .as_deref()
+            .ok_or_else(|| ApplyError::UnsupportedOperation {
+                path: change.path.clone(),
+                operation: format!("{} without field", change.operation),
+            })?;
+        let key = (change.path.clone(), field.to_string());
         if !seen_fields.insert(key) {
             return Err(ApplyError::ConflictingFieldChange {
                 path: change.path.clone(),
-                field: change.field.clone(),
+                field: field.to_string(),
             });
         }
         grouped.entry(change.path.clone()).or_default().push(change);
@@ -203,30 +262,32 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
 
     for change in changes {
-        let current_value = current_object.get(&change.field);
-        check_expected_old_value(
-            &path,
-            &change.field,
-            &change.expected_old_value,
-            current_value,
-        )?;
+        let field = change
+            .field
+            .as_deref()
+            .ok_or_else(|| ApplyError::UnsupportedOperation {
+                path: path.clone(),
+                operation: format!("{} without field", change.operation),
+            })?;
+        let current_value = current_object.get(field);
 
-        let span = spans.iter().find(|s| s.name == change.field);
+        let span = spans.iter().find(|s| s.name == field);
 
         match change.operation.as_str() {
             "set_frontmatter" => {
+                check_expected_old_value(&path, field, &change.expected_old_value, current_value)?;
                 let Some(span) = span else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
-                        reason: format!("field {} not present in frontmatter", change.field),
+                        reason: format!("field {field} not present in frontmatter"),
                     });
                 };
                 let Some(value_range) = span.value_range.clone() else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
                         reason: format!(
-                            "field {} has style {:?}; set_frontmatter requires a scalar value",
-                            change.field, span.style
+                            "field {field} has style {:?}; set_frontmatter requires a scalar value",
+                            span.style
                         ),
                     });
                 };
@@ -251,13 +312,70 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 edits.push((value_range, replacement));
             }
             "remove_frontmatter" => {
+                check_expected_old_value(&path, field, &change.expected_old_value, current_value)?;
                 let Some(span) = span else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
-                        reason: format!("field {} not present in frontmatter", change.field),
+                        reason: format!("field {field} not present in frontmatter"),
                     });
                 };
                 edits.push((span.line_range.clone(), String::new()));
+            }
+            "add_frontmatter" => {
+                // add_frontmatter refuses to overwrite an existing field; the
+                // caller must use set_frontmatter for that. We check the span
+                // list (presence in source) since current_object may not
+                // contain a field whose value style we cannot edit.
+                if span.is_some() {
+                    return Err(ApplyError::FieldAlreadyPresent {
+                        path: path.clone(),
+                        field: field.to_string(),
+                    });
+                }
+                // expected_old_value semantics for add_frontmatter: None or
+                // Null means "expected absent." Anything else is a contract
+                // violation.
+                if let Some(expected) = &change.expected_old_value {
+                    if !expected.is_null() {
+                        return Err(ApplyError::ExpectedOldValueMismatch {
+                            path: path.clone(),
+                            field: field.to_string(),
+                            expected: format!("{expected}"),
+                            actual: "missing".to_string(),
+                        });
+                    }
+                }
+                let new_value = change
+                    .new_value
+                    .as_ref()
+                    .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
+                let rendered = serialize_value_preserving_style(new_value, ValueStyle::Plain)
+                    .map_err(|e| ApplyError::CannotMinimalEdit {
+                        path: path.clone(),
+                        reason: e.to_string(),
+                    })?;
+                // Insert at end of frontmatter block. extract_frontmatter
+                // returns a range over the YAML content (between the leading
+                // and trailing `---` lines). It ends at the byte just after
+                // the final newline of the YAML, so we can splice a new line
+                // here without disturbing the closing `---`.
+                let insertion = frontmatter_range.end;
+                let leading_newline =
+                    if insertion == 0 || content.as_bytes().get(insertion - 1) == Some(&b'\n') {
+                        ""
+                    } else {
+                        "\n"
+                    };
+                let line_to_insert = format!("{leading_newline}{field}: {rendered}\n");
+                edits.push((insertion..insertion, line_to_insert));
+            }
+            "move_document" => {
+                // Handled by `apply_move`, not the per-file edit pass.
+                // Reaching here means the caller bypassed `changes_by_path`.
+                return Err(ApplyError::UnsupportedOperation {
+                    path: path.clone(),
+                    operation: "move_document".to_string(),
+                });
             }
             other => {
                 return Err(ApplyError::UnsupportedOperation {
@@ -307,6 +425,119 @@ fn check_expected_old_value(
     }
 }
 
+/// Performs the filesystem move for a `move_document` PlannedChange.
+/// Refuses with precondition errors if source is missing/symlink or
+/// destination exists. Falls back to copy+remove if rename fails
+/// (typically cross-device).
+pub fn apply_move(cwd: &Utf8Path, change: &PlannedChange) -> Result<MoveResult, ApplyError> {
+    let source_rel = &change.path;
+    let dest_rel = change
+        .destination
+        .as_ref()
+        .ok_or_else(|| ApplyError::UnsupportedOperation {
+            path: source_rel.clone(),
+            operation: "move_document missing destination".to_string(),
+        })?;
+
+    let source_abs = cwd.join(source_rel);
+    let dest_abs = cwd.join(dest_rel);
+
+    if !source_abs.as_std_path().exists() {
+        return Err(ApplyError::MoveSourceMissing {
+            path: source_rel.clone(),
+        });
+    }
+    let metadata = fs::symlink_metadata(source_abs.as_std_path()).map_err(|_| {
+        ApplyError::MoveSourceMissing {
+            path: source_rel.clone(),
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(ApplyError::MoveSourceIsSymlink {
+            path: source_rel.clone(),
+        });
+    }
+    if dest_abs.as_std_path().exists() {
+        return Err(ApplyError::MoveDestinationExists {
+            destination: dest_rel.clone(),
+        });
+    }
+    if let Some(parent) = dest_abs.parent() {
+        fs::create_dir_all(parent.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
+            path: dest_rel.clone(),
+            reason: format!("create parent dir failed: {e}"),
+        })?;
+    }
+
+    match fs::rename(source_abs.as_std_path(), dest_abs.as_std_path()) {
+        Ok(()) => Ok(MoveResult {
+            from: source_rel.clone(),
+            to: dest_rel.clone(),
+        }),
+        Err(_) => {
+            // Cross-device fallback
+            fs::copy(source_abs.as_std_path(), dest_abs.as_std_path()).map_err(|e| {
+                ApplyError::CannotMinimalEdit {
+                    path: dest_rel.clone(),
+                    reason: format!("copy failed: {e}"),
+                }
+            })?;
+            fs::remove_file(source_abs.as_std_path()).map_err(|e| {
+                ApplyError::CannotMinimalEdit {
+                    path: source_rel.clone(),
+                    reason: format!("remove source after copy failed: {e}"),
+                }
+            })?;
+            Ok(MoveResult {
+                from: source_rel.clone(),
+                to: dest_rel.clone(),
+            })
+        }
+    }
+}
+
+/// Reads every file containing an AffectedLink and replaces the raw link
+/// text with the precomputed rewritten replacement. Silent skip if the raw
+/// doesn't match (file drift between plan and apply); --verify catches any
+/// unresolved links.
+pub fn apply_link_rewrites(
+    cwd: &Utf8Path,
+    change: &PlannedChange,
+) -> Result<Vec<LinkRewriteResult>, ApplyError> {
+    let mut results = Vec::new();
+    let risk = match &change.link_risk {
+        Some(r) => r,
+        None => return Ok(results),
+    };
+    let all = risk
+        .stem_links
+        .iter()
+        .chain(risk.path_qualified_wikilinks.iter())
+        .chain(risk.markdown_links.iter());
+    for affected in all {
+        let abs = cwd.join(&affected.source_path);
+        let original =
+            fs::read_to_string(abs.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
+                path: affected.source_path.clone(),
+                reason: format!("read backlinker failed: {e}"),
+            })?;
+        let updated = original.replacen(&affected.raw, &affected.rewritten, 1);
+        if updated == original {
+            continue;
+        }
+        fs::write(abs.as_std_path(), &updated).map_err(|e| ApplyError::CannotMinimalEdit {
+            path: affected.source_path.clone(),
+            reason: format!("write backlinker failed: {e}"),
+        })?;
+        results.push(LinkRewriteResult {
+            file: affected.source_path.clone(),
+            from: affected.raw.clone(),
+            to: affected.rewritten.clone(),
+        });
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,9 +579,12 @@ mod tests {
             finding_rule: None,
             repair_rule: "test".into(),
             operation: operation.to_string(),
-            field: field.to_string(),
+            field: Some(field.to_string()),
             expected_old_value: None,
             new_value,
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
         }
     }
 
@@ -361,8 +595,8 @@ mod tests {
         assert!(matches!(
             err,
             ApplyError::UnsupportedSchemaVersion {
-                expected: 3,
-                got: 99
+                expected: REPAIR_PLAN_SCHEMA_VERSION,
+                got: 99,
             }
         ));
     }
@@ -634,5 +868,49 @@ mod tests {
         let change = make_change("a.md", "status", "h1", "remove_frontmatter", None);
         let err = apply_change(content, &change).unwrap_err();
         assert!(matches!(err, ApplyError::CannotMinimalEdit { .. }));
+    }
+
+    #[test]
+    fn apply_add_frontmatter_inserts_missing_field() {
+        let content = "---\ntitle: hi\n---\n# body\n";
+        let change = make_change(
+            "task.md",
+            "kind",
+            "h1",
+            "add_frontmatter",
+            Some(json!("research")),
+        );
+        let result = apply_change(content, &change).unwrap();
+        assert!(result.contains("kind: research"));
+        assert!(result.contains("title: hi"));
+        assert!(result.contains("# body"));
+    }
+
+    #[test]
+    fn apply_add_frontmatter_refuses_when_field_present() {
+        let content = "---\ntitle: hi\nkind: oldvalue\n---\n# body\n";
+        let change = make_change(
+            "task.md",
+            "kind",
+            "h1",
+            "add_frontmatter",
+            Some(json!("newvalue")),
+        );
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(matches!(err, ApplyError::FieldAlreadyPresent { .. }));
+    }
+
+    #[test]
+    fn apply_add_frontmatter_quotes_special_values() {
+        let content = "---\ntitle: hi\n---\n";
+        let change = make_change(
+            "task.md",
+            "workspace",
+            "h1",
+            "add_frontmatter",
+            Some(json!("[[demo]]")),
+        );
+        let result = apply_change(content, &change).unwrap();
+        assert!(result.contains("workspace: '[[demo]]'"));
     }
 }

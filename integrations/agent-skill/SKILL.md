@@ -18,7 +18,7 @@ Use `vault` when you need to:
 - Validate a vault against configured rules (`required_frontmatter`, `field_types`, `allowed_values`, `allowed_paths`, etc.).
 - Audit unresolved or ambiguous links.
 - Surface frontmatter drift for review.
-- Produce an inspectable repair plan (`schema_version: 3`) and apply it explicitly.
+- Produce an inspectable repair plan (`schema_version: 4`) and apply it explicitly.
 
 Do not use `vault` when you need full-text or semantic search — its `search` command is exact literal substring + frontmatter + path glob.
 
@@ -105,11 +105,24 @@ Apply rejects:
 
 - Plans for a different vault root than the current invocation.
 - Stale document hashes (a file changed since the plan was created).
-- Unsupported schema versions (currently `3`).
+- Unsupported schema versions (currently `4`).
 - Conflicting field changes.
 - Expected-old-value mismatches.
 
 Re-plan rather than retrying. There is no `--force` flag.
+
+### Repair action shapes
+
+vault-cli supports four repair actions in `.vault/config.yaml`:
+
+- `set_frontmatter` — replace an existing frontmatter field's value.
+- `remove_frontmatter` — remove a frontmatter field.
+- `add_frontmatter` — insert a missing frontmatter field.
+- `move_document` — relocate (or rename) a file to a new path, with automatic backlink rewriting.
+
+Agents should not invent destination paths or values for these actions. The repair rule supplies the literal value (`set_frontmatter`, `add_frontmatter`, `remove_frontmatter`) or the destination spec (`move_document`'s `to_directory` or `to_path`). Substitution placeholders (`{stem}`, `{filename}`, `{frontmatter.<field>}`) are resolved at plan time using the file's actual state — no agent judgment required.
+
+When a move action is in the plan, expect `repair apply` to write to multiple files: the moved file itself and every backlinking file that contains a rewritable link. The apply output's `moved_files` and `rewritten_links` enumerate everything that was touched.
 
 ## Typical agent loop
 

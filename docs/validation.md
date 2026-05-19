@@ -117,7 +117,7 @@ vault repair plan --code frontmatter-disallowed-value --field status --out repai
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "vault_root": "/abs/path/to/vault",
   "source_filters": { "...": "..." },
   "summary": {
@@ -136,18 +136,33 @@ vault repair plan --code frontmatter-disallowed-value --field status --out repai
 }
 ```
 
-Each planned change carries the target path, document hash precondition, finding context, operation, field, expected old value when available, and new value when applicable.
+Each planned change carries the target path, document hash precondition, finding context, operation, optional field (omitted for `move_document` changes), expected old value when available, new value when applicable, and — for moves — `destination`, `link_risk`, and any `warnings`.
 
 Skipped findings carry `skip_reason` (`unsupported`, `ambiguous`, `missing_hash`, `precondition_failed`), a free-form `reason`, candidates for ambiguous links, and suggested next actions. Fix the repairability problem, then rerun `repair plan`.
 
 ### Supported actions
 
-The first supported repair actions are frontmatter-only:
+The supported repair actions are:
 
-- `set_frontmatter` — set a scalar field to a new value.
+- `set_frontmatter` — replace an existing scalar field's value.
 - `remove_frontmatter` — remove a field entirely.
+- `add_frontmatter` — insert a missing scalar field.
+- `move_document` — move or rename a file, with automatic backlink rewriting on apply.
 
 Repair rule `match` supports `code`, `rule`, `field`, and `actual_value`. Matches are exact and type-sensitive. A rule must declare exactly one action.
+
+## Repairable findings
+
+The validate → plan → apply → verify loop closes for these finding classes when a matching repair rule is authored:
+
+| Finding code | Repair action | Notes |
+|---|---|---|
+| `frontmatter-disallowed-value` | `set_frontmatter` | Replace the disallowed value with a configured value. |
+| `frontmatter-required-field-missing` | `add_frontmatter` | Insert the missing field with a configured value. |
+| `frontmatter-forbidden-field` | `remove_frontmatter` | Remove the forbidden field. |
+| `document-misrouted` | `move_document` | Move the file to a configured destination (with backlink rewriting). |
+
+Findings without a matching deterministic rule are reported as skipped fallout in the repair plan with `skip_reason: unsupported`.
 
 ## Repair apply
 
@@ -169,6 +184,8 @@ Apply rejects:
 Frontmatter apply preserves Markdown body content byte-for-byte. YAML lines untouched by a repair are preserved exactly (comments, quote style, key ordering). YAML lines touched by a repair preserve the original quote style when the new value is representable in that style; otherwise apply upgrades to the minimum sufficient style and never downgrades.
 
 A `set_frontmatter` change targeting a block-style value (block sequence, block mapping, block literal, block folded, or flow sequence/mapping) returns `cannot minimal-edit` rather than silently rewriting the structure.
+
+When a plan contains `move_document` changes, apply writes to multiple files: the moved file itself plus every backlinking file that contains a rewritable link. The apply output's `moved_files` and `rewritten_links` enumerate everything that was touched.
 
 ### Apply report
 

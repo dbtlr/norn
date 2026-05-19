@@ -328,7 +328,7 @@ fn repair_plan_generates_configured_frontmatter_change() {
     ]);
 
     let plan = serde_json::from_str::<Value>(&output).expect("repair plan should be JSON");
-    assert_eq!(plan["schema_version"], 3);
+    assert_eq!(plan["schema_version"], 4);
     assert_eq!(plan["summary"]["findings"], 1);
     assert_eq!(plan["summary"]["planned_changes"], 1);
     assert_eq!(plan["summary"]["skipped"]["total"], 0);
@@ -737,7 +737,7 @@ fn repair_config_rejects_ambiguous_actions() {
     ]);
 
     assert!(error.contains("invalid config"));
-    assert!(error.contains("repair rule bad declares both"));
+    assert!(error.contains("repair rule bad declares multiple actions"));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
@@ -3293,6 +3293,72 @@ fn completions_install_print_for_nushell_shows_both_targets() {
 }
 
 #[test]
+fn repair_apply_adds_missing_required_field() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        "validate:\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\nrepair:\n  rules:\n    - name: ensure-research-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: research\n",
+    )
+    .expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(
+        root.join("note.md"),
+        "---\ntype: note\ntitle: Sample\n---\n# Body\n",
+    )
+    .expect("note should write");
+
+    let plan_path = root.join("repair.json");
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--out",
+        plan_path.to_str().unwrap(),
+    ]);
+    let plan_text = fs::read_to_string(&plan_path).expect("plan should write");
+    let plan_json = serde_json::from_str::<Value>(&plan_text).expect("repair plan should be JSON");
+    assert_eq!(plan_json["summary"]["planned_changes"], 1);
+    assert_eq!(plan_json["changes"][0]["operation"], "add_frontmatter");
+    assert_eq!(plan_json["changes"][0]["field"], "kind");
+    assert_eq!(plan_json["changes"][0]["new_value"], "research");
+
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+    ]);
+
+    let result = fs::read_to_string(root.join("note.md")).expect("note should read");
+    assert!(
+        result.contains("type: note"),
+        "existing type field should be preserved: {result}"
+    );
+    assert!(
+        result.contains("title: Sample"),
+        "existing title field should be preserved: {result}"
+    );
+    assert!(
+        result.contains("kind: research"),
+        "new kind field should be added: {result}"
+    );
+    assert!(
+        result.contains("# Body"),
+        "body should be preserved: {result}"
+    );
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
 fn completions_install_print_does_not_write() {
     let dir = tempfile::TempDir::new().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_vault"))
@@ -3307,4 +3373,367 @@ fn completions_install_print_does_not_write() {
     assert!(stdout.contains("# >>> vault completions"));
     // No file should have been created.
     assert!(!dir.path().join(".bashrc").exists());
+}
+
+#[test]
+fn repair_plan_emits_move_document_with_link_risk() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        r#"validate:
+  rules:
+    - name: task-routing
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: task
+      allowed_paths:
+        - "Workspaces/**/tasks/*.md"
+repair:
+  rules:
+    - name: route-tasks-to-workspace
+      match:
+        code: document-misrouted
+        rule: task-routing
+      move_document:
+        to_path: "Workspaces/{frontmatter.workspace}/tasks/{stem}.md"
+"#,
+    )
+    .expect("config should write");
+    fs::create_dir_all(root.join("Inbox")).expect("temp dir should be created");
+    fs::write(
+        root.join("Inbox/task.md"),
+        "---\ntype: task\ntitle: My task\nworkspace: demo\nstatus: backlog\n---\n# Body\n",
+    )
+    .expect("task should write");
+    fs::write(
+        root.join("Inbox/index.md"),
+        "---\ntitle: Index\n---\n# Index\n\n- [task](task.md)\n- [[Inbox/task]]\n",
+    )
+    .expect("index should write");
+
+    let plan_path = root.join("repair.json");
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--out",
+        plan_path.to_str().unwrap(),
+    ]);
+
+    let plan_text = fs::read_to_string(&plan_path).expect("plan should write");
+    let plan_json: Value = serde_json::from_str(&plan_text).expect("repair plan should be JSON");
+
+    assert_eq!(plan_json["schema_version"], 4);
+    assert_eq!(plan_json["summary"]["planned_changes"], 1);
+    let change = &plan_json["changes"][0];
+    assert_eq!(change["operation"], "move_document");
+    assert_eq!(change["destination"], "Workspaces/demo/tasks/task.md");
+
+    let risk = &change["link_risk"];
+    assert_eq!(risk["directory_changed"], true);
+    assert_eq!(risk["stem_changed"], false);
+    assert!(
+        risk["path_qualified_wikilinks"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "expected path_qualified_wikilinks to be populated; risk={risk}"
+    );
+    assert!(
+        risk["markdown_links"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "expected markdown_links to be populated; risk={risk}"
+    );
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn repair_plan_skips_move_when_substitution_fails() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        r#"validate:
+  rules:
+    - name: task-routing
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: task
+      allowed_paths:
+        - "Workspaces/**/tasks/*.md"
+repair:
+  rules:
+    - name: route-tasks
+      match:
+        code: document-misrouted
+        rule: task-routing
+      move_document:
+        to_path: "Workspaces/{frontmatter.workspace}/tasks/{stem}.md"
+"#,
+    )
+    .expect("config should write");
+    fs::create_dir_all(root.join("Inbox")).expect("temp dir should be created");
+    // type: task but NO workspace frontmatter — substitution will fail
+    fs::write(
+        root.join("Inbox/orphan-task.md"),
+        "---\ntype: task\ntitle: Orphan\nstatus: backlog\n---\n# Body\n",
+    )
+    .expect("task should write");
+
+    let plan_path = root.join("repair.json");
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--out",
+        plan_path.to_str().unwrap(),
+    ]);
+
+    let plan_text = fs::read_to_string(&plan_path).expect("plan should write");
+    let plan_json: Value = serde_json::from_str(&plan_text).expect("repair plan should be JSON");
+
+    assert_eq!(plan_json["summary"]["planned_changes"], 0);
+    let skipped = plan_json["skipped_findings"].as_array().expect("skipped");
+    let move_skip = skipped
+        .iter()
+        .find(|f| f["code"] == "document-misrouted")
+        .expect("expected a skipped document-misrouted finding");
+    assert_eq!(move_skip["skip_reason"], "precondition_failed");
+    assert!(
+        move_skip["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("substitution"),
+        "reason should mention substitution; got: {}",
+        move_skip["reason"]
+    );
+
+    fs::remove_dir_all(root).ok();
+    fs::remove_file(config_path).ok();
+}
+
+#[test]
+fn repair_apply_moves_document_and_rewrites_links() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        r#"validate:
+  rules:
+    - name: task-routing
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: task
+      allowed_paths:
+        - "Workspaces/**/tasks/*.md"
+repair:
+  rules:
+    - name: route-tasks
+      match:
+        code: document-misrouted
+        rule: task-routing
+      move_document:
+        to_path: "Workspaces/{frontmatter.workspace}/tasks/{stem}.md"
+"#,
+    )
+    .expect("config should write");
+    fs::create_dir_all(root.join("Inbox")).expect("temp dir should be created");
+    fs::write(
+        root.join("Inbox/task.md"),
+        "---\ntype: task\nworkspace: demo\nstatus: backlog\n---\n# Body\n",
+    )
+    .expect("task should write");
+    fs::write(
+        root.join("Inbox/index.md"),
+        "---\ntitle: Index\n---\n- [[Inbox/task]]\n- [task](task.md)\n",
+    )
+    .expect("index should write");
+
+    let plan_path = root.join("repair.json");
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--out",
+        plan_path.to_str().unwrap(),
+    ]);
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        !root.join("Inbox/task.md").exists(),
+        "source path should be gone after apply"
+    );
+    assert!(
+        root.join("Workspaces/demo/tasks/task.md").exists(),
+        "destination path should exist after apply"
+    );
+
+    let index_content = fs::read_to_string(root.join("Inbox/index.md")).expect("index should read");
+    assert!(
+        index_content.contains("[[Workspaces/demo/tasks/task]]"),
+        "wikilink should be rewritten to new path; got: {index_content}"
+    );
+    assert!(
+        !index_content.contains("[[Inbox/task]]"),
+        "old wikilink should be gone; got: {index_content}"
+    );
+    assert!(
+        index_content.contains("../Workspaces/demo/tasks/task.md"),
+        "markdown link should be rewritten to new relative path; got: {index_content}"
+    );
+    assert!(
+        !index_content.contains("[task](task.md)"),
+        "old markdown link should be gone; got: {index_content}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_file(&config_path).ok();
+}
+
+#[test]
+fn repair_apply_refuses_move_when_destination_exists() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(
+        &config_path,
+        r#"validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: task
+      allowed_paths:
+        - "Workspaces/**/tasks/*.md"
+repair:
+  rules:
+    - name: route
+      match:
+        code: document-misrouted
+        rule: r
+      move_document:
+        to_path: "Workspaces/demo/tasks/task.md"
+"#,
+    )
+    .expect("config should write");
+    fs::create_dir_all(root.join("Inbox")).expect("inbox dir should be created");
+    fs::create_dir_all(root.join("Workspaces/demo/tasks"))
+        .expect("destination dir should be created");
+    fs::write(
+        root.join("Inbox/task.md"),
+        "---\ntype: task\n---\n# source\n",
+    )
+    .expect("source task should write");
+    fs::write(
+        root.join("Workspaces/demo/tasks/task.md"),
+        "---\ntype: task\n---\n# pre-existing\n",
+    )
+    .expect("pre-existing dest should write");
+
+    let plan_path = root.join("repair.json");
+    vault_success(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "plan",
+        "--out",
+        plan_path.to_str().unwrap(),
+    ]);
+    let stderr = vault_error(&[
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "repair",
+        "apply",
+        plan_path.to_str().unwrap(),
+    ]);
+    assert!(
+        stderr.contains("destination already exists") || stderr.contains("MoveDestinationExists"),
+        "expected destination-exists error in stderr; got: {stderr}"
+    );
+    assert!(
+        root.join("Inbox/task.md").exists(),
+        "source should remain when move refuses"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_file(&config_path).ok();
+}
+
+#[test]
+fn repair_links_move_to_reports_risk_without_plan() {
+    let root = temp_cache_dir();
+    fs::create_dir_all(root.join("Inbox")).expect("inbox dir should be created");
+    fs::write(root.join("Inbox/task.md"), "---\ntype: task\n---\n# Body\n")
+        .expect("task should write");
+    fs::write(
+        root.join("Inbox/index.md"),
+        "---\ntitle: Index\n---\n- [[Inbox/task]]\n- [task](task.md)\n",
+    )
+    .expect("index should write");
+
+    let output = vault(&[
+        "-C",
+        root.to_str().unwrap(),
+        "repair",
+        "links",
+        "--target",
+        "Inbox/task.md",
+        "--move-to",
+        "Workspaces/demo/tasks/task.md",
+        "--format",
+        "json",
+    ]);
+    let report = serde_json::from_str::<Value>(&output).expect("link report should be JSON");
+
+    assert!(
+        !report["link_risk"]["path_qualified_wikilinks"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected at least one path-qualified wikilink in link_risk; got: {report}"
+    );
+    assert!(
+        !report["link_risk"]["markdown_links"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "expected at least one markdown link in link_risk; got: {report}"
+    );
+    assert_eq!(report["link_risk"]["directory_changed"], true);
+    assert_eq!(report["link_risk"]["stem_changed"], false);
+    assert!(
+        report.get("planned_changes").is_none(),
+        "report should not include a planned move; got: {report}"
+    );
+
+    fs::remove_dir_all(&root).ok();
 }

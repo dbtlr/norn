@@ -131,6 +131,16 @@ vault repair links --target "some-note" --format table
 
 The report includes unresolved links, ambiguous links, path-style Markdown links worth reviewing before path moves, duplicate-stem risks, and optional move/delete risk for a `--target`.
 
+### `vault repair links --target <path> --move-to <destination>`
+
+Read-only analysis of what would change if the target were moved to the destination. Produces the same `link_risk` + `warnings` shape as the planner would compute for an authored `move_document` repair rule, without writing a plan file.
+
+```bash
+vault repair links --target Inbox/task.md --move-to Workspaces/demo/tasks/task.md --format json
+```
+
+Output includes a `link_risk` object (stem-only, path-qualified, and Markdown backlinks with their precomputed rewrites) and any planner warnings (e.g., `StemCollisionAfterMove`).
+
 ## registry
 
 Persistent named-vault registry. Stored at `$XDG_CONFIG_HOME/vault/registry.yaml`.

@@ -1,3 +1,7 @@
+pub mod destination;
+pub mod link_risk;
+pub mod warnings;
+
 use std::collections::BTreeMap;
 
 use camino::Utf8PathBuf;
@@ -8,7 +12,7 @@ use vault_core::Severity;
 use crate::config::{RepairAction, RepairConfig, RepairRule, RepairRuleMatch};
 use crate::findings::{Finding, FindingBody};
 
-pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 3;
+pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RepairPlanFilters {
@@ -31,8 +35,9 @@ pub enum SkipReason {
     /// Index has no current hash for the finding's path (file removed between
     /// indexing and planning, or path didn't normalize the same way).
     MissingHash,
-    /// Reserved: rule matched but a precondition (e.g., target missing) blocked
-    /// planning. No current code emits this; placeholder for future expansion.
+    /// Rule matched but a precondition blocked producing a change. Emitted when
+    /// `move_document` placeholder substitution fails (missing frontmatter field,
+    /// non-scalar value, unknown placeholder).
     PreconditionFailed,
 }
 
@@ -91,11 +96,18 @@ pub struct PlannedChange {
     pub finding_rule: Option<String>,
     pub repair_rule: String,
     pub operation: String,
-    pub field: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_old_value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_value: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Utf8PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_risk: Option<crate::repair::link_risk::LinkRisk>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<crate::repair::warnings::PlanWarning>,
 }
 
 pub fn plan_repairs(
@@ -103,17 +115,24 @@ pub fn plan_repairs(
     filters: RepairPlanFilters,
     findings: Vec<Finding>,
     config: &RepairConfig,
-    document_hashes: &BTreeMap<Utf8PathBuf, String>,
+    index: &vault_core::GraphIndex,
 ) -> RepairPlan {
+    let document_hashes: BTreeMap<Utf8PathBuf, String> = index
+        .documents
+        .iter()
+        .map(|d| (d.path.clone(), d.hash.clone()))
+        .collect();
     let mut changes = Vec::new();
     let mut skipped: Vec<SkippedFinding> = Vec::new();
 
     for finding in &findings {
         match matching_repair_rule(finding, &config.rules) {
-            Some((rule, action)) => match planned_change(finding, rule, &action, document_hashes) {
-                Ok(change) => changes.push(change),
-                Err(skip) => skipped.push(skipped_finding(finding, skip)),
-            },
+            Some((rule, action)) => {
+                match planned_change(finding, rule, &action, &document_hashes, &index.documents) {
+                    Ok(change) => changes.push(change),
+                    Err((skip, reason)) => skipped.push(skipped_finding(finding, skip, reason)),
+                }
+            }
             None => {
                 let skip = if matches!(
                     &finding.body,
@@ -123,7 +142,7 @@ pub fn plan_repairs(
                 } else {
                     SkipReason::Unsupported
                 };
-                skipped.push(skipped_finding(finding, skip));
+                skipped.push(skipped_finding(finding, skip, None));
             }
         }
     }
@@ -199,14 +218,15 @@ fn planned_change(
     rule: &RepairRule,
     action: &RepairAction,
     document_hashes: &BTreeMap<Utf8PathBuf, String>,
-) -> Result<PlannedChange, SkipReason> {
+    documents: &[vault_core::Document],
+) -> Result<PlannedChange, (SkipReason, Option<String>)> {
     let repair_rule = rule
         .name
         .clone()
         .unwrap_or_else(|| "unnamed-repair-rule".to_string());
     let document_hash = document_hashes
         .get(&finding.path)
-        .ok_or(SkipReason::MissingHash)?
+        .ok_or((SkipReason::MissingHash, None))?
         .clone();
     Ok(match action {
         RepairAction::SetFrontmatter { field, value } => PlannedChange {
@@ -216,9 +236,12 @@ fn planned_change(
             finding_rule: finding_rule(finding),
             repair_rule,
             operation: "set_frontmatter".to_string(),
-            field: field.clone(),
+            field: Some(field.clone()),
             expected_old_value: finding_actual_value(finding).cloned(),
             new_value: Some(value.clone()),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
         },
         RepairAction::RemoveFrontmatter { field } => PlannedChange {
             path: finding.path.clone(),
@@ -227,14 +250,78 @@ fn planned_change(
             finding_rule: finding_rule(finding),
             repair_rule,
             operation: "remove_frontmatter".to_string(),
-            field: field.clone(),
+            field: Some(field.clone()),
             expected_old_value: finding_actual_value(finding).cloned(),
             new_value: None,
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
         },
+        RepairAction::AddFrontmatter { field, value } => PlannedChange {
+            path: finding.path.clone(),
+            document_hash,
+            finding_code: finding.code.clone(),
+            finding_rule: finding_rule(finding),
+            repair_rule,
+            operation: "add_frontmatter".to_string(),
+            field: Some(field.clone()),
+            expected_old_value: None,
+            new_value: Some(value.clone()),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+        },
+        RepairAction::MoveDocument { destination } => {
+            let source_doc = documents.iter().find(|d| d.path == finding.path);
+            let frontmatter = source_doc.and_then(|d| d.frontmatter.as_ref());
+
+            let new_path = match crate::repair::destination::resolve_destination(
+                destination,
+                &finding.path,
+                frontmatter,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Err((
+                        SkipReason::PreconditionFailed,
+                        Some(format!("placeholder substitution failed: {e}")),
+                    ));
+                }
+            };
+
+            let link_risk =
+                crate::repair::link_risk::classify(&finding.path, &new_path, documents, &[]);
+
+            let mut warnings = Vec::new();
+            if let Some(w) =
+                crate::repair::warnings::detect_stem_collision(&finding.path, &new_path, documents)
+            {
+                warnings.push(w);
+            }
+
+            PlannedChange {
+                path: finding.path.clone(),
+                document_hash,
+                finding_code: finding.code.clone(),
+                finding_rule: finding_rule(finding),
+                repair_rule,
+                operation: "move_document".to_string(),
+                field: None,
+                expected_old_value: None,
+                new_value: None,
+                destination: Some(new_path),
+                link_risk: Some(link_risk),
+                warnings,
+            }
+        }
     })
 }
 
-fn skipped_finding(finding: &Finding, skip_reason: SkipReason) -> SkippedFinding {
+fn skipped_finding(
+    finding: &Finding,
+    skip_reason: SkipReason,
+    reason_override: Option<String>,
+) -> SkippedFinding {
     let (reason, next_actions) = match &finding.body {
         FindingBody::LinkIssue { link } if link.status == vault_core::LinkStatus::Ambiguous => (
             "ambiguous link target".to_string(),
@@ -269,10 +356,10 @@ fn skipped_finding(finding: &Finding, skip_reason: SkipReason) -> SkippedFinding
             ],
         ),
         FindingBody::DocumentMisrouted { .. } => (
-            "path repair is planning-only in this release".to_string(),
+            "no configured move_document repair rule matched this misrouted document".to_string(),
             vec![
                 "review allowed_paths and current document location".to_string(),
-                "move files manually or use a future path apply command".to_string(),
+                "add a move_document repair rule matching this finding's code".to_string(),
             ],
         ),
         FindingBody::GraphDiagnostic { .. } => (
@@ -294,6 +381,9 @@ fn skipped_finding(finding: &Finding, skip_reason: SkipReason) -> SkippedFinding
     } else {
         (reason, next_actions)
     };
+
+    // Explicit override takes precedence (e.g., MoveDocument substitution failure).
+    let reason = reason_override.unwrap_or(reason);
 
     SkippedFinding {
         path: finding.path.clone(),
@@ -365,7 +455,6 @@ mod tests {
     use crate::config::{RepairAction, RepairRule, RepairRuleMatch};
     use crate::findings::{Finding, FindingBody};
     use serde_json::json;
-    use std::collections::BTreeMap;
     use vault_core::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
 
     fn vault_root() -> Utf8PathBuf {
@@ -444,13 +533,41 @@ mod tests {
         match_actual: Option<serde_json::Value>,
         action: RepairAction,
     ) -> RepairRule {
-        let (set_frontmatter, remove_frontmatter) = match action {
+        let (set_frontmatter, remove_frontmatter, add_frontmatter, move_document) = match action {
             RepairAction::SetFrontmatter { field, value } => (
                 Some(crate::config::SetFrontmatterAction { field, value }),
                 None,
+                None,
+                None,
             ),
-            RepairAction::RemoveFrontmatter { field } => {
-                (None, Some(crate::config::RemoveFrontmatterAction { field }))
+            RepairAction::RemoveFrontmatter { field } => (
+                None,
+                Some(crate::config::RemoveFrontmatterAction { field }),
+                None,
+                None,
+            ),
+            RepairAction::AddFrontmatter { field, value } => (
+                None,
+                None,
+                Some(crate::config::AddFrontmatterAction { field, value }),
+                None,
+            ),
+            RepairAction::MoveDocument { destination } => {
+                let (to_directory, to_path) = match destination {
+                    crate::config::DestinationSpec::Directory { to_directory } => {
+                        (Some(to_directory), None)
+                    }
+                    crate::config::DestinationSpec::Path { to_path } => (None, Some(to_path)),
+                };
+                (
+                    None,
+                    None,
+                    None,
+                    Some(crate::config::MoveDocumentAction {
+                        to_directory,
+                        to_path,
+                    }),
+                )
             }
         };
         RepairRule {
@@ -463,14 +580,32 @@ mod tests {
             },
             set_frontmatter,
             remove_frontmatter,
+            add_frontmatter,
+            move_document,
         }
     }
 
-    fn document_hashes_for(paths: &[&str]) -> BTreeMap<Utf8PathBuf, String> {
-        paths
-            .iter()
-            .map(|p| (Utf8PathBuf::from(*p), format!("hash-{p}")))
-            .collect()
+    fn doc(path: &str, hash: &str) -> vault_core::Document {
+        vault_core::Document {
+            path: path.into(),
+            stem: camino::Utf8Path::new(path).file_stem().unwrap().to_string(),
+            hash: hash.to_string(),
+            frontmatter: None,
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+        }
+    }
+
+    fn index_for(paths: &[&str]) -> vault_core::GraphIndex {
+        let documents = paths.iter().map(|p| doc(p, &format!("hash-{p}"))).collect();
+        vault_core::GraphIndex {
+            root: vault_root(),
+            files: vec![],
+            ignored_files: vec![],
+            documents,
+        }
     }
 
     #[test]
@@ -488,18 +623,18 @@ mod tests {
                 },
             )],
         };
-        let hashes = document_hashes_for(&["task.md"]);
+        let index = index_for(&["task.md"]);
         let plan = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
-            &hashes,
+            &index,
         );
         assert_eq!(plan.changes.len(), 1);
         assert_eq!(plan.skipped_findings.len(), 0);
         assert_eq!(plan.changes[0].operation, "set_frontmatter");
-        assert_eq!(plan.changes[0].field, "status");
+        assert_eq!(plan.changes[0].field.as_deref(), Some("status"));
         assert_eq!(plan.changes[0].new_value, Some(json!("backlog")));
         assert_eq!(plan.changes[0].expected_old_value, Some(json!("someday")));
         assert_eq!(plan.changes[0].document_hash, "hash-task.md");
@@ -509,13 +644,13 @@ mod tests {
     fn unmatched_finding_routes_to_skipped_with_unsupported_reason() {
         let finding = finding_disallowed_value("task.md", "status", json!("someday"));
         let config = RepairConfig { rules: vec![] };
-        let hashes = document_hashes_for(&["task.md"]);
+        let index = index_for(&["task.md"]);
         let plan = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
-            &hashes,
+            &index,
         );
         assert_eq!(plan.changes.len(), 0);
         assert_eq!(plan.skipped_findings.len(), 1);
@@ -535,13 +670,13 @@ mod tests {
             vec!["Calendar/Daily.md", "Templates/Daily.md"],
         );
         let config = RepairConfig { rules: vec![] };
-        let hashes = document_hashes_for(&["note.md"]);
+        let index = index_for(&["note.md"]);
         let plan = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
-            &hashes,
+            &index,
         );
         assert_eq!(plan.skipped_findings.len(), 1);
         assert_eq!(plan.skipped_findings[0].skip_reason, SkipReason::Ambiguous);
@@ -554,13 +689,13 @@ mod tests {
     fn unresolved_link_finding_routes_to_skipped_with_unsupported_reason() {
         let finding = finding_link_unresolved("note.md", "missing");
         let config = RepairConfig { rules: vec![] };
-        let hashes = document_hashes_for(&["note.md"]);
+        let index = index_for(&["note.md"]);
         let plan = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
-            &hashes,
+            &index,
         );
         assert_eq!(
             plan.skipped_findings[0].skip_reason,
@@ -584,13 +719,14 @@ mod tests {
                 },
             )],
         };
-        let hashes: BTreeMap<Utf8PathBuf, String> = BTreeMap::new();
+        // Empty index (no documents) → triggers MissingHash for the finding.
+        let index = index_for(&[]);
         let plan = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
-            &hashes,
+            &index,
         );
         assert_eq!(plan.changes.len(), 0);
         assert_eq!(plan.skipped_findings.len(), 1);
@@ -601,6 +737,52 @@ mod tests {
         // The reason text reflects the new clearer message.
         assert!(plan.skipped_findings[0].reason.contains("hash not present"));
         assert_eq!(plan.summary.skipped.missing_hash, 1);
+    }
+
+    fn finding_required_missing(path: &str, field: &str, rule: Option<&str>) -> Finding {
+        Finding {
+            code: "frontmatter-required-field-missing".into(),
+            severity: Severity::Warning,
+            path: path.into(),
+            message: format!("required frontmatter field is missing: {field}"),
+            body: FindingBody::RequiredFrontmatterMissing {
+                rule: rule.map(Into::into),
+                field: field.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn add_frontmatter_rule_produces_planned_change_for_missing_field() {
+        let finding = finding_required_missing("task.md", "kind", Some("typed-note"));
+        let config = RepairConfig {
+            rules: vec![make_rule(
+                "ensure-kind",
+                "frontmatter-required-field-missing",
+                Some("kind"),
+                None,
+                RepairAction::AddFrontmatter {
+                    field: "kind".into(),
+                    value: json!("research"),
+                },
+            )],
+        };
+        let index = index_for(&["task.md"]);
+        let plan = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.skipped_findings.len(), 0);
+        let change = &plan.changes[0];
+        assert_eq!(change.operation, "add_frontmatter");
+        assert_eq!(change.field.as_deref(), Some("kind"));
+        assert_eq!(change.new_value, Some(json!("research")));
+        assert_eq!(change.expected_old_value, None);
+        assert_eq!(change.document_hash, "hash-task.md");
     }
 
     #[test]
@@ -622,13 +804,13 @@ mod tests {
                 },
             )],
         };
-        let hashes = document_hashes_for(&["task1.md", "note.md"]);
+        let index = index_for(&["task1.md", "note.md"]);
         let plan = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             findings,
             &config,
-            &hashes,
+            &index,
         );
         assert_eq!(plan.summary.findings, 3);
         assert_eq!(plan.summary.planned_changes, 1);

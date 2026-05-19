@@ -268,6 +268,11 @@ pub struct RepairLinksArgs {
         help = "Exact vault-relative path or unique document stem to analyze for move/delete risk"
     )]
     pub target: Option<String>,
+    #[arg(
+        long = "move-to",
+        help = "Hypothetical destination path; computes link risk + warnings as if the target were moved to this path"
+    )]
+    pub move_to: Option<Utf8PathBuf>,
     #[arg(long, value_enum, default_value_t = RepairOutputFormat::Json, help = "Stdout format")]
     pub format: RepairOutputFormat,
 }

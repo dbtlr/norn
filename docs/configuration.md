@@ -45,12 +45,20 @@ repair:
         rule: rule-name
         field: frontmatter-field
         actual_value: ...
+      # exactly one action per rule:
       set_frontmatter:
         field: ...
         value: ...
       # or:
       remove_frontmatter:
         field: ...
+      # or:
+      add_frontmatter:
+        field: ...
+        value: ...
+      # or:
+      move_document:
+        to_directory: ...   # OR to_path: ...
 ```
 
 ## files.ignore
@@ -154,32 +162,93 @@ Findings include `rule` context when a scoped rule produced them.
 
 Declarative deterministic repair rules. `vault repair plan` matches findings against `repair.rules` and converts matched findings into executable changes; unmatched findings appear in `skipped_findings` with `skip_reason: unsupported`.
 
-Each rule has a `match` predicate and exactly one action (`set_frontmatter` or `remove_frontmatter`).
-
-```yaml
-repair:
-  rules:
-    - name: legacy-task-status-someday
-      match:
-        code: frontmatter-disallowed-value
-        rule: task-status
-        field: status
-        actual_value: someday
-      set_frontmatter:
-        field: status
-        value: backlog
-
-    - name: remove-forbidden-kind
-      match:
-        code: frontmatter-forbidden-field
-        field: kind
-      remove_frontmatter:
-        field: kind
-```
+Each rule has a `match` predicate and exactly one action (`set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, or `move_document`).
 
 `match` supports `code`, `rule`, `field`, and `actual_value`. Matches are exact and type-sensitive.
 
-The first supported repair actions are frontmatter-only. Link rewriting and path moves are tracked for v0.27+.
+### set_frontmatter
+
+Replace an existing frontmatter field's value. Apply preserves byte-for-byte the surrounding YAML (comments, ordering, quote style); only the value of the matched field changes.
+
+```yaml
+- name: legacy-task-status-someday
+  match:
+    code: frontmatter-disallowed-value
+    rule: task-status
+    field: status
+    actual_value: someday
+  set_frontmatter:
+    field: status
+    value: backlog
+```
+
+### remove_frontmatter
+
+Remove a frontmatter field entirely.
+
+```yaml
+- name: remove-forbidden-kind
+  match:
+    code: frontmatter-forbidden-field
+    field: kind
+  remove_frontmatter:
+    field: kind
+```
+
+### add_frontmatter
+
+Insert a missing frontmatter field. Refuses at apply time if the field is already present (use `set_frontmatter` for replacement).
+
+```yaml
+- name: ensure-research-kind
+  match:
+    code: frontmatter-required-field-missing
+    rule: typed-note
+    field: kind
+  add_frontmatter:
+    field: kind
+    value: research
+```
+
+### move_document
+
+Move or rename a file. Accepts `to_directory` (file moves into the directory, filename preserved) OR `to_path` (full destination including filename; handles renames).
+
+```yaml
+# Move into a directory, preserving filename
+- name: route-tasks-dir
+  match:
+    code: document-misrouted
+    rule: task-routing
+  move_document:
+    to_directory: "Workspaces/{frontmatter.workspace}/tasks/"
+
+# Full destination, including possible rename
+- name: route-tasks-path
+  match:
+    code: document-misrouted
+    rule: task-routing
+  move_document:
+    to_path: "Workspaces/{frontmatter.workspace}/tasks/{stem}.md"
+```
+
+Either form supports placeholder substitution:
+
+- `{stem}` — the source file's stem (filename without extension).
+- `{filename}` — the source file's filename including extension.
+- `{frontmatter.<field>}` — a scalar value from the source file's frontmatter.
+
+If substitution fails (missing field, non-scalar value), the finding is skipped with `skip_reason: precondition_failed`.
+
+Apply automatically rewrites backlinks alongside the move:
+
+- Stem-only wikilinks `[[task]]` rewrite when the stem changes.
+- Path-qualified wikilinks `[[Inbox/task]]` rewrite when the path changes.
+- Markdown links `[text](path)` rewrite when the path changes.
+
+**Known v0.28.0 limitation:** when a backlinking file contains multiple identical link occurrences pointing at the moved file, only the first occurrence is rewritten. Subsequent identical raw occurrences remain unchanged; running `vault validate` after apply will flag them as unresolved.
+
+A rename whose new stem already exists elsewhere produces a non-blocking `StemCollisionAfterMove` warning attached to the planned change.
 
 ## Examples
 
