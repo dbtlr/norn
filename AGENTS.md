@@ -2,6 +2,16 @@
 
 `vault` is a deterministic Markdown vault CLI for humans and agents. This file is the short agent contract; the full guide is at [docs/agent-workflows.md](docs/agent-workflows.md).
 
+## How We Work
+
+- **Never push to main.** All work should be done in a branch or worktree and
+  pushed as a PR.
+- **Small meaningful commits.** Create useful checkpoints on long tasks.
+- **Discuss first, code second.** Align on package boundaries and user-facing
+  behavior before large implementation changes.
+- **No broken windows.** Fix errors and warnings encountered while working.
+- **Documentation as a deliverable.** No task is complete without accompanying documentation.
+
 ## Quick rules
 
 - `vault validate` and `vault docs|links|files|search` are read-only.
@@ -15,6 +25,26 @@
 2. Start with `vault validate --summary --format json`.
 3. Filter findings for a triage queue with `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason`.
 4. For mutation, write a plan: `vault repair plan --out repair.json`. Apply with `vault repair apply repair.json --dry-run` then `--verify`.
+
+## Documentation First
+
+- All new tasks should include updating any related documentation to updates that are made.
+
+## Architecture Documentation
+
+- Architecture docs live in `docs/architecture/`.
+- When adding or changing a system component, update the relevant doc.
+- When adding a new subsystem, create a new doc for it.
+- Docs explain what, why, and how — not just API signatures.
+- Use Mermaid diagrams to visualize data flows, component relationships, and system architecture.
+
+## CLI Documentation
+
+- CLI docs live in `docs/commands/`.
+- When adding a new command, create a doc page and add it to the commands README.
+- When modifying command flags or behavior, update the corresponding doc page.
+- Each doc page follows the template: description, usage, options table, examples, see also.
+- Examples should show brief JSON output (1-2 records) demonstrating the shape, not exhaustive results.
 
 ## Documentation
 
