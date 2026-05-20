@@ -22,19 +22,15 @@ Table output is for humans and may evolve between point releases. Agents should 
 
 ## Vault targeting
 
-An agent should detect the vault root before running any command. The three ways:
+An agent should detect the vault root before running any command. The two ways:
 
-1. **`-C <path>`.** One-shot invocation against an arbitrary directory.
+1. **`-C <path>` (alias `--cwd`).** One-shot invocation against an arbitrary directory.
    ```bash
    vault -C /path/to/vault validate --summary --format json
    ```
-2. **`--vault <name>`.** Reference a vault registered with `vault registry add`. Registry lives at `$XDG_CONFIG_HOME/vault/registry.yaml`.
-   ```bash
-   vault --vault myvault validate --summary --format json
-   ```
-3. **Process cwd.** When neither flag is set, `vault` runs against the current directory. Discovery of `.vault/config.yaml` is implicit.
+2. **Process cwd.** When `-C` is not set, `vault` runs against the current directory. Discovery of `.vault/config.yaml` is implicit.
 
-`--vault` and `-C` are mutually exclusive. An agent that operates on multiple vaults should register them once and then use `--vault` for the rest of the session.
+`--cwd PATH` is the only vault-targeting mechanism. An agent operating on multiple vaults should pass `-C` per command.
 
 ## Recommended agent loop
 

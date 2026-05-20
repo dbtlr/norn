@@ -88,29 +88,6 @@ fn vault_error(args: &[&str]) -> String {
     String::from_utf8(output.stderr).expect("stderr should be UTF-8")
 }
 
-fn vault_error_env(args: &[&str], envs: &[(&str, &str)]) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
-    command.args(args);
-    let _cache_dir = if envs.iter().any(|(k, _)| *k == "XDG_CACHE_HOME") {
-        None
-    } else {
-        Some(isolate_cache(&mut command))
-    };
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-    let output = command.output().expect("vault command should run");
-
-    assert!(
-        !output.status.success(),
-        "vault command succeeded unexpectedly\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    String::from_utf8(output.stderr).expect("stderr should be UTF-8")
-}
-
 fn temp_cache_dir() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -131,13 +108,11 @@ fn vault_version_reports_package_version() {
 fn vault_help_documents_global_cwd() {
     let output = vault(&["--help"]);
     assert!(output.contains("-C, --cwd"));
-    assert!(output.contains("--vault"));
     assert!(output.contains("--config"));
     assert!(output.contains("--verbose"));
     assert!(output.contains("docs"));
     assert!(output.contains("files"));
     assert!(output.contains("links"));
-    assert!(output.contains("registry"));
     assert!(output.contains("repair"));
     assert!(output.contains("cache"));
 }
@@ -166,12 +141,6 @@ fn grouped_help_lists_new_surfaces() {
     assert!(output.contains("rebuild"));
     assert!(output.contains("clear"));
     assert!(output.contains("status"));
-
-    let output = vault(&["registry", "--help"]);
-    assert!(output.contains("Manage named vault roots"));
-    assert!(output.contains("add"));
-    assert!(output.contains("list"));
-    assert!(output.contains("remove"));
 
     let output = vault(&["repair", "--help"]);
     assert!(output.contains("Plan and apply deterministic vault repairs"));
@@ -737,58 +706,6 @@ fn repair_config_rejects_ambiguous_actions() {
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
-}
-
-#[test]
-fn registry_add_list_target_and_remove_are_isolated_by_xdg_config_home() {
-    let config_home = temp_cache_dir();
-    let config_home_string = config_home.to_string_lossy().to_string();
-    let fixture = fixture_root();
-    let fixture_string = fixture.to_string_lossy().to_string();
-    let envs = [("XDG_CONFIG_HOME", config_home_string.as_str())];
-
-    vault_success_env(
-        &["registry", "add", "basic", fixture_string.as_str()],
-        &envs,
-    );
-
-    let list = vault_success_env(&["registry", "list", "--format", "json"], &envs).0;
-    let entries = serde_json::from_str::<Value>(&list).expect("registry list should be JSON");
-    assert_eq!(entries.as_array().unwrap().len(), 1);
-    assert_eq!(entries[0]["name"], "basic");
-    assert_eq!(entries[0]["path"], fixture_string);
-
-    let docs = vault_success_env(&["--vault", "basic", "files", "--format", "paths"], &envs).0;
-    assert!(docs.lines().any(|line| line == "alpha.md"));
-
-    vault_success_env(&["registry", "remove", "basic"], &envs);
-    let list = vault_success_env(&["registry", "list", "--format", "json"], &envs).0;
-    let entries = serde_json::from_str::<Value>(&list).expect("registry list should be JSON");
-    assert!(entries.as_array().unwrap().is_empty());
-
-    fs::remove_dir_all(config_home).ok();
-}
-
-#[test]
-fn vault_targeting_rejects_vault_and_cwd_together() {
-    let config_home = temp_cache_dir();
-    let config_home_string = config_home.to_string_lossy().to_string();
-    let fixture = fixture_root();
-    let fixture_string = fixture.to_string_lossy().to_string();
-    let envs = [("XDG_CONFIG_HOME", config_home_string.as_str())];
-
-    vault_success_env(
-        &["registry", "add", "basic", fixture_string.as_str()],
-        &envs,
-    );
-    let error = vault_error_env(
-        &["--vault", "basic", "-C", fixture_string.as_str(), "files"],
-        &envs,
-    );
-
-    assert!(error.contains("--vault and -C/--cwd cannot be used together"));
-
-    fs::remove_dir_all(config_home).ok();
 }
 
 #[test]

@@ -15,9 +15,11 @@ pub enum ConfigError {
     DeprecatedGraphIgnore { source_path: camino::Utf8PathBuf },
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultConfig {
+    #[serde(default = "default_schema_version")]
+    pub version: u32,
     #[serde(default)]
     pub files: FilesConfig,
     #[serde(default)]
@@ -27,6 +29,24 @@ pub struct VaultConfig {
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
     _deprecated_graph: Option<serde_yaml::Value>,
+}
+
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    CURRENT_SCHEMA_VERSION
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_SCHEMA_VERSION,
+            files: FilesConfig::default(),
+            validate: ValidateConfig::default(),
+            repair: RepairConfig::default(),
+            _deprecated_graph: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -552,6 +572,31 @@ repair:
 "#;
         let err = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap_err();
         assert!(format!("{err}").contains("declares") && format!("{err}").contains("pick one"));
+    }
+
+    #[test]
+    fn config_without_version_defaults_to_v1() {
+        let yaml = "files:\n  ignore: []\n";
+        let cfg: VaultConfig = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(cfg.version, 1);
+    }
+
+    #[test]
+    fn config_with_explicit_version_1_parses() {
+        let yaml = "version: 1\nfiles:\n  ignore: []\n";
+        let cfg: VaultConfig = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(cfg.version, 1);
+    }
+
+    #[test]
+    fn config_with_unknown_version_parses_but_value_preserved() {
+        // We intentionally accept unknown versions at parse-time so
+        // `vault config validate` can surface them as findings rather
+        // than hard parse errors. Reject-at-validate keeps the
+        // diagnostic surface uniform.
+        let yaml = "version: 99\n";
+        let cfg: VaultConfig = serde_yaml::from_str(yaml).expect("parses");
+        assert_eq!(cfg.version, 99);
     }
 
     #[test]

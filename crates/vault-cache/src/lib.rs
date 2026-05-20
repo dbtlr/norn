@@ -31,6 +31,7 @@ mod status;
 mod writer;
 
 pub use change_detection::{detect, ChangeDetectOptions, FileChange};
+pub use identity::cache_dir_for;
 pub use status::CacheStatus;
 pub use writer::{IndexOptions, IndexReport};
 

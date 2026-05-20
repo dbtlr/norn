@@ -2,12 +2,14 @@ mod cache;
 mod cli;
 mod completions;
 mod config;
+mod config_loader;
 mod filter;
 mod find;
+mod init;
+mod init_scan;
 mod link_repair;
 mod output;
 mod query;
-mod registry;
 mod repair_apply;
 mod target;
 mod validate_filter;
@@ -21,18 +23,18 @@ use vault_graph::{concise_diagnostics, has_errors};
 use vault_standards::{plan_repairs, summarize, validate, RepairPlanFilters};
 
 use crate::cli::{
-    CacheSubcommand, Cli, Command, DocsSubcommand, LinksSubcommand, RegistrySubcommand,
+    CacheSubcommand, Cli, Command, ConfigSubcommand, DocsSubcommand, LinksSubcommand,
     RepairOutputFormat, RepairSubcommand,
 };
-use crate::config::{effective_cwd, load_config, resolve_path};
+use crate::config_loader::{effective_cwd, load_config, resolve_path};
 use crate::filter::{
     filter_documents, index_frontmatter_keys, summarize_documents, DocumentFilterOptions,
 };
 use crate::link_repair::plan_link_repairs;
 use crate::output::{
     is_broken_pipe, resolve_format, write_document_summary, write_files, write_findings,
-    write_item_output, write_link_repair_report, write_links, write_output,
-    write_repair_apply_report, write_repair_plan, write_validate_summary,
+    write_item_output, write_link_repair_report, write_links, write_repair_apply_report,
+    write_repair_plan, write_validate_summary,
 };
 use crate::repair_apply::{apply_repair_plan, with_verification};
 use crate::target::{
@@ -55,7 +57,6 @@ fn main() {
 fn run(cli: Cli) -> Result<i32> {
     let Cli {
         cwd,
-        vault,
         config,
         verbose,
         no_cache_refresh,
@@ -63,13 +64,12 @@ fn run(cli: Cli) -> Result<i32> {
     } = cli;
 
     let command = match command {
-        Command::Registry(registry_command) => return run_registry(registry_command.command),
         Command::Completions(args) => return run_completions_command(args),
         Command::Manpage => return run_manpage_command(),
         command => command,
     };
 
-    let cwd = effective_cwd(cwd.as_ref(), vault.as_deref())?;
+    let cwd = effective_cwd(cwd.as_ref())?;
     let config_path = config;
 
     match command {
@@ -221,6 +221,18 @@ fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Command::Config(cfg) => match cfg.command {
+            ConfigSubcommand::Show(args) => {
+                crate::config::run_show(&cwd, config_path.as_ref(), &args)
+            }
+            ConfigSubcommand::Validate(args) => {
+                crate::config::run_validate(&cwd, config_path.as_ref(), &args)
+            }
+            ConfigSubcommand::Migrate => crate::config::run_migrate(&cwd, config_path.as_ref()),
+            ConfigSubcommand::Edit(args) => {
+                crate::config::run_edit(&cwd, config_path.as_ref(), &args)
+            }
+        },
         Command::Validate(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             let mut index = crate::cache::load_graph_index(
@@ -241,9 +253,7 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(exit_code_for(&index))
         }
         Command::Find(args) => find::run(args, &cwd, no_cache_refresh),
-        Command::Registry(_) => {
-            unreachable!("registry commands are handled before vault targeting")
-        }
+        Command::Init(args) => init::run(&cwd, &args),
         Command::Completions(_) => {
             unreachable!("completions are handled before vault targeting")
         }
@@ -269,24 +279,6 @@ fn run_completions_command(cmd: crate::cli::CompletionsCommand) -> Result<i32> {
 fn run_manpage_command() -> Result<i32> {
     completions::run_manpage()?;
     Ok(0)
-}
-
-fn run_registry(command: RegistrySubcommand) -> Result<i32> {
-    match command {
-        RegistrySubcommand::Add(args) => {
-            registry::add_vault(&args.name, &args.path)?;
-            Ok(0)
-        }
-        RegistrySubcommand::List(args) => {
-            let entries = registry::list_vaults()?;
-            write_output(&entries, resolve_format(args.format))?;
-            Ok(0)
-        }
-        RegistrySubcommand::Remove(args) => {
-            registry::remove_vault(&args.name)?;
-            Ok(0)
-        }
-    }
 }
 
 fn repair_plan_filters(args: &crate::cli::RepairPlanArgs) -> RepairPlanFilters {

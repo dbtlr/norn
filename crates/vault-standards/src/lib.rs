@@ -15,7 +15,7 @@ pub use apply::{
 pub use config::{
     parse_config, ConfigError, FilesConfig, RemoveFrontmatterAction, RepairAction, RepairConfig,
     RepairRule, RepairRuleMatch, RuleExclude, RuleSelector, SetFrontmatterAction, ValidateConfig,
-    ValidateRule, VaultConfig,
+    ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION,
 };
 pub use engine::{validate, validate_rule};
 pub use findings::{Finding, FindingBody};

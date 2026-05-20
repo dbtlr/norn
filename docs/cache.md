@@ -15,7 +15,7 @@ description: The SQLite-backed cache that accelerates vault query commands — w
 
 Honors `$XDG_CACHE_HOME` when set. The directory is created at `0700` and the database file at `0600` — explicitly tightened (not relying on umask) to protect frontmatter values on shared hosts.
 
-The cache identity is derived from the canonical path of the vault root (symlinks resolved). Querying via `--vault registry-name`, the symlinked path, or the resolved target all hit the same cache.
+The cache identity is derived from the canonical path of the vault root (symlinks resolved). Querying via the symlinked path or its resolved target hits the same cache.
 
 ## Surface
 
@@ -28,7 +28,7 @@ vault cache clear               # delete the cache; next command rebuilds
 vault cache status              # path, size, doc/link/file counts, schema version
 ```
 
-Every cache subcommand accepts the global `-C`, `--vault`, and `--config` flags; `status` accepts `--format json|table` like other query commands.
+Every cache subcommand accepts the global `-C` and `--config` flags; `status` accepts `--format json|table` like other query commands.
 
 ## When the cache rebuilds automatically
 

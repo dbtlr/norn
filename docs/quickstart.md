@@ -51,23 +51,9 @@ vault -C /path/to/vault validate --summary --format table
 
 Out of the box `vault` parses Obsidian-compatible internal links: body wikilinks, embeds, frontmatter wikilinks, URL-decoded Markdown links, extensionless Markdown note links, heading anchors, and block references.
 
-## Register a vault for repeated use
+## Targeting a vault
 
-If you'll run commands against the same vault often, register it once:
-
-```bash
-vault registry add myvault /path/to/vault
-vault registry list --format table
-```
-
-Now you can target it with `--vault <name>` instead of `-C`:
-
-```bash
-vault --vault myvault validate --summary --format table
-vault --vault myvault docs list --filter status:draft --format paths
-```
-
-Registry state lives at `$XDG_CONFIG_HOME/vault/registry.yaml` (or `~/.config/vault/registry.yaml` if `XDG_CONFIG_HOME` is unset). `--vault` and `-C` are mutually exclusive.
+Pass `-C <path>` (alias `--cwd`) to run any command against an arbitrary vault directory. When `-C` is omitted, `vault` runs against the current directory. Either way, `.vault/config.yaml` is discovered at the effective root if it exists.
 
 ## A first config
 

@@ -14,14 +14,14 @@
 
 ## Quick rules
 
-- `vault validate` and `vault docs|links|files|search` are read-only.
+- `vault validate` and `vault docs|links|files|find` are read-only.
 - Repair flows are explicit: `vault repair plan` produces an artifact; `vault repair apply` consumes it.
-- Stable contracts: JSON for human/dispatch, JSONL for streams, schema-versioned repair plans (`schema_version: 3`).
+- Stable contracts: JSON for human/dispatch, JSONL for streams, schema-versioned repair plans (`schema_version: 4`).
 - Apply rejects plans for a different vault root, stale document hashes, or unsupported schema versions.
 
 ## Quick start for agents
 
-1. Detect the vault root: `-C <path>` or `--vault <name>` (registered via `vault registry add`).
+1. Detect the vault root: `-C <path>` (or `--cwd <path>`). If neither is set, `vault` runs against the current directory and discovers `.vault/config.yaml` if present.
 2. Start with `vault validate --summary --format json`.
 3. Filter findings for a triage queue with `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason`.
 4. For mutation, write a plan: `vault repair plan --out repair.json`. Apply with `vault repair apply repair.json --dry-run` then `--verify`.

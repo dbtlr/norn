@@ -5,7 +5,7 @@ description: The .vault/config.yaml schema covering file ignores, validate rules
 
 # Configuration
 
-`vault` looks for `.vault/config.yaml` at the root of the effective vault directory (the `-C` path, the `--vault <name>` registered path, or the process cwd if neither is set). Missing config is fine — defaults apply.
+Config is discovered relative to `--cwd` (or `$PWD` if unset). `vault` looks for `.vault/config.yaml` at that root; missing config is fine — defaults apply.
 
 Pass `--config <path>` to point at an explicit file. Relative paths resolve against the effective cwd.
 

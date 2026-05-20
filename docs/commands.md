@@ -12,7 +12,6 @@ Every command accepts the global flags below and a per-command `--format` where 
 | Flag | Description |
 |---|---|
 | `-C, --cwd <dir>` | Run against `<dir>` instead of the process current directory. |
-| `--vault <name>` | Target a registered vault (see `vault registry`). Mutually exclusive with `-C`. |
 | `--config <path>` | Explicit `.vault/config.yaml` path. Relative paths resolve against the effective cwd. |
 | `--verbose` | Verbose stderr logging. |
 
@@ -140,16 +139,6 @@ vault repair links --target Inbox/task.md --move-to Workspaces/demo/tasks/task.m
 ```
 
 Output includes a `link_risk` object (stem-only, path-qualified, and Markdown backlinks with their precomputed rewrites) and any planner warnings (e.g., `StemCollisionAfterMove`).
-
-## registry
-
-Persistent named-vault registry. Stored at `$XDG_CONFIG_HOME/vault/registry.yaml`.
-
-```bash
-vault registry add myvault /path/to/vault
-vault registry list --format table
-vault registry remove myvault
-```
 
 ## cache
 

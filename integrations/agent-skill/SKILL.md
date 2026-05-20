@@ -20,17 +20,16 @@ Use `vault` when you need to:
 - Surface frontmatter drift for review.
 - Produce an inspectable repair plan (`schema_version: 4`) and apply it explicitly.
 
-Do not use `vault` when you need full-text or semantic search — its `search` command is exact literal substring + frontmatter + path glob.
+Do not use `vault` when you need full-text or semantic search — its `find` command is exact literal substring + frontmatter + path glob.
 
 ## Vault root targeting
 
-Before running any command, pick a vault root. Three ways:
+Before running any command, pick a vault root. Two ways:
 
-1. **Inline.** `vault -C /path/to/vault validate --summary --format json`
-2. **Registered name.** `vault registry add myvault /path/to/vault` once, then `vault --vault myvault validate --summary --format json`. Registry lives at `$XDG_CONFIG_HOME/vault/registry.yaml`.
-3. **Process cwd.** If neither `-C` nor `--vault` is set, `vault` runs against the current directory and discovers `.vault/config.yaml` if it exists.
+1. **Explicit path.** `vault -C /path/to/vault validate --summary --format json` (long form: `--cwd /path/to/vault`).
+2. **Process cwd.** If `-C` is not set, `vault` runs against the current directory and discovers `.vault/config.yaml` if it exists.
 
-`--vault` and `-C` are mutually exclusive. When in doubt, use `-C <path>`.
+When in doubt, use `-C <path>`.
 
 ## Read-only commands (safe to run anytime)
 
@@ -39,7 +38,7 @@ None of these write to the vault:
 - `vault docs list / summary / inspect`
 - `vault files`
 - `vault links list / unresolved / backlinks`
-- `vault search`
+- `vault find`
 - `vault validate` (with or without `--summary` or filters)
 - `vault repair plan` (produces an artifact; does not modify the vault)
 - `vault repair links` (planning report only)
@@ -51,9 +50,9 @@ Only `vault repair apply` writes to the vault. It requires an explicit plan argu
 `vault validate --summary --format json` returns grouped counts (by code, severity, rule, field, disallowed value, path prefix). Always run the summary first to size the work, then re-run without `--summary` to read individual findings.
 
 ```bash
-vault --vault myvault validate --summary --format json
-vault --vault myvault validate --code frontmatter-disallowed-value --field status --summary --format json
-vault --vault myvault validate --code frontmatter-disallowed-value --field status --format jsonl
+vault -C /path/to/vault validate --summary --format json
+vault -C /path/to/vault validate --code frontmatter-disallowed-value --field status --summary --format json
+vault -C /path/to/vault validate --code frontmatter-disallowed-value --field status --format jsonl
 ```
 
 The same filter set works for raw output and summaries.
@@ -96,10 +95,10 @@ If a vault has no config, defaults apply.
 
 Mutation is always two steps. Never write to the vault outside `vault repair apply`.
 
-1. `vault --vault myvault repair plan --out repair.json`
+1. `vault -C /path/to/vault repair plan --out repair.json`
 2. Inspect `repair.json`. Read `summary.planned_changes` and `summary.skipped.*` counts.
-3. `vault --vault myvault repair apply repair.json --dry-run --format json` — confirms the plan applies cleanly.
-4. `vault --vault myvault repair apply repair.json --verify --format json` — writes and re-validates.
+3. `vault -C /path/to/vault repair apply repair.json --dry-run --format json` — confirms the plan applies cleanly.
+4. `vault -C /path/to/vault repair apply repair.json --verify --format json` — writes and re-validates.
 
 Apply rejects:
 
@@ -128,16 +127,16 @@ When a move action is in the plan, expect `repair apply` to write to multiple fi
 
 ```bash
 # 1. Detect
-vault --vault myvault validate --summary --format json
+vault -C /path/to/vault validate --summary --format json
 
 # 2. Triage (size the queue)
-vault --vault myvault validate \
+vault -C /path/to/vault validate \
   --code frontmatter-disallowed-value \
   --field status \
   --summary --format json
 
 # 3. Plan
-vault --vault myvault repair plan \
+vault -C /path/to/vault repair plan \
   --code frontmatter-disallowed-value \
   --field status \
   --out repair.json
@@ -146,10 +145,10 @@ vault --vault myvault repair plan \
 # (read repair.json; surface skipped_findings to the human if non-empty)
 
 # 5. Dry-run
-vault --vault myvault repair apply repair.json --dry-run --format json
+vault -C /path/to/vault repair apply repair.json --dry-run --format json
 
 # 6. Apply with verification
-vault --vault myvault repair apply repair.json --verify --format json
+vault -C /path/to/vault repair apply repair.json --verify --format json
 ```
 
 ## Cache
@@ -162,7 +161,7 @@ The cache is disposable — missing or corrupted caches rebuild silently. Don't 
 
 ## Common pitfalls
 
-- **Don't filter by un-indexed fields.** `vault docs list --filter` matches frontmatter scalar or list values only. For body text matching, use `vault search --text "..."`.
+- **Don't filter by un-indexed fields.** `vault docs list --filter` matches frontmatter scalar or list values only. For body text matching, use `vault find --text "..."`.
 - **Honor schema versions.** Repair plans declare `schema_version`. Apply rejects mismatched versions; re-plan instead of editing the artifact.
 - **Don't auto-pick ambiguous link candidates.** `link-ambiguous` findings carry a `candidates` list, but the CLI does not resolve them. Surface the ambiguity to the human or apply a deterministic disambiguation rule documented in the vault's config.
 - **Use `--out` for plan artifacts.** `vault repair plan --out repair.json` writes the plan directly. Shell redirection (`> repair.json`) works but is more prone to partial-write footguns.

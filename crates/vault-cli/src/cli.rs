@@ -18,13 +18,6 @@ pub struct Cli {
         long,
         global = true,
         help_heading = "Global options",
-        help = "Run against a named vault from the user registry"
-    )]
-    pub vault: Option<String>,
-    #[arg(
-        long,
-        global = true,
-        help_heading = "Global options",
         help = "YAML config file. Defaults to <cwd>/.vault/config.yaml when present"
     )]
     pub config: Option<Utf8PathBuf>,
@@ -59,10 +52,10 @@ pub enum Command {
         about = "Find documents in the vault — full-text + metadata filters with sort/limit/paging"
     )]
     Find(FindArgs),
+    #[command(about = "Scaffold .vault/config.yaml")]
+    Init(InitArgs),
     #[command(about = "Link facts across the vault")]
     Links(LinksCommand),
-    #[command(about = "Manage named vault roots")]
-    Registry(RegistryCommand),
     #[command(about = "Plan and apply deterministic vault repairs")]
     Repair(RepairCommand),
     #[command(
@@ -77,6 +70,8 @@ pub enum Command {
         long_about = "Manage the SQLite-backed vault graph cache.\n\nThe cache is a per-vault disposable read-acceleration store. Query commands open it transparently; these subcommands let you index, rebuild, clear, or inspect it explicitly."
     )]
     Cache(CacheCommand),
+    #[command(about = "Manage the per-vault `.vault/config.yaml`")]
+    Config(ConfigCommand),
     #[command(hide = true, about = "Emit roff-format man page to stdout")]
     Manpage,
 }
@@ -168,42 +163,6 @@ pub enum LinksSubcommand {
         long_about = "Emit incoming links for an exact vault-relative file path or unique document stem.\n\nExact paths may target Markdown documents or non-Markdown files. Stem matching only applies to Markdown documents and is case-insensitive.\n\n--format paths emits unique source paths."
     )]
     Backlinks(TargetGraphArgs),
-}
-
-#[derive(Debug, Parser)]
-pub struct RegistryCommand {
-    #[command(subcommand)]
-    pub command: RegistrySubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum RegistrySubcommand {
-    #[command(about = "Register a named vault root")]
-    Add(RegistryAddArgs),
-    #[command(about = "List registered vault roots")]
-    List(RegistryListArgs),
-    #[command(about = "Remove a registered vault root")]
-    Remove(RegistryRemoveArgs),
-}
-
-#[derive(Debug, Parser)]
-pub struct RegistryAddArgs {
-    #[arg(help = "Vault name. Must not be empty, contain whitespace, or contain '/' or '\\\\'")]
-    pub name: String,
-    #[arg(help = "Absolute or relative path to the vault root directory")]
-    pub path: Utf8PathBuf,
-}
-
-#[derive(Debug, Parser)]
-pub struct RegistryListArgs {
-    #[arg(long, value_enum, help = "Stdout format")]
-    pub format: Option<OutputFormat>,
-}
-
-#[derive(Debug, Parser)]
-pub struct RegistryRemoveArgs {
-    #[arg(help = "Vault name registered via `vault registry add`")]
-    pub name: String,
 }
 
 #[derive(Debug, Parser)]
@@ -581,4 +540,51 @@ impl From<RepairOutputFormat> for OutputFormat {
             RepairOutputFormat::Table => OutputFormat::Table,
         }
     }
+}
+
+#[derive(Debug, Parser)]
+pub struct ConfigCommand {
+    #[command(subcommand)]
+    pub command: ConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigSubcommand {
+    #[command(about = "Show effective config: paths + counts")]
+    Show(ConfigShowArgs),
+    #[command(about = "Validate the config file itself")]
+    Validate(ConfigValidateArgs),
+    #[command(about = "Migrate the config file to the current schema version")]
+    Migrate,
+    #[command(about = "Open the config file in $VISUAL or $EDITOR")]
+    Edit(ConfigEditArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigShowArgs {
+    #[arg(long, value_enum, help = "Stdout format")]
+    pub format: Option<OutputFormat>,
+    #[arg(long = "no-pager", help = "Bypass the pager even on TTY records")]
+    pub no_pager: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigValidateArgs {
+    #[arg(long, value_enum, help = "Stdout format")]
+    pub format: Option<OutputFormat>,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigEditArgs {
+    #[arg(
+        long = "no-validate",
+        help = "Skip auto-validation after the editor exits"
+    )]
+    pub no_validate: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    #[arg(long, help = "Overwrite an existing .vault/config.yaml")]
+    pub force: bool,
 }

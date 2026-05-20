@@ -60,7 +60,7 @@ vault -C /path/to/vault validate --summary
 vault -C /path/to/vault docs list --format paths | head
 ```
 
-For a deeper walkthrough including registry-targeted vaults, scoped rules, and a first repair plan, see [docs/quickstart.md](docs/quickstart.md).
+For a deeper walkthrough including scoped rules and a first repair plan, see [docs/quickstart.md](docs/quickstart.md).
 
 ## Core workflows
 
@@ -73,7 +73,7 @@ For a deeper walkthrough including registry-targeted vaults, scoped rules, and a
 | Plan a repair | `vault repair plan --out repair.json` | [validation.md](docs/validation.md) |
 | Apply a repair | `vault repair apply repair.json --verify` | [validation.md](docs/validation.md) |
 | Plan link/path moves | `vault repair links --target <path>` | [validation.md](docs/validation.md) |
-| Search | `vault search --text "..." --filter k:v` | [commands.md](docs/commands.md) |
+| Find | `vault find --text "..." --eq k:v` | [commands.md](docs/commands.md) |
 
 Every command accepts `--format table|json|jsonl|paths` where applicable. JSON and JSONL contracts are stable across point releases; table output is for humans and may evolve.
 
@@ -84,7 +84,7 @@ Every command accepts `--format table|json|jsonl|paths` where applicable. JSON a
 - **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned repair plan (`schema_version: 4`).
 - **Plan/apply boundary.** Mutation is always two steps: produce a plan artifact, then apply it. Apply rejects mismatched vault roots, stale document hashes, and unsupported schema versions.
 - **Filterable triage.** `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason` apply to both raw output and `--summary`, so an agent can size a queue before reading it.
-- **Vault targeting.** Use `-C <path>` for ad-hoc invocations or `vault registry add <name> <path>` once and target with `--vault <name>`.
+- **Vault targeting.** Use `-C <path>` (or `--cwd <path>`) to point `vault` at a specific vault root, or omit it to run against the current directory.
 
 For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-workflows.md). To install the agent skill into your coding agent of choice, see [integrations/agent-skill/README.md](integrations/agent-skill/README.md).
 
