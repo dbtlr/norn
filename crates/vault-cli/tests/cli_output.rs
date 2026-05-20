@@ -3215,3 +3215,125 @@ fn cache_rebuild_repopulates_after_adding_documents() {
     fs::remove_dir_all(&root).ok();
     fs::remove_dir_all(&cache_home).ok();
 }
+
+// ── ANSI-guard helpers ────────────────────────────────────────────────────────
+
+/// Creates a minimal temp vault (config + one markdown file) and runs vault
+/// with `--cwd <tempdir>` prepended to the supplied args.
+///
+/// The temp dir prefix intentionally does NOT start with `.` — a leading dot
+/// would make the directory hidden and the vault walker would skip it,
+/// causing `vault find` to return zero results.
+fn vault_success_in_minimal_vault(args: &[&str]) -> (String, String) {
+    let tmp = tempfile::Builder::new()
+        .prefix("vault-cli-ansi-test")
+        .tempdir()
+        .expect("tempdir");
+    let vault_dir = tmp.path().join(".vault");
+    fs::create_dir_all(&vault_dir).unwrap();
+    fs::write(
+        vault_dir.join("config.yaml"),
+        "version: 1\nfiles:\n  ignore: []\nvalidate:\n  required_frontmatter: []\n  rules: []\nrepair:\n  rules: []\n",
+    )
+    .unwrap();
+    fs::write(tmp.path().join("note.md"), "---\ntype: note\n---\n\nbody\n").unwrap();
+
+    let cwd_arg = tmp.path().to_str().unwrap().to_string();
+    let mut full = vec!["--cwd", cwd_arg.as_str()];
+    full.extend_from_slice(args);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
+    command.args(&full);
+    let _cache_dir = isolate_cache(&mut command);
+    let output = command.output().expect("vault command should run");
+
+    assert!(
+        output.status.success(),
+        "vault failed; args={args:?}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    (
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+// ── Cross-command no-ANSI guard tests ─────────────────────────────────────────
+// §5.5 of the norn-cli-output spec: structured formats (json / jsonl / paths)
+// must never carry ANSI escape sequences, even when --color=always is set.
+
+#[test]
+fn find_json_format_contains_no_ansi_under_color_always() {
+    let (stdout, _stderr) =
+        vault_success_in_minimal_vault(&["--color=always", "find", "--format", "json"]);
+    assert!(
+        !stdout.contains("\x1b["),
+        "JSON must not contain ANSI: {stdout:?}"
+    );
+}
+
+#[test]
+fn find_jsonl_format_contains_no_ansi_under_color_always() {
+    let (stdout, _stderr) =
+        vault_success_in_minimal_vault(&["--color=always", "find", "--format", "jsonl"]);
+    assert!(!stdout.contains("\x1b["), "JSONL must not contain ANSI");
+}
+
+#[test]
+fn find_paths_format_contains_no_ansi_under_color_always() {
+    let (stdout, _stderr) =
+        vault_success_in_minimal_vault(&["--color=always", "find", "--format", "paths"]);
+    assert!(!stdout.contains("\x1b["), "paths must not contain ANSI");
+}
+
+#[test]
+fn config_show_json_no_ansi() {
+    let (stdout, _stderr) =
+        vault_success_in_minimal_vault(&["--color=always", "config", "show", "--format", "json"]);
+    assert!(
+        !stdout.contains("\x1b["),
+        "config show JSON must not contain ANSI"
+    );
+}
+
+#[test]
+fn config_show_jsonl_no_ansi() {
+    let (stdout, _stderr) =
+        vault_success_in_minimal_vault(&["--color=always", "config", "show", "--format", "jsonl"]);
+    assert!(
+        !stdout.contains("\x1b["),
+        "config show JSONL must not contain ANSI"
+    );
+}
+
+#[test]
+fn config_validate_json_no_ansi() {
+    let (stdout, _stderr) = vault_success_in_minimal_vault(&[
+        "--color=always",
+        "config",
+        "validate",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        !stdout.contains("\x1b["),
+        "config validate JSON must not contain ANSI"
+    );
+}
+
+#[test]
+fn config_validate_jsonl_no_ansi() {
+    let (stdout, _stderr) = vault_success_in_minimal_vault(&[
+        "--color=always",
+        "config",
+        "validate",
+        "--format",
+        "jsonl",
+    ]);
+    assert!(
+        !stdout.contains("\x1b["),
+        "config validate JSONL must not contain ANSI"
+    );
+}

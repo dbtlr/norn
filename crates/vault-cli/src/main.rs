@@ -31,7 +31,7 @@ use crate::filter::{
     filter_documents, index_frontmatter_keys, summarize_documents, DocumentFilterOptions,
 };
 use crate::link_repair::plan_link_repairs;
-use crate::output::{
+use crate::output::legacy::{
     is_broken_pipe, resolve_format, write_document_summary, write_files, write_findings,
     write_item_output, write_link_repair_report, write_links, write_repair_apply_report,
     write_repair_plan, write_validate_summary,
@@ -60,6 +60,7 @@ fn run(cli: Cli) -> Result<i32> {
         config,
         verbose,
         no_cache_refresh,
+        color,
         command,
     } = cli;
 
@@ -223,14 +224,14 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::Config(cfg) => match cfg.command {
             ConfigSubcommand::Show(args) => {
-                crate::config::run_show(&cwd, config_path.as_ref(), &args)
+                crate::config::run_show(&cwd, config_path.as_ref(), &args, color)
             }
             ConfigSubcommand::Validate(args) => {
-                crate::config::run_validate(&cwd, config_path.as_ref(), &args)
+                crate::config::run_validate(&cwd, config_path.as_ref(), &args, color)
             }
             ConfigSubcommand::Migrate => crate::config::run_migrate(&cwd, config_path.as_ref()),
             ConfigSubcommand::Edit(args) => {
-                crate::config::run_edit(&cwd, config_path.as_ref(), &args)
+                crate::config::run_edit(&cwd, config_path.as_ref(), &args, color)
             }
         },
         Command::Validate(args) => {
@@ -252,7 +253,7 @@ fn run(cli: Cli) -> Result<i32> {
             }
             Ok(exit_code_for(&index))
         }
-        Command::Find(args) => find::run(args, &cwd, no_cache_refresh),
+        Command::Find(args) => find::run(args, &cwd, no_cache_refresh, color),
         Command::Init(args) => init::run(&cwd, &args),
         Command::Completions(_) => {
             unreachable!("completions are handled before vault targeting")

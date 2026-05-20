@@ -12,11 +12,14 @@ use anyhow::{anyhow, Result};
 use camino::Utf8Path;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write;
 
 use vault_cache::{Cache, DocumentQuery};
 
 use crate::cli::InitArgs;
 use crate::init_scan::{tally_from_keys, ScanResult};
+use crate::output::palette::Palette;
+use crate::output::primitives::{self, NoteLabel};
 
 const SCAFFOLD_TOP: &str = r#"version: 1
 
@@ -47,6 +50,19 @@ const TOP_N: usize = 30;
 
 /// Run `vault init`. Returns the process exit code.
 pub fn run(cwd: &Utf8Path, args: &InitArgs) -> Result<i32> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    run_to(cwd, args, &mut lock)
+}
+
+#[cfg(test)]
+pub(crate) fn run_capturing_output(cwd: &Utf8Path, args: &InitArgs) -> Result<String> {
+    let mut buf = Vec::new();
+    run_to(cwd, args, &mut buf)?;
+    Ok(String::from_utf8(buf)?)
+}
+
+fn run_to(cwd: &Utf8Path, args: &InitArgs, out: &mut dyn Write) -> Result<i32> {
     let vault_dir = cwd.join(".vault");
     let config_path = vault_dir.join("config.yaml");
 
@@ -62,18 +78,37 @@ pub fn run(cwd: &Utf8Path, args: &InitArgs) -> Result<i32> {
     let body = render_scaffold(&scan);
     fs::write(&config_path, body)?;
 
-    println!("created {config_path}");
+    writeln!(out, "created {config_path}")?;
     if scan.total_docs == 0 {
-        println!("no markdown files found during scan");
+        writeln!(out, "no markdown files found during scan")?;
     } else {
-        println!(
-            "observed {} field(s) across {} doc(s) (top {} written as commented hints)",
+        let field_word = if scan.fields.len() == 1 {
+            "field"
+        } else {
+            "fields"
+        };
+        let doc_word = if scan.total_docs == 1 {
+            "document"
+        } else {
+            "documents"
+        };
+        let top_n = TOP_N.min(scan.fields.len());
+        writeln!(
+            out,
+            "observed {} {field_word} across {} {doc_word} — top {} written as commented hints",
             scan.fields.len(),
             scan.total_docs,
-            TOP_N.min(scan.fields.len())
-        );
+            top_n
+        )?;
     }
-    println!("next: edit {config_path} or run `vault validate`");
+    // init output is one-shot status — no TTY-detecting palette needed.
+    let palette = Palette::off();
+    primitives::note_line(
+        out,
+        &palette,
+        NoteLabel::Tip,
+        &format!("edit `{config_path}`, then run `vault validate`"),
+    )?;
     Ok(0)
 }
 
@@ -133,6 +168,50 @@ fn render_scaffold(scan: &ScanResult) -> String {
 mod tests {
     use super::*;
     use crate::init_scan::FieldStat;
+
+    #[test]
+    fn run_output_uses_tip_line_and_proper_plurals() {
+        use camino::Utf8PathBuf;
+        use std::io::Write;
+        use tempfile::Builder;
+
+        // Use a non-hidden prefix: WalkDir filters dirs starting with '.'.
+        let tmp = Builder::new().prefix("vault-init-test").tempdir().unwrap();
+        let cwd = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        // One markdown file with frontmatter so the scan finds something.
+        let doc_path = cwd.join("note.md");
+        let mut f = std::fs::File::create(&doc_path).unwrap();
+        writeln!(f, "---\ntype: note\n---\n\nbody").unwrap();
+
+        let outcome = run_capturing_output(&cwd, &InitArgs { force: false }).unwrap();
+        assert!(outcome.contains("created "), "actual: {outcome:?}");
+        assert!(
+            outcome.contains("observed 1 field across 1 document"),
+            "actual: {outcome:?}"
+        );
+        assert!(
+            outcome.contains(" — top 1 written as commented hints"),
+            "actual: {outcome:?}"
+        );
+        assert!(outcome.contains("tip: edit "), "actual: {outcome:?}");
+        assert!(outcome.contains("vault validate"), "actual: {outcome:?}");
+    }
+
+    #[test]
+    fn run_output_with_no_markdown_skips_observed_line() {
+        use camino::Utf8PathBuf;
+        use tempfile::Builder;
+
+        // Use a non-hidden prefix: WalkDir filters dirs starting with '.'.
+        let tmp = Builder::new().prefix("vault-init-test").tempdir().unwrap();
+        let cwd = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+
+        let outcome = run_capturing_output(&cwd, &InitArgs { force: false }).unwrap();
+        assert!(outcome.contains("created "));
+        assert!(outcome.contains("no markdown files found during scan"));
+        assert!(!outcome.contains("observed "));
+        assert!(outcome.contains("tip: edit "));
+    }
 
     #[test]
     fn render_scaffold_includes_common_ignores_and_sections() {

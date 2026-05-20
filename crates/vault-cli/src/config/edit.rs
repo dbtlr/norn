@@ -2,13 +2,14 @@ use anyhow::{anyhow, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use std::process::Command;
 
-use crate::cli::{ConfigEditArgs, ConfigValidateArgs};
+use crate::cli::{ColorWhen, ConfigEditArgs, ConfigValidateArgs};
 use crate::config::{discover, validate};
 
 pub fn run(
     cwd: &Utf8Path,
     config_override: Option<&Utf8PathBuf>,
     args: &ConfigEditArgs,
+    color: ColorWhen,
 ) -> Result<i32> {
     let discovery = discover(cwd, config_override)?;
     let editor = std::env::var("VISUAL")
@@ -41,7 +42,7 @@ pub fn run(
     // editor's 0 (errors in the saved config matter more than a
     // successful editor exit).
     let v_args = ConfigValidateArgs { format: None };
-    validate::run(cwd, config_override, &v_args)
+    validate::run(cwd, config_override, &v_args, color)
 }
 
 fn parse_editor(input: &str) -> (&str, Vec<&str>) {

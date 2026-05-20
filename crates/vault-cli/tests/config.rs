@@ -115,25 +115,36 @@ fn config_show_uses_records_default_on_tty_like_output() {
         "config",
         "show",
         "--format",
-        "table",
+        "records",
         "--no-pager",
     ]);
     let _cache_dir = isolate_cache(&mut command);
     let output = command
         .output()
-        .expect("vault config show --format table should run");
+        .expect("vault config show --format records should run");
 
     assert!(
         output.status.success(),
-        "vault config show --format table failed\nstdout:\n{}\nstderr:\n{}",
+        "vault config show --format records failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
     let text = String::from_utf8(output.stdout).expect("stdout UTF-8");
-    assert!(text.contains("file"));
-    assert!(text.contains("vault_root"));
-    assert!(text.contains("cache"));
-    assert!(text.contains("version"));
+    // Header is the config file path (ends with .vault/config.yaml).
+    let first_line = text.lines().next().unwrap_or("");
+    assert!(
+        first_line.ends_with(".vault/config.yaml"),
+        "expected file path header, got: {first_line:?}"
+    );
+    // Field rows are 2-indent.
+    assert!(text.contains("  vault_root"));
+    assert!(text.contains("  cache"));
+    assert!(text.contains("  version"));
+    // "file" is in the header, not as a field row.
+    assert!(
+        !text.contains("\n  file "),
+        "file should be header, not a field row"
+    );
 }
 
 #[test]
@@ -239,8 +250,8 @@ fn config_migrate_v1_prints_nothing_to_migrate() {
     );
     let text = String::from_utf8(output.stdout).expect("stdout UTF-8");
     assert!(
-        text.contains("Nothing to migrate"),
-        "stdout did not contain 'Nothing to migrate':\n{text}"
+        text.contains("nothing to migrate"),
+        "stdout did not contain 'nothing to migrate':\n{text}"
     );
 }
 

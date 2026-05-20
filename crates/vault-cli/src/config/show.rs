@@ -1,12 +1,11 @@
 //! `vault config show` — render the effective config: discovery paths plus
 //! per-section counts.
 //!
-//! Output format mirrors `vault find`'s display contract: TTY default
-//! renders as records (key/value blocks), `--format json` emits a single
-//! flat object (pretty-printed), `--format jsonl` emits the same object
-//! on a single line (NDJSON: one record per line — `vault config show`
-//! has one record), and `--format paths` is rejected — `paths` only
-//! makes sense for multi-document queries.
+//! Supported formats via `ConfigFormat`: `records` (default TTY), `json`
+//! (pretty-printed single object), and `jsonl` (single NDJSON line).
+//! Records output uses `output::primitives::record_block`: file path as header,
+//! remaining keys as 2-indent field rows. Color follows the global `--color`
+//! flag via `Palette::resolve`.
 
 use std::fs;
 use std::io::{IsTerminal, Write};
@@ -16,8 +15,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{json, Value};
 use vault_standards::{parse_config, VaultConfig};
 
-use crate::cli::{ConfigShowArgs, OutputFormat};
+use crate::cli::{ConfigFormat, ConfigShowArgs};
 use crate::config::{discover, Discovery};
+use crate::output::palette::{self, Palette};
+use crate::output::primitives::{record_block, Field};
 
 /// Snapshot of everything `vault config show` reports, decoupled from the
 /// renderer choice. Building this once means records / json / jsonl all
@@ -63,6 +64,7 @@ pub fn run(
     cwd: &Utf8Path,
     config_override: Option<&Utf8PathBuf>,
     args: &ConfigShowArgs,
+    color: crate::cli::ColorWhen,
 ) -> Result<i32> {
     let Discovery {
         config_file,
@@ -74,24 +76,20 @@ pub fn run(
         .map_err(|e| anyhow!("failed to read config {config_file}: {e}"))?;
     let cfg = parse_config(&yaml, &config_file)?;
     let snapshot = build_snapshot(config_file, vault_root, cache, &cfg);
+    let palette = palette::resolve(color);
 
     let format = resolve_format(args.format);
     let stdout_is_tty = std::io::stdout().is_terminal();
 
     let mut buffer: Vec<u8> = Vec::new();
     match format {
-        OutputFormat::Paths => {
-            return Err(anyhow!(
-                "paths format is not supported for `vault config show`"
-            ));
-        }
-        OutputFormat::Json => render_json(&snapshot, &mut buffer)?,
-        OutputFormat::Jsonl => render_jsonl(&snapshot, &mut buffer)?,
-        OutputFormat::Table => render_records(&snapshot, &mut buffer)?,
+        ConfigFormat::Json => render_json(&snapshot, &mut buffer)?,
+        ConfigFormat::Jsonl => render_jsonl(&snapshot, &mut buffer)?,
+        ConfigFormat::Records => render_records(&snapshot, &palette, &mut buffer)?,
     }
 
     let buffer_lines = buffer.iter().filter(|&&b| b == b'\n').count();
-    let should_page = matches!(format, OutputFormat::Table)
+    let should_page = matches!(format, ConfigFormat::Records)
         && crate::find::pager::should_page(buffer_lines, args.no_pager, stdout_is_tty);
 
     let stdout = std::io::stdout();
@@ -111,11 +109,11 @@ pub fn run(
     Ok(0)
 }
 
-/// Default to records (`Table`) — `vault config show` always describes a
-/// single config, so the path-style listing has no meaning, and JSON is
-/// only chosen explicitly. TTY/pipe doesn't change the shape here.
-fn resolve_format(explicit: Option<OutputFormat>) -> OutputFormat {
-    explicit.unwrap_or(OutputFormat::Table)
+/// Default to records — `vault config show` always describes a single config,
+/// so path-style listing has no meaning, and JSON is only chosen explicitly.
+/// TTY/pipe doesn't change the shape here.
+fn resolve_format(explicit: Option<ConfigFormat>) -> ConfigFormat {
+    explicit.unwrap_or(ConfigFormat::Records)
 }
 
 fn build_snapshot(
@@ -136,15 +134,29 @@ fn build_snapshot(
     }
 }
 
-/// Records: key column right-padded to the longest key width, two spaces,
-/// then value. Mirrors find's records contract for single-row output.
-fn render_records(snapshot: &ShowSnapshot, out: &mut dyn Write) -> std::io::Result<()> {
+/// Records: file path as header, then 2-indent field rows via `record_block`.
+/// The `file` pair is promoted to the header and excluded from the field list.
+fn render_records(
+    snapshot: &ShowSnapshot,
+    palette: &Palette,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
     let pairs = snapshot.pairs();
-    let key_width = pairs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    for (key, value) in pairs {
-        writeln!(out, "{:<width$}  {}", key, value, width = key_width)?;
-    }
-    Ok(())
+    // Drop the "file" pair — it becomes the header.
+    let header = snapshot.file.as_str();
+    let fields: Vec<Field<'_>> = pairs
+        .iter()
+        .filter(|(k, _)| *k != "file")
+        .map(|(k, v)| Field {
+            label: k,
+            value: v.as_str(),
+            highlight: false,
+        })
+        .collect();
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80);
+    record_block(out, palette, header, &fields, term_width)
 }
 
 /// Build the agent-facing JSON payload (nested by config section). Shared
@@ -198,14 +210,31 @@ mod tests {
     }
 
     #[test]
-    fn records_format_aligns_keys_to_longest() {
+    fn records_format_emits_2_indent_field_rows() {
         let snapshot = sample_snapshot();
         let mut buf = Vec::new();
-        render_records(&snapshot, &mut buf).unwrap();
+        let palette = Palette::off();
+        render_records(&snapshot, &palette, &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        // longest key is "repair_rules" (12 chars); other keys padded to 12.
-        assert!(text.contains("file          /v/.vault/config.yaml"));
-        assert!(text.contains("repair_rules  0 rules"));
+        let lines: Vec<&str> = text.lines().collect();
+        // Header = the config file path.
+        assert_eq!(lines[0], "/v/.vault/config.yaml");
+        // Subsequent lines are 2-indent fields.
+        assert!(
+            lines[1].starts_with("  "),
+            "expected 2-indent, got: {:?}",
+            lines[1]
+        );
+        // Longest remaining label is "repair_rules" (12); column width = 14.
+        // Field rows include vault_root, cache, version, ignore, required, rules, repair_rules.
+        assert!(text.contains("  repair_rules"));
+        assert!(text.contains("  version"));
+        assert!(text.contains("  vault_root"));
+        // No "file" field row (file is now the header).
+        assert!(
+            !text.contains("\n  file "),
+            "file should be header, not field"
+        );
     }
 
     #[test]

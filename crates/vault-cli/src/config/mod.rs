@@ -6,7 +6,7 @@ pub mod validate;
 use anyhow::{anyhow, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::cli::{ConfigEditArgs, ConfigShowArgs, ConfigValidateArgs};
+use crate::cli::{ColorWhen, ConfigEditArgs, ConfigShowArgs, ConfigValidateArgs};
 
 /// Resolved discovery paths for the active `.vault/config.yaml` plus the
 /// vault root the command will operate against, plus the per-vault cache
@@ -50,16 +50,18 @@ pub fn run_show(
     cwd: &Utf8Path,
     config: Option<&Utf8PathBuf>,
     args: &ConfigShowArgs,
+    color: ColorWhen,
 ) -> Result<i32> {
-    show::run(cwd, config, args)
+    show::run(cwd, config, args, color)
 }
 
 pub fn run_validate(
     cwd: &Utf8Path,
     config: Option<&Utf8PathBuf>,
     args: &ConfigValidateArgs,
+    color: ColorWhen,
 ) -> Result<i32> {
-    validate::run(cwd, config, args)
+    validate::run(cwd, config, args, color)
 }
 
 pub fn run_migrate(cwd: &Utf8Path, config: Option<&Utf8PathBuf>) -> Result<i32> {
@@ -70,6 +72,7 @@ pub fn run_edit(
     cwd: &Utf8Path,
     config: Option<&Utf8PathBuf>,
     args: &ConfigEditArgs,
+    color: ColorWhen,
 ) -> Result<i32> {
-    edit::run(cwd, config, args)
+    edit::run(cwd, config, args, color)
 }

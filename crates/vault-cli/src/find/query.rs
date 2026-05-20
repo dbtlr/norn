@@ -193,7 +193,6 @@ mod tests {
             starts_at: 1,
             format: None,
             col: vec![],
-            color: crate::cli::ColorWhen::Auto,
             no_pager: false,
         }
     }

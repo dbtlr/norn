@@ -4,6 +4,7 @@ use std::io::Write;
 use vault_cache::FindResult;
 
 use crate::cli::{FindArgs, FindFormat};
+use crate::output::primitives::{count_line, record_block, separator, Field};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -13,7 +14,7 @@ pub fn render(
     sort_field: Option<&str>,
     sort_direction: Option<&str>,
     starts_at: usize,
-    palette: &crate::find::color::Palette,
+    palette: &crate::output::palette::Palette,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> std::io::Result<()> {
@@ -38,7 +39,7 @@ fn render_paths(
     if result.truncated {
         writeln!(
             stderr,
-            "vault find: showing {} of {} (--no-limit for all)",
+            "note: showing {} of {} (--no-limit for all)",
             result.returned, result.total
         )?;
     }
@@ -48,12 +49,12 @@ fn render_paths(
 fn render_json(
     result: &FindResult,
     args: &FindArgs,
-    sort_field: Option<&str>,
-    sort_direction: Option<&str>,
+    _sort_field: Option<&str>,
+    _sort_direction: Option<&str>,
     starts_at: usize,
     stdout: &mut dyn Write,
 ) -> std::io::Result<()> {
-    let matches: Vec<serde_json::Value> = result
+    let documents: Vec<serde_json::Value> = result
         .matches
         .iter()
         .map(|d| {
@@ -65,18 +66,11 @@ fn render_json(
         })
         .collect();
 
-    let sort = match (sort_field, sort_direction) {
-        (Some(f), Some(d)) => Some(serde_json::json!({ "field": f, "direction": d })),
-        _ => None,
-    };
-
     let payload = serde_json::json!({
-        "matches": matches,
         "total": result.total,
         "returned": result.returned,
-        "truncated": result.truncated,
-        "sort": sort,
         "starts_at": starts_at,
+        "documents": documents,
     });
     writeln!(stdout, "{}", serde_json::to_string_pretty(&payload)?)
 }
@@ -115,7 +109,7 @@ fn render_jsonl(
     if result.truncated {
         writeln!(
             stderr,
-            "vault find: showing {} of {} (--no-limit for all)",
+            "note: showing {} of {} (--no-limit for all)",
             result.returned, result.total
         )?;
     }
@@ -125,7 +119,7 @@ fn render_jsonl(
 fn render_records(
     result: &FindResult,
     args: &FindArgs,
-    palette: &crate::find::color::Palette,
+    palette: &crate::output::palette::Palette,
     stdout: &mut dyn Write,
     _stderr: &mut dyn Write,
 ) -> std::io::Result<()> {
@@ -133,48 +127,41 @@ fn render_records(
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
 
-    for (i, doc) in result.matches.iter().enumerate() {
-        if i > 0 {
-            writeln!(stdout)?;
-            let sep = "─".repeat(term_width.saturating_sub(1).min(78));
-            writeln!(
-                stdout,
-                "{}{}{}",
-                palette.separator.render(),
-                sep,
-                palette.separator.render_reset()
-            )?;
-            writeln!(stdout)?;
-        }
-        render_record(doc, &args.col, term_width, palette, stdout)?;
+    count_line(
+        stdout,
+        palette,
+        result.total,
+        result.returned,
+        args.starts_at,
+        "documents",
+    )?;
+
+    if !result.matches.is_empty() {
+        writeln!(stdout)?;
     }
 
-    if result.truncated {
-        writeln!(stdout)?;
-        writeln!(
-            stdout,
-            "{}… {} of {} (--no-limit for all){}",
-            palette.footer.render(),
-            result.returned,
-            result.total,
-            palette.footer.render_reset()
-        )?;
+    let sort_field = args.sort.as_deref();
+
+    for (i, doc) in result.matches.iter().enumerate() {
+        if i > 0 {
+            separator(stdout, palette, term_width)?;
+        }
+        let pairs = build_record_pairs(doc, &args.col);
+        let fields: Vec<Field<'_>> = pairs
+            .iter()
+            .map(|(k, v)| Field {
+                label: k.as_str(),
+                value: v.as_str(),
+                highlight: sort_field.is_some_and(|sf| sf == k),
+            })
+            .collect();
+        record_block(stdout, palette, doc.path.as_str(), &fields, term_width)?;
     }
     Ok(())
 }
 
-fn render_record(
-    doc: &vault_core::DocumentSummary,
-    cols: &[String],
-    term_width: usize,
-    palette: &crate::find::color::Palette,
-    stdout: &mut dyn Write,
-) -> std::io::Result<()> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    pairs.push(("path".to_string(), doc.path.as_str().to_string()));
-
+fn build_record_pairs(doc: &vault_core::DocumentSummary, cols: &[String]) -> Vec<(String, String)> {
     let fm_object = doc.frontmatter.as_ref().and_then(|fm| fm.as_object());
-
     let field_iter: Vec<String> = if cols.is_empty() {
         fm_object
             .map(|obj| obj.keys().cloned().collect())
@@ -182,36 +169,13 @@ fn render_record(
     } else {
         cols.to_vec()
     };
-
+    let mut pairs = Vec::new();
     for field in &field_iter {
         if let Some(value) = fm_object.and_then(|obj| obj.get(field)) {
             pairs.push((field.clone(), json_value_to_display_string(value)));
         }
     }
-
-    let key_width = pairs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let value_width = term_width.saturating_sub(key_width + 1).max(20);
-
-    for (key, value) in &pairs {
-        let mut first_line = true;
-        for line in wrap_value(value, value_width) {
-            if first_line {
-                writeln!(
-                    stdout,
-                    "{}{:<width$}{} {}",
-                    palette.key.render(),
-                    key,
-                    palette.key.render_reset(),
-                    line,
-                    width = key_width
-                )?;
-                first_line = false;
-            } else {
-                writeln!(stdout, "{:<width$} {}", "", line, width = key_width)?;
-            }
-        }
-    }
-    Ok(())
+    pairs
 }
 
 fn json_value_to_display_string(value: &serde_json::Value) -> String {
@@ -244,8 +208,7 @@ pub fn warn_absent_cols(
         if !present_in_any {
             writeln!(
                 stderr,
-                "vault find: --col field '{}' is not present in any matching document",
-                col
+                "warning: --col field `{col}` not present in any matching document"
             )?;
         }
     }
@@ -258,35 +221,9 @@ pub fn warn_col_ignored_on_paths(
     stderr: &mut dyn Write,
 ) -> std::io::Result<()> {
     if !cols.is_empty() && format == crate::cli::FindFormat::Paths {
-        writeln!(stderr, "vault find: --col is ignored with --format paths")?;
+        writeln!(stderr, "warning: --col is ignored with --format paths")?;
     }
     Ok(())
-}
-
-fn wrap_value(value: &str, width: usize) -> Vec<String> {
-    if value.is_empty() {
-        return vec![String::new()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for word in value.split_whitespace() {
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.len() + 1 + word.len() <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            out.push(std::mem::take(&mut current));
-            current.push_str(word);
-        }
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
 }
 
 #[cfg(test)]
@@ -338,7 +275,9 @@ mod tests {
         let mut stderr = Vec::new();
         render_paths(&result, &mut stdout, &mut stderr).unwrap();
         assert_eq!(std::str::from_utf8(&stdout).unwrap(), "a.md\nb.md\n");
-        assert!(std::str::from_utf8(&stderr).unwrap().contains("2 of 5"));
+        let s = std::str::from_utf8(&stderr).unwrap();
+        assert!(s.starts_with("note: showing "), "got: {s:?}");
+        assert!(s.contains("2 of 5"), "got: {s:?}");
     }
 
     fn sample_args() -> FindArgs {
@@ -360,13 +299,12 @@ mod tests {
             starts_at: 1,
             format: None,
             col: vec![],
-            color: crate::cli::ColorWhen::Auto,
             no_pager: false,
         }
     }
 
     #[test]
-    fn json_format_emits_wrapper_object() {
+    fn json_format_uses_documents_wrapper_key() {
         let result = sample_result();
         let mut stdout = Vec::new();
         let args = sample_args();
@@ -374,30 +312,40 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(parsed["total"], 2);
         assert_eq!(parsed["returned"], 2);
-        assert_eq!(parsed["truncated"], false);
-        assert_eq!(parsed["matches"][0]["path"], "a.md");
-        assert_eq!(parsed["matches"][0]["frontmatter"]["type"], "note");
-        assert!(parsed["sort"].is_null());
+        assert_eq!(parsed["starts_at"], 1);
+        assert!(parsed.get("documents").is_some(), "expected documents key");
+        assert!(
+            parsed.get("matches").is_none(),
+            "matches key should be gone"
+        );
+        assert_eq!(parsed["documents"][0]["path"], "a.md");
     }
 
     #[test]
-    fn json_includes_sort_when_present() {
-        let result = sample_result();
+    fn json_omits_truncated_and_sort_keys() {
+        let mut result = sample_result();
+        result.total = 5;
+        result.truncated = true;
         let mut stdout = Vec::new();
         let args = sample_args();
         render_json(
             &result,
             &args,
-            Some("created"),
+            Some("modified"),
             Some("desc"),
-            11,
+            1,
             &mut stdout,
         )
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(parsed["sort"]["field"], "created");
-        assert_eq!(parsed["sort"]["direction"], "desc");
-        assert_eq!(parsed["starts_at"], 11);
+        assert!(
+            parsed.get("truncated").is_none(),
+            "truncated should be derivable"
+        );
+        assert!(
+            parsed.get("sort").is_none(),
+            "sort echoes request and is dropped"
+        );
     }
 
     #[test]
@@ -408,7 +356,7 @@ mod tests {
         args.col = vec!["type".to_string()];
         render_json(&result, &args, None, None, 1, &mut stdout).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(parsed["matches"][0]["frontmatter"]["type"], "note");
+        assert_eq!(parsed["documents"][0]["frontmatter"]["type"], "note");
     }
 
     #[test]
@@ -434,57 +382,121 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         render_jsonl(&result, &args, &mut stdout, &mut stderr).unwrap();
-        assert!(std::str::from_utf8(&stderr).unwrap().contains("2 of 5"));
+        let s = std::str::from_utf8(&stderr).unwrap();
+        assert!(s.starts_with("note: showing "));
+        assert!(s.contains("2 of 5"));
     }
 
     #[test]
-    fn records_format_emits_key_value_blocks() {
+    fn records_format_leads_with_count_line() {
         let result = sample_result();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        let palette = crate::find::color::Palette::none();
+        let palette = crate::output::palette::Palette::off();
         render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
-        assert!(text.contains("path"));
-        assert!(text.contains("a.md"));
-        assert!(text.contains("type"));
-        assert!(text.contains("note"));
-        assert!(text.contains("b.md"));
-        assert!(text.contains("─") || text.contains("---"));
+        let first_line = text.lines().next().unwrap();
+        assert!(
+            first_line.starts_with("2 documents"),
+            "first line: {first_line:?}"
+        );
     }
 
     #[test]
-    fn records_truncated_emits_footer() {
+    fn records_truncated_count_line_shows_window() {
         let mut result = sample_result();
         result.total = 5;
         result.truncated = true;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        let palette = crate::find::color::Palette::none();
+        let palette = crate::output::palette::Palette::off();
         render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
-        assert!(text.contains("2 of 5"));
+        let first_line = text.lines().next().unwrap();
+        assert!(
+            first_line.contains("5 documents") && first_line.contains("showing 1–2"),
+            "first line: {first_line:?}"
+        );
+        // No trailing footer.
+        assert!(
+            !text.contains("(--no-limit"),
+            "expected no footer: {text:?}"
+        );
     }
 
     #[test]
-    fn col_absent_in_all_matches_warns_to_stderr() {
+    fn records_field_rows_are_two_space_indented() {
+        let result = sample_result();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let args = sample_args();
+        let palette = crate::output::palette::Palette::off();
+        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        // Field rows look like "  type    note" — starts with 2-space indent.
+        assert!(
+            text.contains("\n  type"),
+            "expected 2-indent field rows: {text:?}"
+        );
+    }
+
+    #[test]
+    fn records_separator_has_no_surrounding_blank_lines() {
+        let result = sample_result();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let args = sample_args();
+        let palette = crate::output::palette::Palette::off();
+        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        // No blank-line padding around the horizontal rule.
+        assert!(!text.contains("\n\n─"), "blank before separator: {text:?}");
+        assert!(!text.contains("─\n\n"), "blank after separator: {text:?}");
+    }
+
+    #[test]
+    fn records_path_is_header_not_field() {
+        let result = sample_result();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let args = sample_args();
+        let palette = crate::output::palette::Palette::off();
+        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        // The path "a.md" appears as a header line at column 0, not as a "  path  a.md" field row.
+        // lines[0] is count line, lines[1] is blank, lines[2] is the first record header.
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[2], "a.md",
+            "expected path as header at lines[2]: {lines:?}"
+        );
+        // No "path" field label inside record body.
+        assert!(
+            !text.contains("\n  path"),
+            "path should be header, not field: {text:?}"
+        );
+    }
+
+    #[test]
+    fn col_absent_in_all_matches_warns_with_severity_prefix() {
         let result = sample_result();
         let mut stderr = Vec::new();
         let cols = vec!["nonexistent_field".to_string()];
         warn_absent_cols(&result, &cols, &mut stderr).unwrap();
-        let stderr_str = std::str::from_utf8(&stderr).unwrap();
-        assert!(stderr_str.contains("nonexistent_field"));
+        let s = std::str::from_utf8(&stderr).unwrap();
+        assert!(s.starts_with("warning: --col field "), "got: {s:?}");
+        assert!(s.contains("`nonexistent_field`"), "got: {s:?}");
     }
 
     #[test]
-    fn col_with_paths_format_warns() {
+    fn col_with_paths_format_warns_with_severity_prefix() {
         let mut stderr = Vec::new();
         let cols = vec!["title".to_string()];
         warn_col_ignored_on_paths(&cols, crate::cli::FindFormat::Paths, &mut stderr).unwrap();
-        let stderr_str = std::str::from_utf8(&stderr).unwrap();
-        assert!(stderr_str.contains("--col is ignored with --format paths"));
+        let s = std::str::from_utf8(&stderr).unwrap();
+        assert_eq!(s, "warning: --col is ignored with --format paths\n");
     }
 
     #[test]
@@ -501,7 +513,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        let palette = crate::find::color::Palette::none();
+        let palette = crate::output::palette::Palette::off();
         render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(
@@ -517,7 +529,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        let palette = crate::find::color::Palette::ansi();
+        let palette = crate::output::palette::Palette::on();
         render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(

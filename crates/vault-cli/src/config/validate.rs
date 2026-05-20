@@ -21,8 +21,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use vault_standards::{parse_config, CURRENT_SCHEMA_VERSION};
 
-use crate::cli::{ConfigValidateArgs, OutputFormat};
+use crate::cli::{ColorWhen, ConfigFormat, ConfigValidateArgs};
 use crate::config::discover;
+use crate::output::glyphs::{self, Glyph};
+use crate::output::palette::{self, Palette};
+use crate::output::primitives;
 
 /// One validation finding. Shape mirrors `vault validate` so agents can
 /// parse output from both commands with the same code path.
@@ -46,6 +49,7 @@ pub fn run(
     cwd: &Utf8Path,
     config_override: Option<&Utf8PathBuf>,
     args: &ConfigValidateArgs,
+    color: ColorWhen,
 ) -> Result<i32> {
     // Missing/unreadable config → exit 3 (distinct from error findings).
     // We deliberately swallow the discover error here; `vault config show`
@@ -64,9 +68,17 @@ pub fn run(
 
     let (findings, max_severity) = collect_findings(&yaml, &discovery.config_file);
 
-    let format = args.format.unwrap_or(OutputFormat::Table);
+    // Display path: prefer relative-to-cwd if it strips cleanly; otherwise show absolute.
+    let config_display = discovery
+        .config_file
+        .strip_prefix(cwd)
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|_| discovery.config_file.as_str().to_string());
+
+    let format = args.format.unwrap_or(ConfigFormat::Records);
+    let palette = palette::resolve(color);
     let mut stdout = std::io::stdout().lock();
-    render(&findings, format, &mut stdout)?;
+    render(&findings, &config_display, format, &palette, &mut stdout)?;
 
     Ok(match max_severity {
         SEVERITY_CLEAN => 0,
@@ -112,16 +124,20 @@ fn collect_findings(yaml: &str, config_path: &Utf8Path) -> (Vec<Finding>, u8) {
     (findings, max_severity)
 }
 
-/// Render findings in the requested format. Records / paths print one
-/// line per finding (`severity [code] path: message`) or `config is clean`
-/// when there are none; JSON / JSONL emit machine-readable shapes.
-fn render(findings: &[Finding], format: OutputFormat, out: &mut dyn Write) -> Result<()> {
+/// Render findings in the requested format.
+fn render(
+    findings: &[Finding],
+    config_display: &str,
+    format: ConfigFormat,
+    palette: &Palette,
+    out: &mut dyn Write,
+) -> Result<()> {
     match format {
-        OutputFormat::Json => {
+        ConfigFormat::Json => {
             let payload = json_payload(findings);
             writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;
         }
-        OutputFormat::Jsonl => {
+        ConfigFormat::Jsonl => {
             // NDJSON: one finding per line. When there are zero findings,
             // jsonl emits zero lines — the absence of output IS the signal,
             // mirroring how `vault validate --format jsonl` behaves on a
@@ -130,17 +146,73 @@ fn render(findings: &[Finding], format: OutputFormat, out: &mut dyn Write) -> Re
                 writeln!(out, "{}", serde_json::to_string(f)?)?;
             }
         }
-        OutputFormat::Table | OutputFormat::Paths => {
-            if findings.is_empty() {
-                writeln!(out, "config is clean")?;
-            } else {
-                for f in findings {
-                    writeln!(out, "{} [{}] {}: {}", f.severity, f.code, f.path, f.message)?;
-                }
-            }
+        ConfigFormat::Records => {
+            render_records(findings, config_display, palette, out)?;
         }
     }
     Ok(())
+}
+
+fn render_records(
+    findings: &[Finding],
+    config_display: &str,
+    palette: &Palette,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    primitives::status_headline(out, palette, &format!("validating {config_display}"))?;
+    writeln!(out)?;
+
+    let mut warn_count = 0usize;
+    let mut err_count = 0usize;
+    for f in findings {
+        match f.severity {
+            "warning" => warn_count += 1,
+            "error" => err_count += 1,
+            _ => {}
+        }
+    }
+    if findings.is_empty() {
+        // Clean config: single pass row with custom noun.
+        primitives::severity_tally(out, palette, 1, 0, 0, "config is clean — 1 file")?;
+        return Ok(());
+    }
+    primitives::severity_tally(out, palette, 0, warn_count, err_count, "config")?;
+    writeln!(out)?;
+
+    // Per-finding blocks.
+    let ascii = glyphs::use_ascii();
+    for f in findings {
+        let (glyph, glyph_color) = match f.severity {
+            "warning" => (Glyph::Warn, palette.amber),
+            _ => (Glyph::Err, palette.rune),
+        };
+        writeln!(
+            out,
+            "{gc}{g}{gcr} {bone}{code}{br}",
+            gc = glyph_color.render(),
+            g = glyphs::render(glyph, ascii),
+            gcr = glyph_color.render_reset(),
+            bone = palette.bone.render(),
+            code = f.code,
+            br = palette.bone.render_reset(),
+        )?;
+        writeln!(out, "  {}", f.path)?;
+        writeln!(out, "    {}", f.message)?;
+        if let Some(fix) = fix_hint(f.code) {
+            writeln!(out, "    fix: {fix}")?;
+        }
+    }
+    Ok(())
+}
+
+fn fix_hint(code: &str) -> Option<&'static str> {
+    match code {
+        "config-parse-error" => Some("edit the file, then re-run `vault config validate`"),
+        "unknown-schema-version" => Some(
+            "run `vault config migrate`, or use the build of vault that matches this schema version",
+        ),
+        _ => None,
+    }
 }
 
 /// Build the JSON payload (an object with `findings: [...]`). Wrapping
@@ -191,7 +263,15 @@ mod tests {
             message: "msg".into(),
         }];
         let mut buf = Vec::new();
-        render(&findings, OutputFormat::Json, &mut buf).unwrap();
+        let palette = Palette::off();
+        render(
+            &findings,
+            ".vault/config.yaml",
+            ConfigFormat::Json,
+            &palette,
+            &mut buf,
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(parsed["findings"][0]["code"], "unknown-schema-version");
         assert_eq!(parsed["findings"][0]["severity"], "error");
@@ -215,7 +295,15 @@ mod tests {
             },
         ];
         let mut buf = Vec::new();
-        render(&findings, OutputFormat::Jsonl, &mut buf).unwrap();
+        let palette = Palette::off();
+        render(
+            &findings,
+            ".vault/config.yaml",
+            ConfigFormat::Jsonl,
+            &palette,
+            &mut buf,
+        )
+        .unwrap();
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -224,26 +312,37 @@ mod tests {
     }
 
     #[test]
-    fn render_table_clean_prints_clean_message() {
+    fn render_records_clean_shows_severity_tally_only() {
         let findings: Vec<Finding> = Vec::new();
         let mut buf = Vec::new();
-        render(&findings, OutputFormat::Table, &mut buf).unwrap();
+        let palette = Palette::off();
+        render_records(&findings, ".vault/config.yaml", &palette, &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("config is clean"));
+        assert!(text.contains("validating .vault/config.yaml…"));
+        assert!(text.contains("✓"));
+        // No per-finding block on a clean run.
+        assert!(!text.contains("config-parse-error"));
+        assert!(!text.contains("unknown-schema-version"));
     }
 
     #[test]
-    fn render_table_with_findings_prints_one_per_line() {
+    fn render_records_with_error_shows_tally_and_finding_block_with_fix() {
         let findings = vec![Finding {
             code: "unknown-schema-version",
             severity: "error",
-            path: "/v/.vault/config.yaml".into(),
-            message: "version 99 unknown".into(),
+            path: ".vault/config.yaml".into(),
+            message: "config has version 99 but this build only recognizes 1".into(),
         }];
         let mut buf = Vec::new();
-        render(&findings, OutputFormat::Table, &mut buf).unwrap();
+        let palette = Palette::off();
+        render_records(&findings, ".vault/config.yaml", &palette, &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text
-            .contains("error [unknown-schema-version] /v/.vault/config.yaml: version 99 unknown"));
+        assert!(text.contains("validating .vault/config.yaml…"));
+        assert!(text.contains("✗"));
+        assert!(text.contains("1 error"));
+        assert!(text.contains("unknown-schema-version"));
+        // 4-indent fix line.
+        assert!(text.contains("    fix: "));
+        assert!(text.contains("vault config migrate"));
     }
 }

@@ -1,3 +1,7 @@
+//! Pre-port output helpers. Commands that have not yet adopted `output::primitives`
+//! import from here. When a command is ported, remove its imports from this module.
+//! When this module has no remaining callers, delete it.
+
 use std::collections::BTreeSet;
 use std::io::{self, IsTerminal, Write};
 

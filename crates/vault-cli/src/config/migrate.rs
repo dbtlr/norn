@@ -21,21 +21,36 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::config::discover;
 use vault_standards::{parse_config, CURRENT_SCHEMA_VERSION};
 
+fn write_noop(out: &mut dyn std::io::Write, version: u32) -> std::io::Result<()> {
+    writeln!(out, "config is on schema v{version} — nothing to migrate")
+}
+
 /// Run `vault config migrate`. Returns the process exit code.
 pub fn run(cwd: &Utf8Path, config_override: Option<&Utf8PathBuf>) -> Result<i32> {
     let discovery = discover(cwd, config_override)?;
     let yaml = std::fs::read_to_string(&discovery.config_file)?;
     let cfg = parse_config(&yaml, &discovery.config_file)?;
     if cfg.version == CURRENT_SCHEMA_VERSION {
-        println!(
-            "Config is on schema v{} (current). Nothing to migrate.",
-            cfg.version
-        );
+        let stdout = std::io::stdout();
+        write_noop(&mut stdout.lock(), cfg.version)?;
         Ok(0)
     } else {
         Err(anyhow!(
             "config schema v{} has no migration path in this build",
             cfg.version
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noop_message_is_lowercase_with_em_dash() {
+        let expected = "config is on schema v1 — nothing to migrate\n";
+        let mut buf = Vec::new();
+        write_noop(&mut buf, 1).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), expected);
     }
 }

@@ -1,6 +1,5 @@
 //! `vault find` command implementation.
 
-pub mod color;
 pub mod pager;
 pub mod query;
 pub mod render;
@@ -25,13 +24,18 @@ fn resolve_format(explicit: Option<crate::cli::FindFormat>) -> crate::cli::FindF
     }
 }
 
-pub fn run(args: FindArgs, cwd: &Utf8Path, no_cache_refresh: bool) -> Result<i32> {
+pub fn run(
+    args: FindArgs,
+    cwd: &Utf8Path,
+    no_cache_refresh: bool,
+    color: crate::cli::ColorWhen,
+) -> Result<i32> {
     let cache = crate::cache::open_for_query(cwd, no_cache_refresh)?;
     let query = self::query::build_find_query(&args)?;
     let result = cache.find_documents(&query)?;
 
     let format = resolve_format(args.format);
-    let palette = self::color::resolve_palette(args.color);
+    let palette = crate::output::palette::resolve(color);
 
     let (sort_field, sort_direction) = match &query.sort {
         Some(s) => (

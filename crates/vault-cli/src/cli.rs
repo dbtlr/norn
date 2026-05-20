@@ -35,6 +35,15 @@ pub struct Cli {
         help = "Skip the implicit cache refresh that query commands run before reading the graph index"
     )]
     pub no_cache_refresh: bool,
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value = "auto",
+        help_heading = "Global options",
+        help = "Color output. Honors NO_COLOR / CLICOLOR_FORCE."
+    )]
+    pub color: ColorWhen,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -431,10 +440,6 @@ pub struct FindArgs {
     #[arg(long, value_name = "FIELD1,FIELD2,...", value_delimiter = ',')]
     pub col: Vec<String>,
 
-    /// Color output. Default auto (TTY-detect). Honors NO_COLOR / CLICOLOR_FORCE.
-    #[arg(long, value_enum, default_value = "auto")]
-    pub color: ColorWhen,
-
     /// Skip the pager even when stdout is a TTY.
     #[arg(long = "no-pager")]
     pub no_pager: bool,
@@ -443,6 +448,13 @@ pub struct FindArgs {
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindFormat {
     Paths,
+    Records,
+    Json,
+    Jsonl,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFormat {
     Records,
     Json,
     Jsonl,
@@ -563,7 +575,7 @@ pub enum ConfigSubcommand {
 #[derive(Debug, Args)]
 pub struct ConfigShowArgs {
     #[arg(long, value_enum, help = "Stdout format")]
-    pub format: Option<OutputFormat>,
+    pub format: Option<ConfigFormat>,
     #[arg(long = "no-pager", help = "Bypass the pager even on TTY records")]
     pub no_pager: bool,
 }
@@ -571,7 +583,7 @@ pub struct ConfigShowArgs {
 #[derive(Debug, Args)]
 pub struct ConfigValidateArgs {
     #[arg(long, value_enum, help = "Stdout format")]
-    pub format: Option<OutputFormat>,
+    pub format: Option<ConfigFormat>,
 }
 
 #[derive(Debug, Args)]
