@@ -6,6 +6,7 @@
 pub mod bin_name;
 pub mod extract;
 pub mod model;
+pub mod render;
 
 #[allow(unused_imports)]
 pub use bin_name::BIN_NAME;
@@ -13,3 +14,5 @@ pub use bin_name::BIN_NAME;
 pub use extract::build_model;
 #[allow(unused_imports)]
 pub use model::{FlagEntry, FlagGroup, GlobalEntry, HelpExtras, HelpForm, HelpModel};
+#[allow(unused_imports)]
+pub use render::render_short;
