@@ -51,10 +51,9 @@ pub fn build_model(cmd: &Command, root: &Command, cmd_path: &str, form: HelpForm
         })
         .collect();
 
-    // If cmd IS the root (vault --help with no subcommand), globals come from
-    // the iteration above; skip them in the main arg loop to avoid duplication.
-    let is_root = std::ptr::eq(cmd as *const Command, root as *const Command);
-
+    // Walk this command's args. Globals were already collected from `root`
+    // above; the `is_global_set()` skip below prevents double-collection
+    // (a global declared on `root` is the same Arg instance when `cmd == root`).
     for arg in cmd.get_arguments() {
         if arg.get_id() == "help"
             || arg.get_id() == "help_short"
@@ -64,11 +63,6 @@ pub fn build_model(cmd: &Command, root: &Command, cmd_path: &str, form: HelpForm
             // Help and version flags are not rendered in the model.
             continue;
         }
-        // Skip global args when processing a non-root command — they were
-        // already collected from the root above. When IS the root, process
-        // them through the heading/group logic (they show up under Global
-        // options heading in that case, but we've already put them in globals
-        // above, so we still skip to avoid duplication).
         if arg.is_global_set() {
             continue;
         }
@@ -77,11 +71,6 @@ pub fn build_model(cmd: &Command, root: &Command, cmd_path: &str, form: HelpForm
             positionals.push(entry);
             continue;
         }
-        // For the root command, the global args (already in `globals`) should
-        // not reappear as flag groups either. Non-global root args also go into
-        // groups (but the root has no non-global non-subcommand non-help args
-        // other than the subcommand itself).
-        let _ = is_root; // suppress unused warning; logic handled by is_global_set() skip above
         let heading = arg
             .get_help_heading()
             .map(|s| s.to_string())
@@ -95,9 +84,6 @@ pub fn build_model(cmd: &Command, root: &Command, cmd_path: &str, form: HelpForm
             });
         }
     }
-
-    // De-duplicate globals list in case root IS the subcmd (both paths ran).
-    globals.dedup_by(|a, b| a.long == b.long && a.short == b.short);
 
     let subcommands = cmd
         .get_subcommands()

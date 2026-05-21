@@ -717,9 +717,10 @@ fn docs_summary_help_documents_count_by() {
 }
 
 #[test]
-fn docs_inspect_defaults_to_json() {
-    // Our custom renderer shows enum possible values; clap's "[default: json]"
-    // annotation is replaced. Verify --format is listed and json is an option.
+fn docs_inspect_help_lists_format_options() {
+    // The custom help renderer surfaces enum possible values inline. clap's
+    // "[default: json]" annotation is not rendered; default-value extraction
+    // is a follow-up (TODO: add `default_value` to FlagEntry + render).
     let output = vault(&["docs", "inspect", "--help"]);
     assert!(output.contains("--format"));
     assert!(output.contains("json"));
