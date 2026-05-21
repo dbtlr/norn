@@ -15,4 +15,4 @@ pub use extract::build_model;
 #[allow(unused_imports)]
 pub use model::{FlagEntry, FlagGroup, GlobalEntry, HelpExtras, HelpForm, HelpModel};
 #[allow(unused_imports)]
-pub use render::render_short;
+pub use render::{render_long, render_short};
