@@ -159,6 +159,8 @@ fn render_records(
     palette: &Palette,
     out: &mut dyn Write,
 ) -> std::io::Result<()> {
+    // Leading blank gives breathing room from the user's shell prompt.
+    writeln!(out)?;
     primitives::status_headline(out, palette, &format!("validating {config_display}"))?;
     writeln!(out)?;
 

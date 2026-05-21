@@ -128,9 +128,10 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
     let mut binds: Vec<SqlValue> = Vec::new();
 
     for (field, value) in &query.frontmatter_eq {
-        where_clauses.push("json_extract(frontmatter_json, ?) = ?".to_string());
-        binds.push(SqlValue::Text(json_path_for(field)));
-        binds.push(json_value_to_sql(value));
+        push_equality(&mut where_clauses, &mut binds, field, value, /* negate */ false);
+    }
+    for (field, value) in &query.frontmatter_not_eq {
+        push_equality(&mut where_clauses, &mut binds, field, value, /* negate */ true);
     }
     for field in &query.frontmatter_has {
         where_clauses.push("json_extract(frontmatter_json, ?) IS NOT NULL".to_string());
@@ -146,6 +147,16 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
         if values.is_empty() {
             // `--in field:` with no values matches nothing.
             where_clauses.push("0".to_string());
+            continue;
+        }
+        if values.iter().all(|v| matches!(v, serde_json::Value::String(_))) {
+            push_string_membership(
+                &mut where_clauses,
+                &mut binds,
+                field,
+                values,
+                /* negate */ false,
+            );
             continue;
         }
         let placeholders = std::iter::repeat_n("?", values.len())
@@ -165,6 +176,16 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
     for (field, values) in &query.frontmatter_not_in {
         if values.is_empty() {
             // `--not-in field:` with no values is a no-op.
+            continue;
+        }
+        if values.iter().all(|v| matches!(v, serde_json::Value::String(_))) {
+            push_string_membership(
+                &mut where_clauses,
+                &mut binds,
+                field,
+                values,
+                /* negate */ true,
+            );
             continue;
         }
         let placeholders = std::iter::repeat_n("?", values.len())
@@ -214,6 +235,98 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
     };
 
     (where_sql, binds)
+}
+
+/// Build the WHERE clause for `--eq` (negate=false) or `--not-eq` (negate=true).
+/// String values get the array-aware + bracket-stripped treatment (matches
+/// scalar fields by equality AND array fields via `json_each`, with `[[...]]`
+/// wrappers stripped from stored values). Non-string predicates (bool, number,
+/// null) keep the simple scalar equality — JSON-typed comparisons there are
+/// unambiguous.
+fn push_equality(
+    where_clauses: &mut Vec<String>,
+    binds: &mut Vec<SqlValue>,
+    field: &str,
+    value: &serde_json::Value,
+    negate: bool,
+) {
+    if let serde_json::Value::String(raw) = value {
+        let path = json_path_for(field);
+        let stripped = strip_wikilink_brackets(raw);
+        let array_test = if negate { "NOT EXISTS" } else { "EXISTS" };
+        let scalar_op = if negate { "!=" } else { "=" };
+        where_clauses.push(format!(
+            "((json_type(frontmatter_json, ?) = 'array' \
+              AND {array_test} (SELECT 1 FROM json_each(frontmatter_json, ?) \
+                                WHERE replace(replace(value, '[[', ''), ']]', '') = ?)) \
+              OR \
+              ((json_type(frontmatter_json, ?) IS NULL OR json_type(frontmatter_json, ?) != 'array') \
+               AND replace(replace(json_extract(frontmatter_json, ?), '[[', ''), ']]', '') {scalar_op} ?))"
+        ));
+        binds.push(SqlValue::Text(path.clone()));
+        binds.push(SqlValue::Text(path.clone()));
+        binds.push(SqlValue::Text(stripped.clone()));
+        binds.push(SqlValue::Text(path.clone()));
+        binds.push(SqlValue::Text(path.clone()));
+        binds.push(SqlValue::Text(path));
+        binds.push(SqlValue::Text(stripped));
+    } else {
+        let op = if negate { "!=" } else { "=" };
+        where_clauses.push(format!("json_extract(frontmatter_json, ?) {op} ?"));
+        binds.push(SqlValue::Text(json_path_for(field)));
+        binds.push(json_value_to_sql(value));
+    }
+}
+
+/// Build the WHERE clause for `--in` (negate=false) or `--not-in` (negate=true)
+/// when every value in the list is a string. Same array-aware + bracket-stripped
+/// shape as the string `--eq` branch: matches scalar fields with a stripped
+/// equality test, matches array fields by iterating elements via `json_each`.
+fn push_string_membership(
+    where_clauses: &mut Vec<String>,
+    binds: &mut Vec<SqlValue>,
+    field: &str,
+    values: &[serde_json::Value],
+    negate: bool,
+) {
+    let path = json_path_for(field);
+    let placeholders = std::iter::repeat_n("?", values.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stripped: Vec<String> = values
+        .iter()
+        .filter_map(|v| v.as_str().map(strip_wikilink_brackets))
+        .collect();
+    let array_test = if negate { "NOT EXISTS" } else { "EXISTS" };
+    let scalar_op = if negate { "NOT IN" } else { "IN" };
+    where_clauses.push(format!(
+        "((json_type(frontmatter_json, ?) = 'array' \
+          AND {array_test} (SELECT 1 FROM json_each(frontmatter_json, ?) \
+                            WHERE replace(replace(value, '[[', ''), ']]', '') IN ({placeholders}))) \
+          OR \
+          ((json_type(frontmatter_json, ?) IS NULL OR json_type(frontmatter_json, ?) != 'array') \
+           AND replace(replace(json_extract(frontmatter_json, ?), '[[', ''), ']]', '') {scalar_op} ({placeholders})))"
+    ));
+    binds.push(SqlValue::Text(path.clone()));
+    binds.push(SqlValue::Text(path.clone()));
+    for v in &stripped {
+        binds.push(SqlValue::Text(v.clone()));
+    }
+    binds.push(SqlValue::Text(path.clone()));
+    binds.push(SqlValue::Text(path.clone()));
+    binds.push(SqlValue::Text(path));
+    for v in &stripped {
+        binds.push(SqlValue::Text(v.clone()));
+    }
+}
+
+/// Strip Obsidian-style `[[…]]` wikilink brackets from a value so that
+/// `--eq workspaces:vault-cli` matches a stored `["[[vault-cli]]"]` without
+/// the user having to escape brackets in their shell. Both occurrences are
+/// removed (no balance check) — values that legitimately contain `[[` or
+/// `]]` outside wikilink syntax are vanishingly rare in vault frontmatter.
+fn strip_wikilink_brackets(s: &str) -> String {
+    s.replace("[[", "").replace("]]", "")
 }
 
 /// Convert a `serde_json::Value` scalar to the native SQLite type that

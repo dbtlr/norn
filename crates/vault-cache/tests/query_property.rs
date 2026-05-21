@@ -58,6 +58,173 @@ fn empty_query_returns_every_document_in_path_order() {
     );
 }
 
+fn synth_vault_wikilink_shapes() -> (TempDir, Utf8PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+        .unwrap()
+        .join("vault");
+    std::fs::create_dir(root.as_std_path()).unwrap();
+    std::fs::write(
+        root.join("scalar-wikilink.md").as_std_path(),
+        "---\nworkspace: \"[[vault-cli]]\"\n---\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("scalar-plain.md").as_std_path(),
+        "---\nworkspace: vault-cli\n---\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("array-wikilinks.md").as_std_path(),
+        "---\nsource_notes:\n  - \"[[seed-note]]\"\n  - \"[[other-note]]\"\n---\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("array-plain.md").as_std_path(),
+        "---\ntags:\n  - foo\n  - bar\n---\nbody\n",
+    )
+    .unwrap();
+    (tmp, root)
+}
+
+#[test]
+fn frontmatter_eq_string_matches_scalar_wikilink_without_brackets() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_eq: vec![("workspace".to_string(), serde_json::json!("vault-cli"))],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    let p = paths(&result);
+    assert!(p.contains(&"scalar-wikilink.md"));
+    assert!(p.contains(&"scalar-plain.md"));
+}
+
+#[test]
+fn frontmatter_eq_string_matches_array_element_without_brackets() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_eq: vec![("source_notes".to_string(), serde_json::json!("seed-note"))],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    assert_eq!(paths(&result), vec!["array-wikilinks.md"]);
+}
+
+#[test]
+fn frontmatter_eq_string_with_explicit_brackets_still_matches() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_eq: vec![(
+            "source_notes".to_string(),
+            serde_json::json!("[[seed-note]]"),
+        )],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    assert_eq!(paths(&result), vec!["array-wikilinks.md"]);
+}
+
+#[test]
+fn frontmatter_eq_string_matches_array_of_plain_strings() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_eq: vec![("tags".to_string(), serde_json::json!("foo"))],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    assert_eq!(paths(&result), vec!["array-plain.md"]);
+}
+
+#[test]
+fn frontmatter_not_eq_string_excludes_matching_scalar() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_has: vec!["workspace".to_string()],
+        frontmatter_not_eq: vec![("workspace".to_string(), serde_json::json!("vault-cli"))],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    assert!(
+        result.is_empty(),
+        "both workspace docs match 'vault-cli' (scalar+wikilink); --not-eq should exclude both: {result:?}"
+    );
+}
+
+#[test]
+fn frontmatter_not_eq_string_excludes_array_match() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_has: vec!["source_notes".to_string()],
+        frontmatter_not_eq: vec![("source_notes".to_string(), serde_json::json!("seed-note"))],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    assert!(
+        result.is_empty(),
+        "array-wikilinks contains seed-note; --not-eq should exclude: {result:?}"
+    );
+}
+
+#[test]
+fn frontmatter_in_string_matches_scalar_wikilink_without_brackets() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_in: vec![(
+            "workspace".to_string(),
+            vec![serde_json::json!("vault-cli"), serde_json::json!("atlas")],
+        )],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    let p = paths(&result);
+    assert!(p.contains(&"scalar-wikilink.md"));
+    assert!(p.contains(&"scalar-plain.md"));
+}
+
+#[test]
+fn frontmatter_in_string_matches_array_element_without_brackets() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    let query = DocumentQuery {
+        frontmatter_in: vec![(
+            "source_notes".to_string(),
+            vec![
+                serde_json::json!("seed-note"),
+                serde_json::json!("missing-note"),
+            ],
+        )],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    assert_eq!(paths(&result), vec!["array-wikilinks.md"]);
+}
+
+#[test]
+fn frontmatter_not_in_string_excludes_array_match_and_keeps_others() {
+    let (_tmp, root) = synth_vault_wikilink_shapes();
+    let cache = populate_cache(&root);
+    // Restrict to docs that HAVE source_notes, then exclude those whose
+    // array contains "seed-note".
+    let query = DocumentQuery {
+        frontmatter_has: vec!["source_notes".to_string()],
+        frontmatter_not_in: vec![(
+            "source_notes".to_string(),
+            vec![serde_json::json!("seed-note")],
+        )],
+        ..Default::default()
+    };
+    let result = cache.documents_matching(&query).unwrap();
+    assert!(result.is_empty(), "expected array-wikilinks excluded: {result:?}");
+}
+
 #[test]
 fn frontmatter_eq_string_value() {
     let (_tmp, root) = synth_vault();

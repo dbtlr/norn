@@ -3267,7 +3267,7 @@ fn vault_success_in_minimal_vault(args: &[&str]) -> (String, String) {
 #[test]
 fn find_json_format_contains_no_ansi_under_color_always() {
     let (stdout, _stderr) =
-        vault_success_in_minimal_vault(&["--color=always", "find", "--format", "json"]);
+        vault_success_in_minimal_vault(&["--color=always", "find", "--all", "--format", "json"]);
     assert!(
         !stdout.contains("\x1b["),
         "JSON must not contain ANSI: {stdout:?}"
@@ -3277,15 +3277,56 @@ fn find_json_format_contains_no_ansi_under_color_always() {
 #[test]
 fn find_jsonl_format_contains_no_ansi_under_color_always() {
     let (stdout, _stderr) =
-        vault_success_in_minimal_vault(&["--color=always", "find", "--format", "jsonl"]);
+        vault_success_in_minimal_vault(&["--color=always", "find", "--all", "--format", "jsonl"]);
     assert!(!stdout.contains("\x1b["), "JSONL must not contain ANSI");
 }
 
 #[test]
 fn find_paths_format_contains_no_ansi_under_color_always() {
     let (stdout, _stderr) =
-        vault_success_in_minimal_vault(&["--color=always", "find", "--format", "paths"]);
+        vault_success_in_minimal_vault(&["--color=always", "find", "--all", "--format", "paths"]);
     assert!(!stdout.contains("\x1b["), "paths must not contain ANSI");
+}
+
+#[test]
+fn find_with_no_predicate_shows_help_on_stderr_exit_2() {
+    let tmp = tempfile::Builder::new()
+        .prefix("vault-cli-find-help-test")
+        .tempdir()
+        .expect("tempdir");
+    let vault_dir = tmp.path().join(".vault");
+    fs::create_dir_all(&vault_dir).unwrap();
+    fs::write(
+        vault_dir.join("config.yaml"),
+        "version: 1\nfiles:\n  ignore: []\nvalidate:\n  required_frontmatter: []\n  rules: []\nrepair:\n  rules: []\n",
+    )
+    .unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vault"));
+    command.args(["--cwd", tmp.path().to_str().unwrap(), "find"]);
+    let _cache_dir = isolate_cache(&mut command);
+    let output = command.output().expect("vault find should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit code 2 for no-predicate find"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr UTF-8");
+    assert!(
+        stderr.contains("Usage:") && stderr.contains("--all"),
+        "expected help text mentioning --all on stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn find_with_all_dumps_everything() {
+    let (stdout, _stderr) =
+        vault_success_in_minimal_vault(&["find", "--all", "--format", "paths"]);
+    assert!(
+        stdout.contains("note.md"),
+        "expected --all to return the fixture doc: {stdout:?}"
+    );
 }
 
 #[test]

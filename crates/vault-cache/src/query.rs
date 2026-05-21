@@ -13,6 +13,10 @@ pub struct DocumentQuery {
     pub path_globs: Vec<String>,
     /// Frontmatter equality predicates `(field, value)`. ALL-of.
     pub frontmatter_eq: Vec<(String, Value)>,
+    /// Frontmatter inequality predicates `(field, value)` — negation of
+    /// `frontmatter_eq`. For array-shaped string fields, matches when no
+    /// element equals the value. ALL-of.
+    pub frontmatter_not_eq: Vec<(String, Value)>,
     /// Required-present fields. ALL-of. Match v1 filter_documents semantics
     /// for null-vs-missing — verified via round-trip property tests.
     pub frontmatter_has: Vec<String>,

@@ -155,7 +155,26 @@ fn render_records(
                 highlight: sort_field.is_some_and(|sf| sf == k),
             })
             .collect();
-        record_block(stdout, palette, doc.path.as_str(), &fields, term_width)?;
+        record_block(
+            stdout,
+            palette,
+            Some(doc.path.as_str()),
+            &fields,
+            term_width,
+        )?;
+        if pairs.is_empty() {
+            let placeholder = if args.col.is_empty() {
+                "(no frontmatter)"
+            } else {
+                "(no matching fields)"
+            };
+            writeln!(
+                stdout,
+                "  {}{placeholder}{}",
+                palette.dim.render(),
+                palette.dim.render_reset()
+            )?;
+        }
     }
     Ok(())
 }
@@ -300,6 +319,8 @@ mod tests {
             format: None,
             col: vec![],
             no_pager: false,
+            not_eq: vec![],
+            all: false,
         }
     }
 
@@ -457,6 +478,66 @@ mod tests {
     }
 
     #[test]
+    fn records_empty_frontmatter_shows_placeholder() {
+        let result = sample_result();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let args = sample_args();
+        let palette = crate::output::palette::Palette::off();
+        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        // b.md has no frontmatter; it should show the placeholder line.
+        assert!(
+            text.contains("b.md\n  (no frontmatter)\n"),
+            "expected placeholder under empty-frontmatter record: {text:?}"
+        );
+    }
+
+    #[test]
+    fn records_col_with_no_matches_shows_no_matching_fields_placeholder() {
+        let result = sample_result();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut args = sample_args();
+        // a.md has type=note but no `nonexistent` field.
+        args.col = vec!["nonexistent".to_string()];
+        let palette = crate::output::palette::Palette::off();
+        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        assert!(
+            text.contains("a.md\n  (no matching fields)\n"),
+            "expected (no matching fields) under col-filtered record: {text:?}"
+        );
+        // b.md (no frontmatter at all) also gets the col-aware placeholder
+        // when --col is in effect — the user asked for a field, it isn't there.
+        assert!(
+            text.contains("b.md\n  (no matching fields)\n"),
+            "expected (no matching fields) even when frontmatter absent: {text:?}"
+        );
+        // The unfiltered "(no frontmatter)" message should NOT appear when --col is set.
+        assert!(
+            !text.contains("(no frontmatter)"),
+            "should not say (no frontmatter) when --col is active: {text:?}"
+        );
+    }
+
+    #[test]
+    fn records_empty_frontmatter_placeholder_uses_dim_when_palette_on() {
+        let result = sample_result();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let args = sample_args();
+        let palette = crate::output::palette::Palette::on();
+        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        // Dim renders as ANSI 256 #244.
+        assert!(
+            text.contains("\x1b[38;5;244m(no frontmatter)\x1b[0m"),
+            "expected dim-wrapped placeholder: {text:?}"
+        );
+    }
+
+    #[test]
     fn records_path_is_header_not_field() {
         let result = sample_result();
         let mut stdout = Vec::new();
@@ -466,7 +547,7 @@ mod tests {
         render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // The path "a.md" appears as a header line at column 0, not as a "  path  a.md" field row.
-        // lines[0] is count line, lines[1] is blank, lines[2] is the first record header.
+        // lines[0] = count line, lines[1] = blank, lines[2] = first record header.
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines[2], "a.md",

@@ -18,6 +18,12 @@ pub fn build_find_query(args: &FindArgs) -> Result<FindQuery> {
         frontmatter_eq.push(parse_field_value(spec, "--eq")?);
     }
 
+    // not_eq
+    let mut frontmatter_not_eq = Vec::new();
+    for spec in &args.not_eq {
+        frontmatter_not_eq.push(parse_field_value(spec, "--not-eq")?);
+    }
+
     // in
     let mut frontmatter_in = Vec::new();
     for spec in &args.r#in {
@@ -47,6 +53,7 @@ pub fn build_find_query(args: &FindArgs) -> Result<FindQuery> {
     let predicates = DocumentQuery {
         body_text_contains,
         frontmatter_eq,
+        frontmatter_not_eq,
         frontmatter_in,
         frontmatter_not_in,
         frontmatter_has: args.has.clone(),
@@ -194,6 +201,8 @@ mod tests {
             format: None,
             col: vec![],
             no_pager: false,
+            not_eq: vec![],
+            all: false,
         }
     }
 

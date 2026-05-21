@@ -141,6 +141,8 @@ fn render_records(
     palette: &Palette,
     out: &mut dyn Write,
 ) -> std::io::Result<()> {
+    // Leading blank gives breathing room from the user's shell prompt.
+    writeln!(out)?;
     let pairs = snapshot.pairs();
     // Drop the "file" pair — it becomes the header.
     let header = snapshot.file.as_str();
@@ -156,7 +158,7 @@ fn render_records(
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
-    record_block(out, palette, header, &fields, term_width)
+    record_block(out, palette, Some(header), &fields, term_width)
 }
 
 /// Build the agent-facing JSON payload (nested by config section). Shared
@@ -217,13 +219,14 @@ mod tests {
         render_records(&snapshot, &palette, &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        // Header = the config file path.
-        assert_eq!(lines[0], "/v/.vault/config.yaml");
+        // lines[0] = leading blank; lines[1] = header (config file path).
+        assert_eq!(lines[0], "");
+        assert_eq!(lines[1], "/v/.vault/config.yaml");
         // Subsequent lines are 2-indent fields.
         assert!(
-            lines[1].starts_with("  "),
+            lines[2].starts_with("  "),
             "expected 2-indent, got: {:?}",
-            lines[1]
+            lines[2]
         );
         // Longest remaining label is "repair_rules" (12); column width = 14.
         // Field rows include vault_root, cache, version, ignore, required, rules, repair_rules.

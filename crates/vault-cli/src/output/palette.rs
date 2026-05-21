@@ -28,10 +28,12 @@ pub struct Palette {
     pub amber: Style,
     /// Error (ANSI 256 color 167).
     pub rune: Style,
-    /// Muted — `Style::new().dimmed()`.
+    /// Muted — ANSI 256 #244 (#808080, medium gray) per brand §2.
     pub dim: Style,
     /// Field labels (= `dim`).
     pub label: Style,
+    /// Record-block header — bone bold per norn-cli-output §4.3.
+    pub header: Style,
     /// Section headers (= `dim().bold()`). Used by future grouped-tally commands.
     #[allow(dead_code)]
     pub section: Style,
@@ -56,6 +58,7 @@ impl Palette {
             rune: Style::new(),
             dim: Style::new(),
             label: Style::new(),
+            header: Style::new(),
             section: Style::new(),
             enabled: false,
         }
@@ -63,15 +66,23 @@ impl Palette {
 
     /// Returns the full brand-token palette with ANSI 256 colors applied.
     pub const fn on() -> Self {
-        let dim = Style::new().dimmed();
+        // `dim` and `bone` ship as explicit ANSI 256 colors per
+        // norn-brand §2 — NOT as SGR effects, because many terminals
+        // (macOS Terminal.app default profile, several tmux configs) silently
+        // ignore SGR 2 ("faint") and render text as the terminal default,
+        // defeating the visual distinction between bone (foreground) and dim
+        // (muted) text.
+        let dim = ansi256(244);
+        let bone = ansi256(253);
         Self {
-            bone: Style::new(),
+            bone,
             thread: ansi256(67),
             moss: ansi256(108),
             amber: ansi256(178),
             rune: ansi256(167),
             dim,
             label: dim,
+            header: bone.bold(),
             section: dim.bold(),
             enabled: true,
         }

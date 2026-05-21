@@ -41,19 +41,23 @@ pub struct Field<'a> {
 }
 
 /// Record block per norn-cli-output §4.3.
-/// Header line at column 0 (bone bold ideally, but plain bone is acceptable —
-/// the brand/output spec contradiction is filed as a follow-up).
+/// Optional header at column 0; pass `None` for header-less records where
+/// every datum (including identity like a path) is a field row.
 /// Then 2-indent field rows. Label column width = max(label.len()) + 2.
 /// Long values wrap to value column on continuation lines (no label shown again).
+/// Values containing words longer than the value column are force-broken at
+/// the column boundary so they stay cell-shaped.
 /// `highlight: true` renders the value in `thread`; otherwise `bone`.
 pub fn record_block(
     out: &mut dyn Write,
     p: &Palette,
-    header: &str,
+    header: Option<&str>,
     fields: &[Field<'_>],
     term_width: usize,
 ) -> io::Result<()> {
-    writeln!(out, "{header}")?;
+    if let Some(h) = header {
+        writeln!(out, "{}{h}{}", p.header.render(), p.header.render_reset())?;
+    }
     if fields.is_empty() {
         return Ok(());
     }
@@ -95,9 +99,16 @@ fn wrap_value(value: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     for word in value.split_whitespace() {
+        if word.chars().count() > width {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            out.extend(chunk_str(word, width));
+            continue;
+        }
         if current.is_empty() {
             current.push_str(word);
-        } else if current.len() + 1 + word.len() <= width {
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
             current.push(' ');
             current.push_str(word);
         } else {
@@ -110,6 +121,24 @@ fn wrap_value(value: &str, width: usize) -> Vec<String> {
     }
     if out.is_empty() {
         out.push(String::new());
+    }
+    out
+}
+
+fn chunk_str(s: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut count = 0;
+    for c in s.chars() {
+        current.push(c);
+        count += 1;
+        if count >= width {
+            out.push(std::mem::take(&mut current));
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
     }
     out
 }
@@ -333,7 +362,7 @@ mod tests {
                 highlight: false,
             },
         ];
-        record_block(&mut out, &Palette::off(), "tasks/foo.md", &fields, 80).unwrap();
+        record_block(&mut out, &Palette::off(), Some("tasks/foo.md"), &fields, 80).unwrap();
         let s = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines[0], "tasks/foo.md");
@@ -351,7 +380,7 @@ mod tests {
             value: long,
             highlight: false,
         }];
-        record_block(&mut out, &Palette::off(), "h", &fields, 30).unwrap();
+        record_block(&mut out, &Palette::off(), Some("h"), &fields, 30).unwrap();
         let s = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = s.lines().collect();
         // Header + at least 2 wrapped lines under "k".
@@ -362,6 +391,31 @@ mod tests {
     }
 
     #[test]
+    fn record_block_force_breaks_long_unbreakable_word() {
+        // UUIDs and similar no-whitespace tokens used to overflow the value
+        // column and let the terminal soft-wrap them into the key column.
+        let mut out = Vec::new();
+        let id = "a1b2c3d4-5e6f-7a8b-9c0d-1e2f3a4b5c6d";
+        let fields = [Field {
+            label: "id",
+            value: id,
+            highlight: false,
+        }];
+        record_block(&mut out, &Palette::off(), Some("h"), &fields, 30).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert!(
+            lines.len() >= 3,
+            "expected force-break wrap into multiple lines: {lines:?}"
+        );
+        // Continuation aligns to the value column (no overflow into key column).
+        assert!(
+            lines[2].starts_with("    "),
+            "continuation should be indented past key column: {lines:?}"
+        );
+    }
+
+    #[test]
     fn record_block_highlight_uses_thread_ansi_when_palette_on() {
         let mut out = Vec::new();
         let fields = [Field {
@@ -369,7 +423,7 @@ mod tests {
             value: "v",
             highlight: true,
         }];
-        record_block(&mut out, &Palette::on(), "h", &fields, 80).unwrap();
+        record_block(&mut out, &Palette::on(), Some("h"), &fields, 80).unwrap();
         let s = String::from_utf8(out).unwrap();
         // Thread = ANSI 256 color 67 → escape "\x1b[38;5;67m"
         assert!(s.contains("\x1b[38;5;67m"), "expected thread ansi: {s:?}");
@@ -383,7 +437,7 @@ mod tests {
             value: "v",
             highlight: false,
         }];
-        record_block(&mut out, &Palette::on(), "h", &fields, 80).unwrap();
+        record_block(&mut out, &Palette::on(), Some("h"), &fields, 80).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(
             !s.contains("\x1b[38;5;67m"),
@@ -399,7 +453,7 @@ mod tests {
             value: "v",
             highlight: false,
         }];
-        record_block(&mut out, &Palette::off(), "h", &fields, 80).unwrap();
+        record_block(&mut out, &Palette::off(), Some("h"), &fields, 80).unwrap();
         let s = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = s.lines().collect();
         // Single label "k": label_w = 1 + 2 = 3 → "k  v".

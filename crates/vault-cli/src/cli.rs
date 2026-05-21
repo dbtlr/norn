@@ -369,6 +369,11 @@ pub struct FindArgs {
     #[arg(long = "eq", value_name = "FIELD:VALUE")]
     pub eq: Vec<String>,
 
+    /// Frontmatter `field` is NOT equal to `value`. Negation of `--eq`.
+    /// For array-shaped fields, matches when no element equals the value.
+    #[arg(long = "not-eq", value_name = "FIELD:VALUE")]
+    pub not_eq: Vec<String>,
+
     /// Frontmatter `field` is one of the comma-separated values (ANY-of).
     /// E.g. `--in status:backlog,active`. Repeat for multiple fields;
     /// ALL-of across repeats.
@@ -403,6 +408,12 @@ pub struct FindArgs {
     /// Path glob pattern. Repeat for multiple patterns (ANY-of).
     #[arg(long = "path", value_name = "GLOB")]
     pub path: Vec<String>,
+
+    /// Return every document — escape hatch when no predicate is specified.
+    /// Without --all and without any predicate, `vault find` prints its help
+    /// page (a full-vault dump is almost always a mistake; require opt-in).
+    #[arg(long)]
+    pub all: bool,
 
     // ── Sort / limit / paging ───────────────────────────────────────────
     /// Sort by field (frontmatter key, `path`, or `stem`). Ascending by default.

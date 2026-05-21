@@ -130,11 +130,12 @@ fn config_show_uses_records_default_on_tty_like_output() {
         String::from_utf8_lossy(&output.stderr),
     );
     let text = String::from_utf8(output.stdout).expect("stdout UTF-8");
-    // Header is the config file path (ends with .vault/config.yaml).
-    let first_line = text.lines().next().unwrap_or("");
+    // lines[0] is the leading blank for prompt breathing room.
+    // lines[1] is the header — the config file path.
+    let header_line = text.lines().nth(1).unwrap_or("");
     assert!(
-        first_line.ends_with(".vault/config.yaml"),
-        "expected file path header, got: {first_line:?}"
+        header_line.ends_with(".vault/config.yaml"),
+        "expected file path header, got: {header_line:?}"
     );
     // Field rows are 2-indent.
     assert!(text.contains("  vault_root"));

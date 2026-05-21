@@ -11,6 +11,35 @@ use camino::Utf8Path;
 
 use crate::cli::FindArgs;
 
+/// True when the user supplied at least one predicate that constrains the
+/// result set. Sort, limit, format, and --col are output modifiers, not
+/// predicates; running with only those would dump the whole vault.
+fn has_predicate(args: &FindArgs) -> bool {
+    args.text.as_deref().is_some_and(|t| !t.is_empty())
+        || !args.eq.is_empty()
+        || !args.not_eq.is_empty()
+        || !args.r#in.is_empty()
+        || !args.not_in.is_empty()
+        || !args.has.is_empty()
+        || !args.missing.is_empty()
+        || !args.before.is_empty()
+        || !args.after.is_empty()
+        || !args.on.is_empty()
+        || !args.path.is_empty()
+}
+
+/// Print `vault find --help` to stderr. Used as the "missing predicate" gate.
+fn print_find_help() -> Result<()> {
+    use clap::CommandFactory;
+    let mut cmd = crate::cli::Cli::command();
+    let find = cmd
+        .find_subcommand_mut("find")
+        .ok_or_else(|| anyhow::anyhow!("find subcommand missing from CLI tree"))?;
+    let mut stderr = std::io::stderr().lock();
+    find.write_help(&mut stderr)?;
+    Ok(())
+}
+
 fn resolve_format(explicit: Option<crate::cli::FindFormat>) -> crate::cli::FindFormat {
     match explicit {
         Some(fmt) => fmt,
@@ -30,6 +59,11 @@ pub fn run(
     no_cache_refresh: bool,
     color: crate::cli::ColorWhen,
 ) -> Result<i32> {
+    if !args.all && !has_predicate(&args) {
+        print_find_help()?;
+        return Ok(2);
+    }
+
     let cache = crate::cache::open_for_query(cwd, no_cache_refresh)?;
     let query = self::query::build_find_query(&args)?;
     let result = cache.find_documents(&query)?;
