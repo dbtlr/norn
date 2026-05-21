@@ -4,6 +4,7 @@
 //! argument parser and the source of arg metadata; it does not emit help text.
 
 pub mod bin_name;
+pub mod examples;
 pub mod extract;
 pub mod model;
 pub mod render;

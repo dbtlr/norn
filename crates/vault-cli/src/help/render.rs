@@ -267,6 +267,67 @@ fn write_global_line(
     )
 }
 
+/// Render the `EXAMPLES` section. Per the Phase 2 spec, each entry renders as
+/// two lines: command at 4-space indent (with per-token coloring), then the
+/// comment at 8-space indent in `dim`. A blank line separates entries.
+fn write_examples_block(
+    out: &mut dyn Write,
+    palette: &Palette,
+    examples: &[(String, String)],
+) -> io::Result<()> {
+    if examples.is_empty() {
+        return Ok(());
+    }
+    write_section_header(out, palette, "EXAMPLES")?;
+    for (i, (cmd, comment)) in examples.iter().enumerate() {
+        write_example_command(out, palette, cmd)?;
+        writeln!(
+            out,
+            "        {ds}# {comment}{de}",
+            ds = palette.dim.render(),
+            comment = comment,
+            de = palette.dim.render_reset(),
+        )?;
+        if i + 1 < examples.len() {
+            writeln!(out)?;
+        }
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+/// Render a single example's command line at 4-space indent with per-token
+/// coloring: tokens starting with `-` render in `thread` (flag tokens);
+/// everything else renders in `bone` (including the literal `vault` prefix
+/// and any value tokens).
+fn write_example_command(out: &mut dyn Write, palette: &Palette, cmd: &str) -> io::Result<()> {
+    write!(out, "    ")?;
+    let mut first = true;
+    for token in cmd.split_whitespace() {
+        if !first {
+            write!(out, " ")?;
+        }
+        first = false;
+        if token.starts_with('-') {
+            write!(
+                out,
+                "{ts}{token}{te}",
+                ts = palette.thread.render(),
+                te = palette.thread.render_reset(),
+            )?;
+        } else {
+            write!(
+                out,
+                "{bs}{token}{be}",
+                bs = palette.bone.render(),
+                be = palette.bone.render_reset(),
+            )?;
+        }
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
 /// Render the long (`--help`) form of `model` to `out`.
 ///
 /// Hanging-indent style for flags: flag on its own line, descriptions/prose
@@ -359,6 +420,10 @@ pub fn render_long(
         }
         writeln!(out)?;
     }
+
+    // EXAMPLES — canned, per the Phase 2 design spec. Empty tables suppress
+    // the section entirely.
+    write_examples_block(out, palette, &model.extras.canned_examples)?;
 
     // GLOBAL OPTIONS — aligned column (spec §3.1 — short lines use the column).
     if !model.globals.is_empty() {
@@ -679,5 +744,98 @@ mod tests {
         // Phase 1 footer: a docs pointer line.
         assert!(out.to_lowercase().contains("documentation"));
         assert!(out.contains("github.com"));
+    }
+
+    fn sample_model_with_examples() -> HelpModel {
+        let mut m = sample_model();
+        m.extras.canned_examples = vec![
+            (
+                "vault find --eq type:note --limit 5".to_string(),
+                "backlog notes — top 5".to_string(),
+            ),
+            (
+                "vault find --text reorg --format paths".to_string(),
+                "full-text search; pipe-friendly path list".to_string(),
+            ),
+        ];
+        m
+    }
+
+    #[test]
+    fn long_form_emits_examples_section_when_populated() {
+        let out = render_long_to_string(&sample_model_with_examples());
+        assert!(out.contains("EXAMPLES\n"));
+        assert!(out.contains("vault find --eq type:note --limit 5"));
+        assert!(out.contains("# backlog notes — top 5"));
+        assert!(out.contains("vault find --text reorg --format paths"));
+        assert!(out.contains("# full-text search; pipe-friendly path list"));
+    }
+
+    #[test]
+    fn long_form_omits_examples_section_when_empty() {
+        // sample_model() leaves extras at default (empty canned_examples).
+        let out = render_long_to_string(&sample_model());
+        assert!(
+            !out.contains("EXAMPLES\n"),
+            "empty canned_examples must not produce an EXAMPLES section; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn examples_section_positioned_before_global_options() {
+        let out = render_long_to_string(&sample_model_with_examples());
+        let ex_idx = out.find("EXAMPLES\n").expect("EXAMPLES section present");
+        let go_idx = out
+            .find("GLOBAL OPTIONS\n")
+            .expect("GLOBAL OPTIONS section present");
+        assert!(
+            ex_idx < go_idx,
+            "EXAMPLES must precede GLOBAL OPTIONS in long-form help"
+        );
+    }
+
+    #[test]
+    fn examples_indent_command_at_4_and_comment_at_8() {
+        let out = render_long_to_string(&sample_model_with_examples());
+        let lines: Vec<&str> = out.lines().collect();
+        let cmd_line = lines
+            .iter()
+            .find(|l| l.contains("vault find --eq"))
+            .expect("command line present");
+        assert!(
+            cmd_line.starts_with("    vault"),
+            "command line at 4-space indent, got: {cmd_line:?}"
+        );
+        let comment_line = lines
+            .iter()
+            .find(|l| l.contains("# backlog notes"))
+            .expect("comment line present");
+        assert!(
+            comment_line.starts_with("        #"),
+            "comment line at 8-space indent, got: {comment_line:?}"
+        );
+    }
+
+    #[test]
+    fn examples_blank_line_separates_entries() {
+        let out = render_long_to_string(&sample_model_with_examples());
+        let lines: Vec<&str> = out.lines().collect();
+        // First comment immediately precedes a blank line, which precedes the
+        // second command.
+        let first_comment_idx = lines
+            .iter()
+            .position(|l| l.contains("# backlog notes"))
+            .unwrap();
+        assert_eq!(lines[first_comment_idx + 1], "");
+        assert!(lines[first_comment_idx + 2].contains("vault find --text reorg"));
+    }
+
+    #[test]
+    fn short_form_never_emits_examples() {
+        let out = render_to_string(&sample_model_with_examples());
+        assert!(
+            !out.contains("EXAMPLES\n"),
+            "short form (-h) must not include EXAMPLES; got:\n{out}"
+        );
     }
 }

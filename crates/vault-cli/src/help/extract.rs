@@ -104,7 +104,10 @@ pub fn build_model(cmd: &Command, root: &Command, cmd_path: &str, form: HelpForm
         groups,
         globals,
         subcommands,
-        extras: HelpExtras::default(),
+        extras: HelpExtras {
+            canned_examples: super::examples::examples_for(cmd_path),
+            ..HelpExtras::default()
+        },
     }
 }
 

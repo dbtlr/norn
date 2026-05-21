@@ -256,3 +256,90 @@ fn ascii_fallback_via_env() {
     // confirming the env doesn't cause a panic or structural change.
     assert!(stdout.contains("USAGE\n"));
 }
+
+#[test]
+fn root_long_help_has_examples_section() {
+    let out = vault_help(&["--help"]);
+    assert!(
+        out.contains("EXAMPLES\n"),
+        "vault --help should include EXAMPLES; got:\n{out}"
+    );
+    assert!(out.contains("vault find"));
+}
+
+#[test]
+fn find_long_help_has_examples_with_eq() {
+    let out = vault_help(&["find", "--help"]);
+    assert!(out.contains("EXAMPLES\n"));
+    assert!(
+        out.contains("--eq"),
+        "find --help EXAMPLES should reference --eq; got:\n{out}"
+    );
+}
+
+#[test]
+fn validate_long_help_has_examples() {
+    let out = vault_help(&["validate", "--help"]);
+    assert!(out.contains("EXAMPLES\n"));
+}
+
+#[test]
+fn repair_plan_long_help_has_examples() {
+    let out = vault_help(&["repair", "plan", "--help"]);
+    assert!(out.contains("EXAMPLES\n"));
+}
+
+#[test]
+fn repair_apply_long_help_has_examples() {
+    let out = vault_help(&["repair", "apply", "--help"]);
+    assert!(out.contains("EXAMPLES\n"));
+}
+
+#[test]
+fn links_unresolved_long_help_has_examples() {
+    let out = vault_help(&["links", "unresolved", "--help"]);
+    assert!(out.contains("EXAMPLES\n"));
+}
+
+#[test]
+fn root_short_help_has_no_examples_section() {
+    // The short form (-h) must never include EXAMPLES per spec §1.
+    let out = vault_help(&["-h"]);
+    assert!(
+        !out.contains("EXAMPLES"),
+        "vault -h must not include EXAMPLES; got:\n{out}"
+    );
+}
+
+#[test]
+fn find_short_help_has_no_examples_section() {
+    let out = vault_help(&["find", "-h"]);
+    assert!(
+        !out.contains("EXAMPLES"),
+        "vault find -h must not include EXAMPLES; got:\n{out}"
+    );
+}
+
+#[test]
+fn examples_command_lines_start_with_vault() {
+    // Style assertion: every authored example command line begins with the
+    // literal `vault ` token (no shell prompts, no leading dashes, no $).
+    let out = vault_help(&["find", "--help"]);
+    let ex_section_start = out
+        .find("EXAMPLES\n")
+        .expect("vault find --help has EXAMPLES section");
+    let ex_section = &out[ex_section_start..];
+    for line in ex_section.lines().skip(1) {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue; // Blank line or comment line.
+        }
+        if line.starts_with("GLOBAL OPTIONS") || line.starts_with("Documentation:") {
+            break; // End of EXAMPLES section.
+        }
+        assert!(
+            trimmed.starts_with("vault "),
+            "example command lines must start with 'vault '; got: {line:?}"
+        );
+    }
+}
