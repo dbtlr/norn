@@ -5,6 +5,7 @@ mod config;
 mod config_loader;
 mod filter;
 mod find;
+mod help;
 mod init;
 mod init_scan;
 mod link_repair;
