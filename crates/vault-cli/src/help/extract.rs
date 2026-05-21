@@ -4,6 +4,10 @@ use clap::Command;
 
 use super::model::{FlagEntry, FlagGroup, GlobalEntry, HelpExtras, HelpForm, HelpModel};
 
+/// Heading used for a flag that has no `help_heading` annotation. Rendered
+/// uppercased by the renderer (per spec §2.1).
+const DEFAULT_FLAG_HEADING: &str = "Options";
+
 /// Walk the given clap `Command` and produce a fully-populated `HelpModel`.
 ///
 /// - `cmd_path` is the user-facing path string, e.g. `"vault find"`. The
@@ -46,7 +50,7 @@ pub fn build_model(cmd: &Command, cmd_path: &str, form: HelpForm) -> HelpModel {
         let heading = arg
             .get_help_heading()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "Options".to_string());
+            .unwrap_or_else(|| DEFAULT_FLAG_HEADING.to_string());
         if let Some(g) = groups.iter_mut().find(|g| g.heading == heading) {
             g.flags.push(entry);
         } else {
@@ -80,6 +84,7 @@ pub fn build_model(cmd: &Command, cmd_path: &str, form: HelpForm) -> HelpModel {
     }
 }
 
+/// Map a single clap `Arg` to a `FlagEntry`, gating `long_desc` on `form`.
 fn flag_entry_from_arg(arg: &clap::Arg, form: HelpForm) -> FlagEntry {
     let short = arg.get_short();
     let long = arg.get_long().map(|s| s.to_string());
