@@ -1,4 +1,6 @@
-//! Pager subprocess spawn for records format.
+//! Shared pager subprocess spawn. Used by `find` records output and by `--help`
+//! long-form rendering. Honors `$PAGER`; defaults to `less -FRX` (-F quit if
+//! fits, -R raw ANSI, -X no init/deinit).
 
 use std::env;
 use std::io::Write;
@@ -30,6 +32,7 @@ pub fn spawn_pager_or_passthrough(
     buffer: &[u8],
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
+    context: &str,
 ) -> std::io::Result<()> {
     let (cmd, args) = resolve_pager();
     let mut child = match Command::new(&cmd).args(&args).stdin(Stdio::piped()).spawn() {
@@ -37,7 +40,7 @@ pub fn spawn_pager_or_passthrough(
         Err(e) => {
             writeln!(
                 stderr,
-                "vault find: pager '{}' failed: {}; writing directly to terminal",
+                "{context}: pager '{}' failed: {}; writing directly to terminal",
                 cmd, e
             )?;
             stdout.write_all(buffer)?;

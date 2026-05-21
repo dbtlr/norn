@@ -5,6 +5,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(name = "vault")]
 #[command(about = "Deterministic Markdown vault graph tools")]
 #[command(version)]
+#[command(disable_help_flag = true)]
+#[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[arg(
         short = 'C',
@@ -32,7 +34,7 @@ pub struct Cli {
         long = "no-cache-refresh",
         global = true,
         help_heading = "Global options",
-        help = "Skip the implicit cache refresh that query commands run before reading the graph index"
+        help = "Skip the implicit cache refresh before reading the graph"
     )]
     pub no_cache_refresh: bool,
     #[arg(
@@ -44,48 +46,82 @@ pub struct Cli {
         help = "Color output. Honors NO_COLOR / CLICOLOR_FORCE."
     )]
     pub color: ColorWhen,
+    #[arg(
+        short = 'h',
+        global = true,
+        help_heading = "Global options",
+        help = "Print short help. Use --help for full help",
+        action = clap::ArgAction::SetTrue,
+    )]
+    pub help_short: bool,
+    #[arg(
+        long = "help",
+        global = true,
+        help_heading = "Global options",
+        help = "Print full help. Use -h for a short summary",
+        action = clap::ArgAction::SetTrue,
+    )]
+    pub help_long: bool,
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    #[command(about = "Parsed Markdown documents")]
+    #[command(disable_help_flag = true, about = "Parsed Markdown documents")]
     Docs(DocsCommand),
     #[command(
+        disable_help_flag = true,
         about = "Emit inventoried vault files",
         long_about = "Emit inventoried vault files.\n\nFiles include Markdown documents and non-Markdown attachments. File records can be used with exact-path backlink queries for resolved attachment targets."
     )]
     Files(GraphArgs),
     #[command(
+        disable_help_flag = true,
         about = "Find documents in the vault — full-text + metadata filters with sort/limit/paging"
     )]
     Find(FindArgs),
-    #[command(about = "Scaffold .vault/config.yaml")]
+    #[command(disable_help_flag = true, about = "Scaffold .vault/config.yaml")]
     Init(InitArgs),
-    #[command(about = "Link facts across the vault")]
+    #[command(disable_help_flag = true, about = "Link facts across the vault")]
     Links(LinksCommand),
-    #[command(about = "Plan and apply deterministic vault repairs")]
+    #[command(
+        disable_help_flag = true,
+        about = "Plan and apply deterministic vault repairs"
+    )]
     Repair(RepairCommand),
     #[command(
+        disable_help_flag = true,
         about = "Validate vault graph facts and configured frontmatter rules",
         long_about = "Validate vault graph facts and configured frontmatter rules.\n\nValidation reuses graph/index facts to surface unresolved links, ambiguous links, document diagnostics, and configured frontmatter requirements. Validate does not mutate files."
     )]
     Validate(ValidateArgs),
-    #[command(about = "Shell completion installation and script emission")]
+    #[command(
+        disable_help_flag = true,
+        about = "Shell completion installation and script emission"
+    )]
     Completions(CompletionsCommand),
     #[command(
+        disable_help_flag = true,
         about = "Manage the SQLite-backed vault graph cache",
         long_about = "Manage the SQLite-backed vault graph cache.\n\nThe cache is a per-vault disposable read-acceleration store. Query commands open it transparently; these subcommands let you index, rebuild, clear, or inspect it explicitly."
     )]
     Cache(CacheCommand),
-    #[command(about = "Manage the per-vault `.vault/config.yaml`")]
+    #[command(
+        disable_help_flag = true,
+        about = "Manage the per-vault `.vault/config.yaml`"
+    )]
     Config(ConfigCommand),
-    #[command(hide = true, about = "Emit roff-format man page to stdout")]
+    #[command(
+        hide = true,
+        disable_help_flag = true,
+        about = "Emit roff-format man page to stdout"
+    )]
     Manpage,
 }
 
 #[derive(Debug, Parser)]
+#[command(disable_help_flag = true)]
 pub struct CacheCommand {
     #[command(subcommand)]
     pub command: CacheSubcommand,
@@ -94,18 +130,23 @@ pub struct CacheCommand {
 #[derive(Debug, Subcommand)]
 pub enum CacheSubcommand {
     #[command(
+        disable_help_flag = true,
         about = "Update the cache incrementally",
         long_about = "Update the cache incrementally.\n\nDetects changed files via mtime+size and re-parses only the affected documents. Pass --rebuild to force a full from-scratch rebuild, or --force-hash to bypass the cheap-check and hash every file."
     )]
     Index(CacheIndexArgs),
-    #[command(about = "Rebuild the cache from scratch")]
+    #[command(disable_help_flag = true, about = "Rebuild the cache from scratch")]
     Rebuild,
     #[command(
+        disable_help_flag = true,
         about = "Delete the cache database",
         long_about = "Delete the cache database.\n\nRemoves the cache.db file and its WAL/SHM siblings. The next cache-aware command auto-recreates a fresh database."
     )]
     Clear,
-    #[command(about = "Show cache path, size, document and link counts, and schema version")]
+    #[command(
+        disable_help_flag = true,
+        about = "Show cache path, size, document and link counts, and schema version"
+    )]
     Status(CacheStatusArgs),
 }
 
@@ -136,6 +177,7 @@ pub enum CacheOutputFormat {
 }
 
 #[derive(Debug, Parser)]
+#[command(disable_help_flag = true)]
 pub struct DocsCommand {
     #[command(subcommand)]
     pub command: DocsSubcommand,
@@ -143,13 +185,17 @@ pub struct DocsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum DocsSubcommand {
-    #[command(about = "Emit grouped document counts")]
+    #[command(disable_help_flag = true, about = "Emit grouped document counts")]
     Summary(DocsSummaryArgs),
-    #[command(about = "Emit one document plus incoming, outgoing, and unresolved outgoing links")]
+    #[command(
+        disable_help_flag = true,
+        about = "Emit one document plus incoming, outgoing, and unresolved outgoing links"
+    )]
     Inspect(InspectArgs),
 }
 
 #[derive(Debug, Parser)]
+#[command(disable_help_flag = true)]
 pub struct LinksCommand {
     #[command(subcommand)]
     pub command: LinksSubcommand,
@@ -158,16 +204,19 @@ pub struct LinksCommand {
 #[derive(Debug, Subcommand)]
 pub enum LinksSubcommand {
     #[command(
+        disable_help_flag = true,
         about = "Emit all parsed link facts",
         long_about = "Emit all parsed link facts.\n\nIncludes body wikilinks, embeds, frontmatter/property wikilinks, URL-decoded Markdown internal links, extensionless Markdown note links, same-note heading/block references, Markdown image links to local files, and links to existing attachments. Use source_context.area and source_context.property to distinguish body links from frontmatter links.\n\n--format paths emits unique source paths; multiple links from the same source appear once."
     )]
     List(GraphArgs),
     #[command(
+        disable_help_flag = true,
         about = "Emit unresolved and ambiguous link facts",
         long_about = "Emit unresolved and ambiguous link facts.\n\nRows include target-missing, anchor-missing, block-ref-missing, and ambiguous reasons. Ambiguous rows include candidate document paths.\n\n--format paths emits unique source paths."
     )]
     Unresolved(GraphArgs),
     #[command(
+        disable_help_flag = true,
         about = "Emit incoming links for an exact path or unique stem",
         long_about = "Emit incoming links for an exact vault-relative file path or unique document stem.\n\nExact paths may target Markdown documents or non-Markdown files. Stem matching only applies to Markdown documents and is case-insensitive.\n\n--format paths emits unique source paths."
     )]
@@ -175,6 +224,7 @@ pub enum LinksSubcommand {
 }
 
 #[derive(Debug, Parser)]
+#[command(disable_help_flag = true)]
 pub struct RepairCommand {
     #[command(subcommand)]
     pub command: RepairSubcommand,
@@ -183,16 +233,19 @@ pub struct RepairCommand {
 #[derive(Debug, Subcommand)]
 pub enum RepairSubcommand {
     #[command(
+        disable_help_flag = true,
         about = "Generate an explicit repair plan from validation findings",
         long_about = "Generate an explicit repair plan from validation findings.\n\nRepair planning is read-only. It uses configured deterministic repair rules to produce applyable changes, and reports skipped, unsupported, and ambiguous findings as non-blocking planning fallout."
     )]
     Plan(RepairPlanArgs),
     #[command(
+        disable_help_flag = true,
         about = "Report link and path repair risks without writing files",
         long_about = "Report link and path repair risks without writing files.\n\nThis surfaces unresolved links, ambiguous links, duplicate-stem risks, path-style Markdown links, affected files, and optional move/delete risk for a target."
     )]
     Links(RepairLinksArgs),
     #[command(
+        disable_help_flag = true,
         about = "Apply a frontmatter-only repair plan",
         long_about = "Apply a frontmatter-only repair plan.\n\nApply writes by default, executes deterministic changes, reports skipped fallout as context, preserves Markdown body content, and rejects unsupported schemas, stale hashes, expected-old-value mismatches, conflicting changes, and unsupported operations."
     )]
@@ -360,68 +413,100 @@ pub struct DocsSummaryArgs {
 pub struct FindArgs {
     // ── Predicate operators ─────────────────────────────────────────────
     /// Full-text body substring. Case-insensitive. Empty string is a no-op.
-    #[arg(long, value_name = "NEEDLE")]
+    #[arg(long, value_name = "NEEDLE", help_heading = "Filter options")]
     pub text: Option<String>,
 
     /// Frontmatter equality predicate `field:value`. JSON-typed (e.g.
     /// `--eq published:true` for bool, `--eq priority:5` for number).
     /// Repeat for multiple predicates; ALL-of across repeats.
-    #[arg(long = "eq", value_name = "FIELD:VALUE")]
+    #[arg(
+        long = "eq",
+        value_name = "FIELD:VALUE",
+        help_heading = "Filter options"
+    )]
     pub eq: Vec<String>,
 
     /// Frontmatter `field` is NOT equal to `value`. Negation of `--eq`.
     /// For array-shaped fields, matches when no element equals the value.
-    #[arg(long = "not-eq", value_name = "FIELD:VALUE")]
+    #[arg(
+        long = "not-eq",
+        value_name = "FIELD:VALUE",
+        help_heading = "Filter options"
+    )]
     pub not_eq: Vec<String>,
 
     /// Frontmatter `field` is one of the comma-separated values (ANY-of).
     /// E.g. `--in status:backlog,active`. Repeat for multiple fields;
     /// ALL-of across repeats.
-    #[arg(long = "in", value_name = "FIELD:V1,V2,...")]
+    #[arg(
+        long = "in",
+        value_name = "FIELD:V1,V2,...",
+        help_heading = "Filter options"
+    )]
     pub r#in: Vec<String>,
 
     /// Frontmatter `field` is NOT one of the comma-separated values.
-    #[arg(long = "not-in", value_name = "FIELD:V1,V2,...")]
+    #[arg(
+        long = "not-in",
+        value_name = "FIELD:V1,V2,...",
+        help_heading = "Filter options"
+    )]
     pub not_in: Vec<String>,
 
     /// Frontmatter `field` is present (non-null). Repeat for multiple fields.
-    #[arg(long = "has", value_name = "FIELD")]
+    #[arg(long = "has", value_name = "FIELD", help_heading = "Filter options")]
     pub has: Vec<String>,
 
     /// Frontmatter `field` is absent or null. Repeat for multiple fields.
-    #[arg(long = "missing", value_name = "FIELD")]
+    #[arg(
+        long = "missing",
+        value_name = "FIELD",
+        help_heading = "Filter options"
+    )]
     pub missing: Vec<String>,
 
     /// Frontmatter `field` (a date) is before `DATE`. ISO 8601 expected.
     /// E.g. `--before created:2026-05-01`.
-    #[arg(long = "before", value_name = "FIELD:DATE")]
+    #[arg(
+        long = "before",
+        value_name = "FIELD:DATE",
+        help_heading = "Filter options"
+    )]
     pub before: Vec<String>,
 
     /// Frontmatter `field` (a date) is after `DATE`.
-    #[arg(long = "after", value_name = "FIELD:DATE")]
+    #[arg(
+        long = "after",
+        value_name = "FIELD:DATE",
+        help_heading = "Filter options"
+    )]
     pub after: Vec<String>,
 
     /// Frontmatter `field` (a date) is exactly `DATE`. Accepts `today`.
-    #[arg(long = "on", value_name = "FIELD:DATE")]
+    #[arg(
+        long = "on",
+        value_name = "FIELD:DATE",
+        help_heading = "Filter options"
+    )]
     pub on: Vec<String>,
 
     /// Path glob pattern. Repeat for multiple patterns (ANY-of).
-    #[arg(long = "path", value_name = "GLOB")]
+    #[arg(long = "path", value_name = "GLOB", help_heading = "Filter options")]
     pub path: Vec<String>,
 
     /// Return every document — escape hatch when no predicate is specified.
     /// Without --all and without any predicate, `vault find` prints its help
     /// page (a full-vault dump is almost always a mistake; require opt-in).
-    #[arg(long)]
+    #[arg(long, help_heading = "Filter options")]
     pub all: bool,
 
     // ── Sort / limit / paging ───────────────────────────────────────────
     /// Sort by field (frontmatter key, `path`, or `stem`). Ascending by default.
-    #[arg(long, value_name = "FIELD")]
+    #[arg(long, value_name = "FIELD", help_heading = "Sort and paging")]
     pub sort: Option<String>,
 
     /// Sort descending (only meaningful with --sort).
-    #[arg(long)]
+    #[arg(long, help_heading = "Sort and paging")]
     pub desc: bool,
 
     /// Maximum number of matches to return. Default 10.
@@ -429,30 +514,41 @@ pub struct FindArgs {
         long,
         value_name = "N",
         default_value = "10",
-        conflicts_with = "no_limit"
+        conflicts_with = "no_limit",
+        help_heading = "Sort and paging"
     )]
     pub limit: usize,
 
     /// Return all matches; no limit. Overrides --limit.
-    #[arg(long = "no-limit")]
+    #[arg(long = "no-limit", help_heading = "Sort and paging")]
     pub no_limit: bool,
 
     /// 1-indexed starting offset for paging. Default 1.
-    #[arg(long = "starts-at", value_name = "N", default_value = "1")]
+    #[arg(
+        long = "starts-at",
+        value_name = "N",
+        default_value = "1",
+        help_heading = "Sort and paging"
+    )]
     pub starts_at: usize,
 
     // ── Output ───────────────────────────────────────────────────────────
     /// Output format. Default auto-detects: TTY → records, piped → paths.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help_heading = "Output")]
     pub format: Option<FindFormat>,
 
     /// Comma-separated list of frontmatter fields to include in output.
     /// Default: all (records/json/jsonl). Ignored with warning on paths format.
-    #[arg(long, value_name = "FIELD1,FIELD2,...", value_delimiter = ',')]
+    #[arg(
+        long,
+        value_name = "FIELD1,FIELD2,...",
+        value_delimiter = ',',
+        help_heading = "Output"
+    )]
     pub col: Vec<String>,
 
     /// Skip the pager even when stdout is a TTY.
-    #[arg(long = "no-pager")]
+    #[arg(long = "no-pager", help_heading = "Output")]
     pub no_pager: bool,
 }
 
@@ -479,6 +575,7 @@ pub enum ColorWhen {
 }
 
 #[derive(Debug, Parser)]
+#[command(disable_help_flag = true)]
 pub struct CompletionsCommand {
     #[command(subcommand)]
     pub command: CompletionsSubcommand,
@@ -487,11 +584,13 @@ pub struct CompletionsCommand {
 #[derive(Debug, Subcommand)]
 pub enum CompletionsSubcommand {
     #[command(
+        disable_help_flag = true,
         about = "Emit a shell completion script to stdout",
         long_about = "Emit a shell completion script to stdout.\n\nMeant to be sourced or eval'd by the user's shell at startup. For one-command setup, prefer `vault completions install [shell]`."
     )]
     Init(CompletionsInitArgs),
     #[command(
+        disable_help_flag = true,
         about = "Install completions into the user's shell config",
         long_about = "Install completions into the user's shell config.\n\nAuto-detects the target shell from $SHELL if no argument is given. Idempotent via a marker comment block; pass --force to overwrite an existing install. Pass --print to preview without writing."
     )]
@@ -566,6 +665,7 @@ impl From<RepairOutputFormat> for OutputFormat {
 }
 
 #[derive(Debug, Parser)]
+#[command(disable_help_flag = true)]
 pub struct ConfigCommand {
     #[command(subcommand)]
     pub command: ConfigSubcommand,
@@ -573,13 +673,22 @@ pub struct ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigSubcommand {
-    #[command(about = "Show effective config: paths + counts")]
+    #[command(
+        disable_help_flag = true,
+        about = "Show effective config: paths + counts"
+    )]
     Show(ConfigShowArgs),
-    #[command(about = "Validate the config file itself")]
+    #[command(disable_help_flag = true, about = "Validate the config file itself")]
     Validate(ConfigValidateArgs),
-    #[command(about = "Migrate the config file to the current schema version")]
+    #[command(
+        disable_help_flag = true,
+        about = "Migrate the config file to the current schema version"
+    )]
     Migrate,
-    #[command(about = "Open the config file in $VISUAL or $EDITOR")]
+    #[command(
+        disable_help_flag = true,
+        about = "Open the config file in $VISUAL or $EDITOR"
+    )]
     Edit(ConfigEditArgs),
 }
 

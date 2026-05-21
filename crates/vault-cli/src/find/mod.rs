@@ -1,6 +1,5 @@
 //! `vault find` command implementation.
 
-pub mod pager;
 pub mod query;
 pub mod render;
 
@@ -101,12 +100,17 @@ pub fn run(
 
     let buffer_lines = buffer.iter().filter(|&&b| b == b'\n').count();
     let should_page = matches!(format, crate::cli::FindFormat::Records)
-        && self::pager::should_page(buffer_lines, args.no_pager, stdout_is_tty);
+        && crate::output::pager::should_page(buffer_lines, args.no_pager, stdout_is_tty);
 
     let stdout = std::io::stdout();
     let mut stdout_lock = stdout.lock();
     if should_page {
-        self::pager::spawn_pager_or_passthrough(&buffer, &mut stdout_lock, &mut stderr_lock)?;
+        crate::output::pager::spawn_pager_or_passthrough(
+            &buffer,
+            &mut stdout_lock,
+            &mut stderr_lock,
+            "vault find",
+        )?;
     } else {
         stdout_lock.write_all(&buffer)?;
     }

@@ -5,6 +5,7 @@ mod config;
 mod config_loader;
 mod filter;
 mod find;
+mod help;
 mod init;
 mod init_scan;
 mod link_repair;
@@ -43,6 +44,12 @@ use crate::target::{
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 
 fn main() {
+    // Intercept -h / --help before Cli::parse() so that subcommands with
+    // required positionals (e.g. `vault completions init --help`) can render
+    // help without clap erroring out on the missing positional arg.
+    if let Some(exit_code) = help::intercept_from_args() {
+        process::exit(exit_code);
+    }
     let cli = Cli::parse();
     match run(cli) {
         Ok(exit_code) => process::exit(exit_code),
@@ -61,6 +68,8 @@ fn run(cli: Cli) -> Result<i32> {
         verbose,
         no_cache_refresh,
         color,
+        help_short: _,
+        help_long: _,
         command,
     } = cli;
 

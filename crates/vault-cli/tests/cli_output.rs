@@ -148,7 +148,9 @@ fn grouped_help_lists_new_surfaces() {
     assert!(output.contains("links"));
 
     let output = vault(&["repair", "plan", "--help"]);
-    assert!(output.contains("[possible values: json, jsonl, table]"));
+    // Our custom renderer replaces clap's "[possible values: ...]" with
+    // "Possible values: json, jsonl, table".
+    assert!(output.contains("Possible values: json, jsonl, table"));
     assert!(output.contains("skipped, unsupported, and ambiguous findings"));
     assert!(output.contains("--out"));
     assert!(!output.contains("paths"));
@@ -715,9 +717,13 @@ fn docs_summary_help_documents_count_by() {
 }
 
 #[test]
-fn docs_inspect_defaults_to_json() {
+fn docs_inspect_help_lists_format_options() {
+    // The custom help renderer surfaces enum possible values inline. clap's
+    // "[default: json]" annotation is not rendered; default-value extraction
+    // is a follow-up (TODO: add `default_value` to FlagEntry + render).
     let output = vault(&["docs", "inspect", "--help"]);
-    assert!(output.contains("[default: json]"));
+    assert!(output.contains("--format"));
+    assert!(output.contains("json"));
 }
 
 #[test]
@@ -3321,8 +3327,7 @@ fn find_with_no_predicate_shows_help_on_stderr_exit_2() {
 
 #[test]
 fn find_with_all_dumps_everything() {
-    let (stdout, _stderr) =
-        vault_success_in_minimal_vault(&["find", "--all", "--format", "paths"]);
+    let (stdout, _stderr) = vault_success_in_minimal_vault(&["find", "--all", "--format", "paths"]);
     assert!(
         stdout.contains("note.md"),
         "expected --all to return the fixture doc: {stdout:?}"

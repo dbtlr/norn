@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Changed
+
+- **BREAKING:** `vault --help` and `vault -h` (and the same flags on every subcommand) now render through a custom layout instead of clap's default. Two forms with different jobs: `-h` is a one-screen orientation summary; `--help` is the deep reference with hanging-indent flag prose and pagination via `$PAGER`. Pager mirrors `vault find` (`less -FRX` default, honored `$PAGER`, TTY+height gate). Set `PAGER=cat` or pipe through `cat` to bypass. `GLOBAL OPTIONS` is shown in full on every subcommand. Phase 1 ships the structural skeleton; canned examples, live examples, and conceptual sections layer on in later phases.
+
 ## v0.29.0 - 2026-05-20
 
 A foundation release. Three large arcs land together: (1) the SQLite cache becomes the read path for query commands; (2) a new `vault find` consolidates search and metadata filtering into a single composable command, retiring `vault search` and `vault docs query`; (3) the `vault init` + `vault config` cluster bootstraps and inspects per-vault configuration. Layered on top: a shared `output/` primitives module that implements the new CLI output spec — bone-bold record headers, dim-gray labels via ANSI 256 instead of SGR 2, cell-shaped value wrapping that force-breaks long unbreakable tokens, count lines that lead query output, severity tallies with fix-hint blocks. The `--eq`, `--not-eq`, `--in`, `--not-in` predicates are now array-aware and bracket-tolerant for string values, so `vault find --eq workspace:vault-cli` matches both scalar `"[[vault-cli]]"` and `["[[vault-cli]]"]` shapes without users escaping brackets or knowing the field's underlying type.

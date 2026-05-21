@@ -222,7 +222,10 @@ fn frontmatter_not_in_string_excludes_array_match_and_keeps_others() {
         ..Default::default()
     };
     let result = cache.documents_matching(&query).unwrap();
-    assert!(result.is_empty(), "expected array-wikilinks excluded: {result:?}");
+    assert!(
+        result.is_empty(),
+        "expected array-wikilinks excluded: {result:?}"
+    );
 }
 
 #[test]

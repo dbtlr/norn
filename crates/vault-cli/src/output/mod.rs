@@ -4,5 +4,6 @@
 
 pub mod glyphs;
 pub mod legacy;
+pub mod pager;
 pub mod palette;
 pub mod primitives;

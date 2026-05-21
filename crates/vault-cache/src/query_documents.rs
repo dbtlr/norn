@@ -128,10 +128,22 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
     let mut binds: Vec<SqlValue> = Vec::new();
 
     for (field, value) in &query.frontmatter_eq {
-        push_equality(&mut where_clauses, &mut binds, field, value, /* negate */ false);
+        push_equality(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            value,
+            /* negate */ false,
+        );
     }
     for (field, value) in &query.frontmatter_not_eq {
-        push_equality(&mut where_clauses, &mut binds, field, value, /* negate */ true);
+        push_equality(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            value,
+            /* negate */ true,
+        );
     }
     for field in &query.frontmatter_has {
         where_clauses.push("json_extract(frontmatter_json, ?) IS NOT NULL".to_string());
@@ -149,7 +161,10 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
             where_clauses.push("0".to_string());
             continue;
         }
-        if values.iter().all(|v| matches!(v, serde_json::Value::String(_))) {
+        if values
+            .iter()
+            .all(|v| matches!(v, serde_json::Value::String(_)))
+        {
             push_string_membership(
                 &mut where_clauses,
                 &mut binds,
@@ -178,7 +193,10 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
             // `--not-in field:` with no values is a no-op.
             continue;
         }
-        if values.iter().all(|v| matches!(v, serde_json::Value::String(_))) {
+        if values
+            .iter()
+            .all(|v| matches!(v, serde_json::Value::String(_)))
+        {
             push_string_membership(
                 &mut where_clauses,
                 &mut binds,

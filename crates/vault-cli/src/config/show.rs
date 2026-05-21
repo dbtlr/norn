@@ -90,17 +90,18 @@ pub fn run(
 
     let buffer_lines = buffer.iter().filter(|&&b| b == b'\n').count();
     let should_page = matches!(format, ConfigFormat::Records)
-        && crate::find::pager::should_page(buffer_lines, args.no_pager, stdout_is_tty);
+        && crate::output::pager::should_page(buffer_lines, args.no_pager, stdout_is_tty);
 
     let stdout = std::io::stdout();
     let mut stdout_lock = stdout.lock();
     if should_page {
         let stderr = std::io::stderr();
         let mut stderr_lock = stderr.lock();
-        crate::find::pager::spawn_pager_or_passthrough(
+        crate::output::pager::spawn_pager_or_passthrough(
             &buffer,
             &mut stdout_lock,
             &mut stderr_lock,
+            "vault config show",
         )?;
     } else {
         stdout_lock.write_all(&buffer)?;
