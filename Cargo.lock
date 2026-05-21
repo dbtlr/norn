@@ -924,7 +924,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "vault-cache"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "blake3",
  "camino",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "vault-cli"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "camino",
  "serde",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "vault-frontmatter"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "vault-graph"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "blake3",
  "camino",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "vault-links"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "camino",
  "pulldown-cmark",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "vault-standards"
-version = "0.28.0"
+version = "0.29.0"
 dependencies = [
  "anyhow",
  "camino",

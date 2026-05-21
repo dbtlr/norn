@@ -10,6 +10,12 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.29.0 - 2026-05-20
+
+A foundation release. Three large arcs land together: (1) the SQLite cache becomes the read path for query commands; (2) a new `vault find` consolidates search and metadata filtering into a single composable command, retiring `vault search` and `vault docs query`; (3) the `vault init` + `vault config` cluster bootstraps and inspects per-vault configuration. Layered on top: a shared `output/` primitives module that implements the new CLI output spec — bone-bold record headers, dim-gray labels via ANSI 256 instead of SGR 2, cell-shaped value wrapping that force-breaks long unbreakable tokens, count lines that lead query output, severity tallies with fix-hint blocks. The `--eq`, `--not-eq`, `--in`, `--not-in` predicates are now array-aware and bracket-tolerant for string values, so `vault find --eq workspace:vault-cli` matches both scalar `"[[vault-cli]]"` and `["[[vault-cli]]"]` shapes without users escaping brackets or knowing the field's underlying type.
+
+Pre-release-shaped breaking changes: `vault search`, `vault docs query`, `vault registry`, and `--vault NAME` are removed (use `vault find` and `--cwd PATH`); `vault find` requires a predicate or the new `--all` flag (a bare invocation prints help); JSON wrapper key is now `documents` not `matches`; config commands use `ConfigFormat` (Records/Json/Jsonl) — `--format table` is gone. No migration shims; vault-cli is still pre-1.0.
+
 ### Breaking changes
 
 - **`vault search` removed.** Replaced by `vault find`. No alias. Scripts and skills that called `vault search --text X` should call `vault find --text X`. Pre-release; no migration shim.
