@@ -1,6 +1,5 @@
-//! Link queries — `Cache::links`, `Cache::links_unresolved`,
-//! `Cache::backlinks_to`. Share row-decoding logic but with different
-//! WHERE clauses.
+//! Link queries — `Cache::links_unresolved` and `Cache::backlinks_to`.
+//! Share row-decoding logic but with different WHERE clauses.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use rusqlite::params_from_iter;
@@ -12,12 +11,6 @@ use vault_core::{
 use crate::error::CacheError;
 
 impl crate::Cache {
-    /// Every link in the vault. Order: source_path ASC, rowid ASC.
-    /// Used by `vault links list`.
-    pub fn links(&self) -> Result<Vec<Link>, CacheError> {
-        query_links(&self.conn, "", Vec::new())
-    }
-
     /// Every link with status != Resolved. Used by `vault links unresolved`.
     pub fn links_unresolved(&self) -> Result<Vec<Link>, CacheError> {
         query_links(

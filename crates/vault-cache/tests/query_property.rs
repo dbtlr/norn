@@ -438,20 +438,6 @@ fn synth_link_vault() -> (TempDir, Utf8PathBuf) {
 }
 
 #[test]
-fn links_returns_every_link_in_order() {
-    let (_tmp, root) = synth_link_vault();
-    let mut cache = Cache::open(&root).unwrap();
-    cache.rebuild(&root).unwrap();
-
-    let links = cache.links().unwrap();
-
-    assert_eq!(links.len(), 3);
-    assert_eq!(links[0].source_path.as_str(), "a.md");
-    assert_eq!(links[1].source_path.as_str(), "a.md");
-    assert_eq!(links[2].source_path.as_str(), "b.md");
-}
-
-#[test]
 fn links_unresolved_filters_by_status() {
     let (_tmp, root) = synth_link_vault();
     let mut cache = Cache::open(&root).unwrap();
