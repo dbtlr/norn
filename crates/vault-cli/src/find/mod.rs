@@ -55,6 +55,7 @@ fn resolve_format(explicit: Option<crate::cli::FindFormat>) -> crate::cli::FindF
 pub fn run(
     args: FindArgs,
     cwd: &Utf8Path,
+    alias_field: Option<&str>,
     no_cache_refresh: bool,
     color: crate::cli::ColorWhen,
 ) -> Result<i32> {
@@ -63,7 +64,7 @@ pub fn run(
         return Ok(2);
     }
 
-    let cache = crate::cache::open_for_query(cwd, no_cache_refresh)?;
+    let cache = crate::cache::open_for_query(cwd, alias_field, no_cache_refresh)?;
     let query = self::query::build_find_query(&args)?;
     let result = cache.find_documents(&query)?;
 

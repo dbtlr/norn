@@ -215,6 +215,8 @@ mod tests {
             block_ids: vec![],
             links: vec![],
             diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
         }
     }
 

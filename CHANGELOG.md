@@ -19,6 +19,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 - Unresolved-link inventory now respects `.vault/config.yaml`'s `validate.ignore` patterns by default. The old `vault links unresolved` walked every indexed document; the migration path `vault validate --code link-unresolved,link-ambiguous` respects the same ignore config that `vault validate` already honored. Vaults with ignored paths will see fewer finding rows than before.
 - **BREAKING:** `vault --help` and `vault -h` (and the same flags on every subcommand) now render through a custom layout instead of clap's default. Two forms with different jobs: `-h` is a one-screen orientation summary; `--help` is the deep reference with hanging-indent flag prose and pagination via `$PAGER`. Pager mirrors `vault find` (`less -FRX` default, honored `$PAGER`, TTY+height gate). Set `PAGER=cat` or pipe through `cat` to bypass. `GLOBAL OPTIONS` is shown in full on every subcommand. Phase 1 ships the structural skeleton; canned examples, live examples, and conceptual sections layer on in later phases.
+- Cache identity now tracks `links.alias_field`. Changing the config (enabling, disabling, or renaming the field) triggers a silent cache rebuild on the next vault-cli invocation.
 
 ### Added
 
@@ -32,6 +33,11 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
   top value, ≥ 10% field coverage). Outside a vault, on `-h`, or in vaults
   without enum-shaped frontmatter, the block is omitted silently.
 - `vault validate --help`, `vault repair plan --help`, and `vault repair apply --help` now carry conceptual prose sections explaining how each workflow fits together. `HOW VALIDATION WORKS` covers finding shapes, severity, exit codes, and how triage filters compose. `THE PLAN/APPLY BOUNDARY` walks through what plan emits vs. what apply consumes, with sample JSON for a planned change and a skipped finding. `HOW APPLY WRITES` numbers the precondition checks and write sequence apply runs. Conceptual sections render only on `--help`, positioned after EXAMPLES and LIVE EXAMPLES. Commands without workflow-shaped operation skip the section silently.
+- **Alias-aware wikilink resolution.** Opt-in via `.vault/config.yaml`'s new `links.alias_field` key (typically `aliases`). When set, wikilinks that don't resolve via filename stem fall back to matching alias values from the named frontmatter field. Fallback-only — stem resolution always wins, so enabling never turns previously-resolved links into unresolved or ambiguous. Alias values are case-insensitive and tolerate any YAML scalar (string, number, boolean).
+- **`vault show` addressing accepts aliases.** When `links.alias_field` is configured, `vault show "[[Some Alias]]"` (or bare `vault show "some alias"`) resolves to the doc whose alias matches, after stem resolution fails.
+- Three new validate finding codes for alias frontmatter drift: `frontmatter-alias-shadowed-by-stem` (an alias matches another doc's stem in fallback resolution), `frontmatter-alias-duplicate-across-docs` (two or more docs claim the same alias), `frontmatter-alias-malformed` (the alias field contains a non-scalar map or nested sequence value). All three are warnings, fire only when `links.alias_field` is configured, and respect `validate.ignore` patterns.
+- `vault validate --help` gains a `FINDING CODES` section listing all ten codes with one-line explanations.
+- `vault init` scaffold now emits a commented `links.alias_field` hint block explaining the opt-in feature.
 
 ## v0.29.0 - 2026-05-20
 

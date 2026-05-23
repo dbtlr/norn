@@ -44,6 +44,20 @@ validate:
 # Repair planning rules — turn findings into mutation plans.
 repair:
   rules: []
+
+# Optional: alias-aware link resolution.
+#
+# When enabled, wikilinks that don't resolve via filename stem fall back to
+# matching alias values from the named frontmatter field. The resolver is
+# fallback-only — stem resolution always wins, so enabling this only ever
+# turns currently-unresolved links into resolved ones (never the reverse).
+#
+# Uncomment and set alias_field to the frontmatter key your vault uses for
+# alternate document names. Conventional choice: `aliases`. The value
+# can be a string or a list of scalars (numbers and booleans coerced).
+#
+# links:
+#   alias_field: aliases
 "#;
 
 const TOP_N: usize = 30;
@@ -237,6 +251,37 @@ mod tests {
         };
         let body = render_scaffold(&scan);
         assert!(body.contains("No markdown files found"));
+    }
+
+    #[test]
+    fn scaffold_contains_commented_links_alias_field_hint() {
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cli-init-alias-")
+            .tempdir()
+            .unwrap();
+        let cwd = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        std::fs::write(cwd.join("a.md"), "# A\n").unwrap();
+
+        let args = super::InitArgs { force: false };
+        super::run_capturing_output(&cwd, &args).unwrap();
+
+        let config = std::fs::read_to_string(cwd.join(".vault/config.yaml")).unwrap();
+
+        // Commented section header
+        assert!(
+            config.contains("# links:"),
+            "expected commented-out `# links:` block; got:\n{config}"
+        );
+        // Explanatory comments
+        assert!(
+            config.contains("fallback"),
+            "expected fallback-resolution explanation; got:\n{config}"
+        );
+        // Commented alias_field with `aliases` as the conventional example
+        assert!(
+            config.contains("#   alias_field: aliases"),
+            "expected commented + 2-space-indented `#   alias_field: aliases` hint (so it nests correctly under `links:` when uncommented); got:\n{config}"
+        );
     }
 
     #[test]

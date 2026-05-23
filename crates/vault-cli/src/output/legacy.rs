@@ -540,6 +540,13 @@ fn finding_context(finding: &Finding) -> (String, String, String) {
             String::new(),
             String::new(),
         ),
+        FindingBody::AliasMalformed { field, .. } => (String::new(), field.clone(), String::new()),
+        FindingBody::AliasShadowedByStem { alias_value, .. } => {
+            (String::new(), String::new(), alias_value.clone())
+        }
+        FindingBody::AliasDuplicateAcrossDocs { alias_value, .. } => {
+            (String::new(), String::new(), alias_value.clone())
+        }
     }
 }
 

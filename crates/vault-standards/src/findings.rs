@@ -47,6 +47,18 @@ pub enum FindingBody {
         rule: Option<String>,
         allowed_paths: Vec<String>,
     },
+    AliasMalformed {
+        field: String,
+        invalid_entries: Vec<Value>,
+    },
+    AliasShadowedByStem {
+        alias_value: String,
+        shadowing_doc_path: Utf8PathBuf,
+    },
+    AliasDuplicateAcrossDocs {
+        alias_value: String,
+        peer_doc_paths: Vec<Utf8PathBuf>,
+    },
 }
 
 impl Finding {
@@ -175,6 +187,74 @@ impl Finding {
             body: FindingBody::DocumentMisrouted {
                 rule,
                 allowed_paths,
+            },
+        }
+    }
+
+    pub fn frontmatter_alias_malformed(
+        path: Utf8PathBuf,
+        field: String,
+        invalid_entries: Vec<Value>,
+    ) -> Self {
+        let message = format!(
+            "alias field '{field}' contains {} non-scalar value(s); entries skipped from resolution",
+            invalid_entries.len()
+        );
+        Self {
+            code: "frontmatter-alias-malformed".to_string(),
+            severity: Severity::Warning,
+            path,
+            message,
+            body: FindingBody::AliasMalformed {
+                field,
+                invalid_entries,
+            },
+        }
+    }
+
+    pub fn frontmatter_alias_shadowed_by_stem(
+        path: Utf8PathBuf,
+        alias_value: String,
+        shadowing_doc_path: Utf8PathBuf,
+    ) -> Self {
+        let message = if shadowing_doc_path == path {
+            format!(
+                "alias '{alias_value}' is shadowed by this doc's own stem; alias is dead in fallback resolution"
+            )
+        } else {
+            format!(
+                "alias '{alias_value}' is shadowed by stem of {shadowing_doc_path}; alias is dead in fallback resolution"
+            )
+        };
+        Self {
+            code: "frontmatter-alias-shadowed-by-stem".to_string(),
+            severity: Severity::Warning,
+            path,
+            message,
+            body: FindingBody::AliasShadowedByStem {
+                alias_value,
+                shadowing_doc_path,
+            },
+        }
+    }
+
+    pub fn frontmatter_alias_duplicate_across_docs(
+        path: Utf8PathBuf,
+        alias_value: String,
+        peer_doc_paths: Vec<Utf8PathBuf>,
+    ) -> Self {
+        let message = format!(
+            "alias '{alias_value}' is also claimed by {} other doc(s); resolution will be ambiguous",
+            peer_doc_paths.len()
+        );
+        Self {
+            code: "frontmatter-alias-duplicate-across-docs".to_string(),
+            severity: Severity::Warning,
+            path,
+            message,
+            body: FindingBody::AliasDuplicateAcrossDocs {
+                alias_value,
+                peer_doc_paths,
             },
         }
     }

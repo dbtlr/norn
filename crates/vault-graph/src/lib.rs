@@ -1,3 +1,4 @@
+pub mod aliases;
 mod graph;
 mod pattern;
 
@@ -16,7 +17,9 @@ pub enum IndexError {
 #[derive(Debug, Clone, Default)]
 pub struct IndexOptions {
     pub ignore: Vec<String>,
+    pub alias_field: Option<String>,
 }
 
+pub use aliases::parse_aliases;
 pub use graph::{build_index, build_index_with_options, concise_diagnostics, has_errors};
 pub use pattern::pattern_matches_path;

@@ -90,7 +90,7 @@ impl crate::Cache {
             return Ok(None);
         };
 
-        let frontmatter = fm_json
+        let frontmatter: Option<serde_json::Value> = fm_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
         let path_buf = Utf8PathBuf::from(path_str);
@@ -98,6 +98,12 @@ impl crate::Cache {
         let block_ids = crate::reader::load_block_ids(&self.conn, path_buf.as_str())?;
         let links = crate::reader::load_links(&self.conn, path_buf.as_str())?;
         let diagnostics = crate::reader::load_diagnostics(&self.conn, path_buf.as_str())?;
+        // Re-derive aliases on read against the cache's configured
+        // `alias_field`. See `reader::load_documents` for the rationale.
+        let (aliases, alias_malformed) = match self.alias_field.as_deref() {
+            Some(field) => vault_graph::parse_aliases(frontmatter.as_ref(), field),
+            None => (Vec::new(), Vec::new()),
+        };
 
         Ok(Some(vault_core::Document {
             path: path_buf,
@@ -109,6 +115,8 @@ impl crate::Cache {
             block_ids,
             links,
             diagnostics,
+            aliases,
+            alias_malformed,
         }))
     }
 }

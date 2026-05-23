@@ -133,9 +133,36 @@ pub fn resolve_target(cache: &Cache, raw: &str) -> Result<ResolvedTarget> {
         .filter(|d| d.stem.eq_ignore_ascii_case(&normalized))
         .map(|d| d.path.clone())
         .collect();
+    if !stem_matches.is_empty() {
+        return Ok(ResolvedTarget {
+            raw: raw.to_string(),
+            paths: stem_matches,
+        });
+    }
+
+    // 3. Alias fallback: only when stem found nothing AND alias_field is set.
+    //    Reuses the `all` Vec from step 2 — still a single SELECT total.
+    //    parse_aliases returns lowercased strings, so we compare against the
+    //    lowercased target.
+    if let Some(field) = cache.alias_field() {
+        let target_lower = normalized.to_lowercase();
+        let alias_matches: Vec<Utf8PathBuf> = all
+            .iter()
+            .filter(|d| {
+                let (doc_aliases, _) = vault_graph::parse_aliases(d.frontmatter.as_ref(), field);
+                doc_aliases.iter().any(|a| a == &target_lower)
+            })
+            .map(|d| d.path.clone())
+            .collect();
+        return Ok(ResolvedTarget {
+            raw: raw.to_string(),
+            paths: alias_matches,
+        });
+    }
+
     Ok(ResolvedTarget {
         raw: raw.to_string(),
-        paths: stem_matches,
+        paths: vec![],
     })
 }
 
@@ -206,5 +233,63 @@ mod resolver_tests {
         let cache = open(&root);
         let r = resolve_target(&cache, "Nonexistent").unwrap();
         assert!(r.paths.is_empty());
+    }
+
+    #[test]
+    fn alias_addressing_resolves_when_stem_returns_nothing() {
+        let tmp = tempfile::Builder::new()
+            .prefix("vault-cli-show-alias-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        // Doc with stem "vm" and alias "vault memory"
+        std::fs::write(
+            root.join("vm.md").as_std_path(),
+            "---\naliases:\n  - Vault Memory\n---\n# Vault Memory\n",
+        )
+        .unwrap();
+
+        let mut cache = vault_cache::Cache::open_with_config(&root, Some("aliases")).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        // Target via wikilink shape — should resolve via alias since stem "vault memory" doesn't exist.
+        let resolved = resolve_target(&cache, "[[Vault Memory]]").unwrap();
+        assert_eq!(
+            resolved.paths,
+            vec![Utf8PathBuf::from("vm.md")],
+            "expected alias resolution to find vm.md; got {:?}",
+            resolved.paths
+        );
+    }
+
+    #[test]
+    fn alias_addressing_skipped_when_alias_field_unconfigured() {
+        let tmp = tempfile::Builder::new()
+            .prefix("vault-cli-show-no-alias-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("vm.md").as_std_path(),
+            "---\naliases:\n  - Vault Memory\n---\n# Vault Memory\n",
+        )
+        .unwrap();
+
+        // Open WITHOUT alias_field
+        let mut cache = vault_cache::Cache::open_with_config(&root, None).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let resolved = resolve_target(&cache, "[[Vault Memory]]").unwrap();
+        assert!(
+            resolved.paths.is_empty(),
+            "expected no resolution when alias_field is None; got {:?}",
+            resolved.paths
+        );
     }
 }

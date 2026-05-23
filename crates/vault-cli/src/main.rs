@@ -24,7 +24,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use vault_core::GraphIndex;
 use vault_graph::{concise_diagnostics, has_errors};
-use vault_standards::{plan_repairs, summarize, validate, RepairPlanFilters};
+use vault_standards::{plan_repairs, summarize, validate_with_alias_field, RepairPlanFilters};
 
 use crate::cli::{
     CacheSubcommand, Cli, Command, ConfigSubcommand, RepairOutputFormat, RepairSubcommand,
@@ -94,7 +94,11 @@ fn run(cli: Cli) -> Result<i32> {
                     no_cache_refresh,
                 )?;
                 trim_diagnostics(&mut index, verbose);
-                let findings = validate(&index, &loaded_config.validate);
+                let findings = validate_with_alias_field(
+                    &index,
+                    &loaded_config.validate,
+                    loaded_config.index_options.alias_field.as_deref(),
+                );
                 let filters = ValidateFilterOptions::from(&args);
                 let findings = filter_findings(findings, &filters)?;
                 let plan = plan_repairs(
@@ -144,7 +148,11 @@ fn run(cli: Cli) -> Result<i32> {
                     let mut verify_index =
                         crate::cache::load_graph_index(&cwd, &loaded_config.index_options, false)?;
                     trim_diagnostics(&mut verify_index, verbose);
-                    let findings = validate(&verify_index, &loaded_config.validate);
+                    let findings = validate_with_alias_field(
+                        &verify_index,
+                        &loaded_config.validate,
+                        loaded_config.index_options.alias_field.as_deref(),
+                    );
                     report = with_verification(report, &findings);
                 }
                 write_repair_apply_report(&report, args.format.into())?;
@@ -160,11 +168,13 @@ fn run(cli: Cli) -> Result<i32> {
             }
         },
         Command::Cache(cache_command) => {
+            let loaded_config = load_config(&cwd, config_path.as_ref())?;
+            let alias_field = loaded_config.index_options.alias_field.as_deref();
             match &cache_command.command {
-                CacheSubcommand::Index(args) => crate::cache::run_index(&cwd, args)?,
-                CacheSubcommand::Rebuild => crate::cache::run_rebuild(&cwd)?,
+                CacheSubcommand::Index(args) => crate::cache::run_index(&cwd, alias_field, args)?,
+                CacheSubcommand::Rebuild => crate::cache::run_rebuild(&cwd, alias_field)?,
                 CacheSubcommand::Clear => crate::cache::run_clear(&cwd)?,
-                CacheSubcommand::Status(args) => crate::cache::run_status(&cwd, args)?,
+                CacheSubcommand::Status(args) => crate::cache::run_status(&cwd, alias_field, args)?,
             }
             Ok(0)
         }
@@ -188,7 +198,11 @@ fn run(cli: Cli) -> Result<i32> {
                 no_cache_refresh,
             )?;
             trim_diagnostics(&mut index, verbose);
-            let findings = validate(&index, &loaded_config.validate);
+            let findings = validate_with_alias_field(
+                &index,
+                &loaded_config.validate,
+                loaded_config.index_options.alias_field.as_deref(),
+            );
             let filters = ValidateFilterOptions::from(&args);
             let findings = filter_findings(findings, &filters)?;
             if args.summary {
@@ -200,7 +214,12 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(exit_code_for(&index))
         }
         Command::Show(args) => {
-            let cache = crate::cache::open_for_query(&cwd, no_cache_refresh)?;
+            let loaded_config = load_config(&cwd, config_path.as_ref())?;
+            let cache = crate::cache::open_for_query(
+                &cwd,
+                loaded_config.index_options.alias_field.as_deref(),
+                no_cache_refresh,
+            )?;
             let report = show::run(&cache, &args)?;
 
             let stdout_text = match args.format {
@@ -228,9 +247,23 @@ fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Command::Find(args) => find::run(args, &cwd, no_cache_refresh, color),
+        Command::Find(args) => {
+            let loaded_config = load_config(&cwd, config_path.as_ref())?;
+            find::run(
+                args,
+                &cwd,
+                loaded_config.index_options.alias_field.as_deref(),
+                no_cache_refresh,
+                color,
+            )
+        }
         Command::Count(args) => {
-            let cache = crate::cache::open_for_query(&cwd, no_cache_refresh)?;
+            let loaded_config = load_config(&cwd, config_path.as_ref())?;
+            let cache = crate::cache::open_for_query(
+                &cwd,
+                loaded_config.index_options.alias_field.as_deref(),
+                no_cache_refresh,
+            )?;
             let out = count::run(&cache, &args)?;
             let text = match args.format {
                 cli::CountFormat::Json => count::render::render_json(&out),

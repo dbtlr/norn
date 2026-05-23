@@ -254,6 +254,32 @@ fn validate_long_help_has_examples() {
 }
 
 #[test]
+fn validate_help_renders_finding_codes_section_with_all_codes() {
+    let stdout = vault_help(&["validate", "--help"]);
+    assert!(
+        stdout.contains("FINDING CODES"),
+        "expected FINDING CODES header in --help output; got:\n{stdout}"
+    );
+    for code in [
+        "link-unresolved",
+        "link-ambiguous",
+        "frontmatter-required-field-missing",
+        "frontmatter-disallowed-value",
+        "frontmatter-invalid-type",
+        "frontmatter-forbidden-field",
+        "frontmatter-alias-shadowed-by-stem",
+        "frontmatter-alias-duplicate-across-docs",
+        "frontmatter-alias-malformed",
+        "document-misrouted",
+    ] {
+        assert!(
+            stdout.contains(code),
+            "expected code `{code}` in --help output"
+        );
+    }
+}
+
+#[test]
 fn repair_plan_long_help_has_examples() {
     let out = vault_help(&["repair", "plan", "--help"]);
     assert!(out.contains("EXAMPLES\n"));

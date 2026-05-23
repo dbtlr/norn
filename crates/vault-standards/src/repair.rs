@@ -369,6 +369,34 @@ fn skipped_finding(
                 "fix the document manually and rerun validate".to_string(),
             ],
         ),
+        FindingBody::AliasMalformed { field, .. } => (
+            "malformed alias entries cannot be repaired deterministically".to_string(),
+            vec![
+                format!("edit the '{field}' frontmatter list to contain only scalar strings"),
+                "rerun validate after fixing the entries".to_string(),
+            ],
+        ),
+        FindingBody::AliasShadowedByStem {
+            alias_value,
+            shadowing_doc_path,
+        } => (
+            "alias shadowed by a doc stem cannot be repaired deterministically".to_string(),
+            vec![
+                format!(
+                    "remove or rename alias '{alias_value}' on this doc, or rename {shadowing_doc_path} to free the stem"
+                ),
+                "rerun validate after fixing the conflict".to_string(),
+            ],
+        ),
+        FindingBody::AliasDuplicateAcrossDocs { alias_value, .. } => (
+            "alias duplicated across docs cannot be repaired deterministically".to_string(),
+            vec![
+                format!(
+                    "pick a canonical doc for alias '{alias_value}', remove the alias from the others"
+                ),
+                "rerun validate after fixing the conflict".to_string(),
+            ],
+        ),
     };
 
     // MissingHash overrides the default reason since the cause is upstream of the rule.
@@ -407,7 +435,11 @@ fn finding_rule(finding: &Finding) -> Option<String> {
         | FindingBody::InvalidFieldType { rule, .. }
         | FindingBody::ForbiddenField { rule, .. }
         | FindingBody::DocumentMisrouted { rule, .. } => rule.clone(),
-        FindingBody::GraphDiagnostic { .. } | FindingBody::LinkIssue { .. } => None,
+        FindingBody::GraphDiagnostic { .. }
+        | FindingBody::LinkIssue { .. }
+        | FindingBody::AliasMalformed { .. }
+        | FindingBody::AliasShadowedByStem { .. }
+        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
     }
 }
 
@@ -416,10 +448,13 @@ fn finding_field(finding: &Finding) -> Option<String> {
         FindingBody::RequiredFrontmatterMissing { field, .. }
         | FindingBody::DisallowedValue { field, .. }
         | FindingBody::InvalidFieldType { field, .. }
-        | FindingBody::ForbiddenField { field, .. } => Some(field.clone()),
+        | FindingBody::ForbiddenField { field, .. }
+        | FindingBody::AliasMalformed { field, .. } => Some(field.clone()),
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
-        | FindingBody::DocumentMisrouted { .. } => None,
+        | FindingBody::DocumentMisrouted { .. }
+        | FindingBody::AliasShadowedByStem { .. }
+        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
     }
 }
 
@@ -431,7 +466,10 @@ fn finding_actual_value(finding: &Finding) -> Option<&Value> {
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
         | FindingBody::RequiredFrontmatterMissing { .. }
-        | FindingBody::DocumentMisrouted { .. } => None,
+        | FindingBody::DocumentMisrouted { .. }
+        | FindingBody::AliasMalformed { .. }
+        | FindingBody::AliasShadowedByStem { .. }
+        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
     }
 }
 
@@ -596,6 +634,8 @@ mod tests {
             block_ids: vec![],
             links: vec![],
             diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
         }
     }
 

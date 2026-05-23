@@ -155,6 +155,10 @@ pub struct Document {
     pub links: Vec<Link>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnostics: Vec<Diagnostic>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub aliases: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub alias_malformed: Vec<Value>,
 }
 
 /// A lean Document projection — Document minus the joined tables (headings,
@@ -221,6 +225,8 @@ mod document_summary_tests {
             block_ids: vec![],
             links: vec![],
             diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
         };
 
         let summary: DocumentSummary = (&doc).into();
@@ -244,9 +250,60 @@ mod document_summary_tests {
             block_ids: vec![],
             links: vec![],
             diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
         };
         let from_ref: DocumentSummary = (&doc).into();
         let from_owned: DocumentSummary = doc.into();
         assert_eq!(from_owned, from_ref);
+    }
+}
+
+#[cfg(test)]
+mod alias_field_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn document_with_aliases_round_trips() {
+        let mut doc = Document {
+            path: "a.md".into(),
+            stem: "a".into(),
+            hash: "h".into(),
+            frontmatter: None,
+            body_text: String::new(),
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+            aliases: vec!["vault memory".into()],
+            alias_malformed: vec![json!({"nested": "x"})],
+        };
+        let serialized = serde_json::to_string(&doc).unwrap();
+        let parsed: Document = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed.aliases, vec!["vault memory".to_string()]);
+        assert_eq!(parsed.alias_malformed.len(), 1);
+
+        doc.aliases.clear();
+        doc.alias_malformed.clear();
+        let serialized_empty = serde_json::to_string(&doc).unwrap();
+        assert!(
+            !serialized_empty.contains("aliases"),
+            "got: {serialized_empty}"
+        );
+        assert!(
+            !serialized_empty.contains("alias_malformed"),
+            "got: {serialized_empty}"
+        );
+    }
+
+    #[test]
+    fn document_deserializes_when_alias_fields_absent() {
+        // Backward-compat: existing serialized Documents (no aliases / alias_malformed fields)
+        // must deserialize into a Document with empty Vecs.
+        let json = r#"{"path":"a.md","stem":"a","hash":"h"}"#;
+        let parsed: Document = serde_json::from_str(json).unwrap();
+        assert!(parsed.aliases.is_empty());
+        assert!(parsed.alias_malformed.is_empty());
     }
 }

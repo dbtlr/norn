@@ -23,6 +23,8 @@ pub struct VaultConfig {
     #[serde(default)]
     pub files: FilesConfig,
     #[serde(default)]
+    pub links: LinksConfig,
+    #[serde(default)]
     pub validate: ValidateConfig,
     #[serde(default)]
     pub repair: RepairConfig,
@@ -42,6 +44,7 @@ impl Default for VaultConfig {
         Self {
             version: CURRENT_SCHEMA_VERSION,
             files: FilesConfig::default(),
+            links: LinksConfig::default(),
             validate: ValidateConfig::default(),
             repair: RepairConfig::default(),
             _deprecated_graph: None,
@@ -54,6 +57,13 @@ impl Default for VaultConfig {
 pub struct FilesConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinksConfig {
+    #[serde(default)]
+    pub alias_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -597,6 +607,32 @@ repair:
         let yaml = "version: 99\n";
         let cfg: VaultConfig = serde_yaml::from_str(yaml).expect("parses");
         assert_eq!(cfg.version, 99);
+    }
+
+    #[test]
+    fn links_alias_field_parses() {
+        let yaml = "links:\n  alias_field: aliases\n";
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(cfg.links.alias_field.as_deref(), Some("aliases"));
+    }
+
+    #[test]
+    fn links_section_absent_defaults_to_none() {
+        let yaml = "files:\n  ignore: []\n";
+        let cfg = parse(yaml).unwrap();
+        assert!(cfg.links.alias_field.is_none());
+    }
+
+    #[test]
+    fn links_alias_field_as_list_is_rejected() {
+        let err = parse("links:\n  alias_field:\n    - aliases\n").unwrap_err();
+        assert!(err.to_string().contains("invalid"), "got: {err}");
+    }
+
+    #[test]
+    fn links_unknown_field_is_rejected() {
+        let err = parse("links:\n  notakey: x\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
     }
 
     #[test]

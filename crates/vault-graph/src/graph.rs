@@ -47,7 +47,7 @@ pub fn build_index_with_options(
         }
         files.push(parse_file(&root, &path));
         if is_markdown(entry.path()) {
-            documents.push(parse_document(&root, &path));
+            documents.push(parse_document(&root, &path, options.alias_field.as_deref()));
         }
     }
 
@@ -89,7 +89,11 @@ fn parse_file(root: &Utf8Path, absolute_path: &Utf8Path) -> VaultFile {
     }
 }
 
-fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
+fn parse_document(
+    root: &Utf8Path,
+    absolute_path: &Utf8Path,
+    alias_field: Option<&str>,
+) -> Document {
     let path = absolute_path
         .strip_prefix(root)
         .unwrap_or(absolute_path)
@@ -111,6 +115,8 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
                 links: Vec::new(),
                 diagnostics: vec![Diagnostic::error("read-failed", "failed to read document")
                     .with_detail(error.to_string())],
+                aliases: vec![],
+                alias_malformed: vec![],
             };
         }
     };
@@ -131,6 +137,12 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
     }
     let block_ids = parse_block_ids(body);
 
+    let (aliases, alias_malformed) = if let Some(field) = alias_field {
+        crate::aliases::parse_aliases(frontmatter.as_ref(), field)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     Document {
         path,
         stem,
@@ -141,6 +153,8 @@ fn parse_document(root: &Utf8Path, absolute_path: &Utf8Path) -> Document {
         block_ids,
         links,
         diagnostics,
+        aliases,
+        alias_malformed,
     }
 }
 
@@ -225,5 +239,49 @@ mod tests {
             .find(|document| document.path == "broken-frontmatter.md")
             .unwrap();
         assert_eq!(broken.diagnostics[0].code, "frontmatter-parse-failed");
+    }
+
+    #[test]
+    fn build_index_populates_aliases_when_configured() {
+        let options = IndexOptions {
+            ignore: vec![],
+            alias_field: Some("aliases".into()),
+        };
+        let index = build_index_with_options(Utf8Path::new("../../fixtures/alias-basic"), &options)
+            .unwrap();
+
+        let vm = index
+            .documents
+            .iter()
+            .find(|d| d.path == "vault-memory.md")
+            .unwrap();
+        assert_eq!(
+            vm.aliases,
+            vec!["vault memory".to_string(), "vm".to_string()]
+        );
+        assert!(vm.alias_malformed.is_empty());
+
+        let other = index
+            .documents
+            .iter()
+            .find(|d| d.path == "other.md")
+            .unwrap();
+        assert_eq!(other.aliases, vec!["42".to_string()]);
+        assert_eq!(other.alias_malformed.len(), 1);
+    }
+
+    #[test]
+    fn build_index_skips_aliases_when_unconfigured() {
+        let options = IndexOptions::default();
+        let index = build_index_with_options(Utf8Path::new("../../fixtures/alias-basic"), &options)
+            .unwrap();
+        for doc in &index.documents {
+            assert!(
+                doc.aliases.is_empty(),
+                "expected no aliases for {}",
+                doc.path
+            );
+            assert!(doc.alias_malformed.is_empty());
+        }
     }
 }

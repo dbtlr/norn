@@ -15,7 +15,7 @@ impl crate::Cache {
     /// Diagnostics are not round-tripped (the writer stores parsed output, not
     /// parse-time warnings); `ignored_files` is empty for the same reason.
     pub fn load_graph_index(&self) -> Result<GraphIndex, CacheError> {
-        let documents = load_documents(&self.conn)?;
+        let documents = load_documents(&self.conn, self.alias_field.as_deref())?;
         let files = load_files(&self.conn)?;
         Ok(GraphIndex {
             root: self.vault_root.clone(),
@@ -26,7 +26,10 @@ impl crate::Cache {
     }
 }
 
-fn load_documents(conn: &rusqlite::Connection) -> Result<Vec<Document>, CacheError> {
+fn load_documents(
+    conn: &rusqlite::Connection,
+    alias_field: Option<&str>,
+) -> Result<Vec<Document>, CacheError> {
     let mut docs_stmt = conn.prepare(
         "SELECT path, stem, hash, frontmatter_json, body_text FROM documents ORDER BY path",
     )?;
@@ -50,6 +53,14 @@ fn load_documents(conn: &rusqlite::Connection) -> Result<Vec<Document>, CacheErr
         let block_ids = load_block_ids(conn, path.as_str())?;
         let links = load_links(conn, path.as_str())?;
         let diagnostics = load_diagnostics(conn, path.as_str())?;
+        // Re-derive aliases on read: the cache schema has no dedicated
+        // columns for `aliases` / `alias_malformed`, but `frontmatter_json`
+        // is the source of truth and `parse_aliases` is cheap.  Without
+        // this, every alias-aware finding silently no-ops in production.
+        let (aliases, alias_malformed) = match alias_field {
+            Some(field) => vault_graph::parse_aliases(frontmatter.as_ref(), field),
+            None => (Vec::new(), Vec::new()),
+        };
         documents.push(Document {
             path,
             stem,
@@ -60,6 +71,8 @@ fn load_documents(conn: &rusqlite::Connection) -> Result<Vec<Document>, CacheErr
             block_ids,
             links,
             diagnostics,
+            aliases,
+            alias_malformed,
         });
     }
     Ok(documents)
@@ -360,5 +373,71 @@ mod tests {
         assert_eq!(doc.links.len(), 1);
         assert_eq!(doc.links[0].target, "other.md");
         assert!(doc.links[0].resolved_path.is_some());
+    }
+
+    /// Regression test for the alias readback bug: documents loaded from the
+    /// cache must have `aliases` populated by re-deriving from the stored
+    /// `frontmatter_json` against the cache's configured `alias_field`. Without
+    /// this, every alias-aware validate finding silently no-ops in production
+    /// because `load_graph_index` produces docs with empty aliases.
+    #[test]
+    fn loaded_documents_have_aliases_when_cache_was_built_with_alias_field() {
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir(vault_root.as_std_path()).unwrap();
+        std::fs::write(
+            vault_root.join("vm.md").as_std_path(),
+            "---\naliases:\n  - Vault Memory\n  - VM\n---\n# Vault Memory\n",
+        )
+        .unwrap();
+
+        // Open with alias_field = Some("aliases"), rebuild to populate the cache.
+        let mut cache = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        cache.rebuild(&vault_root).unwrap();
+
+        // Reopen the cache, then load documents back. Aliases must be present.
+        let cache2 = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        let index = cache2.load_graph_index().unwrap();
+        let vm = index
+            .documents
+            .iter()
+            .find(|d| d.path == "vm.md")
+            .expect("vm.md in loaded docs");
+        assert_eq!(
+            vm.aliases,
+            vec!["vault memory".to_string(), "vm".to_string()],
+            "expected lowercased aliases populated on read; got {:?}",
+            vm.aliases
+        );
+    }
+
+    #[test]
+    fn loaded_documents_have_empty_aliases_when_cache_built_without_alias_field() {
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir(vault_root.as_std_path()).unwrap();
+        std::fs::write(
+            vault_root.join("vm.md").as_std_path(),
+            "---\naliases:\n  - Vault Memory\n---\n# Vault Memory\n",
+        )
+        .unwrap();
+
+        let mut cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        cache.rebuild(&vault_root).unwrap();
+
+        let cache2 = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        let index = cache2.load_graph_index().unwrap();
+        let vm = index
+            .documents
+            .iter()
+            .find(|d| d.path == "vm.md")
+            .expect("vm.md in loaded docs");
+        assert!(
+            vm.aliases.is_empty(),
+            "expected empty aliases when alias_field is None; got {:?}",
+            vm.aliases
+        );
     }
 }

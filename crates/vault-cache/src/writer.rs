@@ -42,7 +42,11 @@ impl crate::Cache {
         let _lock =
             crate::lock::WriteLock::acquire(&self.cache_dir, std::time::Duration::from_secs(5))?;
         let start = std::time::Instant::now();
-        let index = vault_graph::build_index(vault_root)?;
+        let options = vault_graph::IndexOptions {
+            alias_field: self.alias_field.clone(),
+            ..Default::default()
+        };
+        let index = vault_graph::build_index_with_options(vault_root, &options)?;
 
         let tx = self.conn.transaction()?;
         clear_all_rows(&tx)?;
@@ -55,6 +59,7 @@ impl crate::Cache {
             report.file_count += 1;
         }
         update_meta_rebuild_ts(&tx)?;
+        update_meta_alias_field(&tx, self.alias_field.as_deref())?;
         tx.commit()?;
 
         report.duration_ms = start.elapsed().as_millis();
@@ -90,7 +95,11 @@ impl crate::Cache {
         // the affected documents. Simpler than scoped parsing, and the
         // per-doc cost dominates only on truly huge vaults where
         // parse-everything beats incremental in total time anyway.
-        let fresh_index = vault_graph::build_index(vault_root)?;
+        let options = vault_graph::IndexOptions {
+            alias_field: self.alias_field.clone(),
+            ..Default::default()
+        };
+        let fresh_index = vault_graph::build_index_with_options(vault_root, &options)?;
         let fresh_docs: std::collections::HashMap<_, _> = fresh_index
             .documents
             .iter()
@@ -417,6 +426,21 @@ fn update_meta_rebuild_ts(tx: &rusqlite::Transaction) -> Result<(), CacheError> 
     Ok(())
 }
 
+/// Stamp the `links_alias_field` meta row with the value the cache was
+/// opened with. Always written (empty string when alias support is disabled)
+/// so subsequent `Cache::open_with_config` calls can compare against a
+/// definite value.
+fn update_meta_alias_field(
+    tx: &rusqlite::Transaction,
+    alias_field: Option<&str>,
+) -> Result<(), CacheError> {
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('links_alias_field', ?)",
+        params![alias_field.unwrap_or("")],
+    )?;
+    Ok(())
+}
+
 fn mtime_ns(path: &Utf8Path) -> Option<i64> {
     std::fs::metadata(path.as_std_path()).ok().and_then(|m| {
         m.modified()
@@ -608,6 +632,58 @@ mod tests {
             )
             .unwrap();
         assert_eq!(renamed_count, 1);
+    }
+
+    #[test]
+    fn cache_rebuild_threads_alias_field_through_to_link_resolution() {
+        // Regression: prior to this fix, `Cache::rebuild` called
+        // `vault_graph::build_index` with default options, which left
+        // `alias_field = None` so alias fallback never ran during link
+        // resolution. Cached link rows then served alias-blind status to
+        // every downstream consumer (validate, find, repair plan, show
+        // incoming).
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        // vm.md is the alias target.
+        std::fs::write(
+            root.join("vm.md").as_std_path(),
+            "---\naliases:\n  - Vault Memory\n---\n# Vault Memory\n",
+        )
+        .unwrap();
+        // src.md has a wikilink that only resolves via alias.
+        std::fs::write(
+            root.join("src.md").as_std_path(),
+            "---\n---\n# Source\n\nThis links to [[Vault Memory]].\n",
+        )
+        .unwrap();
+
+        let mut cache = crate::Cache::open_with_config(&root, Some("aliases")).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let deep = cache
+            .document_with_connections(camino::Utf8Path::new("src.md"), false)
+            .unwrap()
+            .expect("src.md in cache");
+        // After rebuild with alias_field set, the [[Vault Memory]] link in
+        // src.md must be Resolved (via alias) — NOT Unresolved.
+        assert!(
+            deep.unresolved_links.is_empty(),
+            "expected no unresolved links, got: {:?}",
+            deep.unresolved_links
+        );
+        let alias_link = deep
+            .outgoing_links
+            .iter()
+            .find(|l| l.target == "Vault Memory")
+            .expect("[[Vault Memory]] outgoing link");
+        assert_eq!(
+            alias_link.resolved_path.as_deref(),
+            Some(camino::Utf8Path::new("vm.md")),
+            "alias link should resolve to vm.md"
+        );
     }
 
     #[test]

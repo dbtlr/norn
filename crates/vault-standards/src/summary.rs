@@ -79,7 +79,13 @@ pub fn summarize(findings: &[Finding]) -> Summary {
                     increment(&mut summary.rules, rule);
                 }
             }
-            FindingBody::LinkIssue { .. } | FindingBody::GraphDiagnostic { .. } => {}
+            FindingBody::AliasMalformed { field, .. } => {
+                increment(&mut summary.fields, field);
+            }
+            FindingBody::AliasShadowedByStem { .. }
+            | FindingBody::AliasDuplicateAcrossDocs { .. }
+            | FindingBody::LinkIssue { .. }
+            | FindingBody::GraphDiagnostic { .. } => {}
         }
 
         increment(&mut summary.path_prefixes, path_prefix_key(&finding.path));

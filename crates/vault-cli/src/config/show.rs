@@ -32,6 +32,7 @@ struct ShowSnapshot {
     required_count: usize,
     rule_count: usize,
     repair_rule_count: usize,
+    alias_field: Option<String>,
 }
 
 impl ShowSnapshot {
@@ -46,7 +47,7 @@ impl ShowSnapshot {
     /// `render_json` separately from this list when the shape needs to
     /// change; they will diverge by design.
     fn pairs(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut pairs = vec![
             ("file", self.file.as_str().to_string()),
             ("vault_root", self.vault_root.as_str().to_string()),
             ("cache", self.cache.as_str().to_string()),
@@ -55,7 +56,13 @@ impl ShowSnapshot {
             ("required", format!("{} fields", self.required_count)),
             ("rules", format!("{} rules", self.rule_count)),
             ("repair_rules", format!("{} rules", self.repair_rule_count)),
-        ]
+        ];
+        // links.alias_field is opt-in; surface it only when configured so
+        // the row doesn't show a noisy "(unset)" for the common default.
+        if let Some(field) = &self.alias_field {
+            pairs.push(("alias_field", field.clone()));
+        }
+        pairs
     }
 }
 
@@ -132,6 +139,7 @@ fn build_snapshot(
         required_count: cfg.validate.required_frontmatter.len(),
         rule_count: cfg.validate.rules.len(),
         repair_rule_count: cfg.repair.rules.len(),
+        alias_field: cfg.links.alias_field.clone(),
     }
 }
 
@@ -177,6 +185,7 @@ fn json_payload(snapshot: &ShowSnapshot) -> Value {
             "rule_count": snapshot.rule_count,
         },
         "repair": { "rule_count": snapshot.repair_rule_count },
+        "links": { "alias_field": snapshot.alias_field },
     })
 }
 
@@ -209,6 +218,7 @@ mod tests {
             required_count: 3,
             rule_count: 0,
             repair_rule_count: 0,
+            alias_field: None,
         }
     }
 
@@ -255,6 +265,41 @@ mod tests {
         assert_eq!(parsed["validate"]["required_count"], 3);
         assert_eq!(parsed["validate"]["rule_count"], 0);
         assert_eq!(parsed["repair"]["rule_count"], 0);
+        // links.alias_field surfaces nullably; None renders as JSON null so
+        // agents can distinguish "unset" from any literal field name.
+        assert!(parsed["links"]["alias_field"].is_null());
+    }
+
+    #[test]
+    fn records_format_omits_alias_field_row_when_unset() {
+        let snapshot = sample_snapshot();
+        let mut buf = Vec::new();
+        let palette = Palette::off();
+        render_records(&snapshot, &palette, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        // alias_field is None — its row should be absent.
+        assert!(
+            !text.contains("alias_field"),
+            "expected no alias_field row when unset, got: {text}"
+        );
+    }
+
+    #[test]
+    fn records_format_emits_alias_field_row_when_configured() {
+        let mut snapshot = sample_snapshot();
+        snapshot.alias_field = Some("aliases".to_string());
+        let mut buf = Vec::new();
+        let palette = Palette::off();
+        render_records(&snapshot, &palette, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("  alias_field"),
+            "expected alias_field row when configured, got: {text}"
+        );
+        assert!(
+            text.contains("aliases"),
+            "expected alias_field value 'aliases' in output, got: {text}"
+        );
     }
 
     #[test]
@@ -276,5 +321,6 @@ mod tests {
         assert_eq!(parsed["validate"]["required_count"], 3);
         assert_eq!(parsed["validate"]["rule_count"], 0);
         assert_eq!(parsed["repair"]["rule_count"], 0);
+        assert!(parsed["links"]["alias_field"].is_null());
     }
 }

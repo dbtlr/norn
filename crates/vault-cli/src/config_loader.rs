@@ -63,8 +63,48 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
     Ok(LoadedConfig {
         index_options: IndexOptions {
             ignore: config.files.ignore,
+            alias_field: config.links.alias_field,
         },
         validate: config.validate,
         repair: config.repair,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alias_field_propagates_from_config_to_index_options() {
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cli-alias-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let config_dir = root.join(".vault");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.yaml"),
+            "links:\n  alias_field: aliases\n",
+        )
+        .unwrap();
+
+        let loaded = load_config(&root, None).unwrap();
+        assert_eq!(loaded.index_options.alias_field.as_deref(), Some("aliases"));
+    }
+
+    #[test]
+    fn alias_field_absent_in_config_yields_none() {
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cli-alias-none-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let config_dir = root.join(".vault");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.yaml"), "files:\n  ignore: []\n").unwrap();
+
+        let loaded = load_config(&root, None).unwrap();
+        assert!(loaded.index_options.alias_field.is_none());
+    }
 }

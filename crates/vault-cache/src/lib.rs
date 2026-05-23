@@ -42,11 +42,14 @@ pub use writer::{IndexOptions, IndexReport};
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Handle to an opened cache. Holds a rusqlite Connection plus the resolved
-/// vault root and cache directory path.
+/// vault root and cache directory path. `alias_field` is the value passed
+/// in via `Cache::open_with_config`; it gets written to the `links_alias_field`
+/// meta row on every rebuild so subsequent opens can detect config drift.
 pub struct Cache {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) vault_root: camino::Utf8PathBuf,
     pub(crate) cache_dir: camino::Utf8PathBuf,
+    pub(crate) alias_field: Option<String>,
 }
 
 impl Cache {
@@ -84,5 +87,12 @@ impl Cache {
     #[doc(hidden)]
     pub fn conn(&self) -> &rusqlite::Connection {
         &self.conn
+    }
+
+    /// Configured frontmatter field name used for alias parsing, if any.
+    /// Returns `None` when the cache was opened without an alias field
+    /// (i.e. via `Cache::open` or `open_with_config(_, None)`).
+    pub fn alias_field(&self) -> Option<&str> {
+        self.alias_field.as_deref()
     }
 }

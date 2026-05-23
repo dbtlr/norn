@@ -145,10 +145,13 @@ fn finding_field(finding: &Finding) -> Option<&str> {
         FindingBody::RequiredFrontmatterMissing { field, .. }
         | FindingBody::DisallowedValue { field, .. }
         | FindingBody::InvalidFieldType { field, .. }
-        | FindingBody::ForbiddenField { field, .. } => Some(field),
+        | FindingBody::ForbiddenField { field, .. }
+        | FindingBody::AliasMalformed { field, .. } => Some(field),
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
-        | FindingBody::DocumentMisrouted { .. } => None,
+        | FindingBody::DocumentMisrouted { .. }
+        | FindingBody::AliasShadowedByStem { .. }
+        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
     }
 }
 
@@ -159,7 +162,11 @@ fn finding_rule(finding: &Finding) -> Option<&str> {
         | FindingBody::InvalidFieldType { rule, .. }
         | FindingBody::ForbiddenField { rule, .. }
         | FindingBody::DocumentMisrouted { rule, .. } => rule.as_deref(),
-        FindingBody::GraphDiagnostic { .. } | FindingBody::LinkIssue { .. } => None,
+        FindingBody::GraphDiagnostic { .. }
+        | FindingBody::LinkIssue { .. }
+        | FindingBody::AliasMalformed { .. }
+        | FindingBody::AliasShadowedByStem { .. }
+        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
     }
 }
 

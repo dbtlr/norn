@@ -994,6 +994,7 @@ dependencies = [
  "camino",
  "pulldown-cmark",
  "regex",
+ "serde_json",
  "thiserror",
  "vault-core",
  "vault-frontmatter",

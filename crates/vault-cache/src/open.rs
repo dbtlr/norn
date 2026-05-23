@@ -11,25 +11,45 @@ impl crate::Cache {
     /// if missing; inspects an existing cache file and either reuses it,
     /// rebuilds it (corruption / older schema / identity drift), or hard-errors
     /// (schema newer than this binary supports).
+    ///
+    /// Thin wrapper around [`Cache::open_with_config`] that passes
+    /// `alias_field = None`. Test and bootstrap call sites that don't have
+    /// access to a loaded config should use this; production call sites with
+    /// `LoadedConfig` in scope should use `open_with_config` so cached
+    /// resolved-link state stays consistent with the operator's config.
     pub fn open(vault_root: &Utf8Path) -> Result<Self, CacheError> {
+        Self::open_with_config(vault_root, None)
+    }
+
+    /// Open the cache for a vault, passing the configured `links.alias_field`
+    /// value. When `alias_field` differs from the value stored in the
+    /// `links_alias_field` meta row (including the disabled/empty case), the
+    /// cache is silently rebuilt so resolved links stay consistent with
+    /// current config.
+    pub fn open_with_config(
+        vault_root: &Utf8Path,
+        alias_field: Option<&str>,
+    ) -> Result<Self, CacheError> {
         let (canonical, cache_dir) = cache_dir_for(vault_root)?;
 
         // Ensure cache directory exists at 0700.
         create_dir_secure(&cache_dir)?;
 
         let db_path = cache_dir.join("cache.db");
+        let alias_field_owned: Option<String> = alias_field.map(|s| s.to_string());
 
         loop {
-            let action = inspect_existing_cache(&db_path, &canonical)?;
+            let action = inspect_existing_cache(&db_path, &canonical, alias_field)?;
             match action {
                 InspectResult::Fresh => {
-                    return open_fresh(&cache_dir, &db_path, &canonical);
+                    return open_fresh(&cache_dir, &db_path, &canonical, alias_field);
                 }
                 InspectResult::Reuse(conn) => {
                     return Ok(crate::Cache {
                         conn,
                         vault_root: canonical,
                         cache_dir,
+                        alias_field: alias_field_owned,
                     });
                 }
                 InspectResult::RebuildNeeded(reason) => {
@@ -71,11 +91,13 @@ enum RebuildReason {
     Corrupted(String),
     SchemaOlder { found: u32 },
     IdentityDrift { cached: String, current: String },
+    AliasFieldDrift { cached: String, current: String },
 }
 
 fn inspect_existing_cache(
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
+    alias_field: Option<&str>,
 ) -> Result<InspectResult, CacheError> {
     if !db_path.as_std_path().exists() {
         return Ok(InspectResult::Fresh);
@@ -155,6 +177,27 @@ fn inspect_existing_cache(
         }
     }
 
+    // Alias-field check. The `links_alias_field` meta row is written on
+    // every fresh open and rebuild as either the configured field name or
+    // the empty string when the feature is disabled. Caches built before
+    // this row existed return Err here; treat that the same as "empty" so
+    // a None -> None reopen reuses the cache cleanly.
+    let cached_alias: Result<String, _> = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'links_alias_field'",
+        [],
+        |r| r.get(0),
+    );
+    let cached_alias_str = cached_alias.unwrap_or_default();
+    let current_alias_str = alias_field.unwrap_or("").to_string();
+    if cached_alias_str != current_alias_str {
+        return Ok(InspectResult::RebuildNeeded(
+            RebuildReason::AliasFieldDrift {
+                cached: cached_alias_str,
+                current: current_alias_str,
+            },
+        ));
+    }
+
     Ok(InspectResult::Reuse(conn))
 }
 
@@ -162,17 +205,19 @@ fn open_fresh(
     cache_dir: &Utf8Path,
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
+    alias_field: Option<&str>,
 ) -> Result<crate::Cache, CacheError> {
     let conn = Connection::open(db_path.as_std_path())?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     secure_file(db_path)?;
     crate::schema::apply_schema(&conn)?;
-    init_meta(&conn, canonical_root)?;
+    init_meta(&conn, canonical_root, alias_field)?;
     Ok(crate::Cache {
         conn,
         vault_root: canonical_root.to_owned(),
         cache_dir: cache_dir.to_owned(),
+        alias_field: alias_field.map(|s| s.to_string()),
     })
 }
 
@@ -187,6 +232,21 @@ fn emit_rebuild_message(reason: &RebuildReason) {
         }
         RebuildReason::IdentityDrift { cached, current } => {
             format!("cache was built against {cached}, current vault is {current}; rebuilding")
+        }
+        RebuildReason::AliasFieldDrift { cached, current } => {
+            let cached_disp = if cached.is_empty() {
+                "<disabled>".to_string()
+            } else {
+                cached.clone()
+            };
+            let current_disp = if current.is_empty() {
+                "<disabled>".to_string()
+            } else {
+                current.clone()
+            };
+            format!(
+                "cache was built with links.alias_field = {cached_disp}, current config is {current_disp}; rebuilding"
+            )
         }
     };
     eprintln!("vault: {msg}");
@@ -223,7 +283,11 @@ fn secure_file(path: &Utf8Path) -> Result<(), CacheError> {
     Ok(())
 }
 
-fn init_meta(conn: &Connection, canonical_root: &Utf8Path) -> Result<(), CacheError> {
+fn init_meta(
+    conn: &Connection,
+    canonical_root: &Utf8Path,
+    alias_field: Option<&str>,
+) -> Result<(), CacheError> {
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
         rusqlite::params!["schema_version", crate::SCHEMA_VERSION.to_string()],
@@ -231,6 +295,12 @@ fn init_meta(conn: &Connection, canonical_root: &Utf8Path) -> Result<(), CacheEr
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
         rusqlite::params!["vault_root", canonical_root.as_str()],
+    )?;
+    // Always present so drift-detection is a straight string comparison.
+    // Empty string represents the alias feature being disabled.
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+        rusqlite::params!["links_alias_field", alias_field.unwrap_or("")],
     )?;
     let created_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,5 +518,106 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v.parse::<u32>().unwrap(), crate::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn open_with_alias_field_drift_rebuilds_silently() {
+        // 1. Build cache with alias_field = None
+        // 2. Reopen with alias_field = Some("aliases") — expect a silent rebuild
+        // 3. Verify the meta row `links_alias_field` now contains "aliases"
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cache-alias-drift-")
+            .tempdir()
+            .unwrap();
+        let base = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        std::fs::write(vault_root.join("a.md"), "# A\n").unwrap();
+
+        // Initial build: alias_field = None
+        let mut cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        cache.rebuild(&vault_root).unwrap();
+        drop(cache);
+
+        // Reopen with alias_field = Some("aliases") — expect rebuild on open.
+        let cache = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        let alias_meta: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'links_alias_field'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias_meta, "aliases");
+    }
+
+    #[test]
+    fn open_with_alias_field_disabled_then_enabled_then_disabled_triggers_two_rebuilds() {
+        // Tests the full lifecycle: None -> Some -> None should each rebuild.
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cache-alias-cycle-")
+            .tempdir()
+            .unwrap();
+        let base = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        std::fs::write(vault_root.join("a.md"), "# A\n").unwrap();
+
+        let mut cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        cache.rebuild(&vault_root).unwrap();
+        drop(cache);
+
+        // None -> Some: rebuild expected. Verify meta.
+        let cache = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        let v: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'links_alias_field'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "aliases");
+        drop(cache);
+
+        // Some -> None: rebuild expected. Verify meta now empty.
+        let cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        let v: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'links_alias_field'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "");
+    }
+
+    #[test]
+    fn open_legacy_call_preserves_pre_feature_behavior() {
+        // Cache::open(vault_root) without _with_config must behave exactly like
+        // open_with_config(vault_root, None) — preserves existing call sites.
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cache-legacy-")
+            .tempdir()
+            .unwrap();
+        let base = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        std::fs::write(vault_root.join("a.md"), "# A\n").unwrap();
+
+        let mut cache = crate::Cache::open(&vault_root).unwrap();
+        cache.rebuild(&vault_root).unwrap();
+
+        let v: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'links_alias_field'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "");
     }
 }

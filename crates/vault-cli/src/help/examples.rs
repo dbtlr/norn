@@ -205,10 +205,16 @@ pub fn examples_for(cmd_path: &str) -> Vec<(String, String)> {
 /// paragraph keep their internal indentation.
 pub fn conceptual_sections_for(cmd_path: &str) -> Vec<(String, String)> {
     let pairs: &[(&str, &str)] = match cmd_path {
-        "vault validate" => &[(
-            "How validation works",
-            "Validate reads `.vault/config.yaml` for the rules that shape your vault: required frontmatter fields, allowed values, expected types, and path scoping. Each rule produces findings with a stable code and a severity (`error`, `warning`, `info`).\n\nFindings cover three surfaces. Frontmatter findings come from schema rules — codes like `frontmatter-required-field-missing` and `frontmatter-disallowed-value`. Link findings come from graph facts — `link-unresolved` and `link-ambiguous`. Document diagnostics come from parse — malformed frontmatter, encoding issues. Validate never writes files.\n\nExit code is `1` when any finding has severity `error`, `0` otherwise. Pipelines gate on this exit code.\n\nTriage filters combine with AND across types and OR within a type. `--severity error --code frontmatter-required-field-missing` returns errors that match that code. `--code link-unresolved --code link-ambiguous` returns either. `--path 'notes/**'` scopes to a path glob; `--field`, `--rule`, `--target`, and `--reason` narrow further.",
-        )],
+        "vault validate" => &[
+            (
+                "How validation works",
+                "Validate reads `.vault/config.yaml` for the rules that shape your vault: required frontmatter fields, allowed values, expected types, and path scoping. Each rule produces findings with a stable code and a severity (`error`, `warning`, `info`).\n\nFindings cover three surfaces. Frontmatter findings come from schema rules — codes like `frontmatter-required-field-missing` and `frontmatter-disallowed-value`. Link findings come from graph facts — `link-unresolved` and `link-ambiguous`. Document diagnostics come from parse — malformed frontmatter, encoding issues. Validate never writes files.\n\nExit code is `1` when any finding has severity `error`, `0` otherwise. Pipelines gate on this exit code.\n\nTriage filters combine with AND across types and OR within a type. `--severity error --code frontmatter-required-field-missing` returns errors that match that code. `--code link-unresolved --code link-ambiguous` returns either. `--path 'notes/**'` scopes to a path glob; `--field`, `--rule`, `--target`, and `--reason` narrow further.",
+            ),
+            (
+                "Finding codes",
+                "Codes identify validation findings. Filter with --code <code>.\n\nlink-unresolved             A link target, anchor, or block-ref is missing.\nlink-ambiguous              A wikilink resolves to multiple candidates.\nfrontmatter-required-field-missing\n                            A required frontmatter field is absent.\nfrontmatter-disallowed-value\n                            A field's value is not in the configured set.\nfrontmatter-invalid-type    A field's value doesn't match its declared type.\nfrontmatter-forbidden-field A field that the rule forbids is present.\nfrontmatter-alias-shadowed-by-stem\n                            An alias matches another doc's stem; the alias is dead because stem resolution wins.\nfrontmatter-alias-duplicate-across-docs\n                            Two or more docs claim the same alias; wikilinks resolving via that alias will be ambiguous.\nfrontmatter-alias-malformed The alias field contains a non-scalar value.\ndocument-misrouted          A doc is in a directory the rule's path selector excludes.",
+            ),
+        ],
         "vault repair plan" => &[(
             "The plan/apply boundary",
             "Repair runs in two halves. Plan reads validate findings and emits a JSON artifact describing every change it would make. Plan never writes to vault documents. Apply consumes that artifact and writes the changes; preconditions are checked before any file is touched.\n\nPlan classifies each finding as supported or skipped. Supported findings produce a `PlannedChange` — the path, the field, the new value, and the source document's hash recorded at plan time. Skipped findings carry a reason: `unsupported`, `ambiguous`, `missing_hash`, or `precondition_failed`.\n\nA planned change:\n\n{\n  \"path\": \"notes/welcome.md\",\n  \"field\": \"kind\",\n  \"new_value\": \"note\",\n  \"document_hash\": \"a3f2…\"\n}\n\nA skipped finding records the reason:\n\n{\n  \"path\": \"drafts/x.md\",\n  \"code\": \"link-ambiguous\",\n  \"skip_reason\": \"ambiguous\"\n}\n\nThe plan captures a vault snapshot. Each change records the document's hash at plan time; apply refuses to write if that hash has changed. Re-run plan after editing files between plan and apply.\n\nTriage filters here are the same as on `validate` — pass `--severity error` to plan only error-level findings. Filters that excluded a finding from validate also exclude it from plan.",
@@ -304,6 +310,43 @@ mod tests {
             .expect("boundary section present");
         assert!(body.contains("supported"));
         assert!(body.contains("skipped"));
+    }
+
+    #[test]
+    fn validate_has_finding_codes_section() {
+        let sections = conceptual_sections_for("vault validate");
+        assert!(
+            sections.iter().any(|(h, _)| h == "Finding codes"),
+            "expected `Finding codes` section; got headings: {:?}",
+            sections.iter().map(|(h, _)| h).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn validate_finding_codes_section_lists_all_ten_codes() {
+        let sections = conceptual_sections_for("vault validate");
+        let body = sections
+            .iter()
+            .find(|(h, _)| h == "Finding codes")
+            .map(|(_, b)| b.clone())
+            .expect("Finding codes section present");
+        for code in [
+            "link-unresolved",
+            "link-ambiguous",
+            "frontmatter-required-field-missing",
+            "frontmatter-disallowed-value",
+            "frontmatter-invalid-type",
+            "frontmatter-forbidden-field",
+            "frontmatter-alias-shadowed-by-stem",
+            "frontmatter-alias-duplicate-across-docs",
+            "frontmatter-alias-malformed",
+            "document-misrouted",
+        ] {
+            assert!(
+                body.contains(code),
+                "expected code `{code}` in Finding codes body; got:\n{body}"
+            );
+        }
     }
 
     #[test]

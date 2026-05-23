@@ -23,7 +23,7 @@ pub fn load_graph_index(
     options: &IndexOptions,
     no_cache_refresh: bool,
 ) -> Result<GraphIndex> {
-    let mut cache = Cache::open(vault_root)?;
+    let mut cache = Cache::open_with_config(vault_root, options.alias_field.as_deref())?;
     if !no_cache_refresh {
         match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
             Ok(_) => {}
@@ -46,8 +46,12 @@ pub fn load_graph_index(
 /// emits the same stderr note as `load_graph_index` and continues against
 /// the current cache state.
 #[allow(dead_code)]
-pub fn open_for_query(vault_root: &Utf8Path, no_cache_refresh: bool) -> Result<Cache> {
-    let mut cache = Cache::open(vault_root)?;
+pub fn open_for_query(
+    vault_root: &Utf8Path,
+    alias_field: Option<&str>,
+    no_cache_refresh: bool,
+) -> Result<Cache> {
+    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
     if !no_cache_refresh {
         match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
             Ok(_) => {}
@@ -91,8 +95,12 @@ fn apply_ignore_filter(index: &mut GraphIndex, ignore: &[String]) {
     index.ignored_files.dedup();
 }
 
-pub fn run_index(vault_root: &Utf8Path, args: &CacheIndexArgs) -> Result<()> {
-    let mut cache = Cache::open(vault_root)?;
+pub fn run_index(
+    vault_root: &Utf8Path,
+    alias_field: Option<&str>,
+    args: &CacheIndexArgs,
+) -> Result<()> {
+    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
     if args.rebuild {
         let report = cache.rebuild(vault_root)?;
         eprintln!(
@@ -114,8 +122,8 @@ pub fn run_index(vault_root: &Utf8Path, args: &CacheIndexArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn run_rebuild(vault_root: &Utf8Path) -> Result<()> {
-    let mut cache = Cache::open(vault_root)?;
+pub fn run_rebuild(vault_root: &Utf8Path, alias_field: Option<&str>) -> Result<()> {
+    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
     let report = cache.rebuild(vault_root)?;
     eprintln!(
         "vault: cache rebuilt {} docs, {} links in {}ms",
@@ -125,14 +133,20 @@ pub fn run_rebuild(vault_root: &Utf8Path) -> Result<()> {
 }
 
 pub fn run_clear(vault_root: &Utf8Path) -> Result<()> {
+    // `clear` discards the database entirely; the next open recreates with
+    // whatever alias_field is then in scope, so we don't need to pass one here.
     let mut cache = Cache::open(vault_root)?;
     cache.clear()?;
     eprintln!("vault: cache cleared");
     Ok(())
 }
 
-pub fn run_status(vault_root: &Utf8Path, args: &CacheStatusArgs) -> Result<()> {
-    let cache = Cache::open(vault_root)?;
+pub fn run_status(
+    vault_root: &Utf8Path,
+    alias_field: Option<&str>,
+    args: &CacheStatusArgs,
+) -> Result<()> {
+    let cache = Cache::open_with_config(vault_root, alias_field)?;
     let status = cache.status()?;
     match args.format {
         CacheOutputFormat::Json => {
