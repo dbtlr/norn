@@ -10,6 +10,20 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Added
+
+- New `cli::ValidateFormat { Records, Json, Jsonl, Paths }`; default honors `isatty` (Records on TTY, Jsonl piped).
+
+### Fixed
+
+- `NO_COLOR` now correctly overrides `--color always` per [no-color.org](https://no-color.org/). Previously, an explicit `--color always` would still emit ANSI even when `NO_COLOR` was set. Affects every command using the shared palette (`vault find`, `vault config show`, `vault show`, `vault validate`).
+
+### Changed
+
+- **BREAKING:** `vault validate` records output now follows the norn-cli-output spec. Status headline → severity tally → grouped tallies (`--summary`) or per-finding blocks with fix hints (default). `--format table` is no longer supported; use `--format records` (default on a TTY) or `--format json`/`jsonl`/`paths` for machine consumers. Default piped format is now `jsonl` (validate has no natural `paths` representation).
+- `vault validate --format paths` continues to emit unique sorted paths of documents that have findings.
+- **BREAKING:** `vault validate --format json` output is now wrapped in `{"total": N, "findings": [...]}` (matches norn-cli-output §5.3). Consumers reading the old bare-array shape must navigate to `.findings`.
+
 ## v0.31.0 - 2026-05-23
 
 The link-health release. Three coordinated cuts ship together: the docs/links namespace cleanup retires `vault docs` and `vault links` in favor of `vault count`, `vault show`, and `vault validate --code 'link-*'`; alias-aware wikilink resolution lets a configured frontmatter field serve as a fallback link target; and the Gap 1 + Gap 4 cut splits `link-unresolved` into three specific codes (`link-target-missing`, `link-anchor-missing`, `link-block-missing`), adds glob matching to `--code`, and gives `vault repair plan` the ability to propose closest-match rewrites for broken targets with a confidence band carried in a new `footnotes` layer that `repair apply` ignores entirely. `vault repair apply` learns a new `rewrite_link` operation that preserves display text, anchors, and block-ref suffixes. Plan schema bumps to v5 (additive). On top of all this, `--help` output gets its own overhaul: a custom renderer with canned EXAMPLES, vault-derived LIVE EXAMPLES, conceptual prose sections, and pagination via `$PAGER`; `-h` stays a one-screen orientation summary.

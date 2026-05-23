@@ -11,7 +11,7 @@ description: Finding codes, summary output, triage filters, the schema-versioned
 
 `vault validate` is read-only. It runs the graph builder, applies configured `validate.rules`, and emits one finding per violation.
 
-Findings are emitted as flat JSON objects keyed by `code`, with variant-specific fields present only when applicable. Use `--format jsonl` for one finding per line, `--format json` for an array, or `--format table` for human inspection.
+Findings are emitted as flat JSON objects keyed by `code`, with variant-specific fields present only when applicable. Use `--format jsonl` for one finding per line, `--format json` for a wrapped envelope (`{"total": N, "findings": [...]}`), or `--format records` for human-readable output on a TTY (the default).
 
 ```bash
 vault validate --format jsonl
@@ -53,7 +53,7 @@ For the selector + constraint model that produces these codes, see [rule-shape.m
 Use summaries to size a cleanup queue before reading raw findings.
 
 ```bash
-vault validate --summary --format table
+vault validate --summary --format records
 vault validate --summary --code frontmatter-invalid-type --field created --format json
 ```
 
@@ -86,7 +86,7 @@ vault validate --severity error --format jsonl
 ### Size a queue, then read it
 
 ```bash
-vault validate --summary --code frontmatter-invalid-type --field created --format table
+vault validate --summary --code frontmatter-invalid-type --field created --format records
 vault validate --code frontmatter-invalid-type --field created --format jsonl
 ```
 
@@ -95,7 +95,7 @@ vault validate --code frontmatter-invalid-type --field created --format jsonl
 ```bash
 vault validate --code link-target-missing --format jsonl
 vault validate --code link-anchor-missing,link-block-missing --format jsonl
-vault validate --code link-ambiguous --summary --format table
+vault validate --code link-ambiguous --summary --format records
 vault validate --code 'link-*' --format jsonl
 ```
 

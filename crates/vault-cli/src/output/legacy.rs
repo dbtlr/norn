@@ -9,9 +9,8 @@ use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
-use vault_core::display;
 use vault_core::VaultFile;
-use vault_standards::{Finding, FindingBody, RepairPlan, Summary};
+use vault_standards::RepairPlan;
 
 use crate::cli::OutputFormat;
 use crate::link_repair::LinkRepairReport;
@@ -79,67 +78,6 @@ pub fn write_files(files: &[&VaultFile], format: OutputFormat) -> Result<()> {
                 })
                 .collect::<Vec<_>>();
             write_table(&["path", "ext", "hash"], &rows)
-        }
-    }
-}
-
-pub fn write_findings(findings: &[Finding], format: OutputFormat) -> Result<()> {
-    match format {
-        OutputFormat::Json | OutputFormat::Jsonl => write_output(findings, format),
-        OutputFormat::Paths => {
-            let paths = findings
-                .iter()
-                .map(|finding| finding.path.clone())
-                .collect::<BTreeSet<_>>();
-            write_paths(paths.iter())
-        }
-        OutputFormat::Table => {
-            let rows = findings
-                .iter()
-                .map(|finding| {
-                    let (rule, field, target) = finding_context(finding);
-                    vec![
-                        finding.path.to_string(),
-                        finding.code.clone(),
-                        display::severity_str(&finding.severity).to_string(),
-                        rule,
-                        field,
-                        target,
-                    ]
-                })
-                .collect::<Vec<_>>();
-            write_table(
-                &["path", "code", "severity", "rule", "field", "target"],
-                &rows,
-            )
-        }
-    }
-}
-
-pub fn write_validate_summary(summary: &Summary, format: OutputFormat) -> Result<()> {
-    match format {
-        OutputFormat::Json | OutputFormat::Jsonl => write_item_output(summary, format),
-        OutputFormat::Paths => write_item_output(summary, OutputFormat::Json),
-        OutputFormat::Table => {
-            let totals = vec![vec!["findings".to_string(), summary.findings.to_string()]];
-            write_table(&["metric", "count"], &totals)?;
-            write_blank_line()?;
-            write_count_rows("codes", &summary.codes)?;
-            write_blank_line()?;
-            write_count_rows("severities", &summary.severities)?;
-            if !summary.rules.is_empty() {
-                write_blank_line()?;
-                write_count_rows("rules", &summary.rules)?;
-            }
-            if !summary.fields.is_empty() {
-                write_blank_line()?;
-                write_count_rows("fields", &summary.fields)?;
-            }
-            if !summary.path_prefixes.is_empty() {
-                write_blank_line()?;
-                write_count_rows("path_prefixes", &summary.path_prefixes)?;
-            }
-            Ok(())
         }
     }
 }
@@ -413,14 +351,6 @@ fn write_table_row<'a>(
     Ok(())
 }
 
-fn write_count_rows(label: &str, counts: &std::collections::BTreeMap<String, usize>) -> Result<()> {
-    let rows = counts
-        .iter()
-        .map(|(key, count)| vec![key.clone(), count.to_string()])
-        .collect::<Vec<_>>();
-    write_table(&[label, "count"], &rows)
-}
-
 fn write_blank_line() -> Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -521,33 +451,6 @@ fn display_value(value: &Value) -> String {
 
 fn short_hash(hash: &str) -> String {
     hash.chars().take(12).collect()
-}
-
-fn finding_context(finding: &Finding) -> (String, String, String) {
-    match &finding.body {
-        FindingBody::GraphDiagnostic { .. } => (String::new(), String::new(), String::new()),
-        FindingBody::LinkIssue { link } => (String::new(), String::new(), link.target.clone()),
-        FindingBody::RequiredFrontmatterMissing { rule, field }
-        | FindingBody::ForbiddenField { rule, field, .. }
-        | FindingBody::InvalidFieldType { rule, field, .. }
-        | FindingBody::DisallowedValue { rule, field, .. } => (
-            rule.clone().unwrap_or_default(),
-            field.clone(),
-            String::new(),
-        ),
-        FindingBody::DocumentMisrouted { rule, .. } => (
-            rule.clone().unwrap_or_default(),
-            String::new(),
-            String::new(),
-        ),
-        FindingBody::AliasMalformed { field, .. } => (String::new(), field.clone(), String::new()),
-        FindingBody::AliasShadowedByStem { alias_value, .. } => {
-            (String::new(), String::new(), alias_value.clone())
-        }
-        FindingBody::AliasDuplicateAcrossDocs { alias_value, .. } => {
-            (String::new(), String::new(), alias_value.clone())
-        }
-    }
 }
 
 pub fn is_broken_pipe(error: &anyhow::Error) -> bool {

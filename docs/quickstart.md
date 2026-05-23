@@ -35,7 +35,7 @@ The fixture intentionally includes a `[[missing]]` wikilink, an ambiguous `[[dup
 Run validation against the fixture's default config (`fixtures/basic/.vault/config.yaml` if present, otherwise built-in defaults):
 
 ```bash
-vault -C fixtures/basic validate --summary --format table
+vault -C fixtures/basic validate --summary --format records
 ```
 
 You'll see grouped finding counts: unresolved-link counts, ambiguous-link counts, and any rule violations the fixture exercises.
@@ -46,7 +46,7 @@ Pick a Markdown vault you own — an Obsidian vault, a notes directory, a docs s
 
 ```bash
 vault -C /path/to/vault find --all --format paths | head
-vault -C /path/to/vault validate --summary --format table
+vault -C /path/to/vault validate --summary --format records
 ```
 
 Out of the box `vault` parses Obsidian-compatible internal links: body wikilinks, embeds, frontmatter wikilinks, URL-decoded Markdown links, extensionless Markdown note links, heading anchors, and block references.

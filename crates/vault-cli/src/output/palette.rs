@@ -114,13 +114,16 @@ pub fn resolve(when: ColorWhen) -> Palette {
 /// `force`: `CLICOLOR_FORCE` env var is set.
 /// `is_tty`: stdout is a terminal.
 pub(crate) fn resolve_inner(when: ColorWhen, no_color: bool, force: bool, is_tty: bool) -> Palette {
+    // NO_COLOR takes precedence over everything, including --color always.
+    // See https://no-color.org/
+    if no_color {
+        return Palette::off();
+    }
     match when {
         ColorWhen::Always => Palette::on(),
         ColorWhen::Never => Palette::off(),
         ColorWhen::Auto => {
-            if no_color {
-                Palette::off()
-            } else if force || is_tty {
+            if force || is_tty {
                 Palette::on()
             } else {
                 Palette::off()
@@ -152,13 +155,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_always_returns_on() {
-        assert!(resolve(ColorWhen::Always).enabled);
+    fn resolve_always_without_no_color_returns_on() {
+        assert!(resolve_inner(ColorWhen::Always, false, false, false).enabled);
+    }
+
+    #[test]
+    fn resolve_always_with_no_color_returns_off() {
+        // NO_COLOR takes precedence over --color always per https://no-color.org/
+        assert!(!resolve_inner(ColorWhen::Always, true, false, false).enabled);
     }
 
     #[test]
     fn resolve_never_returns_off() {
-        assert!(!resolve(ColorWhen::Never).enabled);
+        assert!(!resolve_inner(ColorWhen::Never, false, false, true).enabled);
     }
 
     #[test]

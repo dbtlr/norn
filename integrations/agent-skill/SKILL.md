@@ -60,7 +60,9 @@ The same filter set works for raw output and summaries.
 
 ## Stable JSON / JSONL contracts
 
-Use `--format json` for one-shot agent dispatch (single JSON document). Use `--format jsonl` for streaming queues (one JSON object per line). Table output is for humans and may evolve between point releases — never parse it.
+Use `--format json` for one-shot agent dispatch (single JSON document). Use `--format jsonl` for streaming queues (one JSON object per line). Records output is for humans and may evolve between point releases — never parse it.
+
+Findings come back wrapped as `{"total": N, "findings": [...]}`; iterate `.findings` for individual entries.
 
 Finding codes are stable. Renames are called out as breaking changes in the project's CHANGELOG.
 
@@ -187,7 +189,7 @@ The cache is disposable — missing or corrupted caches rebuild silently. Don't 
 - **Honor schema versions.** Repair plans declare `schema_version`. Apply rejects mismatched versions; re-plan instead of editing the artifact.
 - **Don't auto-pick ambiguous link candidates.** `link-ambiguous` findings carry a `candidates` list, but the CLI does not resolve them. Surface the ambiguity to the human or apply a deterministic disambiguation rule documented in the vault's config.
 - **Use `--out` for plan artifacts.** `vault repair plan --out repair.json` writes the plan directly. Shell redirection (`> repair.json`) works but is more prone to partial-write footguns.
-- **Don't parse table output.** Tables are for humans. Always pass `--format json` or `--format jsonl` from an agent context.
+- **Don't parse records output.** Records are for humans. Always pass `--format json` or `--format jsonl` from an agent context.
 - **Run `--summary` first.** It's cheaper than a full finding stream and tells you whether a more expensive query is worth running.
 
 ## Shell completions

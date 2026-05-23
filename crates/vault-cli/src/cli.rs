@@ -496,6 +496,19 @@ pub enum FindFormat {
     Jsonl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ValidateFormat {
+    /// Human-legible records (TTY default). Summary or per-finding blocks
+    /// composed from output::primitives.
+    Records,
+    /// One JSON object per finding, streaming.
+    Jsonl,
+    /// Single JSON object wrapper with a `findings` array.
+    Json,
+    /// One path per affected document, sorted and deduped.
+    Paths,
+}
+
 #[derive(Args, Debug)]
 pub struct CountArgs {
     /// Frontmatter field to group document counts by. Without --by,
@@ -621,7 +634,7 @@ pub enum SupportedShell {
 #[derive(Debug, Parser)]
 pub struct ValidateArgs {
     #[arg(long, value_enum, help = "Stdout format")]
-    pub format: Option<OutputFormat>,
+    pub format: Option<ValidateFormat>,
     #[arg(
         long,
         help = "Emit grouped validation finding counts instead of raw findings"

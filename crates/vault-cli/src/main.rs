@@ -16,6 +16,7 @@ mod query;
 mod repair_apply;
 mod show;
 mod target;
+mod validate;
 mod validate_filter;
 
 use std::{fs, process};
@@ -24,7 +25,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use vault_core::GraphIndex;
 use vault_graph::{concise_diagnostics, has_errors};
-use vault_standards::{plan_repairs, summarize, validate_with_alias_field, RepairPlanFilters};
+use vault_standards::{plan_repairs, validate_with_alias_field, RepairPlanFilters};
 
 use crate::cli::{
     CacheSubcommand, Cli, Command, ConfigSubcommand, RepairOutputFormat, RepairSubcommand,
@@ -32,8 +33,8 @@ use crate::cli::{
 use crate::config_loader::{effective_cwd, load_config, resolve_path};
 use crate::link_repair::plan_link_repairs;
 use crate::output::legacy::{
-    is_broken_pipe, resolve_format, write_files, write_findings, write_link_repair_report,
-    write_repair_apply_report, write_repair_plan, write_validate_summary,
+    is_broken_pipe, resolve_format, write_files, write_link_repair_report,
+    write_repair_apply_report, write_repair_plan,
 };
 use crate::repair_apply::{apply_repair_plan, with_verification};
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
@@ -205,12 +206,30 @@ fn run(cli: Cli) -> Result<i32> {
             );
             let filters = ValidateFilterOptions::from(&args);
             let findings = filter_findings(findings, &filters)?;
-            if args.summary {
-                let summary = summarize(&findings);
-                write_validate_summary(&summary, resolve_format(args.format))?;
-            } else {
-                write_findings(&findings, resolve_format(args.format))?;
-            }
+
+            let format = args.format.unwrap_or_else(|| {
+                if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                    cli::ValidateFormat::Records
+                } else {
+                    cli::ValidateFormat::Jsonl
+                }
+            });
+            let palette = crate::output::palette::resolve(color);
+            let rules_count = loaded_config.validate.rules.len()
+                + loaded_config.validate.required_frontmatter.len();
+            let total_docs = index.documents.len();
+
+            let mut stdout = std::io::stdout().lock();
+            validate::render::render(
+                &findings,
+                args.summary,
+                rules_count,
+                total_docs,
+                format,
+                &palette,
+                &mut stdout,
+            )?;
+
             Ok(exit_code_for(&index))
         }
         Command::Show(args) => {

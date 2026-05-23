@@ -173,6 +173,72 @@ pub fn note_line(out: &mut dyn Write, p: &Palette, label: NoteLabel, body: &str)
     )
 }
 
+/// Tally group per norn-cli-output §4.4.
+///
+/// Emits:
+/// ```text
+///   {header}                                  <- 2-indent, dim bold
+///     {label}  ··········  {count}            <- 4-indent, label dim, leader dim, count thread
+/// ```
+///
+/// Computes label column width = max(label.len()) + 2 and count column width =
+/// max(count.to_string().len()) inside the function so callers don't have to.
+/// Leader dots fill the gap between label and count up to `term_width`.
+/// Header omitted (no line written) if `header` is empty.
+/// Rows omitted entirely if `rows` is empty (caller is responsible for skipping
+/// the call when there are no rows to emit).
+pub fn tally_group(
+    out: &mut dyn Write,
+    p: &Palette,
+    header: &str,
+    rows: &[(&str, usize)],
+    term_width: usize,
+) -> io::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if !header.is_empty() {
+        writeln!(
+            out,
+            "  {}{header}{}",
+            p.section.render(),
+            p.section.render_reset(),
+        )?;
+    }
+    let label_w = rows
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let count_w = rows
+        .iter()
+        .map(|(_, c)| c.to_string().chars().count())
+        .max()
+        .unwrap_or(1);
+
+    // Row prefix is 4-indent + label-col + count-col + 2 spaces between leader and count.
+    // Remaining width is the leader. Floor at 3 dots so narrow terminals stay legible.
+    let prefix_w = 4 + label_w + count_w + 2;
+    let leader_w = term_width.saturating_sub(prefix_w).max(3);
+
+    let leader: String = "·".repeat(leader_w);
+
+    for (label, count) in rows {
+        writeln!(
+            out,
+            "    {l_start}{label:<label_w$}{l_end}{d_start}{leader}{d_end}  {t_start}{count:>count_w$}{t_end}",
+            l_start = p.label.render(),
+            l_end = p.label.render_reset(),
+            d_start = p.dim.render(),
+            d_end = p.dim.render_reset(),
+            t_start = p.thread.render(),
+            t_end = p.thread.render_reset(),
+        )?;
+    }
+    Ok(())
+}
+
 /// Severity tally per norn-cli-output §4.2.
 /// Three-line block (pass / warn / err); zero rows elided. Right-aligned counts.
 /// If all three are zero, emits a single "0 {noun} pass" row so the caller still
@@ -514,5 +580,102 @@ mod tests {
         let mut out = Vec::new();
         note_line(&mut out, &Palette::on(), NoteLabel::Tip, "body").unwrap();
         assert!(String::from_utf8(out).unwrap().contains("\x1b["));
+    }
+
+    #[test]
+    fn tally_group_emits_header_and_rows() {
+        let mut out = Vec::new();
+        let rows = [("missing-required-field", 8), ("document-misrouted", 3)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines[0], "  by code");
+        // Row format: "    {label:<label_w}{leader:·>leader_w}  {count:>count_w}"
+        // label_w = max("missing-required-field"=22, "document-misrouted"=18) + 2 = 24.
+        // count_w = max("8".len()=1, "3".len()=1) = 1.
+        // First row: "    missing-required-field  " + leader dots + "  8"
+        assert!(lines[1].starts_with("    missing-required-field"));
+        assert!(lines[1].ends_with("  8"));
+        assert!(
+            lines[1].contains("··"),
+            "expected leader dots: {:?}",
+            lines[1]
+        );
+        assert!(lines[2].starts_with("    document-misrouted"));
+        assert!(lines[2].ends_with("  3"));
+    }
+
+    #[test]
+    fn tally_group_right_aligns_counts_to_widest() {
+        let mut out = Vec::new();
+        let rows = [("a", 5), ("b", 100), ("c", 12)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        // count_w = 3 (max of "5"=1, "100"=3, "12"=2). All counts right-aligned to 3 chars.
+        assert!(lines[1].ends_with("  5"), "row 1: {:?}", lines[1]);
+        assert!(lines[2].ends_with("100"), "row 2: {:?}", lines[2]);
+        assert!(lines[3].ends_with(" 12"), "row 3: {:?}", lines[3]);
+    }
+
+    #[test]
+    fn tally_group_uses_dim_for_labels_and_leader_on_palette() {
+        let mut out = Vec::new();
+        let rows = [("x", 1)];
+        tally_group(&mut out, &Palette::on(), "by code", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        // Palette::on() emits ANSI for dim and thread.
+        assert!(s.contains("\x1b["), "expected ANSI: {s:?}");
+    }
+
+    #[test]
+    fn tally_group_no_ansi_when_palette_off() {
+        let mut out = Vec::new();
+        let rows = [("x", 1)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains("\x1b["));
+    }
+
+    #[test]
+    fn tally_group_skips_header_when_empty() {
+        let mut out = Vec::new();
+        let rows = [("x", 1)];
+        tally_group(&mut out, &Palette::off(), "", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        // First emitted line is a row (4-indent), not a header (2-indent).
+        let first = s.lines().next().unwrap();
+        assert!(
+            first.starts_with("    "),
+            "expected row first, got: {first:?}"
+        );
+        assert!(!s.starts_with("  by"), "header should be omitted: {s:?}");
+    }
+
+    #[test]
+    fn tally_group_empty_rows_emits_nothing() {
+        let mut out = Vec::new();
+        let rows: [(&str, usize); 0] = [];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        assert!(
+            out.is_empty(),
+            "expected no output: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    #[test]
+    fn tally_group_narrow_terminal_keeps_minimum_leader() {
+        // Even with a very narrow term_width, leave at least 3 dots between label and count
+        // (lets the row stay legible if it overflows).
+        let mut out = Vec::new();
+        let rows = [("missing-required-field", 8)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 30).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let row = s.lines().nth(1).unwrap();
+        assert!(
+            row.contains("···"),
+            "expected at least 3 leader dots: {row:?}"
+        );
     }
 }

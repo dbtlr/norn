@@ -69,7 +69,7 @@ Read-only validation against configured rules.
 
 ```bash
 vault validate --format jsonl
-vault validate --summary --format table
+vault validate --summary --format records
 vault validate --code frontmatter-invalid-type --field created --format jsonl
 vault validate --rule task-status --path "notes/**/*.md" --summary --format json
 ```

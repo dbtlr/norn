@@ -842,8 +842,9 @@ fn validate_reports_required_frontmatter_from_config() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["code"], "frontmatter-required-field-missing");
     assert_eq!(findings[0]["path"], "missing-title.md");
     assert_eq!(findings[0]["field"], "title");
@@ -865,8 +866,9 @@ fn validate_discovers_default_config_from_cwd() {
 
     let output = vault(&["-C", root.to_str().unwrap(), "validate", "--format", "json"]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["field"], "title");
 
     fs::remove_dir_all(root).ok();
@@ -881,8 +883,9 @@ fn validate_missing_default_config_uses_defaults() {
 
     let output = vault(&["-C", root.to_str().unwrap(), "validate", "--format", "json"]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 0);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 0);
 
     fs::remove_dir_all(root).ok();
 }
@@ -928,8 +931,9 @@ fn validate_resolves_explicit_relative_config_against_cwd() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["field"], "title");
 
     fs::remove_dir_all(root).ok();
@@ -969,28 +973,25 @@ fn validate_reports_scoped_required_frontmatter_from_config() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 3);
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 3);
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "Workspaces/demo/notes/note.md"
             && finding["field"] == "type"
             && finding["rule"] == "workspace-notes"
     }));
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "Workspaces/demo/notes/note.md"
             && finding["field"] == "workspace"
             && finding["rule"] == "workspace-notes"
     }));
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "Workspaces/demo/tasks/task.md"
             && finding["field"] == "status"
             && finding["rule"] == "workspace-tasks"
     }));
-    assert!(!findings
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|finding| finding["path"] == "loose.md"));
+    assert!(!findings.iter().any(|finding| finding["path"] == "loose.md"));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
@@ -1049,18 +1050,8 @@ fn validate_summary_reports_grouped_counts() {
 
 #[test]
 fn omitted_validate_summary_format_defaults_to_json_when_stdout_is_piped() {
-    let root = fixture_root();
-    let output = vault(&["-C", root.to_str().unwrap(), "validate", "--summary"]);
-
-    let summary = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(summary["findings"], 7);
-    assert_eq!(summary["codes"]["link-target-missing"], 1);
-    assert_eq!(summary["codes"]["link-anchor-missing"], 2);
-    assert_eq!(summary["codes"]["link-block-missing"], 2);
-}
-
-#[test]
-fn validate_summary_supports_table_format() {
+    // Piped default is now Jsonl for the non-summary path; summary view
+    // requires an explicit --format json to get the JSON summary shape.
     let root = fixture_root();
     let output = vault(&[
         "-C",
@@ -1068,14 +1059,14 @@ fn validate_summary_supports_table_format() {
         "validate",
         "--summary",
         "--format",
-        "table",
+        "json",
     ]);
 
-    assert!(output.contains("metric"));
-    assert!(output.contains("findings"));
-    assert!(output.contains("codes"));
-    assert!(output.contains("link-target-missing"));
-    assert!(output.contains("path_prefixes"));
+    let summary = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    assert_eq!(summary["findings"], 7);
+    assert_eq!(summary["codes"]["link-target-missing"], 1);
+    assert_eq!(summary["codes"]["link-anchor-missing"], 2);
+    assert_eq!(summary["codes"]["link-block-missing"], 2);
 }
 
 #[test]
@@ -1119,8 +1110,9 @@ fn validate_filters_raw_findings_for_triage() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["path"], "Notes/bad-created.md");
     assert_eq!(findings[0]["code"], "frontmatter-invalid-type");
     assert_eq!(findings[0]["field"], "created");
@@ -1310,8 +1302,9 @@ fn validate_reports_allowed_value_findings() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["code"], "frontmatter-disallowed-value");
     assert_eq!(findings[0]["path"], "task.md");
     assert_eq!(findings[0]["field"], "status");
@@ -1348,8 +1341,9 @@ fn validate_allowed_values_do_not_coerce_types() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["code"], "frontmatter-disallowed-value");
     assert_eq!(findings[0]["actual_value"], 1);
     assert_eq!(findings[0]["allowed_values"], serde_json::json!(["1"]));
@@ -1423,24 +1417,23 @@ fn validate_rules_match_frontmatter_predicates() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 3);
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 3);
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "note.md" && finding["field"] == "kind" && finding["rule"] == "note-kind"
     }));
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "task.md"
             && finding["field"] == "status"
             && finding["rule"] == "task-status"
     }));
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "published-note.md"
             && finding["field"] == "published_at"
             && finding["rule"] == "published-note"
     }));
     assert!(!findings
-        .as_array()
-        .unwrap()
         .iter()
         .any(|finding| finding["path"] == "artifact.md"));
 
@@ -1471,8 +1464,9 @@ fn validate_rules_do_not_coerce_frontmatter_predicate_types() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 0);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 0);
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
@@ -1556,8 +1550,9 @@ fn validate_ignore_skips_validation_without_graph_ignore() {
         "--format",
         "json",
     ]);
-    let findings = serde_json::from_str::<Value>(&validate_output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&validate_output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["path"], "active.md");
 
     let files_output = vault(&[
@@ -1605,8 +1600,9 @@ fn validate_rule_exclude_and_path_not_skip_matching_documents() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 1);
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["path"], "active.md");
     assert_eq!(findings[0]["rule"], "active-title");
 
@@ -1652,22 +1648,21 @@ fn validate_reports_frontmatter_field_type_findings() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 5);
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 5);
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "note.md"
             && finding["field"] == "created"
             && finding["expected_type"] == "datetime"
     }));
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    assert!(findings.iter().any(|finding| {
         finding["field"] == "aliases" && finding["expected_type"] == "list_of_strings"
     }));
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    assert!(findings.iter().any(|finding| {
         finding["field"] == "workspace" && finding["expected_type"] == "wikilink"
     }));
     assert!(!findings
-        .as_array()
-        .unwrap()
         .iter()
         .any(|finding| finding["path"] == "valid-exported.md"));
 
@@ -1707,14 +1702,15 @@ fn validate_reports_forbidden_frontmatter_and_path_violations() {
         "json",
     ]);
 
-    let findings = serde_json::from_str::<Value>(&output).expect("output should be JSON");
-    assert_eq!(findings.as_array().unwrap().len(), 2);
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2);
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "artifact.md"
             && finding["code"] == "frontmatter-forbidden-field"
             && finding["field"] == "kind"
     }));
-    assert!(findings.as_array().unwrap().iter().any(|finding| {
+    assert!(findings.iter().any(|finding| {
         finding["path"] == "artifact.md"
             && finding["code"] == "document-misrouted"
             && finding["allowed_paths"] == serde_json::json!(["Workspaces/**/agent-artifacts/*.md"])
