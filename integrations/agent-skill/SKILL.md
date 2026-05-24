@@ -38,7 +38,6 @@ None of these write to the vault:
 - `vault find --all` (document inventory)
 - `vault count` / `vault count --by FIELD`
 - `vault show <doc>`
-- `vault files`
 - `vault find`
 - `vault validate` (with or without `--summary` or filters)
 - `vault repair plan` (produces an artifact; does not modify the vault)

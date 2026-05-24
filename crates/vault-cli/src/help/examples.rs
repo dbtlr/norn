@@ -153,10 +153,6 @@ pub fn examples_for(cmd_path: &str) -> Vec<(String, String)> {
                 "hash every file; bypass cheap-check",
             ),
         ],
-        "vault files" => &[
-            ("vault files", "every inventoried file under the vault"),
-            ("vault files --format paths", "just paths; pipe-friendly"),
-        ],
         "vault repair links" => &[
             (
                 "vault repair links",

@@ -70,12 +70,6 @@ pub struct Cli {
 pub enum Command {
     #[command(
         disable_help_flag = true,
-        about = "Emit inventoried vault files",
-        long_about = "Emit inventoried vault files.\n\nFiles include Markdown documents and non-Markdown attachments. File records can be used with exact-path backlink queries for resolved attachment targets."
-    )]
-    Files(GraphArgs),
-    #[command(
-        disable_help_flag = true,
         about = "Find documents in the vault — full-text + metadata filters with sort/limit/paging"
     )]
     Find(FindArgs),

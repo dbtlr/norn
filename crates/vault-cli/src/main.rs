@@ -33,8 +33,7 @@ use crate::cli::{
 use crate::config_loader::{effective_cwd, load_config, resolve_path};
 use crate::link_repair::plan_link_repairs;
 use crate::output::legacy::{
-    is_broken_pipe, resolve_format, write_files, write_link_repair_report,
-    write_repair_apply_report, write_repair_plan,
+    is_broken_pipe, write_link_repair_report, write_repair_apply_report, write_repair_plan,
 };
 use crate::repair_apply::{apply_repair_plan, with_verification};
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
@@ -79,13 +78,6 @@ fn run(cli: Cli) -> Result<i32> {
     let config_path = config;
 
     match command {
-        Command::Files(args) => {
-            let mut index = build_index_for(&cwd, config_path.as_ref(), no_cache_refresh)?;
-            trim_diagnostics(&mut index, verbose);
-            let files: Vec<_> = index.files.iter().collect();
-            write_files(&files, resolve_format(args.format))?;
-            Ok(exit_code_for(&index))
-        }
         Command::Repair(repair_command) => match repair_command.command {
             RepairSubcommand::Plan(args) => {
                 let loaded_config = load_config(&cwd, config_path.as_ref())?;

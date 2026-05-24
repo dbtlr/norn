@@ -2,48 +2,16 @@
 //! import from here. When a command is ported, remove its imports from this module.
 //! When this module has no remaining callers, delete it.
 
-use std::collections::BTreeSet;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 
 use anyhow::{bail, Result};
-use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
-use vault_core::VaultFile;
 use vault_standards::RepairPlan;
 
 use crate::cli::OutputFormat;
 use crate::link_repair::LinkRepairReport;
 use crate::repair_apply::RepairApplyReport;
-
-pub fn resolve_format(format: Option<OutputFormat>) -> OutputFormat {
-    format.unwrap_or_else(|| {
-        if io::stdout().is_terminal() {
-            OutputFormat::Table
-        } else {
-            OutputFormat::Json
-        }
-    })
-}
-
-pub fn write_output<T: Serialize>(items: &[T], format: OutputFormat) -> Result<()> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-
-    match format {
-        OutputFormat::Json => {
-            write_json_line(&mut stdout, &serde_json::to_string_pretty(items)?)?;
-        }
-        OutputFormat::Jsonl => {
-            for item in items {
-                write_json_line(&mut stdout, &serde_json::to_string(item)?)?;
-            }
-        }
-        OutputFormat::Table => write_generic_items_table(items)?,
-        OutputFormat::Paths => write_generic_item_paths(items)?,
-    }
-    Ok(())
-}
 
 pub fn write_item_output<T: Serialize>(item: &T, format: OutputFormat) -> Result<()> {
     let stdout = io::stdout();
@@ -60,26 +28,6 @@ pub fn write_item_output<T: Serialize>(item: &T, format: OutputFormat) -> Result
         OutputFormat::Paths => bail!("paths format is not supported for this command"),
     }
     Ok(())
-}
-
-pub fn write_files(files: &[&VaultFile], format: OutputFormat) -> Result<()> {
-    match format {
-        OutputFormat::Json | OutputFormat::Jsonl => write_output(files, format),
-        OutputFormat::Paths => write_paths(files.iter().map(|file| &file.path)),
-        OutputFormat::Table => {
-            let rows = files
-                .iter()
-                .map(|file| {
-                    vec![
-                        file.path.to_string(),
-                        file.extension.clone().unwrap_or_default(),
-                        file.hash.as_deref().map(short_hash).unwrap_or_default(),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            write_table(&["path", "ext", "hash"], &rows)
-        }
-    }
 }
 
 pub fn write_repair_plan(plan: &RepairPlan, format: OutputFormat) -> Result<()> {
@@ -308,15 +256,6 @@ fn link_repair_row(category: &str, link: &crate::link_repair::LinkDecision) -> V
     ]
 }
 
-fn write_paths<'a>(paths: impl IntoIterator<Item = &'a Utf8PathBuf>) -> Result<()> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    for path in paths {
-        writeln!(stdout, "{path}")?;
-    }
-    Ok(())
-}
-
 fn write_table(headers: &[&str], rows: &[Vec<String>]) -> Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -358,20 +297,6 @@ fn write_blank_line() -> Result<()> {
     Ok(())
 }
 
-fn write_generic_items_table<T: Serialize>(items: &[T]) -> Result<()> {
-    let values = items
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<serde_json::Result<Vec<_>>>()?;
-    let headers = table_headers(&values);
-    let header_refs = headers.iter().map(String::as_str).collect::<Vec<_>>();
-    let rows = values
-        .iter()
-        .map(|value| table_row_for(value, &headers))
-        .collect::<Vec<_>>();
-    write_table(&header_refs, &rows)
-}
-
 fn write_generic_item_table<T: Serialize>(item: &T) -> Result<()> {
     let value = serde_json::to_value(item)?;
     match value {
@@ -387,41 +312,6 @@ fn write_generic_item_table<T: Serialize>(item: &T) -> Result<()> {
             write_table(&["value"], &rows)
         }
     }
-}
-
-fn write_generic_item_paths<T: Serialize>(items: &[T]) -> Result<()> {
-    let values = items
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<serde_json::Result<Vec<_>>>()?;
-    let paths = values
-        .iter()
-        .map(|value| {
-            value
-                .get("path")
-                .and_then(Value::as_str)
-                .map(Utf8PathBuf::from)
-                .ok_or_else(|| anyhow::anyhow!("paths format is not supported for this command"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    write_paths(paths.iter())
-}
-
-fn table_headers(values: &[Value]) -> Vec<String> {
-    let mut headers = BTreeSet::new();
-    for value in values {
-        if let Value::Object(object) = value {
-            headers.extend(object.keys().cloned());
-        }
-    }
-    headers.into_iter().collect()
-}
-
-fn table_row_for(value: &Value, headers: &[String]) -> Vec<String> {
-    headers
-        .iter()
-        .map(|header| value.get(header).map(display_value).unwrap_or_default())
-        .collect()
 }
 
 fn column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
@@ -447,10 +337,6 @@ fn display_value(value: &Value) -> String {
         Value::Null => String::new(),
         Value::Array(_) | Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
     }
-}
-
-fn short_hash(hash: &str) -> String {
-    hash.chars().take(12).collect()
 }
 
 pub fn is_broken_pipe(error: &anyhow::Error) -> bool {

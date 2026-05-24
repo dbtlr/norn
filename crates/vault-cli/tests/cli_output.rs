@@ -110,7 +110,6 @@ fn vault_help_documents_global_cwd() {
     assert!(output.contains("-C, --cwd"));
     assert!(output.contains("--config"));
     assert!(output.contains("--verbose"));
-    assert!(output.contains("files"));
     assert!(output.contains("repair"));
     assert!(output.contains("cache"));
 }
@@ -129,6 +128,16 @@ fn links_list_is_removed() {
             || error.contains("unrecognized subcommand 'links'")
             || error.contains("unexpected argument 'list'"),
         "expected unrecognized-subcommand error for `vault links list`; got: {error}"
+    );
+}
+
+#[test]
+fn files_subcommand_is_removed() {
+    let error = vault_error(&["files"]);
+    assert!(
+        error.contains("unrecognized subcommand 'files'")
+            || error.contains("unexpected argument 'files'"),
+        "expected unrecognized-subcommand error for `vault files`; got: {error}"
     );
 }
 
@@ -1555,21 +1564,24 @@ fn validate_ignore_skips_validation_without_graph_ignore() {
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["path"], "active.md");
 
-    let files_output = vault(&[
-        "files",
+    let find_output = vault(&[
+        "find",
         "-C",
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
+        "--path",
+        "Templates/**",
         "--format",
         "json",
     ]);
-    let files = serde_json::from_str::<Value>(&files_output).expect("output should be JSON");
-    assert!(files
+    let envelope = serde_json::from_str::<Value>(&find_output).expect("output should be JSON");
+    let docs = envelope["documents"]
         .as_array()
-        .unwrap()
+        .expect("envelope.documents should be array");
+    assert!(docs
         .iter()
-        .any(|file| file["path"] == "Templates/template.md"));
+        .any(|doc| doc["path"] == "Templates/template.md"));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
@@ -1718,25 +1730,6 @@ fn validate_reports_forbidden_frontmatter_and_path_violations() {
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
-}
-
-#[test]
-fn graph_files_jsonl_contract() {
-    let root = fixture_root();
-    let output = vault(&["files", "-C", root.to_str().unwrap(), "--format", "jsonl"]);
-
-    let files = output
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
-        .collect::<Vec<_>>();
-
-    assert_eq!(files.len(), 12);
-    assert!(files.iter().any(|file| file["path"] == "Assets/pic.png"
-        && file["stem"] == "pic"
-        && file["extension"] == "png"));
-    assert!(files.iter().any(|file| file["path"] == "alpha.md"
-        && file["stem"] == "alpha"
-        && file["extension"] == "md"));
 }
 
 #[test]

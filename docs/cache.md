@@ -5,7 +5,7 @@ description: The SQLite-backed cache that accelerates vault query commands — w
 
 # Vault cache
 
-`vault` uses a SQLite-backed cache to accelerate query commands. The cache is the read path for `vault validate`, `vault find`, `vault count`, `vault show`, `vault files`, and `vault repair` — these commands open the cache, refresh it incrementally if needed, and load the graph in-memory before running their existing logic.
+`vault` uses a SQLite-backed cache to accelerate query commands. The cache is the read path for `vault validate`, `vault find`, `vault count`, `vault show`, and `vault repair` — these commands open the cache, refresh it incrementally if needed, and load the graph in-memory before running their existing logic.
 
 ## Where it lives
 

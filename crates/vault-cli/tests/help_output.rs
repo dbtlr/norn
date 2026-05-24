@@ -184,12 +184,6 @@ fn cache_status_short_help() {
 }
 
 #[test]
-fn files_short_help() {
-    let out = vault_help(&["files", "-h"]);
-    assert_short_help_shape(&out, "vault files");
-}
-
-#[test]
 fn completions_init_short_help() {
     let out = vault_help(&["completions", "init", "-h"]);
     assert_short_help_shape(&out, "vault completions init");

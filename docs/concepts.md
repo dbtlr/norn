@@ -14,8 +14,7 @@ A **vault** is a directory containing Markdown files plus their attachments. `va
 The graph contains:
 
 - **Documents.** Markdown files (`*.md`) with parsed frontmatter, headings, and body text.
-- **Files.** Every file the walker sees, including non-Markdown attachments (`*.png`, `*.pdf`, etc.). Use `vault files --format jsonl` to inspect.
-- **Links.** Every Markdown link, wikilink, embed, and image reference between documents and files. Each link carries the source path, target string, kind, status (resolved / unresolved / ambiguous), and source span.
+- **Links.** Every Markdown link, wikilink, embed, and image reference between documents and files. Each link carries the source path, target string, kind, status (resolved / unresolved / ambiguous), and source span. Non-Markdown attachments (`*.png`, `*.pdf`, etc.) are tracked internally as link targets so attachment references can resolve, but they are not first-class graph nodes.
 
 Graph construction is read-only and stateless. The same vault produces the same graph on every run.
 

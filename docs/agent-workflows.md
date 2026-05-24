@@ -57,7 +57,6 @@ These commands never write to the vault. An agent can run them with confidence:
 - `vault find`
 - `vault count`
 - `vault show`
-- `vault files`
 - `vault validate` (with or without `--summary`, with or without filters)
 - `vault repair plan` (produces an artifact; does not modify the vault)
 - `vault repair links` (planning report only)

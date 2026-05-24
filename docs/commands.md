@@ -55,14 +55,6 @@ vault show "My Note" --body --format json
 
 `--col` narrows the output fields; `--body` adds document body content. Multiple targets are accepted.
 
-## files
-
-Non-Markdown file inventory (and Markdown when you want the file-level view rather than the document-level view).
-
-```bash
-vault files --format jsonl
-```
-
 ## validate
 
 Read-only validation against configured rules.
@@ -136,7 +128,7 @@ Cache management subcommands. See [cache.md](cache.md) for full documentation.
 | `vault cache clear` | Delete the cache; next command rebuilds. |
 | `vault cache status` | Report cache path, size, doc/link/file counts, schema version. |
 
-Query commands (`vault validate`, `vault find`, `vault count`, `vault show`, `vault files`, `vault repair`) refresh the cache implicitly before reading. Pass the global `--no-cache-refresh` flag to skip that step.
+Query commands (`vault validate`, `vault find`, `vault count`, `vault show`, `vault repair`) refresh the cache implicitly before reading. Pass the global `--no-cache-refresh` flag to skip that step.
 
 ## Hidden subcommands
 

@@ -10,19 +10,23 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Breaking changes
+
+- **`vault files` removed.** No documented user story; "Files" demoted from a first-class graph concept to an internal walker step. Broken attachment references continue to surface via `vault validate`'s `link-target-missing` finding.
+- **`vault validate` records output now follows the norn-cli-output spec.** Status headline → severity tally → grouped tallies (`--summary`) or per-finding blocks with fix hints (default). `--format table` is no longer supported; use `--format records` (default on a TTY) or `--format json`/`jsonl`/`paths` for machine consumers. Default piped format is now `jsonl` (validate has no natural `paths` representation).
+- **`vault validate --format json` output is now wrapped in `{"total": N, "findings": [...]}`** (matches norn-cli-output §5.3). Consumers reading the old bare-array shape must navigate to `.findings`.
+
 ### Added
 
 - New `cli::ValidateFormat { Records, Json, Jsonl, Paths }`; default honors `isatty` (Records on TTY, Jsonl piped).
 
+### Changed
+
+- `vault validate --format paths` continues to emit unique sorted paths of documents that have findings.
+
 ### Fixed
 
 - `NO_COLOR` now correctly overrides `--color always` per [no-color.org](https://no-color.org/). Previously, an explicit `--color always` would still emit ANSI even when `NO_COLOR` was set. Affects every command using the shared palette (`vault find`, `vault config show`, `vault show`, `vault validate`).
-
-### Changed
-
-- **BREAKING:** `vault validate` records output now follows the norn-cli-output spec. Status headline → severity tally → grouped tallies (`--summary`) or per-finding blocks with fix hints (default). `--format table` is no longer supported; use `--format records` (default on a TTY) or `--format json`/`jsonl`/`paths` for machine consumers. Default piped format is now `jsonl` (validate has no natural `paths` representation).
-- `vault validate --format paths` continues to emit unique sorted paths of documents that have findings.
-- **BREAKING:** `vault validate --format json` output is now wrapped in `{"total": N, "findings": [...]}` (matches norn-cli-output §5.3). Consumers reading the old bare-array shape must navigate to `.findings`.
 
 ## v0.31.0 - 2026-05-23
 
