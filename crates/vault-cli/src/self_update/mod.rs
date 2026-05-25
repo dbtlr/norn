@@ -101,9 +101,18 @@ pub fn run(cfg: &RunConfig) -> Result<(SelfUpdateReport, i32)> {
     };
 
     // 4. Fetch manifest(s). In pinned mode, also fetch latest so the
-    //    JSON envelope's `latest_version` reflects the true latest.
-    let (manifest, latest_version) = if cfg.pinned_version.is_some() {
-        let pinned = manifest::fetch(&manifest_url)?;
+    //    JSON envelope's `latest_version` reflects the true latest. A 404
+    //    on the pinned URL means the tag does not exist on GitHub — surface
+    //    that as a precondition error (BLOCK), not a transient runtime fail.
+    let (manifest, latest_version) = if let Some(pin) = cfg.pinned_version.as_deref() {
+        let pinned = manifest::fetch(&manifest_url).map_err(|e| {
+            let msg = format!("{e:#}");
+            if msg.contains("HTTP 404") {
+                anyhow!("BLOCK::version_not_found: release v{pin} does not exist on GitHub")
+            } else {
+                e
+            }
+        })?;
         let latest_url = format!("{}/latest/download/dist-manifest.json", cfg.releases_url);
         let latest = manifest::fetch(&latest_url)?;
         let latest_v = latest.announcement_version().to_string();
@@ -336,6 +345,32 @@ mod run_tests {
         assert_eq!(classify_exit(&err), 2);
         let msg = format!("{err:#}");
         assert!(msg.contains("no_asset"), "got: {msg}");
+    }
+
+    #[test]
+    fn pinned_version_returns_block_when_tag_missing() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/download/v9.99.99/dist-manifest.json")
+            .with_status(404)
+            .create();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let receipt_path = write_receipt(tmp.path());
+
+        let cfg = RunConfig {
+            dry_run: true,
+            pinned_version: Some("9.99.99".to_string()),
+            receipt_path_override: Some(receipt_path),
+            install_path: tmp.path().join("vault"),
+            releases_url: server.url(),
+            target_triple: Some("aarch64-apple-darwin".to_string()),
+            current_version: "0.32.0".to_string(),
+        };
+        let err = run(&cfg).unwrap_err();
+        assert_eq!(classify_exit(&err), 2);
+        let msg = format!("{err:#}");
+        assert!(msg.contains("version_not_found"), "got: {msg}");
     }
 
     #[test]
