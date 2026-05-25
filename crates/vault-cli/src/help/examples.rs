@@ -176,6 +176,36 @@ pub fn examples_for(cmd_path: &str) -> Vec<(String, String)> {
                 "preview link risk if target were moved",
             ),
         ],
+        "vault set" => &[
+            (
+                "vault set notes/project.md --field status=active --yes",
+                "set the `status` field to `active`; skip confirm",
+            ),
+            (
+                "vault set notes/project.md --push aliases=new-alias --yes",
+                "append a value to an array-typed frontmatter field",
+            ),
+            (
+                "vault set notes/project.md --pop aliases=old-name --yes",
+                "drop a value from an array; silent if absent",
+            ),
+            (
+                "vault set notes/project.md --remove priority --yes",
+                "remove a frontmatter key (blocks on schema required fields)",
+            ),
+            (
+                r#"echo "new body" | vault set notes/project.md --body-from-stdin --yes"#,
+                "wholesale replace body content via stdin; frontmatter kept",
+            ),
+            (
+                r#"vault set notes/project.md --field-json tags='["foo","bar"]' --yes"#,
+                "set a structured value via raw JSON; escape hatch",
+            ),
+            (
+                "vault set notes/project.md --field status=active --dry-run --format json",
+                "preview the mutation as JSON without writing",
+            ),
+        ],
 
         // ── Thin tier: 0-1 examples each ────────────────────────────────────
         "vault completions init" => &[(
@@ -373,5 +403,28 @@ mod tests {
                 "expected numbered item {needle:?}; got body:\n{body}"
             );
         }
+    }
+
+    #[test]
+    fn set_examples_block_is_present() {
+        let examples = examples_for("vault set");
+        assert!(!examples.is_empty(), "vault set should have EXAMPLES");
+    }
+
+    #[test]
+    fn set_examples_cover_field_push_pop_remove_body_json_and_dryrun() {
+        let examples = examples_for("vault set");
+        let body = examples
+            .iter()
+            .map(|(cmd, _)| cmd.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("--field"), "should have --field example");
+        assert!(body.contains("--push"), "should have --push example");
+        assert!(body.contains("--pop"), "should have --pop example");
+        assert!(body.contains("--remove"), "should have --remove example");
+        assert!(body.contains("--body-from-stdin"), "should have --body-from-stdin example");
+        assert!(body.contains("--field-json"), "should have --field-json example");
+        assert!(body.contains("--dry-run"), "should have --dry-run example");
     }
 }
