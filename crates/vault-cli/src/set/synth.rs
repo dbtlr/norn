@@ -416,6 +416,32 @@ pub fn synth_frontmatter_ops_typed(
     Ok(changes)
 }
 
+/// Produce a `replace_body` PlannedChange if the new body differs from the
+/// current body byte-for-byte. Returns None when content is identical (no-op
+/// write — caller should report `body_changed: false`).
+#[allow(dead_code)] // wired in when Command::Set handler lands (Phase 5.4)
+pub fn synth_body_op(current_body: &str, new_body: &str) -> Option<PlannedChange> {
+    if current_body == new_body {
+        return None;
+    }
+    Some(PlannedChange {
+        change_id: String::new(),
+        path: camino::Utf8PathBuf::new(),
+        document_hash: String::new(),
+        finding_code: "operator-mutation".to_string(),
+        finding_rule: None,
+        repair_rule: "vault-set".to_string(),
+        operation: "replace_body".to_string(),
+        field: None,
+        expected_old_value: None,
+        new_value: Some(serde_json::Value::String(new_body.to_string())),
+        destination: None,
+        link_risk: None,
+        warnings: vec![],
+        force: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,5 +854,25 @@ mod tests {
             result.is_err(),
             "cross-class conflict on 'tags' should refuse"
         );
+    }
+
+    // ── synth_body_op tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn synth_body_op_emitted_when_stdin_differs_from_current() {
+        let current_body = "old body\n";
+        let new_body = "new body\n";
+        let op = synth_body_op(current_body, new_body);
+        assert!(op.is_some());
+        let op = op.unwrap();
+        assert_eq!(op.operation, "replace_body");
+        assert_eq!(op.new_value, Some(serde_json::json!("new body\n")));
+    }
+
+    #[test]
+    fn synth_body_op_omitted_when_stdin_matches_current_byte_for_byte() {
+        let current_body = "same body\n";
+        let new_body = "same body\n";
+        assert!(synth_body_op(current_body, new_body).is_none());
     }
 }
