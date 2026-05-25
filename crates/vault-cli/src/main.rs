@@ -18,6 +18,7 @@ pub mod prompt;
 mod query;
 mod repair;
 mod repair_apply;
+mod self_update;
 mod show;
 mod target;
 mod validate;
