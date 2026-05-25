@@ -172,6 +172,39 @@ pub fn apply_repair_plan(
         }
     }
 
+    // Pass 1d: replace_body operations. Whole-body rewrites with hash-check
+    // discipline matching Passes 1a / 1b. Sequenced after delete_document so we
+    // never attempt a body-replace on a file that was just removed, and before
+    // move_document so the content is settled before any rename.
+    for change in plan
+        .changes
+        .iter()
+        .filter(|c| c.operation == "replace_body")
+    {
+        check_hash(&current_hashes, change)?;
+
+        if dry_run {
+            if !report.changed_files.contains(&change.path) {
+                report.changed_files.push(change.path.clone());
+            }
+            report.replaced_bodies.push(change.path.clone());
+            continue;
+        }
+
+        let absolute_path = cwd.join(&change.path);
+        let content =
+            fs::read_to_string(&absolute_path).with_context(|| format!("read {absolute_path}"))?;
+        let updated = vault_standards::apply::apply_replace_body(&content, change)?;
+        if updated != content {
+            fs::write(&absolute_path, &updated)
+                .with_context(|| format!("write {absolute_path}"))?;
+            if !report.changed_files.contains(&change.path) {
+                report.changed_files.push(change.path.clone());
+            }
+        }
+        report.replaced_bodies.push(change.path.clone());
+    }
+
     // Collect move_document changes for passes 2 and 3.
     let move_changes: Vec<&PlannedChange> = plan
         .changes

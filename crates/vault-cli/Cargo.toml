@@ -49,6 +49,7 @@ clap_complete_nushell.workspace = true
 clap_mangen.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 mockito.workspace = true
 rusqlite = { workspace = true }
 tempfile = "3"
