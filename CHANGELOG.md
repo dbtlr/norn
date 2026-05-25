@@ -18,6 +18,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 - Bumped `serde_json` 1.0.149 → 1.0.150 (patch).
 - Bumped `rusqlite` 0.32.1 → 0.39.0 (still `features = ["bundled"]`; ships with a newer bundled SQLite). No source changes required; cache schema and on-disk format unchanged.
+- Bumped `sha2` 0.10.9 → 0.11.0. The digest type lost its `LowerHex` impl in 0.11; cache-identity hashing in `vault-cache` migrated from `format!("{:x}", …)` to explicit byte-iteration. Hash output is byte-identical to the previous formulation, so existing cache directories continue to resolve.
 
 ## v0.32.0 - 2026-05-25
 
