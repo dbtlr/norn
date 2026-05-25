@@ -29,13 +29,17 @@ clap_mangen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
+tar.workspace = true
 terminal_size = { workspace = true }
 thiserror.workspace = true
+ureq.workspace = true
 vault-cache = { path = "../vault-cache" }
 vault-core = { path = "../vault-core" }
 vault-frontmatter = { path = "../vault-frontmatter" }
 vault-graph = { path = "../vault-graph" }
 vault-standards = { path = "../vault-standards" }
+xz2.workspace = true
 
 [build-dependencies]
 camino.workspace = true
@@ -45,5 +49,6 @@ clap_complete_nushell.workspace = true
 clap_mangen.workspace = true
 
 [dev-dependencies]
+mockito.workspace = true
 rusqlite = { workspace = true }
 tempfile = "3"
