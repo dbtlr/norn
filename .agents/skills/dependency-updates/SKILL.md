@@ -69,12 +69,21 @@ Procedure:
 git fetch origin
 git checkout -b dependabot-pr-<n> origin/dependabot/cargo/<dep>-<version>
 
-# Run the full vault-cli quartet (matches CI):
+# IMPORTANT for dep updates: run --locked FIRST. The non-locked `cargo test`
+# silently regenerates Cargo.lock, masking lockfile drift that CI catches
+# under --locked. Order matters.
+cargo check --workspace --locked
+
+# Then the rest of the quartet:
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
-cargo check --workspace --locked
+
+# Finally, confirm the lockfile is still clean (in case test regenerated it):
+git status --short  # Cargo.lock should NOT show as modified
 ```
+
+If `git status` shows `M Cargo.lock` after the quartet, you have lockfile drift — commit the regenerated Cargo.lock as part of the dep PR (`build: regenerate Cargo.lock after <dep> bump`). CI runs `cargo test --workspace --locked` and will fail on stale lockfiles.
 
 Note: `cargo deny check` is NOT in the quartet but IS in CI. License-allowlist failures show up only in CI. If you've added a new dep that pulls in an unfamiliar license (e.g., `webpki-roots` ships under `CDLA-Permissive-2.0`), expect a CI failure unless `deny.toml` already has the license.
 
@@ -213,6 +222,14 @@ Once closed, GH may refuse `gh pr reopen <n>`. If you anticipate doing the migra
 ### Pitfall: cargo-deny only runs in CI
 
 A new TLS-touching dep often pulls in `webpki-roots` (CDLA-Permissive-2.0) or similar permissive licenses not in vault-cli's existing allow-list. The local quartet is silent on this. Watch the first CI run on a new-dep PR.
+
+### Pitfall: lockfile drift masked by `cargo test --workspace`
+
+The non-locked `cargo test --workspace` (and `cargo build`) silently regenerates `Cargo.lock` if the dep tree resolves differently than what's recorded. CI runs `cargo test --workspace --locked`, which rejects any drift. Common trigger: rebasing a dep PR onto a new main pulls fresh transitive resolutions that the bump's original `Cargo.lock` doesn't match.
+
+**Symptoms:** Local quartet green, CI fails with `the lock file Cargo.lock needs to be updated but --locked was passed`.
+
+**Prevention:** Run `cargo check --workspace --locked` *before* the non-locked test commands so any drift surfaces immediately. After the quartet, `git status` should show no Cargo.lock changes. If it does, commit the regenerated lock as part of the PR.
 
 ### Pitfall: cargo-deny duplicate-version warnings
 
