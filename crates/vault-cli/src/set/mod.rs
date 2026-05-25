@@ -3,6 +3,7 @@
 //! the existing apply_repair_plan orchestrator.
 
 pub mod synth;
+pub mod validate;
 
 use anyhow::bail;
 use anyhow::Result;
