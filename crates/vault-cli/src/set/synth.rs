@@ -1,5 +1,7 @@
 //! `vault set` plan synthesis: CLI args → RepairPlan.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
 use vault_cache::Cache;
@@ -38,6 +40,61 @@ pub fn parse_kv(raw: &str) -> Result<(String, String)> {
         bail!("KEY cannot be empty in: {raw}");
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+/// Refuse with a clear error if any key appears across multiple mutation
+/// classes (--field/--field-json/--push/--pop/--remove). Within-class
+/// multi-instance is fine (accumulation semantics).
+///
+/// --field and --field-json are treated as a single class for this purpose:
+/// both write a value to the key, and using both for the same key is
+/// ambiguous.
+#[allow(dead_code)] // wired in during Task 2.6 (plan synthesis)
+pub fn detect_cross_class_conflicts(
+    fields: &[String],
+    field_json: &[String],
+    push: &[String],
+    pop: &[String],
+    remove: &[String],
+) -> Result<()> {
+    let mut by_key: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
+
+    for kv in fields {
+        let (k, _) = parse_kv(kv)?;
+        by_key.entry(k).or_default().insert("--field");
+    }
+    for kv in field_json {
+        let (k, _) = parse_kv(kv)?;
+        by_key.entry(k).or_default().insert("--field-json");
+    }
+    for kv in push {
+        let (k, _) = parse_kv(kv)?;
+        by_key.entry(k).or_default().insert("--push");
+    }
+    for kv in pop {
+        let (k, _) = parse_kv(kv)?;
+        by_key.entry(k).or_default().insert("--pop");
+    }
+    for k in remove {
+        by_key.entry(k.clone()).or_default().insert("--remove");
+    }
+
+    let conflicts: Vec<(String, Vec<&'static str>)> = by_key
+        .into_iter()
+        .filter(|(_, classes)| classes.len() > 1)
+        .map(|(k, classes)| (k, classes.into_iter().collect()))
+        .collect();
+
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = String::from("cross-class conflict on the same key:\n");
+    for (k, classes) in &conflicts {
+        msg.push_str(&format!("  '{k}': {}\n", classes.join(" + ")));
+    }
+    msg.push_str("each key may be targeted by only one of --field/--field-json/--push/--pop/--remove per invocation");
+    bail!("{msg}")
 }
 
 #[cfg(test)]
@@ -150,5 +207,82 @@ mod tests {
     #[test]
     fn parse_kv_rejects_empty_key() {
         assert!(parse_kv("=value").is_err());
+    }
+
+    #[test]
+    fn detect_conflicts_passes_when_keys_are_disjoint() {
+        let report = detect_cross_class_conflicts(
+            &["tags=foo".to_string()],
+            &[],
+            &["aliases=bar".to_string()],
+            &[],
+            &["old_key".to_string()],
+        );
+        assert!(report.is_ok());
+    }
+
+    #[test]
+    fn detect_conflicts_refuses_field_plus_push_on_same_key() {
+        let report = detect_cross_class_conflicts(
+            &["tags=foo".to_string()],
+            &[],
+            &["tags=bar".to_string()],
+            &[],
+            &[],
+        );
+        assert!(report.is_err());
+        let err = report.unwrap_err().to_string();
+        assert!(err.contains("tags"));
+        assert!(err.contains("--field") && err.contains("--push"));
+    }
+
+    #[test]
+    fn detect_conflicts_refuses_field_plus_remove_on_same_key() {
+        let report = detect_cross_class_conflicts(
+            &["name=foo".to_string()],
+            &[],
+            &[],
+            &[],
+            &["name".to_string()],
+        );
+        assert!(report.is_err());
+    }
+
+    #[test]
+    fn detect_conflicts_allows_within_class_multi_instance() {
+        let report = detect_cross_class_conflicts(
+            &["tags=foo".to_string(), "tags=bar".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(report.is_ok());
+    }
+
+    #[test]
+    fn detect_conflicts_refuses_field_plus_field_json_on_same_key() {
+        // --field and --field-json target the same logical operation (set the
+        // value). Cross-instance on the same key is ambiguous; refuse.
+        let report = detect_cross_class_conflicts(
+            &["count=42".to_string()],
+            &["count=43".to_string()],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(report.is_err());
+    }
+
+    #[test]
+    fn detect_conflicts_refuses_push_plus_pop_on_same_key() {
+        let report = detect_cross_class_conflicts(
+            &[],
+            &[],
+            &["tags=add".to_string()],
+            &["tags=drop".to_string()],
+            &[],
+        );
+        assert!(report.is_err());
     }
 }
