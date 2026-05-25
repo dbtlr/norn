@@ -597,6 +597,39 @@ pub fn apply_link_rewrites(
 /// Apply a `rewrite_link` operation to source-doc content. Rewrites every
 /// wikilink in the source whose target equals `expected_old_value` to use
 /// `new_value`, preserving display text, anchor, and block-ref suffixes.
+/// Replaces the body of a document wholesale, preserving the frontmatter block
+/// (opening `---`, YAML content, and closing `---`) exactly as-is. If the
+/// document has no frontmatter, the entire content is replaced by `new_value`.
+///
+/// Returns `ApplyError::MissingNewValue` when `change.new_value` is absent or
+/// not a string.
+///
+/// Caller is responsible for hash verification before invoking this.
+pub fn apply_replace_body(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
+    let new_body = change
+        .new_value
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApplyError::MissingNewValue {
+            path: change.path.clone(),
+        })?;
+
+    let mut diagnostics = Vec::new();
+    let (_, frontmatter_range, _, body_start) = extract_frontmatter(content, &mut diagnostics);
+
+    match frontmatter_range {
+        Some(_) => {
+            // Preserve everything up to (and including) the closing `---\n`,
+            // then replace the body.
+            let mut result = String::with_capacity(body_start + new_body.len());
+            result.push_str(&content[..body_start]);
+            result.push_str(new_body);
+            Ok(result)
+        }
+        None => Ok(new_body.to_string()),
+    }
+}
+
 ///
 /// Caller is responsible for hash verification before invoking this.
 ///
@@ -1221,6 +1254,76 @@ mod tests {
         };
         let updated = apply_rewrite_link(original, &change).unwrap();
         assert!(updated.contains("[[norn-brand#^block-id]]"));
+    }
+
+    #[test]
+    fn apply_replace_body_replaces_body_preserves_frontmatter() {
+        let content = "---\ntitle: Foo\n---\nold body line 1\nold body line 2\n";
+        let change = PlannedChange {
+            change_id: "test".to_string(),
+            path: "test.md".into(),
+            document_hash: "ignored".to_string(),
+            finding_code: "operator-mutation".to_string(),
+            finding_rule: None,
+            repair_rule: "vault-set".to_string(),
+            operation: "replace_body".to_string(),
+            field: None,
+            expected_old_value: None,
+            new_value: Some(Value::String("new body content\n".to_string())),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+        };
+        let result =
+            apply_replace_body(content, &change).expect("apply_replace_body should succeed");
+        assert_eq!(result, "---\ntitle: Foo\n---\nnew body content\n");
+    }
+
+    #[test]
+    fn apply_replace_body_handles_doc_with_no_frontmatter() {
+        let content = "raw body line 1\nraw body line 2\n";
+        let change = PlannedChange {
+            change_id: "test".to_string(),
+            path: "test.md".into(),
+            document_hash: "ignored".to_string(),
+            finding_code: "operator-mutation".to_string(),
+            finding_rule: None,
+            repair_rule: "vault-set".to_string(),
+            operation: "replace_body".to_string(),
+            field: None,
+            expected_old_value: None,
+            new_value: Some(Value::String("new body\n".to_string())),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+        };
+        let result =
+            apply_replace_body(content, &change).expect("apply_replace_body should succeed");
+        assert_eq!(result, "new body\n");
+    }
+
+    #[test]
+    fn apply_replace_body_returns_error_when_new_value_missing() {
+        let content = "---\ntitle: Foo\n---\nbody\n";
+        let change = PlannedChange {
+            change_id: "test".to_string(),
+            path: "test.md".into(),
+            document_hash: "ignored".to_string(),
+            finding_code: "operator-mutation".to_string(),
+            finding_rule: None,
+            repair_rule: "vault-set".to_string(),
+            operation: "replace_body".to_string(),
+            field: None,
+            expected_old_value: None,
+            new_value: None, // missing!
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+        };
+        assert!(apply_replace_body(content, &change).is_err());
     }
 
     #[test]
