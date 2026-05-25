@@ -2,6 +2,7 @@
 //! body replacement. Synthesizes a RepairPlan in-process and feeds it through
 //! the existing apply_repair_plan orchestrator.
 
+pub mod report;
 pub mod synth;
 pub mod validate;
 
