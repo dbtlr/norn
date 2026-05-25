@@ -15,6 +15,10 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
+    # webpki-roots bundles the Mozilla root CA list under this license;
+    # pulled in via ureq's rustls TLS feature for `vault self-update`.
+    # Permissive in effect (no copyleft, no source-share requirement).
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
