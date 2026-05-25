@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
+use serde_json::Value;
 use vault_cache::Cache;
+use vault_standards::PlannedChange;
 
 /// Resolve the user-supplied DOC argument into a vault-relative path.
 /// Accepts path, stem, or wikilink-shaped input (with or without [[]]).
@@ -95,6 +97,133 @@ pub fn detect_cross_class_conflicts(
     }
     msg.push_str("each key may be targeted by only one of --field/--field-json/--push/--pop/--remove per invocation");
     bail!("{msg}")
+}
+
+/// Light type inference for schema-silent values:
+/// - "true"/"false" → bool
+/// - integer-shaped → i64
+/// - "null" → null
+/// - everything else → string
+///
+/// Does NOT do YAML datetime/date inference (foot-gun).
+#[allow(dead_code)] // wired in when synth_frontmatter_ops is called from Command::Set handler
+pub fn infer_scalar(raw: &str) -> Value {
+    match raw {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" => Value::Null,
+        s => {
+            if let Ok(n) = s.parse::<i64>() {
+                Value::from(n)
+            } else {
+                Value::String(s.to_string())
+            }
+        }
+    }
+}
+
+/// Construct a partial PlannedChange with the operator-mutation defaults filled in.
+///
+/// path / document_hash / change_id are left empty for the caller to stamp.
+#[allow(dead_code)] // wired in when synth_frontmatter_ops is called from Command::Set handler
+pub fn make_planned_change(
+    key: &str,
+    op: &str,
+    expected_old: Option<Value>,
+    new_value: Option<Value>,
+) -> PlannedChange {
+    PlannedChange {
+        change_id: String::new(),
+        path: camino::Utf8PathBuf::new(),
+        document_hash: String::new(),
+        finding_code: "operator-mutation".to_string(),
+        finding_rule: None,
+        repair_rule: "vault-set".to_string(),
+        operation: op.to_string(),
+        field: Some(key.to_string()),
+        expected_old_value: expected_old,
+        new_value,
+        destination: None,
+        link_risk: None,
+        warnings: vec![],
+        force: false,
+    }
+}
+
+/// Schema-silent plan synthesis from CLI args.
+///
+/// Uses light type inference for --field values (bool/int/null + string
+/// fallback). Push/pop arrays are resolved against the current value at synth
+/// time.
+///
+/// Refuses on:
+/// - Malformed JSON in --field-json
+///
+/// Silent no-ops: none yet (push/pop/remove added in the next task).
+#[allow(dead_code)] // wired in when Command::Set handler lands (Phase 5)
+pub fn synth_frontmatter_ops(
+    current_frontmatter: &Value,
+    fields: &[String],
+    field_json: &[String],
+    push: &[String],
+    pop: &[String],
+    remove: &[String],
+) -> Result<Vec<PlannedChange>> {
+    let current_obj = current_frontmatter
+        .as_object()
+        .ok_or_else(|| anyhow!("frontmatter is not a top-level mapping"))?;
+
+    let mut changes: Vec<PlannedChange> = Vec::new();
+
+    // --field: group by key, multi-instance accumulates into array.
+    let mut grouped_fields: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for kv in fields {
+        let (k, v) = parse_kv(kv)?;
+        grouped_fields.entry(k).or_default().push(infer_scalar(&v));
+    }
+    for (key, values) in &grouped_fields {
+        let new_value = if values.len() == 1 {
+            values[0].clone()
+        } else {
+            Value::Array(values.clone())
+        };
+        let op = if current_obj.contains_key(key) {
+            "set_frontmatter"
+        } else {
+            "add_frontmatter"
+        };
+        let expected_old_value = current_obj.get(key).cloned();
+        changes.push(make_planned_change(
+            key,
+            op,
+            expected_old_value,
+            Some(new_value),
+        ));
+    }
+
+    // --field-json: raw JSON parsed verbatim.
+    for kv in field_json {
+        let (key, raw_json) = parse_kv(kv)?;
+        let parsed: Value = serde_json::from_str(&raw_json)
+            .map_err(|e| anyhow!("--field-json value is not valid JSON ({key}): {e}"))?;
+        let op = if current_obj.contains_key(&key) {
+            "set_frontmatter"
+        } else {
+            "add_frontmatter"
+        };
+        let expected_old_value = current_obj.get(&key).cloned();
+        changes.push(make_planned_change(
+            &key,
+            op,
+            expected_old_value,
+            Some(parsed),
+        ));
+    }
+
+    // push/pop/remove args are accepted but not yet processed (added Task 3.2).
+    let _ = (push, pop, remove);
+
+    Ok(changes)
 }
 
 #[cfg(test)]
@@ -284,5 +413,118 @@ mod tests {
             &[],
         );
         assert!(report.is_err());
+    }
+
+    // ── synth_frontmatter_ops tests ──────────────────────────────────────────
+
+    use serde_json::json;
+
+    #[test]
+    fn synth_field_for_new_key_emits_add_frontmatter() {
+        let current_frontmatter = json!({"title": "Foo"});
+        let changes = synth_frontmatter_ops(
+            &current_frontmatter,
+            &["status=active".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .expect("synth should succeed");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].operation, "add_frontmatter");
+        assert_eq!(changes[0].field.as_deref(), Some("status"));
+        assert_eq!(changes[0].new_value, Some(json!("active")));
+    }
+
+    #[test]
+    fn synth_field_for_existing_key_emits_set_frontmatter_with_old_value() {
+        let current_frontmatter = json!({"status": "draft"});
+        let changes = synth_frontmatter_ops(
+            &current_frontmatter,
+            &["status=active".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].operation, "set_frontmatter");
+        assert_eq!(changes[0].expected_old_value, Some(json!("draft")));
+        assert_eq!(changes[0].new_value, Some(json!("active")));
+    }
+
+    #[test]
+    fn synth_field_multi_instance_same_key_accumulates_array() {
+        let current_frontmatter = json!({});
+        let changes = synth_frontmatter_ops(
+            &current_frontmatter,
+            &["tags=foo".to_string(), "tags=bar".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field.as_deref(), Some("tags"));
+        assert_eq!(changes[0].new_value, Some(json!(["foo", "bar"])));
+    }
+
+    #[test]
+    fn synth_field_json_parses_raw_json() {
+        let current_frontmatter = json!({});
+        let changes = synth_frontmatter_ops(
+            &current_frontmatter,
+            &[],
+            &["count=42".to_string()],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(changes[0].new_value, Some(json!(42)));
+    }
+
+    #[test]
+    fn synth_field_json_with_malformed_json_errors() {
+        let current_frontmatter = json!({});
+        let result = synth_frontmatter_ops(
+            &current_frontmatter,
+            &[],
+            &["data={not valid".to_string()],
+            &[],
+            &[],
+            &[],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn synth_field_with_schema_silent_path_infers_bool_int_null() {
+        let current_frontmatter = json!({});
+        let changes = synth_frontmatter_ops(
+            &current_frontmatter,
+            &[
+                "active=true".to_string(),
+                "count=42".to_string(),
+                "missing=null".to_string(),
+                "name=alpha".to_string(),
+            ],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let by_field: std::collections::BTreeMap<_, _> = changes
+            .iter()
+            .map(|c| (c.field.as_deref().unwrap_or(""), c.new_value.clone()))
+            .collect();
+        assert_eq!(by_field.get("active"), Some(&Some(json!(true))));
+        assert_eq!(by_field.get("count"), Some(&Some(json!(42))));
+        assert_eq!(by_field.get("missing"), Some(&Some(json!(null))));
+        assert_eq!(by_field.get("name"), Some(&Some(json!("alpha"))));
     }
 }
