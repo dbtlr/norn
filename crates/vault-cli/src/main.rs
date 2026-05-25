@@ -555,6 +555,10 @@ fn run(cli: Cli) -> Result<i32> {
 
             Ok(0)
         }
+        Command::Set(args) => {
+            let exit_code = set::run(&cwd, args)?;
+            Ok(exit_code)
+        }
         Command::Init(args) => init::run(&cwd, &args),
         Command::Completions(_) => {
             unreachable!("completions are handled before vault targeting")
