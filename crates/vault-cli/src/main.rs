@@ -19,6 +19,7 @@ mod query;
 mod repair;
 mod repair_apply;
 mod self_update;
+mod set;
 mod show;
 mod target;
 mod validate;
