@@ -116,11 +116,58 @@ Output formats:
 
 Apply rejects mismatched vault roots, stale document hashes, unsupported schema versions, conflicting field changes, and expected-old-value mismatches. The orchestrator is atomic-at-batch-level: any precondition failure aborts the whole apply before any partial writes (stderr error, exit 1, no report rendered).
 
+## set
+
+Update one document — frontmatter mutation and wholesale body replacement.
+
+```bash
+vault set notes/task.md --field status=active
+vault set notes/task.md --push tags=work --dry-run
+vault set notes/task.md --remove old_key --yes
+vault set notes/task.md --field-json count=42 --format json
+echo "new body" | vault set notes/task.md --body-from-stdin --yes
+```
+
+Flag classes:
+
+| Flag | Purpose |
+|---|---|
+| `--field KEY=VALUE` | Set a frontmatter field. Repeatable; multiple instances of the same key accumulate into an array. |
+| `--field-json KEY=JSON` | Set a frontmatter field with an explicitly JSON-parsed value (arrays, objects, null). |
+| `--push KEY=VALUE` | Append a value to a list-typed field. Creates a single-element array if the key is absent. |
+| `--pop KEY=VALUE` | Remove a value from a list-typed field. Silent no-op if the value is absent. |
+| `--remove KEY` | Drop a frontmatter key entirely. Silent no-op if absent. |
+| `--body-from-stdin` | Wholesale body replacement; new body content is read from stdin. |
+| `--force` | Bypass schema enforcement (type validation and required-field protection). |
+| `--yes` | Skip the interactive confirmation prompt and apply. |
+| `--dry-run` | Preview the mutation without writing. |
+| `--format records\|json` | Output shape. `json` emits the SetReport envelope. |
+
+Schema-aware behavior: when `field_types` rules are configured, `vault set` validates
+each value's type before applying. `--force` bypasses type validation and required-field
+protection. `--remove` on a required field is refused unless `--force` is given.
+
+Wikilink fields: when a field is declared `wikilink` or `wikilink_or_list` in `field_types`,
+values are auto-wrapped on write (`vault-cli` becomes `[[vault-cli]]`). Unresolved or
+ambiguous link targets surface as warnings (not refusals).
+
+Atomicity: all ops in a single invocation apply as one filesystem write. Any pre-flight
+refusal is all-or-nothing — no partial writes.
+
+Apply model: matches `vault move` and `vault delete`. TTY shows a preview and prompts for
+confirmation; non-TTY without `--yes` prints a dry-run summary and exits. `--yes` skips the
+prompt and applies. `--dry-run` previews and exits. `--format json` is implicitly
+non-interactive and emits the SetReport envelope.
+
+Output: SetReport JSON envelope with `schema_version: 1`.
+
+Exit codes: 0 success or dry-run, 1 operator-cancelled, 2 pre-flight refusal.
+
 ## Document mutation surface
 
-`vault get`, `vault move`, and `vault delete` form a CRUD-shaped surface
+`vault get`, `vault set`, `vault move`, and `vault delete` form a CRUD-shaped surface
 for working with vault documents without touching the filesystem directly.
-All mutation commands (`move`, `delete`) are safe-by-default: TTY runs
+All mutation commands (`set`, `move`, `delete`) are safe-by-default: TTY runs
 prompt for confirmation, non-TTY runs without `--yes` print a dry-run summary
 and exit. `--yes` skips the prompt and applies; `--dry-run` previews and
 exits explicitly; `--format json` is implicitly non-interactive.
@@ -128,7 +175,9 @@ exits explicitly; `--format json` is implicitly non-interactive.
 The cascading backlink rewrites that `vault move` performs reuse the
 existing `apply_link_rewrites` machinery from the repair-apply orchestrator;
 `vault delete --rewrite-to <ALT>` does the same for redirecting backlinks
-before deletion.
+before deletion. Under the hood, `vault set --body-from-stdin` emits a
+`replace_body` plan op alongside its frontmatter ops — this is a `vault set`
+implementation detail, not a config-rule-triggerable action.
 
 ## move
 

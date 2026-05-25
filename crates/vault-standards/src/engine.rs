@@ -167,7 +167,7 @@ pub(crate) fn matching_rules<'a>(
         .collect()
 }
 
-pub(crate) fn rule_matches(document: &Document, rule: &ValidateRule) -> bool {
+pub fn rule_matches(document: &Document, rule: &ValidateRule) -> bool {
     if let Some(path_pattern) = &rule.r#match.path {
         if !pattern_matches_path(path_pattern, &document.path) {
             return false;

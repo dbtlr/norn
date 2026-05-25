@@ -575,7 +575,7 @@ fn piped_default_is_json_explicit_format_overrides() {
     );
     let json: serde_json::Value =
         serde_json::from_str(&piped_stdout).expect("piped default should be valid JSON");
-    assert_eq!(json["schema_version"], 7);
+    assert_eq!(json["schema_version"], 8);
 
     // Explicit --format report overrides the piped default
     let report = Command::new(env!("CARGO_BIN_EXE_vault"))

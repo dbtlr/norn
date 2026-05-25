@@ -1664,6 +1664,7 @@ version = "0.32.0"
 dependencies = [
  "anstyle",
  "anyhow",
+ "blake3",
  "camino",
  "chrono",
  "clap",

@@ -73,9 +73,11 @@ The product loop is four stages:
 3. **Apply** the plan explicitly via `vault repair apply`. Output: modified files + an apply report.
 4. **Verify** the vault after changes (`apply --verify`, or another `validate --summary` run).
 
-Validation is read-only and does not guess repairs. Repair planning is read-only and produces only inspectable artifacts. Repair apply is the only writing surface, and it requires an explicit plan input. There is no hidden write path.
+Validation is read-only and does not guess repairs. Repair planning is read-only and produces only inspectable artifacts. There is no hidden write path.
 
-Repair plans are schema-versioned (`schema_version: 6` as of v0.32). Apply rejects unsupported schema versions, plans for a different vault root, stale document hashes, conflicting field changes, and expected-old-value mismatches.
+Two explicit write surfaces exist: `vault repair apply` is the finding-driven batch write path — it requires an explicit plan artifact. `vault set`, `vault move`, and `vault delete` are the operator-driven CRUD surface for direct one-document mutations. Both paths are safe-by-default (dry-run previews, `--yes` to apply) and both go through the same underlying apply machinery.
+
+Repair plans are schema-versioned (`schema_version: 8` as of v0.32). Apply rejects unsupported schema versions, plans for a different vault root, stale document hashes, conflicting field changes, and expected-old-value mismatches.
 
 For the full repair model and supported actions, see [validation.md](validation.md).
 

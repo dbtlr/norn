@@ -284,7 +284,7 @@ fn repair_plan_generates_configured_frontmatter_change() {
     ]);
 
     let plan = serde_json::from_str::<Value>(&output).expect("repair plan should be JSON");
-    assert_eq!(plan["schema_version"], 7);
+    assert_eq!(plan["schema_version"], 8);
     assert_eq!(plan["summary"]["findings"], 1);
     assert_eq!(plan["summary"]["planned_changes"], 1);
     assert_eq!(plan["summary"]["skipped"]["total"], 0);
@@ -2301,7 +2301,7 @@ repair:
     let plan_text = fs::read_to_string(&plan_path).expect("plan should write");
     let plan_json: Value = serde_json::from_str(&plan_text).expect("repair plan should be JSON");
 
-    assert_eq!(plan_json["schema_version"], 7);
+    assert_eq!(plan_json["schema_version"], 8);
     assert_eq!(plan_json["summary"]["planned_changes"], 1);
     let change = &plan_json["changes"][0];
     assert_eq!(change["operation"], "move_document");

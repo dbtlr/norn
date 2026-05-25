@@ -19,6 +19,7 @@ mod query;
 mod repair;
 mod repair_apply;
 mod self_update;
+mod set;
 mod show;
 mod target;
 mod validate;
@@ -550,6 +551,104 @@ fn run(cli: Cli) -> Result<i32> {
                 // no-flag paths already returned above).
                 let preview = crate::delete_doc::build_report(plan, &index, rewrite_to, false);
                 crate::delete_doc::render_records(&mut out, &preview)?;
+            }
+
+            Ok(0)
+        }
+        Command::Set(args) => {
+            use std::io::{IsTerminal, Write};
+
+            let loaded_config = load_config(&cwd, config_path.as_ref())?;
+            let mut index = crate::cache::load_graph_index(
+                &cwd,
+                &loaded_config.index_options,
+                no_cache_refresh,
+            )?;
+            trim_diagnostics(&mut index, verbose);
+
+            // Open a Cache for resolve_target (needs document query, not just index).
+            let cache = crate::cache::open_for_query(
+                &cwd,
+                loaded_config.index_options.alias_field.as_deref(),
+                no_cache_refresh,
+            )?;
+
+            let vault_cfg = loaded_config.vault_config;
+
+            let outcome = match crate::set::synth::preflight_and_plan(
+                &cwd, &cache, &index, &vault_cfg, &args,
+            ) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                }
+            };
+
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+
+            // Determine whether to apply, and handle the TTY-interactive branch specially
+            // (it needs to render the preview before prompting).
+            // In JSON mode we must render exactly once — skip the preview when we're
+            // going to apply so callers never see two concatenated JSON objects.
+            let should_apply = if args.dry_run {
+                false
+            } else if args.yes {
+                true
+            } else if matches!(args.format, crate::cli::SetFormat::Json) {
+                // --format json is implicitly non-interactive; render preview and exit.
+                let preview = crate::set::report::build_report(&outcome, false);
+                crate::set::report::render_json(&mut out, &preview)?;
+                return Ok(0);
+            } else if std::io::stdin().is_terminal() {
+                // TTY interactive: render preview first so the operator can see what
+                // they're confirming, then prompt.
+                let preview = crate::set::report::build_report(&outcome, false);
+                crate::set::report::render_records(&mut out, &preview)?;
+                let stdin = std::io::stdin();
+                let mut reader = stdin.lock();
+                let mut prompt_out = std::io::stderr();
+                writeln!(prompt_out)?;
+                let ok = crate::prompt::confirm(&mut reader, &mut prompt_out, "Proceed? [y/N] ")?;
+                if !ok {
+                    std::process::exit(1);
+                }
+                true
+            } else {
+                // Non-TTY without --yes = implicit dry-run: render preview and exit.
+                let preview = crate::set::report::build_report(&outcome, false);
+                crate::set::report::render_records(&mut out, &preview)?;
+                return Ok(0);
+            };
+
+            if should_apply {
+                crate::repair_apply::apply_repair_plan(
+                    &cwd,
+                    &index,
+                    &outcome.plan,
+                    /*dry_run=*/ false,
+                )?;
+                let applied = crate::set::report::build_report(&outcome, true);
+                match args.format {
+                    crate::cli::SetFormat::Records => {
+                        crate::set::report::render_records(&mut out, &applied)?;
+                    }
+                    crate::cli::SetFormat::Json => {
+                        crate::set::report::render_json(&mut out, &applied)?;
+                    }
+                }
+            } else {
+                // --dry-run: render preview, respecting --format.
+                let preview = crate::set::report::build_report(&outcome, false);
+                match args.format {
+                    crate::cli::SetFormat::Records => {
+                        crate::set::report::render_records(&mut out, &preview)?;
+                    }
+                    crate::cli::SetFormat::Json => {
+                        crate::set::report::render_json(&mut out, &preview)?;
+                    }
+                }
             }
 
             Ok(0)

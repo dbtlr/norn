@@ -3,12 +3,15 @@ use std::fs;
 use anyhow::Result;
 use camino::Utf8PathBuf;
 use vault_graph::IndexOptions;
-use vault_standards::{parse_config, RepairConfig, ValidateConfig};
+use vault_standards::{parse_config, RepairConfig, ValidateConfig, VaultConfig};
 
 pub struct LoadedConfig {
     pub index_options: IndexOptions,
     pub validate: ValidateConfig,
     pub repair: RepairConfig,
+    /// Full parsed vault config. Commands that need the whole VaultConfig
+    /// (e.g. `vault set`'s schema-aware path) should use this field.
+    pub vault_config: VaultConfig,
 }
 
 pub fn effective_cwd(cwd: Option<&Utf8PathBuf>) -> Result<Utf8PathBuf> {
@@ -53,6 +56,7 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
             index_options: IndexOptions::default(),
             validate: ValidateConfig::default(),
             repair: RepairConfig::default(),
+            vault_config: VaultConfig::default(),
         });
     };
 
@@ -62,11 +66,12 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
 
     Ok(LoadedConfig {
         index_options: IndexOptions {
-            ignore: config.files.ignore,
-            alias_field: config.links.alias_field,
+            ignore: config.files.ignore.clone(),
+            alias_field: config.links.alias_field.clone(),
         },
-        validate: config.validate,
-        repair: config.repair,
+        validate: config.validate.clone(),
+        repair: config.repair.clone(),
+        vault_config: config,
     })
 }
 

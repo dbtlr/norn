@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use vault_frontmatter::{
-    extract_frontmatter, serialize_value_preserving_style, top_level_property_spans, QuoteError,
-    ValueStyle,
+    extract_frontmatter, serialize_array_block_for_new_field, serialize_value_preserving_style,
+    top_level_property_spans, QuoteError, ValueStyle,
 };
 
 use crate::findings::Finding;
@@ -117,6 +117,9 @@ pub struct RepairApplyReport {
     pub deleted_documents: Vec<DeleteResult>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub rewritten_links: Vec<LinkRewriteResult>,
+    /// Paths whose body was wholly replaced by a `replace_body` change (Pass 1d).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub replaced_bodies: Vec<Utf8PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<RepairApplyWarning>,
     pub plan_context: RepairApplyPlanContext,
@@ -145,6 +148,7 @@ impl RepairApplyReport {
             moved_files: Vec::new(),
             deleted_documents: Vec::new(),
             rewritten_links: Vec::new(),
+            replaced_bodies: Vec::new(),
             warnings: Vec::new(),
             plan_context: RepairApplyPlanContext {
                 skipped: plan.summary.skipped.clone(),
@@ -180,12 +184,12 @@ pub fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &RepairPlan) -> Result<(
 }
 
 /// Returns true for operations that are handled by dedicated orchestrator passes
-/// (Pass 1b, 1c, 2, 3) rather than the per-file frontmatter edit pass. These
+/// (Pass 1b, 1c, 1d, 2, 3) rather than the per-file frontmatter edit pass. These
 /// are skipped in `changes_by_path` rather than rejected as unsupported.
 fn is_orchestrator_pass_op(operation: &str) -> bool {
     matches!(
         operation,
-        "move_document" | "rewrite_link" | "delete_document"
+        "move_document" | "rewrite_link" | "delete_document" | "replace_body"
     )
 }
 
@@ -301,6 +305,37 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                         reason: format!("field {field} not present in frontmatter"),
                     });
                 };
+                let new_value = change
+                    .new_value
+                    .as_ref()
+                    .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
+
+                // Block-sequence arrays: value_range is None; replace the
+                // entire line_range (which covers `key:\n  - item\n …`) with
+                // a freshly serialized block.
+                if span.style == ValueStyle::BlockSequence {
+                    if let Value::Array(items) = new_value {
+                        let block_items =
+                            serialize_array_block_for_new_field(items).map_err(|e| {
+                                ApplyError::CannotMinimalEdit {
+                                    path: path.clone(),
+                                    reason: e.to_string(),
+                                }
+                            })?;
+                        let replacement = format!("{field}:\n{block_items}");
+                        edits.push((span.line_range.clone(), replacement));
+                        continue;
+                    }
+                    // Scalar value into a block-sequence field — refuse.
+                    return Err(ApplyError::CannotMinimalEdit {
+                        path: path.clone(),
+                        reason: format!(
+                            "field {field} has style {:?}; set_frontmatter requires a scalar value",
+                            span.style
+                        ),
+                    });
+                }
+
                 let Some(value_range) = span.value_range.clone() else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
@@ -310,18 +345,14 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                         ),
                     });
                 };
-                let new_value = change
-                    .new_value
-                    .as_ref()
-                    .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
                 let replacement = serialize_value_preserving_style(new_value, span.style).map_err(
                     |e| match e {
-                        QuoteError::StructuredOriginalStyle(_) | QuoteError::NonScalarValue => {
-                            ApplyError::CannotMinimalEdit {
-                                path: path.clone(),
-                                reason: e.to_string(),
-                            }
-                        }
+                        QuoteError::StructuredOriginalStyle(_)
+                        | QuoteError::NonScalarValue
+                        | QuoteError::ArrayIntoScalar => ApplyError::CannotMinimalEdit {
+                            path: path.clone(),
+                            reason: e.to_string(),
+                        },
                         QuoteError::Unrepresentable { .. } => ApplyError::CannotMinimalEdit {
                             path: path.clone(),
                             reason: e.to_string(),
@@ -368,11 +399,6 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                     .new_value
                     .as_ref()
                     .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
-                let rendered = serialize_value_preserving_style(new_value, ValueStyle::Plain)
-                    .map_err(|e| ApplyError::CannotMinimalEdit {
-                        path: path.clone(),
-                        reason: e.to_string(),
-                    })?;
                 // Insert at end of frontmatter block. extract_frontmatter
                 // returns a range over the YAML content (between the leading
                 // and trailing `---` lines). It ends at the byte just after
@@ -385,7 +411,29 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                     } else {
                         "\n"
                     };
-                let line_to_insert = format!("{leading_newline}{field}: {rendered}\n");
+                let line_to_insert = match new_value {
+                    Value::Array(items) => {
+                        // Default to block style for new array fields — more
+                        // readable in Markdown frontmatter.
+                        let block_items =
+                            serialize_array_block_for_new_field(items).map_err(|e| {
+                                ApplyError::CannotMinimalEdit {
+                                    path: path.clone(),
+                                    reason: e.to_string(),
+                                }
+                            })?;
+                        format!("{leading_newline}{field}:\n{block_items}")
+                    }
+                    _ => {
+                        let rendered =
+                            serialize_value_preserving_style(new_value, ValueStyle::Plain)
+                                .map_err(|e| ApplyError::CannotMinimalEdit {
+                                    path: path.clone(),
+                                    reason: e.to_string(),
+                                })?;
+                        format!("{leading_newline}{field}: {rendered}\n")
+                    }
+                };
                 edits.push((insertion..insertion, line_to_insert));
             }
             "move_document" => {
@@ -597,6 +645,39 @@ pub fn apply_link_rewrites(
 /// Apply a `rewrite_link` operation to source-doc content. Rewrites every
 /// wikilink in the source whose target equals `expected_old_value` to use
 /// `new_value`, preserving display text, anchor, and block-ref suffixes.
+/// Replaces the body of a document wholesale, preserving the frontmatter block
+/// (opening `---`, YAML content, and closing `---`) exactly as-is. If the
+/// document has no frontmatter, the entire content is replaced by `new_value`.
+///
+/// Returns `ApplyError::MissingNewValue` when `change.new_value` is absent or
+/// not a string.
+///
+/// Caller is responsible for hash verification before invoking this.
+pub fn apply_replace_body(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
+    let new_body = change
+        .new_value
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApplyError::MissingNewValue {
+            path: change.path.clone(),
+        })?;
+
+    let mut diagnostics = Vec::new();
+    let (_, frontmatter_range, _, body_start) = extract_frontmatter(content, &mut diagnostics);
+
+    match frontmatter_range {
+        Some(_) => {
+            // Preserve everything up to (and including) the closing `---\n`,
+            // then replace the body.
+            let mut result = String::with_capacity(body_start + new_body.len());
+            result.push_str(&content[..body_start]);
+            result.push_str(new_body);
+            Ok(result)
+        }
+        None => Ok(new_body.to_string()),
+    }
+}
+
 ///
 /// Caller is responsible for hash verification before invoking this.
 ///
@@ -1016,6 +1097,98 @@ mod tests {
     }
 
     #[test]
+    fn apply_add_frontmatter_array_inserts_block_style() {
+        let content = "---\ntitle: Foo\n---\nbody\n";
+        let change = make_change(
+            "a.md",
+            "aliases",
+            "h1",
+            "add_frontmatter",
+            Some(json!(["alpha", "beta"])),
+        );
+        let result = apply_change(content, &change).unwrap();
+        assert!(
+            result.contains("aliases:\n  - alpha\n  - beta"),
+            "expected block-style array in result: {result}"
+        );
+        assert!(result.contains("title: Foo"));
+        assert!(result.contains("body"));
+    }
+
+    #[test]
+    fn apply_add_frontmatter_empty_array_inserts_key_only() {
+        let content = "---\ntitle: Foo\n---\nbody\n";
+        let change = make_change("a.md", "aliases", "h1", "add_frontmatter", Some(json!([])));
+        let result = apply_change(content, &change).unwrap();
+        assert!(
+            result.contains("aliases:\n"),
+            "expected key line with no items: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_set_frontmatter_array_on_existing_block_replaces_items() {
+        let content = "---\naliases:\n  - old\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["old"])),
+            ..make_change(
+                "a.md",
+                "aliases",
+                "h1",
+                "set_frontmatter",
+                Some(json!(["alpha", "beta"])),
+            )
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert!(
+            result.contains("aliases:\n  - alpha\n  - beta"),
+            "expected new block items: {result}"
+        );
+        assert!(
+            !result.contains("- old"),
+            "old item should be removed: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_set_frontmatter_array_on_existing_flow_replaces_inline() {
+        let content = "---\naliases: [old]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["old"])),
+            ..make_change(
+                "a.md",
+                "aliases",
+                "h1",
+                "set_frontmatter",
+                Some(json!(["alpha", "beta"])),
+            )
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert!(
+            result.contains("aliases: [alpha, beta]"),
+            "expected inline flow array: {result}"
+        );
+        assert!(!result.contains("old"), "old item should be gone: {result}");
+    }
+
+    #[test]
+    fn apply_set_frontmatter_scalar_into_scalar_still_works() {
+        let content = "---\nstatus: draft\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("draft")),
+            ..make_change(
+                "a.md",
+                "status",
+                "h1",
+                "set_frontmatter",
+                Some(json!("active")),
+            )
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\nstatus: active\n---\nbody\n");
+    }
+
+    #[test]
     fn apply_add_frontmatter_inserts_missing_field() {
         let content = "---\ntitle: hi\n---\n# body\n";
         let change = make_change(
@@ -1221,6 +1394,76 @@ mod tests {
         };
         let updated = apply_rewrite_link(original, &change).unwrap();
         assert!(updated.contains("[[norn-brand#^block-id]]"));
+    }
+
+    #[test]
+    fn apply_replace_body_replaces_body_preserves_frontmatter() {
+        let content = "---\ntitle: Foo\n---\nold body line 1\nold body line 2\n";
+        let change = PlannedChange {
+            change_id: "test".to_string(),
+            path: "test.md".into(),
+            document_hash: "ignored".to_string(),
+            finding_code: "operator-mutation".to_string(),
+            finding_rule: None,
+            repair_rule: "vault-set".to_string(),
+            operation: "replace_body".to_string(),
+            field: None,
+            expected_old_value: None,
+            new_value: Some(Value::String("new body content\n".to_string())),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+        };
+        let result =
+            apply_replace_body(content, &change).expect("apply_replace_body should succeed");
+        assert_eq!(result, "---\ntitle: Foo\n---\nnew body content\n");
+    }
+
+    #[test]
+    fn apply_replace_body_handles_doc_with_no_frontmatter() {
+        let content = "raw body line 1\nraw body line 2\n";
+        let change = PlannedChange {
+            change_id: "test".to_string(),
+            path: "test.md".into(),
+            document_hash: "ignored".to_string(),
+            finding_code: "operator-mutation".to_string(),
+            finding_rule: None,
+            repair_rule: "vault-set".to_string(),
+            operation: "replace_body".to_string(),
+            field: None,
+            expected_old_value: None,
+            new_value: Some(Value::String("new body\n".to_string())),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+        };
+        let result =
+            apply_replace_body(content, &change).expect("apply_replace_body should succeed");
+        assert_eq!(result, "new body\n");
+    }
+
+    #[test]
+    fn apply_replace_body_returns_error_when_new_value_missing() {
+        let content = "---\ntitle: Foo\n---\nbody\n";
+        let change = PlannedChange {
+            change_id: "test".to_string(),
+            path: "test.md".into(),
+            document_hash: "ignored".to_string(),
+            finding_code: "operator-mutation".to_string(),
+            finding_rule: None,
+            repair_rule: "vault-set".to_string(),
+            operation: "replace_body".to_string(),
+            field: None,
+            expected_old_value: None,
+            new_value: None, // missing!
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+        };
+        assert!(apply_replace_body(content, &change).is_err());
     }
 
     #[test]

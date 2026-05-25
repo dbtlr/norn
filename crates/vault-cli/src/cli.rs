@@ -84,6 +84,36 @@ pub enum Command {
         long_about = "Get one or more documents in detail.\n\nEach target may be a vault-relative path, a unique case-insensitive document stem, or a wikilink-shaped string (with or without brackets, with or without anchor / block-ref / pipe-alias suffix). Ambiguous targets emit one record per resolved candidate. --body adds full body content; --col narrows the default field set."
     )]
     Get(GetArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Update one document — schema-aware frontmatter mutation + wholesale body replacement",
+        long_about = "Update one document: mutate frontmatter fields and optionally replace the body.\n\
+\n\
+WORKFLOW: vault set runs schema-aware validation against the configured field_types rules, \
+then applies all ops as a single atomic filesystem write, then emits a SetReport (records on \
+TTY, JSON when piped or --format json is set).\n\
+\n\
+SAFE BY DEFAULT: vault set is destructive. In a TTY, it shows a preview and prompts for \
+confirmation. Without --yes (and in a non-TTY context), nothing is written — the preview is \
+your dry-run.\n\
+\n\
+Safety flags:\n  \
+--yes            Skip the confirmation prompt and apply.\n  \
+--dry-run        Show the preview and exit without writing or prompting.\n  \
+--force          Bypass schema enforcement (type validation + required-field protection).\n  \
+--format records|json  Output shape. --format json is non-interactive and emits the SetReport envelope.\n\
+\n\
+Flag classes:\n  \
+--field KEY=VALUE      Set a frontmatter field. Multi-instance of the same key accumulates into an array.\n  \
+--field-json KEY=JSON  Set a field with an explicit JSON-parsed value (arrays, objects, null).\n  \
+--push KEY=VALUE       Append to a list-typed field; creates a single-element array if absent.\n  \
+--pop KEY=VALUE        Remove a value from a list-typed field. Silent no-op if absent.\n  \
+--remove KEY           Drop a frontmatter key entirely. Silent no-op if the key is missing.\n  \
+--body-from-stdin      Read new body content from stdin (wholesale body replacement).\n\
+\n\
+Exit codes: 0 success or dry-run, 1 operator-cancelled, 2 pre-flight refusal."
+    )]
+    Set(SetArgs),
     #[command(disable_help_flag = true, about = "Scaffold .vault/config.yaml")]
     Init(InitArgs),
     #[command(
@@ -610,6 +640,63 @@ pub enum GetFormat {
     Json,
 }
 
+#[derive(Args, Debug)]
+pub struct SetArgs {
+    /// The doc to mutate. Path, stem, or wikilink-shaped (with or without [[]]).
+    #[arg(value_name = "DOC")]
+    pub target: String,
+
+    /// Set a frontmatter field. Repeatable; multiple instances of the same key
+    /// accumulate into an array. KEY=VALUE.
+    #[arg(long = "field", value_name = "KEY=VALUE")]
+    pub fields: Vec<String>,
+
+    /// Set a frontmatter field with a JSON-parsed value. Escape hatch for
+    /// structured values (arrays, nested objects, explicit null). KEY=JSON.
+    #[arg(long = "field-json", value_name = "KEY=JSON")]
+    pub field_json: Vec<String>,
+
+    /// Append a value to a list-typed frontmatter field. Creates a single-element
+    /// array if the key doesn't exist. KEY=VALUE.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub push: Vec<String>,
+
+    /// Remove a value from a list-typed frontmatter field. Silent no-op if value
+    /// not present. KEY=VALUE.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub pop: Vec<String>,
+
+    /// Remove a frontmatter key entirely. Silent no-op if key not present.
+    #[arg(long, value_name = "KEY")]
+    pub remove: Vec<String>,
+
+    /// Read new body content from stdin (wholesale body replacement).
+    #[arg(long)]
+    pub body_from_stdin: bool,
+
+    /// Bypass schema enforcement (type validation + required-field protection).
+    #[arg(long)]
+    pub force: bool,
+
+    /// Apply the mutation without an interactive confirm prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Preview the mutation without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = SetFormat::Records)]
+    pub format: SetFormat,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetFormat {
+    Records,
+    Json,
+}
+
 #[derive(Debug, clap::Args)]
 pub struct MoveArgs {
     /// Source: vault-relative path or unique stem.
@@ -986,6 +1073,83 @@ mod get_cli_tests {
         match cli.command {
             Command::Get(args) => assert_eq!(args.format, GetFormat::Text),
             _ => panic!("expected Get variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod set_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn set_requires_a_doc_argument() {
+        assert!(Cli::try_parse_from(["vault", "set"]).is_err());
+    }
+
+    #[test]
+    fn set_accepts_field_flag() {
+        let cli = Cli::try_parse_from(["vault", "set", "Notes/foo.md", "--field", "status=active"])
+            .unwrap();
+        match cli.command {
+            Command::Set(args) => {
+                assert_eq!(args.target, "Notes/foo.md");
+                assert_eq!(args.fields, vec!["status=active".to_string()]);
+            }
+            _ => panic!("expected Command::Set"),
+        }
+    }
+
+    #[test]
+    fn set_accepts_push_pop_remove_flags() {
+        let cli = Cli::try_parse_from([
+            "vault",
+            "set",
+            "doc.md",
+            "--push",
+            "aliases=foo",
+            "--pop",
+            "aliases=bar",
+            "--remove",
+            "old_key",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Set(args) => {
+                assert_eq!(args.push, vec!["aliases=foo".to_string()]);
+                assert_eq!(args.pop, vec!["aliases=bar".to_string()]);
+                assert_eq!(args.remove, vec!["old_key".to_string()]);
+            }
+            _ => panic!("expected Command::Set"),
+        }
+    }
+
+    #[test]
+    fn set_accepts_field_json_and_body_from_stdin_and_force_and_yes_and_dry_run() {
+        let cli = Cli::try_parse_from([
+            "vault",
+            "set",
+            "doc.md",
+            "--field-json",
+            "count=42",
+            "--body-from-stdin",
+            "--force",
+            "--yes",
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Set(args) => {
+                assert_eq!(args.field_json, vec!["count=42".to_string()]);
+                assert!(args.body_from_stdin);
+                assert!(args.force);
+                assert!(args.yes);
+                assert!(args.dry_run);
+                assert_eq!(args.format, SetFormat::Json);
+            }
+            _ => panic!("expected Command::Set"),
         }
     }
 }

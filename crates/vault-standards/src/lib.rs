@@ -1,9 +1,9 @@
 pub mod apply;
 mod checks;
 mod config;
-mod engine;
+pub mod engine;
 mod findings;
-mod predicates;
+pub mod predicates;
 mod repair;
 mod summary;
 

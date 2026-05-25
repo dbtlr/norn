@@ -12,7 +12,7 @@ pub(crate) fn frontmatter_value_matches(actual: &Value, expected: &Value) -> boo
     }
 }
 
-pub(crate) fn frontmatter_type_matches(value: &Value, expected_type: &str) -> bool {
+pub fn frontmatter_type_matches(value: &Value, expected_type: &str) -> bool {
     match expected_type {
         "datetime" => value.as_str().is_some_and(is_datetime_string),
         "date" => value.as_str().is_some_and(is_date_string),
@@ -32,7 +32,7 @@ pub(crate) fn frontmatter_type_matches(value: &Value, expected_type: &str) -> bo
     }
 }
 
-pub(crate) fn is_datetime_string(value: &str) -> bool {
+pub fn is_datetime_string(value: &str) -> bool {
     let Some((date, time)) = value.split_once('T').or_else(|| value.split_once(' ')) else {
         return false;
     };
@@ -40,7 +40,7 @@ pub(crate) fn is_datetime_string(value: &str) -> bool {
     is_date_string(date) && is_time_string(time)
 }
 
-pub(crate) fn is_date_string(value: &str) -> bool {
+pub fn is_date_string(value: &str) -> bool {
     if is_plain_date_string(value) {
         return true;
     }
@@ -171,7 +171,7 @@ fn parse_two_digit_u8(value: &str, max: u8) -> Option<u8> {
     value.parse::<u8>().ok().filter(|value| *value <= max)
 }
 
-pub(crate) fn is_wikilink_string(value: &str) -> bool {
+pub fn is_wikilink_string(value: &str) -> bool {
     value.starts_with("[[") && value.ends_with("]]") && value.len() > 4
 }
 
@@ -179,10 +179,7 @@ pub(crate) fn document_has_frontmatter_field(document: &Document, field: &str) -
     document_frontmatter_field(document, field).is_some()
 }
 
-pub(crate) fn document_frontmatter_field<'a>(
-    document: &'a Document,
-    field: &str,
-) -> Option<&'a Value> {
+pub fn document_frontmatter_field<'a>(document: &'a Document, field: &str) -> Option<&'a Value> {
     document
         .frontmatter
         .as_ref()

@@ -13,7 +13,7 @@ use vault_core::Severity;
 use crate::config::{RepairAction, RepairConfig, RepairRule, RepairRuleMatch};
 use crate::findings::{Finding, FindingBody};
 
-pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 7;
+pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1574,8 +1574,47 @@ mod tests {
     }
 
     #[test]
-    fn repair_plan_schema_version_is_seven() {
-        assert_eq!(REPAIR_PLAN_SCHEMA_VERSION, 7);
+    fn repair_plan_schema_version_is_eight() {
+        assert_eq!(REPAIR_PLAN_SCHEMA_VERSION, 8);
+    }
+
+    #[test]
+    fn replace_body_op_is_a_valid_operation() {
+        let plan_json = r#"{
+            "schema_version": 8,
+            "vault_root": "/tmp/vault",
+            "source_filters": {
+                "code": [],
+                "severity": [],
+                "field": [],
+                "rule": [],
+                "path": [],
+                "target": [],
+                "reason": [],
+                "skip_reason": []
+            },
+            "summary": {
+                "findings": 1,
+                "planned_changes": 1,
+                "skipped": {
+                    "by_reason": {},
+                    "total": 0
+                }
+            },
+            "changes": [{
+                "change_id": "abcd1234",
+                "path": "notes/foo.md",
+                "document_hash": "deadbeef",
+                "finding_code": "operator-mutation",
+                "repair_rule": "vault-set",
+                "operation": "replace_body",
+                "new_value": "fresh body content"
+            }],
+            "skipped_findings": [],
+            "footnotes": []
+        }"#;
+        let plan: RepairPlan = serde_json::from_str(plan_json).expect("plan should deserialize");
+        assert_eq!(plan.changes[0].operation, "replace_body");
     }
 
     #[test]

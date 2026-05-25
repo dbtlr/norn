@@ -12,10 +12,12 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 ### Added
 
+- **`vault set <DOC>`** — frontmatter mutation (`--field` set, `--push`/`--pop` for arrays, `--remove` to drop a key) plus wholesale body replacement via `--body-from-stdin`. Schema-aware value validation with `--force` opt-out. Wikilink-typed fields auto-wrap on write (`--field workspace=foo` → `[[foo]]`) and surface unresolved / ambiguous targets as warnings. Combined ops apply atomically. Safe-by-default apply model matching `vault move` / `vault delete`: TTY confirms, non-TTY implicit dry-run, `--yes` to mutate, `--dry-run` to preview, `--format json` for scripting.
 - **`vault self-update`** — refresh the running `vault` binary to the latest (or a pinned) GitHub release. `--dry-run` resolves the target and prints the plan (with `update_available`, current/latest/target versions, asset URL, sha256) without downloading anything; pair with `--format json` for scriptable "is there an update?" checks. `--version X.Y.Z` pins a specific release (downgrades allowed). Hidden from `vault --help` and exits 2 with installer instructions when the running binary was not installed via the official GitHub install script (detected by the presence of cargo-dist's install receipt at `~/.config/vault-cli/install-receipt.json`).
 
 ### Changed
 
+- `vault repair apply` (and the underlying `vault-frontmatter` minimal-edit writer) now supports array-valued frontmatter operations. Previously, only scalar `set_frontmatter` / `add_frontmatter` ops applied; array values were rejected at apply time. New `vault set` push/pop and any future repair-action that writes arrays now work end-to-end.
 - Bumped `serde_json` 1.0.149 → 1.0.150 (patch).
 - Bumped `rusqlite` 0.32.1 → 0.39.0 (still `features = ["bundled"]`; ships with a newer bundled SQLite). No source changes required; cache schema and on-disk format unchanged.
 - Bumped `sha2` 0.10.9 → 0.11.0. The digest type lost its `LowerHex` impl in 0.11; cache-identity hashing in `vault-cache` migrated from `format!("{:x}", …)` to explicit byte-iteration. Hash output is byte-identical to the previous formulation, so existing cache directories continue to resolve.
