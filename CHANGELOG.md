@@ -14,6 +14,10 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 - **`vault self-update`** — refresh the running `vault` binary to the latest (or a pinned) GitHub release. `--dry-run` resolves the target and prints the plan (with `update_available`, current/latest/target versions, asset URL, sha256) without downloading anything; pair with `--format json` for scriptable "is there an update?" checks. `--version X.Y.Z` pins a specific release (downgrades allowed). Hidden from `vault --help` and exits 2 with installer instructions when the running binary was not installed via the official GitHub install script (detected by the presence of cargo-dist's install receipt at `~/.config/vault-cli/install-receipt.json`).
 
+### Changed
+
+- Bumped `serde_json` 1.0.149 → 1.0.150 (patch).
+
 ## v0.32.0 - 2026-05-25
 
 The renderer-port + mutation-surface release. Two coordinated arcs ship together. (1) The `output::legacy` cleanup that began at v0.27 closes: `vault validate`, `vault repair plan`, and `vault repair apply` all port onto `output::primitives` with new TTY-as-summary shapes, JSON envelopes (`{ total, findings }`, `{ ... + applied }`), and orthogonal `--out` / `--format` streams; the `legacy.rs` module itself goes away with the last renderer. (2) A new document mutation surface lands — `vault get` (renamed from `vault show`), `vault move`, and `vault delete` — replacing `vault repair links` and giving operators a CRUD-shaped surface for working with vault documents without touching the filesystem directly. Both `move` and `delete` are safe-by-default (TTY interactive confirm; non-TTY implicit dry-run; `--yes` to mutate; `--dry-run` to preview-and-exit; `--format json` is non-interactive). Along the way: `vault files` retired (orphan command with no operator use case), `repair_plan_schema_version` bumps twice (5 → 6 for SkipReason taxonomy + plan/apply orthogonality; 6 → 7 for the `force` field on `PlannedChange`), and the long-running pre-port `output::legacy` arc closes. 812 → 865 tests.
