@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod download;
 pub mod manifest;
 pub mod receipt;
 pub mod render;
