@@ -157,6 +157,7 @@ pub fn make_planned_change(
 /// time.
 ///
 /// Refuses on:
+/// - Cross-class same-key conflicts (delegates to detect_cross_class_conflicts)
 /// - Malformed JSON in --field-json
 /// - --push against a current scalar value (schema-silent defensive check)
 ///
@@ -172,6 +173,8 @@ pub fn synth_frontmatter_ops(
     pop: &[String],
     remove: &[String],
 ) -> Result<Vec<PlannedChange>> {
+    detect_cross_class_conflicts(fields, field_json, push, pop, remove)?;
+
     let current_obj = current_frontmatter
         .as_object()
         .ok_or_else(|| anyhow!("frontmatter is not a top-level mapping"))?;
@@ -691,5 +694,22 @@ mod tests {
             synth_frontmatter_ops(&current, &[], &[], &[], &[], &["nonexistent".to_string()])
                 .unwrap();
         assert_eq!(changes.len(), 0);
+    }
+
+    #[test]
+    fn synth_refuses_cross_class_conflict() {
+        let current = json!({});
+        let result = synth_frontmatter_ops(
+            &current,
+            &["tags=foo".to_string()],
+            &[],
+            &["tags=bar".to_string()],
+            &[],
+            &[],
+        );
+        assert!(
+            result.is_err(),
+            "cross-class conflict on 'tags' should refuse"
+        );
     }
 }
