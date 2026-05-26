@@ -278,13 +278,93 @@ pub fn render(template: &str, ctx: &Context) -> Result<String, RenderError> {
 }
 
 fn render_expression(expr: &str, ctx: &Context) -> Result<String, RenderError> {
-    // `|` is not a valid Moment format token (see TOKENS), so this gate cannot
-    // false-positive on legitimate `{{date:fmt}}` strings. Task 1.3 replaces
-    // this with actual pipe-transform handling.
-    if expr.contains('|') {
-        return Err(RenderError::UnknownTransform(expr.to_string()));
+    let mut parts = expr.split('|').map(str::trim);
+    let var_part = parts.next().expect("split always yields at least one part");
+    let mut value = render_var(var_part, ctx)?;
+    for transform_name in parts {
+        value = apply_transform(transform_name, &value)?;
     }
-    render_var(expr.trim(), ctx)
+    Ok(value)
+}
+
+fn apply_transform(name: &str, value: &str) -> Result<String, RenderError> {
+    match name {
+        "titlecase" => Ok(titlecase(value)),
+        "sentencecase" => Ok(sentencecase(value)),
+        "lower" => Ok(value.to_lowercase()),
+        "upper" => Ok(value.to_uppercase()),
+        "unsep" => Ok(unsep(value)),
+        "strip_date_prefix" => Ok(strip_date_prefix(value)),
+        "slugify" => Ok(slugify(value)),
+        other => Err(RenderError::UnknownTransform(other.into())),
+    }
+}
+
+fn titlecase(s: &str) -> String {
+    unsep(s)
+        .split_whitespace()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sentencecase(s: &str) -> String {
+    let lowered = unsep(s).to_lowercase();
+    let mut chars = lowered.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn unsep(s: &str) -> String {
+    s.replace(['-', '_'], " ")
+}
+
+fn strip_date_prefix(s: &str) -> String {
+    // Match leading YYYY-MM-DD- (11 bytes including trailing hyphen).
+    let bytes = s.as_bytes();
+    if bytes.len() < 11 {
+        return s.into();
+    }
+    let prefix_shape = bytes[..10].iter().enumerate().all(|(i, b)| match i {
+        0..=3 => b.is_ascii_digit(),
+        4 => *b == b'-',
+        5 | 6 => b.is_ascii_digit(),
+        7 => *b == b'-',
+        8 | 9 => b.is_ascii_digit(),
+        _ => unreachable!(),
+    });
+    if prefix_shape && bytes[10] == b'-' {
+        s[11..].into()
+    } else {
+        s.into()
+    }
+}
+
+fn slugify(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut last_was_sep = true;
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_was_sep = false;
+        } else if !last_was_sep {
+            out.push('-');
+            last_was_sep = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 fn render_var(expr: &str, ctx: &Context) -> Result<String, RenderError> {
@@ -424,15 +504,120 @@ mod var_tests {
             "expected UnknownVariable(\"whatever\"), got: {err:?}"
         );
     }
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+    use chrono::{NaiveDate, NaiveTime};
+    use std::collections::BTreeMap;
+
+    fn ctx() -> Context {
+        Context {
+            now: NaiveDate::from_ymd_opt(2026, 5, 25)
+                .unwrap()
+                .and_time(NaiveTime::from_hms_opt(18, 30, 0).unwrap()),
+            title: "design-vault-new".into(),
+            path_vars: BTreeMap::new(),
+            date_format: "YYYY-MM-DD".into(),
+            time_format: "HH:mm".into(),
+        }
+    }
 
     #[test]
-    fn pipeline_rejected_until_task_1_3() {
-        // Tasks 1.3 implements pipe transforms; for now this errors cleanly.
-        let ctx = ctx_for("foo");
-        let err = render("{{title | titlecase}}", &ctx).unwrap_err();
+    fn titlecase_basic() {
+        assert_eq!(
+            render("{{title | titlecase}}", &ctx()).unwrap(),
+            "Design Vault New"
+        );
+    }
+
+    #[test]
+    fn sentencecase_basic() {
+        assert_eq!(
+            render("{{title | sentencecase}}", &ctx()).unwrap(),
+            "Design vault new"
+        );
+    }
+
+    #[test]
+    fn lower_upper() {
+        let mut c = ctx();
+        c.title = "Vault CLI".into();
+        assert_eq!(render("{{title | lower}}", &c).unwrap(), "vault cli");
+        assert_eq!(render("{{title | upper}}", &c).unwrap(), "VAULT CLI");
+    }
+
+    #[test]
+    fn unsep_handles_hyphen_and_underscore() {
+        let mut c = ctx();
+        c.title = "design-vault_new".into();
+        assert_eq!(render("{{title | unsep}}", &c).unwrap(), "design vault new");
+    }
+
+    #[test]
+    fn strip_date_prefix_strips_iso() {
+        let mut c = ctx();
+        c.title = "2026-05-25-design-vault-new".into();
+        assert_eq!(
+            render("{{title | strip_date_prefix}}", &c).unwrap(),
+            "design-vault-new"
+        );
+    }
+
+    #[test]
+    fn strip_date_prefix_noop_when_absent() {
+        let mut c = ctx();
+        c.title = "design-vault-new".into();
+        assert_eq!(
+            render("{{title | strip_date_prefix}}", &c).unwrap(),
+            "design-vault-new"
+        );
+    }
+
+    #[test]
+    fn slugify_basic() {
+        let mut c = ctx();
+        c.title = "Design Vault New Command!".into();
+        assert_eq!(
+            render("{{title | slugify}}", &c).unwrap(),
+            "design-vault-new-command"
+        );
+    }
+
+    #[test]
+    fn slugify_handles_consecutive_seps() {
+        let mut c = ctx();
+        c.title = "  a  --  b  ".into();
+        assert_eq!(render("{{title | slugify}}", &c).unwrap(), "a-b");
+    }
+
+    #[test]
+    fn chain_strip_then_titlecase() {
+        let mut c = ctx();
+        c.title = "2026-05-25-design-vault-new".into();
+        assert_eq!(
+            render("{{title | strip_date_prefix | titlecase}}", &c).unwrap(),
+            "Design Vault New"
+        );
+    }
+
+    #[test]
+    fn unknown_transform_errors() {
+        let err = render("{{title | bogus}}", &ctx()).unwrap_err();
         assert!(
-            matches!(err, RenderError::UnknownTransform(_)),
-            "expected UnknownTransform, got: {err:?}"
+            matches!(err, RenderError::UnknownTransform(ref name) if name == "bogus"),
+            "expected UnknownTransform(\"bogus\"), got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn chain_arbitrary_order() {
+        let mut c = ctx();
+        c.title = "Foo Bar".into();
+        assert_eq!(
+            render("{{title | lower | slugify}}", &c).unwrap(),
+            "foo-bar"
         );
     }
 }
