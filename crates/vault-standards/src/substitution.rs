@@ -278,11 +278,11 @@ pub fn render(template: &str, ctx: &Context) -> Result<String, RenderError> {
 }
 
 fn render_expression(expr: &str, ctx: &Context) -> Result<String, RenderError> {
+    // `|` is not a valid Moment format token (see TOKENS), so this gate cannot
+    // false-positive on legitimate `{{date:fmt}}` strings. Task 1.3 replaces
+    // this with actual pipe-transform handling.
     if expr.contains('|') {
-        // Pipe transforms land in Task 1.3.
-        return Err(RenderError::UnknownTransform(
-            "pipeline transforms not yet implemented".into(),
-        ));
+        return Err(RenderError::UnknownTransform(expr.to_string()));
     }
     render_var(expr.trim(), ctx)
 }
@@ -406,10 +406,23 @@ mod var_tests {
     }
 
     #[test]
+    fn unclosed_brace_errors() {
+        let ctx = ctx_for("foo");
+        let err = render("{{unclosed", &ctx).unwrap_err();
+        assert!(
+            matches!(err, RenderError::Malformed(_)),
+            "expected Malformed, got: {err:?}"
+        );
+    }
+
+    #[test]
     fn unknown_var_errors() {
         let ctx = ctx_for("foo");
         let err = render("{{whatever}}", &ctx).unwrap_err();
-        assert!(err.to_string().contains("unknown variable"));
+        assert!(
+            matches!(err, RenderError::UnknownVariable(ref name) if name == "whatever"),
+            "expected UnknownVariable(\"whatever\"), got: {err:?}"
+        );
     }
 
     #[test]
@@ -417,7 +430,10 @@ mod var_tests {
         // Tasks 1.3 implements pipe transforms; for now this errors cleanly.
         let ctx = ctx_for("foo");
         let err = render("{{title | titlecase}}", &ctx).unwrap_err();
-        assert!(err.to_string().contains("transform"));
+        assert!(
+            matches!(err, RenderError::UnknownTransform(_)),
+            "expected UnknownTransform, got: {err:?}"
+        );
     }
 }
 
