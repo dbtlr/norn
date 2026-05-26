@@ -657,10 +657,16 @@ fn run(cli: Cli) -> Result<i32> {
 
             Ok(0)
         }
-        Command::New(_args) => {
-            // Filled in Task 7.4 (orchestrator).
-            anyhow::bail!("vault new: not yet implemented");
-        }
+        Command::New(args) => match crate::new::preflight_and_plan(&args, &cwd) {
+            Ok(bundle) => {
+                print!("{}", bundle.rendered);
+                std::process::exit(bundle.exit_code);
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        },
         Command::Init(args) => init::run(&cwd, &args),
         Command::Completions(_) => {
             unreachable!("completions are handled before vault targeting")

@@ -1,8 +1,4 @@
 //! `vault new` orchestration glue. Mirror of `crates/vault-cli/src/set/mod.rs`.
-//
-// dead_code silenced: `OutputBundle`, `preflight_and_plan`, and
-// `apply_and_render` will be wired into `Command::New` in Task 7.8.
-#![allow(dead_code)]
 
 pub mod report;
 pub mod synth;
