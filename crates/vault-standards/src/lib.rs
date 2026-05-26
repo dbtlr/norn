@@ -18,7 +18,7 @@ pub use apply::{
 pub use config::{
     parse_config, parse_config_compiled, CompiledConfig, CompiledRule, ConfigError, FilesConfig,
     RemoveFrontmatterAction, RepairAction, RepairConfig, RepairRule, RepairRuleMatch, RuleExclude,
-    RuleSelector, SetFrontmatterAction, ValidateConfig, ValidateRule, VaultConfig,
+    RuleSelector, SetFrontmatterAction, TemplatesConfig, ValidateConfig, ValidateRule, VaultConfig,
     CURRENT_SCHEMA_VERSION,
 };
 pub use defaults::{

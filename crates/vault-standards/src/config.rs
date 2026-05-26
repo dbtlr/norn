@@ -30,6 +30,8 @@ pub struct VaultConfig {
     pub validate: ValidateConfig,
     #[serde(default)]
     pub repair: RepairConfig,
+    #[serde(default)]
+    pub templates: TemplatesConfig,
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
     _deprecated_graph: Option<serde_yaml::Value>,
@@ -49,9 +51,36 @@ impl Default for VaultConfig {
             links: LinksConfig::default(),
             validate: ValidateConfig::default(),
             repair: RepairConfig::default(),
+            templates: TemplatesConfig::default(),
             _deprecated_graph: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplatesConfig {
+    #[serde(default = "default_date_format")]
+    pub date_format: String,
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
+}
+
+impl Default for TemplatesConfig {
+    fn default() -> Self {
+        Self {
+            date_format: default_date_format(),
+            time_format: default_time_format(),
+        }
+    }
+}
+
+fn default_date_format() -> String {
+    "YYYY-MM-DD".into()
+}
+
+fn default_time_format() -> String {
+    "HH:mm".into()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1031,5 +1060,37 @@ validate:
         type: note
 "#;
         parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+    }
+
+    #[test]
+    fn parses_templates_config_block() {
+        let yaml = r#"
+templates:
+  date_format: "YYYY/MM/DD"
+  time_format: "HH:mm:ss"
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        assert_eq!(cfg.templates.date_format, "YYYY/MM/DD");
+        assert_eq!(cfg.templates.time_format, "HH:mm:ss");
+    }
+
+    #[test]
+    fn templates_config_block_defaults_when_absent() {
+        let yaml = "files:\n  ignore: []\n";
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        assert_eq!(cfg.templates.date_format, "YYYY-MM-DD");
+        assert_eq!(cfg.templates.time_format, "HH:mm");
+    }
+
+    #[test]
+    fn templates_config_block_partial_uses_defaults() {
+        // Only date_format specified — time_format should fall back to default.
+        let yaml = r#"
+templates:
+  date_format: "DD/MM/YYYY"
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        assert_eq!(cfg.templates.date_format, "DD/MM/YYYY");
+        assert_eq!(cfg.templates.time_format, "HH:mm");
     }
 }

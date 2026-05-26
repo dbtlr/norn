@@ -197,10 +197,8 @@ pub fn resolve_to_fixpoint(
             .trim_end_matches(".md")
             .to_string(),
         path_vars: path_vars_for_substitution.clone(),
-        // Phase 4 will wire in cfg.templates.date_format/time_format.
-        // For now use standard defaults that match the substitution module's own tests.
-        date_format: "YYYY-MM-DD".to_string(),
-        time_format: "HH:mm".to_string(),
+        date_format: cfg.templates.date_format.clone(),
+        time_format: cfg.templates.time_format.clone(),
     };
 
     // Hard cap on iterations. Real schemas reach fixpoint in 2-3; cap at 16
@@ -618,5 +616,40 @@ validate:
         .unwrap();
         assert!(frontmatter.is_empty());
         assert!(rules_applied.is_empty());
+    }
+
+    #[test]
+    fn fixpoint_uses_configured_date_format() {
+        let (cfg, compiled) = build(
+            r#"
+templates:
+  date_format: "DD/MM/YYYY"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        when: "{{date}}"
+"#,
+        );
+        let (frontmatter, _) = resolve_to_fixpoint(
+            &cfg,
+            &compiled,
+            "foo.md",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let value = frontmatter.get("when").unwrap().as_str().unwrap();
+        // We can't pin today's exact date, but we can verify the format shape:
+        // DD/MM/YYYY is 10 chars with `/` at positions 2 and 5.
+        assert_eq!(
+            value.len(),
+            10,
+            "expected DD/MM/YYYY = 10 chars, got {value}"
+        );
+        assert_eq!(&value[2..3], "/");
+        assert_eq!(&value[5..6], "/");
     }
 }
