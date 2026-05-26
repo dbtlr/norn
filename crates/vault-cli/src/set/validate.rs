@@ -579,7 +579,7 @@ validate:
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "---\ntype: note\n---\n").unwrap();
         }
-        let index = vault_graph::build_index(&root).unwrap();
+        let index = crate::graph::build_index(&root).unwrap();
         (tmp, index)
     }
 

@@ -28,6 +28,7 @@ clap.workspace = true
 clap_complete.workspace = true
 clap_complete_nushell.workspace = true
 clap_mangen.workspace = true
+pulldown-cmark.workspace = true
 regex = { workspace = true }
 rusqlite = { workspace = true }
 serde.workspace = true
@@ -41,7 +42,8 @@ thiserror.workspace = true
 ureq.workspace = true
 vault-core = { path = "../vault-core" }
 vault-frontmatter = { path = "../vault-frontmatter" }
-vault-graph = { path = "../vault-graph" }
+vault-links = { path = "../vault-links" }
+walkdir.workspace = true
 xz2.workspace = true
 
 [build-dependencies]

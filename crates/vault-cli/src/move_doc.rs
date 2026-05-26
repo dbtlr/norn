@@ -490,7 +490,7 @@ mod tests {
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n[[b]]\n").unwrap();
         std::fs::write(root.join("b.md"), "---\ntype: note\n---\n# B\n").unwrap();
 
-        let index = vault_graph::build_index(&root).unwrap();
+        let index = crate::graph::build_index(&root).unwrap();
         (tmp, root, index)
     }
 
@@ -770,7 +770,7 @@ mod tests {
         std::fs::create_dir(root.join("subdir")).unwrap();
         std::fs::write(root.join("source.md"), "---\ntype: note\n---\n# S\n").unwrap();
         std::fs::write(root.join("renamed.md"), "---\ntype: note\n---\n# R1\n").unwrap();
-        let index = vault_graph::build_index(&root).unwrap();
+        let index = crate::graph::build_index(&root).unwrap();
 
         let plan = preflight_and_plan(PreflightConfig {
             src: "source.md",

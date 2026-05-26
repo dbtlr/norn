@@ -166,7 +166,7 @@ fn walk(
 }
 
 fn hash_file(path: &Utf8Path) -> Result<String, CacheError> {
-    // Must match the hash format vault_graph::build_index stores in
+    // Must match the hash format crate::graph::build_index stores in
     // documents.hash (blake3 hex of the raw file bytes). Mismatching the
     // algorithm would make every force_hash run flag every file as Modified.
     let bytes = std::fs::read(path.as_std_path()).map_err(|e| CacheError::IndexRead {

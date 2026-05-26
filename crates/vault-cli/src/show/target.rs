@@ -149,7 +149,7 @@ pub fn resolve_target(cache: &Cache, raw: &str) -> Result<ResolvedTarget> {
         let alias_matches: Vec<Utf8PathBuf> = all
             .iter()
             .filter(|d| {
-                let (doc_aliases, _) = vault_graph::parse_aliases(d.frontmatter.as_ref(), field);
+                let (doc_aliases, _) = crate::graph::parse_aliases(d.frontmatter.as_ref(), field);
                 doc_aliases.iter().any(|a| a == &target_lower)
             })
             .map(|d| d.path.clone())

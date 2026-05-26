@@ -10,7 +10,7 @@ use crate::cache::error::CacheError;
 
 impl crate::cache::Cache {
     /// Reconstruct a `GraphIndex` from the SQLite tables. Mirrors the shape
-    /// `vault_graph::build_index` would produce for the same vault.
+    /// `crate::graph::build_index` would produce for the same vault.
     ///
     /// Diagnostics are not round-tripped (the writer stores parsed output, not
     /// parse-time warnings); `ignored_files` is empty for the same reason.
@@ -58,7 +58,7 @@ fn load_documents(
         // is the source of truth and `parse_aliases` is cheap.  Without
         // this, every alias-aware finding silently no-ops in production.
         let (aliases, alias_malformed) = match alias_field {
-            Some(field) => vault_graph::parse_aliases(frontmatter.as_ref(), field),
+            Some(field) => crate::graph::parse_aliases(frontmatter.as_ref(), field),
             None => (Vec::new(), Vec::new()),
         };
         documents.push(Document {
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn loaded_index_matches_filesystem_build() {
         let (_tmp, root) = make_vault();
-        let direct = vault_graph::build_index(&root).unwrap();
+        let direct = crate::graph::build_index(&root).unwrap();
 
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();

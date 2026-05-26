@@ -357,7 +357,7 @@ mod tests {
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n[[b]]\n").unwrap();
         std::fs::write(root.join("b.md"), "---\ntype: note\n---\n# B\n").unwrap();
         std::fs::write(root.join("c.md"), "---\ntype: note\n---\n# C\n").unwrap();
-        let index = vault_graph::build_index(&root).unwrap();
+        let index = crate::graph::build_index(&root).unwrap();
         (tmp, root, index)
     }
 

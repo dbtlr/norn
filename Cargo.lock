@@ -1655,6 +1655,7 @@ dependencies = [
  "fs2",
  "globset",
  "mockito",
+ "pulldown-cmark",
  "regex",
  "rusqlite",
  "serde",
@@ -1669,7 +1670,8 @@ dependencies = [
  "ureq",
  "vault-core",
  "vault-frontmatter",
- "vault-graph",
+ "vault-links",
+ "walkdir",
  "xz2",
 ]
 
@@ -1691,22 +1693,6 @@ dependencies = [
  "serde_yaml",
  "thiserror",
  "vault-core",
-]
-
-[[package]]
-name = "vault-graph"
-version = "0.33.0"
-dependencies = [
- "blake3",
- "camino",
- "pulldown-cmark",
- "regex",
- "serde_json",
- "thiserror",
- "vault-core",
- "vault-frontmatter",
- "vault-links",
- "walkdir",
 ]
 
 [[package]]

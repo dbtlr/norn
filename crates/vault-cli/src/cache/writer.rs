@@ -47,11 +47,11 @@ impl crate::cache::Cache {
             std::time::Duration::from_secs(5),
         )?;
         let start = std::time::Instant::now();
-        let options = vault_graph::IndexOptions {
+        let options = crate::graph::IndexOptions {
             alias_field: self.alias_field.clone(),
             ..Default::default()
         };
-        let index = vault_graph::build_index_with_options(vault_root, &options)?;
+        let index = crate::graph::build_index_with_options(vault_root, &options)?;
 
         let tx = self.conn.transaction()?;
         clear_all_rows(&tx)?;
@@ -73,7 +73,7 @@ impl crate::cache::Cache {
 
     /// Incremental update: detect changes against the cached state, then
     /// drop+reinsert only the affected documents. Re-runs the full
-    /// `vault_graph::build_index` for parse authority but updates only the
+    /// `crate::graph::build_index` for parse authority but updates only the
     /// changed-document subset of rows.
     ///
     /// When the cache has never been fully built (no `last_full_rebuild_ts`
@@ -102,11 +102,11 @@ impl crate::cache::Cache {
         // the affected documents. Simpler than scoped parsing, and the
         // per-doc cost dominates only on truly huge vaults where
         // parse-everything beats incremental in total time anyway.
-        let options = vault_graph::IndexOptions {
+        let options = crate::graph::IndexOptions {
             alias_field: self.alias_field.clone(),
             ..Default::default()
         };
-        let fresh_index = vault_graph::build_index_with_options(vault_root, &options)?;
+        let fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
         let fresh_docs: std::collections::HashMap<_, _> = fresh_index
             .documents
             .iter()
@@ -351,7 +351,7 @@ fn insert_link(tx: &rusqlite::Transaction, link: &Link) -> Result<(), CacheError
     // SourceSpan currently exposes only a single byte offset; store it as
     // span_start and leave span_end NULL until the parser tracks an end.
     // Line/column are persisted in their own columns so the cache round-trip
-    // matches `vault_graph::build_index` for downstream consumers that read
+    // matches `crate::graph::build_index` for downstream consumers that read
     // those fields.
     let (span_start, span_end, span_line, span_column): (
         Option<i64>,
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn cache_rebuild_threads_alias_field_through_to_link_resolution() {
         // Regression: prior to this fix, `Cache::rebuild` called
-        // `vault_graph::build_index` with default options, which left
+        // `crate::graph::build_index` with default options, which left
         // `alias_field = None` so alias fallback never ran during link
         // resolution. Cached link rows then served alias-blind status to
         // every downstream consumer (validate, find, repair plan, show

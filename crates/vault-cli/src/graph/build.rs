@@ -9,9 +9,10 @@ use vault_links::{
 };
 use walkdir::WalkDir;
 
-use crate::pattern::pattern_matches_path;
-use crate::{IndexError, IndexOptions};
+use super::pattern::pattern_matches_path;
+use super::{IndexError, IndexOptions};
 
+#[cfg(test)]
 pub fn build_index(root: impl AsRef<Utf8Path>) -> Result<GraphIndex, IndexError> {
     build_index_with_options(root, &IndexOptions::default())
 }
@@ -138,7 +139,7 @@ fn parse_document(
     let block_ids = parse_block_ids(body);
 
     let (aliases, alias_malformed) = if let Some(field) = alias_field {
-        crate::aliases::parse_aliases(frontmatter.as_ref(), field)
+        super::aliases::parse_aliases(frontmatter.as_ref(), field)
     } else {
         (Vec::new(), Vec::new())
     };

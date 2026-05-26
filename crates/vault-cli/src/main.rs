@@ -9,6 +9,7 @@ pub mod delete_doc;
 mod filter;
 mod filter_args;
 mod find;
+mod graph;
 mod help;
 mod init;
 mod init_scan;
@@ -33,13 +34,13 @@ use std::{fs, process};
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use vault_core::GraphIndex;
-use vault_graph::{concise_diagnostics, has_errors};
 
 use crate::cli::{
     CacheSubcommand, Cli, Command, ConfigSubcommand, RepairApplyFormat, RepairPlanFormat,
     RepairSubcommand,
 };
 use crate::config_loader::{effective_cwd, load_config, resolve_path};
+use crate::graph::{concise_diagnostics, has_errors};
 use crate::output::primitives::is_broken_pipe;
 use crate::repair::skip_reasons::code_matches_any;
 use crate::repair_apply::{apply_repair_plan, with_verification};

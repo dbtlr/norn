@@ -43,5 +43,5 @@ pub enum CacheError {
     },
 
     #[error("graph build error: {0}")]
-    GraphBuild(#[from] vault_graph::IndexError),
+    GraphBuild(#[from] crate::graph::IndexError),
 }

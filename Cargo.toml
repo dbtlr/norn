@@ -3,7 +3,6 @@ members = [
     "crates/vault-core",
     "crates/vault-frontmatter",
     "crates/vault-links",
-    "crates/vault-graph",
     "crates/vault-cli",
 ]
 resolver = "2"

@@ -103,7 +103,7 @@ impl crate::cache::Cache {
         // Re-derive aliases on read against the cache's configured
         // `alias_field`. See `reader::load_documents` for the rationale.
         let (aliases, alias_malformed) = match self.alias_field.as_deref() {
-            Some(field) => vault_graph::parse_aliases(frontmatter.as_ref(), field),
+            Some(field) => crate::graph::parse_aliases(frontmatter.as_ref(), field),
             None => (Vec::new(), Vec::new()),
         };
 
