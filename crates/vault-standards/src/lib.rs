@@ -15,11 +15,15 @@ pub use apply::{
     RepairApplyPlanContext, RepairApplyReport, RepairApplyVerification, RepairApplyWarning,
 };
 pub use config::{
-    parse_config, ConfigError, FilesConfig, RemoveFrontmatterAction, RepairAction, RepairConfig,
-    RepairRule, RepairRuleMatch, RuleExclude, RuleSelector, SetFrontmatterAction, ValidateConfig,
-    ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION,
+    parse_config, parse_config_compiled, CompiledConfig, CompiledRule, ConfigError, FilesConfig,
+    RemoveFrontmatterAction, RepairAction, RepairConfig, RepairRule, RepairRuleMatch, RuleExclude,
+    RuleSelector, SetFrontmatterAction, ValidateConfig, ValidateRule, VaultConfig,
+    CURRENT_SCHEMA_VERSION,
 };
-pub use engine::{validate, validate_rule, validate_with_alias_field};
+pub use engine::{
+    validate, validate_rule, validate_rule_compiled, validate_with_alias_field,
+    validate_with_compiled,
+};
 pub use findings::{Finding, FindingBody};
 pub use repair::link_risk::{classify as classify_link_risk, AffectedLink, LinkRisk};
 pub use repair::warnings::{detect_stem_collision, PlanWarning};

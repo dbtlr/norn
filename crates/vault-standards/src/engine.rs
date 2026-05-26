@@ -1,6 +1,6 @@
 use vault_core::{Document, DocumentSummary, GraphIndex};
 
-use crate::config::{ValidateConfig, ValidateRule};
+use crate::config::{CompiledConfig, CompiledRule, ValidateConfig, ValidateRule};
 use crate::findings::Finding;
 use crate::path_match::PathPattern;
 use crate::predicates::frontmatter_predicates_match;
@@ -14,10 +14,22 @@ pub fn validate_with_alias_field(
     config: &ValidateConfig,
     alias_field: Option<&str>,
 ) -> Vec<Finding> {
+    validate_with_compiled(index, config, &CompiledConfig::default(), alias_field)
+}
+
+/// Validate using pre-compiled path patterns. This is the hot path — call
+/// this instead of `validate_with_alias_field` when you have a `CompiledConfig`
+/// available (i.e., you loaded the config via `parse_config_compiled`).
+pub fn validate_with_compiled(
+    index: &GraphIndex,
+    config: &ValidateConfig,
+    compiled: &CompiledConfig,
+    alias_field: Option<&str>,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     for document in &index.documents {
-        if document_ignored(document, config) {
+        if document_ignored_compiled(document, compiled, &config.ignore) {
             continue;
         }
 
@@ -29,7 +41,7 @@ pub fn validate_with_alias_field(
             None,
         ));
 
-        for rule in matching_rules(document, &config.rules) {
+        for (rule, compiled_rule) in matching_rules_compiled(document, &config.rules, compiled) {
             findings.extend(crate::checks::check_required_frontmatter(
                 document,
                 &rule.required_frontmatter,
@@ -48,8 +60,9 @@ pub fn validate_with_alias_field(
                 rule.name.as_deref(),
             ));
 
-            if let Some(finding) = crate::checks::check_allowed_paths(
+            if let Some(finding) = crate::checks::check_allowed_paths_compiled(
                 document,
+                &compiled_rule.allowed_paths,
                 &rule.allowed_paths,
                 rule.name.as_deref(),
             ) {
@@ -72,7 +85,7 @@ pub fn validate_with_alias_field(
         let non_ignored: Vec<&Document> = index
             .documents
             .iter()
-            .filter(|d| !document_ignored(d, config))
+            .filter(|d| !document_ignored_compiled(d, compiled, &config.ignore))
             .collect();
         findings.extend(crate::checks::check_alias_shadowed_by_stem(
             &non_ignored,
@@ -97,6 +110,15 @@ pub fn validate_with_alias_field(
 /// joined tables so the existing per-doc check helpers can be reused
 /// without signature changes.
 pub fn validate_rule(rule: &ValidateRule, scope: &[DocumentSummary]) -> Vec<Finding> {
+    validate_rule_compiled(rule, None, scope)
+}
+
+/// Same as `validate_rule` but uses pre-compiled path patterns when available.
+pub fn validate_rule_compiled(
+    rule: &ValidateRule,
+    compiled: Option<&CompiledRule>,
+    scope: &[DocumentSummary],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     for summary in scope {
         let doc = summary_to_document(summary);
@@ -119,9 +141,18 @@ pub fn validate_rule(rule: &ValidateRule, scope: &[DocumentSummary]) -> Vec<Find
             rule.name.as_deref(),
         ));
 
-        if let Some(finding) =
-            crate::checks::check_allowed_paths(&doc, &rule.allowed_paths, rule.name.as_deref())
-        {
+        let allowed_finding = match compiled {
+            Some(c) => crate::checks::check_allowed_paths_compiled(
+                &doc,
+                &c.allowed_paths,
+                &rule.allowed_paths,
+                rule.name.as_deref(),
+            ),
+            None => {
+                crate::checks::check_allowed_paths(&doc, &rule.allowed_paths, rule.name.as_deref())
+            }
+        };
+        if let Some(finding) = allowed_finding {
             findings.push(finding);
         }
 
@@ -150,46 +181,110 @@ fn summary_to_document(summary: &DocumentSummary) -> Document {
     }
 }
 
-pub(crate) fn document_ignored(document: &Document, config: &ValidateConfig) -> bool {
-    config
-        .ignore
-        .iter()
-        .any(|pattern| path_pattern_matches(pattern, document.path.as_str()))
+fn document_ignored_compiled(
+    document: &Document,
+    compiled: &CompiledConfig,
+    fallback_patterns: &[String],
+) -> bool {
+    if !compiled.validate_ignore.is_empty() {
+        compiled
+            .validate_ignore
+            .iter()
+            .any(|p| p.match_path(document.path.as_str()).is_some())
+    } else {
+        fallback_patterns.iter().any(|pattern| {
+            PathPattern::parse(pattern)
+                .map(|p| p.match_path(document.path.as_str()).is_some())
+                .unwrap_or(false)
+        })
+    }
 }
 
-pub(crate) fn matching_rules<'a>(
+fn matching_rules_compiled<'a>(
     document: &Document,
     rules: &'a [ValidateRule],
-) -> Vec<&'a ValidateRule> {
-    rules
-        .iter()
-        .filter(|rule| rule_matches(document, rule))
-        .collect()
+    compiled: &'a CompiledConfig,
+) -> Vec<(&'a ValidateRule, &'a CompiledRule)> {
+    if compiled.rules.is_empty() {
+        // No compiled rules — fall back to uncompiled matching
+        rules
+            .iter()
+            .filter(|rule| rule_matches(document, rule))
+            .map(|rule| {
+                // Safety: if we have no compiled rules this arm shouldn't fire,
+                // but if it does we need a dummy. Use a static empty compiled rule
+                // via a leaked allocation. In practice this path is only hit in
+                // tests that call validate_with_alias_field (which passes default compiled).
+                // We use a thread-local to avoid repeated allocation.
+                static EMPTY: std::sync::OnceLock<CompiledRule> = std::sync::OnceLock::new();
+                let empty = EMPTY.get_or_init(|| CompiledRule {
+                    path: None,
+                    path_not: None,
+                    exclude_path: None,
+                    allowed_paths: vec![],
+                });
+                (rule, empty)
+            })
+            .collect()
+    } else {
+        rules
+            .iter()
+            .zip(compiled.rules.iter())
+            .filter(|(rule, compiled_rule)| rule_matches_compiled(document, rule, compiled_rule))
+            .collect()
+    }
 }
 
 pub fn rule_matches(document: &Document, rule: &ValidateRule) -> bool {
     if let Some(path_pattern) = &rule.r#match.path {
-        if !path_pattern_matches(path_pattern, document.path.as_str()) {
+        let matches = PathPattern::parse(path_pattern)
+            .map(|p| p.match_path(document.path.as_str()).is_some())
+            .unwrap_or(false);
+        if !matches {
             return false;
         }
     }
     if let Some(path_not_pattern) = &rule.r#match.path_not {
-        if path_pattern_matches(path_not_pattern, document.path.as_str()) {
+        let matches = PathPattern::parse(path_not_pattern)
+            .map(|p| p.match_path(document.path.as_str()).is_some())
+            .unwrap_or(false);
+        if matches {
             return false;
         }
     }
     if let Some(exclude_path) = &rule.exclude.path {
-        if path_pattern_matches(exclude_path, document.path.as_str()) {
+        let matches = PathPattern::parse(exclude_path)
+            .map(|p| p.match_path(document.path.as_str()).is_some())
+            .unwrap_or(false);
+        if matches {
             return false;
         }
     }
     frontmatter_predicates_match(document, &rule.r#match.frontmatter)
 }
 
-fn path_pattern_matches(pattern: &str, path: &str) -> bool {
-    PathPattern::parse(pattern)
-        .map(|p| p.match_path(path).is_some())
-        .unwrap_or(false)
+fn rule_matches_compiled(
+    document: &Document,
+    rule: &ValidateRule,
+    compiled: &CompiledRule,
+) -> bool {
+    let path = document.path.as_str();
+    if let Some(p) = &compiled.path {
+        if p.match_path(path).is_none() {
+            return false;
+        }
+    }
+    if let Some(p) = &compiled.path_not {
+        if p.match_path(path).is_some() {
+            return false;
+        }
+    }
+    if let Some(p) = &compiled.exclude_path {
+        if p.match_path(path).is_some() {
+            return false;
+        }
+    }
+    frontmatter_predicates_match(document, &rule.r#match.frontmatter)
 }
 
 #[cfg(test)]

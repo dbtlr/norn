@@ -31,7 +31,7 @@ use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use vault_core::GraphIndex;
 use vault_graph::{concise_diagnostics, has_errors};
-use vault_standards::{plan_repairs, validate_with_alias_field, RepairPlanFilters, SkippedSummary};
+use vault_standards::{plan_repairs, validate_with_compiled, RepairPlanFilters, SkippedSummary};
 
 use crate::cli::{
     CacheSubcommand, Cli, Command, ConfigSubcommand, RepairApplyFormat, RepairPlanFormat,
@@ -98,9 +98,10 @@ fn run(cli: Cli) -> Result<i32> {
                     no_cache_refresh,
                 )?;
                 trim_diagnostics(&mut index, verbose);
-                let findings = validate_with_alias_field(
+                let findings = validate_with_compiled(
                     &index,
                     &loaded_config.validate,
+                    &loaded_config.compiled,
                     loaded_config.index_options.alias_field.as_deref(),
                 );
                 let filters = ValidateFilterOptions::from(&args);
@@ -201,9 +202,10 @@ fn run(cli: Cli) -> Result<i32> {
                     let mut verify_index =
                         crate::cache::load_graph_index(&cwd, &loaded_config.index_options, false)?;
                     trim_diagnostics(&mut verify_index, verbose);
-                    let findings = validate_with_alias_field(
+                    let findings = validate_with_compiled(
                         &verify_index,
                         &loaded_config.validate,
+                        &loaded_config.compiled,
                         loaded_config.index_options.alias_field.as_deref(),
                     );
                     report = with_verification(report, &findings);
@@ -287,9 +289,10 @@ fn run(cli: Cli) -> Result<i32> {
                 no_cache_refresh,
             )?;
             trim_diagnostics(&mut index, verbose);
-            let findings = validate_with_alias_field(
+            let findings = validate_with_compiled(
                 &index,
                 &loaded_config.validate,
+                &loaded_config.compiled,
                 loaded_config.index_options.alias_field.as_deref(),
             );
             let filters = ValidateFilterOptions::from(&args);

@@ -3,7 +3,9 @@ use std::fs;
 use anyhow::Result;
 use camino::Utf8PathBuf;
 use vault_graph::IndexOptions;
-use vault_standards::{parse_config, RepairConfig, ValidateConfig, VaultConfig};
+use vault_standards::{
+    parse_config_compiled, CompiledConfig, RepairConfig, ValidateConfig, VaultConfig,
+};
 
 pub struct LoadedConfig {
     pub index_options: IndexOptions,
@@ -12,6 +14,8 @@ pub struct LoadedConfig {
     /// Full parsed vault config. Commands that need the whole VaultConfig
     /// (e.g. `vault set`'s schema-aware path) should use this field.
     pub vault_config: VaultConfig,
+    /// Pre-compiled path patterns for hot-path matching (validate engine).
+    pub compiled: CompiledConfig,
 }
 
 pub fn effective_cwd(cwd: Option<&Utf8PathBuf>) -> Result<Utf8PathBuf> {
@@ -57,12 +61,14 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
             validate: ValidateConfig::default(),
             repair: RepairConfig::default(),
             vault_config: VaultConfig::default(),
+            compiled: CompiledConfig::default(),
         });
     };
 
     let config_text = fs::read_to_string(&config_path)
         .map_err(|error| anyhow::anyhow!("failed to read config {config_path}: {error}"))?;
-    let config = parse_config(&config_text, &config_path)?;
+    let (config, compiled) =
+        parse_config_compiled(&config_text, &config_path).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     Ok(LoadedConfig {
         index_options: IndexOptions {
@@ -72,6 +78,7 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
         validate: config.validate.clone(),
         repair: config.repair.clone(),
         vault_config: config,
+        compiled,
     })
 }
 

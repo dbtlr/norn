@@ -4,6 +4,8 @@ use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::path_match::{PathPattern, PathPatternError};
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("invalid config {source_path}: {message}")]
@@ -248,6 +250,58 @@ impl RepairRule {
     }
 }
 
+/// Pre-compiled path patterns for a single validate rule. Index-matched with
+/// `validate.rules[i]` — `compiled_rules[i]` corresponds to `validate.rules[i]`.
+#[derive(Debug, Clone)]
+pub struct CompiledRule {
+    pub path: Option<PathPattern>,
+    pub path_not: Option<PathPattern>,
+    pub exclude_path: Option<PathPattern>,
+    pub allowed_paths: Vec<PathPattern>,
+}
+
+/// Pre-compiled path patterns for `files.ignore` and `validate.ignore`.
+/// Each entry in the vec corresponds to the pattern string at the same index
+/// in the source `Vec<String>`.
+#[derive(Debug, Clone, Default)]
+pub struct CompiledConfig {
+    pub files_ignore: Vec<PathPattern>,
+    pub validate_ignore: Vec<PathPattern>,
+    pub rules: Vec<CompiledRule>,
+}
+
+fn compile_pattern(
+    pattern: &str,
+    label: &str,
+    source_path: &Utf8Path,
+) -> Result<PathPattern, ConfigError> {
+    PathPattern::parse(pattern).map_err(|e: PathPatternError| ConfigError::Invalid {
+        source_path: source_path.to_owned(),
+        message: format!("{label}: invalid path pattern `{pattern}`: {e}"),
+    })
+}
+
+fn compile_optional(
+    opt: &Option<String>,
+    label: &str,
+    source_path: &Utf8Path,
+) -> Result<Option<PathPattern>, ConfigError> {
+    opt.as_deref()
+        .map(|s| compile_pattern(s, label, source_path))
+        .transpose()
+}
+
+fn compile_vec(
+    patterns: &[String],
+    label: &str,
+    source_path: &Utf8Path,
+) -> Result<Vec<PathPattern>, ConfigError> {
+    patterns
+        .iter()
+        .map(|s| compile_pattern(s, label, source_path))
+        .collect()
+}
+
 /// Parse a YAML config string with full validation. This is the single public entry
 /// point — replaces the old split between `serde_yaml::from_str::<VaultConfig>` (in
 /// the CLI) and `validate_config_yaml` (in vault-standards).
@@ -258,6 +312,60 @@ pub fn parse_config(yaml: &str, source_path: &Utf8Path) -> Result<VaultConfig, C
     })?;
     post_validate(&cfg, source_path)?;
     Ok(cfg)
+}
+
+/// Parse and compile all path patterns in the config. Returns both the raw
+/// deserialized config and a `CompiledConfig` with pre-built `PathPattern`
+/// values. Call this instead of `parse_config` when you need hot-path
+/// matching (e.g., the validate engine).
+pub fn parse_config_compiled(
+    yaml: &str,
+    source_path: &Utf8Path,
+) -> Result<(VaultConfig, CompiledConfig), ConfigError> {
+    let cfg = parse_config(yaml, source_path)?;
+
+    let files_ignore = compile_vec(&cfg.files.ignore, "files.ignore", source_path)?;
+    let validate_ignore = compile_vec(&cfg.validate.ignore, "validate.ignore", source_path)?;
+
+    let mut compiled_rules = Vec::with_capacity(cfg.validate.rules.len());
+    for rule in &cfg.validate.rules {
+        let rule_label = rule.name.as_deref().unwrap_or("unnamed validate rule");
+        let path = compile_optional(
+            &rule.r#match.path,
+            &format!("rule {rule_label}: match.path"),
+            source_path,
+        )?;
+        let path_not = compile_optional(
+            &rule.r#match.path_not,
+            &format!("rule {rule_label}: match.path_not"),
+            source_path,
+        )?;
+        let exclude_path = compile_optional(
+            &rule.exclude.path,
+            &format!("rule {rule_label}: exclude.path"),
+            source_path,
+        )?;
+        let allowed_paths = compile_vec(
+            &rule.allowed_paths,
+            &format!("rule {rule_label}: allowed_paths"),
+            source_path,
+        )?;
+        compiled_rules.push(CompiledRule {
+            path,
+            path_not,
+            exclude_path,
+            allowed_paths,
+        });
+    }
+
+    Ok((
+        cfg,
+        CompiledConfig {
+            files_ignore,
+            validate_ignore,
+            rules: compiled_rules,
+        },
+    ))
 }
 
 fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), ConfigError> {

@@ -124,6 +124,30 @@ pub(crate) fn check_allowed_paths(
     ))
 }
 
+/// Like `check_allowed_paths` but uses pre-compiled `PathPattern` values.
+/// `raw_paths` is passed through as the finding's allowed-path list.
+pub(crate) fn check_allowed_paths_compiled(
+    document: &Document,
+    compiled_paths: &[PathPattern],
+    raw_paths: &[String],
+    rule: Option<&str>,
+) -> Option<Finding> {
+    if raw_paths.is_empty() {
+        return None;
+    }
+    if compiled_paths
+        .iter()
+        .any(|p| p.match_path(document.path.as_str()).is_some())
+    {
+        return None;
+    }
+    Some(Finding::document_misrouted(
+        document.path.clone(),
+        rule.map(str::to_string),
+        raw_paths.to_vec(),
+    ))
+}
+
 pub(crate) fn check_alias_malformed(
     document: &Document,
     alias_field: Option<&str>,
