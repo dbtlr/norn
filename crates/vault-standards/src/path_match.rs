@@ -29,6 +29,12 @@ pub struct PathPattern {
 
 impl PathPattern {
     pub fn parse(pattern: &str) -> Result<Self, PathPatternError> {
+        // Strip a single leading `/` to match the legacy matcher's normalization.
+        // This lets patterns like `/Archive/**` work identically to `Archive/**`.
+        // Trailing slashes are intentionally NOT stripped (patterns don't end in `/`
+        // for file-matching; stripping could mask user errors).
+        let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+
         let mut declared = Vec::new();
         let mut regex_str = String::from("^");
         let bytes = pattern.as_bytes();
@@ -195,5 +201,13 @@ mod tests {
     #[test]
     fn parse_rejects_unclosed_brace() {
         assert!(PathPattern::parse("Workspaces/{{workspace/foo.md").is_err());
+    }
+
+    #[test]
+    fn leading_slash_normalized() {
+        let p = PathPattern::parse("/Archive/**").unwrap();
+        assert!(p.match_path("Archive/foo.md").is_some());
+        assert!(p.match_path("Archive/sub/foo.md").is_some());
+        assert!(p.match_path("Other/foo.md").is_none());
     }
 }

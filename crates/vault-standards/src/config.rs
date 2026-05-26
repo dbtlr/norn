@@ -783,4 +783,19 @@ repair:
         assert_eq!(cfg.validate.rules.len(), 1);
         assert_eq!(cfg.repair.rules.len(), 1);
     }
+
+    #[test]
+    fn config_load_rejects_invalid_path_pattern() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: bad
+      match:
+        path: "Workspaces/{{unclosed/foo.md"
+"#;
+        let err = parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid path pattern"), "got: {msg}");
+        assert!(msg.contains("bad"), "got: {msg}");
+    }
 }

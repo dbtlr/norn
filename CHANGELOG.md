@@ -10,6 +10,15 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Breaking changes
+
+- **vault-standards path patterns**: `?` and `{a,b,c}` are now interpreted as glob
+  wildcards (single-char and alternation respectively), matching standard glob
+  semantics. Previously both were treated as literal characters by the legacy
+  matcher. Atlas config does not exercise either shape today; user configs that
+  deliberately used a literal `?` or literal `{` must escape via regex-free
+  equivalents.
+
 ### Added
 
 - **`vault set <DOC>`** — frontmatter mutation (`--field` set, `--push`/`--pop` for arrays, `--remove` to drop a key) plus wholesale body replacement via `--body-from-stdin`. Schema-aware value validation with `--force` opt-out. Wikilink-typed fields auto-wrap on write (`--field workspace=foo` → `[[foo]]`) and surface unresolved / ambiguous targets as warnings. Combined ops apply atomically. Safe-by-default apply model matching `vault move` / `vault delete`: TTY confirms, non-TTY implicit dry-run, `--yes` to mutate, `--dry-run` to preview, `--format json` for scripting.
