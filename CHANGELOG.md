@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Changed
+
+- `vault repair apply`'s schema-mismatch error now ends with `; regenerate with \`vault repair plan\`` so operators see the next step inline instead of having to consult the CHANGELOG.
+
 ## v0.33.0 - 2026-05-26
 
 The mutation-surface completion + self-update release. Closes the CRUD-ish document-mutation arc started in v0.32: `vault set` adds the update verb (frontmatter mutation with `--push` / `--pop` / `--remove` and wholesale body replacement via `--body-from-stdin`), and `vault new` adds the create verb (schema-aware scaffold from path with `frontmatter_defaults` declared per rule, Obsidian-core-compatible substitution language, and seven chainable pipe transforms). `vault edit` (partial-edit primitive) remains the one deferred verb. Alongside the mutation work: `vault self-update` lands as the housekeeping primitive — refresh the running binary against GitHub Releases; pair `--dry-run` with `--format json` for scriptable "is there an update?" checks. `vault-standards` config gains `frontmatter_defaults`, named path captures (`{{name}}` declared in `match.path`, `{{path.name}}` referenced in defaults), and an optional `templates: { date_format, time_format }` block — all additive. Three runtime dependency bumps ship: `serde_json` patch, `rusqlite` minor (bundled SQLite update), and `sha2` 0.10 → 0.11 (cache-identity hashing migrated to explicit byte iteration; existing cache directories continue to resolve). `repair_plan_schema_version` bumps twice (7 → 8 for `replace_body`, 8 → 9 for `create_document`). 865 → 1136 tests.

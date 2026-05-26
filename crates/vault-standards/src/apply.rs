@@ -19,7 +19,7 @@ use crate::summary::Summary;
 
 #[derive(Debug, Error)]
 pub enum ApplyError {
-    #[error("unsupported repair plan schema version: expected {expected}, got {got}")]
+    #[error("unsupported repair plan schema version: expected {expected}, got {got}; regenerate with `vault repair plan`")]
     UnsupportedSchemaVersion { expected: u32, got: u32 },
 
     #[error("repair plan vault root does not match effective cwd: plan {plan}, cwd {cwd}")]
