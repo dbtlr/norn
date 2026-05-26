@@ -51,5 +51,6 @@ clap_mangen.workspace = true
 
 [dev-dependencies]
 mockito.workspace = true
+regex = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = "3"

@@ -120,6 +120,13 @@ Constraints (independent and additive):
 
 Supported `field_types`: `datetime`, `date`, `list_of_strings`, `wikilink`, `wikilink_or_list`. Field-type checks only run when the field is present — combine with `required_frontmatter` when presence is also required.
 
+- `frontmatter_defaults`: map of field → default value. Used by `vault new` to
+  fill required fields when creating a new document. Values may use the
+  substitution language (`{{title}}`, `{{date}}`, `{{time}}`, `{{date:fmt}}`,
+  `{{time:fmt}}`, `{{now}}`, `{{path.X}}`) and pipe transforms
+  (`titlecase`, `sentencecase`, `lower`, `upper`, `unsep`, `strip_date_prefix`,
+  `slugify`). See `CHANGELOG.md` for details.
+
 `datetime` accepts ISO/YAML forms with optional seconds, fractional seconds, `Z`, numeric timezone offsets, or a space separator. `date` accepts plain `YYYY-MM-DD` values and YAML-normalized midnight datetime strings.
 
 ### Worked example
@@ -249,6 +256,21 @@ Apply automatically rewrites backlinks alongside the move:
 **Known v0.28.0 limitation:** when a backlinking file contains multiple identical link occurrences pointing at the moved file, only the first occurrence is rewritten. Subsequent identical raw occurrences remain unchanged; running `vault validate` after apply will flag them as unresolved.
 
 A rename whose new stem already exists elsewhere produces a non-blocking `StemCollisionAfterMove` warning attached to the planned change.
+
+## Templates
+
+Optional. Overrides defaults for the substitution language's `{{date}}` and
+`{{time}}` vars used in `frontmatter_defaults`.
+
+```yaml
+templates:
+  date_format: "YYYY-MM-DD"  # default
+  time_format: "HH:mm"       # default
+```
+
+Format strings follow Moment.js-subset tokens: YYYY, YY, MM, M, MMM, MMMM, DD,
+D, HH, H, hh, h, mm, ss, A, a, dddd, ddd. See `CHANGELOG.md` for the full
+substitution-language reference.
 
 ## Examples
 

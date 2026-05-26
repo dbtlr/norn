@@ -120,7 +120,7 @@ vault repair plan --code frontmatter-disallowed-value --field status --out repai
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "vault_root": "/abs/path/to/vault",
   "source_filters": { "...": "..." },
   "summary": {
@@ -149,10 +149,11 @@ The supported repair actions are:
 - `add_frontmatter` — insert a missing scalar field.
 - `move_document` — move or rename a file, with automatic backlink rewriting on apply.
 - `rewrite_link` — rewrite a broken wikilink in the source document to a new target. Proposed automatically by the closest-match algorithm for `link-target-missing` findings; preserves display text, anchor, and block-ref suffixes.
+- `create_document` — create a brand-new document with synthesized frontmatter and body. Emitted exclusively by `vault new`; not config-rule-triggerable.
 
 Repair rule `match` supports `code`, `rule`, `field`, and `actual_value`. Matches are exact and type-sensitive. A rule must declare exactly one action (for configurable rules; `rewrite_link` is emitted by the closest-match planner, not from config rules).
 
-> **Note on `replace_body`:** A sixth plan op variant exists — `replace_body` — but it is not config-rule-triggerable. It is emitted exclusively by `vault set --body-from-stdin` for wholesale document body replacement. Operators cannot reference `replace_body` in a `repair.rules` entry.
+> **Note on emitter-only ops:** Two plan op variants are emitter-only — `replace_body` (emitted by `vault set --body-from-stdin`) and `create_document` (emitted by `vault new`). Neither is config-rule-triggerable.
 
 ## Repairable findings
 

@@ -115,6 +115,9 @@ pub struct RepairApplyReport {
     pub moved_files: Vec<MoveResult>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub deleted_documents: Vec<DeleteResult>,
+    /// Documents created by `create_document` ops (Pass 1e).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub created_documents: Vec<CreateDocumentResult>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub rewritten_links: Vec<LinkRewriteResult>,
     /// Paths whose body was wholly replaced by a `replace_body` change (Pass 1d).
@@ -147,6 +150,7 @@ impl RepairApplyReport {
             applied_changes: plan.changes.len(),
             moved_files: Vec::new(),
             deleted_documents: Vec::new(),
+            created_documents: Vec::new(),
             rewritten_links: Vec::new(),
             replaced_bodies: Vec::new(),
             warnings: Vec::new(),
@@ -184,12 +188,12 @@ pub fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &RepairPlan) -> Result<(
 }
 
 /// Returns true for operations that are handled by dedicated orchestrator passes
-/// (Pass 1b, 1c, 1d, 2, 3) rather than the per-file frontmatter edit pass. These
+/// (Pass 1b, 1c, 1d, 1e, 2, 3) rather than the per-file frontmatter edit pass. These
 /// are skipped in `changes_by_path` rather than rejected as unsupported.
 fn is_orchestrator_pass_op(operation: &str) -> bool {
     matches!(
         operation,
-        "move_document" | "rewrite_link" | "delete_document" | "replace_body"
+        "move_document" | "rewrite_link" | "delete_document" | "replace_body" | "create_document"
     )
 }
 
@@ -570,6 +574,11 @@ pub fn apply_move(cwd: &Utf8Path, change: &PlannedChange) -> Result<MoveResult, 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteResult {
+    pub path: Utf8PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDocumentResult {
     pub path: Utf8PathBuf,
 }
 

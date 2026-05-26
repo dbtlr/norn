@@ -58,3 +58,15 @@ A rule can declare any combination of constraints. For example:
 This rule fires on any document with `type: agent-artifact` and emits up to
 three independent findings: one for missing `artifact_kind`, one for present
 `kind`, one for misrouted location.
+
+## Creation defaults
+
+In addition to constraints (validated at `vault validate` time), a rule can
+declare `frontmatter_defaults` — values that `vault new` fills in when
+creating a new document whose path matches the rule. Defaults complement
+constraints: a rule can require `status` AND declare `status: backlog` as
+the default, so `vault new` produces valid documents without operator
+intervention.
+
+Substitution language and transforms apply to default values. See
+`docs/configuration.md` for the full vocabulary.

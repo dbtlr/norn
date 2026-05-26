@@ -539,7 +539,7 @@ fn apply_guidance_suppresses_apply_block_when_skip_reason_active() {
 }
 
 /// Subprocess stdout is a pipe, not a tty, so omitting `--format` should default
-/// to JSON output (schema_version 7). Explicit `--format report` still wins.
+/// to JSON output (schema_version 9). Explicit `--format report` still wins.
 #[test]
 fn piped_default_is_json_explicit_format_overrides() {
     let (root, config_path) = build_plan_with_proposals_fixture();
@@ -575,7 +575,7 @@ fn piped_default_is_json_explicit_format_overrides() {
     );
     let json: serde_json::Value =
         serde_json::from_str(&piped_stdout).expect("piped default should be valid JSON");
-    assert_eq!(json["schema_version"], 8);
+    assert_eq!(json["schema_version"], 9);
 
     // Explicit --format report overrides the piped default
     let report = Command::new(env!("CARGO_BIN_EXE_vault"))

@@ -76,7 +76,7 @@ impl crate::Cache {
         use camino::Utf8PathBuf;
         use rusqlite::params_from_iter;
         use rusqlite::types::Value as SqlValue;
-        use vault_graph::pattern_matches_path;
+        use vault_standards::path_match::PathPattern;
 
         let (where_sql, where_binds) = build_documents_matching_sql_parts(&query.predicates);
 
@@ -136,11 +136,12 @@ impl crate::Cache {
             // Path-glob post-pass: filter all results in Rust, then apply
             // OFFSET/LIMIT in Rust too. `total` = count after glob filtering.
             all_matches.retain(|doc| {
-                query
-                    .predicates
-                    .path_globs
-                    .iter()
-                    .any(|pattern| pattern_matches_path(pattern, &doc.path))
+                query.predicates.path_globs.iter().any(|pattern| {
+                    PathPattern::parse(pattern)
+                        .ok()
+                        .and_then(|p| p.match_path(doc.path.as_str()))
+                        .is_some()
+                })
             });
             let total = all_matches.len();
             let matches = all_matches.into_iter().skip(offset).take(limit).collect();

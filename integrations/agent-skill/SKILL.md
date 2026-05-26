@@ -18,7 +18,7 @@ Use `vault` when you need to:
 - Validate a vault against configured rules (`required_frontmatter`, `field_types`, `allowed_values`, `allowed_paths`, etc.).
 - Audit unresolved or ambiguous links.
 - Surface frontmatter drift for review.
-- Produce an inspectable repair plan (`schema_version: 8`) and apply it explicitly.
+- Produce an inspectable repair plan (`schema_version: 9`) and apply it explicitly.
 
 Do not use `vault` when you need full-text or semantic search — its `find` command is exact literal substring + frontmatter + path glob.
 
@@ -42,7 +42,7 @@ None of these write to the vault:
 - `vault validate` (with or without `--summary` or filters)
 - `vault repair plan` (produces an artifact; does not modify the vault)
 
-`vault set`, `vault move`, and `vault delete` are mutation commands; pass `--dry-run` to preview without writing. Only `vault repair apply`, `vault set`, `vault move`, and `vault delete` (without `--dry-run`) write to the vault. The repair plan argument is optional — omit it (or pass `-`) to read the plan from stdin.
+`vault new`, `vault set`, `vault move`, and `vault delete` are mutation commands; pass `--dry-run` to preview without writing. Only `vault repair apply`, `vault new`, `vault set`, `vault move`, and `vault delete` (without `--dry-run`) write to the vault. The repair plan argument is optional — omit it (or pass `-`) to read the plan from stdin.
 
 ## Validation summary first, raw findings second
 
@@ -100,7 +100,7 @@ If a vault has no config, defaults apply.
 
 Two write surfaces exist. Use the right one for the job:
 
-- **`vault set` / `vault move` / `vault delete`** — operator-driven CRUD. One document, one command. Schema-aware, safe-by-default (dry-run preview, `--yes` to apply).
+- **`vault new` / `vault set` / `vault move` / `vault delete`** — operator-driven CRUD. One document, one command. Schema-aware, safe-by-default (dry-run preview, `--yes` to apply).
 - **`vault repair apply`** — finding-driven batch repair. Consumes a plan artifact produced by `vault repair plan`. Apply checks document hashes; any precondition failure aborts the whole batch before any partial writes.
 
 1. `vault -C /path/to/vault repair plan --out repair.json`
@@ -118,7 +118,7 @@ Apply rejects:
 
 - Plans for a different vault root than the current invocation.
 - Stale document hashes (a file changed since the plan was created).
-- Unsupported schema versions (currently `8`).
+- Unsupported schema versions (currently `9`).
 - Conflicting field changes.
 - Expected-old-value mismatches.
 
@@ -126,7 +126,7 @@ Re-plan rather than retrying. There is no `--force` flag.
 
 ### Repair action shapes
 
-vault-cli supports six repair actions:
+vault-cli supports seven repair actions:
 
 - `set_frontmatter` — replace an existing frontmatter field's value.
 - `remove_frontmatter` — remove a frontmatter field.
@@ -134,6 +134,7 @@ vault-cli supports six repair actions:
 - `move_document` — relocate (or rename) a file to a new path, with automatic backlink rewriting.
 - `rewrite_link` — rewrite a broken wikilink in the source document to a new target. Preserves display text (`[[X|label]]`), anchor (`[[X#section]]`), and block-ref (`[[X^block-id]]`) suffixes. All matching occurrences in the source are rewritten.
 - `replace_body` — wholesale replacement of the document body. **Emitted only by `vault set --body-from-stdin`; this is not a config-rule-triggerable action.** Operators cannot write `replace_body` in a `repair.rules` config entry.
+- `create_document` — create a brand-new document with synthesized frontmatter and body. Emitted exclusively by `vault new`; not config-rule-triggerable. (Sibling to `replace_body`, which is `vault set --body-from-stdin`'s plan op.)
 
 Agents should not invent destination paths or values for these actions. The repair rule (or closest-match algorithm for `rewrite_link`) supplies the target value at plan time — no agent judgment required.
 
@@ -155,7 +156,7 @@ Stable reason codes: `missing-default`, `link-decision-needed`, `no-rule-matched
 
 ### Plan footnotes
 
-Repair plans (schema v8) carry a `footnotes` array alongside `changes`. Footnotes are read-only commentary — `repair apply` ignores them entirely; they exist for LLM/operator consumers to reason about proposal quality. Each footnote for a closest-match rewrite carries:
+Repair plans (schema v9) carry a `footnotes` array alongside `changes`. Footnotes are read-only commentary — `repair apply` ignores them entirely; they exist for LLM/operator consumers to reason about proposal quality. Each footnote for a closest-match rewrite carries:
 
 - `change_id` — references the corresponding change.
 - `confidence` — `high` or `medium`.

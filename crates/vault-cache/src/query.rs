@@ -8,7 +8,7 @@ use serde_json::Value;
 /// ALL-of across all flag-fields and across vectors.
 #[derive(Default, Debug, Clone)]
 pub struct DocumentQuery {
-    /// Path glob patterns in `vault_graph::pattern_matches_path` syntax.
+    /// Path glob patterns in `vault_standards::path_match::PathPattern` syntax.
     /// ANY-of. Empty = no path narrowing. Applied as a Rust post-pass.
     pub path_globs: Vec<String>,
     /// Frontmatter equality predicates `(field, value)`. ALL-of.

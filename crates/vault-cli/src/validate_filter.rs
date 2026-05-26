@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{bail, Result};
 use vault_core::display;
-use vault_graph::pattern_matches_path;
+use vault_standards::path_match::PathPattern;
 use vault_standards::{Finding, FindingBody};
 
 use crate::cli::{RepairPlanArgs, ValidateArgs};
@@ -170,9 +170,12 @@ fn optional_set_matches(values: &BTreeSet<String>, actual: Option<&str>) -> bool
 
 fn paths_match(finding: &Finding, patterns: &[String]) -> bool {
     patterns.is_empty()
-        || patterns
-            .iter()
-            .any(|pattern| pattern_matches_path(pattern, &finding.path))
+        || patterns.iter().any(|pattern| {
+            PathPattern::parse(pattern)
+                .ok()
+                .and_then(|p| p.match_path(finding.path.as_str()))
+                .is_some()
+        })
 }
 
 fn severity_key(finding: &Finding) -> &'static str {

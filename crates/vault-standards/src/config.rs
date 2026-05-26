@@ -4,6 +4,8 @@ use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::path_match::{PathPattern, PathPatternError};
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("invalid config {source_path}: {message}")]
@@ -28,6 +30,8 @@ pub struct VaultConfig {
     pub validate: ValidateConfig,
     #[serde(default)]
     pub repair: RepairConfig,
+    #[serde(default)]
+    pub templates: TemplatesConfig,
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
     _deprecated_graph: Option<serde_yaml::Value>,
@@ -47,9 +51,36 @@ impl Default for VaultConfig {
             links: LinksConfig::default(),
             validate: ValidateConfig::default(),
             repair: RepairConfig::default(),
+            templates: TemplatesConfig::default(),
             _deprecated_graph: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplatesConfig {
+    #[serde(default = "default_date_format")]
+    pub date_format: String,
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
+}
+
+impl Default for TemplatesConfig {
+    fn default() -> Self {
+        Self {
+            date_format: default_date_format(),
+            time_format: default_time_format(),
+        }
+    }
+}
+
+fn default_date_format() -> String {
+    "YYYY-MM-DD".into()
+}
+
+fn default_time_format() -> String {
+    "HH:mm".into()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -95,6 +126,8 @@ pub struct ValidateRule {
     pub allowed_values: HashMap<String, Vec<serde_json::Value>>,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub frontmatter_defaults: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -248,6 +281,58 @@ impl RepairRule {
     }
 }
 
+/// Pre-compiled path patterns for a single validate rule. Index-matched with
+/// `validate.rules[i]` — `compiled_rules[i]` corresponds to `validate.rules[i]`.
+#[derive(Debug, Clone)]
+pub struct CompiledRule {
+    pub path: Option<PathPattern>,
+    pub path_not: Option<PathPattern>,
+    pub exclude_path: Option<PathPattern>,
+    pub allowed_paths: Vec<PathPattern>,
+}
+
+/// Pre-compiled path patterns for `files.ignore` and `validate.ignore`.
+/// Each entry in the vec corresponds to the pattern string at the same index
+/// in the source `Vec<String>`.
+#[derive(Debug, Clone, Default)]
+pub struct CompiledConfig {
+    pub files_ignore: Vec<PathPattern>,
+    pub validate_ignore: Vec<PathPattern>,
+    pub rules: Vec<CompiledRule>,
+}
+
+fn compile_pattern(
+    pattern: &str,
+    label: &str,
+    source_path: &Utf8Path,
+) -> Result<PathPattern, ConfigError> {
+    PathPattern::parse(pattern).map_err(|e: PathPatternError| ConfigError::Invalid {
+        source_path: source_path.to_owned(),
+        message: format!("{label}: invalid path pattern `{pattern}`: {e}"),
+    })
+}
+
+fn compile_optional(
+    opt: &Option<String>,
+    label: &str,
+    source_path: &Utf8Path,
+) -> Result<Option<PathPattern>, ConfigError> {
+    opt.as_deref()
+        .map(|s| compile_pattern(s, label, source_path))
+        .transpose()
+}
+
+fn compile_vec(
+    patterns: &[String],
+    label: &str,
+    source_path: &Utf8Path,
+) -> Result<Vec<PathPattern>, ConfigError> {
+    patterns
+        .iter()
+        .map(|s| compile_pattern(s, label, source_path))
+        .collect()
+}
+
 /// Parse a YAML config string with full validation. This is the single public entry
 /// point — replaces the old split between `serde_yaml::from_str::<VaultConfig>` (in
 /// the CLI) and `validate_config_yaml` (in vault-standards).
@@ -258,6 +343,60 @@ pub fn parse_config(yaml: &str, source_path: &Utf8Path) -> Result<VaultConfig, C
     })?;
     post_validate(&cfg, source_path)?;
     Ok(cfg)
+}
+
+/// Parse and compile all path patterns in the config. Returns both the raw
+/// deserialized config and a `CompiledConfig` with pre-built `PathPattern`
+/// values. Call this instead of `parse_config` when you need hot-path
+/// matching (e.g., the validate engine).
+pub fn parse_config_compiled(
+    yaml: &str,
+    source_path: &Utf8Path,
+) -> Result<(VaultConfig, CompiledConfig), ConfigError> {
+    let cfg = parse_config(yaml, source_path)?;
+
+    let files_ignore = compile_vec(&cfg.files.ignore, "files.ignore", source_path)?;
+    let validate_ignore = compile_vec(&cfg.validate.ignore, "validate.ignore", source_path)?;
+
+    let mut compiled_rules = Vec::with_capacity(cfg.validate.rules.len());
+    for rule in &cfg.validate.rules {
+        let rule_label = rule.name.as_deref().unwrap_or("unnamed validate rule");
+        let path = compile_optional(
+            &rule.r#match.path,
+            &format!("rule {rule_label}: match.path"),
+            source_path,
+        )?;
+        let path_not = compile_optional(
+            &rule.r#match.path_not,
+            &format!("rule {rule_label}: match.path_not"),
+            source_path,
+        )?;
+        let exclude_path = compile_optional(
+            &rule.exclude.path,
+            &format!("rule {rule_label}: exclude.path"),
+            source_path,
+        )?;
+        let allowed_paths = compile_vec(
+            &rule.allowed_paths,
+            &format!("rule {rule_label}: allowed_paths"),
+            source_path,
+        )?;
+        compiled_rules.push(CompiledRule {
+            path,
+            path_not,
+            exclude_path,
+            allowed_paths,
+        });
+    }
+
+    Ok((
+        cfg,
+        CompiledConfig {
+            files_ignore,
+            validate_ignore,
+            rules: compiled_rules,
+        },
+    ))
 }
 
 fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), ConfigError> {
@@ -314,6 +453,73 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                         "rule {rule_label}: match.frontmatter.{field} must be a string, boolean, or number"
                     ),
                 });
+            }
+        }
+
+        // frontmatter_defaults: path.X references must be declared in this rule's match.path.
+        let declared: std::collections::BTreeSet<String> = rule
+            .r#match
+            .path
+            .as_deref()
+            .and_then(|p| {
+                crate::path_match::PathPattern::parse(p)
+                    .ok()
+                    .map(|pp| pp.declared_variables().into_iter().collect())
+            })
+            .unwrap_or_default();
+        for (field, value) in &rule.frontmatter_defaults {
+            let Some(s) = value.as_str() else {
+                continue;
+            };
+            for referenced in crate::defaults::collect_path_var_refs(s) {
+                if !declared.contains(&referenced) {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: field `{field}` references {{{{path.{referenced}}}}} which is not declared in this rule's match.path"
+                        ),
+                    });
+                }
+            }
+        }
+
+        // frontmatter_defaults: transforms must be known.
+        for (field, value) in &rule.frontmatter_defaults {
+            let Some(s) = value.as_str() else {
+                continue;
+            };
+            for t in crate::defaults::collect_transform_refs(s) {
+                if !crate::defaults::KNOWN_TRANSFORMS.contains(&t.as_str()) {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: field `{field}` uses unknown transform `{t}`"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    // frontmatter_defaults: reject conflicting values for the same field across rules.
+    {
+        let mut seen: std::collections::HashMap<&str, (&str, &serde_json::Value)> =
+            std::collections::HashMap::new();
+        for rule in &cfg.validate.rules {
+            let rule_label = rule.name.as_deref().unwrap_or("(unnamed)");
+            for (field, value) in &rule.frontmatter_defaults {
+                if let Some((other_rule, other_value)) = seen.get(field.as_str()) {
+                    if *other_value != value {
+                        return Err(ConfigError::Invalid {
+                            source_path: source_path.to_owned(),
+                            message: format!(
+                                "conflicting frontmatter_defaults for field `{field}`: rule `{other_rule}` and rule `{rule_label}` declare different values"
+                            ),
+                        });
+                    }
+                } else {
+                    seen.insert(field, (rule_label, value));
+                }
             }
         }
     }
@@ -674,5 +880,217 @@ repair:
         let cfg = parse(yaml).unwrap();
         assert_eq!(cfg.validate.rules.len(), 1);
         assert_eq!(cfg.repair.rules.len(), 1);
+    }
+
+    #[test]
+    fn config_load_rejects_invalid_path_pattern() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: bad
+      match:
+        path: "Workspaces/{{unclosed/foo.md"
+"#;
+        let err = parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid path pattern"), "got: {msg}");
+        assert!(msg.contains("bad"), "got: {msg}");
+    }
+
+    #[test]
+    fn parses_frontmatter_defaults() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: task-rule
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      required_frontmatter: [type, status]
+      frontmatter_defaults:
+        type: task
+        status: backlog
+        workspace: "[[{{path.workspace}}]]"
+        created: "{{now}}"
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        let rule = &cfg.validate.rules[0];
+        assert_eq!(
+            rule.frontmatter_defaults.get("type"),
+            Some(&serde_json::json!("task"))
+        );
+        assert_eq!(
+            rule.frontmatter_defaults.get("status"),
+            Some(&serde_json::json!("backlog"))
+        );
+        assert_eq!(rule.frontmatter_defaults.len(), 4);
+    }
+
+    #[test]
+    fn frontmatter_defaults_optional_and_empty_by_default() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: any
+      match:
+        path: "**/*.md"
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        assert!(cfg.validate.rules[0].frontmatter_defaults.is_empty());
+    }
+
+    #[test]
+    fn config_load_rejects_unknown_path_var_in_default() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        title: "{{path.bogus}}"
+"#;
+        let err = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("rule r") || msg.contains("`r`"),
+            "msg was {msg}"
+        );
+        assert!(
+            msg.contains("path.bogus") || msg.contains("bogus"),
+            "msg was {msg}"
+        );
+        assert!(
+            msg.contains("not declared")
+                || msg.contains("undeclared")
+                || msg.contains("not defined"),
+            "msg was {msg}"
+        );
+    }
+
+    #[test]
+    fn config_load_accepts_known_path_var_in_default() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        workspace: "[[{{path.workspace}}]]"
+"#;
+        parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+    }
+
+    #[test]
+    fn config_load_rejects_unknown_transform_in_default() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        title: "{{title | bogus_transform}}"
+"#;
+        let err = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown transform") || msg.contains("transform"),
+            "msg was {msg}"
+        );
+        assert!(
+            msg.contains("bogus_transform") || msg.contains("bogus"),
+            "msg was {msg}"
+        );
+    }
+
+    #[test]
+    fn config_load_accepts_known_transforms() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        title: "{{title | strip_date_prefix | titlecase}}"
+"#;
+        parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+    }
+
+    #[test]
+    fn config_load_rejects_conflicting_defaults_across_rules() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: a
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        status: backlog
+    - name: b
+      match:
+        path: "tasks/**/*.md"
+      frontmatter_defaults:
+        status: in_progress
+"#;
+        let err = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("conflict") || msg.contains("conflicting"),
+            "msg was {msg}"
+        );
+        assert!(msg.contains("status"), "msg was {msg}");
+    }
+
+    #[test]
+    fn config_load_accepts_identical_defaults_across_rules() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: a
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        type: note
+    - name: b
+      match:
+        path: "notes/**/*.md"
+      frontmatter_defaults:
+        type: note
+"#;
+        parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+    }
+
+    #[test]
+    fn parses_templates_config_block() {
+        let yaml = r#"
+templates:
+  date_format: "YYYY/MM/DD"
+  time_format: "HH:mm:ss"
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        assert_eq!(cfg.templates.date_format, "YYYY/MM/DD");
+        assert_eq!(cfg.templates.time_format, "HH:mm:ss");
+    }
+
+    #[test]
+    fn templates_config_block_defaults_when_absent() {
+        let yaml = "files:\n  ignore: []\n";
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        assert_eq!(cfg.templates.date_format, "YYYY-MM-DD");
+        assert_eq!(cfg.templates.time_format, "HH:mm");
+    }
+
+    #[test]
+    fn templates_config_block_partial_uses_defaults() {
+        // Only date_format specified — time_format should fall back to default.
+        let yaml = r#"
+templates:
+  date_format: "DD/MM/YYYY"
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        assert_eq!(cfg.templates.date_format, "DD/MM/YYYY");
+        assert_eq!(cfg.templates.time_format, "HH:mm");
     }
 }

@@ -14,7 +14,7 @@ fn fixture_vault() -> tempfile::TempDir {
 
 fn empty_plan_json(vault_root: &str) -> String {
     serde_json::to_string(&serde_json::json!({
-        "schema_version": 8,
+        "schema_version": 9,
         "vault_root": vault_root,
         "source_filters": {
             "code": [],

@@ -1656,6 +1656,7 @@ dependencies = [
  "vault-frontmatter",
  "vault-graph",
  "vault-links",
+ "vault-standards",
 ]
 
 [[package]]
@@ -1673,6 +1674,7 @@ dependencies = [
  "clap_mangen",
  "globset",
  "mockito",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1745,6 +1747,9 @@ version = "0.32.0"
 dependencies = [
  "anyhow",
  "camino",
+ "chrono",
+ "globset",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",

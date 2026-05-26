@@ -6,7 +6,7 @@ use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::OptionalExtension;
 use vault_core::DocumentSummary;
-use vault_graph::pattern_matches_path;
+use vault_standards::path_match::PathPattern;
 
 use crate::error::CacheError;
 use crate::query::{json_path_for, DocumentQuery};
@@ -17,7 +17,7 @@ impl crate::Cache {
     ///
     /// Frontmatter predicates push into SQL via `json_extract` with the JSON
     /// path bound as a parameter; path globs post-filter via
-    /// `vault_graph::pattern_matches_path`.
+    /// `vault_standards::path_match::PathPattern`.
     pub fn documents_matching(
         &self,
         query: &DocumentQuery,
@@ -49,10 +49,12 @@ impl crate::Cache {
 
         if !query.path_globs.is_empty() {
             docs.retain(|doc| {
-                query
-                    .path_globs
-                    .iter()
-                    .any(|pattern| pattern_matches_path(pattern, &doc.path))
+                query.path_globs.iter().any(|pattern| {
+                    PathPattern::parse(pattern)
+                        .ok()
+                        .and_then(|p| p.match_path(doc.path.as_str()))
+                        .is_some()
+                })
             });
         }
 

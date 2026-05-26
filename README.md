@@ -72,6 +72,7 @@ For a deeper walkthrough including scoped rules and a first repair plan, see [do
 | Validate against rules | `vault validate --summary` | [validation.md](docs/validation.md) |
 | Plan a repair | `vault repair plan --out repair.json` | [validation.md](docs/validation.md) |
 | Apply a repair | `vault repair apply repair.json --verify` | [validation.md](docs/validation.md) |
+| Create a document | `vault new <path>` | [commands.md](docs/commands.md) |
 | Move a document | `vault move <src> <dst>` | [commands.md](docs/commands.md) |
 | Delete a document | `vault delete <doc>` | [commands.md](docs/commands.md) |
 | Find | `vault find --text "..." --eq k:v` | [commands.md](docs/commands.md) |
@@ -82,7 +83,7 @@ Commands accept `--format json|jsonl` (stable contracts) plus format-specific hu
 
 `vault` is designed to be a first-class tool for coding agents:
 
-- **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned repair plan (`schema_version: 8`).
+- **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned repair plan (`schema_version: 9`).
 - **Plan/apply boundary.** Mutation is always two steps: produce a plan artifact, then apply it. Apply rejects mismatched vault roots, stale document hashes, and unsupported schema versions.
 - **Filterable triage.** `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason` apply to both raw output and `--summary`, so an agent can size a queue before reading it.
 - **Vault targeting.** Use `-C <path>` (or `--cwd <path>`) to point `vault` at a specific vault root, or omit it to run against the current directory.

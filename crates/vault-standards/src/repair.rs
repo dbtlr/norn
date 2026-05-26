@@ -13,7 +13,7 @@ use vault_core::Severity;
 use crate::config::{RepairAction, RepairConfig, RepairRule, RepairRuleMatch};
 use crate::findings::{Finding, FindingBody};
 
-pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 8;
+pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1574,8 +1574,36 @@ mod tests {
     }
 
     #[test]
-    fn repair_plan_schema_version_is_eight() {
-        assert_eq!(REPAIR_PLAN_SCHEMA_VERSION, 8);
+    fn repair_plan_schema_version_is_nine() {
+        assert_eq!(REPAIR_PLAN_SCHEMA_VERSION, 9);
+    }
+
+    #[test]
+    fn create_document_planned_change_serializes_round_trip() {
+        let pc = PlannedChange {
+            change_id: "abc12345".into(),
+            path: "Workspaces/foo/tasks/bar.md".into(),
+            document_hash: "0".repeat(64),
+            finding_code: "imperative-create".into(),
+            finding_rule: None,
+            repair_rule: "vault-new".into(),
+            operation: "create_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: Some(serde_json::json!({
+                "frontmatter": {"type": "task", "status": "backlog"},
+                "body": ""
+            })),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+        };
+        let json = serde_json::to_string(&pc).unwrap();
+        let round: PlannedChange = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.operation, "create_document");
+        assert_eq!(round.path.as_str(), "Workspaces/foo/tasks/bar.md");
+        assert!(round.new_value.is_some());
     }
 
     #[test]

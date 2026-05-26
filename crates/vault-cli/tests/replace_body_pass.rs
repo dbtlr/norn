@@ -30,7 +30,7 @@ fn blake3_of_file(path: &std::path::Path) -> String {
 
 fn plan_json(vault_root: &str, note_rel: &str, document_hash: &str, new_body: &str) -> String {
     serde_json::to_string(&serde_json::json!({
-        "schema_version": 8,
+        "schema_version": 9,
         "vault_root": vault_root,
         "source_filters": {
             "code": [], "severity": [], "field": [], "rule": [],

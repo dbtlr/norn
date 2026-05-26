@@ -1,0 +1,528 @@
+//! `vault new` orchestration glue. Mirror of `crates/vault-cli/src/set/mod.rs`.
+
+pub mod report;
+pub mod synth;
+pub mod validate;
+
+use std::io::{IsTerminal, Write};
+
+use anyhow::Result;
+use camino::Utf8Path;
+
+use crate::cli::{NewArgs, NewFormat};
+
+// ── Public surface ─────────────────────────────────────────────────────────────
+
+/// Holds the rendered output string and the process exit code the caller
+/// should use. Mirrors the return shape that `Command::Set` uses inline.
+#[derive(Debug)]
+pub struct OutputBundle {
+    pub rendered: String,
+    pub exit_code: i32,
+}
+
+/// Orchestration entry for `vault new`.
+///
+/// Flow:
+/// 1. Load config (`.vault/config.yaml`).
+/// 2. Open cache + build `GraphIndex`.
+/// 3. Run preflight checks.
+/// 4. Read body from stdin if `--body-from-stdin`.
+/// 5. Synthesize the plan via `synth::build_plan`.
+/// 6. Decide dry-run vs. apply (respecting `--dry-run`, `--yes`, `--format json`, TTY).
+/// 7. On apply, call `repair_apply::apply_repair_plan_with_context` with the
+///    `create_document` arm and the `-p` / `--parents` flag threaded through.
+/// 8. Render output and return an `OutputBundle` with the appropriate exit code.
+///
+/// Exit-code mapping:
+/// - 0 — success (dry-run or applied).
+/// - 1 — user cancelled (TTY confirm → n/N).
+/// - 2 — preflight or synth error, config-load error.
+pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<OutputBundle> {
+    // ── Step 1: Load config ───────────────────────────────────────────────────
+    let vault_root_buf = vault_root.to_owned();
+    let loaded_config = crate::config_loader::load_config(&vault_root_buf, None)
+        .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+
+    // ── Step 2: Open cache + build GraphIndex ─────────────────────────────────
+    let index = crate::cache::load_graph_index(
+        &vault_root_buf,
+        &loaded_config.index_options,
+        /*no_cache_refresh=*/ false,
+    )?;
+
+    // ── Step 3: Preflight ─────────────────────────────────────────────────────
+    crate::new::validate::preflight(
+        vault_root.as_str(),
+        args.path.as_str(),
+        args.force,
+        args.parents,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // ── Step 4: Body from stdin ───────────────────────────────────────────────
+    let body = if args.body_from_stdin {
+        let raw = std::io::read_to_string(std::io::stdin())?;
+        // Trim a single trailing newline to match shell convention (echo adds one).
+        raw.strip_suffix('\n').unwrap_or(&raw).to_string()
+    } else {
+        String::new()
+    };
+
+    // ── Step 5: Synthesize the plan ───────────────────────────────────────────
+    let plan = crate::new::synth::build_plan(
+        args,
+        &loaded_config.vault_config,
+        &loaded_config.compiled,
+        Some(&index),
+        body.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let body_bytes = body.len();
+
+    // ── Step 6: Decide dry-run vs. apply ──────────────────────────────────────
+    //
+    // Decision tree (mirrors Command::Set logic in main.rs):
+    //   --dry-run           → always dry-run
+    //   --yes               → apply
+    //   --format json       → implicit non-interactive; dry-run unless --yes
+    //   stdout is TTY       → interactive confirm
+    //   non-TTY, no --yes   → implicit dry-run
+
+    let render_preview = |applied: bool| -> Result<String> {
+        Ok(match args.format {
+            NewFormat::Records => {
+                crate::new::report::render_records(&plan, args.path.as_str(), applied, body_bytes)
+            }
+            NewFormat::Json => {
+                crate::new::report::render_json(&plan, args.path.as_str(), applied, body_bytes)?
+            }
+        })
+    };
+
+    if args.dry_run {
+        // Explicit dry-run: render preview only.
+        let rendered = render_preview(false)?;
+        return Ok(OutputBundle {
+            rendered,
+            exit_code: 0,
+        });
+    }
+
+    if args.yes {
+        // --yes: skip confirm, go straight to apply.
+        return apply_and_render(args, vault_root, &index, &plan, body_bytes, render_preview);
+    }
+
+    if matches!(args.format, NewFormat::Json) {
+        // JSON format is implicitly non-interactive. Without --yes, dry-run.
+        let rendered = render_preview(false)?;
+        return Ok(OutputBundle {
+            rendered,
+            exit_code: 0,
+        });
+    }
+
+    if std::io::stdout().is_terminal() {
+        // TTY interactive: render preview, prompt, then apply or cancel.
+        let preview = render_preview(false)?;
+        // Print preview to stdout before prompting.
+        print!("{preview}");
+        std::io::stdout().flush()?;
+
+        let stdin = std::io::stdin();
+        let mut reader = stdin.lock();
+        let mut prompt_out = std::io::stderr();
+        writeln!(prompt_out)?;
+        let ok = crate::prompt::confirm(&mut reader, &mut prompt_out, "Apply? [y/N] ")?;
+        if !ok {
+            return Ok(OutputBundle {
+                rendered: String::new(),
+                exit_code: 1,
+            });
+        }
+        return apply_and_render(args, vault_root, &index, &plan, body_bytes, render_preview);
+    }
+
+    // Non-TTY without --yes: implicit dry-run.
+    let rendered = render_preview(false)?;
+    Ok(OutputBundle {
+        rendered,
+        exit_code: 0,
+    })
+}
+
+// ── Apply path ────────────────────────────────────────────────────────────────
+
+/// Call the apply orchestrator and render the post-apply output.
+fn apply_and_render(
+    args: &NewArgs,
+    vault_root: &Utf8Path,
+    index: &vault_core::GraphIndex,
+    plan: &crate::new::synth::CreateDocumentPlan,
+    body_bytes: usize,
+    render_preview: impl Fn(bool) -> Result<String>,
+) -> Result<OutputBundle> {
+    use camino::Utf8PathBuf;
+
+    // Build the single-change RepairPlan expected by apply_repair_plan_with_context.
+    let repair_plan = vault_standards::RepairPlan {
+        schema_version: vault_standards::REPAIR_PLAN_SCHEMA_VERSION,
+        vault_root: Utf8PathBuf::from(vault_root.as_str()),
+        source_filters: vault_standards::RepairPlanFilters::default(),
+        summary: vault_standards::RepairPlanSummary {
+            findings: 1,
+            planned_changes: 1,
+            skipped: vault_standards::SkippedSummary::default(),
+        },
+        changes: vec![plan.change.clone()],
+        skipped_findings: vec![],
+        footnotes: vec![],
+    };
+
+    // Thread the -p / --parents flag through to the create_document arm.
+    let ctx = crate::repair_apply::CreateApplyContext {
+        parents: args.parents,
+    };
+    let vault_root_buf = vault_root.to_owned();
+    crate::repair_apply::apply_repair_plan_with_context(
+        &vault_root_buf,
+        index,
+        &repair_plan,
+        /*dry_run=*/ false,
+        &ctx,
+    )?;
+
+    // Task 8.3: post-create validate hook.
+    // Re-validate the new doc to surface any findings as warnings in the envelope.
+    // We reload the index to include the newly created file.
+    let post_warnings =
+        post_create_validate(vault_root, args, &plan.warnings, body_bytes).unwrap_or_default();
+
+    // If post-validate found additional warnings, merge them into the plan's warnings
+    // for rendering. We render with a modified plan that includes post_warnings.
+    let rendered = if post_warnings.is_empty() {
+        render_preview(true)?
+    } else {
+        // Build an augmented plan with the post-validate warnings appended.
+        let mut augmented = crate::new::synth::CreateDocumentPlan {
+            change: plan.change.clone(),
+            warnings: plan.warnings.clone(),
+            field_sources: plan.field_sources.clone(),
+        };
+        augmented.warnings.extend(post_warnings);
+        match args.format {
+            crate::cli::NewFormat::Records => Ok(crate::new::report::render_records(
+                &augmented,
+                args.path.as_str(),
+                true,
+                body_bytes,
+            )),
+            crate::cli::NewFormat::Json => {
+                crate::new::report::render_json(&augmented, args.path.as_str(), true, body_bytes)
+            }
+        }?
+    };
+
+    Ok(OutputBundle {
+        rendered,
+        exit_code: 0,
+    })
+}
+
+/// Re-validate the newly created document and return any findings as
+/// `Warning` variants to surface in the output envelope.
+///
+/// Choice: rebuild the cache + index after apply (clean; adequate for v1 on
+/// small–medium vaults). A single-doc validate path doesn't exist yet in
+/// vault-standards, so the rebuild is the straightforward option. The 50ms
+/// perf budget applies only to the primary query path — post-create validate
+/// is a one-shot operation and is acceptable to be slightly slower.
+fn post_create_validate(
+    vault_root: &Utf8Path,
+    args: &NewArgs,
+    existing_warnings: &[crate::new::synth::Warning],
+    _body_bytes: usize,
+) -> Result<Vec<crate::new::synth::Warning>> {
+    use crate::new::synth::Warning;
+
+    // Quick rebuild of the index to include the newly created file.
+    let vault_root_buf = vault_root.to_owned();
+    let loaded = crate::config_loader::load_config(&vault_root_buf, None)
+        .map_err(|e| anyhow::anyhow!("post-create validate: config error: {e}"))?;
+    let index = crate::cache::load_graph_index(
+        &vault_root_buf,
+        &loaded.index_options,
+        /*no_cache_refresh=*/ false,
+    )?;
+
+    let findings = vault_standards::validate_with_compiled(
+        &index,
+        &loaded.vault_config.validate,
+        &loaded.compiled,
+        None,
+    );
+
+    // Filter to only findings for the newly created document.
+    let new_path = args.path.as_str();
+    let relevant: Vec<_> = findings
+        .iter()
+        .filter(|f| f.path.as_str() == new_path)
+        .collect();
+
+    // Collect field names already warned by the synth phase (MissingRequiredField).
+    let already_warned: std::collections::BTreeSet<String> = existing_warnings
+        .iter()
+        .filter_map(|w| match w {
+            Warning::MissingRequiredField { field, .. } => Some(field.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let mut extra = Vec::new();
+    for f in relevant {
+        if let vault_standards::FindingBody::RequiredFrontmatterMissing { field, rule } = &f.body {
+            // Deduplicate with synth-phase warnings.
+            if !already_warned.contains(field) {
+                extra.push(Warning::MissingRequiredField {
+                    field: field.clone(),
+                    rules: rule.as_ref().map(|r| vec![r.clone()]).unwrap_or_default(),
+                });
+            }
+        }
+        // Other finding codes are not yet mapped to Warning variants (v1).
+    }
+
+    Ok(extra)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::Builder;
+
+    fn vault() -> tempfile::TempDir {
+        Builder::new().prefix("vault-new-mod-").tempdir().unwrap()
+    }
+
+    fn write_config(root: &std::path::Path, yaml: &str) {
+        let dir = root.join(".vault");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), yaml).unwrap();
+    }
+
+    fn args_for(path: &str) -> crate::cli::NewArgs {
+        crate::cli::NewArgs {
+            path: path.into(),
+            field: vec![],
+            field_json: vec![],
+            body_from_stdin: false,
+            force: false,
+            parents: false,
+            yes: false,
+            dry_run: true, // tests default to dry-run to avoid TTY/apply
+            format: crate::cli::NewFormat::Records,
+        }
+    }
+
+    #[test]
+    fn preflight_and_plan_dry_run_happy_path() {
+        let root = vault();
+        write_config(
+            root.path(),
+            r#"
+validate:
+  rules:
+    - name: any
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        type: note
+"#,
+        );
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let args = args_for("foo.md");
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        assert!(
+            bundle.rendered.contains("foo.md") || bundle.rendered.contains("new"),
+            "rendered: {}",
+            bundle.rendered
+        );
+    }
+
+    #[test]
+    fn preflight_and_plan_refuses_existing_path() {
+        let root = vault();
+        write_config(root.path(), "validate: {}\n");
+        std::fs::write(root.path().join("foo.md"), "existing").unwrap();
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = true;
+        let err = preflight_and_plan(&args, cwd).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exists") || msg.contains("DestinationExists"),
+            "error: {msg}"
+        );
+    }
+
+    #[test]
+    fn preflight_and_plan_refuses_missing_parent_without_parents() {
+        let root = vault();
+        write_config(root.path(), "validate: {}\n");
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("deep/nested/foo.md");
+        args.dry_run = true;
+        let err = preflight_and_plan(&args, cwd).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parent") || msg.contains("ParentMissing"),
+            "error: {msg}"
+        );
+    }
+
+    #[test]
+    fn preflight_and_plan_json_format_emits_envelope() {
+        let root = vault();
+        write_config(root.path(), "validate: {}\n");
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = true;
+        args.format = crate::cli::NewFormat::Json;
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+        assert_eq!(v["operation"], serde_json::json!("new"));
+        assert_eq!(v["applied"], serde_json::json!(false));
+    }
+
+    // ── Apply path tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_path_creates_file_and_emits_applied_true() {
+        let root = vault();
+        write_config(
+            root.path(),
+            r#"
+validate:
+  rules:
+    - name: any
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        type: note
+"#,
+        );
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = false;
+        args.yes = true;
+        args.format = crate::cli::NewFormat::Json;
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(true));
+        assert!(
+            root.path().join("foo.md").exists(),
+            "foo.md should have been created"
+        );
+    }
+
+    #[test]
+    fn apply_path_with_parents_flag_creates_nested_dirs() {
+        let root = vault();
+        write_config(root.path(), "validate: {}\n");
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("deep/nested/dir/bar.md");
+        args.dry_run = false;
+        args.yes = true;
+        args.parents = true;
+        args.format = crate::cli::NewFormat::Json;
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        assert!(
+            root.path().join("deep/nested/dir/bar.md").exists(),
+            "nested file should have been created"
+        );
+    }
+
+    // ── Task 8.3: Post-create validate hook ────────────────────────────────────
+
+    #[test]
+    fn post_create_validate_surfaces_missing_required_field() {
+        let root = vault();
+        // Rule requires both `type` and `description`, but only provides default for `type`.
+        write_config(
+            root.path(),
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      required_frontmatter: [type, description]
+      frontmatter_defaults:
+        type: note
+"#,
+        );
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = false;
+        args.yes = true;
+        args.format = crate::cli::NewFormat::Json;
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(true));
+
+        // The warnings array should include missing-required-field for `description`.
+        let warnings = v["warnings"].as_array().unwrap();
+        let has_missing_desc = warnings
+            .iter()
+            .any(|w| w["kind"] == "missing-required-field" && w["field"] == "description");
+        assert!(
+            has_missing_desc,
+            "expected missing-required-field for description in warnings: {warnings:?}"
+        );
+    }
+
+    // ── Task 8.4: Stem-collision warning end-to-end ────────────────────────────
+
+    #[test]
+    fn stem_collision_warning_surfaces_in_envelope() {
+        let root = vault();
+        write_config(root.path(), "validate: {}\n");
+        // Pre-create a file with the same stem in a different directory.
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/foo.md"), "---\ntype: note\n---\n").unwrap();
+
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        // Now create other-dir/foo.md — same stem "foo", different path.
+        let mut args = args_for("other-dir/foo.md");
+        args.dry_run = true; // dry-run is enough; stem-collision warning comes from synth
+        args.format = crate::cli::NewFormat::Json;
+        // Need other-dir to exist for the preflight to pass without -p.
+        std::fs::create_dir_all(root.path().join("other-dir")).unwrap();
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+
+        let warnings = v["warnings"].as_array().unwrap();
+        let stem_warn = warnings.iter().find(|w| w["kind"] == "stem-collision");
+        assert!(
+            stem_warn.is_some(),
+            "expected stem-collision warning in envelope, warnings: {warnings:?}"
+        );
+        let sw = stem_warn.unwrap();
+        assert_eq!(sw["stem"], serde_json::json!("foo"));
+        let locs = sw["locations"].as_array().unwrap();
+        assert!(
+            locs.iter()
+                .any(|l| l.as_str().unwrap_or("").contains("notes/foo.md")),
+            "expected notes/foo.md in collision locations: {locs:?}"
+        );
+    }
+}

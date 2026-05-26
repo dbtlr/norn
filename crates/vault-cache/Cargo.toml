@@ -18,6 +18,7 @@ vault-core = { path = "../vault-core" }
 vault-graph = { path = "../vault-graph" }
 vault-frontmatter = { path = "../vault-frontmatter" }
 vault-links = { path = "../vault-links" }
+vault-standards = { path = "../vault-standards" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

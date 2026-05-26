@@ -176,6 +176,24 @@ pub fn examples_for(cmd_path: &str) -> Vec<(String, String)> {
                 "preview link risk if target were moved",
             ),
         ],
+        "vault new" => &[
+            (
+                "vault new Workspaces/my-project/tasks/2026-05-26-design-foo.md --yes",
+                "create a task doc; schema defaults fill required frontmatter",
+            ),
+            (
+                "vault new notes/my-note.md --field description=\"Design pass\" --yes",
+                "override one field; remaining defaults come from the matched rule",
+            ),
+            (
+                "vault new Inbox/draft.md --parents --yes",
+                "--parents creates missing ancestor dirs (mkdir -p style)",
+            ),
+            (
+                "vault new notes/my-note.md --dry-run",
+                "preview the scaffold and defaults without writing",
+            ),
+        ],
         "vault set" => &[
             (
                 "vault set notes/project.md --field status=active --yes",

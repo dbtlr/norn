@@ -5,10 +5,20 @@ use camino::Utf8PathBuf;
 use vault_core::GraphIndex;
 use vault_standards::apply::{
     apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
-    changes_by_path, validate_plan_for_apply, ApplyError, DeleteResult, LinkRewriteResult,
-    MoveResult, RepairApplyWarning,
+    changes_by_path, validate_plan_for_apply, ApplyError, CreateDocumentResult, DeleteResult,
+    LinkRewriteResult, MoveResult, RepairApplyWarning,
 };
 use vault_standards::{Finding, PlannedChange, RepairPlan};
+
+/// Context passed to `apply_repair_plan` for flags that only affect specific
+/// orchestrator passes (currently, `create_document` Pass 1e).
+#[derive(Debug, Default, Clone)]
+pub struct CreateApplyContext {
+    /// When true and a `create_document` change's parent directory is missing,
+    /// create the full path via `create_dir_all` instead of refusing.
+    /// Threaded from `NewArgs::parents` / the `-p` / `--parents` flag.
+    pub parents: bool,
+}
 
 #[allow(unused_imports)]
 pub use vault_standards::apply::{
@@ -39,6 +49,18 @@ pub fn apply_repair_plan(
     index: &GraphIndex,
     plan: &RepairPlan,
     dry_run: bool,
+) -> Result<RepairApplyReport> {
+    apply_repair_plan_with_context(cwd, index, plan, dry_run, &CreateApplyContext::default())
+}
+
+/// Like `apply_repair_plan` but with additional context for `create_document`
+/// operations (e.g., the `-p` / `--parents` flag).
+pub fn apply_repair_plan_with_context(
+    cwd: &Utf8PathBuf,
+    index: &GraphIndex,
+    plan: &RepairPlan,
+    dry_run: bool,
+    ctx: &CreateApplyContext,
 ) -> Result<RepairApplyReport> {
     validate_plan_for_apply(cwd, plan)?;
 
@@ -203,6 +225,96 @@ pub fn apply_repair_plan(
             }
         }
         report.replaced_bodies.push(change.path.clone());
+    }
+
+    // Pass 1e: create_document operations. Sequenced after all mutation passes
+    // (set/remove frontmatter, rewrite_link, delete, replace_body) and before
+    // move_document, so we never move a document that was just created and then
+    // immediately renamed.
+    for change in plan
+        .changes
+        .iter()
+        .filter(|c| c.operation == "create_document")
+    {
+        // create_document has no document_hash precondition (the file doesn't
+        // exist yet). Skip the hash-check used by other passes.
+
+        let nv = change.new_value.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(ApplyError::MissingNewValue {
+                path: change.path.clone(),
+            })
+        })?;
+        let fm_obj = nv
+            .get("frontmatter")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| {
+                anyhow::anyhow!("create_document: missing or non-object frontmatter in new_value")
+            })?;
+        let body = nv.get("body").and_then(|v| v.as_str()).unwrap_or("");
+
+        let full = cwd.join(&change.path);
+
+        // Pre-flight (defense in depth — preflight/synth should have caught these).
+        if full.as_std_path().exists() && !change.force {
+            return Err(anyhow::anyhow!(
+                "create_document: destination already exists (use --force to overwrite): {}",
+                change.path
+            ));
+        }
+        if let Some(parent) = full.parent() {
+            if !parent.as_std_path().exists() {
+                if ctx.parents {
+                    if !dry_run {
+                        fs::create_dir_all(parent.as_std_path()).with_context(|| {
+                            format!("create_document: create parent dirs for {}", change.path)
+                        })?;
+                    }
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "create_document: parent directory does not exist (use -p / --parents to auto-create): {}",
+                        change.path
+                    ));
+                }
+            }
+        }
+
+        if dry_run {
+            report.created_documents.push(CreateDocumentResult {
+                path: change.path.clone(),
+            });
+            if !report.changed_files.contains(&change.path) {
+                report.changed_files.push(change.path.clone());
+            }
+            continue;
+        }
+
+        // Serialize the document.
+        let fm_btree: std::collections::BTreeMap<String, serde_json::Value> =
+            fm_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let contents = vault_frontmatter::serialize_new_document(&fm_btree, body)
+            .map_err(|e| anyhow::anyhow!("create_document: serialize failed: {e}"))?;
+
+        // Atomic write: write to a sibling temp file, then rename into place.
+        let tmp_path = {
+            let mut p = full.clone();
+            let stem = p.file_name().unwrap_or("doc").to_string();
+            p.set_file_name(format!(".{stem}.tmp"));
+            p
+        };
+        fs::write(tmp_path.as_std_path(), &contents)
+            .with_context(|| format!("create_document: write temp file {tmp_path}"))?;
+        fs::rename(tmp_path.as_std_path(), full.as_std_path()).with_context(|| {
+            // Best-effort cleanup on rename failure.
+            let _ = fs::remove_file(tmp_path.as_std_path());
+            format!("create_document: rename temp to {full}")
+        })?;
+
+        report.created_documents.push(CreateDocumentResult {
+            path: change.path.clone(),
+        });
+        if !report.changed_files.contains(&change.path) {
+            report.changed_files.push(change.path.clone());
+        }
     }
 
     // Collect move_document changes for passes 2 and 3.
@@ -462,6 +574,175 @@ mod tests {
         assert!(
             a_content.contains("[[c]]"),
             "a.md should now link to c: {a_content}"
+        );
+    }
+
+    // ── create_document tests ─────────────────────────────────────────────────
+
+    fn make_empty_vault(prefix: &str) -> (tempfile::TempDir, camino::Utf8PathBuf, GraphIndex) {
+        let tmp = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path())
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(tmp.path().join(".vault")).unwrap();
+        std::fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+        let index = vault_graph::build_index(&root).unwrap();
+        (tmp, root, index)
+    }
+
+    fn create_plan(
+        vault_root: &camino::Utf8PathBuf,
+        rel_path: &str,
+        fm: serde_json::Map<String, serde_json::Value>,
+        body: &str,
+        force: bool,
+    ) -> RepairPlan {
+        let new_value = serde_json::json!({
+            "frontmatter": serde_json::Value::Object(fm),
+            "body": body,
+        });
+        RepairPlan {
+            schema_version: REPAIR_PLAN_SCHEMA_VERSION,
+            vault_root: vault_root.clone(),
+            source_filters: RepairPlanFilters::default(),
+            summary: RepairPlanSummary {
+                findings: 1,
+                planned_changes: 1,
+                skipped: SkippedSummary::default(),
+            },
+            changes: vec![PlannedChange {
+                change_id: "create-test".into(),
+                path: rel_path.into(),
+                document_hash: String::new(),
+                finding_code: "imperative-create".into(),
+                finding_rule: None,
+                repair_rule: "vault-new".into(),
+                operation: "create_document".into(),
+                field: None,
+                expected_old_value: None,
+                new_value: Some(new_value),
+                destination: None,
+                link_risk: None,
+                warnings: vec![],
+                force,
+            }],
+            skipped_findings: vec![],
+            footnotes: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_create_document_writes_file() {
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "foo.md", fm, "Hello\n", false);
+
+        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+
+        assert_eq!(report.created_documents.len(), 1);
+        assert_eq!(
+            report.created_documents[0].path,
+            camino::Utf8PathBuf::from("foo.md")
+        );
+        let full = root.join("foo.md");
+        assert!(full.as_std_path().exists(), "file should exist after apply");
+        let written = std::fs::read_to_string(full.as_std_path()).unwrap();
+        assert!(written.starts_with("---\n"), "got: {written}");
+        assert!(written.contains("type: note"), "got: {written}");
+        assert!(written.contains("Hello\n"), "got: {written}");
+    }
+
+    #[test]
+    fn apply_create_document_dry_run_does_not_write_file() {
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-dry-");
+        let plan = create_plan(&root, "foo.md", serde_json::Map::new(), "", false);
+
+        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ true).unwrap();
+
+        assert_eq!(report.created_documents.len(), 1);
+        assert!(
+            !root.join("foo.md").as_std_path().exists(),
+            "dry-run must not create file"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_refuses_existing_path_without_force() {
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-exists-");
+        std::fs::write(root.join("foo.md").as_std_path(), "existing\n").unwrap();
+        let plan = create_plan(&root, "foo.md", serde_json::Map::new(), "", false);
+
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exists") || msg.contains("force"),
+            "expected exists/force error, got: {msg}"
+        );
+        // Original file must be untouched.
+        let content = std::fs::read_to_string(root.join("foo.md").as_std_path()).unwrap();
+        assert_eq!(content, "existing\n");
+    }
+
+    #[test]
+    fn apply_create_document_overwrites_with_force() {
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-force-");
+        std::fs::write(root.join("foo.md").as_std_path(), "old content\n").unwrap();
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "foo.md", fm, "new\n", true);
+
+        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+
+        assert_eq!(report.created_documents.len(), 1);
+        let written = std::fs::read_to_string(root.join("foo.md").as_std_path()).unwrap();
+        assert!(written.contains("new\n"), "got: {written}");
+        assert!(!written.contains("old content"), "got: {written}");
+    }
+
+    // ── -p / --parents tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn apply_create_document_creates_parent_dirs_when_p() {
+        let (_tmp, root, index) = make_empty_vault("vault-apply-parents-");
+        let plan = create_plan(
+            &root,
+            "deep/nested/dir/foo.md",
+            serde_json::Map::new(),
+            "",
+            false,
+        );
+
+        let ctx = CreateApplyContext { parents: true };
+        let report =
+            apply_repair_plan_with_context(&root, &index, &plan, /*dry_run=*/ false, &ctx).unwrap();
+
+        assert_eq!(report.created_documents.len(), 1);
+        assert!(
+            root.join("deep/nested/dir/foo.md").as_std_path().exists(),
+            "file should exist"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_refuses_missing_parent_without_p() {
+        let (_tmp, root, index) = make_empty_vault("vault-apply-no-parents-");
+        let plan = create_plan(
+            &root,
+            "deep/nested/foo.md",
+            serde_json::Map::new(),
+            "",
+            false,
+        );
+
+        let ctx = CreateApplyContext { parents: false };
+        let err =
+            apply_repair_plan_with_context(&root, &index, &plan, /*dry_run=*/ false, &ctx)
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parent") || msg.contains("-p"),
+            "expected parent-missing error, got: {msg}"
         );
     }
 }

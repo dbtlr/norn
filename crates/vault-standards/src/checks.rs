@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
+use crate::findings::Finding;
+use crate::path_match::PathPattern;
 use camino::Utf8PathBuf;
 use serde_json::Value;
 use vault_core::{Document, LinkStatus};
-use vault_graph::pattern_matches_path;
-
-use crate::findings::Finding;
 
 pub(crate) fn check_graph_diagnostics(document: &Document) -> Vec<Finding> {
     document
@@ -111,16 +110,41 @@ pub(crate) fn check_allowed_paths(
     if paths.is_empty() {
         return None;
     }
-    if paths
-        .iter()
-        .any(|pattern| pattern_matches_path(pattern, &document.path))
-    {
+    if paths.iter().any(|pattern| {
+        PathPattern::parse(pattern)
+            .map(|p| p.match_path(document.path.as_str()).is_some())
+            .unwrap_or(false)
+    }) {
         return None;
     }
     Some(Finding::document_misrouted(
         document.path.clone(),
         rule.map(str::to_string),
         paths.to_vec(),
+    ))
+}
+
+/// Like `check_allowed_paths` but uses pre-compiled `PathPattern` values.
+/// `raw_paths` is passed through as the finding's allowed-path list.
+pub(crate) fn check_allowed_paths_compiled(
+    document: &Document,
+    compiled_paths: &[PathPattern],
+    raw_paths: &[String],
+    rule: Option<&str>,
+) -> Option<Finding> {
+    if raw_paths.is_empty() {
+        return None;
+    }
+    if compiled_paths
+        .iter()
+        .any(|p| p.match_path(document.path.as_str()).is_some())
+    {
+        return None;
+    }
+    Some(Finding::document_misrouted(
+        document.path.clone(),
+        rule.map(str::to_string),
+        raw_paths.to_vec(),
     ))
 }
 
