@@ -656,6 +656,10 @@ fn run(cli: Cli) -> Result<i32> {
 
             Ok(0)
         }
+        Command::New(_args) => {
+            // Filled in Task 7.4 (orchestrator).
+            anyhow::bail!("vault new: not yet implemented");
+        }
         Command::Init(args) => init::run(&cwd, &args),
         Command::Completions(_) => {
             unreachable!("completions are handled before vault targeting")

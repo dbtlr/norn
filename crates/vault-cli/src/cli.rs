@@ -114,6 +114,20 @@ Flag classes:\n  \
 Exit codes: 0 success or dry-run, 1 operator-cancelled, 2 pre-flight refusal."
     )]
     Set(SetArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Create a new document — schema-aware frontmatter pre-fill from path rules",
+        long_about = "Create a new Markdown document with frontmatter pre-filled from the path's schema rules.\n\
+\n\
+`vault new` is the create verb of the CRUD-ish mutation surface (sibling to `vault get`, `vault set`,\n\
+`vault move`, `vault delete`). It infers required-field defaults from matching schema rules, applies\n\
+substitution (date/time/title/path variables), and writes the new document atomically.\n\
+\n\
+Operator overrides via --field always win over schema defaults. Refuses if path exists (unless\n\
+--force) or parent directory missing (unless -p). Safe-by-default apply model with TTY confirm,\n\
+non-TTY implicit dry-run, --yes, and --dry-run."
+    )]
+    New(NewArgs),
     #[command(disable_help_flag = true, about = "Scaffold .vault/config.yaml")]
     Init(InitArgs),
     #[command(
@@ -693,6 +707,50 @@ pub struct SetArgs {
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetFormat {
+    Records,
+    Json,
+}
+
+#[derive(Args, Debug)]
+pub struct NewArgs {
+    /// Vault-relative path of the new document (must end in .md).
+    pub path: camino::Utf8PathBuf,
+
+    /// Frontmatter field override, repeatable. Format: KEY=VALUE.
+    #[arg(long = "field", value_name = "KEY=VALUE")]
+    pub field: Vec<String>,
+
+    /// Frontmatter field with raw JSON value, repeatable. Format: KEY=JSON.
+    #[arg(long = "field-json", value_name = "KEY=JSON")]
+    pub field_json: Vec<String>,
+
+    /// Read body content from stdin.
+    #[arg(long = "body-from-stdin")]
+    pub body_from_stdin: bool,
+
+    /// Overwrite existing destination and skip schema-aware coercion.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Auto-create missing parent directories (mkdir -p style).
+    #[arg(short = 'p', long = "parents")]
+    pub parents: bool,
+
+    /// Mutate without TTY confirmation.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Preview only; never write.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = NewFormat::Records)]
+    pub format: NewFormat,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewFormat {
     Records,
     Json,
 }
@@ -1323,5 +1381,77 @@ mod delete_cli_tests {
             "new.md",
         ]);
         assert!(cli.is_err(), "expected mutually-exclusive error");
+    }
+}
+
+#[cfg(test)]
+mod new_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_new_with_path_and_fields() {
+        let cli = Cli::try_parse_from([
+            "vault",
+            "new",
+            "Workspaces/foo/tasks/bar.md",
+            "--field",
+            "description=hello",
+            "--field",
+            "priority=high",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::New(args) => {
+                assert_eq!(args.path.as_str(), "Workspaces/foo/tasks/bar.md");
+                assert_eq!(args.field.len(), 2);
+            }
+            _ => panic!("expected Command::New"),
+        }
+    }
+
+    #[test]
+    fn parses_new_with_parents_short_flag() {
+        let cli = Cli::try_parse_from(["vault", "new", "a/b/c.md", "-p"]).unwrap();
+        match cli.command {
+            Command::New(args) => assert!(args.parents),
+            _ => panic!("expected Command::New"),
+        }
+    }
+
+    #[test]
+    fn parses_new_with_force_body_stdin_yes_dryrun() {
+        let cli = Cli::try_parse_from([
+            "vault",
+            "new",
+            "a.md",
+            "--force",
+            "--body-from-stdin",
+            "--yes",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::New(args) => {
+                assert!(args.force);
+                assert!(args.body_from_stdin);
+                assert!(args.yes);
+                assert!(args.dry_run);
+            }
+            _ => panic!("expected Command::New"),
+        }
+    }
+
+    #[test]
+    fn parses_new_with_field_json() {
+        let cli =
+            Cli::try_parse_from(["vault", "new", "a.md", "--field-json", r#"tags=["a","b"]"#])
+                .unwrap();
+        match cli.command {
+            Command::New(args) => {
+                assert_eq!(args.field_json.len(), 1);
+            }
+            _ => panic!("expected Command::New"),
+        }
     }
 }
