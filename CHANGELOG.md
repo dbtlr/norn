@@ -18,14 +18,31 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
   matcher. Atlas config does not exercise either shape today; user configs that
   deliberately used a literal `?` or literal `{` must escape via regex-free
   equivalents.
+- **`RepairPlan` schema version 8 → 9** (additive). New `create_document` op
+  variant. Plans emitted at schema 8 still parse; new plans emit version 9.
 
 ### Added
 
+- **`vault new <PATH>`** — create verb of the document mutation surface. Schema-aware
+  scaffold from path with `frontmatter_defaults` declared per rule. Substitution
+  language is Obsidian-core-compatible (`{{title}}`, `{{date}}`, `{{time}}` +
+  formatted `{{date:fmt}}`/`{{time:fmt}}`) plus Norn extensions (`{{now}}`,
+  `{{path.X}}`, and pipe transforms `titlecase` / `sentencecase` / `lower` /
+  `upper` / `unsep` / `strip_date_prefix` / `slugify`). New `-p` / `--parents`
+  flag for mkdir-style parent-dir auto-create. Apply model mirrors `vault set` /
+  `move` / `delete` (TTY confirm default, non-TTY implicit dry-run, `--yes`,
+  `--dry-run`, `--format records|json`). Post-create `vault validate` hook
+  surfaces findings as envelope warnings.
 - **`vault set <DOC>`** — frontmatter mutation (`--field` set, `--push`/`--pop` for arrays, `--remove` to drop a key) plus wholesale body replacement via `--body-from-stdin`. Schema-aware value validation with `--force` opt-out. Wikilink-typed fields auto-wrap on write (`--field workspace=foo` → `[[foo]]`) and surface unresolved / ambiguous targets as warnings. Combined ops apply atomically. Safe-by-default apply model matching `vault move` / `vault delete`: TTY confirms, non-TTY implicit dry-run, `--yes` to mutate, `--dry-run` to preview, `--format json` for scripting.
 - **`vault self-update`** — refresh the running `vault` binary to the latest (or a pinned) GitHub release. `--dry-run` resolves the target and prints the plan (with `update_available`, current/latest/target versions, asset URL, sha256) without downloading anything; pair with `--format json` for scriptable "is there an update?" checks. `--version X.Y.Z` pins a specific release (downgrades allowed). Hidden from `vault --help` and exits 2 with installer instructions when the running binary was not installed via the official GitHub install script (detected by the presence of cargo-dist's install receipt at `~/.config/vault-cli/install-receipt.json`).
 
 ### Changed
 
+- `vault-standards` config gains optional `frontmatter_defaults` field on
+  validate rules, named path variables (`{{name}}` in `match.path` declared
+  bare, referenced as `{{path.name}}` in defaults), and an optional top-level
+  `templates: { date_format, time_format }` block. Pre-existing configs work
+  unchanged — all additions default to empty/none.
 - `vault repair apply` (and the underlying `vault-frontmatter` minimal-edit writer) now supports array-valued frontmatter operations. Previously, only scalar `set_frontmatter` / `add_frontmatter` ops applied; array values were rejected at apply time. New `vault set` push/pop and any future repair-action that writes arrays now work end-to-end.
 - Bumped `serde_json` 1.0.149 → 1.0.150 (patch).
 - Bumped `rusqlite` 0.32.1 → 0.39.0 (still `features = ["bundled"]`; ships with a newer bundled SQLite). No source changes required; cache schema and on-disk format unchanged.
