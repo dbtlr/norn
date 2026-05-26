@@ -7,9 +7,9 @@
 //! The cache is *disposable*. Missing, corrupted, schema-mismatched, or
 //! identity-drifted caches trigger a silent rebuild rather than erroring.
 
-pub(crate) mod error;
-pub(crate) mod live_examples;
-pub(crate) mod query;
+mod error;
+mod live_examples;
+mod query;
 
 pub(crate) use error::CacheError;
 pub(crate) use find::{FindQuery, FindResult, SortClause, SortDirection};

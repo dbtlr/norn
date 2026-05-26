@@ -7,6 +7,8 @@ use vault_core::{Document, GraphIndex, Link, VaultFile};
 use crate::cache::change_detection::{detect, ChangeDetectOptions, FileChange};
 use crate::cache::error::CacheError;
 
+// Superseded by `ChangeDetectOptions` (the live force-hash knob). Kept to
+// preserve the writer's option-struct shape; safe to delete in a cleanup pass.
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct IndexOptions {

@@ -12,6 +12,9 @@ pub enum CacheError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
+    // Superseded by `open::RebuildReason::IdentityDrift` (drift triggers a
+    // silent rebuild rather than an error). Variant kept for now; safe to
+    // delete in a cleanup pass.
     #[error("cache identity drift: cache was built against {cached}, current vault is {current}")]
     #[allow(dead_code)]
     IdentityDrift {
