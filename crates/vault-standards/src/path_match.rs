@@ -4,10 +4,18 @@
 //! single-brace, comma-separated), and named single-segment captures
 //! (`{{name}}` — double-brace).
 //!
-//! Backed by `regex` internally: patterns are translated to a regex with
-//! `(?P<name>[^/]+)` for captures, `[^/]*` for `*`, `.*` for `**`, `[^/]` for `?`,
-//! and `(?:a|b|c)` for glob alternation. Other characters are regex-escaped.
+//! **Two-tier matching:**
+//! - Patterns with no named captures (`{{name}}`) compile to a `globset::GlobMatcher`
+//!   for boolean matching. Globset is DFA-backed and significantly faster for the
+//!   common case (pure glob patterns without capture variables).
+//! - Patterns with named captures additionally compile a `regex::Regex` for capture
+//!   extraction. The glob fast-path is still used for boolean matching; the regex
+//!   only runs when captures need to be extracted.
+//!
+//! The regex translation: `[^/]*` for `*`, `.*` for `**`, `[^/]` for `?`,
+//! `(?:a|b|c)` for glob alternation, `(?P<name>[^/]+)` for captures.
 
+use globset::{GlobBuilder, GlobMatcher};
 use regex::Regex;
 use std::collections::BTreeMap;
 
@@ -15,6 +23,8 @@ use std::collections::BTreeMap;
 pub enum PathPatternError {
     #[error("unclosed `{{{{` in path pattern at byte {0}")]
     UnclosedBrace(usize),
+    #[error("invalid glob pattern: {0}")]
+    InvalidGlob(String),
     #[error("invalid regex generated from path pattern: {0}")]
     InvalidRegex(String),
 }
@@ -23,7 +33,13 @@ pub enum PathPatternError {
 /// string, then [`PathPattern::match_path`] to test against a path.
 #[derive(Debug, Clone)]
 pub struct PathPattern {
-    regex: Regex,
+    /// Globset matcher for fast boolean matching (always present).
+    /// For patterns with named captures, `{{name}}` is replaced with `*` in the
+    /// glob so the shape still matches; the regex then extracts the actual captures.
+    glob: GlobMatcher,
+    /// Regex for capture extraction. Only present when the pattern has named
+    /// captures (`{{name}}`); `None` for pure-glob patterns.
+    regex: Option<Regex>,
     declared_vars: Vec<String>,
 }
 
@@ -35,97 +51,66 @@ impl PathPattern {
         // for file-matching; stripping could mask user errors).
         let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
 
-        let mut declared = Vec::new();
-        let mut regex_str = String::from("^");
-        let bytes = pattern.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            // `{{name}}` named capture (double-brace)
-            if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-                let end = pattern[i + 2..]
-                    .find("}}")
-                    .ok_or(PathPatternError::UnclosedBrace(i))?;
-                let name = pattern[i + 2..i + 2 + end].trim();
-                if declared.contains(&name.to_string()) {
-                    // Duplicate: use a non-capturing group (regex forbids dup named groups)
-                    regex_str.push_str("[^/]+");
-                } else {
-                    regex_str.push_str(&format!("(?P<{name}>[^/]+)"));
-                    declared.push(name.to_string());
-                }
-                i += end + 4;
-                continue;
-            }
-            // `{a,b,c}` glob alternation (single-brace) → `(?:a|b|c)`
-            if bytes[i] == b'{' {
-                if let Some(end) = pattern[i + 1..].find('}') {
-                    let body = &pattern[i + 1..i + 1 + end];
-                    let alt = body
-                        .split(',')
-                        .map(|p| regex::escape(p.trim()))
-                        .collect::<Vec<_>>()
-                        .join("|");
-                    regex_str.push_str(&format!("(?:{alt})"));
-                    i += end + 2;
-                    continue;
-                }
-            }
-            // `**/` → `(?:.*/)?` — matches any path prefix (including empty)
-            if i + 2 < bytes.len()
-                && bytes[i] == b'*'
-                && bytes[i + 1] == b'*'
-                && bytes[i + 2] == b'/'
-            {
-                regex_str.push_str("(?:.*/)?");
-                i += 3;
-                continue;
-            }
-            // `**` (at end or not followed by `/`) → `.*`
-            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'*' {
-                regex_str.push_str(".*");
-                i += 2;
-                continue;
-            }
-            // `*` → `[^/]*`
-            if bytes[i] == b'*' {
-                regex_str.push_str("[^/]*");
-                i += 1;
-                continue;
-            }
-            // `?` → `[^/]`
-            if bytes[i] == b'?' {
-                regex_str.push_str("[^/]");
-                i += 1;
-                continue;
-            }
-            // Literal char (UTF-8 safe, regex-escape)
-            let ch = pattern[i..]
-                .chars()
-                .next()
-                .expect("non-empty by loop guard");
-            regex_str.push_str(&regex::escape(&ch.to_string()));
-            i += ch.len_utf8();
-        }
-        regex_str.push('$');
+        // Detect named captures. The globset fast-path handles pure-glob patterns;
+        // the regex is only built when `{{name}}` captures are present.
+        let has_named_captures = pattern.contains("{{");
 
-        let regex =
-            Regex::new(&regex_str).map_err(|e| PathPatternError::InvalidRegex(e.to_string()))?;
+        // Build the glob pattern: named captures become `*` (single-segment wildcard)
+        // so globset can match the structural shape of the path.
+        let glob_pattern = if has_named_captures {
+            replace_captures_with_glob_star(pattern)?
+        } else {
+            // No named captures; validate by parsing directly.
+            pattern.to_string()
+        };
+
+        // Build globset with literal_separator=true so that `*` does NOT match
+        // path separators (`/`), matching the same semantics as our regex `[^/]*`.
+        // `**` continues to match across path separators (globset's default for `**`).
+        let glob = GlobBuilder::new(&glob_pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| PathPatternError::InvalidGlob(e.to_string()))?
+            .compile_matcher();
+
+        // Build the regex only when named captures are needed.
+        let (regex, declared) = if has_named_captures {
+            let (rx, decl) = build_regex_with_captures(pattern)?;
+            (Some(rx), decl)
+        } else {
+            (None, Vec::new())
+        };
+
         Ok(Self {
+            glob,
             regex,
             declared_vars: declared,
         })
     }
 
     /// Try to match the path; on success, return the captured variables.
+    ///
+    /// For pure-glob patterns (no `{{name}}`), uses the fast globset path and
+    /// returns an empty map on success. For patterns with named captures, also
+    /// runs the regex to extract variable values.
     pub fn match_path(&self, path: &str) -> Option<BTreeMap<String, String>> {
-        let caps = self.regex.captures(path)?;
-        let mut out = BTreeMap::new();
-        for name in &self.declared_vars {
-            if let Some(m) = caps.name(name) {
-                out.insert(name.clone(), m.as_str().to_string());
-            }
+        if !self.glob.is_match(path) {
+            return None;
         }
-        Some(out)
+        if let Some(regex) = &self.regex {
+            // Named captures present — extract them via the regex.
+            let caps = regex.captures(path)?;
+            let mut out = BTreeMap::new();
+            for name in &self.declared_vars {
+                if let Some(m) = caps.name(name) {
+                    out.insert(name.clone(), m.as_str().to_string());
+                }
+            }
+            Some(out)
+        } else {
+            // Pure-glob pattern — glob already matched, return empty map.
+            Some(BTreeMap::new())
+        }
     }
 
     /// The list of named variables declared by `{{name}}` in the pattern.
@@ -133,6 +118,109 @@ impl PathPattern {
     pub fn declared_variables(&self) -> Vec<String> {
         self.declared_vars.clone()
     }
+}
+
+/// Replace `{{name}}` captures with `*` in a glob pattern string.
+/// Used to build the globset fast-path matcher for patterns with named captures.
+fn replace_captures_with_glob_star(pattern: &str) -> Result<String, PathPatternError> {
+    let mut out = String::with_capacity(pattern.len());
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            let end = pattern[i + 2..]
+                .find("}}")
+                .ok_or(PathPatternError::UnclosedBrace(i))?;
+            // Replace `{{name}}` with `*` (single-segment wildcard in globset).
+            out.push('*');
+            i += end + 4;
+        } else {
+            let ch = pattern[i..]
+                .chars()
+                .next()
+                .expect("non-empty by loop guard");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    Ok(out)
+}
+
+/// Build a regex string from a pattern containing `{{name}}` captures.
+/// Returns `(Regex, Vec<declared_var_names>)`.
+fn build_regex_with_captures(pattern: &str) -> Result<(Regex, Vec<String>), PathPatternError> {
+    let mut declared = Vec::new();
+    let mut regex_str = String::from("^");
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // `{{name}}` named capture (double-brace)
+        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            let end = pattern[i + 2..]
+                .find("}}")
+                .ok_or(PathPatternError::UnclosedBrace(i))?;
+            let name = pattern[i + 2..i + 2 + end].trim();
+            if declared.contains(&name.to_string()) {
+                // Duplicate: use a non-capturing group (regex forbids dup named groups)
+                regex_str.push_str("[^/]+");
+            } else {
+                regex_str.push_str(&format!("(?P<{name}>[^/]+)"));
+                declared.push(name.to_string());
+            }
+            i += end + 4;
+            continue;
+        }
+        // `{a,b,c}` glob alternation (single-brace) → `(?:a|b|c)`
+        if bytes[i] == b'{' {
+            if let Some(end) = pattern[i + 1..].find('}') {
+                let body = &pattern[i + 1..i + 1 + end];
+                let alt = body
+                    .split(',')
+                    .map(|p| regex::escape(p.trim()))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                regex_str.push_str(&format!("(?:{alt})"));
+                i += end + 2;
+                continue;
+            }
+        }
+        // `**/` → `(?:.*/)?` — matches any path prefix (including empty)
+        if i + 2 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'*' && bytes[i + 2] == b'/' {
+            regex_str.push_str("(?:.*/)?");
+            i += 3;
+            continue;
+        }
+        // `**` (at end or not followed by `/`) → `.*`
+        if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            regex_str.push_str(".*");
+            i += 2;
+            continue;
+        }
+        // `*` → `[^/]*`
+        if bytes[i] == b'*' {
+            regex_str.push_str("[^/]*");
+            i += 1;
+            continue;
+        }
+        // `?` → `[^/]`
+        if bytes[i] == b'?' {
+            regex_str.push_str("[^/]");
+            i += 1;
+            continue;
+        }
+        // Literal char (UTF-8 safe, regex-escape)
+        let ch = pattern[i..]
+            .chars()
+            .next()
+            .expect("non-empty by loop guard");
+        regex_str.push_str(&regex::escape(&ch.to_string()));
+        i += ch.len_utf8();
+    }
+    regex_str.push('$');
+
+    let regex =
+        Regex::new(&regex_str).map_err(|e| PathPatternError::InvalidRegex(e.to_string()))?;
+    Ok((regex, declared))
 }
 
 #[cfg(test)]

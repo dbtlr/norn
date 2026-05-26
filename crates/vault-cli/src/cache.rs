@@ -68,21 +68,20 @@ pub fn open_for_query(
 }
 
 fn apply_ignore_filter(index: &mut GraphIndex, ignore: &[String]) {
-    let patterns: Vec<&str> = ignore
+    // Pre-compile patterns once; PathPattern::parse (Regex::new) is expensive.
+    let compiled: Vec<PathPattern> = ignore
         .iter()
         .map(|p| p.trim())
         .filter(|p| !p.is_empty())
+        .filter_map(|p| PathPattern::parse(p).ok())
         .collect();
-    if patterns.is_empty() {
+    if compiled.is_empty() {
         return;
     }
     let is_ignored = |path: &camino::Utf8Path| -> bool {
-        patterns.iter().any(|pattern| {
-            PathPattern::parse(pattern)
-                .ok()
-                .and_then(|p| p.match_path(path.as_str()))
-                .is_some()
-        })
+        compiled
+            .iter()
+            .any(|p| p.match_path(path.as_str()).is_some())
     };
     let mut ignored_files: Vec<camino::Utf8PathBuf> = Vec::new();
     index.files.retain(|f| {
