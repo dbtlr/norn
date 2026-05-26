@@ -72,6 +72,7 @@ For a deeper walkthrough including scoped rules and a first repair plan, see [do
 | Validate against rules | `vault validate --summary` | [validation.md](docs/validation.md) |
 | Plan a repair | `vault repair plan --out repair.json` | [validation.md](docs/validation.md) |
 | Apply a repair | `vault repair apply repair.json --verify` | [validation.md](docs/validation.md) |
+| Create a document | `vault new <path>` | [commands.md](docs/commands.md) |
 | Move a document | `vault move <src> <dst>` | [commands.md](docs/commands.md) |
 | Delete a document | `vault delete <doc>` | [commands.md](docs/commands.md) |
 | Find | `vault find --text "..." --eq k:v` | [commands.md](docs/commands.md) |

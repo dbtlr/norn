@@ -163,10 +163,32 @@ Output: SetReport JSON envelope with `schema_version: 1`.
 
 Exit codes: 0 success or dry-run, 1 operator-cancelled, 2 pre-flight refusal.
 
+## new
+
+Create a document. Fills frontmatter from `frontmatter_defaults` declared in the
+matching validate rule; the path drives substitution variables (`{{title}}`,
+`{{date}}`, `{{path.X}}`, and the full Norn transform set).
+
+```bash
+vault new notes/2026-05-26-design-foo.md --yes
+vault new notes/my-note.md --field description="Design pass" --yes
+vault new Inbox/draft.md --parents --yes
+vault new notes/my-note.md --dry-run
+```
+
+Flags: `--field KEY=VALUE` (override a default), `--parents` / `-p` (create
+missing ancestor directories), `--dry-run` (preview without writing), `--yes`
+(skip confirm prompt), `--format records|json`.
+
+Apply model: same safe-by-default pattern as `vault set`, `move`, and `delete`.
+TTY shows a preview and prompts; non-TTY without `--yes` dry-runs. Post-create
+`vault validate` runs automatically; findings surface as envelope warnings.
+
 ## Document mutation surface
 
-`vault get`, `vault set`, `vault move`, and `vault delete` form a CRUD-shaped surface
-for working with vault documents without touching the filesystem directly.
+`vault new`, `vault get`, `vault set`, `vault move`, and `vault delete` form a
+CRUD-shaped surface for working with vault documents without touching the
+filesystem directly.
 All mutation commands (`set`, `move`, `delete`) are safe-by-default: TTY runs
 prompt for confirmation, non-TTY runs without `--yes` print a dry-run summary
 and exit. `--yes` skips the prompt and applies; `--dry-run` previews and

@@ -24,7 +24,7 @@
 1. Detect the vault root: `-C <path>` (or `--cwd <path>`). If neither is set, `vault` runs against the current directory and discovers `.vault/config.yaml` if present.
 2. Start with `vault validate --summary --format json`.
 3. Filter findings for a triage queue with `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason`.
-4. For single-document frontmatter mutation, use `vault set <doc> --field KEY=VALUE --dry-run` (preview) then `--yes` (apply). For batch finding-driven repairs, write a plan: `vault repair plan --out repair.json`. Apply with `vault repair apply repair.json --dry-run` then `--verify`.
+4. To create a document from a schema scaffold, use `vault new <path> --dry-run` (preview) then `--yes` (apply). For single-document frontmatter mutation, use `vault set <doc> --field KEY=VALUE --dry-run` (preview) then `--yes` (apply). For batch finding-driven repairs, write a plan: `vault repair plan --out repair.json`. Apply with `vault repair apply repair.json --dry-run` then `--verify`.
 
 ## Documentation First
 

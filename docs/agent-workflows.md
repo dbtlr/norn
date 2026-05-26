@@ -60,7 +60,7 @@ These commands never write to the vault. An agent can run them with confidence:
 - `vault validate` (with or without `--summary`, with or without filters)
 - `vault repair plan` (produces an artifact; does not modify the vault)
 
-`vault set`, `vault move`, and `vault delete` are mutation commands; pass `--dry-run` to preview without writing. Only `vault repair apply`, `vault set`, `vault move`, and `vault delete` (without `--dry-run`) write to the vault. The repair plan is provided via a positional file path, via `-`, or via stdin (the pipeline form `vault repair plan --format json | vault repair apply` composes plan + apply in one shot).
+`vault new`, `vault set`, `vault move`, and `vault delete` are mutation commands; pass `--dry-run` to preview without writing. Only `vault repair apply`, `vault new`, `vault set`, `vault move`, and `vault delete` (without `--dry-run`) write to the vault. The repair plan is provided via a positional file path, via `-`, or via stdin (the pipeline form `vault repair plan --format json | vault repair apply` composes plan + apply in one shot).
 
 ## Output sketches
 
@@ -128,7 +128,7 @@ vault validate --code frontmatter-invalid-type --field modified --format jsonl
 
 Two rules an agent must follow:
 
-1. **Use the appropriate write surface.** For operator-driven one-doc mutations, `vault set` (frontmatter + body), `vault move`, and `vault delete` are the CRUD surface. For finding-driven batch repairs, `vault repair apply` is the only path — it consumes a plan artifact and applies deterministic changes with precondition checks. Never edit vault files directly; the graph state would diverge from the cache.
+1. **Use the appropriate write surface.** For creating a new document from a schema scaffold, use `vault new`. For operator-driven one-doc mutations on existing docs, `vault set` (frontmatter + body), `vault move`, and `vault delete` are the CRUD surface. For finding-driven batch repairs, `vault repair apply` is the only path — it consumes a plan artifact and applies deterministic changes with precondition checks. Never edit vault files directly; the graph state would diverge from the cache.
 2. **Always pass the plan that matches the current vault state.** Apply checks document hashes; if a file changed since the plan was created, the change is rejected for that file. Re-plan rather than re-apply with `--force` (there is no `--force` for repair apply).
 
 `--dry-run` confirms the plan is applyable without writing. `--verify` runs validation after apply and includes the result in the report.
