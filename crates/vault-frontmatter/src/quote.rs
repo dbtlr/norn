@@ -108,6 +108,63 @@ fn serialize_array(items: &[Value], original_style: ValueStyle) -> Result<String
     }
 }
 
+/// Serialize a brand-new document with frontmatter and body.
+///
+/// Used by `vault new` (and any future caller that synthesizes a complete
+/// Markdown file from scratch). Unlike [`serialize_value_preserving_style`]
+/// which operates on individual values for in-place editing, this entry
+/// point emits a full `---` frontmatter block plus body.
+///
+/// Semantics:
+/// - Fields are emitted in key order (BTreeMap iteration order).
+/// - `Value::Null` fields are skipped (e.g., required-but-undefaulted
+///   fields per the `vault new` warn-don't-block model).
+/// - Array values use [`serialize_array_block_for_new_field`].
+/// - Scalar values pick a style based on YAML safety: wikilinks / strings
+///   with `:` / strings starting with YAML indicators are quoted; others
+///   are plain.
+/// - If `body` doesn't end with a newline, one is appended.
+pub fn serialize_new_document(
+    frontmatter: &std::collections::BTreeMap<String, serde_json::Value>,
+    body: &str,
+) -> Result<String, QuoteError> {
+    let mut out = String::from("---\n");
+    for (field, value) in frontmatter {
+        if value.is_null() {
+            continue;
+        }
+        if let Some(items) = value.as_array() {
+            let block = serialize_array_block_for_new_field(items)?;
+            out.push_str(&format!("{field}:\n{block}"));
+        } else {
+            let style = scalar_style_for(value);
+            let serialized = serialize_value_preserving_style(value, style)?;
+            out.push_str(&format!("{field}: {serialized}\n"));
+        }
+    }
+    out.push_str("---\n");
+    if !body.is_empty() {
+        out.push_str(body);
+        if !body.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+fn scalar_style_for(value: &Value) -> ValueStyle {
+    if let Some(s) = value.as_str() {
+        let first = s.chars().next();
+        let needs_quoting = s.starts_with('[')
+            || s.contains(':')
+            || matches!(first, Some('-' | '?' | '*' | '&' | '!' | '%' | '@' | '`'));
+        if needs_quoting {
+            return ValueStyle::DoubleQuoted;
+        }
+    }
+    ValueStyle::Plain
+}
+
 /// Serialize an array as block-style YAML items for a brand-new field.
 ///
 /// Output is the items portion only: `  - item1\n  - item2\n` (2-space
@@ -241,6 +298,133 @@ fn is_plain_safe(s: &str) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod serialize_new_document_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn serialize_new_document_basic_scalar_fields() {
+        let mut fm = BTreeMap::new();
+        fm.insert("type".into(), json!("task"));
+        fm.insert("status".into(), json!("backlog"));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        assert!(out.starts_with("---\n"), "got:\n{out}");
+        assert!(out.contains("status: backlog\n"));
+        assert!(out.contains("type: task\n"));
+        // Closing fence must appear after the last frontmatter field,
+        // not immediately after the opening fence.
+        // The output should contain a second `---\n` that closes the block;
+        // we verify the closing fence is not the first occurrence.
+        let first_fence_end = out.find("---\n").unwrap() + 4;
+        let remaining = &out[first_fence_end..];
+        assert!(
+            remaining.contains("---\n"),
+            "closing fence missing, got:\n{out}"
+        );
+        // Empty body — file ends with closing fence + newline only.
+        assert!(out.ends_with("---\n"));
+    }
+
+    #[test]
+    fn serialize_new_document_quotes_wikilink_values() {
+        let mut fm = BTreeMap::new();
+        fm.insert("workspace".into(), json!("[[vault-cli]]"));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        // Wikilinks must be quoted — `[` starts a YAML flow sequence otherwise.
+        assert!(
+            out.contains("workspace: \"[[vault-cli]]\"\n")
+                || out.contains("workspace: '[[vault-cli]]'\n"),
+            "expected quoted wikilink, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn serialize_new_document_with_body() {
+        let mut fm = BTreeMap::new();
+        fm.insert("type".into(), json!("note"));
+
+        let out = serialize_new_document(&fm, "# Hello\n\nBody content.\n").unwrap();
+        assert!(out.ends_with("# Hello\n\nBody content.\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn serialize_new_document_appends_trailing_newline_to_body() {
+        let mut fm = BTreeMap::new();
+        fm.insert("type".into(), json!("note"));
+
+        let out = serialize_new_document(&fm, "Body without newline").unwrap();
+        assert!(out.ends_with("Body without newline\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn serialize_new_document_skips_null_values() {
+        let mut fm = BTreeMap::new();
+        fm.insert("type".into(), json!("note"));
+        fm.insert("description".into(), serde_json::Value::Null);
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        assert!(out.contains("type: note\n"));
+        assert!(
+            !out.contains("description"),
+            "null field should not be emitted, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn serialize_new_document_arrays_emit_as_block() {
+        let mut fm = BTreeMap::new();
+        fm.insert("aliases".into(), json!(["foo", "bar"]));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        // Block-style: `aliases:` on one line followed by `- foo` / `- bar` lines.
+        assert!(out.contains("aliases:"), "got:\n{out}");
+        assert!(out.contains("foo"));
+        assert!(out.contains("bar"));
+    }
+
+    #[test]
+    fn serialize_new_document_keys_sorted_alphabetically() {
+        // BTreeMap iterates in key order, so output should be alphabetical.
+        let mut fm = BTreeMap::new();
+        fm.insert("z_last".into(), json!("z"));
+        fm.insert("a_first".into(), json!("a"));
+        fm.insert("m_middle".into(), json!("m"));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        let a_pos = out.find("a_first:").unwrap();
+        let m_pos = out.find("m_middle:").unwrap();
+        let z_pos = out.find("z_last:").unwrap();
+        assert!(a_pos < m_pos);
+        assert!(m_pos < z_pos);
+    }
+
+    #[test]
+    fn serialize_new_document_empty_frontmatter_emits_just_fences() {
+        let fm = BTreeMap::new();
+        let out = serialize_new_document(&fm, "").unwrap();
+        assert_eq!(out, "---\n---\n");
+    }
+
+    #[test]
+    fn serialize_new_document_value_with_colon_is_quoted() {
+        // Strings containing `:` must be quoted to avoid YAML ambiguity
+        // (`time: 10:30` would parse `10:30` as a sexagesimal in older YAML).
+        let mut fm = BTreeMap::new();
+        fm.insert("note".into(), json!("see 12:34 for context"));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        assert!(
+            out.contains("note: \"see 12:34 for context\"")
+                || out.contains("note: 'see 12:34 for context'"),
+            "expected quoted value with embedded colon, got:\n{out}"
+        );
+    }
 }
 
 #[cfg(test)]
