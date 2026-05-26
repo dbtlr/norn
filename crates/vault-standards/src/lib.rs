@@ -3,6 +3,7 @@ mod checks;
 mod config;
 pub mod engine;
 mod findings;
+pub mod path_match;
 pub mod predicates;
 mod repair;
 pub mod substitution;
