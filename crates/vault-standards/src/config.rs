@@ -426,6 +426,33 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                 });
             }
         }
+
+        // frontmatter_defaults: path.X references must be declared in this rule's match.path.
+        let declared: std::collections::BTreeSet<String> = rule
+            .r#match
+            .path
+            .as_deref()
+            .and_then(|p| {
+                crate::path_match::PathPattern::parse(p)
+                    .ok()
+                    .map(|pp| pp.declared_variables().into_iter().collect())
+            })
+            .unwrap_or_default();
+        for (field, value) in &rule.frontmatter_defaults {
+            let Some(s) = value.as_str() else {
+                continue;
+            };
+            for referenced in crate::defaults::collect_path_var_refs(s) {
+                if !declared.contains(&referenced) {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: field `{field}` references {{{{path.{referenced}}}}} which is not declared in this rule's match.path"
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     // Repair rules: exactly one of the four action fields.
@@ -840,5 +867,48 @@ validate:
 "#;
         let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
         assert!(cfg.validate.rules[0].frontmatter_defaults.is_empty());
+    }
+
+    #[test]
+    fn config_load_rejects_unknown_path_var_in_default() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        title: "{{path.bogus}}"
+"#;
+        let err = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("rule r") || msg.contains("`r`"),
+            "msg was {msg}"
+        );
+        assert!(
+            msg.contains("path.bogus") || msg.contains("bogus"),
+            "msg was {msg}"
+        );
+        assert!(
+            msg.contains("not declared")
+                || msg.contains("undeclared")
+                || msg.contains("not defined"),
+            "msg was {msg}"
+        );
+    }
+
+    #[test]
+    fn config_load_accepts_known_path_var_in_default() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        workspace: "[[{{path.workspace}}]]"
+"#;
+        parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
     }
 }
