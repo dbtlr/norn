@@ -21,7 +21,9 @@ pub use config::{
     RuleSelector, SetFrontmatterAction, ValidateConfig, ValidateRule, VaultConfig,
     CURRENT_SCHEMA_VERSION,
 };
-pub use defaults::{applicable_rules, merge_defaults, path_variables};
+pub use defaults::{
+    applicable_rules, merge_defaults, path_variables, resolve_to_fixpoint, ResolveError,
+};
 pub use engine::{
     validate, validate_rule, validate_rule_compiled, validate_with_alias_field,
     validate_with_compiled,

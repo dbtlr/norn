@@ -160,6 +160,91 @@ pub fn merge_defaults<'a>(
     out
 }
 
+/// Errors produced by [`resolve_to_fixpoint`].
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("substitution failed: {0}")]
+    Substitution(String),
+}
+
+/// Iteratively resolve `frontmatter_defaults` from all matching rules to a fixpoint.
+///
+/// Pass 1 matches rules by path only (no synthesized frontmatter yet); subsequent
+/// passes re-match including frontmatter predicates so rules keyed on
+/// just-applied fields can now match. Operator overrides always win and never
+/// get overwritten.
+///
+/// Returns the fully-resolved frontmatter map plus the names of all rules
+/// whose defaults contributed.
+pub fn resolve_to_fixpoint(
+    cfg: &VaultConfig,
+    compiled: &CompiledConfig,
+    path: &str,
+    operator_overrides: &BTreeMap<String, serde_json::Value>,
+    path_vars_for_substitution: &BTreeMap<String, String>,
+) -> Result<(BTreeMap<String, serde_json::Value>, Vec<String>), ResolveError> {
+    use chrono::Local;
+
+    let mut frontmatter: BTreeMap<String, serde_json::Value> = operator_overrides.clone();
+    let mut applied_rules: Vec<String> = Vec::new();
+
+    let sub_ctx = crate::substitution::Context {
+        now: Local::now().naive_local(),
+        title: path
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(".md")
+            .to_string(),
+        path_vars: path_vars_for_substitution.clone(),
+        // Phase 4 will wire in cfg.templates.date_format/time_format.
+        // For now use standard defaults that match the substitution module's own tests.
+        date_format: "YYYY-MM-DD".to_string(),
+        time_format: "HH:mm".to_string(),
+    };
+
+    // Hard cap on iterations. Real schemas reach fixpoint in 2-3; cap at 16
+    // to refuse pathological configs early without hanging.
+    const MAX_PASSES: usize = 16;
+    for pass in 0..MAX_PASSES {
+        let fm_value = serde_json::Value::Object(
+            frontmatter
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        );
+        let rules = applicable_rules(cfg, compiled, path, Some(&fm_value));
+        let merged = merge_defaults(&rules);
+
+        let mut changed = false;
+        for (field, raw_value) in merged {
+            if frontmatter.contains_key(&field) {
+                continue;
+            }
+            let resolved = if let Some(s) = raw_value.as_str() {
+                let rendered = crate::substitution::render(s, &sub_ctx)
+                    .map_err(|e| ResolveError::Substitution(format!("rule pass {pass}: {e}")))?;
+                serde_json::Value::String(rendered)
+            } else {
+                raw_value.clone()
+            };
+            frontmatter.insert(field, resolved);
+            changed = true;
+        }
+        for (r, _) in &rules {
+            if let Some(n) = r.name.as_deref() {
+                if !applied_rules.contains(&n.to_string()) {
+                    applied_rules.push(n.to_string());
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok((frontmatter, applied_rules))
+}
+
 #[cfg(test)]
 mod api_tests {
     use super::*;
@@ -399,5 +484,139 @@ validate:
                 Err(other) => panic!("unexpected render error for known transform `{name}`: {other:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fixpoint_tests {
+    use super::*;
+    use crate::config::{parse_config_compiled, VaultConfig};
+    use camino::Utf8Path;
+
+    fn build(yaml: &str) -> (VaultConfig, crate::config::CompiledConfig) {
+        parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap()
+    }
+
+    #[test]
+    fn fixpoint_resolves_two_phase_chain() {
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: by-path
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        type: task
+    - name: by-type
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: task
+      frontmatter_defaults:
+        status: backlog
+"#,
+        );
+        let path_vars = BTreeMap::from([("workspace".to_string(), "foo".to_string())]);
+        let (frontmatter, rules_applied) = resolve_to_fixpoint(
+            &cfg,
+            &compiled,
+            "Workspaces/foo/tasks/bar.md",
+            &BTreeMap::new(), // no operator overrides
+            &path_vars,
+        )
+        .unwrap();
+
+        assert_eq!(frontmatter.get("type"), Some(&serde_json::json!("task")));
+        assert_eq!(
+            frontmatter.get("status"),
+            Some(&serde_json::json!("backlog"))
+        );
+        assert!(rules_applied.contains(&"by-path".to_string()));
+        assert!(rules_applied.contains(&"by-type".to_string()));
+    }
+
+    #[test]
+    fn operator_overrides_win_over_defaults() {
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        type: note
+        status: backlog
+"#,
+        );
+        let overrides = BTreeMap::from([("type".to_string(), serde_json::json!("custom"))]);
+        let (frontmatter, _rules) =
+            resolve_to_fixpoint(&cfg, &compiled, "foo.md", &overrides, &BTreeMap::new()).unwrap();
+
+        assert_eq!(frontmatter.get("type"), Some(&serde_json::json!("custom")));
+        assert_eq!(
+            frontmatter.get("status"),
+            Some(&serde_json::json!("backlog"))
+        );
+    }
+
+    #[test]
+    fn fixpoint_substitutes_string_templates() {
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        workspace: "[[{{path.workspace}}]]"
+        title: "{{title | titlecase}}"
+"#,
+        );
+        let path_vars = BTreeMap::from([("workspace".to_string(), "vault-cli".to_string())]);
+        let (frontmatter, _rules) = resolve_to_fixpoint(
+            &cfg,
+            &compiled,
+            "Workspaces/vault-cli/tasks/design-foo.md",
+            &BTreeMap::new(),
+            &path_vars,
+        )
+        .unwrap();
+
+        assert_eq!(
+            frontmatter.get("workspace"),
+            Some(&serde_json::json!("[[vault-cli]]"))
+        );
+        assert_eq!(
+            frontmatter.get("title"),
+            Some(&serde_json::json!("Design Foo"))
+        );
+    }
+
+    #[test]
+    fn path_matches_no_rules_returns_empty() {
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        type: task
+"#,
+        );
+        let (frontmatter, rules_applied) = resolve_to_fixpoint(
+            &cfg,
+            &compiled,
+            "Logs/2026/foo.md",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(frontmatter.is_empty());
+        assert!(rules_applied.is_empty());
     }
 }
