@@ -8,10 +8,10 @@ use rusqlite::OptionalExtension;
 use vault_core::DocumentSummary;
 use vault_standards::path_match::PathPattern;
 
-use crate::error::CacheError;
-use crate::query::{json_path_for, DocumentQuery};
+use crate::cache::error::CacheError;
+use crate::cache::query::{json_path_for, DocumentQuery};
 
-impl crate::Cache {
+impl crate::cache::Cache {
     /// Document summaries matching the predicate set. Empty predicate set
     /// returns every document. Result ordered by `path ASC`.
     ///
@@ -96,10 +96,10 @@ impl crate::Cache {
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
         let path_buf = Utf8PathBuf::from(path_str);
-        let headings = crate::reader::load_headings(&self.conn, path_buf.as_str())?;
-        let block_ids = crate::reader::load_block_ids(&self.conn, path_buf.as_str())?;
-        let links = crate::reader::load_links(&self.conn, path_buf.as_str())?;
-        let diagnostics = crate::reader::load_diagnostics(&self.conn, path_buf.as_str())?;
+        let headings = crate::cache::reader::load_headings(&self.conn, path_buf.as_str())?;
+        let block_ids = crate::cache::reader::load_block_ids(&self.conn, path_buf.as_str())?;
+        let links = crate::cache::reader::load_links(&self.conn, path_buf.as_str())?;
+        let diagnostics = crate::cache::reader::load_diagnostics(&self.conn, path_buf.as_str())?;
         // Re-derive aliases on read against the cache's configured
         // `alias_field`. See `reader::load_documents` for the rationale.
         let (aliases, alias_malformed) = match self.alias_field.as_deref() {

@@ -3,7 +3,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use sha2::{Digest, Sha256};
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
 /// Resolves the vault root to its canonical form (symlinks resolved) and
 /// returns a stable SHA-256 hex digest of the canonical path.

@@ -64,7 +64,7 @@ pub fn run(
         return Ok(2);
     }
 
-    let cache = crate::cache::open_for_query(cwd, alias_field, no_cache_refresh)?;
+    let cache = crate::cache_cmd::open_for_query(cwd, alias_field, no_cache_refresh)?;
     let query = self::query::build_find_query(&args)?;
     let result = cache.find_documents(&query)?;
 
@@ -75,8 +75,8 @@ pub fn run(
         Some(s) => (
             Some(s.field.as_str()),
             Some(match s.direction {
-                vault_cache::SortDirection::Asc => "asc",
-                vault_cache::SortDirection::Desc => "desc",
+                crate::cache::SortDirection::Asc => "asc",
+                crate::cache::SortDirection::Desc => "desc",
             }),
         ),
         None => (None, None),

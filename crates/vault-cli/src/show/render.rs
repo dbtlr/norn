@@ -317,7 +317,7 @@ fn unresolved_links_to_display(links: &[vault_core::Link]) -> String {
 }
 
 /// Render incoming links: `source_path  raw_link_text`.
-fn incoming_links_to_display(links: &[vault_cache::IncomingLink]) -> String {
+fn incoming_links_to_display(links: &[crate::cache::IncomingLink]) -> String {
     links
         .iter()
         .map(|il| format!("{}  {}", il.source_path, il.link.raw))

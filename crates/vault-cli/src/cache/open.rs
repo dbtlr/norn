@@ -3,10 +3,10 @@
 use camino::Utf8Path;
 use rusqlite::Connection;
 
-use crate::error::CacheError;
-use crate::identity::cache_dir_for;
+use crate::cache::error::CacheError;
+use crate::cache::identity::cache_dir_for;
 
-impl crate::Cache {
+impl crate::cache::Cache {
     /// Open the cache for a vault. Creates the cache directory and database
     /// if missing; inspects an existing cache file and either reuses it,
     /// rebuilds it (corruption / older schema / identity drift), or hard-errors
@@ -45,7 +45,7 @@ impl crate::Cache {
                     return open_fresh(&cache_dir, &db_path, &canonical, alias_field);
                 }
                 InspectResult::Reuse(conn) => {
-                    return Ok(crate::Cache {
+                    return Ok(crate::cache::Cache {
                         conn,
                         vault_root: canonical,
                         cache_dir,
@@ -145,13 +145,13 @@ fn inspect_existing_cache(
             )));
         }
     };
-    if found_version > crate::SCHEMA_VERSION {
+    if found_version > crate::cache::SCHEMA_VERSION {
         return Ok(InspectResult::HardError(CacheError::SchemaNewer {
             found: found_version,
-            expected: crate::SCHEMA_VERSION,
+            expected: crate::cache::SCHEMA_VERSION,
         }));
     }
-    if found_version < crate::SCHEMA_VERSION {
+    if found_version < crate::cache::SCHEMA_VERSION {
         return Ok(InspectResult::RebuildNeeded(RebuildReason::SchemaOlder {
             found: found_version,
         }));
@@ -206,14 +206,14 @@ fn open_fresh(
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
     alias_field: Option<&str>,
-) -> Result<crate::Cache, CacheError> {
+) -> Result<crate::cache::Cache, CacheError> {
     let conn = Connection::open(db_path.as_std_path())?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     secure_file(db_path)?;
-    crate::schema::apply_schema(&conn)?;
+    crate::cache::schema::apply_schema(&conn)?;
     init_meta(&conn, canonical_root, alias_field)?;
-    Ok(crate::Cache {
+    Ok(crate::cache::Cache {
         conn,
         vault_root: canonical_root.to_owned(),
         cache_dir: cache_dir.to_owned(),
@@ -227,7 +227,7 @@ fn emit_rebuild_message(reason: &RebuildReason) {
         RebuildReason::SchemaOlder { found } => {
             format!(
                 "cache schema is v{found}, expected v{}; rebuilding",
-                crate::SCHEMA_VERSION
+                crate::cache::SCHEMA_VERSION
             )
         }
         RebuildReason::IdentityDrift { cached, current } => {
@@ -290,7 +290,7 @@ fn init_meta(
 ) -> Result<(), CacheError> {
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-        rusqlite::params!["schema_version", crate::SCHEMA_VERSION.to_string()],
+        rusqlite::params!["schema_version", crate::cache::SCHEMA_VERSION.to_string()],
     )?;
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn opening_a_fresh_vault_creates_cache_db() {
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         assert!(cache.cache_dir.exists());
         assert!(cache.cache_dir.join("cache.db").exists());
     }
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn reopening_existing_cache_does_not_recreate() {
         let (_tmp, root) = make_vault();
-        let cache1 = crate::Cache::open(&root).unwrap();
+        let cache1 = crate::cache::Cache::open(&root).unwrap();
         let path1 = cache1.cache_dir.join("cache.db");
         // Stamp the cache_created_ts so we can detect if init_meta runs again
         // on reopen (which would mean we recreated rather than reused).
@@ -355,7 +355,7 @@ mod tests {
         };
         drop(cache1);
 
-        let cache2 = crate::Cache::open(&root).unwrap();
+        let cache2 = crate::cache::Cache::open(&root).unwrap();
         let path2 = cache2.cache_dir.join("cache.db");
         assert_eq!(path1, path2);
         #[cfg(unix)]
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn meta_rows_present_after_open() {
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         let schema_version: u32 = cache
             .conn
             .query_row(
@@ -388,7 +388,7 @@ mod tests {
                 |r| r.get::<_, String>(0).map(|s| s.parse().unwrap()),
             )
             .unwrap();
-        assert_eq!(schema_version, crate::SCHEMA_VERSION);
+        assert_eq!(schema_version, crate::cache::SCHEMA_VERSION);
 
         let vault_root: String = cache
             .conn
@@ -405,7 +405,7 @@ mod tests {
     fn cache_directory_has_0700_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         let metadata = std::fs::metadata(cache.cache_dir.as_std_path()).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "cache dir should be 0700, got {:o}", mode);
@@ -416,7 +416,7 @@ mod tests {
     fn cache_db_file_has_0600_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         let db_path = cache.cache_dir.join("cache.db");
         let metadata = std::fs::metadata(db_path.as_std_path()).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn open_after_schema_too_old_rebuilds_silently() {
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         // Tamper: set schema_version to 0 (older than this binary).
         cache
             .conn
@@ -437,7 +437,7 @@ mod tests {
             .unwrap();
         drop(cache);
 
-        let cache2 = crate::Cache::open(&root).unwrap();
+        let cache2 = crate::cache::Cache::open(&root).unwrap();
         // Should have rebuilt — schema_version is now the current value.
         let v: String = cache2
             .conn
@@ -447,13 +447,13 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v.parse::<u32>().unwrap(), crate::SCHEMA_VERSION);
+        assert_eq!(v.parse::<u32>().unwrap(), crate::cache::SCHEMA_VERSION);
     }
 
     #[test]
     fn open_with_newer_schema_returns_hard_error() {
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         cache
             .conn
             .execute(
@@ -463,11 +463,11 @@ mod tests {
             .unwrap();
         drop(cache);
 
-        let result = crate::Cache::open(&root);
+        let result = crate::cache::Cache::open(&root);
         match result {
-            Err(crate::CacheError::SchemaNewer { found, expected }) => {
+            Err(crate::cache::CacheError::SchemaNewer { found, expected }) => {
                 assert_eq!(found, 999);
-                assert_eq!(expected, crate::SCHEMA_VERSION);
+                assert_eq!(expected, crate::cache::SCHEMA_VERSION);
             }
             Err(other) => panic!("expected SchemaNewer, got {:?}", other),
             Ok(_) => panic!("expected SchemaNewer, got Ok(Cache)"),
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn open_with_identity_drift_rebuilds_silently() {
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         cache
             .conn
             .execute(
@@ -487,7 +487,7 @@ mod tests {
             .unwrap();
         drop(cache);
 
-        let cache2 = crate::Cache::open(&root).unwrap();
+        let cache2 = crate::cache::Cache::open(&root).unwrap();
         let vr: String = cache2
             .conn
             .query_row("SELECT value FROM meta WHERE key = 'vault_root'", [], |r| {
@@ -500,14 +500,14 @@ mod tests {
     #[test]
     fn open_after_corruption_rebuilds_silently() {
         let (_tmp, root) = make_vault();
-        let cache = crate::Cache::open(&root).unwrap();
+        let cache = crate::cache::Cache::open(&root).unwrap();
         let db_path = cache.cache_dir.join("cache.db");
         drop(cache);
 
         // Truncate the db file to corrupt it.
         std::fs::write(db_path.as_std_path(), b"corrupt").unwrap();
 
-        let cache2 = crate::Cache::open(&root).unwrap();
+        let cache2 = crate::cache::Cache::open(&root).unwrap();
         // Should have rebuilt cleanly; schema present again.
         let v: String = cache2
             .conn
@@ -517,7 +517,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v.parse::<u32>().unwrap(), crate::SCHEMA_VERSION);
+        assert_eq!(v.parse::<u32>().unwrap(), crate::cache::SCHEMA_VERSION);
     }
 
     #[test]
@@ -535,12 +535,12 @@ mod tests {
         std::fs::write(vault_root.join("a.md"), "# A\n").unwrap();
 
         // Initial build: alias_field = None
-        let mut cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        let mut cache = crate::cache::Cache::open_with_config(&vault_root, None).unwrap();
         cache.rebuild(&vault_root).unwrap();
         drop(cache);
 
         // Reopen with alias_field = Some("aliases") — expect rebuild on open.
-        let cache = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        let cache = crate::cache::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
         let alias_meta: String = cache
             .conn
             .query_row(
@@ -564,12 +564,12 @@ mod tests {
         std::fs::create_dir_all(&vault_root).unwrap();
         std::fs::write(vault_root.join("a.md"), "# A\n").unwrap();
 
-        let mut cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        let mut cache = crate::cache::Cache::open_with_config(&vault_root, None).unwrap();
         cache.rebuild(&vault_root).unwrap();
         drop(cache);
 
         // None -> Some: rebuild expected. Verify meta.
-        let cache = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        let cache = crate::cache::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
         let v: String = cache
             .conn
             .query_row(
@@ -582,7 +582,7 @@ mod tests {
         drop(cache);
 
         // Some -> None: rebuild expected. Verify meta now empty.
-        let cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        let cache = crate::cache::Cache::open_with_config(&vault_root, None).unwrap();
         let v: String = cache
             .conn
             .query_row(
@@ -607,7 +607,7 @@ mod tests {
         std::fs::create_dir_all(&vault_root).unwrap();
         std::fs::write(vault_root.join("a.md"), "# A\n").unwrap();
 
-        let mut cache = crate::Cache::open(&vault_root).unwrap();
+        let mut cache = crate::cache::Cache::open(&vault_root).unwrap();
         cache.rebuild(&vault_root).unwrap();
 
         let v: String = cache

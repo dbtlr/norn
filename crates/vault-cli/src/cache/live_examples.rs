@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::error::CacheError;
-use crate::Cache;
+use crate::cache::error::CacheError;
+use crate::cache::Cache;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldStats {

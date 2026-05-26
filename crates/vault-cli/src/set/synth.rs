@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::cache::Cache;
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
 use serde_json::Value;
-use vault_cache::Cache;
 use vault_standards::PlannedChange;
 
 /// Resolve the user-supplied DOC argument into a vault-relative path.
@@ -431,7 +431,7 @@ pub struct PreflightOutcome {
 /// into a RepairPlan.
 pub fn preflight_and_plan(
     cwd: &camino::Utf8Path,
-    cache: &vault_cache::Cache,
+    cache: &crate::cache::Cache,
     index: &vault_core::GraphIndex,
     cfg: &vault_standards::VaultConfig,
     args: &crate::cli::SetArgs,
@@ -632,7 +632,7 @@ pub fn synth_body_op(current_body: &str, new_body: &str) -> Option<PlannedChange
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vault_cache::Cache;
+    use crate::cache::Cache;
 
     fn fixture_cache() -> (tempfile::TempDir, Cache) {
         let tmp = tempfile::Builder::new()

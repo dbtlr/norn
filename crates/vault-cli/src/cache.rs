@@ -1,171 +1,270 @@
-//! `vault cache` subcommand handlers and the cache-backed read path for
-//! query commands.
+//! SQLite-backed cache for the vault graph.
+//!
+//! Acts as the read path for query commands: `Cache::load_graph_index` returns
+//! the same `GraphIndex` shape that `vault-graph::build_index` does, but loads
+//! from SQLite instead of walking the filesystem.
+//!
+//! The cache is *disposable*. Missing, corrupted, schema-mismatched, or
+//! identity-drifted caches trigger a silent rebuild rather than erroring.
 
-use anyhow::Result;
-use camino::Utf8Path;
-use vault_cache::{Cache, CacheError, ChangeDetectOptions};
-use vault_core::GraphIndex;
-use vault_graph::IndexOptions;
-use vault_standards::path_match::PathPattern;
+pub(crate) mod error;
+pub(crate) mod live_examples;
+pub(crate) mod query;
 
-use crate::cli::{CacheIndexArgs, CacheOutputFormat, CacheStatusArgs};
+pub(crate) use error::CacheError;
+pub(crate) use find::{FindQuery, FindResult, SortClause, SortDirection};
+pub(crate) use live_examples::{count_matching, field_statistics, FieldStats};
+pub(crate) use query::DocumentQuery;
 
-/// Load the graph index for a query command. Opens the per-vault cache,
-/// optionally runs an implicit incremental refresh, then reconstructs the
-/// in-memory `GraphIndex` from the cached rows. Configured `ignore`
-/// patterns are applied as a read-time filter so cache contents stay
-/// independent of per-invocation config.
-///
-/// Lock contention during the implicit refresh is non-fatal: the command
-/// proceeds against the current cache state and writes a single stderr
-/// note. Set `no_cache_refresh = true` to skip the refresh entirely.
-pub fn load_graph_index(
-    vault_root: &Utf8Path,
-    options: &IndexOptions,
-    no_cache_refresh: bool,
-) -> Result<GraphIndex> {
-    let mut cache = Cache::open_with_config(vault_root, options.alias_field.as_deref())?;
-    if !no_cache_refresh {
-        match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
-            Ok(_) => {}
-            Err(CacheError::LockTimeout) => {
-                eprintln!(
-                    "vault: another cache operation is in progress; using current cache state"
-                );
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let mut index = cache.load_graph_index()?;
-    apply_ignore_filter(&mut index, &options.ignore);
-    Ok(index)
+mod change_detection;
+mod find;
+mod identity;
+mod invalidation;
+mod lock;
+mod open;
+mod query_diagnostics;
+mod query_documents;
+mod query_links;
+mod query_show;
+mod reader;
+mod schema;
+mod status;
+mod writer;
+
+pub(crate) use change_detection::ChangeDetectOptions;
+pub(crate) use identity::cache_dir_for;
+pub(crate) use query_show::IncomingLink;
+
+pub(crate) const SCHEMA_VERSION: u32 = 2;
+
+/// Handle to an opened cache. Holds a rusqlite Connection plus the resolved
+/// vault root and cache directory path. `alias_field` is the value passed
+/// in via `Cache::open_with_config`; it gets written to the `links_alias_field`
+/// meta row on every rebuild so subsequent opens can detect config drift.
+pub(crate) struct Cache {
+    pub(crate) conn: rusqlite::Connection,
+    pub(crate) vault_root: camino::Utf8PathBuf,
+    pub(crate) cache_dir: camino::Utf8PathBuf,
+    pub(crate) alias_field: Option<String>,
 }
 
-/// Open the per-vault cache for query commands. Runs the implicit
-/// incremental refresh (unless `no_cache_refresh = true`), returning a
-/// usable `Cache` handle. Lock contention during refresh is non-fatal —
-/// emits the same stderr note as `load_graph_index` and continues against
-/// the current cache state.
-#[allow(dead_code)]
-pub fn open_for_query(
-    vault_root: &Utf8Path,
-    alias_field: Option<&str>,
-    no_cache_refresh: bool,
-) -> Result<Cache> {
-    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
-    if !no_cache_refresh {
-        match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
-            Ok(_) => {}
-            Err(CacheError::LockTimeout) => {
-                eprintln!(
-                    "vault: another cache operation is in progress; using current cache state"
-                );
-            }
-            Err(error) => return Err(error.into()),
+impl Cache {
+    /// Delete the on-disk cache (database + WAL/SHM siblings). Holds the
+    /// advisory write lock for the duration. After clear the caller should
+    /// drop the `Cache` handle; the next `Cache::open` recreates a fresh
+    /// database with the current schema and identity meta rows.
+    pub fn clear(&mut self) -> Result<(), CacheError> {
+        let _lock = lock::WriteLock::acquire(&self.cache_dir, std::time::Duration::from_secs(5))?;
+        let db_path = self.cache_dir.join("cache.db");
+        // Detach the live connection from the on-disk database so the file
+        // can be removed cleanly on platforms (notably Windows) where an
+        // open handle blocks deletion. Replace with an in-memory connection
+        // so `&mut self.conn` remains usable until the caller drops us.
+        drop(std::mem::replace(
+            &mut self.conn,
+            rusqlite::Connection::open_in_memory()?,
+        ));
+        if db_path.as_std_path().exists() {
+            std::fs::remove_file(db_path.as_std_path()).map_err(|e| CacheError::Io {
+                path: db_path.clone(),
+                source: e,
+            })?;
         }
+        let wal = self.cache_dir.join("cache.db-wal");
+        let shm = self.cache_dir.join("cache.db-shm");
+        let _ = std::fs::remove_file(wal.as_std_path());
+        let _ = std::fs::remove_file(shm.as_std_path());
+        Ok(())
     }
-    Ok(cache)
+
+    /// Crate-internal connection accessor for production primitives and
+    /// for tests (including cross-crate integration tests) that need direct
+    /// SQL access. Not part of the stable public API — treat as `#[doc(hidden)]`.
+    #[doc(hidden)]
+    pub fn conn(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
+    /// Configured frontmatter field name used for alias parsing, if any.
+    /// Returns `None` when the cache was opened without an alias field
+    /// (i.e. via `Cache::open` or `open_with_config(_, None)`).
+    pub fn alias_field(&self) -> Option<&str> {
+        self.alias_field.as_deref()
+    }
 }
 
-fn apply_ignore_filter(index: &mut GraphIndex, ignore: &[String]) {
-    // Pre-compile patterns once; PathPattern::parse (Regex::new) is expensive.
-    let compiled: Vec<PathPattern> = ignore
-        .iter()
-        .map(|p| p.trim())
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| PathPattern::parse(p).ok())
-        .collect();
-    if compiled.is_empty() {
-        return;
-    }
-    let is_ignored = |path: &camino::Utf8Path| -> bool {
-        compiled
-            .iter()
-            .any(|p| p.match_path(path.as_str()).is_some())
-    };
-    let mut ignored_files: Vec<camino::Utf8PathBuf> = Vec::new();
-    index.files.retain(|f| {
-        if is_ignored(&f.path) {
-            ignored_files.push(f.path.clone());
-            false
-        } else {
-            true
-        }
-    });
-    index.documents.retain(|d| !is_ignored(&d.path));
-    index.ignored_files.extend(ignored_files);
-    index.ignored_files.sort();
-    index.ignored_files.dedup();
-}
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use tempfile::TempDir;
 
-pub fn run_index(
-    vault_root: &Utf8Path,
-    alias_field: Option<&str>,
-    args: &CacheIndexArgs,
-) -> Result<()> {
-    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
-    if args.rebuild {
-        let report = cache.rebuild(vault_root)?;
-        eprintln!(
-            "vault: cache rebuilt {} docs, {} links in {}ms",
-            report.doc_count, report.link_count, report.duration_ms,
+    // Performance regression test. Locks in the documented cold-rebuild target:
+    // a 1000-document vault should rebuild from scratch in under 2 seconds.
+    //
+    // Marked `#[ignore]` so it does not run on every `cargo test` invocation.
+    // Opt in via `cargo test --ignored` or in CI when locking targets.
+    #[test]
+    #[ignore]
+    fn cold_rebuild_under_2s_on_1k_docs() {
+        let tmp = TempDir::new().unwrap();
+        // Nest under `vault/` so the basename is not hidden — TempDir uses
+        // `.tmp...` which `vault_graph` skips.
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        for i in 0..1000 {
+            std::fs::write(
+                root.join(format!("doc{i}.md")).as_std_path(),
+                format!("---\ntitle: Doc {i}\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        let start = std::time::Instant::now();
+        cache.rebuild(&root).unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 2000,
+            "cold rebuild took {}ms (target: < 2000ms)",
+            elapsed.as_millis(),
         );
-    } else {
-        let report = cache.index_incremental(
-            vault_root,
-            &ChangeDetectOptions {
-                force_hash: args.force_hash,
-            },
-        )?;
-        eprintln!(
-            "vault: cache indexed {} docs, {} links in {}ms",
-            report.doc_count, report.link_count, report.duration_ms,
-        );
     }
-    Ok(())
-}
 
-pub fn run_rebuild(vault_root: &Utf8Path, alias_field: Option<&str>) -> Result<()> {
-    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
-    let report = cache.rebuild(vault_root)?;
-    eprintln!(
-        "vault: cache rebuilt {} docs, {} links in {}ms",
-        report.doc_count, report.link_count, report.duration_ms,
-    );
-    Ok(())
-}
+    // Property test: any sequence of filesystem operations must produce the
+    // same final cache state via incremental update as from-scratch rebuild.
+    //
+    // Catches invalidation bugs that scenario tests miss by running random
+    // sequences of (Create, Modify, Delete) ops against two parallel vaults
+    // and asserting the indices match.
+    mod property {
+        use super::*;
 
-pub fn run_clear(vault_root: &Utf8Path) -> Result<()> {
-    // `clear` discards the database entirely; the next open recreates with
-    // whatever alias_field is then in scope, so we don't need to pass one here.
-    let mut cache = Cache::open(vault_root)?;
-    cache.clear()?;
-    eprintln!("vault: cache cleared");
-    Ok(())
-}
-
-pub fn run_status(
-    vault_root: &Utf8Path,
-    alias_field: Option<&str>,
-    args: &CacheStatusArgs,
-) -> Result<()> {
-    let cache = Cache::open_with_config(vault_root, alias_field)?;
-    let status = cache.status()?;
-    match args.format {
-        CacheOutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&status)?);
+        #[derive(Debug, Clone)]
+        enum Op {
+            Create(String),
+            Modify(String),
+            Delete(String),
         }
-        CacheOutputFormat::Text => {
-            println!("cache path:        {}", status.cache_path);
-            println!("size:              {} bytes", status.size_bytes);
-            println!("documents:         {}", status.doc_count);
-            println!("files:             {}", status.file_count);
-            println!("links:             {}", status.link_count);
-            println!("schema version:    {}", status.schema_version);
-            if let Some(ts) = status.last_full_rebuild {
-                println!("last full rebuild: {ts}");
+
+        /// Builds an isolated vault rooted at `<tmpdir>/vault/`. `vault_graph` treats
+        /// directories whose basename starts with `.` as hidden, and `TempDir` itself
+        /// uses a `.tmp...` prefix — so we nest under a non-hidden subdirectory.
+        fn fresh_vault() -> (TempDir, Utf8PathBuf) {
+            let tmp = TempDir::new().unwrap();
+            let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+                .unwrap()
+                .join("vault");
+            std::fs::create_dir(root.as_std_path()).unwrap();
+            (tmp, root)
+        }
+
+        fn run_sequence(ops: &[Op]) {
+            let (_tmp1, root1) = fresh_vault();
+            let (_tmp2, root2) = fresh_vault();
+
+            // Apply ops to both vaults identically.
+            // root1 gets an incremental update after each op.
+            // root2 only gets a single from-scratch rebuild at the end.
+            for op in ops {
+                apply_op(&root1, op);
+                apply_op(&root2, op);
+                let mut cache1 = crate::cache::Cache::open(&root1).unwrap();
+                cache1
+                    .index_incremental(&root1, &Default::default())
+                    .unwrap();
+            }
+
+            let mut cache2 = crate::cache::Cache::open(&root2).unwrap();
+            cache2.rebuild(&root2).unwrap();
+
+            let cache1 = crate::cache::Cache::open(&root1).unwrap();
+            let index1 = cache1.load_graph_index().unwrap();
+            let index2 = cache2.load_graph_index().unwrap();
+
+            assert_eq!(
+                index1.documents.len(),
+                index2.documents.len(),
+                "doc count drift: {} (incremental) vs {} (from-scratch); ops: {:?}",
+                index1.documents.len(),
+                index2.documents.len(),
+                ops,
+            );
+
+            let paths1: std::collections::BTreeSet<_> =
+                index1.documents.iter().map(|d| d.path.clone()).collect();
+            let paths2: std::collections::BTreeSet<_> =
+                index2.documents.iter().map(|d| d.path.clone()).collect();
+            assert_eq!(paths1, paths2, "path set drift; ops: {:?}", ops);
+
+            let links1: usize = index1.documents.iter().map(|d| d.links.len()).sum();
+            let links2: usize = index2.documents.iter().map(|d| d.links.len()).sum();
+            assert_eq!(
+                links1, links2,
+                "link count drift: {links1} (incremental) vs {links2} (from-scratch); ops: {ops:?}",
+            );
+        }
+
+        fn apply_op(root: &camino::Utf8Path, op: &Op) {
+            match op {
+                Op::Create(name) => {
+                    std::fs::write(
+                        root.join(format!("{name}.md")).as_std_path(),
+                        format!("---\ntitle: {name}\n---\nbody [link]({name}-target.md)\n"),
+                    )
+                    .unwrap();
+                }
+                Op::Modify(name) => {
+                    std::fs::write(
+                        root.join(format!("{name}.md")).as_std_path(),
+                        format!("---\ntitle: {name}\n---\nupdated body\n"),
+                    )
+                    .unwrap();
+                }
+                Op::Delete(name) => {
+                    let _ = std::fs::remove_file(root.join(format!("{name}.md")).as_std_path());
+                }
             }
         }
+
+        #[test]
+        fn incremental_matches_from_scratch_simple() {
+            run_sequence(&[
+                Op::Create("a".into()),
+                Op::Create("b".into()),
+                Op::Modify("a".into()),
+                Op::Delete("b".into()),
+            ]);
+        }
+
+        #[test]
+        fn incremental_matches_from_scratch_create_delete_create() {
+            run_sequence(&[
+                Op::Create("foo".into()),
+                Op::Delete("foo".into()),
+                Op::Create("foo".into()),
+            ]);
+        }
+
+        #[test]
+        fn incremental_matches_from_scratch_many_creates() {
+            let ops: Vec<Op> = (0..20).map(|i| Op::Create(format!("doc{i}"))).collect();
+            run_sequence(&ops);
+        }
+
+        #[test]
+        fn incremental_matches_from_scratch_interleaved() {
+            let mut ops = Vec::new();
+            for i in 0..10 {
+                ops.push(Op::Create(format!("doc{i}")));
+                if i % 2 == 0 {
+                    ops.push(Op::Modify(format!("doc{i}")));
+                }
+                if i % 3 == 0 && i > 0 {
+                    ops.push(Op::Delete(format!("doc{}", i - 1)));
+                }
+            }
+            run_sequence(&ops);
+        }
     }
-    Ok(())
 }

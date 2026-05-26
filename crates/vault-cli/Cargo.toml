@@ -20,6 +20,7 @@ path = "src/main.rs"
 anstyle = "1"
 anyhow.workspace = true
 blake3.workspace = true
+fs2.workspace = true
 globset = { workspace = true }
 camino.workspace = true
 chrono = { workspace = true }
@@ -27,6 +28,7 @@ clap.workspace = true
 clap_complete.workspace = true
 clap_complete_nushell.workspace = true
 clap_mangen.workspace = true
+rusqlite = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -35,7 +37,6 @@ tar.workspace = true
 terminal_size = { workspace = true }
 thiserror.workspace = true
 ureq.workspace = true
-vault-cache = { path = "../vault-cache" }
 vault-core = { path = "../vault-core" }
 vault-frontmatter = { path = "../vault-frontmatter" }
 vault-graph = { path = "../vault-graph" }
@@ -52,5 +53,4 @@ clap_mangen.workspace = true
 [dev-dependencies]
 mockito.workspace = true
 regex = { workspace = true }
-rusqlite = { workspace = true }
 tempfile = "3"

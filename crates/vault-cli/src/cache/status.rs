@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheStatus {
@@ -15,7 +15,7 @@ pub struct CacheStatus {
     pub last_full_rebuild: Option<String>,
 }
 
-impl crate::Cache {
+impl crate::cache::Cache {
     pub fn status(&self) -> Result<CacheStatus, CacheError> {
         let db_path = self.cache_dir.join("cache.db");
         let size_bytes = std::fs::metadata(db_path.as_std_path())

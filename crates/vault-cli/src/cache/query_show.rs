@@ -9,7 +9,7 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use vault_core::{Heading, Link, LinkStatus};
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
 /// A document with full connection context: headings, outgoing links,
 /// unresolved links, and incoming back-links.
@@ -33,7 +33,7 @@ pub struct IncomingLink {
     pub link: Link,
 }
 
-impl crate::Cache {
+impl crate::cache::Cache {
     /// Load a single document with its full connection set.
     ///
     /// - `outgoing_links` — links with `LinkStatus::Resolved`
@@ -70,8 +70,8 @@ impl crate::Cache {
             .and_then(|s| serde_json::from_str(s).ok());
         let path_buf = Utf8PathBuf::from(&path_str);
 
-        let headings = crate::reader::load_headings(&self.conn, &path_str)?;
-        let all_links = crate::reader::load_links(&self.conn, &path_str)?;
+        let headings = crate::cache::reader::load_headings(&self.conn, &path_str)?;
+        let all_links = crate::cache::reader::load_links(&self.conn, &path_str)?;
 
         let mut outgoing_links = Vec::new();
         let mut unresolved_links = Vec::new();
@@ -114,7 +114,7 @@ fn load_incoming(
     )?;
 
     let rows = stmt.query_map([target_path.as_str()], |row| {
-        crate::query_links::decode_link_row(row)
+        crate::cache::query_links::decode_link_row(row)
     })?;
 
     let mut out: Vec<IncomingLink> = Vec::new();
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn deep_projection_includes_headings_outgoing_incoming() {
         let (_t, root) = synth();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         let deep = cache
             .document_with_connections(camino::Utf8Path::new("a.md"), false)
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn body_only_loaded_when_requested() {
         let (_t, root) = synth();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         let deep = cache
             .document_with_connections(camino::Utf8Path::new("a.md"), true)
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn missing_path_returns_none() {
         let (_t, root) = synth();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         let deep = cache
             .document_with_connections(camino::Utf8Path::new("nonexistent.md"), false)
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn document_with_connections_uses_index_for_incoming_links() {
         let (_t, root) = synth();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
 
         // The incoming-link query is the load-bearing one for perf:

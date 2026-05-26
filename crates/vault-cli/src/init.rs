@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
 
-use vault_cache::{Cache, DocumentQuery};
+use crate::cache::{Cache, DocumentQuery};
 
 use crate::cli::InitArgs;
 use crate::init_scan::{tally_from_keys, ScanResult};

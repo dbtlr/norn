@@ -3,7 +3,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::HashMap;
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
 #[derive(Debug, Clone, Default)]
 pub struct ChangeDetectOptions {
@@ -29,7 +29,7 @@ impl FileChange {
 
 pub fn detect(
     vault_root: &Utf8Path,
-    cache: &crate::Cache,
+    cache: &crate::cache::Cache,
     options: &ChangeDetectOptions,
 ) -> Result<Vec<FileChange>, CacheError> {
     let cached = load_cached_metadata(&cache.conn)?;
@@ -182,7 +182,7 @@ mod tests {
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
-    fn setup() -> (TempDir, Utf8PathBuf, crate::Cache) {
+    fn setup() -> (TempDir, Utf8PathBuf, crate::cache::Cache) {
         let tmp = TempDir::new().unwrap();
         // Create the vault under a non-hidden subdirectory: TempDir's own
         // basename starts with `.tmp`, which vault_graph's WalkDir filter
@@ -193,7 +193,7 @@ mod tests {
         std::fs::create_dir(root.as_std_path()).unwrap();
         std::fs::write(root.join("a.md").as_std_path(), "---\ntitle: A\n---\n").unwrap();
         std::fs::write(root.join("b.md").as_std_path(), "---\ntitle: B\n---\n").unwrap();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         (tmp, root, cache)
     }

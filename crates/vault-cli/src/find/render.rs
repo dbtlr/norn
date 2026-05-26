@@ -1,7 +1,7 @@
 //! Format-specific output renderers (paths / records / json / jsonl).
 
+use crate::cache::FindResult;
 use std::io::Write;
-use vault_cache::FindResult;
 
 use crate::cli::{FindArgs, FindFormat};
 use crate::output::primitives::{count_line, record_block, separator, Field};

@@ -37,7 +37,7 @@ pub fn discover(cwd: &Utf8Path, config_override: Option<&Utf8PathBuf>) -> Result
     };
     let vault_root = cwd.to_owned();
     let (_canonical, cache_dir) =
-        vault_cache::cache_dir_for(&vault_root).map_err(|e| anyhow!("resolve cache dir: {e}"))?;
+        crate::cache::cache_dir_for(&vault_root).map_err(|e| anyhow!("resolve cache dir: {e}"))?;
     let cache = cache_dir.join("cache.db");
     Ok(Discovery {
         config_file,

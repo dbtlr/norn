@@ -9,17 +9,17 @@
 use std::process::Command;
 
 use camino::Utf8PathBuf;
-use rusqlite::params;
 use tempfile::TempDir;
-use vault_cache::Cache;
 
 fn vault_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vault"))
 }
 
 /// Build a small fixture vault on disk: empty `.vault/` so it's recognized
-/// as a vault root, plus a cache pre-seeded with documents whose top-level
-/// frontmatter matches the Phase 3 algorithm.
+/// as a vault root, plus on-disk Markdown files whose top-level frontmatter
+/// matches the Phase 3 algorithm. Pre-populates the cache by running
+/// `vault cache rebuild` so the live-examples generator (which only opens
+/// the cache, never rebuilds it) sees populated rows.
 fn fixture_vault() -> TempDir {
     let tmp = tempfile::Builder::new()
         .prefix("vault-cli-help-live-integ-")
@@ -27,40 +27,40 @@ fn fixture_vault() -> TempDir {
         .unwrap();
     let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
     std::fs::create_dir_all(root.join(".vault").as_std_path()).unwrap();
-    let cache = Cache::open(&root).unwrap();
     let docs: &[(&str, &str)] = &[
         (
             "a.md",
-            r#"{"type":"note","workspace":"vault-cli","modified":"2026-05-21"}"#,
+            "---\ntype: note\nworkspace: vault-cli\nmodified: 2026-05-21\n---\n",
         ),
         (
             "b.md",
-            r#"{"type":"note","workspace":"vault-cli","modified":"2026-05-20"}"#,
+            "---\ntype: note\nworkspace: vault-cli\nmodified: 2026-05-20\n---\n",
         ),
         (
             "c.md",
-            r#"{"type":"note","workspace":"vault-cli","modified":"2026-05-19"}"#,
+            "---\ntype: note\nworkspace: vault-cli\nmodified: 2026-05-19\n---\n",
         ),
         (
             "d.md",
-            r#"{"type":"task","workspace":"vault-cli","modified":"2026-05-18"}"#,
+            "---\ntype: task\nworkspace: vault-cli\nmodified: 2026-05-18\n---\n",
         ),
         (
             "e.md",
-            r#"{"type":"task","workspace":"atlas","modified":"2026-05-17"}"#,
+            "---\ntype: task\nworkspace: atlas\nmodified: 2026-05-17\n---\n",
         ),
     ];
-    for (path, fm) in docs {
-        cache
-            .conn()
-            .execute(
-                "INSERT INTO documents (path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![path, path.trim_end_matches(".md"), "h", fm, "", 0i64, 0i64],
-            )
-            .unwrap();
+    for (path, body) in docs {
+        std::fs::write(root.join(path).as_std_path(), body).unwrap();
     }
-    drop(cache);
+    let out = vault_bin()
+        .args(["--cwd", tmp.path().to_str().unwrap(), "cache", "rebuild"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cache rebuild failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     tmp
 }
 

@@ -45,7 +45,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
 
     // ── Step 2: Open cache + build GraphIndex ─────────────────────────────────
-    let index = crate::cache::load_graph_index(
+    let index = crate::cache_cmd::load_graph_index(
         &vault_root_buf,
         &loaded_config.index_options,
         /*no_cache_refresh=*/ false,
@@ -251,7 +251,7 @@ fn post_create_validate(
     let vault_root_buf = vault_root.to_owned();
     let loaded = crate::config_loader::load_config(&vault_root_buf, None)
         .map_err(|e| anyhow::anyhow!("post-create validate: config error: {e}"))?;
-    let index = crate::cache::load_graph_index(
+    let index = crate::cache_cmd::load_graph_index(
         &vault_root_buf,
         &loaded.index_options,
         /*no_cache_refresh=*/ false,

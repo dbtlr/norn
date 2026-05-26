@@ -12,7 +12,7 @@
 //! 7. Compose `BIN_NAME find --eq F1:V1 [--eq F2:V2] [--sort SORT] --limit 5`.
 //! 8. Re-count the final query; emit only if non-zero.
 
-use vault_cache::{count_matching, field_statistics, Cache, FieldStats};
+use crate::cache::{count_matching, field_statistics, Cache, FieldStats};
 
 use crate::help::bin_name::BIN_NAME;
 use crate::help::model::LiveExample;
@@ -137,10 +137,10 @@ fn strip_wikilink(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::Cache;
     use camino::Utf8PathBuf;
     use rusqlite::params;
     use tempfile::TempDir;
-    use vault_cache::Cache;
 
     fn fresh_cache() -> (TempDir, Cache) {
         let tmp = tempfile::Builder::new()

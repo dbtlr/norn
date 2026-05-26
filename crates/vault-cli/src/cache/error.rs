@@ -13,6 +13,7 @@ pub enum CacheError {
     Sqlite(#[from] rusqlite::Error),
 
     #[error("cache identity drift: cache was built against {cached}, current vault is {current}")]
+    #[allow(dead_code)]
     IdentityDrift {
         cached: Utf8PathBuf,
         current: Utf8PathBuf,

@@ -291,7 +291,9 @@ pub fn conceptual_sections_for(cmd_path: &str) -> Vec<(String, String)> {
 ///
 /// The generator (when present) is invoked by the help interceptor on
 /// `--help` form only, after `Cache::open` succeeds.
-pub fn live_examples_fn_for(cmd_path: &str) -> Option<fn(&vault_cache::Cache) -> Vec<LiveExample>> {
+pub fn live_examples_fn_for(
+    cmd_path: &str,
+) -> Option<fn(&crate::cache::Cache) -> Vec<LiveExample>> {
     match cmd_path {
         "vault find" => Some(crate::help::find_live::live_examples_for_find),
         _ => None,

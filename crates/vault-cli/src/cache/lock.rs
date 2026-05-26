@@ -9,7 +9,7 @@ use camino::Utf8Path;
 use fs2::FileExt;
 use std::fs::OpenOptions;
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
 pub struct WriteLock {
     _file: std::fs::File,
@@ -68,6 +68,6 @@ mod tests {
         let dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let _guard1 = WriteLock::acquire(&dir, std::time::Duration::from_millis(100)).unwrap();
         let result = WriteLock::acquire(&dir, std::time::Duration::from_millis(100));
-        assert!(matches!(result, Err(crate::CacheError::LockTimeout)));
+        assert!(matches!(result, Err(crate::cache::CacheError::LockTimeout)));
     }
 }

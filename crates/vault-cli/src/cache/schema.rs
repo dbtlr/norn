@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
 pub(crate) const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (

@@ -88,9 +88,9 @@ mod tests {
     }
 }
 
+use crate::cache::Cache;
 use anyhow::Result;
 use camino::Utf8PathBuf;
-use vault_cache::Cache;
 
 #[derive(Debug, PartialEq)]
 pub struct ResolvedTarget {
@@ -127,7 +127,7 @@ pub fn resolve_target(cache: &Cache, raw: &str) -> Result<ResolvedTarget> {
 
     // 2. Stem fallback: load all summaries once for case-insensitive stem scan.
     //    This still costs one SELECT against the documents table.
-    let all = cache.documents_matching(&vault_cache::DocumentQuery::default())?;
+    let all = cache.documents_matching(&crate::cache::DocumentQuery::default())?;
     let stem_matches: Vec<Utf8PathBuf> = all
         .iter()
         .filter(|d| d.stem.eq_ignore_ascii_case(&normalized))
@@ -252,7 +252,7 @@ mod resolver_tests {
         )
         .unwrap();
 
-        let mut cache = vault_cache::Cache::open_with_config(&root, Some("aliases")).unwrap();
+        let mut cache = crate::cache::Cache::open_with_config(&root, Some("aliases")).unwrap();
         cache.rebuild(&root).unwrap();
 
         // Target via wikilink shape — should resolve via alias since stem "vault memory" doesn't exist.
@@ -282,7 +282,7 @@ mod resolver_tests {
         .unwrap();
 
         // Open WITHOUT alias_field
-        let mut cache = vault_cache::Cache::open_with_config(&root, None).unwrap();
+        let mut cache = crate::cache::Cache::open_with_config(&root, None).unwrap();
         cache.rebuild(&root).unwrap();
 
         let resolved = resolve_target(&cache, "[[Vault Memory]]").unwrap();

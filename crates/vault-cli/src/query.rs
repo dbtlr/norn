@@ -1,7 +1,7 @@
 //! CLI-side adapters: convert `DocumentFilterOptions` and validate
-//! `ValidateRule.match` into `vault_cache::DocumentQuery`.
+//! `ValidateRule.match` into `crate::cache::DocumentQuery`.
 
-use vault_cache::DocumentQuery;
+use crate::cache::DocumentQuery;
 use vault_standards::ValidateRule;
 
 use crate::filter::DocumentFilterOptions;

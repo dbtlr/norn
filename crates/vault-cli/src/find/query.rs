@@ -1,7 +1,7 @@
-//! CLI args → vault_cache::FindQuery translation.
+//! CLI args → crate::cache::FindQuery translation.
 
+use crate::cache::{FindQuery, SortClause, SortDirection};
 use anyhow::Result;
-use vault_cache::{FindQuery, SortClause, SortDirection};
 
 use crate::cli::FindArgs;
 

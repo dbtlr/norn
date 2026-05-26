@@ -4,7 +4,7 @@
 use camino::Utf8Path;
 use rusqlite::{params, Transaction};
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
 /// Delete all rows for the given document path across every table.
 pub(crate) fn drop_document(tx: &Transaction, path: &Utf8Path) -> Result<(), CacheError> {

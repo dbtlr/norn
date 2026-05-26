@@ -6,9 +6,9 @@ use vault_core::{
     LinkStatus, Severity, SourceSpan, UnresolvedReason, VaultFile,
 };
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
-impl crate::Cache {
+impl crate::cache::Cache {
     /// Reconstruct a `GraphIndex` from the SQLite tables. Mirrors the shape
     /// `vault_graph::build_index` would produce for the same vault.
     ///
@@ -346,7 +346,7 @@ mod tests {
         let (_tmp, root) = make_vault();
         let direct = vault_graph::build_index(&root).unwrap();
 
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         let loaded = cache.load_graph_index().unwrap();
 
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn loaded_index_preserves_resolved_links() {
         let (_tmp, root) = make_vault();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         let loaded = cache.load_graph_index().unwrap();
         let doc = loaded
@@ -393,11 +393,12 @@ mod tests {
         .unwrap();
 
         // Open with alias_field = Some("aliases"), rebuild to populate the cache.
-        let mut cache = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        let mut cache =
+            crate::cache::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
         cache.rebuild(&vault_root).unwrap();
 
         // Reopen the cache, then load documents back. Aliases must be present.
-        let cache2 = crate::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
+        let cache2 = crate::cache::Cache::open_with_config(&vault_root, Some("aliases")).unwrap();
         let index = cache2.load_graph_index().unwrap();
         let vm = index
             .documents
@@ -424,10 +425,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut cache = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        let mut cache = crate::cache::Cache::open_with_config(&vault_root, None).unwrap();
         cache.rebuild(&vault_root).unwrap();
 
-        let cache2 = crate::Cache::open_with_config(&vault_root, None).unwrap();
+        let cache2 = crate::cache::Cache::open_with_config(&vault_root, None).unwrap();
         let index = cache2.load_graph_index().unwrap();
         let vm = index
             .documents

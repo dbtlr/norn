@@ -1,9 +1,9 @@
 //! Diagnostic count primitive — used for exit-code derivation on
 //! cache-direct command paths.
 
-use crate::error::CacheError;
+use crate::cache::error::CacheError;
 
-impl crate::Cache {
+impl crate::cache::Cache {
     /// True if any document has at least one diagnostic with `severity = 'error'`.
     /// Replaces `exit_code_for(&index)` for command paths that don't build a
     /// full GraphIndex.

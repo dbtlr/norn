@@ -4,10 +4,11 @@ use camino::Utf8Path;
 use rusqlite::{params, Transaction};
 use vault_core::{Document, GraphIndex, Link, VaultFile};
 
-use crate::change_detection::{detect, ChangeDetectOptions, FileChange};
-use crate::error::CacheError;
+use crate::cache::change_detection::{detect, ChangeDetectOptions, FileChange};
+use crate::cache::error::CacheError;
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct IndexOptions {
     pub force_hash: bool,
 }
@@ -20,7 +21,7 @@ pub struct IndexReport {
     pub duration_ms: u128,
 }
 
-impl crate::Cache {
+impl crate::cache::Cache {
     /// Returns true if a full rebuild has ever stamped this cache (a
     /// `last_full_rebuild_ts` meta row exists). Fresh caches and caches that
     /// have only seen schema/meta init return false.
@@ -39,8 +40,10 @@ impl crate::Cache {
     /// Full rebuild: walk the vault, parse every document, replace all rows.
     /// Used by `vault cache rebuild` and the implicit rebuild after a self-heal trigger.
     pub fn rebuild(&mut self, vault_root: &Utf8Path) -> Result<IndexReport, CacheError> {
-        let _lock =
-            crate::lock::WriteLock::acquire(&self.cache_dir, std::time::Duration::from_secs(5))?;
+        let _lock = crate::cache::lock::WriteLock::acquire(
+            &self.cache_dir,
+            std::time::Duration::from_secs(5),
+        )?;
         let start = std::time::Instant::now();
         let options = vault_graph::IndexOptions {
             alias_field: self.alias_field.clone(),
@@ -82,8 +85,10 @@ impl crate::Cache {
         if !self.has_been_built()? {
             return self.rebuild(vault_root);
         }
-        let _lock =
-            crate::lock::WriteLock::acquire(&self.cache_dir, std::time::Duration::from_secs(5))?;
+        let _lock = crate::cache::lock::WriteLock::acquire(
+            &self.cache_dir,
+            std::time::Duration::from_secs(5),
+        )?;
         let start = std::time::Instant::now();
         let changes = detect(vault_root, self, options)?;
         if changes.is_empty() {
@@ -112,17 +117,17 @@ impl crate::Cache {
         for change in &changes {
             match change {
                 FileChange::Deleted(path) => {
-                    crate::invalidation::drop_document(&tx, path)?;
-                    crate::invalidation::unresolve_incoming(&tx, path)?;
+                    crate::cache::invalidation::drop_document(&tx, path)?;
+                    crate::cache::invalidation::unresolve_incoming(&tx, path)?;
                 }
                 FileChange::Added(path) | FileChange::Modified(path) => {
-                    crate::invalidation::drop_document(&tx, path)?;
+                    crate::cache::invalidation::drop_document(&tx, path)?;
                     if let Some(doc) = fresh_docs.get(path) {
                         insert_document(&tx, vault_root, doc, &mut report)?;
                     }
                     // Re-resolve incoming links that *might* now match this
                     // new path/stem.
-                    crate::invalidation::unresolve_incoming(&tx, path)?;
+                    crate::cache::invalidation::unresolve_incoming(&tx, path)?;
                 }
             }
         }
@@ -487,7 +492,7 @@ mod tests {
     #[test]
     fn rebuild_populates_documents_table() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         let report = cache.rebuild(&root).unwrap();
         assert_eq!(report.doc_count, 2);
 
@@ -501,7 +506,7 @@ mod tests {
     #[test]
     fn rebuild_populates_links_table() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
 
         let count: i64 = cache
@@ -518,7 +523,7 @@ mod tests {
     #[test]
     fn rebuild_stores_body_text() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
 
         let body: String = cache
@@ -538,7 +543,7 @@ mod tests {
     #[test]
     fn incremental_picks_up_added_file() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
 
         std::fs::write(
@@ -563,7 +568,7 @@ mod tests {
     #[test]
     fn incremental_removes_deleted_file() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
 
         std::fs::remove_file(root.join("other.md").as_std_path()).unwrap();
@@ -594,7 +599,7 @@ mod tests {
     #[test]
     fn incremental_after_no_changes_is_cheap() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         let report = cache.index_incremental(&root, &Default::default()).unwrap();
         assert_eq!(report.doc_count, 0);
@@ -604,7 +609,7 @@ mod tests {
     #[test]
     fn incremental_handles_rename_via_delete_plus_add() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
 
         std::fs::rename(
@@ -660,7 +665,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut cache = crate::Cache::open_with_config(&root, Some("aliases")).unwrap();
+        let mut cache = crate::cache::Cache::open_with_config(&root, Some("aliases")).unwrap();
         cache.rebuild(&root).unwrap();
 
         let deep = cache
@@ -689,7 +694,7 @@ mod tests {
     #[test]
     fn rebuild_clears_existing_rows() {
         let (_tmp, root) = make_vault_with_one_doc();
-        let mut cache = crate::Cache::open(&root).unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
         // Add a stale row.
         cache
@@ -710,5 +715,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    // Concurrency integration test: two simultaneous `rebuild` calls must
+    // both complete successfully, with the second one serializing behind
+    // the first via the advisory write lock.
+    #[test]
+    fn two_simultaneous_rebuilds_serialize() {
+        let tmp = TempDir::new().unwrap();
+        // vault_graph treats hidden directories (basename starts with `.`) as
+        // skipped — TempDir's own basename starts with `.tmp`, so nest the
+        // vault under a non-hidden subdirectory.
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntitle: A\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\n---\nbody [[a]]\n",
+        )
+        .unwrap();
+
+        let root1 = root.clone();
+        let handle1 = std::thread::spawn(move || {
+            let mut cache = crate::cache::Cache::open(&root1).unwrap();
+            cache.rebuild(&root1)
+        });
+
+        // Tiny stagger so handle1 has reached `rebuild` and acquired the lock
+        // before handle2 races for it. Without this the test still asserts both
+        // succeed, but with the stagger we exercise the "second writer waits"
+        // path deterministically.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let root2 = root.clone();
+        let handle2 = std::thread::spawn(move || {
+            let mut cache = crate::cache::Cache::open(&root2).unwrap();
+            cache.rebuild(&root2)
+        });
+
+        let r1 = handle1.join().unwrap();
+        let r2 = handle2.join().unwrap();
+        assert!(r1.is_ok(), "first rebuild failed: {r1:?}");
+        assert!(r2.is_ok(), "second rebuild failed: {r2:?}");
     }
 }

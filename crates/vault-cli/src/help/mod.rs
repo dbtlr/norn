@@ -70,7 +70,7 @@ pub fn intercept_from_args() -> Option<i32> {
             let cwd_arg = parse_cwd_from_args(&args);
             if let Ok(root_path) = crate::config_loader::effective_cwd(cwd_arg.as_ref()) {
                 if root_path.join(".vault").as_std_path().is_dir() {
-                    if let Ok(cache) = vault_cache::Cache::open(&root_path) {
+                    if let Ok(cache) = crate::cache::Cache::open(&root_path) {
                         model.live_examples = generator(&cache);
                     }
                 }

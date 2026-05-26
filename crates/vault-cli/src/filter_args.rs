@@ -3,12 +3,12 @@
 //! [`FilterArgs`] is defined in `cli.rs` (not here) so that `build.rs` can
 //! include `cli.rs` directly without pulling in intra-crate deps. This module
 //! owns the translation logic: [`build_document_query`] converts the parsed
-//! flags into a `vault_cache::DocumentQuery`.
+//! flags into a `crate::cache::DocumentQuery`.
 
+use crate::cache::DocumentQuery;
 use anyhow::{anyhow, Result};
 use chrono::Local;
 use serde_json::Value;
-use vault_cache::DocumentQuery;
 
 pub use crate::cli::FilterArgs;
 

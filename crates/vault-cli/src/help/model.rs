@@ -74,7 +74,7 @@ pub struct HelpExtras {
     /// an open cache. `None` for commands without live-examples support.
     /// The interceptor invokes this on `--help` form only; the result is
     /// materialized onto `HelpModel::live_examples`.
-    pub live_examples_fn: Option<fn(&vault_cache::Cache) -> Vec<LiveExample>>,
+    pub live_examples_fn: Option<fn(&crate::cache::Cache) -> Vec<LiveExample>>,
 }
 
 /// Complete rendering input for one help invocation.
