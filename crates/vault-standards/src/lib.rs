@@ -1,6 +1,7 @@
 pub mod apply;
 mod checks;
 mod config;
+pub mod defaults;
 pub mod engine;
 mod findings;
 pub mod path_match;
@@ -20,6 +21,7 @@ pub use config::{
     RuleSelector, SetFrontmatterAction, ValidateConfig, ValidateRule, VaultConfig,
     CURRENT_SCHEMA_VERSION,
 };
+pub use defaults::path_variables;
 pub use engine::{
     validate, validate_rule, validate_rule_compiled, validate_with_alias_field,
     validate_with_compiled,
