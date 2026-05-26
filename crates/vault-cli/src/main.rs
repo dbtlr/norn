@@ -13,6 +13,7 @@ mod init;
 mod init_scan;
 pub mod move_doc;
 pub mod mutation_report;
+mod new;
 mod output;
 pub mod prompt;
 mod query;
