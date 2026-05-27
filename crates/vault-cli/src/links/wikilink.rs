@@ -7,8 +7,8 @@ use serde_json::Value;
 use vault_core::{Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus};
 use vault_frontmatter::frontmatter_property_strings;
 
-use crate::anchor::{source_span, split_anchor_or_block_ref};
-use crate::commonmark::ignored_wikilink_ranges;
+use super::anchor::{source_span, split_anchor_or_block_ref};
+use super::commonmark::ignored_wikilink_ranges;
 
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex"));

@@ -1670,7 +1670,6 @@ dependencies = [
  "ureq",
  "vault-core",
  "vault-frontmatter",
- "vault-links",
  "walkdir",
  "xz2",
 ]
@@ -1693,18 +1692,6 @@ dependencies = [
  "serde_yaml",
  "thiserror",
  "vault-core",
-]
-
-[[package]]
-name = "vault-links"
-version = "0.33.0"
-dependencies = [
- "camino",
- "pulldown-cmark",
- "regex",
- "serde_json",
- "vault-core",
- "vault-frontmatter",
 ]
 
 [[package]]

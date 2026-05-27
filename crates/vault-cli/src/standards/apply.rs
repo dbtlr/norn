@@ -698,7 +698,7 @@ pub fn apply_replace_body(content: &str, change: &PlannedChange) -> Result<Strin
 /// both in prose (flagged by validate) and inside a ``` ... ``` block (not
 /// flagged), apply will rewrite BOTH occurrences. Validate's link extractor
 /// skips code fences via `ignored_wikilink_ranges` in vault-links, but this
-/// rewrite path does not. Reuse of `vault_links::parse_wikilinks` here would
+/// rewrite path does not. Reuse of `crate::links::parse_wikilinks` here would
 /// require byte-span based rewriting; deferred to a follow-up.
 pub fn apply_rewrite_link(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
     let old_target = change

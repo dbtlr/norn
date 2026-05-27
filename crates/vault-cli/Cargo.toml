@@ -42,7 +42,6 @@ thiserror.workspace = true
 ureq.workspace = true
 vault-core = { path = "../vault-core" }
 vault-frontmatter = { path = "../vault-frontmatter" }
-vault-links = { path = "../vault-links" }
 walkdir.workspace = true
 xz2.workspace = true
 

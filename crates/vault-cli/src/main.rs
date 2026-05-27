@@ -13,6 +13,7 @@ mod graph;
 mod help;
 mod init;
 mod init_scan;
+mod links;
 pub mod move_doc;
 pub mod mutation_report;
 mod new;

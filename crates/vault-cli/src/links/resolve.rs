@@ -4,7 +4,7 @@ use std::path::Component;
 use camino::{Utf8Path, Utf8PathBuf};
 use vault_core::{Document, Link, LinkKind, LinkStatus, UnresolvedReason, VaultFile};
 
-use crate::anchor::slugify;
+use super::anchor::slugify;
 
 pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
     let mut by_path: HashMap<String, Utf8PathBuf> = HashMap::new();
