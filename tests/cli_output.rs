@@ -9,9 +9,7 @@ use serde_json::Value;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("fixtures/basic")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/basic")
 }
 
 /// Wraps a vault invocation with a per-test `XDG_CACHE_HOME` so each test
@@ -1806,9 +1804,7 @@ fn completions_rejects_unknown_shell() {
 /// (for example after a clap_complete shell list change).
 #[test]
 fn build_script_emits_release_artifacts() {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let completions = workspace_root.join("target").join("completions");
     let man = workspace_root.join("target").join("man");
 

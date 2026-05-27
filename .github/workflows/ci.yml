@@ -38,8 +38,8 @@ jobs:
       - name: cargo build -p vault-cli --release --locked
         run: cargo build -p vault-cli --release --locked
 
-      - name: cargo install --path crates/vault-cli --locked
-        run: cargo install --path crates/vault-cli --locked
+      - name: cargo install --path . --locked
+        run: cargo install --path . --locked
 
       - name: vault --help
         run: vault --help

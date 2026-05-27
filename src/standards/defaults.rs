@@ -70,7 +70,7 @@ pub(crate) fn collect_transform_refs(template: &str) -> Vec<String> {
 /// The canonical list of known transform names.
 ///
 /// **Invariant:** must stay in sync with `apply_transform` in
-/// `crates/vault-standards/src/substitution.rs`. Adding a transform there
+/// `src/standards/substitution.rs`. Adding a transform there
 /// without updating this list silently under-validates configs; removing one
 /// here will reject configs that the renderer would still accept. There is no
 /// compile-time enforcement of the sync — see the `KNOWN_TRANSFORMS_match`

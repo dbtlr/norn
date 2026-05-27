@@ -22,21 +22,15 @@ use clap_mangen::Man;
 mod cli;
 
 fn main() -> std::io::Result<()> {
-    // CARGO_MANIFEST_DIR is crates/vault-cli/; walk two levels up to the
-    // workspace root so the generated paths match cargo-dist's `include`
-    // entries declared from the same root.
+    // CARGO_MANIFEST_DIR is the repo root, so cargo-dist's `include` entries
+    // and the build-script outputs share the same base directory.
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR must be set by cargo when running build.rs"),
     );
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|crates_dir| crates_dir.parent())
-        .expect("workspace root resolves two levels above crates/vault-cli")
-        .to_path_buf();
 
-    let completions_dir = workspace_root.join("target").join("completions");
-    let man_dir = workspace_root.join("target").join("man");
+    let completions_dir = manifest_dir.join("target").join("completions");
+    let man_dir = manifest_dir.join("target").join("man");
 
     std::fs::create_dir_all(&completions_dir)?;
     std::fs::create_dir_all(&man_dir)?;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo:crates/vault-cli"]
+members = ["cargo:."]
 
 # Config for 'dist'
 [dist]

@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn indexes_documents_and_resolves_links() {
-        let index = build_index(Utf8Path::new("../../fixtures/basic")).unwrap();
+        let index = build_index(Utf8Path::new("fixtures/basic")).unwrap();
         assert_eq!(index.documents.len(), 10);
 
         let alpha = index
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn malformed_frontmatter_is_a_warning() {
-        let index = build_index(Utf8Path::new("../../fixtures/basic")).unwrap();
+        let index = build_index(Utf8Path::new("fixtures/basic")).unwrap();
         let broken = index
             .documents
             .iter()
@@ -248,8 +248,8 @@ mod tests {
             ignore: vec![],
             alias_field: Some("aliases".into()),
         };
-        let index = build_index_with_options(Utf8Path::new("../../fixtures/alias-basic"), &options)
-            .unwrap();
+        let index =
+            build_index_with_options(Utf8Path::new("fixtures/alias-basic"), &options).unwrap();
 
         let vm = index
             .documents
@@ -274,8 +274,8 @@ mod tests {
     #[test]
     fn build_index_skips_aliases_when_unconfigured() {
         let options = IndexOptions::default();
-        let index = build_index_with_options(Utf8Path::new("../../fixtures/alias-basic"), &options)
-            .unwrap();
+        let index =
+            build_index_with_options(Utf8Path::new("fixtures/alias-basic"), &options).unwrap();
         for doc in &index.documents {
             assert!(
                 doc.aliases.is_empty(),

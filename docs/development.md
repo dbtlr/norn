@@ -47,27 +47,31 @@ Build outputs:
 
 - Debug binary: `target/debug/vault`
 - Release binary: `target/release/vault`
-- `cargo install --path crates/vault-cli` installs to `~/.cargo/bin/vault`
+- `cargo install --path .` installs to `~/.cargo/bin/vault`
 
-## Workspace layout
+## Crate layout
+
+`vault-cli` is a single-crate repo. The previous workspace layout (six internal library crates plus the `vault-cli` bin) was collapsed in v0.34 — the former crates now live as modules under `src/`:
 
 ```
-crates/
-  vault-core/         # serializable graph types and diagnostics
-  vault-frontmatter/  # YAML frontmatter extraction and offset utilities
-  vault-links/        # CommonMark + wikilink parsing, block IDs, anchors, resolution
-  vault-graph/        # vault walking, build/index entry points, pattern matching
-  vault-standards/    # validate engine, config types, findings, summary, repair
-  vault-cli/          # clap command surface for the `vault` binary
+src/
+  core/         # serializable graph types and diagnostics
+  frontmatter/  # YAML frontmatter extraction and offset utilities
+  links/        # CommonMark + wikilink parsing, block IDs, anchors, resolution
+  graph/        # vault walking, build/index entry points, pattern matching
+  standards/    # validate engine, config types, findings, summary, repair
+  cache/        # SQLite-backed graph cache
+  cli.rs        # clap command surface for the `vault` binary
+  main.rs
 ```
 
-`vault-cli` depends on `vault-graph` and `vault-standards`. The pure-parsing crates (`vault-core`, `vault-frontmatter`, `vault-links`) have no upstream dependencies on each other beyond `vault-core` and are unit-tested in isolation.
+The pure-parsing modules (`core`, `frontmatter`, `links`) still depend on each other only through `core` and are unit-tested in isolation.
 
 ## MSRV policy
 
 The project tracks **latest stable** Rust. The toolchain pin in `mise.toml` and the `dtolnay/rust-toolchain` action in CI move in lockstep when a new stable lands; update both in one commit and note the bump in the CHANGELOG.
 
-`rust-version` is intentionally omitted from `crates/vault-cli/Cargo.toml` for now. Cargo-dist's release builders (notably `aarch64-unknown-linux-musl`) ship rustc versions that lag the latest stable by several months, and declaring a high MSRV would reject those builders even though the actual code compiles cleanly. The field will be re-added when vault-cli commits to publishing on crates.io and needs to advertise a stable MSRV contract.
+`rust-version` is intentionally omitted from `Cargo.toml` for now. Cargo-dist's release builders (notably `aarch64-unknown-linux-musl`) ship rustc versions that lag the latest stable by several months, and declaring a high MSRV would reject those builders even though the actual code compiles cleanly. The field will be re-added when vault-cli commits to publishing on crates.io and needs to advertise a stable MSRV contract.
 
 ## Test fixtures
 
@@ -87,7 +91,7 @@ The main fixture vault is `fixtures/basic`. It intentionally covers:
 - non-Markdown attachments
 - ignored wikilinks in inline code and fenced code
 
-Integration tests live at `crates/vault-cli/tests/cli_output.rs`. When changing output schemas or parsing behavior, update those tests and run:
+Integration tests live at `tests/cli_output.rs`. When changing output schemas or parsing behavior, update those tests and run:
 
 ```bash
 mise exec -- just verify
