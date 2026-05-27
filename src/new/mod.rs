@@ -24,7 +24,7 @@ pub struct OutputBundle {
 /// Orchestration entry for `vault new`.
 ///
 /// Flow:
-/// 1. Load config (`.vault/config.yaml`).
+/// 1. Load config (`.norn/config.yaml`).
 /// 2. Open cache + build `GraphIndex`.
 /// 3. Run preflight checks.
 /// 4. Read body from stdin if `--body-from-stdin`.
@@ -309,7 +309,7 @@ mod tests {
     }
 
     fn write_config(root: &std::path::Path, yaml: &str) {
-        let dir = root.join(".vault");
+        let dir = root.join(".norn");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.yaml"), yaml).unwrap();
     }

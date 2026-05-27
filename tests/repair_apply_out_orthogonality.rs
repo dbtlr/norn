@@ -6,8 +6,8 @@ fn fixture_vault() -> tempfile::TempDir {
         .prefix("vault-cli-apply-orthog-")
         .tempdir()
         .unwrap();
-    fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-    fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+    fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+    fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
     tmp
 }
 

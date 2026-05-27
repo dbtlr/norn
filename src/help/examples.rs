@@ -136,7 +136,7 @@ pub fn examples_for(cmd_path: &str) -> Vec<(String, String)> {
         // ── Default tier: 1-2 examples each ─────────────────────────────────
         "norn init" => &[(
             "norn init",
-            "scaffold .vault/config.yaml in the current directory",
+            "scaffold .norn/config.yaml in the current directory",
         )],
         "norn config show" => &[
             ("norn config show", "effective config: paths + counts"),
@@ -256,7 +256,7 @@ pub fn conceptual_sections_for(cmd_path: &str) -> Vec<(String, String)> {
         "norn validate" => &[
             (
                 "How validation works",
-                "Validate reads `.vault/config.yaml` for the rules that shape your vault: required frontmatter fields, allowed values, expected types, and path scoping. Each rule produces findings with a stable code and a severity (`error`, `warning`, `info`).\n\nFindings cover three surfaces. Frontmatter findings come from schema rules — codes like `frontmatter-required-field-missing` and `frontmatter-disallowed-value`. Link findings come from graph facts — `link-target-missing`, `link-anchor-missing`, `link-block-missing`, and `link-ambiguous`. Document diagnostics come from parse — malformed frontmatter, encoding issues. Validate never writes files.\n\nExit code is `1` when any finding has severity `error`, `0` otherwise. Pipelines gate on this exit code.\n\nTriage filters combine with AND across types and OR within a type. `--severity error --code frontmatter-required-field-missing` returns errors that match that code. `--code 'link-*'` returns the whole family. `--path 'notes/**'` scopes to a path glob; `--field`, `--rule`, `--target`, and `--reason` narrow further.",
+                "Validate reads `.norn/config.yaml` for the rules that shape your vault: required frontmatter fields, allowed values, expected types, and path scoping. Each rule produces findings with a stable code and a severity (`error`, `warning`, `info`).\n\nFindings cover three surfaces. Frontmatter findings come from schema rules — codes like `frontmatter-required-field-missing` and `frontmatter-disallowed-value`. Link findings come from graph facts — `link-target-missing`, `link-anchor-missing`, `link-block-missing`, and `link-ambiguous`. Document diagnostics come from parse — malformed frontmatter, encoding issues. Validate never writes files.\n\nExit code is `1` when any finding has severity `error`, `0` otherwise. Pipelines gate on this exit code.\n\nTriage filters combine with AND across types and OR within a type. `--severity error --code frontmatter-required-field-missing` returns errors that match that code. `--code 'link-*'` returns the whole family. `--path 'notes/**'` scopes to a path glob; `--field`, `--rule`, `--target`, and `--reason` narrow further.",
             ),
             (
                 "Finding codes",

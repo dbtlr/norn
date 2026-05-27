@@ -8,7 +8,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cli::{ColorWhen, ConfigEditArgs, ConfigShowArgs, ConfigValidateArgs};
 
-/// Resolved discovery paths for the active `.vault/config.yaml` plus the
+/// Resolved discovery paths for the active `.norn/config.yaml` plus the
 /// vault root the command will operate against, plus the per-vault cache
 /// database path. Shared across `vault config show / validate / migrate /
 /// edit` so the four subcommands report consistent resolution.
@@ -20,16 +20,16 @@ pub struct Discovery {
 
 /// Resolve the config file, vault root, and cache path for the current
 /// invocation. With `config_override = Some(path)` the override wins;
-/// otherwise the loader looks for `<cwd>/.vault/config.yaml` and errors
+/// otherwise the loader looks for `<cwd>/.norn/config.yaml` and errors
 /// with a `vault init` hint when no config is present.
 pub fn discover(cwd: &Utf8Path, config_override: Option<&Utf8PathBuf>) -> Result<Discovery> {
     let config_file = match config_override {
         Some(path) => path.clone(),
         None => {
-            let candidate = cwd.join(".vault").join("config.yaml");
+            let candidate = cwd.join(".norn").join("config.yaml");
             if !candidate.exists() {
                 return Err(anyhow!(
-                    "no .vault/config.yaml found in {cwd}\nhint: run `vault init` to scaffold one"
+                    "no .norn/config.yaml found in {cwd}\nhint: run `vault init` to scaffold one"
                 ));
             }
             candidate

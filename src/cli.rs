@@ -20,7 +20,7 @@ pub struct Cli {
         long,
         global = true,
         help_heading = "Global options",
-        help = "YAML config file. Defaults to <cwd>/.vault/config.yaml when present"
+        help = "YAML config file. Defaults to <cwd>/.norn/config.yaml when present"
     )]
     pub config: Option<Utf8PathBuf>,
     #[arg(
@@ -130,7 +130,7 @@ non-TTY implicit dry-run, --yes, and --dry-run.\n\
 After write, `vault validate` runs against the new doc; findings surface as envelope warnings."
     )]
     New(NewArgs),
-    #[command(disable_help_flag = true, about = "Scaffold .vault/config.yaml")]
+    #[command(disable_help_flag = true, about = "Scaffold .norn/config.yaml")]
     Init(InitArgs),
     #[command(
         disable_help_flag = true,
@@ -195,7 +195,7 @@ Exit codes: 0 success or dry-run, 1 user-cancelled or runtime failure, 2 pre-fli
     Cache(CacheCommand),
     #[command(
         disable_help_flag = true,
-        about = "Manage the per-vault `.vault/config.yaml`"
+        about = "Manage the per-vault `.norn/config.yaml`"
     )]
     Config(ConfigCommand),
     #[command(
@@ -1039,7 +1039,7 @@ pub struct ConfigEditArgs {
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    #[arg(long, help = "Overwrite an existing .vault/config.yaml")]
+    #[arg(long, help = "Overwrite an existing .norn/config.yaml")]
     pub force: bool,
 }
 

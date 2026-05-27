@@ -15,7 +15,7 @@ fn norn_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_norn"))
 }
 
-/// Build a small fixture vault on disk: empty `.vault/` so it's recognized
+/// Build a small fixture vault on disk: empty `.norn/` so it's recognized
 /// as a vault root, plus on-disk Markdown files whose top-level frontmatter
 /// matches the Phase 3 algorithm. Pre-populates the cache by running
 /// `vault cache rebuild` so the live-examples generator (which only opens
@@ -26,7 +26,7 @@ fn fixture_vault() -> TempDir {
         .tempdir()
         .unwrap();
     let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-    std::fs::create_dir_all(root.join(".vault").as_std_path()).unwrap();
+    std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
     let docs: &[(&str, &str)] = &[
         (
             "a.md",

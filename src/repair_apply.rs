@@ -405,8 +405,8 @@ mod tests {
             .unwrap()
             .to_path_buf();
         // Write a minimal vault config so build_index doesn't complain.
-        std::fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-        std::fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+        std::fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
         std::fs::write(root.join(doc_rel), body).unwrap();
         let index = crate::graph::build_index(&root).unwrap();
         let hash = index
@@ -519,8 +519,8 @@ mod tests {
         let root = camino::Utf8Path::from_path(tmp.path())
             .unwrap()
             .to_path_buf();
-        std::fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-        std::fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+        std::fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n[[b]]\n").unwrap();
         std::fs::write(root.join("b.md"), "---\ntype: note\n---\n# B\n").unwrap();
         std::fs::write(root.join("c.md"), "---\ntype: note\n---\n# C\n").unwrap();
@@ -584,8 +584,8 @@ mod tests {
         let root = camino::Utf8Path::from_path(tmp.path())
             .unwrap()
             .to_path_buf();
-        std::fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-        std::fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+        std::fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
         let index = crate::graph::build_index(&root).unwrap();
         (tmp, root, index)
     }

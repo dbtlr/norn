@@ -766,9 +766,9 @@ fn validate_reports_required_frontmatter_from_config() {
 #[test]
 fn validate_discovers_default_config_from_cwd() {
     let root = temp_cache_dir();
-    fs::create_dir_all(root.join(".vault")).expect("config dir should be created");
+    fs::create_dir_all(root.join(".norn")).expect("config dir should be created");
     fs::write(
-        root.join(".vault/config.yaml"),
+        root.join(".norn/config.yaml"),
         "validate:\n  required_frontmatter:\n    - title\n",
     )
     .expect("config should write");
@@ -803,9 +803,9 @@ fn validate_missing_default_config_uses_defaults() {
 #[test]
 fn validate_invalid_discovered_config_fails() {
     let root = temp_cache_dir();
-    fs::create_dir_all(root.join(".vault")).expect("config dir should be created");
+    fs::create_dir_all(root.join(".norn")).expect("config dir should be created");
     fs::write(
-        root.join(".vault/config.yaml"),
+        root.join(".norn/config.yaml"),
         "validate:\n  rules:\n    - name: bad\n      match:\n        path:\n          - 1\n          - 2\n",
     )
     .expect("config should write");
@@ -814,7 +814,7 @@ fn validate_invalid_discovered_config_fails() {
     let error = vault_error(&["-C", root.to_str().unwrap(), "validate"]);
 
     assert!(error.contains("invalid config"));
-    assert!(error.contains(".vault/config.yaml"));
+    assert!(error.contains(".norn/config.yaml"));
     assert!(error.contains("validate.rules[0].match.path"));
 
     fs::remove_dir_all(root).ok();
@@ -1733,7 +1733,7 @@ fn manpage_writes_clean_stderr() {
 
 #[test]
 fn completions_runs_without_a_vault_root() {
-    // Run from a temp directory with no .vault/config.yaml and no -C flag.
+    // Run from a temp directory with no .norn/config.yaml and no -C flag.
     // The subcommand must succeed without complaining about vault discovery.
     let scratch = std::env::temp_dir().join(format!(
         "vault-completions-no-vault-{}-{}",
@@ -2680,7 +2680,7 @@ fn vault_success_in_minimal_vault(args: &[&str]) -> (String, String) {
         .prefix("vault-cli-ansi-test")
         .tempdir()
         .expect("tempdir");
-    let vault_dir = tmp.path().join(".vault");
+    let vault_dir = tmp.path().join(".norn");
     fs::create_dir_all(&vault_dir).unwrap();
     fs::write(
         vault_dir.join("config.yaml"),
@@ -2745,7 +2745,7 @@ fn find_with_no_predicate_shows_help_on_stderr_exit_2() {
         .prefix("vault-cli-find-help-test")
         .tempdir()
         .expect("tempdir");
-    let vault_dir = tmp.path().join(".vault");
+    let vault_dir = tmp.path().join(".norn");
     fs::create_dir_all(&vault_dir).unwrap();
     fs::write(
         vault_dir.join("config.yaml"),

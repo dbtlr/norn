@@ -310,10 +310,10 @@ mod tests {
     #[test]
     fn status_headline_writes_text_then_ellipsis_and_newline() {
         let mut out = Vec::new();
-        status_headline(&mut out, &Palette::off(), "validating .vault/config.yaml").unwrap();
+        status_headline(&mut out, &Palette::off(), "validating .norn/config.yaml").unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "validating .vault/config.yaml…\n"
+            "validating .norn/config.yaml…\n"
         );
     }
 

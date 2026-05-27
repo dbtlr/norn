@@ -4,10 +4,10 @@ Generic, copy-pasteable starter files for vault-cli. Everything here uses generi
 
 ## config-minimal.yaml
 
-Minimum viable `.vault/config.yaml` — just `files.ignore` patterns. Use this as a starting point when you want `vault` to walk a vault without enforcing any standards yet.
+Minimum viable `.norn/config.yaml` — just `files.ignore` patterns. Use this as a starting point when you want `vault` to walk a vault without enforcing any standards yet.
 
 ```bash
-cp examples/config-minimal.yaml /path/to/vault/.vault/config.yaml
+cp examples/config-minimal.yaml /path/to/vault/.norn/config.yaml
 vault -C /path/to/vault validate --summary
 ```
 
@@ -20,7 +20,7 @@ A worked config showing the full shape of `validate.rules` and `repair.rules`:
 - A legacy `status: someday` value repairs to `status: backlog`.
 
 ```bash
-cp examples/config-typed-notes.yaml /path/to/vault/.vault/config.yaml
+cp examples/config-typed-notes.yaml /path/to/vault/.norn/config.yaml
 vault -C /path/to/vault validate --summary
 vault -C /path/to/vault repair plan --out repair.json
 ```
@@ -38,6 +38,6 @@ Read the script before running it against a real vault — it's small enough to 
 
 ## See also
 
-- [Configuration guide](../docs/configuration.md) — the `.vault/config.yaml` schema.
+- [Configuration guide](../docs/configuration.md) — the `.norn/config.yaml` schema.
 - [Validate rule shape](../docs/rule-shape.md) — the selector + constraint conceptual model.
 - [Validation and repair](../docs/validation.md) — finding codes, the apply contract, and more recipes.

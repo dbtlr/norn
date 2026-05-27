@@ -1,4 +1,4 @@
-//! `vault init` — scaffold `.vault/config.yaml` for a fresh vault.
+//! `vault init` — scaffold `.norn/config.yaml` for a fresh vault.
 //!
 //! This is the bootstrap command. It runs in folders that may or may not
 //! contain Markdown, and crucially runs WITHOUT a config (it's creating
@@ -77,12 +77,12 @@ pub(crate) fn run_capturing_output(cwd: &Utf8Path, args: &InitArgs) -> Result<St
 }
 
 fn run_to(cwd: &Utf8Path, args: &InitArgs, out: &mut dyn Write) -> Result<i32> {
-    let vault_dir = cwd.join(".vault");
+    let vault_dir = cwd.join(".norn");
     let config_path = vault_dir.join("config.yaml");
 
     if config_path.exists() && !args.force {
         return Err(anyhow!(
-            ".vault/config.yaml already exists at {}\nhint: pass --force to overwrite",
+            ".norn/config.yaml already exists at {}\nhint: pass --force to overwrite",
             config_path
         ));
     }
@@ -265,7 +265,7 @@ mod tests {
         let args = super::InitArgs { force: false };
         super::run_capturing_output(&cwd, &args).unwrap();
 
-        let config = std::fs::read_to_string(cwd.join(".vault/config.yaml")).unwrap();
+        let config = std::fs::read_to_string(cwd.join(".norn/config.yaml")).unwrap();
 
         // Commented section header
         assert!(

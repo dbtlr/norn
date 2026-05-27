@@ -12,13 +12,13 @@ fn norn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_norn")
 }
 
-/// Create a minimal tempdir vault with the given YAML in `.vault/config.yaml`.
+/// Create a minimal tempdir vault with the given YAML in `.norn/config.yaml`.
 fn build_vault(config_yaml: &str) -> tempfile::TempDir {
     let dir = Builder::new()
         .prefix("vault-new-process-")
         .tempdir()
         .unwrap();
-    let vault_config_dir = dir.path().join(".vault");
+    let vault_config_dir = dir.path().join(".norn");
     fs::create_dir_all(&vault_config_dir).unwrap();
     fs::write(vault_config_dir.join("config.yaml"), config_yaml).unwrap();
     dir

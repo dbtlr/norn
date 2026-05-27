@@ -7,7 +7,7 @@
 //! the (deleted in v0.30) `vault links unresolved`.
 //!
 //! The key behavioral difference was **path-filter divergence**:
-//! - `vault validate` respects `validate.ignore` patterns in `.vault/config.yaml`.
+//! - `vault validate` respects `validate.ignore` patterns in `.norn/config.yaml`.
 //! - `vault links unresolved` walked all indexed documents regardless of config.
 //!
 //! ## Behavior contracts locked in by these tests
@@ -38,7 +38,7 @@ fn isolate_cache(command: &mut Command) -> TempDir {
 /// - `active/a.md` — two occurrences of `[[missing]]` in an active (non-ignored) path
 /// - `Archive/old.md` — one occurrence of `[[missing]]` in a path matched by `validate.ignore`
 ///
-/// `.vault/config.yaml` sets `validate.ignore: ["Archive/**"]`.
+/// `.norn/config.yaml` sets `validate.ignore: ["Archive/**"]`.
 fn synth_vault_with_ignore() -> TempDir {
     let tmp = tempfile::Builder::new()
         .prefix("vault-cli-parity-")
@@ -47,7 +47,7 @@ fn synth_vault_with_ignore() -> TempDir {
     let root = tmp.path().join("vault");
     let active = root.join("active");
     let archive = root.join("Archive");
-    let vault_dir = root.join(".vault");
+    let vault_dir = root.join(".norn");
 
     fs::create_dir_all(&active).unwrap();
     fs::create_dir_all(&archive).unwrap();

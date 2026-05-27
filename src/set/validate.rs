@@ -572,8 +572,8 @@ validate:
         let root = camino::Utf8Path::from_path(tmp.path())
             .unwrap()
             .to_path_buf();
-        std::fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-        std::fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+        std::fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
         for p in paths {
             let path = tmp.path().join(p);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

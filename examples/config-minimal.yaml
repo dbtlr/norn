@@ -1,6 +1,6 @@
 # Minimal vault-cli config.
 #
-# Drop this at <vault-root>/.vault/config.yaml to declare what `vault` should
+# Drop this at <vault-root>/.norn/config.yaml to declare what `vault` should
 # ignore. With no rules, validate runs only on link resolution and frontmatter
 # parse health — useful as a starting point before you decide which standards
 # to enforce.

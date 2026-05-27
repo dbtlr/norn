@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn collect_findings_clean_config_is_empty() {
         let yaml = "version: 1\nfiles:\n  ignore: []\n";
-        let (findings, max) = collect_findings(yaml, Utf8Path::new("/v/.vault/config.yaml"));
+        let (findings, max) = collect_findings(yaml, Utf8Path::new("/v/.norn/config.yaml"));
         assert!(findings.is_empty());
         assert_eq!(max, SEVERITY_CLEAN);
     }
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn collect_findings_unknown_version_emits_unknown_schema_version() {
         let yaml = "version: 99\nfiles:\n  ignore: []\n";
-        let (findings, max) = collect_findings(yaml, Utf8Path::new("/v/.vault/config.yaml"));
+        let (findings, max) = collect_findings(yaml, Utf8Path::new("/v/.norn/config.yaml"));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "unknown-schema-version");
         assert_eq!(findings[0].severity, "error");
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn collect_findings_unknown_field_emits_config_parse_error() {
         let yaml = "version: 1\nbogus: true\n";
-        let (findings, max) = collect_findings(yaml, Utf8Path::new("/v/.vault/config.yaml"));
+        let (findings, max) = collect_findings(yaml, Utf8Path::new("/v/.norn/config.yaml"));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "config-parse-error");
         assert_eq!(findings[0].severity, "error");
@@ -261,14 +261,14 @@ mod tests {
         let findings = vec![Finding {
             code: "unknown-schema-version",
             severity: "error",
-            path: "/v/.vault/config.yaml".into(),
+            path: "/v/.norn/config.yaml".into(),
             message: "msg".into(),
         }];
         let mut buf = Vec::new();
         let palette = Palette::off();
         render(
             &findings,
-            ".vault/config.yaml",
+            ".norn/config.yaml",
             ConfigFormat::Json,
             &palette,
             &mut buf,
@@ -277,7 +277,7 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(parsed["findings"][0]["code"], "unknown-schema-version");
         assert_eq!(parsed["findings"][0]["severity"], "error");
-        assert_eq!(parsed["findings"][0]["path"], "/v/.vault/config.yaml");
+        assert_eq!(parsed["findings"][0]["path"], "/v/.norn/config.yaml");
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         let palette = Palette::off();
         render(
             &findings,
-            ".vault/config.yaml",
+            ".norn/config.yaml",
             ConfigFormat::Jsonl,
             &palette,
             &mut buf,
@@ -318,9 +318,9 @@ mod tests {
         let findings: Vec<Finding> = Vec::new();
         let mut buf = Vec::new();
         let palette = Palette::off();
-        render_records(&findings, ".vault/config.yaml", &palette, &mut buf).unwrap();
+        render_records(&findings, ".norn/config.yaml", &palette, &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("validating .vault/config.yaml…"));
+        assert!(text.contains("validating .norn/config.yaml…"));
         assert!(text.contains("✓"));
         // No per-finding block on a clean run.
         assert!(!text.contains("config-parse-error"));
@@ -332,14 +332,14 @@ mod tests {
         let findings = vec![Finding {
             code: "unknown-schema-version",
             severity: "error",
-            path: ".vault/config.yaml".into(),
+            path: ".norn/config.yaml".into(),
             message: "config has version 99 but this build only recognizes 1".into(),
         }];
         let mut buf = Vec::new();
         let palette = Palette::off();
-        render_records(&findings, ".vault/config.yaml", &palette, &mut buf).unwrap();
+        render_records(&findings, ".norn/config.yaml", &palette, &mut buf).unwrap();
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("validating .vault/config.yaml…"));
+        assert!(text.contains("validating .norn/config.yaml…"));
         assert!(text.contains("✗"));
         assert!(text.contains("1 error"));
         assert!(text.contains("unknown-schema-version"));

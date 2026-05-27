@@ -11,8 +11,8 @@ fn synth() -> TempDir {
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
     // Minimal vault config required by build_index.
-    std::fs::create_dir(root.join(".vault")).unwrap();
-    std::fs::write(root.join(".vault/config.yaml"), "validate: {}\n").unwrap();
+    std::fs::create_dir(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
     std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n[[b]]\n").unwrap();
     std::fs::write(root.join("b.md"), "---\ntype: note\n---\n# B\n").unwrap();
     std::fs::write(root.join("c.md"), "---\ntype: note\n---\n# C\n").unwrap();

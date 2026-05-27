@@ -33,7 +33,7 @@ fn init_creates_config_with_default_stubs_and_common_ignores() {
     let status = command.status().unwrap();
     assert_eq!(status.code(), Some(0));
 
-    let body = fs::read_to_string(tmp.path().join(".vault/config.yaml")).unwrap();
+    let body = fs::read_to_string(tmp.path().join(".norn/config.yaml")).unwrap();
     assert!(body.contains("version: 1"), "body={body}");
     assert!(body.contains(".obsidian/"), "body={body}");
     assert!(body.contains(".git/"), "body={body}");
@@ -46,8 +46,8 @@ fn init_creates_config_with_default_stubs_and_common_ignores() {
 #[test]
 fn init_refuses_without_force_when_config_exists() {
     let tmp = vault_tempdir();
-    fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-    fs::write(tmp.path().join(".vault/config.yaml"), "version: 1\n").unwrap();
+    fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+    fs::write(tmp.path().join(".norn/config.yaml"), "version: 1\n").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_norn");
     let mut command = Command::new(bin);
@@ -57,15 +57,15 @@ fn init_refuses_without_force_when_config_exists() {
     assert_eq!(status.code(), Some(1));
 
     // Untouched
-    let body = fs::read_to_string(tmp.path().join(".vault/config.yaml")).unwrap();
+    let body = fs::read_to_string(tmp.path().join(".norn/config.yaml")).unwrap();
     assert_eq!(body, "version: 1\n");
 }
 
 #[test]
 fn init_force_overwrites_existing_config() {
     let tmp = vault_tempdir();
-    fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-    fs::write(tmp.path().join(".vault/config.yaml"), "version: 1\n").unwrap();
+    fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+    fs::write(tmp.path().join(".norn/config.yaml"), "version: 1\n").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_norn");
     let mut command = Command::new(bin);
@@ -74,7 +74,7 @@ fn init_force_overwrites_existing_config() {
     let status = command.status().unwrap();
     assert_eq!(status.code(), Some(0));
 
-    let body = fs::read_to_string(tmp.path().join(".vault/config.yaml")).unwrap();
+    let body = fs::read_to_string(tmp.path().join(".norn/config.yaml")).unwrap();
     assert!(body.contains(".obsidian/"));
 }
 
@@ -95,7 +95,7 @@ fn init_scaffold_records_observed_fields_when_markdown_present() {
     let status = command.status().unwrap();
     assert_eq!(status.code(), Some(0));
 
-    let body = fs::read_to_string(tmp.path().join(".vault/config.yaml")).unwrap();
+    let body = fs::read_to_string(tmp.path().join(".norn/config.yaml")).unwrap();
     assert!(body.contains("Observed in this vault"), "body={body}");
     assert!(body.contains("type"), "body={body}");
     assert!(
@@ -114,6 +114,6 @@ fn init_with_no_markdown_uses_empty_observation_block() {
     let status = command.status().unwrap();
     assert_eq!(status.code(), Some(0));
 
-    let body = fs::read_to_string(tmp.path().join(".vault/config.yaml")).unwrap();
+    let body = fs::read_to_string(tmp.path().join(".norn/config.yaml")).unwrap();
     assert!(body.contains("No markdown files found"), "body={body}");
 }

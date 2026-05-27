@@ -51,7 +51,7 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
     let resolved_config_path = config_path
         .map(|config_path| resolve_path(cwd, config_path))
         .or_else(|| {
-            let discovered = cwd.join(".vault/config.yaml");
+            let discovered = cwd.join(".norn/config.yaml");
             discovered.exists().then_some(discovered)
         });
 
@@ -93,7 +93,7 @@ mod tests {
             .tempdir()
             .unwrap();
         let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let config_dir = root.join(".vault");
+        let config_dir = root.join(".norn");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("config.yaml"),
@@ -112,7 +112,7 @@ mod tests {
             .tempdir()
             .unwrap();
         let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let config_dir = root.join(".vault");
+        let config_dir = root.join(".norn");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(config_dir.join("config.yaml"), "files:\n  ignore: []\n").unwrap();
 

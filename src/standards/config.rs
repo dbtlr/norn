@@ -607,7 +607,7 @@ mod tests {
     use super::*;
 
     fn parse(yaml: &str) -> Result<VaultConfig, ConfigError> {
-        parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml"))
+        parse_config(yaml, Utf8Path::new("/test/.norn/config.yaml"))
     }
 
     #[test]
@@ -699,7 +699,7 @@ repair:
         field: kind
         value: research
 "#;
-        let cfg = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, Utf8Path::new("/test/.norn/config.yaml")).unwrap();
         assert_eq!(cfg.repair.rules.len(), 1);
         let action = cfg.repair.rules[0].action();
         match action {
@@ -722,7 +722,7 @@ repair:
       move_document:
         to_directory: "Workspaces/demo/tasks/"
 "#;
-        let cfg = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, Utf8Path::new("/test/.norn/config.yaml")).unwrap();
         let action = cfg.repair.rules[0].action();
         match action {
             RepairAction::MoveDocument { destination } => match destination {
@@ -746,7 +746,7 @@ repair:
       move_document:
         to_path: "Workspaces/demo/tasks/{stem}.md"
 "#;
-        let cfg = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, Utf8Path::new("/test/.norn/config.yaml")).unwrap();
         let action = cfg.repair.rules[0].action();
         match action {
             RepairAction::MoveDocument { destination } => match destination {
@@ -771,7 +771,7 @@ repair:
         to_directory: "x/"
         to_path: "y/{stem}.md"
 "#;
-        let err = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap_err();
+        let err = parse_config(yaml, Utf8Path::new("/test/.norn/config.yaml")).unwrap_err();
         assert!(format!("{err}").contains("exactly one"), "got: {err}");
     }
 
@@ -790,7 +790,7 @@ repair:
         field: a
         value: 2
 "#;
-        let err = parse_config(yaml, Utf8Path::new("/test/.vault/config.yaml")).unwrap_err();
+        let err = parse_config(yaml, Utf8Path::new("/test/.norn/config.yaml")).unwrap_err();
         assert!(format!("{err}").contains("declares") && format!("{err}").contains("pick one"));
     }
 
@@ -895,7 +895,7 @@ validate:
       match:
         path: "Workspaces/{{unclosed/foo.md"
 "#;
-        let err = parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let err = parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid path pattern"), "got: {msg}");
         assert!(msg.contains("bad"), "got: {msg}");
@@ -916,7 +916,7 @@ validate:
         workspace: "[[{{path.workspace}}]]"
         created: "{{now}}"
 "#;
-        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         let rule = &cfg.validate.rules[0];
         assert_eq!(
             rule.frontmatter_defaults.get("type"),
@@ -938,7 +938,7 @@ validate:
       match:
         path: "**/*.md"
 "#;
-        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         assert!(cfg.validate.rules[0].frontmatter_defaults.is_empty());
     }
 
@@ -953,7 +953,7 @@ validate:
       frontmatter_defaults:
         title: "{{path.bogus}}"
 "#;
-        let err = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let err = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("rule r") || msg.contains("`r`"),
@@ -982,7 +982,7 @@ validate:
       frontmatter_defaults:
         workspace: "[[{{path.workspace}}]]"
 "#;
-        parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
     }
 
     #[test]
@@ -996,7 +996,7 @@ validate:
       frontmatter_defaults:
         title: "{{title | bogus_transform}}"
 "#;
-        let err = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let err = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("unknown transform") || msg.contains("transform"),
@@ -1019,7 +1019,7 @@ validate:
       frontmatter_defaults:
         title: "{{title | strip_date_prefix | titlecase}}"
 "#;
-        parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
     }
 
     #[test]
@@ -1038,7 +1038,7 @@ validate:
       frontmatter_defaults:
         status: in_progress
 "#;
-        let err = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap_err();
+        let err = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("conflict") || msg.contains("conflicting"),
@@ -1063,7 +1063,7 @@ validate:
       frontmatter_defaults:
         type: note
 "#;
-        parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
     }
 
     #[test]
@@ -1073,7 +1073,7 @@ templates:
   date_format: "YYYY/MM/DD"
   time_format: "HH:mm:ss"
 "#;
-        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         assert_eq!(cfg.templates.date_format, "YYYY/MM/DD");
         assert_eq!(cfg.templates.time_format, "HH:mm:ss");
     }
@@ -1081,7 +1081,7 @@ templates:
     #[test]
     fn templates_config_block_defaults_when_absent() {
         let yaml = "files:\n  ignore: []\n";
-        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         assert_eq!(cfg.templates.date_format, "YYYY-MM-DD");
         assert_eq!(cfg.templates.time_format, "HH:mm");
     }
@@ -1093,7 +1093,7 @@ templates:
 templates:
   date_format: "DD/MM/YYYY"
 "#;
-        let cfg = parse_config(yaml, camino::Utf8Path::new(".vault/config.yaml")).unwrap();
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         assert_eq!(cfg.templates.date_format, "DD/MM/YYYY");
         assert_eq!(cfg.templates.time_format, "HH:mm");
     }

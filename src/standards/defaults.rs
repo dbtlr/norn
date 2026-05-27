@@ -250,7 +250,7 @@ mod api_tests {
     use camino::Utf8Path;
 
     fn build(yaml: &str) -> (VaultConfig, crate::standards::config::CompiledConfig) {
-        parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap()
+        parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).unwrap()
     }
 
     #[test]
@@ -372,7 +372,7 @@ mod tests {
 
     fn compile(yaml: &str) -> crate::standards::config::CompiledConfig {
         let (_, compiled) =
-            parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap();
+            parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).unwrap();
         compiled
     }
 
@@ -492,7 +492,7 @@ mod fixpoint_tests {
     use camino::Utf8Path;
 
     fn build(yaml: &str) -> (VaultConfig, crate::standards::config::CompiledConfig) {
-        parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap()
+        parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).unwrap()
     }
 
     #[test]

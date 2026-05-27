@@ -8,14 +8,14 @@ fn norn_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_norn"))
 }
 
-/// Build a minimal vault on disk with a `.vault/config.yaml` and one note.
+/// Build a minimal vault on disk with a `.norn/config.yaml` and one note.
 fn setup_vault(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::Builder::new()
         .prefix("vault-cli-replace-body-")
         .tempdir()
         .unwrap();
-    fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-    fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+    fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+    fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
     let note_path = tmp.path().join("note.md");
     fs::write(&note_path, content).unwrap();
     (tmp, note_path)

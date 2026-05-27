@@ -210,7 +210,7 @@ mod tests {
 
     fn sample_snapshot() -> ShowSnapshot {
         ShowSnapshot {
-            file: Utf8PathBuf::from("/v/.vault/config.yaml"),
+            file: Utf8PathBuf::from("/v/.norn/config.yaml"),
             vault_root: Utf8PathBuf::from("/v"),
             cache: Utf8PathBuf::from("/c/cache.db"),
             version: 1,
@@ -232,7 +232,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         // lines[0] = leading blank; lines[1] = header (config file path).
         assert_eq!(lines[0], "");
-        assert_eq!(lines[1], "/v/.vault/config.yaml");
+        assert_eq!(lines[1], "/v/.norn/config.yaml");
         // Subsequent lines are 2-indent fields.
         assert!(
             lines[2].starts_with("  "),
@@ -257,7 +257,7 @@ mod tests {
         let mut buf = Vec::new();
         render_json(&snapshot, &mut buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(parsed["file"], "/v/.vault/config.yaml");
+        assert_eq!(parsed["file"], "/v/.norn/config.yaml");
         assert_eq!(parsed["vault_root"], "/v");
         assert_eq!(parsed["cache"], "/c/cache.db");
         assert_eq!(parsed["version"], 1);
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "jsonl should emit exactly one line");
         let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         // Shape matches `render_json` output exactly.
-        assert_eq!(parsed["file"], "/v/.vault/config.yaml");
+        assert_eq!(parsed["file"], "/v/.norn/config.yaml");
         assert_eq!(parsed["vault_root"], "/v");
         assert_eq!(parsed["cache"], "/c/cache.db");
         assert_eq!(parsed["version"], 1);

@@ -357,7 +357,7 @@ mod tests {
     use camino::Utf8Path;
 
     fn build(yaml: &str) -> (VaultConfig, crate::standards::CompiledConfig) {
-        parse_config_compiled(yaml, Utf8Path::new(".vault/config.yaml")).unwrap()
+        parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).unwrap()
     }
 
     fn args(path: &str, fields: Vec<&str>) -> crate::cli::NewArgs {

@@ -351,8 +351,8 @@ mod tests {
             .to_path_buf();
 
         // Minimal vault config required by build_index.
-        std::fs::create_dir_all(tmp.path().join(".vault")).unwrap();
-        std::fs::write(tmp.path().join(".vault/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+        std::fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
 
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n[[b]]\n").unwrap();
         std::fs::write(root.join("b.md"), "---\ntype: note\n---\n# B\n").unwrap();
