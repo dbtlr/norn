@@ -74,7 +74,7 @@ Not stored: validation findings — they depend on `.vault/config.yaml`, which c
 - Warm read for `vault validate`: under 100 ms on a vault with no filesystem changes.
 - `vault cache status`: under 50 ms.
 
-If you're seeing significantly slower numbers, run `vault cache rebuild` to start from a clean slate. The performance regression test in `crates/vault-cache/tests/perf.rs` locks in the 1000-doc target — opt in with `cargo test -p vault-cache --ignored`.
+If you're seeing significantly slower numbers, run `vault cache rebuild` to start from a clean slate.
 
 ## Schema evolution
 
@@ -88,7 +88,7 @@ Future evolution (planned, not in this release):
 
 ## Concurrency
 
-Writes are serialized by an advisory file lock (`fs2`). Two simultaneous `vault cache index` runs will queue rather than race; readers never block, because reads go through SQLite's WAL mode and the in-memory `GraphIndex` is rebuilt on each command. The integration test at `crates/vault-cache/tests/concurrency.rs` exercises the lock path.
+Writes are serialized by an advisory file lock (`fs2`). Two simultaneous `vault cache index` runs will queue rather than race; readers never block, because reads go through SQLite's WAL mode and the in-memory `GraphIndex` is rebuilt on each command.
 
 ## See also
 
