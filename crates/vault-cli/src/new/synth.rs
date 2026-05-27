@@ -92,7 +92,7 @@ pub fn build_plan(
     args: &crate::cli::NewArgs,
     cfg: &crate::standards::VaultConfig,
     compiled: &crate::standards::CompiledConfig,
-    index: Option<&vault_core::GraphIndex>,
+    index: Option<&crate::core::GraphIndex>,
     body: String,
 ) -> Result<CreateDocumentPlan, SynthError> {
     // ── Step 1: path variable extraction ─────────────────────────────────────

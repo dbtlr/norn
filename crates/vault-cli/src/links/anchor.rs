@@ -1,5 +1,5 @@
+use crate::core::SourceSpan;
 use pulldown_cmark::HeadingLevel;
-use vault_core::SourceSpan;
 
 pub fn split_anchor(raw: &str) -> (String, Option<String>) {
     match raw.split_once('#') {

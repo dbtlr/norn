@@ -85,7 +85,7 @@ mod tests {
         use tempfile::TempDir;
 
         use crate::cache::{Cache, DocumentQuery};
-        use vault_core::DocumentSummary;
+        use crate::core::DocumentSummary;
 
         fn synth_vault() -> (TempDir, Utf8PathBuf) {
             let tmp = TempDir::new().unwrap();

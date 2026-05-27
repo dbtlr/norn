@@ -3,12 +3,12 @@
 // These functions are pub for Phase 5 wiring; the binary doesn't call them yet.
 #![allow(dead_code)]
 
+use crate::core::Document;
 use crate::standards::PlannedChange;
 use crate::standards::VaultConfig;
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
-use vault_core::Document;
 
 // ── Warning types ────────────────────────────────────────────────────────────
 
@@ -256,7 +256,7 @@ pub fn synth_with_schema(
 /// Linear scan over GraphIndex.documents. Atlas-scale (~800 docs) is well
 /// under perf budget.
 pub fn check_wikilink_resolution(
-    index: &vault_core::GraphIndex,
+    index: &crate::core::GraphIndex,
     field: &str,
     wikilink_value: &str,
 ) -> Vec<SetWarning> {
@@ -273,7 +273,7 @@ pub fn check_wikilink_resolution(
         .unwrap_or(target)
         .to_lowercase();
 
-    let matches: Vec<&vault_core::Document> = index
+    let matches: Vec<&crate::core::Document> = index
         .documents
         .iter()
         .filter(|d| d.stem.to_lowercase() == canonical)
@@ -564,7 +564,7 @@ validate:
 
     // ── Task 4.4: check_wikilink_resolution ──────────────────────────────────
 
-    fn fixture_index_with_docs(paths: &[&str]) -> (tempfile::TempDir, vault_core::GraphIndex) {
+    fn fixture_index_with_docs(paths: &[&str]) -> (tempfile::TempDir, crate::core::GraphIndex) {
         let tmp = tempfile::Builder::new()
             .prefix("vault-cli-set-wikilink-")
             .tempdir()

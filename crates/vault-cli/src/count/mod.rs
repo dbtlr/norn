@@ -5,10 +5,10 @@
 pub mod render;
 
 use crate::cache::Cache;
+use crate::core::DocumentSummary;
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use vault_core::DocumentSummary;
 
 use crate::cli::CountArgs;
 use crate::filter_args::build_document_query;

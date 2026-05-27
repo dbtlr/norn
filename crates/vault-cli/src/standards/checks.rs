@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
+use crate::core::{Document, LinkStatus};
 use crate::standards::findings::Finding;
 use crate::standards::path_match::PathPattern;
 use camino::Utf8PathBuf;
 use serde_json::Value;
-use vault_core::{Document, LinkStatus};
 
 pub(crate) fn check_graph_diagnostics(document: &Document) -> Vec<Finding> {
     document

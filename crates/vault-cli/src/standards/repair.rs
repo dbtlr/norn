@@ -5,10 +5,10 @@ pub mod warnings;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::core::Severity;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vault_core::Severity;
 
 use crate::standards::config::{RepairAction, RepairConfig, RepairRule, RepairRuleMatch};
 use crate::standards::findings::{Finding, FindingBody};
@@ -75,7 +75,7 @@ impl SkipReason {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SkippedFinding {
+pub(crate) struct SkippedFinding {
     pub path: Utf8PathBuf,
     pub code: String,
     pub severity: Severity,
@@ -106,7 +106,7 @@ pub struct SkippedSummary {
 }
 
 impl SkippedSummary {
-    pub fn from_skipped(findings: &[SkippedFinding]) -> Self {
+    pub(crate) fn from_skipped(findings: &[SkippedFinding]) -> Self {
         let mut by_reason: BTreeMap<String, usize> = BTreeMap::new();
         for f in findings {
             *by_reason
@@ -127,7 +127,7 @@ pub struct RepairPlan {
     pub source_filters: RepairPlanFilters,
     pub summary: RepairPlanSummary,
     pub changes: Vec<PlannedChange>,
-    pub skipped_findings: Vec<SkippedFinding>,
+    pub(crate) skipped_findings: Vec<SkippedFinding>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub footnotes: Vec<PlanFootnote>,
 }
@@ -194,7 +194,7 @@ pub struct PlannedChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination: Option<Utf8PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub link_risk: Option<crate::standards::repair::link_risk::LinkRisk>,
+    pub(crate) link_risk: Option<crate::standards::repair::link_risk::LinkRisk>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<crate::standards::repair::warnings::PlanWarning>,
     /// When true, `apply_move` will remove an existing destination before
@@ -240,7 +240,7 @@ enum ClosestMatchOutcome {
 fn handle_closest_match(
     finding: &Finding,
     stem_corpus: &[&str],
-    documents: &[vault_core::Document],
+    documents: &[crate::core::Document],
     document_hashes: &BTreeMap<Utf8PathBuf, String>,
     occurrence_counts: &mut BTreeMap<(Utf8PathBuf, String, String), u32>,
     medium_threshold: f64,
@@ -359,7 +359,7 @@ pub fn plan_repairs(
     filters: RepairPlanFilters,
     findings: Vec<Finding>,
     config: &RepairConfig,
-    index: &vault_core::GraphIndex,
+    index: &crate::core::GraphIndex,
 ) -> RepairPlan {
     let document_hashes: BTreeMap<Utf8PathBuf, String> = index
         .documents
@@ -496,7 +496,7 @@ fn planned_change(
     rule: &RepairRule,
     action: &RepairAction,
     document_hashes: &BTreeMap<Utf8PathBuf, String>,
-    documents: &[vault_core::Document],
+    documents: &[crate::core::Document],
     occurrence_index: u32,
 ) -> Result<PlannedChange, (SkipReason, Option<String>)> {
     let repair_rule = rule
@@ -620,7 +620,7 @@ fn planned_change(
 /// Used at emit sites that previously emitted the coarse `Unsupported` or `Ambiguous` variants.
 fn skip_reason_for_body(body: &FindingBody) -> SkipReason {
     match body {
-        FindingBody::LinkIssue { link } if link.status == vault_core::LinkStatus::Ambiguous => {
+        FindingBody::LinkIssue { link } if link.status == crate::core::LinkStatus::Ambiguous => {
             SkipReason::AmbiguousTarget
         }
         FindingBody::LinkIssue { .. } => SkipReason::LinkDecisionNeeded,
@@ -642,7 +642,7 @@ fn skipped_finding(
     reason_override: Option<String>,
 ) -> SkippedFinding {
     let (reason, next_actions) = match &finding.body {
-        FindingBody::LinkIssue { link } if link.status == vault_core::LinkStatus::Ambiguous => (
+        FindingBody::LinkIssue { link } if link.status == crate::core::LinkStatus::Ambiguous => (
             "ambiguous link target".to_string(),
             vec![
                 "change the link to an explicit path".to_string(),
@@ -810,10 +810,10 @@ fn finding_candidates(finding: &Finding) -> Vec<Utf8PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
     use crate::standards::config::{RepairAction, RepairRule, RepairRuleMatch};
     use crate::standards::findings::{Finding, FindingBody};
     use serde_json::json;
-    use vault_core::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
 
     fn vault_root() -> Utf8PathBuf {
         "/vault".into()
@@ -934,8 +934,8 @@ mod tests {
         }
     }
 
-    fn doc(path: &str, hash: &str) -> vault_core::Document {
-        vault_core::Document {
+    fn doc(path: &str, hash: &str) -> crate::core::Document {
+        crate::core::Document {
             path: path.into(),
             stem: camino::Utf8Path::new(path).file_stem().unwrap().to_string(),
             hash: hash.to_string(),
@@ -950,9 +950,9 @@ mod tests {
         }
     }
 
-    fn index_for(paths: &[&str]) -> vault_core::GraphIndex {
+    fn index_for(paths: &[&str]) -> crate::core::GraphIndex {
         let documents = paths.iter().map(|p| doc(p, &format!("hash-{p}"))).collect();
-        vault_core::GraphIndex {
+        crate::core::GraphIndex {
             root: vault_root(),
             files: vec![],
             ignored_files: vec![],
@@ -964,7 +964,7 @@ mod tests {
     /// Unlike `index_for`, the stem is specified explicitly rather than derived
     /// from the filename — needed when we want docs in subdirectories where the
     /// file stem differs from the vault-level stem we're testing against.
-    fn test_index_with_stems(pairs: &[(&str, &str)]) -> vault_core::GraphIndex {
+    fn test_index_with_stems(pairs: &[(&str, &str)]) -> crate::core::GraphIndex {
         let documents = pairs
             .iter()
             .map(|(path, stem)| {
@@ -973,7 +973,7 @@ mod tests {
                 d
             })
             .collect();
-        vault_core::GraphIndex {
+        crate::core::GraphIndex {
             root: vault_root(),
             files: vec![],
             ignored_files: vec![],
@@ -1742,7 +1742,7 @@ mod tests {
         let f = SkippedFinding {
             path: "foo.md".into(),
             code: "frontmatter-required-field-missing".into(),
-            severity: vault_core::Severity::Warning,
+            severity: crate::core::Severity::Warning,
             message: "missing field".into(),
             skip_reason: SkipReason::MissingDefault,
             reason_code: SkipReason::MissingDefault.code().to_string(),

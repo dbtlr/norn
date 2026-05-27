@@ -1,8 +1,8 @@
 use std::ops::Range;
 
+use crate::core::{Heading, Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus};
 use camino::Utf8Path;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-use vault_core::{Heading, Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus};
 
 use super::anchor::{
     decode_percent_escapes, heading_level, is_local_file_target, is_local_markdown_target, slugify,

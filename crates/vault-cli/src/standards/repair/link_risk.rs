@@ -12,12 +12,12 @@
 //! For each affected link, the rewritten replacement text is precomputed so
 //! apply can perform a literal string-replace at write time.
 
+use crate::core::{Document, Link, LinkKind, VaultFile};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
-use vault_core::{Document, Link, LinkKind, VaultFile};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct LinkRisk {
+pub(crate) struct LinkRisk {
     pub stem_changed: bool,
     pub directory_changed: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -29,7 +29,9 @@ pub struct LinkRisk {
 }
 
 impl LinkRisk {
-    pub fn has_affected(&self) -> bool {
+    // Superseded by direct field inspection at call sites; safe to delete in a cleanup pass.
+    #[allow(dead_code)]
+    pub(crate) fn has_affected(&self) -> bool {
         !self.stem_links.is_empty()
             || !self.path_qualified_wikilinks.is_empty()
             || !self.markdown_links.is_empty()
@@ -37,12 +39,12 @@ impl LinkRisk {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AffectedLink {
+pub(crate) struct AffectedLink {
     pub source_path: Utf8PathBuf,
     pub raw: String,
     pub kind: LinkKind,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_span: Option<vault_core::SourceSpan>,
+    pub source_span: Option<crate::core::SourceSpan>,
     pub rewritten: String,
 }
 
@@ -202,7 +204,7 @@ fn compute_relative_path(from: &Utf8Path, to: &Utf8Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vault_core::{Document, Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus};
+    use crate::core::{Document, Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus};
 
     fn make_doc(path: &str) -> Document {
         Document {

@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
+use crate::core::display;
 use crate::standards::path_match::PathPattern;
 use crate::standards::{Finding, FindingBody};
 use anyhow::{bail, Result};
-use vault_core::display;
 
 use crate::cli::{RepairPlanArgs, ValidateArgs};
 
@@ -180,8 +180,8 @@ fn paths_match(finding: &Finding, patterns: &[String]) -> bool {
 
 fn severity_key(finding: &Finding) -> &'static str {
     match finding.severity {
-        vault_core::Severity::Warning => "warning",
-        vault_core::Severity::Error => "error",
+        crate::core::Severity::Warning => "warning",
+        crate::core::Severity::Error => "error",
     }
 }
 
@@ -234,8 +234,8 @@ fn finding_reason(finding: &Finding) -> Option<&'static str> {
 #[cfg(test)]
 mod glob_match_tests {
     use super::*;
+    use crate::core::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
     use crate::standards::{Finding, FindingBody};
-    use vault_core::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
 
     fn link_finding(code: &str) -> Finding {
         Finding {

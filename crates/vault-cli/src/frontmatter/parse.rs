@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use vault_core::Diagnostic;
+use crate::core::Diagnostic;
 
 pub fn extract_frontmatter<'a>(
     content: &'a str,

@@ -40,7 +40,6 @@ tar.workspace = true
 terminal_size = { workspace = true }
 thiserror.workspace = true
 ureq.workspace = true
-vault-core = { path = "../vault-core" }
 walkdir.workspace = true
 xz2.workspace = true
 

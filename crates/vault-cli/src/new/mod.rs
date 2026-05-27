@@ -159,7 +159,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
 fn apply_and_render(
     args: &NewArgs,
     vault_root: &Utf8Path,
-    index: &vault_core::GraphIndex,
+    index: &crate::core::GraphIndex,
     plan: &crate::new::synth::CreateDocumentPlan,
     body_bytes: usize,
     render_preview: impl Fn(bool) -> Result<String>,

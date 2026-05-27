@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::Path;
 
+use crate::core::{Diagnostic, Document, GraphIndex, Severity, VaultFile};
 use crate::frontmatter::extract_frontmatter;
 use crate::links::{
     parse_block_ids, parse_commonmark, parse_frontmatter_wikilinks, parse_wikilinks, resolve_links,
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use vault_core::{Diagnostic, Document, GraphIndex, Severity, VaultFile};
 use walkdir::WalkDir;
 
 use super::pattern::pattern_matches_path;
@@ -204,7 +204,7 @@ pub fn has_errors(index: &GraphIndex) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vault_core::LinkStatus;
+    use crate::core::LinkStatus;
 
     #[test]
     fn indexes_documents_and_resolves_links() {

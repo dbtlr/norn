@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
+use crate::core::Severity;
 use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
-use vault_core::Severity;
 
 use crate::standards::findings::{Finding, FindingBody};
 

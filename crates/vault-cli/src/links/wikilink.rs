@@ -1,11 +1,11 @@
 use std::ops::Range;
 use std::sync::LazyLock;
 
+use crate::core::{Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus};
 use crate::frontmatter::frontmatter_property_strings;
 use camino::Utf8Path;
 use regex::Regex;
 use serde_json::Value;
-use vault_core::{Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus};
 
 use super::anchor::{source_span, split_anchor_or_block_ref};
 use super::commonmark::ignored_wikilink_ranges;

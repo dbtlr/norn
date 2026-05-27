@@ -1,4 +1,4 @@
-use vault_core::{Document, DocumentSummary, GraphIndex};
+use crate::core::{Document, DocumentSummary, GraphIndex};
 
 use crate::standards::config::{CompiledConfig, CompiledRule, ValidateConfig, ValidateRule};
 use crate::standards::findings::Finding;
@@ -312,9 +312,9 @@ fn rule_matches_compiled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{Document, GraphIndex};
     use crate::standards::config::{RuleExclude, RuleSelector, ValidateConfig, ValidateRule};
     use serde_json::json;
-    use vault_core::{Document, GraphIndex};
 
     fn empty_rule(name: &str) -> ValidateRule {
         ValidateRule {
@@ -398,8 +398,8 @@ mod tests {
 
     #[test]
     fn validate_emits_alias_malformed_finding() {
+        use crate::core::{Document, GraphIndex};
         use serde_json::json;
-        use vault_core::{Document, GraphIndex};
 
         let doc = Document {
             path: "a.md".into(),
@@ -431,8 +431,8 @@ mod tests {
 
     #[test]
     fn validate_does_not_emit_alias_findings_when_field_unconfigured() {
+        use crate::core::{Document, GraphIndex};
         use serde_json::json;
-        use vault_core::{Document, GraphIndex};
 
         let doc = Document {
             path: "a.md".into(),
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn validate_emits_alias_shadowed_by_stem_finding() {
-        use vault_core::{Document, GraphIndex};
+        use crate::core::{Document, GraphIndex};
 
         // doc-a.md has stem "foo"
         // doc-b.md has aliases: ["foo"] — shadowed by doc-a's stem.
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn validate_emits_self_stem_shadow_finding() {
-        use vault_core::{Document, GraphIndex};
+        use crate::core::{Document, GraphIndex};
 
         let doc = Document {
             path: "self.md".into(),
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn validate_does_not_emit_shadow_when_alias_field_none() {
-        use vault_core::{Document, GraphIndex};
+        use crate::core::{Document, GraphIndex};
 
         let doc_a = Document {
             path: "doc-a.md".into(),
@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn validate_emits_alias_duplicate_finding_for_each_participant() {
-        use vault_core::{Document, GraphIndex};
+        use crate::core::{Document, GraphIndex};
 
         let doc_a = Document {
             path: "a.md".into(),
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn validate_does_not_emit_duplicate_when_only_one_doc_claims_alias() {
-        use vault_core::{Document, GraphIndex};
+        use crate::core::{Document, GraphIndex};
 
         let doc = Document {
             path: "a.md".into(),
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn validate_does_not_emit_duplicate_when_single_doc_has_repeated_alias() {
-        use vault_core::{Document, GraphIndex};
+        use crate::core::{Document, GraphIndex};
 
         // A doc with the same alias listed twice — weird but legal frontmatter.
         // The duplicate-across-docs check must NOT fire (only one real doc claims it).
@@ -733,10 +733,10 @@ mod tests {
 #[cfg(test)]
 mod validate_rule_tests {
     use super::*;
+    use crate::core::DocumentSummary;
     use crate::standards::config::{RuleExclude, RuleSelector, ValidateRule};
     use serde_json::json;
     use std::collections::HashMap;
-    use vault_core::DocumentSummary;
 
     #[test]
     fn validate_rule_applies_required_frontmatter_only_to_scope() {

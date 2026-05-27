@@ -1,6 +1,6 @@
+use crate::core::{GraphIndex, Link};
 use anyhow::{bail, Result};
 use camino::Utf8PathBuf;
-use vault_core::{GraphIndex, Link};
 
 pub fn backlinks<'a>(index: &'a GraphIndex, target_path: &Utf8PathBuf) -> Vec<&'a Link> {
     index

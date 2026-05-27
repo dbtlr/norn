@@ -1,9 +1,9 @@
 //! Link row decoder — shared helper for `query_show` and future link queries.
 
-use camino::Utf8PathBuf;
-use vault_core::{
+use crate::core::{
     Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus, SourceSpan, UnresolvedReason,
 };
+use camino::Utf8PathBuf;
 
 pub(crate) fn decode_link_row(row: &rusqlite::Row) -> rusqlite::Result<Link> {
     let source_path: String = row.get(0)?;

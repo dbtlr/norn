@@ -179,7 +179,10 @@ fn render_records(
     Ok(())
 }
 
-fn build_record_pairs(doc: &vault_core::DocumentSummary, cols: &[String]) -> Vec<(String, String)> {
+fn build_record_pairs(
+    doc: &crate::core::DocumentSummary,
+    cols: &[String],
+) -> Vec<(String, String)> {
     let fm_object = doc.frontmatter.as_ref().and_then(|fm| fm.as_object());
     let field_iter: Vec<String> = if cols.is_empty() {
         fm_object
@@ -248,8 +251,8 @@ pub fn warn_col_ignored_on_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::DocumentSummary;
     use camino::Utf8PathBuf;
-    use vault_core::DocumentSummary;
 
     fn sample_result() -> FindResult {
         FindResult {

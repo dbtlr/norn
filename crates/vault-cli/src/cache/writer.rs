@@ -1,8 +1,8 @@
 //! Cache writer: full rebuild and (later) incremental update.
 
+use crate::core::{Document, GraphIndex, Link, VaultFile};
 use camino::Utf8Path;
 use rusqlite::{params, Transaction};
-use vault_core::{Document, GraphIndex, Link, VaultFile};
 
 use crate::cache::change_detection::{detect, ChangeDetectOptions, FileChange};
 use crate::cache::error::CacheError;
@@ -284,11 +284,11 @@ fn insert_document(
 fn insert_diagnostic(
     tx: &rusqlite::Transaction,
     doc_path: &str,
-    diagnostic: &vault_core::Diagnostic,
+    diagnostic: &crate::core::Diagnostic,
 ) -> Result<(), CacheError> {
     let severity = match diagnostic.severity {
-        vault_core::Severity::Warning => "warning",
-        vault_core::Severity::Error => "error",
+        crate::core::Severity::Warning => "warning",
+        crate::core::Severity::Error => "error",
     };
     tx.execute(
         "INSERT INTO diagnostics (doc_path, severity, code, message, detail)
@@ -304,35 +304,35 @@ fn insert_diagnostic(
     Ok(())
 }
 
-fn link_kind_str(kind: &vault_core::LinkKind) -> &'static str {
+fn link_kind_str(kind: &crate::core::LinkKind) -> &'static str {
     match kind {
-        vault_core::LinkKind::Wikilink => "wikilink",
-        vault_core::LinkKind::Markdown => "markdown",
-        vault_core::LinkKind::Embed => "embed",
+        crate::core::LinkKind::Wikilink => "wikilink",
+        crate::core::LinkKind::Markdown => "markdown",
+        crate::core::LinkKind::Embed => "embed",
     }
 }
 
-fn link_status_str(status: &vault_core::LinkStatus) -> &'static str {
+fn link_status_str(status: &crate::core::LinkStatus) -> &'static str {
     match status {
-        vault_core::LinkStatus::Resolved => "resolved",
-        vault_core::LinkStatus::Unresolved => "unresolved",
-        vault_core::LinkStatus::Ambiguous => "ambiguous",
+        crate::core::LinkStatus::Resolved => "resolved",
+        crate::core::LinkStatus::Unresolved => "unresolved",
+        crate::core::LinkStatus::Ambiguous => "ambiguous",
     }
 }
 
-fn link_source_area_str(area: &vault_core::LinkSourceArea) -> &'static str {
+fn link_source_area_str(area: &crate::core::LinkSourceArea) -> &'static str {
     match area {
-        vault_core::LinkSourceArea::Body => "body",
-        vault_core::LinkSourceArea::Frontmatter => "frontmatter",
+        crate::core::LinkSourceArea::Body => "body",
+        crate::core::LinkSourceArea::Frontmatter => "frontmatter",
     }
 }
 
-fn unresolved_reason_str(reason: &vault_core::UnresolvedReason) -> &'static str {
+fn unresolved_reason_str(reason: &crate::core::UnresolvedReason) -> &'static str {
     match reason {
-        vault_core::UnresolvedReason::TargetMissing => "target-missing",
-        vault_core::UnresolvedReason::AnchorMissing => "anchor-missing",
-        vault_core::UnresolvedReason::BlockRefMissing => "block-ref-missing",
-        vault_core::UnresolvedReason::Ambiguous => "ambiguous",
+        crate::core::UnresolvedReason::TargetMissing => "target-missing",
+        crate::core::UnresolvedReason::AnchorMissing => "anchor-missing",
+        crate::core::UnresolvedReason::BlockRefMissing => "block-ref-missing",
+        crate::core::UnresolvedReason::Ambiguous => "ambiguous",
     }
 }
 

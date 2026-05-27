@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/vault-core",
     "crates/vault-cli",
 ]
 resolver = "2"

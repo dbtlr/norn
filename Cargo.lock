@@ -1668,18 +1668,8 @@ dependencies = [
  "terminal_size",
  "thiserror",
  "ureq",
- "vault-core",
  "walkdir",
  "xz2",
-]
-
-[[package]]
-name = "vault-core"
-version = "0.33.0"
-dependencies = [
- "camino",
- "serde",
- "serde_json",
 ]
 
 [[package]]

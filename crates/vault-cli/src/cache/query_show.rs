@@ -4,10 +4,10 @@
 //! (resolved), unresolved links, and incoming links (other documents that
 //! link *to* this one).  Used by `vault show`.
 
+use crate::core::{Heading, Link, LinkStatus};
 use camino::{Utf8Path, Utf8PathBuf};
 use rusqlite::OptionalExtension;
 use serde::Serialize;
-use vault_core::{Heading, Link, LinkStatus};
 
 use crate::cache::error::CacheError;
 

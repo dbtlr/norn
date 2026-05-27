@@ -1,7 +1,10 @@
-use crate::{LinkKind, LinkStatus, Severity, UnresolvedReason};
+use super::UnresolvedReason;
+#[cfg(test)]
+use super::{LinkKind, LinkStatus, Severity};
 
 /// String form of a [`LinkKind`] matching the `#[serde(rename_all = "kebab-case")]` representation.
-pub fn link_kind_str(kind: &LinkKind) -> &'static str {
+#[cfg(test)]
+fn link_kind_str(kind: &LinkKind) -> &'static str {
     match kind {
         LinkKind::Markdown => "markdown",
         LinkKind::Wikilink => "wikilink",
@@ -10,7 +13,8 @@ pub fn link_kind_str(kind: &LinkKind) -> &'static str {
 }
 
 /// String form of a [`LinkStatus`] matching the `#[serde(rename_all = "kebab-case")]` representation.
-pub fn link_status_str(status: &LinkStatus) -> &'static str {
+#[cfg(test)]
+fn link_status_str(status: &LinkStatus) -> &'static str {
     match status {
         LinkStatus::Resolved => "resolved",
         LinkStatus::Unresolved => "unresolved",
@@ -19,7 +23,8 @@ pub fn link_status_str(status: &LinkStatus) -> &'static str {
 }
 
 /// String form of a [`Severity`] matching the `#[serde(rename_all = "kebab-case")]` representation.
-pub fn severity_str(severity: &Severity) -> &'static str {
+#[cfg(test)]
+fn severity_str(severity: &Severity) -> &'static str {
     match severity {
         Severity::Warning => "warning",
         Severity::Error => "error",
@@ -27,7 +32,7 @@ pub fn severity_str(severity: &Severity) -> &'static str {
 }
 
 /// String form of an [`UnresolvedReason`] matching the `#[serde(rename_all = "kebab-case")]` representation.
-pub fn unresolved_reason_str(reason: &UnresolvedReason) -> &'static str {
+pub(crate) fn unresolved_reason_str(reason: &UnresolvedReason) -> &'static str {
     match reason {
         UnresolvedReason::TargetMissing => "target-missing",
         UnresolvedReason::AnchorMissing => "anchor-missing",
@@ -39,7 +44,7 @@ pub fn unresolved_reason_str(reason: &UnresolvedReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LinkKind, LinkStatus, Severity, UnresolvedReason};
+    use super::{LinkKind, LinkStatus, Severity, UnresolvedReason};
 
     #[test]
     fn link_kind_str_matches_serde_rename_all() {

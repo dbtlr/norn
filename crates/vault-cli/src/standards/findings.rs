@@ -1,7 +1,7 @@
+use crate::core::{Diagnostic, Link, Severity};
 use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
-use vault_core::{Diagnostic, Link, Severity};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
@@ -81,8 +81,8 @@ impl Finding {
     ///
     /// Falls back to `link-target-missing` for Unresolved with no reason set;
     /// emitter is expected to populate reason but we don't panic if absent.
-    pub fn from_link(path: Utf8PathBuf, link: vault_core::Link) -> Self {
-        use vault_core::{LinkStatus, UnresolvedReason};
+    pub fn from_link(path: Utf8PathBuf, link: crate::core::Link) -> Self {
+        use crate::core::{LinkStatus, UnresolvedReason};
 
         let (code, message) = match (&link.status, &link.unresolved_reason) {
             (LinkStatus::Ambiguous, _) => (
@@ -289,7 +289,7 @@ impl Finding {
 #[cfg(test)]
 mod link_finding_tests {
     use super::*;
-    use vault_core::{Link, LinkKind, LinkStatus, UnresolvedReason};
+    use crate::core::{Link, LinkKind, LinkStatus, UnresolvedReason};
 
     fn link_with(status: LinkStatus, reason: Option<UnresolvedReason>) -> Link {
         Link {

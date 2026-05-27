@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::Component;
 
+use crate::core::{Document, Link, LinkKind, LinkStatus, UnresolvedReason, VaultFile};
 use camino::{Utf8Path, Utf8PathBuf};
-use vault_core::{Document, Link, LinkKind, LinkStatus, UnresolvedReason, VaultFile};
 
 use super::anchor::slugify;
 
@@ -250,7 +250,7 @@ fn normalize_relative(base: &Utf8Path, target: &str) -> Utf8PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vault_core::{Document, Link, LinkKind, LinkStatus, VaultFile};
+    use crate::core::{Document, Link, LinkKind, LinkStatus, VaultFile};
 
     fn make_file(path: &str) -> VaultFile {
         VaultFile {
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(link.status, LinkStatus::Unresolved);
         assert_eq!(
             link.unresolved_reason,
-            Some(vault_core::UnresolvedReason::TargetMissing)
+            Some(crate::core::UnresolvedReason::TargetMissing)
         );
     }
 
@@ -378,7 +378,7 @@ mod tests {
     fn wikilink_with_missing_anchor_returns_anchor_missing() {
         let files = vec![make_file("a.md"), make_file("b.md")];
         let mut documents = vec![make_document("a.md"), make_document("b.md")];
-        documents[1].headings.push(vault_core::Heading {
+        documents[1].headings.push(crate::core::Heading {
             level: 1,
             text: "Existing".into(),
             slug: "existing".into(),
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(link.status, LinkStatus::Unresolved);
         assert_eq!(
             link.unresolved_reason,
-            Some(vault_core::UnresolvedReason::AnchorMissing)
+            Some(crate::core::UnresolvedReason::AnchorMissing)
         );
     }
 
@@ -462,7 +462,7 @@ mod tests {
             make_document_with_aliases("vault-memory.md", vec!["vault memory"]),
             make_document("src.md"),
         ];
-        documents[0].headings.push(vault_core::Heading {
+        documents[0].headings.push(crate::core::Heading {
             level: 1,
             text: "Architecture".into(),
             slug: "architecture".into(),
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(link.status, LinkStatus::Unresolved);
         assert_eq!(
             link.unresolved_reason,
-            Some(vault_core::UnresolvedReason::AnchorMissing)
+            Some(crate::core::UnresolvedReason::AnchorMissing)
         );
     }
 }

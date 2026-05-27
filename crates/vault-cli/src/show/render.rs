@@ -269,7 +269,7 @@ fn json_value_inline(v: &serde_json::Value) -> String {
 }
 
 /// Render headings as `#`-prefixed lines, one per heading.
-fn headings_to_display(headings: &[vault_core::Heading]) -> String {
+fn headings_to_display(headings: &[crate::core::Heading]) -> String {
     headings
         .iter()
         .map(|h| {
@@ -281,7 +281,7 @@ fn headings_to_display(headings: &[vault_core::Heading]) -> String {
 }
 
 /// Render outgoing (resolved) links: `target → resolved_path`.
-fn outgoing_links_to_display(links: &[vault_core::Link]) -> String {
+fn outgoing_links_to_display(links: &[crate::core::Link]) -> String {
     links
         .iter()
         .map(|l| {
@@ -296,7 +296,7 @@ fn outgoing_links_to_display(links: &[vault_core::Link]) -> String {
 }
 
 /// Render unresolved links: `target  (unresolved: reason)`.
-fn unresolved_links_to_display(links: &[vault_core::Link]) -> String {
+fn unresolved_links_to_display(links: &[crate::core::Link]) -> String {
     links
         .iter()
         .map(|l| {
@@ -304,10 +304,10 @@ fn unresolved_links_to_display(links: &[vault_core::Link]) -> String {
                 .unresolved_reason
                 .as_ref()
                 .map(|r| match r {
-                    vault_core::UnresolvedReason::TargetMissing => "target-missing",
-                    vault_core::UnresolvedReason::AnchorMissing => "anchor-missing",
-                    vault_core::UnresolvedReason::BlockRefMissing => "block-ref-missing",
-                    vault_core::UnresolvedReason::Ambiguous => "ambiguous",
+                    crate::core::UnresolvedReason::TargetMissing => "target-missing",
+                    crate::core::UnresolvedReason::AnchorMissing => "anchor-missing",
+                    crate::core::UnresolvedReason::BlockRefMissing => "block-ref-missing",
+                    crate::core::UnresolvedReason::Ambiguous => "ambiguous",
                 })
                 .unwrap_or("unknown");
             format!("{}  (unresolved: {})", l.target, reason)

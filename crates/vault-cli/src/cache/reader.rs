@@ -1,10 +1,10 @@
 //! Cache reader: SQLite rows → in-memory `GraphIndex`.
 
-use camino::Utf8PathBuf;
-use vault_core::{
+use crate::core::{
     Diagnostic, Document, GraphIndex, Heading, Link, LinkKind, LinkSourceArea, LinkSourceContext,
     LinkStatus, Severity, SourceSpan, UnresolvedReason, VaultFile,
 };
+use camino::Utf8PathBuf;
 
 use crate::cache::error::CacheError;
 

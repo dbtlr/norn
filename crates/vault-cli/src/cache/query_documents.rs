@@ -1,12 +1,12 @@
 //! SQL-direct document query — `Cache::documents_matching` and
 //! `Cache::document_by_path`.
 
+use crate::core::DocumentSummary;
 use crate::standards::path_match::PathPattern;
 use camino::{Utf8Path, Utf8PathBuf};
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::OptionalExtension;
-use vault_core::DocumentSummary;
 
 use crate::cache::error::CacheError;
 use crate::cache::query::{json_path_for, DocumentQuery};
@@ -72,7 +72,7 @@ impl crate::cache::Cache {
     pub fn document_by_path(
         &self,
         path: &Utf8Path,
-    ) -> Result<Option<vault_core::Document>, CacheError> {
+    ) -> Result<Option<crate::core::Document>, CacheError> {
         let mut stmt = self.conn.prepare(
             "SELECT path, stem, hash, frontmatter_json, body_text \
              FROM documents WHERE path = ?",
@@ -107,7 +107,7 @@ impl crate::cache::Cache {
             None => (Vec::new(), Vec::new()),
         };
 
-        Ok(Some(vault_core::Document {
+        Ok(Some(crate::core::Document {
             path: path_buf,
             stem,
             hash,

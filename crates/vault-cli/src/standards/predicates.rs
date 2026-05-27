@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use crate::core::Document;
 use serde_json::Value;
-use vault_core::Document;
 
 pub(crate) fn frontmatter_value_matches(actual: &Value, expected: &Value) -> bool {
     match (actual, expected) {

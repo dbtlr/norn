@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
+use crate::core::Severity;
 use crate::standards::{summarize, Finding};
 use anyhow::Result;
-use vault_core::Severity;
 
 use super::fix_hints::fix_hint_for;
 use crate::cli::ValidateFormat;
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn records_full_omits_fix_when_code_unknown() {
         // Build a finding with a synthetic unrecognized code via a GraphDiagnostic shape.
-        use vault_core::Diagnostic;
+        use crate::core::Diagnostic;
         let finding = Finding::from_graph_diagnostic(
             "x.md".into(),
             Diagnostic::warning("not-a-real-code", "fake"),

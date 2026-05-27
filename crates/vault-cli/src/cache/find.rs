@@ -5,7 +5,7 @@
 //! (before limit/offset) so callers can emit accurate truncation
 //! signals.
 
-use vault_core::DocumentSummary;
+use crate::core::DocumentSummary;
 
 use crate::cache::query::DocumentQuery;
 

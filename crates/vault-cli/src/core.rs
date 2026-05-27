@@ -1,4 +1,4 @@
-pub mod display;
+pub(crate) mod display;
 
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
@@ -6,13 +6,13 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum Severity {
+pub(crate) enum Severity {
     Warning,
     Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Diagnostic {
+pub(crate) struct Diagnostic {
     pub severity: Severity,
     pub code: String,
     pub message: String,
@@ -21,7 +21,7 @@ pub struct Diagnostic {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SourceSpan {
+pub(crate) struct SourceSpan {
     pub line: usize,
     pub column: usize,
     pub byte_offset: usize,
@@ -29,20 +29,20 @@ pub struct SourceSpan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum LinkSourceArea {
+pub(crate) enum LinkSourceArea {
     Body,
     Frontmatter,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LinkSourceContext {
+pub(crate) struct LinkSourceContext {
     pub area: LinkSourceArea,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub property: Option<String>,
 }
 
 impl Diagnostic {
-    pub fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
             code: code.into(),
@@ -51,7 +51,7 @@ impl Diagnostic {
         }
     }
 
-    pub fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
             code: code.into(),
@@ -60,14 +60,14 @@ impl Diagnostic {
         }
     }
 
-    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+    pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Heading {
+pub(crate) struct Heading {
     pub level: u8,
     pub text: String,
     pub slug: String,
@@ -77,7 +77,7 @@ pub struct Heading {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum LinkKind {
+pub(crate) enum LinkKind {
     Markdown,
     Wikilink,
     Embed,
@@ -85,7 +85,7 @@ pub enum LinkKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum LinkStatus {
+pub(crate) enum LinkStatus {
     Resolved,
     Unresolved,
     Ambiguous,
@@ -93,7 +93,7 @@ pub enum LinkStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum UnresolvedReason {
+pub(crate) enum UnresolvedReason {
     TargetMissing,
     AnchorMissing,
     BlockRefMissing,
@@ -101,7 +101,7 @@ pub enum UnresolvedReason {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Link {
+pub(crate) struct Link {
     pub source_path: Utf8PathBuf,
     pub raw: String,
     pub kind: LinkKind,
@@ -126,7 +126,7 @@ pub struct Link {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultFile {
+pub(crate) struct VaultFile {
     pub path: Utf8PathBuf,
     pub stem: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,7 +136,7 @@ pub struct VaultFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Document {
+pub(crate) struct Document {
     pub path: Utf8PathBuf,
     pub stem: String,
     pub hash: String,
@@ -166,7 +166,7 @@ pub struct Document {
 /// command except `docs inspect`, which needs the joined data and uses
 /// `Document` directly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DocumentSummary {
+pub(crate) struct DocumentSummary {
     pub path: Utf8PathBuf,
     pub stem: String,
     pub hash: String,
@@ -199,7 +199,7 @@ impl From<Document> for DocumentSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphIndex {
+pub(crate) struct GraphIndex {
     pub root: Utf8PathBuf,
     pub files: Vec<VaultFile>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]

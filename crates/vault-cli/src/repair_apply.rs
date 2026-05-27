@@ -1,5 +1,6 @@
 use std::fs;
 
+use crate::core::GraphIndex;
 use crate::standards::apply::{
     apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
     changes_by_path, validate_plan_for_apply, ApplyError, CreateDocumentResult, DeleteResult,
@@ -8,7 +9,6 @@ use crate::standards::apply::{
 use crate::standards::{Finding, PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
-use vault_core::GraphIndex;
 
 /// Context passed to `apply_repair_plan` for flags that only affect specific
 /// orchestrator passes (currently, `create_document` Pass 1e).

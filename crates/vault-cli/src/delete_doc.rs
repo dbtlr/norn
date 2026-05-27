@@ -7,13 +7,13 @@
 
 use std::io::Write;
 
+use crate::core::GraphIndex;
 use crate::standards::{
     classify_link_risk, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary,
     SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
 };
 use camino::Utf8PathBuf;
 use serde::Serialize;
-use vault_core::GraphIndex;
 
 use crate::mutation_report::{LinkFile, LinkSummary};
 
@@ -141,7 +141,7 @@ pub fn render_json<W: Write>(out: &mut W, report: &DeleteReport) -> anyhow::Resu
 /// `rewrite_to` is the resolved vault-relative path of the `--rewrite-to` target
 /// (if provided). `applied` should be `false` for the preview and `true` after
 /// `apply_repair_plan` has completed.
-pub fn build_report(
+pub(crate) fn build_report(
     plan: &RepairPlan,
     index: &GraphIndex,
     rewrite_to: Option<&Utf8PathBuf>,
@@ -225,7 +225,7 @@ pub enum DeletePreflightError {
     },
 }
 
-pub struct PreflightConfig<'a> {
+pub(crate) struct PreflightConfig<'a> {
     pub doc: &'a str,
     pub allow_broken_links: bool,
     pub rewrite_to: Option<&'a str>,
@@ -241,7 +241,7 @@ pub struct PreflightOutcome {
     pub resolved_rewrite_to: Option<Utf8PathBuf>,
 }
 
-pub fn preflight_and_plan(
+pub(crate) fn preflight_and_plan(
     cfg: PreflightConfig<'_>,
 ) -> Result<PreflightOutcome, DeletePreflightError> {
     use crate::target::{backlinks, resolve_target_path};

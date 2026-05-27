@@ -5,9 +5,9 @@ pub mod render;
 pub mod target;
 
 use crate::cache::{Cache, IncomingLink};
+use crate::core::{Heading, Link};
 use anyhow::Result;
 use serde::Serialize;
-use vault_core::{Heading, Link};
 
 use crate::cli::GetArgs;
 

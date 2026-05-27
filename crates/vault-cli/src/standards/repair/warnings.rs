@@ -4,9 +4,9 @@
 //! already exists elsewhere in the vault inventory introduces wikilink
 //! ambiguity. The operator decides whether to revise the rule.
 
+use crate::core::Document;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
-use vault_core::Document;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]

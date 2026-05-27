@@ -432,7 +432,7 @@ pub struct PreflightOutcome {
 pub fn preflight_and_plan(
     cwd: &camino::Utf8Path,
     cache: &crate::cache::Cache,
-    index: &vault_core::GraphIndex,
+    index: &crate::core::GraphIndex,
     cfg: &crate::standards::VaultConfig,
     args: &crate::cli::SetArgs,
 ) -> anyhow::Result<PreflightOutcome> {

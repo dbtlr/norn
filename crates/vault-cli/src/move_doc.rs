@@ -7,13 +7,13 @@
 
 use std::io::Write;
 
+use crate::core::GraphIndex;
 use crate::standards::{
     classify_link_risk, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary,
     SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
 };
 use camino::Utf8PathBuf;
 use serde::Serialize;
-use vault_core::GraphIndex;
 
 use crate::mutation_report::{LinkFile, LinkSummary};
 
@@ -156,7 +156,7 @@ pub enum MovePreflightError {
     SamePath(Utf8PathBuf),
 }
 
-pub struct PreflightConfig<'a> {
+pub(crate) struct PreflightConfig<'a> {
     pub src: &'a str,
     pub dst: &'a str,
     pub force: bool,
@@ -165,7 +165,9 @@ pub struct PreflightConfig<'a> {
     pub index: &'a GraphIndex,
 }
 
-pub fn preflight_and_plan(cfg: PreflightConfig<'_>) -> Result<RepairPlan, MovePreflightError> {
+pub(crate) fn preflight_and_plan(
+    cfg: PreflightConfig<'_>,
+) -> Result<RepairPlan, MovePreflightError> {
     // --- Pre-flight: resolve source ---
 
     // Attempt exact path match first, then stem match.
@@ -288,7 +290,7 @@ pub fn preflight_and_plan(cfg: PreflightConfig<'_>) -> Result<RepairPlan, MovePr
 /// - `CodeFenceSuspected`: an affected backlink file contains the src stem inside a fenced code block.
 /// - `OutgoingRelativePathLink`: the source document contains a relative-path Markdown link that will
 ///   break after the file moves to a different directory.
-pub fn collect_warnings(
+pub(crate) fn collect_warnings(
     plan: &RepairPlan,
     index: &GraphIndex,
     vault_root: &Utf8PathBuf,
