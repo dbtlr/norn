@@ -1,9 +1,9 @@
 ---
 name: dependency-updates
-description: How to evaluate, migrate, and ship cargo dependency updates in vault-cli — including dependabot PRs and manual bumps. Covers triage, local verification, breaking-API migration shapes, CHANGELOG conventions, and merge mechanics (squash, conflict resolution, force-push to dependabot's branch). Use when a dependabot PR is open, when CI fails on a dep bump, when evaluating whether to take a bump now, or when staging a manual cargo update.
+description: How to evaluate, migrate, and ship cargo dependency updates in norn — including dependabot PRs and manual bumps. Covers triage, local verification, breaking-API migration shapes, CHANGELOG conventions, and merge mechanics (squash, conflict resolution, force-push to dependabot's branch). Use when a dependabot PR is open, when CI fails on a dep bump, when evaluating whether to take a bump now, or when staging a manual cargo update.
 ---
 
-# Dependency updates in vault-cli
+# Dependency updates in norn
 
 ## Why this exists
 
@@ -221,7 +221,7 @@ Once closed, GH may refuse `gh pr reopen <n>`. If you anticipate doing the migra
 
 ### Pitfall: cargo-deny only runs in CI
 
-A new TLS-touching dep often pulls in `webpki-roots` (CDLA-Permissive-2.0) or similar permissive licenses not in vault-cli's existing allow-list. The local quartet is silent on this. Watch the first CI run on a new-dep PR.
+A new TLS-touching dep often pulls in `webpki-roots` (CDLA-Permissive-2.0) or similar permissive licenses not in norn's existing allow-list. The local quartet is silent on this. Watch the first CI run on a new-dep PR.
 
 ### Pitfall: lockfile drift masked by `cargo test --workspace`
 

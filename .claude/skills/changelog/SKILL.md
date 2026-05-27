@@ -1,9 +1,9 @@
 ---
 name: changelog
-description: Hard-and-fast rule and conventions for maintaining CHANGELOG.md in vault-cli. Every user-visible change lands in `## [Unreleased]` BEFORE the change ships to main; promoted to a versioned section when a release is cut. Use when staging a commit, opening a PR, squash-merging to main, or cutting a release.
+description: Hard-and-fast rule and conventions for maintaining CHANGELOG.md in norn. Every user-visible change lands in `## [Unreleased]` BEFORE the change ships to main; promoted to a versioned section when a release is cut. Use when staging a commit, opening a PR, squash-merging to main, or cutting a release.
 ---
 
-# CHANGELOG discipline for vault-cli
+# CHANGELOG discipline for norn
 
 ## The rule (non-negotiable)
 
@@ -29,12 +29,12 @@ This is a binary-effect test, not a "did the user request it" test. A runtime ca
 - Changed command behavior, default values, or output format
 - Removed or renamed surface (binary names, command names, flags, config keys)
 - New error variants or error messages users will see
-- Performance characteristics meaningful enough to mention (e.g., "vault validate now under 100ms via cache")
+- Performance characteristics meaningful enough to mention (e.g., "norn validate now under 100ms via cache")
 - Plan/cache/index JSON schema changes (especially version bumps)
 - Breaking changes — these get loud treatment, see below
 - **Runtime cargo dependency *bumps* that land in the compiled binary** — version changes to existing `[dependencies]` entries (`Cargo.toml` or transitive `Cargo.lock`), feature-flag changes that alter what's linked in. Even when the change is "transparent" from a feature perspective, the bytes the user runs are different and there is no other paper trail in the CHANGELOG. *Adding* a new dep is different — it almost always rides along with a feature/change that already has its own CHANGELOG entry, and that entry implicitly covers the dep. Only call out the dep separately when it ships without a corresponding feature change.
 - New dependencies that affect installation (e.g., a new C library, a different TLS backend that pulls in system libraries)
-- File-location changes (cache path, log path, where vault writes user data)
+- File-location changes (cache path, log path, where norn writes user data)
 - New permission requirements (e.g., file mode changes)
 - Documentation contract changes (changing what an agent is told to do)
 
@@ -105,7 +105,7 @@ Loud, explicit, named. Every breaking change names:
 3. **The scope of the blast radius** — what else gets affected.
 
 Example (good):
-> **Repair plan JSON schema bumps from v3 to v4.** `vault repair apply` rejects v3 plans with `unsupported repair plan schema version: expected 4, got 3`. No migration shim. Regenerate any persisted plans with `vault repair plan` against v0.28.0+.
+> **Repair plan JSON schema bumps from v3 to v4.** `norn repair apply` rejects v3 plans with `unsupported repair plan schema version: expected 4, got 3`. No migration shim. Regenerate any persisted plans with `norn repair plan` against v0.28.0+.
 
 Example (bad — too vague):
 > Breaking change: schema bumped.
@@ -129,14 +129,14 @@ Behavior or default that already existed but now works differently. For changes 
 Bug fixes shipping to main. Name the symptom users observed, not the internal cause.
 
 Example (good):
-> Markdown link rewriting on `move_document` apply now correctly handles bare-URL `raw` form. Previously, `vault repair apply` would silently no-op on Markdown link rewrites; only wikilinks were rewritten.
+> Markdown link rewriting on `move_document` apply now correctly handles bare-URL `raw` form. Previously, `norn repair apply` would silently no-op on Markdown link rewrites; only wikilinks were rewritten.
 
 ### Known limitations
 
 V1 trade-offs that are intentional but worth documenting. Each entry names the symptom, the workaround, and what triggers the eventual fix.
 
 Example:
-> When a backlinking file contains multiple identical link occurrences pointing at a moved file, `repair apply` rewrites only the first occurrence. Subsequent occurrences flag as unresolved on the next `vault validate`. To be addressed in a follow-up by adopting byte-span-precise edits.
+> When a backlinking file contains multiple identical link occurrences pointing at a moved file, `repair apply` rewrites only the first occurrence. Subsequent occurrences flag as unresolved on the next `norn validate`. To be addressed in a follow-up by adopting byte-span-precise edits.
 
 ## Cutting a release
 
@@ -166,7 +166,7 @@ Don't duplicate effort across layers. Each answers a different question:
 
 **"Various improvements" / "Bug fixes".** Name them. If the work was worth shipping, it's worth describing.
 
-**Pasting commit messages verbatim.** Commit messages talk to other engineers in implementer-narrative ("refactor parse loop to avoid clone"); CHANGELOG entries talk to operators and agents in user-narrative ("`vault validate` is now ~30% faster on large vaults"). Translate.
+**Pasting commit messages verbatim.** Commit messages talk to other engineers in implementer-narrative ("refactor parse loop to avoid clone"); CHANGELOG entries talk to operators and agents in user-narrative ("`norn validate` is now ~30% faster on large vaults"). Translate.
 
 **Leaving `## [Unreleased]` empty between releases.** If the file's last entry is a versioned release and there's no `## [Unreleased]` above it, the next change author has to remember to add the header. Always keep an `## [Unreleased]` heading at the top, even if empty.
 
