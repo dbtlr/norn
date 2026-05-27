@@ -29,24 +29,6 @@ verify: fmt-check test
 run *args:
     cargo run -q -p norn-run -- {{args}}
 
-fixture-documents root="fixtures/basic":
-    cargo run -q -p vault-cli -- -C '{{root}}' docs list --format jsonl
-
-fixture-links root="fixtures/basic":
-    cargo run -q -p vault-cli -- -C '{{root}}' links list --format jsonl
-
-fixture-unresolved root="fixtures/basic":
-    cargo run -q -p vault-cli -- -C '{{root}}' links unresolved --format json
-
-fixture-diagnostics root="fixtures/basic":
-    cargo run -q -p vault-cli -- -C '{{root}}' validate --format jsonl
-
-fixture-backlinks target="beta" root="fixtures/basic":
-    cargo run -q -p vault-cli -- -C '{{root}}' links backlinks '{{target}}' --format jsonl
-
-fixture-inspect target="alpha.md" root="fixtures/basic":
-    cargo run -q -p vault-cli -- -C '{{root}}' docs inspect '{{target}}' --format json
-
 dist-plan:
     cargo dist plan
 
