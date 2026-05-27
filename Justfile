@@ -16,18 +16,18 @@ test:
     cargo test
 
 build:
-    cargo build -p vault-cli
+    cargo build -p norn-run
 
 build-release:
-    cargo build -p vault-cli --release
+    cargo build -p norn-run --release
 
 install:
-    cargo install --path crates/vault-cli
+    cargo install --path .
 
 verify: fmt-check test
 
 run *args:
-    cargo run -q -p vault-cli -- {{args}}
+    cargo run -q -p norn-run -- {{args}}
 
 fixture-documents root="fixtures/basic":
     cargo run -q -p vault-cli -- -C '{{root}}' docs list --format jsonl
@@ -58,14 +58,14 @@ release version:
     cargo check
     git add Cargo.toml Cargo.lock
     git commit -m "Bump workspace version to {{version}}"
-    git tag -a v{{version}} -m "vault-cli v{{version}}"
+    git tag -a v{{version}} -m "norn v{{version}}"
 
 completions:
     mkdir -p target/completions
-    cargo run -q -p vault-cli -- completions bash > target/completions/vault.bash
-    cargo run -q -p vault-cli -- completions zsh  > target/completions/_vault
-    cargo run -q -p vault-cli -- completions fish > target/completions/vault.fish
+    cargo run -q -p norn-run -- completions bash > target/completions/norn.bash
+    cargo run -q -p norn-run -- completions zsh  > target/completions/_norn
+    cargo run -q -p norn-run -- completions fish > target/completions/norn.fish
 
 manpage:
     mkdir -p target/man
-    cargo run -q -p vault-cli -- manpage > target/man/vault.1
+    cargo run -q -p norn-run -- manpage > target/man/norn.1
