@@ -20,8 +20,8 @@ mod powershell;
 mod zsh;
 
 /// Marker comment prefix written into rc files to enable idempotent re-install.
-pub(crate) const MARKER_PREFIX: &str = "# >>> vault completions";
-pub(crate) const MARKER_SUFFIX: &str = "# <<< vault completions <<<";
+pub(crate) const MARKER_PREFIX: &str = "# >>> norn completions";
+pub(crate) const MARKER_SUFFIX: &str = "# <<< norn completions <<<";
 
 /// Outcome of an install run, for reporting and tests.
 #[derive(Debug)]

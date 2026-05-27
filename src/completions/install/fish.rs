@@ -15,7 +15,7 @@ impl Installer for FishInstaller {
     fn target_paths(&self) -> Result<TargetPaths> {
         let xdg = xdg_config_home()?;
         Ok(TargetPaths {
-            primary: xdg.join("fish").join("completions").join("vault.fish"),
+            primary: xdg.join("fish").join("completions").join("norn.fish"),
             secondary: None,
         })
     }

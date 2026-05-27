@@ -16,7 +16,7 @@ impl Installer for NushellInstaller {
 
     fn target_paths(&self) -> Result<TargetPaths> {
         let xdg = xdg_config_home()?;
-        let script: Utf8PathBuf = xdg.join("nushell").join("completions").join("vault.nu");
+        let script: Utf8PathBuf = xdg.join("nushell").join("completions").join("norn.nu");
         let config: Utf8PathBuf = xdg.join("nushell").join("config.nu");
         // Primary is the config.nu (the marker-block file). Secondary is the
         // script we write alongside it.
@@ -31,9 +31,9 @@ impl Installer for NushellInstaller {
         // reference the script path; resolve it the same way target_paths
         // does.
         let xdg = xdg_config_home()?;
-        let script: Utf8PathBuf = xdg.join("nushell").join("completions").join("vault.nu");
+        let script: Utf8PathBuf = xdg.join("nushell").join("completions").join("norn.nu");
         Ok(format!(
-            "{MARKER_PREFIX} (added by 'vault completions install' on {today}) >>>\nsource {script}\n{MARKER_SUFFIX}",
+            "{MARKER_PREFIX} (added by 'norn completions install' on {today}) >>>\nsource {script}\n{MARKER_SUFFIX}",
         ))
     }
 

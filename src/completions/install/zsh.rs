@@ -24,7 +24,7 @@ impl Installer for ZshInstaller {
 
     fn primary_content(&self, today: &str) -> Result<String> {
         Ok(format!(
-            "{MARKER_PREFIX} (added by 'vault completions install' on {today}) >>>\neval \"$(vault completions init zsh)\"\n{MARKER_SUFFIX}",
+            "{MARKER_PREFIX} (added by 'norn completions install' on {today}) >>>\neval \"$(norn completions init zsh)\"\n{MARKER_SUFFIX}",
         ))
     }
 

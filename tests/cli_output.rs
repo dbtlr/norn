@@ -1897,15 +1897,15 @@ fn completions_install_bash_writes_marker_block_to_bashrc() {
     );
     let bashrc = fs::read_to_string(dir.path().join(".bashrc")).unwrap();
     assert!(
-        bashrc.contains("# >>> vault completions"),
+        bashrc.contains("# >>> norn completions"),
         "missing marker: {bashrc}"
     );
     assert!(
-        bashrc.contains("eval \"$(vault completions init bash)\""),
+        bashrc.contains("eval \"$(norn completions init bash)\""),
         "missing eval line: {bashrc}"
     );
     assert!(
-        bashrc.contains("# <<< vault completions <<<"),
+        bashrc.contains("# <<< norn completions <<<"),
         "missing end marker: {bashrc}"
     );
 }
@@ -1919,8 +1919,8 @@ fn completions_install_zsh_writes_marker_block_to_zshrc() {
         String::from_utf8_lossy(&output.stderr)
     );
     let zshrc = fs::read_to_string(dir.path().join(".zshrc")).unwrap();
-    assert!(zshrc.contains("# >>> vault completions"));
-    assert!(zshrc.contains("eval \"$(vault completions init zsh)\""));
+    assert!(zshrc.contains("# >>> norn completions"));
+    assert!(zshrc.contains("eval \"$(norn completions init zsh)\""));
 }
 
 #[test]
@@ -1929,7 +1929,7 @@ fn completions_install_zsh_honors_zdotdir() {
     let (_home, output) = install_in_tempdir("zsh", &[("ZDOTDIR", zdir.path().to_str().unwrap())]);
     assert!(output.status.success());
     let zshrc = fs::read_to_string(zdir.path().join(".zshrc")).unwrap();
-    assert!(zshrc.contains("# >>> vault completions"));
+    assert!(zshrc.contains("# >>> norn completions"));
 }
 
 #[test]
@@ -1941,8 +1941,8 @@ fn completions_install_elvish_writes_marker_block_to_rc_elv() {
         String::from_utf8_lossy(&output.stderr)
     );
     let rc = fs::read_to_string(dir.path().join(".config/elvish/rc.elv")).unwrap();
-    assert!(rc.contains("# >>> vault completions"));
-    assert!(rc.contains("vault completions init elvish"));
+    assert!(rc.contains("# >>> norn completions"));
+    assert!(rc.contains("norn completions init elvish"));
 }
 
 #[test]
@@ -1950,7 +1950,7 @@ fn completions_install_is_idempotent() {
     let (dir, output1) = install_in_tempdir("bash", &[]);
     assert!(output1.status.success());
     let bashrc_first = fs::read_to_string(dir.path().join(".bashrc")).unwrap();
-    let count_first = bashrc_first.matches("# >>> vault completions").count();
+    let count_first = bashrc_first.matches("# >>> norn completions").count();
     assert_eq!(count_first, 1);
 
     // Re-run install
@@ -1979,7 +1979,7 @@ fn completions_install_force_replaces_marker_block() {
     // Tamper with the marker block contents to simulate drift
     let bashrc_path = dir.path().join(".bashrc");
     let original = fs::read_to_string(&bashrc_path).unwrap();
-    let tampered = original.replace("vault completions init bash", "OLD_COMMAND");
+    let tampered = original.replace("norn completions init bash", "OLD_COMMAND");
     fs::write(&bashrc_path, &tampered).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_norn"))
@@ -1995,7 +1995,7 @@ fn completions_install_force_replaces_marker_block() {
     );
     let final_bashrc = fs::read_to_string(&bashrc_path).unwrap();
     assert!(
-        final_bashrc.contains("vault completions init bash"),
+        final_bashrc.contains("norn completions init bash"),
         "force should restore current line: {final_bashrc}"
     );
     assert!(
@@ -2018,7 +2018,7 @@ fn completions_install_nushell_writes_both_files() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let script = dir.path().join(".config/nushell/completions/vault.nu");
+    let script = dir.path().join(".config/nushell/completions/norn.nu");
     let config = dir.path().join(".config/nushell/config.nu");
 
     assert!(script.exists(), "completion script should be written");
@@ -2026,14 +2026,14 @@ fn completions_install_nushell_writes_both_files() {
 
     let script_content = fs::read_to_string(&script).unwrap();
     assert!(
-        script_content.contains("vault"),
-        "script should reference vault"
+        script_content.contains("norn"),
+        "script should reference norn"
     );
 
     let config_content = fs::read_to_string(&config).unwrap();
-    assert!(config_content.contains("# >>> vault completions"));
+    assert!(config_content.contains("# >>> norn completions"));
     assert!(config_content.contains("source"));
-    assert!(config_content.contains("vault.nu"));
+    assert!(config_content.contains("norn.nu"));
 }
 
 #[test]
@@ -2062,7 +2062,7 @@ fn completions_install_fish_overwrites_script() {
     // Pre-create a stale completion file
     let fish_completions = dir.path().join(".config/fish/completions");
     fs::create_dir_all(&fish_completions).unwrap();
-    let target = fish_completions.join("vault.fish");
+    let target = fish_completions.join("norn.fish");
     fs::write(&target, "# old stale content").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_norn"))
@@ -2081,7 +2081,7 @@ fn completions_install_fish_overwrites_script() {
     assert!(!content.contains("# old stale content"));
     // The fish completion script clap_complete produces references the
     // command name and at least one subcommand.
-    assert!(content.contains("vault"));
+    assert!(content.contains("norn"));
 }
 
 #[test]
@@ -2097,8 +2097,8 @@ fn completions_install_powershell_writes_marker_block() {
         .path()
         .join(".config/powershell/Microsoft.PowerShell_profile.ps1");
     let content = fs::read_to_string(&profile).unwrap();
-    assert!(content.contains("# >>> vault completions"));
-    assert!(content.contains("vault completions init powershell"));
+    assert!(content.contains("# >>> norn completions"));
+    assert!(content.contains("norn completions init powershell"));
     assert!(content.contains("Invoke-Expression"));
 }
 
@@ -2115,7 +2115,7 @@ fn completions_install_powershell_honors_profile_env() {
         .unwrap();
     assert!(output.status.success());
     let content = fs::read_to_string(&custom_profile).unwrap();
-    assert!(content.contains("# >>> vault completions"));
+    assert!(content.contains("# >>> norn completions"));
 }
 
 #[test]
@@ -2135,8 +2135,8 @@ fn completions_install_auto_detects_from_shell_env() {
         String::from_utf8_lossy(&output.stderr)
     );
     let zshrc = fs::read_to_string(dir.path().join(".zshrc")).unwrap();
-    assert!(zshrc.contains("# >>> vault completions"));
-    assert!(zshrc.contains("eval \"$(vault completions init zsh)\""));
+    assert!(zshrc.contains("# >>> norn completions"));
+    assert!(zshrc.contains("eval \"$(norn completions init zsh)\""));
 }
 
 #[test]
@@ -2151,12 +2151,12 @@ fn completions_install_print_for_nushell_shows_both_targets() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     // Both targets named
-    assert!(stdout.contains("vault.nu"));
+    assert!(stdout.contains("norn.nu"));
     assert!(stdout.contains("config.nu"));
     // No files written
     assert!(!dir
         .path()
-        .join(".config/nushell/completions/vault.nu")
+        .join(".config/nushell/completions/norn.nu")
         .exists());
     assert!(!dir.path().join(".config/nushell/config.nu").exists());
 }
@@ -2239,7 +2239,7 @@ fn completions_install_print_does_not_write() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Would write to"));
-    assert!(stdout.contains("# >>> vault completions"));
+    assert!(stdout.contains("# >>> norn completions"));
     // No file should have been created.
     assert!(!dir.path().join(".bashrc").exists());
 }
