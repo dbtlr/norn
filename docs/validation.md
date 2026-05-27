@@ -5,18 +5,18 @@ description: Finding codes, summary output, triage filters, the schema-versioned
 
 # Validation and repair
 
-`vault validate` is the detection surface. `vault repair plan` and `vault repair apply` are the planning and writing surfaces. Together they form the deterministic drift-healing loop: detect, plan, apply, verify.
+`norn validate` is the detection surface. `norn repair plan` and `norn repair apply` are the planning and writing surfaces. Together they form the deterministic drift-healing loop: detect, plan, apply, verify.
 
 ## The validate command
 
-`vault validate` is read-only. It runs the graph builder, applies configured `validate.rules`, and emits one finding per violation.
+`norn validate` is read-only. It runs the graph builder, applies configured `validate.rules`, and emits one finding per violation.
 
 Findings are emitted as flat JSON objects keyed by `code`, with variant-specific fields present only when applicable. Use `--format jsonl` for one finding per line, `--format json` for a wrapped envelope (`{"total": N, "findings": [...]}`), or `--format records` for human-readable output on a TTY (the default).
 
 ```bash
-vault validate --format jsonl
-vault validate --code frontmatter-invalid-type --field created --format jsonl
-vault validate --rule typed-note --path "notes/**/*.md" --format jsonl
+norn validate --format jsonl
+norn validate --code frontmatter-invalid-type --field created --format jsonl
+norn validate --rule typed-note --path "notes/**/*.md" --format jsonl
 ```
 
 ## Finding codes
@@ -39,7 +39,7 @@ For the selector + constraint model that produces these codes, see [rule-shape.m
 
 ## Summary output
 
-`vault validate --summary` emits grouped finding counts instead of raw findings. The schema includes:
+`norn validate --summary` emits grouped finding counts instead of raw findings. The schema includes:
 
 - `total` — total finding count.
 - `codes` — count per finding code.
@@ -53,13 +53,13 @@ For the selector + constraint model that produces these codes, see [rule-shape.m
 Use summaries to size a cleanup queue before reading raw findings.
 
 ```bash
-vault validate --summary --format records
-vault validate --summary --code frontmatter-invalid-type --field created --format json
+norn validate --summary --format records
+norn validate --summary --code frontmatter-invalid-type --field created --format json
 ```
 
 ## Triage filters
 
-`vault validate` supports filter flags that apply to both raw output and `--summary`:
+`norn validate` supports filter flags that apply to both raw output and `--summary`:
 
 | Filter | Matches |
 |---|---|
@@ -74,9 +74,9 @@ vault validate --summary --code frontmatter-invalid-type --field created --forma
 Comma-separated values within one filter are ORed (`--code link-target-missing,link-ambiguous`); different filters are ANDed. Glob patterns also work within `--code` (`--code 'link-*'` matches all four link codes).
 
 ```bash
-vault validate --code link-target-missing --format jsonl
-vault validate --code frontmatter-disallowed-value --field status --summary --format json
-vault validate --severity error --format jsonl
+norn validate --code link-target-missing --format jsonl
+norn validate --code frontmatter-disallowed-value --field status --summary --format json
+norn validate --severity error --format jsonl
 ```
 
 `--target` matches the raw parsed link target string — not a fuzzy stem, a resolved path, or a normalized candidate.
@@ -86,34 +86,34 @@ vault validate --severity error --format jsonl
 ### Size a queue, then read it
 
 ```bash
-vault validate --summary --code frontmatter-invalid-type --field created --format records
-vault validate --code frontmatter-invalid-type --field created --format jsonl
+norn validate --summary --code frontmatter-invalid-type --field created --format records
+norn validate --code frontmatter-invalid-type --field created --format jsonl
 ```
 
 ### Split link cleanup by failure mode
 
 ```bash
-vault validate --code link-target-missing --format jsonl
-vault validate --code link-anchor-missing,link-block-missing --format jsonl
-vault validate --code link-ambiguous --summary --format records
-vault validate --code 'link-*' --format jsonl
+norn validate --code link-target-missing --format jsonl
+norn validate --code link-anchor-missing,link-block-missing --format jsonl
+norn validate --code link-ambiguous --summary --format records
+norn validate --code 'link-*' --format jsonl
 ```
 
 ### Scope by path
 
 ```bash
-vault validate --path "notes/**/*.md" --summary --format json
-vault validate --path "tasks/**/*.md" --rule task-status --format jsonl
+norn validate --path "notes/**/*.md" --summary --format json
+norn validate --path "tasks/**/*.md" --rule task-status --format jsonl
 ```
 
 ## Repair planning
 
-`vault repair plan` runs validation, applies the same triage filters, and converts findings matched by configured `repair.rules` into an explicit JSON repair plan.
+`norn repair plan` runs validation, applies the same triage filters, and converts findings matched by configured `repair.rules` into an explicit JSON repair plan.
 
 ```bash
-vault repair plan --format json
-vault repair plan --out repair.json
-vault repair plan --code frontmatter-disallowed-value --field status --out repair.json
+norn repair plan --format json
+norn repair plan --out repair.json
+norn repair plan --code frontmatter-disallowed-value --field status --out repair.json
 ```
 
 ### Plan schema
@@ -149,11 +149,11 @@ The supported repair actions are:
 - `add_frontmatter` — insert a missing scalar field.
 - `move_document` — move or rename a file, with automatic backlink rewriting on apply.
 - `rewrite_link` — rewrite a broken wikilink in the source document to a new target. Proposed automatically by the closest-match algorithm for `link-target-missing` findings; preserves display text, anchor, and block-ref suffixes.
-- `create_document` — create a brand-new document with synthesized frontmatter and body. Emitted exclusively by `vault new`; not config-rule-triggerable.
+- `create_document` — create a brand-new document with synthesized frontmatter and body. Emitted exclusively by `norn new`; not config-rule-triggerable.
 
 Repair rule `match` supports `code`, `rule`, `field`, and `actual_value`. Matches are exact and type-sensitive. A rule must declare exactly one action (for configurable rules; `rewrite_link` is emitted by the closest-match planner, not from config rules).
 
-> **Note on emitter-only ops:** Two plan op variants are emitter-only — `replace_body` (emitted by `vault set --body-from-stdin`) and `create_document` (emitted by `vault new`). Neither is config-rule-triggerable.
+> **Note on emitter-only ops:** Two plan op variants are emitter-only — `replace_body` (emitted by `norn set --body-from-stdin`) and `create_document` (emitted by `norn new`). Neither is config-rule-triggerable.
 
 ## Repairable findings
 
@@ -171,15 +171,15 @@ Findings without a matching deterministic rule are reported as skipped fallout i
 
 ## Repair apply
 
-`vault repair apply [<plan>]` applies repair plans. Apply writes by default because the command is explicit; pass `--dry-run` to preview.
+`norn repair apply [<plan>]` applies repair plans. Apply writes by default because the command is explicit; pass `--dry-run` to preview.
 
 The positional is optional: omit it (or pass `-`) to read the plan from stdin. The pipeline form composes plan generation and apply in one shot:
 
 ```bash
-vault repair apply repair.json --dry-run
-vault repair plan --format json | vault repair apply --dry-run
-vault repair apply repair.json --verify
-vault repair apply repair.json --out report.json
+norn repair apply repair.json --dry-run
+norn repair plan --format json | norn repair apply --dry-run
+norn repair apply repair.json --verify
+norn repair apply repair.json --out report.json
 ```
 
 Output formats: `--format report` (TTY default; human summary), `--format json` (pipe default; full envelope), `--format paths` (sorted dedup of changed files). `--out <PATH>` writes the JSON report to file independently of `--format`. `--format jsonl` and `--format table` were removed in v0.32; both are rejected with migration messages.
@@ -218,10 +218,10 @@ Apply output includes `plan_context` so broad plans remain explainable after app
 ## Stable repair loop
 
 ```bash
-vault validate --summary --format json
-vault repair plan --out repair.json
-vault repair apply repair.json --dry-run --format json
-vault repair apply repair.json --verify --format json
+norn validate --summary --format json
+norn repair plan --out repair.json
+norn repair apply repair.json --dry-run --format json
+norn repair apply repair.json --verify --format json
 ```
 
 For live maintenance with a snapshot tag:
@@ -229,9 +229,9 @@ For live maintenance with a snapshot tag:
 ```bash
 git status --short
 git tag snapshot/vault-repair-$(date +%Y%m%d-%H%M%S)
-vault repair plan --out repair.json
-vault repair apply repair.json --dry-run --format json
-vault repair apply repair.json --verify --format json
+norn repair plan --out repair.json
+norn repair apply repair.json --dry-run --format json
+norn repair apply repair.json --verify --format json
 git diff --check
 git diff
 ```
@@ -240,26 +240,26 @@ See [examples/repair-recipe.sh](../examples/repair-recipe.sh) for a runnable ver
 
 ## Link and path planning
 
-To surface link drift across the vault before moving or deleting documents, use `vault validate --code 'link-*'`. This returns unresolved links, ambiguous links with candidate paths, and related link findings in the standard validation shape.
+To surface link drift across the norn before moving or deleting documents, use `norn validate --code 'link-*'`. This returns unresolved links, ambiguous links with candidate paths, and related link findings in the standard validation shape.
 
 ```bash
-vault validate --code 'link-*' --format jsonl
-vault validate --code 'link-*' --target "notes/some-note.md" --format jsonl
-vault validate --code 'link-*' --summary --format json
+norn validate --code 'link-*' --format jsonl
+norn validate --code 'link-*' --target "notes/some-note.md" --format jsonl
+norn validate --code 'link-*' --summary --format json
 ```
 
-To preview the effect of moving a document (backlink rewrites, stem collisions, affected files), use `vault move` with `--dry-run`:
+To preview the effect of moving a document (backlink rewrites, stem collisions, affected files), use `norn move` with `--dry-run`:
 
 ```bash
-vault move Inbox/task.md Projects/demo/task.md --dry-run
-vault move Inbox/task.md Projects/demo/task.md --dry-run --format json
+norn move Inbox/task.md Projects/demo/task.md --dry-run
+norn move Inbox/task.md Projects/demo/task.md --dry-run --format json
 ```
 
-To preview deletion risk (incoming links that would break), use `vault delete` with `--dry-run`:
+To preview deletion risk (incoming links that would break), use `norn delete` with `--dry-run`:
 
 ```bash
-vault delete notes/old-note.md --dry-run
-vault delete notes/old-note.md --dry-run --format json
+norn delete notes/old-note.md --dry-run
+norn delete notes/old-note.md --dry-run --format json
 ```
 
 These dry-run passes separate deterministic facts (exact backlinks, path conflicts) from ambiguous/skipped fallout, without writing to the vault.

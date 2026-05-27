@@ -1,12 +1,12 @@
-# vault-cli — working principles for Claude
+# norn — working principles for Claude
 
-Project-level instructions for agents working in this repo. Workspace-private setup details live in `CLAUDE.local.md` (gitignored). This file is the durable middle layer: vault-cli-specific habits learned from real CI failures and Drew's stated design constraints.
+Project-level instructions for agents working in this repo. Workspace-private setup details live in `CLAUDE.local.md` (gitignored). This file is the durable middle layer: norn-specific habits learned from real CI failures and Drew's stated design constraints.
 
 ## Northstar
 
-**vault-cli is the agent's query primitive, not a stage in a pipeline.** Every output / filter / sort / limit / paging / column-selection decision must hold against this. When the instinct says "agents can just pipe to jq for this," push back — vault-cli should do it natively. Filter, sort, limit, paging, column selection, and (eventually) grouping all native by default.
+**norn is the agent's query primitive, not a stage in a pipeline.** Every output / filter / sort / limit / paging / column-selection decision must hold against this. When the instinct says "agents can just pipe to jq for this," push back — norn should do it natively. Filter, sort, limit, paging, column selection, and (eventually) grouping all native by default.
 
-Drew named this during the `vault find` brainstorm: *"prevent agent piping and turns where possible… we can't stop it completely day one, but that is a long term northstar."* It's the design constraint that should shape every new command and every output format choice.
+Drew named this during the `norn find` brainstorm: *"prevent agent piping and turns where possible… we can't stop it completely day one, but that is a long term northstar."* It's the design constraint that should shape every new command and every output format choice.
 
 ## Per-task verification (Rust workspace)
 
@@ -37,7 +37,7 @@ Surface enumeration first locks the conversation into "how can these commands wo
 
 ## Pre-release posture
 
-vault-cli is pre-1.0. No external consumers besides Drew. Drew has been explicit: *"this is all pre-release. There are no consumers outside of me at the moment. Now is the time for churn to exist."*
+norn is pre-1.0. No external consumers besides Drew. Drew has been explicit: *"this is all pre-release. There are no consumers outside of me at the moment. Now is the time for churn to exist."*
 
 When CI failures or downstream tests surface a v1-parity gap during a redesign, the default response is **redesign, not restore.** Question whether the existing contract was deliberate or historical-accident-shaped; prefer breaking changes (with CHANGELOG breaking-change entries) over preserving suspect behavior. This flips post-1.0 — but until then, churn is cheap.
 
@@ -68,10 +68,10 @@ Without the self-review, these defects ship into the plan and the implementation
 
 These are durable preferences across sessions. Honor them when they apply:
 
-- **The `docs` namespace is dead.** Drew: *"I hate the docs commands, their naming is unintuitive."* Any new command must use a job-shaped name (`find`, `links`, `validate`), not a noun-shaped one (`docs`, `files` is borderline). When `vault docs summary` and `vault docs inspect` get their redesign turn, they need new names.
+- **The `docs` namespace is dead.** Drew: *"I hate the docs commands, their naming is unintuitive."* Any new command must use a job-shaped name (`find`, `links`, `validate`), not a noun-shaped one (`docs`, `files` is borderline). When `norn docs summary` and `norn docs inspect` get their redesign turn, they need new names.
 - **Records output, not tables.** Drew: terminal rendering of query results is per-doc key-value blocks with terminal-width-aware value wrapping. The reference is pgcli / mycli vertical mode, not a spreadsheet grid. Don't reach for column-style tables for multi-field output.
 - **Default to dump-everything; let users narrow.** Drew: *"Without it, dump everything. Let the user / agent ask for less, they might not know what that is until they see it and then filter down."* `--col` and similar narrowing flags are subtractive; the default shows everything.
-- **`warn`, don't `block`.** For non-destructive operator decisions, vault-cli warns and proceeds; blockers reserved for cases where the action can't proceed cleanly.
+- **`warn`, don't `block`.** For non-destructive operator decisions, norn warns and proceeds; blockers reserved for cases where the action can't proceed cleanly.
 
 ## Three-layer durability for shipping
 

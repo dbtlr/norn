@@ -5,11 +5,11 @@ description: The deterministic graph, document inventory, frontmatter model, Obs
 
 # Concepts
 
-`vault` is built around a few small ideas. This page explains them once so the command reference and validation guide can stay tight.
+`norn` is built around a few small ideas. This page explains them once so the command reference and validation guide can stay tight.
 
 ## The vault graph
 
-A **vault** is a directory containing Markdown files plus their attachments. `vault` walks the directory (honoring `files.ignore` patterns from `.vault/config.yaml`) and produces a deterministic graph.
+A **vault** is a directory containing Markdown files plus their attachments. `norn` walks the directory (honoring `files.ignore` patterns from `.norn/config.yaml`) and produces a deterministic graph.
 
 The graph contains:
 
@@ -20,7 +20,7 @@ Graph construction is read-only and stateless. The same vault produces the same 
 
 ## Document inventory
 
-`vault find` is the inventory and search query. Predicates:
+`norn find` is the inventory and search query. Predicates:
 
 - `--path "<glob>"` — vault-relative path glob (path-segment semantics; see [Glob matching](#glob-matching) below).
 - `--eq field:value` / `--not-eq field:value` — frontmatter equality / inequality.
@@ -30,15 +30,15 @@ Graph construction is read-only and stateless. The same vault produces the same 
 
 All predicates are ANDed. Pass `--all` with no other predicates to return every document.
 
-`vault count --by <field>` produces grouped counts for a single frontmatter field. Without `--by`, emits the total. Use it to size a queue before listing.
+`norn count --by <field>` produces grouped counts for a single frontmatter field. Without `--by`, emits the total. Use it to size a queue before listing.
 
-`vault get <path-or-stem>` returns one document's detail: frontmatter, headings, outgoing links, unresolved links, and incoming links.
+`norn get <path-or-stem>` returns one document's detail: frontmatter, headings, outgoing links, unresolved links, and incoming links.
 
 ## Frontmatter
 
-`vault` parses YAML frontmatter at the top of each Markdown file. Top-level scalar strings and top-level lists of strings are extracted to the graph; nested YAML objects and lists are parsed for validation purposes but are not surfaced as graph links (the link-extraction layer is intentionally shallow in v0.x).
+`norn` parses YAML frontmatter at the top of each Markdown file. Top-level scalar strings and top-level lists of strings are extracted to the graph; nested YAML objects and lists are parsed for validation purposes but are not surfaced as graph links (the link-extraction layer is intentionally shallow in v0.x).
 
-Frontmatter validation lives in `validate.rules` in `.vault/config.yaml`. See [validation.md](validation.md) and [rule-shape.md](rule-shape.md) for the rule model.
+Frontmatter validation lives in `validate.rules` in `.norn/config.yaml`. See [validation.md](validation.md) and [rule-shape.md](rule-shape.md) for the rule model.
 
 ## Links: Obsidian-compatible
 
@@ -62,7 +62,7 @@ Wikilinks inside inline code (`` `[[example]]` ``) and fenced code blocks are no
 - **Exact paths** are case-sensitive.
 - **Unique stem lookup** is case-insensitive and applies only to Markdown documents.
 - **Ambiguous stems** (two documents with the same case-insensitive stem) report as `link-ambiguous` findings with all candidate paths.
-- **Backlink queries by exact attachment path** are supported via `vault get <path> --col incoming_links`.
+- **Backlink queries by exact attachment path** are supported via `norn get <path> --col incoming_links`.
 
 ## Validation vs repair
 
@@ -70,12 +70,12 @@ The product loop is four stages:
 
 1. **Detect** drift with graph facts and configured `validate.rules`. Output: findings.
 2. **Plan** supported repairs as a JSON artifact. Output: `repair.json`.
-3. **Apply** the plan explicitly via `vault repair apply`. Output: modified files + an apply report.
+3. **Apply** the plan explicitly via `norn repair apply`. Output: modified files + an apply report.
 4. **Verify** the vault after changes (`apply --verify`, or another `validate --summary` run).
 
 Validation is read-only and does not guess repairs. Repair planning is read-only and produces only inspectable artifacts. There is no hidden write path.
 
-Two explicit write surfaces exist: `vault repair apply` is the finding-driven batch write path — it requires an explicit plan artifact. `vault new`, `vault set`, `vault move`, and `vault delete` are the operator-driven CRUD surface for direct one-document mutations. Both paths are safe-by-default (dry-run previews, `--yes` to apply) and both go through the same underlying apply machinery.
+Two explicit write surfaces exist: `norn repair apply` is the finding-driven batch write path — it requires an explicit plan artifact. `norn new`, `norn set`, `norn move`, and `norn delete` are the operator-driven CRUD surface for direct one-document mutations. Both paths are safe-by-default (dry-run previews, `--yes` to apply) and both go through the same underlying apply machinery.
 
 Repair plans are schema-versioned (`schema_version: 9` as of v0.32). Apply rejects unsupported schema versions, plans for a different vault root, stale document hashes, conflicting field changes, and expected-old-value mismatches.
 
@@ -107,5 +107,5 @@ When `--format` is omitted, commands with a human renderer default to `table` on
 ## Next
 
 - [Commands](commands.md) — the full subcommand surface.
-- [Configuration](configuration.md) — `.vault/config.yaml` schema.
+- [Configuration](configuration.md) — `.norn/config.yaml` schema.
 - [Validation and repair](validation.md) — the detect/plan/apply/verify loop in detail.

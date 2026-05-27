@@ -5,7 +5,7 @@ description: Release workflow, semver and Keep a Changelog conventions, recommen
 
 # Releases and versioning
 
-`vault-cli` is pre-1.0. Minor releases may include breaking changes (CLI flags, config keys, JSON contracts). Breaking changes are called out in [CHANGELOG.md](../CHANGELOG.md) with migration notes.
+`norn` is pre-1.0. Minor releases may include breaking changes (CLI flags, config keys, JSON contracts). Breaking changes are called out in [CHANGELOG.md](../CHANGELOG.md) with migration notes.
 
 ## Versioning
 
@@ -41,7 +41,7 @@ For a release bump (from a clean working tree on `main`):
 3. Run `mise exec -- just verify`.
 4. Update `CHANGELOG.md`: rename `## Unreleased` to `## vX.Y.Z - YYYY-MM-DD`.
 5. Commit `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`.
-6. Tag: `git tag -a vX.Y.Z -m "vault-cli vX.Y.Z"`.
+6. Tag: `git tag -a vX.Y.Z -m "norn vX.Y.Z"`.
 7. Push: `git push && git push --tags`.
 
 The `just release <version>` recipe automates steps 1, 2, 5, and 6.
@@ -88,7 +88,7 @@ For tags:
 
 ### v0.28.0 schema break
 
-The repair plan JSON schema bumps from v3 to v4 in v0.28.0. `vault repair apply` rejects v3 plans with `unsupported repair plan schema version: expected 4, got 3`. No migration shim. Regenerate any persisted plans with `vault repair plan` against v0.28.0+.
+The repair plan JSON schema bumps from v3 to v4 in v0.28.0. `norn repair apply` rejects v3 plans with `unsupported repair plan schema version: expected 4, got 3`. No migration shim. Regenerate any persisted plans with `norn repair plan` against v0.28.0+.
 
 ## Post-release verification
 
@@ -96,10 +96,10 @@ After tagging, verify the release on a clean machine:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/dbtlr/vault-cli/releases/latest/download/vault-cli-installer.sh \
+  https://github.com/dbtlr/norn/releases/latest/download/norn-run-installer.sh \
   | sh
-vault --version
-vault -C fixtures/basic validate --summary --format json
+norn --version
+norn -C fixtures/basic validate --summary --format json
 ```
 
 If the install or the smoke test fails, mark the release as a pre-release in GitHub and investigate before announcing.

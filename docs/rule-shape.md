@@ -1,6 +1,6 @@
 ---
 title: Validate rule shape
-description: The conceptual model for vault-cli validate rules — selectors that pick documents and constraints that check them, with worked examples.
+description: The conceptual model for norn validate rules — selectors that pick documents and constraints that check them, with worked examples.
 ---
 
 # Validate Rule Shape
@@ -61,11 +61,11 @@ three independent findings: one for missing `artifact_kind`, one for present
 
 ## Creation defaults
 
-In addition to constraints (validated at `vault validate` time), a rule can
-declare `frontmatter_defaults` — values that `vault new` fills in when
+In addition to constraints (validated at `norn validate` time), a rule can
+declare `frontmatter_defaults` — values that `norn new` fills in when
 creating a new document whose path matches the rule. Defaults complement
 constraints: a rule can require `status` AND declare `status: backlog` as
-the default, so `vault new` produces valid documents without operator
+the default, so `norn new` produces valid documents without operator
 intervention.
 
 Substitution language and transforms apply to default values. See

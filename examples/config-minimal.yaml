@@ -1,11 +1,11 @@
-# Minimal vault-cli config.
+# Minimal norn config.
 #
-# Drop this at <vault-root>/.norn/config.yaml to declare what `vault` should
+# Drop this at <vault-root>/.norn/config.yaml to declare what `norn` should
 # ignore. With no rules, validate runs only on link resolution and frontmatter
 # parse health — useful as a starting point before you decide which standards
 # to enforce.
 #
-# See https://github.com/dbtlr/vault-cli/blob/main/docs/configuration.md for
+# See https://github.com/dbtlr/norn/blob/main/docs/configuration.md for
 # the full schema.
 
 files:

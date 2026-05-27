@@ -1,11 +1,11 @@
 ---
 title: Configuration
-description: The .vault/config.yaml schema covering file ignores, validate rules, and repair rules, with worked examples.
+description: The .norn/config.yaml schema covering file ignores, validate rules, and repair rules, with worked examples.
 ---
 
 # Configuration
 
-Config is discovered relative to `--cwd` (or `$PWD` if unset). `vault` looks for `.vault/config.yaml` at that root; missing config is fine — defaults apply.
+Config is discovered relative to `--cwd` (or `$PWD` if unset). `norn` looks for `.norn/config.yaml` at that root; missing config is fine — defaults apply.
 
 Pass `--config <path>` to point at an explicit file. Relative paths resolve against the effective cwd.
 
@@ -78,7 +78,7 @@ Ignored targets stay out of the graph entirely. If an indexed document links to 
 
 ## validate.ignore
 
-Path globs that remain in the graph but are skipped by `vault validate`. Use this for content you want indexed (so links resolve correctly) but don't want to assert standards against.
+Path globs that remain in the graph but are skipped by `norn validate`. Use this for content you want indexed (so links resolve correctly) but don't want to assert standards against.
 
 ```yaml
 validate:
@@ -120,7 +120,7 @@ Constraints (independent and additive):
 
 Supported `field_types`: `datetime`, `date`, `list_of_strings`, `wikilink`, `wikilink_or_list`. Field-type checks only run when the field is present — combine with `required_frontmatter` when presence is also required.
 
-- `frontmatter_defaults`: map of field → default value. Used by `vault new` to
+- `frontmatter_defaults`: map of field → default value. Used by `norn new` to
   fill required fields when creating a new document. Values may use the
   substitution language (`{{title}}`, `{{date}}`, `{{time}}`, `{{date:fmt}}`,
   `{{time:fmt}}`, `{{now}}`, `{{path.X}}`) and pipe transforms
@@ -167,7 +167,7 @@ Findings include `rule` context when a scoped rule produced them.
 
 ## repair.rules
 
-Declarative deterministic repair rules. `vault repair plan` matches findings against `repair.rules` and converts matched findings into executable changes; unmatched findings appear in `skipped_findings` with `skip_reason: no_rule_matched`.
+Declarative deterministic repair rules. `norn repair plan` matches findings against `repair.rules` and converts matched findings into executable changes; unmatched findings appear in `skipped_findings` with `skip_reason: no_rule_matched`.
 
 Each rule has a `match` predicate and exactly one action (`set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, or `move_document`).
 
@@ -253,7 +253,7 @@ Apply automatically rewrites backlinks alongside the move:
 - Path-qualified wikilinks `[[Inbox/task]]` rewrite when the path changes.
 - Markdown links `[text](path)` rewrite when the path changes.
 
-**Known v0.28.0 limitation:** when a backlinking file contains multiple identical link occurrences pointing at the moved file, only the first occurrence is rewritten. Subsequent identical raw occurrences remain unchanged; running `vault validate` after apply will flag them as unresolved.
+**Known v0.28.0 limitation:** when a backlinking file contains multiple identical link occurrences pointing at the moved file, only the first occurrence is rewritten. Subsequent identical raw occurrences remain unchanged; running `norn validate` after apply will flag them as unresolved.
 
 A rename whose new stem already exists elsewhere produces a non-blocking `StemCollisionAfterMove` warning attached to the planned change.
 

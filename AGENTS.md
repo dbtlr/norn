@@ -1,6 +1,6 @@
 # Agent Guide
 
-`vault` is a deterministic Markdown vault CLI for humans and agents. This file is the short agent contract; the full guide is at [docs/agent-workflows.md](docs/agent-workflows.md).
+`norn` is a deterministic Markdown vault CLI for humans and agents. This file is the short agent contract; the full guide is at [docs/agent-workflows.md](docs/agent-workflows.md).
 
 ## How We Work
 
@@ -14,17 +14,17 @@
 
 ## Quick rules
 
-- `vault validate`, `vault find`, `vault count`, `vault get`, `vault repair plan`, and `vault config show` are read-only.
-- Repair flows are explicit: `vault repair plan` produces an artifact; `vault repair apply` consumes it.
+- `norn validate`, `norn find`, `norn count`, `norn get`, `norn repair plan`, and `norn config show` are read-only.
+- Repair flows are explicit: `norn repair plan` produces an artifact; `norn repair apply` consumes it.
 - Stable contracts: JSON for human/dispatch, JSONL for streams, schema-versioned repair plans (`schema_version: 9`).
 - Apply rejects plans for a different vault root, stale document hashes, or unsupported schema versions.
 
 ## Quick start for agents
 
-1. Detect the vault root: `-C <path>` (or `--cwd <path>`). If neither is set, `vault` runs against the current directory and discovers `.vault/config.yaml` if present.
-2. Start with `vault validate --summary --format json`.
+1. Detect the vault root: `-C <path>` (or `--cwd <path>`). If neither is set, `norn` runs against the current directory and discovers `.norn/config.yaml` if present.
+2. Start with `norn validate --summary --format json`.
 3. Filter findings for a triage queue with `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason`.
-4. To create a document from a schema scaffold, use `vault new <path> --dry-run` (preview) then `--yes` (apply). For single-document frontmatter mutation, use `vault set <doc> --field KEY=VALUE --dry-run` (preview) then `--yes` (apply). For batch finding-driven repairs, write a plan: `vault repair plan --out repair.json`. Apply with `vault repair apply repair.json --dry-run` then `--verify`.
+4. To create a document from a schema scaffold, use `norn new <path> --dry-run` (preview) then `--yes` (apply). For single-document frontmatter mutation, use `norn set <doc> --field KEY=VALUE --dry-run` (preview) then `--yes` (apply). For batch finding-driven repairs, write a plan: `norn repair plan --out repair.json`. Apply with `norn repair apply repair.json --dry-run` then `--verify`.
 
 ## Documentation First
 
@@ -55,4 +55,4 @@
 
 ## Developer guide
 
-For contributors working on `vault` itself (build, test, release), see [docs/development.md](docs/development.md). This file intentionally stays short and agent-focused.
+For contributors working on `norn` itself (build, test, release), see [docs/development.md](docs/development.md). This file intentionally stays short and agent-focused.

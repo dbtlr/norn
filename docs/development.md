@@ -5,7 +5,7 @@ description: Local build, test, and verification workflow for contributors using
 
 # Development
 
-This page is for contributors working on `vault-cli` itself. If you're a user looking to install the binary, see [installation.md](installation.md).
+This page is for contributors working on `norn` itself. If you're a user looking to install the binary, see [installation.md](installation.md).
 
 ## Toolchain
 
@@ -29,7 +29,7 @@ mise exec -- just build
 Direct Cargo commands also work:
 
 ```bash
-cargo build -p vault-cli
+cargo build -p norn
 cargo test --workspace
 cargo fmt --check
 ```
@@ -37,21 +37,21 @@ cargo fmt --check
 ## Common recipes
 
 ```bash
-mise exec -- just build      # cargo build -p vault-cli
+mise exec -- just build      # cargo build -p norn
 mise exec -- just test       # cargo test --workspace
 mise exec -- just verify     # fmt --check + clippy + test
-mise exec -- just run -C fixtures/basic docs list --format jsonl
+mise exec -- just run -C fixtures/basic find --all --format jsonl
 ```
 
 Build outputs:
 
-- Debug binary: `target/debug/vault`
-- Release binary: `target/release/vault`
-- `cargo install --path .` installs to `~/.cargo/bin/vault`
+- Debug binary: `target/debug/norn`
+- Release binary: `target/release/norn`
+- `cargo install --path .` installs to `~/.cargo/bin/norn`
 
 ## Crate layout
 
-`vault-cli` is a single-crate repo. The previous workspace layout (six internal library crates plus the `vault-cli` bin) was collapsed in v0.34 — the former crates now live as modules under `src/`:
+`norn` is a single-crate repo. The previous workspace layout (six internal library crates plus the `norn` bin) was collapsed in v0.34 — the former crates now live as modules under `src/`:
 
 ```
 src/
@@ -61,7 +61,7 @@ src/
   graph/        # vault walking, build/index entry points, pattern matching
   standards/    # validate engine, config types, findings, summary, repair
   cache/        # SQLite-backed graph cache
-  cli.rs        # clap command surface for the `vault` binary
+  cli.rs        # clap command surface for the `norn` binary
   main.rs
 ```
 
@@ -71,7 +71,7 @@ The pure-parsing modules (`core`, `frontmatter`, `links`) still depend on each o
 
 The project tracks **latest stable** Rust. The toolchain pin in `mise.toml` and the `dtolnay/rust-toolchain` action in CI move in lockstep when a new stable lands; update both in one commit and note the bump in the CHANGELOG.
 
-`rust-version` is intentionally omitted from `Cargo.toml` for now. Cargo-dist's release builders (notably `aarch64-unknown-linux-musl`) ship rustc versions that lag the latest stable by several months, and declaring a high MSRV would reject those builders even though the actual code compiles cleanly. The field will be re-added when vault-cli commits to publishing on crates.io and needs to advertise a stable MSRV contract.
+`rust-version` is intentionally omitted from `Cargo.toml` for now. Cargo-dist's release builders (notably `aarch64-unknown-linux-musl`) ship rustc versions that lag the latest stable by several months, and declaring a high MSRV would reject those builders even though the actual code compiles cleanly. The field will be re-added when norn commits to publishing on crates.io and needs to advertise a stable MSRV contract.
 
 ## Test fixtures
 

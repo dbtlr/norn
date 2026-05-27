@@ -14,7 +14,7 @@ set -euo pipefail
 VAULT_DIR="${VAULT_DIR:-$PWD}"
 PLAN_FILE="${PLAN_FILE:-repair.json}"
 
-echo "vault repair recipe"
+echo "norn repair recipe"
 echo "  vault dir: $VAULT_DIR"
 echo "  plan file: $PLAN_FILE"
 echo
@@ -30,23 +30,23 @@ fi
 
 # 2. Detect: how much drift is there?
 echo "step 1: validate --summary"
-vault -C "$VAULT_DIR" validate --summary --format json
+norn -C "$VAULT_DIR" validate --summary --format json
 echo
 
 # 3. Plan: write a repair plan artifact for review.
 echo "step 2: repair plan --out $PLAN_FILE"
-vault -C "$VAULT_DIR" repair plan --out "$PLAN_FILE"
+norn -C "$VAULT_DIR" repair plan --out "$PLAN_FILE"
 echo "plan written"
 echo
 
 # 4. Dry-run: confirm the plan applies cleanly without writing.
 echo "step 3: repair apply $PLAN_FILE --dry-run"
-vault -C "$VAULT_DIR" repair apply "$PLAN_FILE" --dry-run --format json
+norn -C "$VAULT_DIR" repair apply "$PLAN_FILE" --dry-run --format json
 echo
 
 # 5. Apply with verification.
 echo "step 4: repair apply $PLAN_FILE --verify"
-vault -C "$VAULT_DIR" repair apply "$PLAN_FILE" --verify --format json
+norn -C "$VAULT_DIR" repair apply "$PLAN_FILE" --verify --format json
 echo
 
 # 6. Show what changed in git, if applicable.

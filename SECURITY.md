@@ -8,7 +8,7 @@ Email security reports to **hi@dbtlr.com**. Please do not file a public GitHub i
 
 Include:
 
-- The version of `vault-cli` affected (`vault --version`).
+- The version of `norn` affected (`norn --version`).
 - The platform you reproduced on.
 - A description of the issue, ideally with a minimal reproducer.
 - Whether the issue has been disclosed anywhere else.
@@ -24,7 +24,7 @@ There is no bug bounty program. Credit for reports is offered in the security ad
 
 ## Supported versions
 
-Only the latest minor release receives security fixes. `vault-cli` is pre-1.0; minor releases may include breaking changes, and users are encouraged to stay close to the latest release. Backports to older minors are not guaranteed.
+Only the latest minor release receives security fixes. `norn` is pre-1.0; minor releases may include breaking changes, and users are encouraged to stay close to the latest release. Backports to older minors are not guaranteed.
 
 | Version          | Supported |
 |------------------|-----------|
@@ -35,7 +35,7 @@ Only the latest minor release receives security fixes. `vault-cli` is pre-1.0; m
 
 In scope:
 
-- The `vault` CLI binary and the crates that compose it (`vault-core`, `vault-frontmatter`, `vault-links`, `vault-graph`, `vault-standards`, `vault-cli`).
+- The `norn` CLI binary (single-crate since v0.34; formerly composed of `vault-core`, `vault-frontmatter`, `vault-links`, `vault-graph`, `vault-standards`).
 - The published shell installer and binary release artifacts.
 
 Out of scope:

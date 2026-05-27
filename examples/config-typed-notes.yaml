@@ -1,4 +1,4 @@
-# Typed-notes vault-cli config.
+# Typed-notes norn config.
 #
 # Demonstrates the full shape of validate.rules and repair.rules using a
 # generic "typed note" vocabulary:
@@ -14,9 +14,9 @@
 #
 # Run a dry-run validate against this config:
 #
-#   vault --config examples/config-typed-notes.yaml validate --summary
+#   norn --config examples/config-typed-notes.yaml validate --summary
 #
-# See https://github.com/dbtlr/vault-cli/blob/main/docs/configuration.md
+# See https://github.com/dbtlr/norn/blob/main/docs/configuration.md
 # for the full schema, and docs/rule-shape.md for the selector + constraint
 # conceptual model.
 

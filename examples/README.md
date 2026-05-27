@@ -1,14 +1,14 @@
 # Examples
 
-Generic, copy-pasteable starter files for vault-cli. Everything here uses generic Markdown vault terminology — adapt the field names, status vocabularies, and path globs to match your own vault's doctrine.
+Generic, copy-pasteable starter files for norn. Everything here uses generic Markdown vault terminology — adapt the field names, status vocabularies, and path globs to match your own vault's doctrine.
 
 ## config-minimal.yaml
 
-Minimum viable `.norn/config.yaml` — just `files.ignore` patterns. Use this as a starting point when you want `vault` to walk a vault without enforcing any standards yet.
+Minimum viable `.norn/config.yaml` — just `files.ignore` patterns. Use this as a starting point when you want `norn` to walk a vault without enforcing any standards yet.
 
 ```bash
 cp examples/config-minimal.yaml /path/to/vault/.norn/config.yaml
-vault -C /path/to/vault validate --summary
+norn -C /path/to/vault validate --summary
 ```
 
 ## config-typed-notes.yaml
@@ -21,8 +21,8 @@ A worked config showing the full shape of `validate.rules` and `repair.rules`:
 
 ```bash
 cp examples/config-typed-notes.yaml /path/to/vault/.norn/config.yaml
-vault -C /path/to/vault validate --summary
-vault -C /path/to/vault repair plan --out repair.json
+norn -C /path/to/vault validate --summary
+norn -C /path/to/vault repair plan --out repair.json
 ```
 
 ## repair-recipe.sh
