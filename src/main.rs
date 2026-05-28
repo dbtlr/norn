@@ -22,6 +22,7 @@ pub mod move_doc;
 pub mod mutation_report;
 mod new;
 mod output;
+pub mod planner;
 pub mod prompt;
 mod query;
 mod repair;
