@@ -20,10 +20,6 @@
 /// The leading blank line and indentation match clap's `after_help` rendering
 /// (which appends the block after the standard help body with a single blank
 /// line of separation).
-// Task 13 wires this into every intent-verb's clap `after_help`. Until then,
-// the function is intentionally unused — suppress the lint rather than
-// removing the forward-declaration.
-#[allow(dead_code)]
 pub fn render_plan_example(kind: &str, fields: &[(&str, &str)]) -> String {
     let mut s = String::from("\nPLAN OPERATION:\n  - kind: ");
     s.push_str(kind);

@@ -10,6 +10,7 @@
 //! the literal `norn` prefix; the renderer styles tokens per palette.
 
 use crate::help::model::LiveExample;
+use crate::help::plan_example::render_plan_example;
 
 /// Return canned examples for the given command path string (e.g. `"norn find"`).
 ///
@@ -248,7 +249,55 @@ pub fn examples_for(cmd_path: &str) -> Vec<(String, String)> {
 /// and before GLOBAL OPTIONS. Headings render in `dim` bold uppercase; body
 /// paragraphs split on blank lines. Numbered lists and JSON blocks within a
 /// paragraph keep their internal indentation.
+///
+/// Intent-verb commands (move, delete, set, new, rewrite-wikilink) include a
+/// PLAN OPERATION section showing the MigrationPlan YAML equivalent so users
+/// and agents can see CLI ⇄ plan parity at the point of consumption.
 pub fn conceptual_sections_for(cmd_path: &str) -> Vec<(String, String)> {
+    // Intent-verb PLAN OPERATION blocks: show the MigrationPlan YAML
+    // equivalent for each command so the CLI ⇄ plan parity is visible
+    // in --help output.
+    match cmd_path {
+        "norn move" => {
+            return vec![(
+                "Plan operation".to_string(),
+                render_plan_example("move_document", &[("src", "<SRC>"), ("dst", "<DST>")]),
+            )];
+        }
+        "norn delete" => {
+            return vec![(
+                "Plan operation".to_string(),
+                render_plan_example("delete_document", &[("path", "<DOC>")]),
+            )];
+        }
+        "norn set" => {
+            return vec![(
+                "Plan operation".to_string(),
+                render_plan_example(
+                    "set_frontmatter",
+                    &[
+                        ("path", "<DOC>"),
+                        ("field", "<KEY>"),
+                        ("new_value", "<VALUE>"),
+                    ],
+                ),
+            )];
+        }
+        "norn new" => {
+            return vec![(
+                "Plan operation".to_string(),
+                render_plan_example("create_document", &[("path", "<PATH>")]),
+            )];
+        }
+        "norn rewrite-wikilink" => {
+            return vec![(
+                "Plan operation".to_string(),
+                render_plan_example("rewrite_wikilink", &[("old", "<OLD>"), ("new", "<NEW>")]),
+            )];
+        }
+        _ => {}
+    }
+
     let pairs: &[(&str, &str)] = match cmd_path {
         "norn validate" => &[
             (
