@@ -176,7 +176,7 @@ pub fn apply_repair_plan_with_context(
             } else {
                 report
                     .rewritten_links
-                    .extend(apply_link_rewrites(cwd, change)?);
+                    .extend(apply_link_rewrites(cwd, change)?.rewritten);
             }
         }
 
@@ -355,7 +355,7 @@ pub fn apply_repair_plan_with_context(
                 }
             }
         } else {
-            rewrites.extend(apply_link_rewrites(cwd, change)?);
+            rewrites.extend(apply_link_rewrites(cwd, change)?.rewritten);
         }
     }
 

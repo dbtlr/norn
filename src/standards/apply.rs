@@ -98,6 +98,46 @@ pub struct LinkRewriteResult {
     pub to: String,
 }
 
+/// Why a planned backlink rewrite did not land. v1 has only `Drifted`;
+/// extensible for a later slice's failure codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkSkipReason {
+    /// The on-disk link text changed between plan and apply (the planned
+    /// `raw` was not found in the file), so the rewrite was a no-op.
+    Drifted,
+}
+
+impl LinkSkipReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            LinkSkipReason::Drifted => "drifted",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            LinkSkipReason::Drifted => "on-disk link text changed between plan and apply",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkSkipResult {
+    pub file: Utf8PathBuf,
+    pub from: String,
+    pub to: String,
+    pub reason: LinkSkipReason,
+}
+
+/// Result of applying a move/delete backlink cascade: what landed and what
+/// was skipped (with a reason). Replaces the bare `Vec<LinkRewriteResult>`
+/// so deviations are recorded, not silently dropped.
+#[derive(Debug, Clone, Default)]
+pub struct LinkRewriteOutcome {
+    pub rewritten: Vec<LinkRewriteResult>,
+    pub skipped: Vec<LinkSkipResult>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RepairApplyWarning {
     pub path: Utf8PathBuf,
@@ -607,11 +647,11 @@ pub fn apply_delete(cwd: &Utf8Path, change: &PlannedChange) -> Result<DeleteResu
 pub fn apply_link_rewrites(
     cwd: &Utf8Path,
     change: &PlannedChange,
-) -> Result<Vec<LinkRewriteResult>, ApplyError> {
-    let mut results = Vec::new();
+) -> Result<LinkRewriteOutcome, ApplyError> {
+    let mut outcome = LinkRewriteOutcome::default();
     let risk = match &change.link_risk {
         Some(r) => r,
-        None => return Ok(results),
+        None => return Ok(outcome),
     };
     let all = risk
         .stem_links
@@ -627,19 +667,27 @@ pub fn apply_link_rewrites(
             })?;
         let updated = original.replacen(&affected.raw, &affected.rewritten, 1);
         if updated == original {
+            // Drift: the planned link text is no longer on disk. Record the
+            // deviation with a reason instead of silently skipping.
+            outcome.skipped.push(LinkSkipResult {
+                file: affected.source_path.clone(),
+                from: affected.raw.clone(),
+                to: affected.rewritten.clone(),
+                reason: LinkSkipReason::Drifted,
+            });
             continue;
         }
         fs::write(abs.as_std_path(), &updated).map_err(|e| ApplyError::CannotMinimalEdit {
             path: affected.source_path.clone(),
             reason: format!("write backlinker failed: {e}"),
         })?;
-        results.push(LinkRewriteResult {
+        outcome.rewritten.push(LinkRewriteResult {
             file: affected.source_path.clone(),
             from: affected.raw.clone(),
             to: affected.rewritten.clone(),
         });
     }
-    Ok(results)
+    Ok(outcome)
 }
 
 /// Apply a `rewrite_link` operation to source-doc content. Rewrites every
@@ -1663,5 +1711,53 @@ mod tests {
             }
             other => panic!("expected MoveDestinationExists, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn apply_link_rewrites_records_drift_skip_with_reason() {
+        let tmp = tempfile::Builder::new()
+            .prefix("apply-skip-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        // Backlinker on disk references [[c]], but the plan expects [[a]] → drift.
+        std::fs::write(root.join("d.md"), "see [[c]] here\n").unwrap();
+
+        let change = PlannedChange {
+            change_id: "test-skip-id".into(),
+            path: camino::Utf8PathBuf::from("a.md"),
+            document_hash: String::new(),
+            finding_code: "move_document".into(),
+            finding_rule: None,
+            repair_rule: "test".into(),
+            operation: "move_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: Some(camino::Utf8PathBuf::from("b.md")),
+            link_risk: Some(crate::standards::repair::link_risk::LinkRisk {
+                stem_changed: true,
+                directory_changed: false,
+                stem_links: vec![crate::standards::repair::link_risk::AffectedLink {
+                    source_path: camino::Utf8PathBuf::from("d.md"),
+                    raw: "[[a]]".into(),
+                    kind: crate::core::LinkKind::Wikilink,
+                    source_span: None,
+                    rewritten: "[[b]]".into(),
+                }],
+                path_qualified_wikilinks: vec![],
+                markdown_links: vec![],
+            }),
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(outcome.rewritten.len(), 0, "drifted link must not be rewritten");
+        assert_eq!(outcome.skipped.len(), 1, "drifted link must be recorded as skipped");
+        assert_eq!(outcome.skipped[0].file.as_str(), "d.md");
+        assert_eq!(outcome.skipped[0].reason.code(), "drifted");
+        assert_eq!(std::fs::read_to_string(root.join("d.md")).unwrap(), "see [[c]] here\n");
     }
 }
