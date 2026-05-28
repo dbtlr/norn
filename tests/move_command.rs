@@ -363,6 +363,96 @@ fn move_cascade_covers_mixed_contexts_with_self_reference() {
     }
 }
 
+fn synth_folder_vault() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-move-recursive-int-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir_all(root.join("src_dir/sub")).unwrap();
+    std::fs::write(root.join("src_dir/a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+    std::fs::write(
+        root.join("src_dir/sub/b.md"),
+        "---\ntype: note\n---\n# B\n[[a]]\n",
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn move_with_parents_creates_missing_dst_dirs() {
+    let tmp = synth(); // existing synth() — single-vault with a.md + b.md
+    let vault = tmp.path().join("vault");
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["move", "b.md", "deep/nested/new.md", "--parents", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(vault.join("deep/nested/new.md").exists());
+}
+
+#[test]
+fn move_without_parents_refuses_when_dst_parent_missing() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["move", "b.md", "deep/nested/new.md", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "exit 2 when dst parent missing and --parents not set"
+    );
+}
+
+#[test]
+fn move_recursive_folder_rename() {
+    let tmp = synth_folder_vault();
+    let vault = tmp.path().join("vault");
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&vault)
+        .args([
+            "move",
+            "src_dir",
+            "dst_dir",
+            "--recursive",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(vault.join("dst_dir/a.md").exists());
+    assert!(vault.join("dst_dir/sub/b.md").exists());
+    assert!(
+        !vault.join("src_dir").exists() || vault.join("src_dir").read_dir().unwrap().count() == 0
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+    let moves: Vec<_> = report["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["kind"] == "move_document")
+        .collect();
+    assert_eq!(moves.len(), 2, "two .md files → two move_document ops");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn move_case_only_difference_refuses_same_path() {

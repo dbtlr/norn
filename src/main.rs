@@ -439,6 +439,129 @@ fn run(cli: Cli) -> Result<i32> {
             )?;
             trim_diagnostics(&mut index, verbose);
 
+            // Auto-detect folder move: if SRC is a directory on disk (or --recursive
+            // is explicit), route through the planner via a move_folder op.
+            // This matches the "warn don't block" pattern — an operator who typed
+            // `norn move src_dir dst_dir` without -r almost certainly meant folder-move.
+            let src_full = cwd.join(&args.src);
+            let src_is_dir = src_full.as_std_path().is_dir();
+
+            if args.recursive || src_is_dir {
+                // Route through planner via a one-op MigrationPlan with kind move_folder.
+                use crate::applier::{apply_migration_plan, ApplyContext};
+                use crate::migration_plan::{
+                    MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION,
+                };
+
+                let plan = MigrationPlan {
+                    schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
+                    vault_root: cwd.to_string(),
+                    generator: None,
+                    generated_at: None,
+                    operations: vec![MigrationOp {
+                        kind: "move_folder".into(),
+                        id: None,
+                        requires: vec![],
+                        fields: serde_json::json!({
+                            "src": args.src.clone(),
+                            "dst": args.dst.clone(),
+                            "parents": args.parents,
+                        }),
+                        footnote: None,
+                    }],
+                    skipped: vec![],
+                    plan_footnote: None,
+                };
+
+                // Determine whether to apply (same TTY/yes/dry-run logic as single-file).
+                let dry_run = if args.dry_run {
+                    true
+                } else if args.yes {
+                    false
+                } else if matches!(args.format, crate::cli::MoveFormat::Json) {
+                    // --format json: non-interactive, dry-run
+                    true
+                } else if std::io::stdin().is_terminal() {
+                    use std::io::Write;
+                    let stdin = std::io::stdin();
+                    let mut reader = stdin.lock();
+                    let mut prompt_out = std::io::stderr();
+                    writeln!(prompt_out)?;
+                    let ok =
+                        crate::prompt::confirm(&mut reader, &mut prompt_out, "Proceed? [y/N] ")?;
+                    if !ok {
+                        std::process::exit(1);
+                    }
+                    false
+                } else {
+                    // Non-TTY without --yes: implicit dry-run
+                    true
+                };
+
+                let ctx = ApplyContext {
+                    dry_run,
+                    parents: args.parents,
+                };
+                let report = match apply_migration_plan(&plan, &index, ctx) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return Ok(2);
+                    }
+                };
+
+                let exit = if report.failed > 0 { 1 } else { 0 };
+
+                // After a live (non-dry-run) folder move, clean up empty source
+                // directories. The applier moved individual .md files; the skeleton
+                // of the source tree (empty leaf dirs and their empty ancestors)
+                // should be removed so the source path no longer exists.
+                if !dry_run && exit == 0 {
+                    remove_empty_dirs(src_full.as_std_path());
+                }
+
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                match args.format {
+                    crate::cli::MoveFormat::Json => {
+                        let json = serde_json::to_string_pretty(&report)?;
+                        out.write_all(json.as_bytes())?;
+                        out.write_all(b"\n")?;
+                    }
+                    crate::cli::MoveFormat::Records => {
+                        let status_label = if dry_run { "dry-run" } else { "applied" };
+                        writeln!(out, "move-folder {status_label}")?;
+                        writeln!(
+                            out,
+                            "  applied: {}  skipped: {}  failed: {}",
+                            report.applied, report.skipped, report.failed
+                        )?;
+                        for op in &report.operations {
+                            let status = format!("{:?}", op.status).to_lowercase();
+                            writeln!(out, "  [{status}] {}", op.summary)?;
+                        }
+                    }
+                }
+                return Ok(exit);
+            }
+
+            // ---- Single-file path (unchanged, except --parents handling added below) ----
+
+            // --parents: create missing destination parent directories before preflight.
+            if args.parents {
+                let dst_path = camino::Utf8Path::new(&args.dst);
+                if let Some(parent) = dst_path.parent() {
+                    if !parent.as_str().is_empty() {
+                        std::fs::create_dir_all(cwd.join(parent)).map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to create destination parents for {}: {e}",
+                                args.dst
+                            )
+                        })?;
+                    }
+                }
+            }
+
             let cfg = crate::move_doc::PreflightConfig {
                 src: &args.src,
                 dst: &args.dst,
@@ -806,6 +929,28 @@ fn run_self_update_command(args: cli::SelfUpdateArgs, color: cli::ColorWhen) -> 
             Ok(exit)
         }
     }
+}
+
+/// Recursively remove a directory and all of its children, but only if every
+/// descendant is an empty directory. If any non-directory file remains (e.g. a
+/// .md file that failed to move), the directory is left intact.
+///
+/// Called after a `move_folder` apply to clean up the empty source tree.
+fn remove_empty_dirs(path: &std::path::Path) {
+    if !path.is_dir() {
+        return;
+    }
+    // Recurse into children first (depth-first).
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                remove_empty_dirs(&child);
+            }
+        }
+    }
+    // Now attempt to remove this directory (succeeds only if empty).
+    let _ = std::fs::remove_dir(path);
 }
 
 fn strip_block_prefix(msg: &str) -> &str {

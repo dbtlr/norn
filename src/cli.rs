@@ -801,6 +801,15 @@ pub struct MoveArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Create missing destination parent directories before moving.
+    #[arg(long, short = 'p')]
+    pub parents: bool,
+
+    /// When SRC and DST are directories, recursively move all .md files
+    /// preserving structure (one cascade pass for all backlinks).
+    #[arg(long, short = 'r')]
+    pub recursive: bool,
+
     /// Stdout format. `records` is the default TTY summary; `json` emits the MoveReport.
     #[arg(long, value_enum, default_value_t = MoveFormat::Records)]
     pub format: MoveFormat,
@@ -1422,10 +1431,32 @@ mod move_cli_tests {
             "--dry-run",
             "--no-link-rewrite",
             "--force",
+            "--parents",
+            "--recursive",
             "--format",
             "json",
         ]);
         assert!(cli.is_ok(), "parse error: {:?}", cli.err());
+    }
+
+    #[test]
+    fn move_subcommand_parses_parents_short_flag() {
+        let cli = Cli::try_parse_from(["vault", "move", "src.md", "dst.md", "-p"]);
+        assert!(cli.is_ok(), "parse error: {:?}", cli.err());
+        match cli.unwrap().command {
+            Command::Move(args) => assert!(args.parents),
+            _ => panic!("expected Move"),
+        }
+    }
+
+    #[test]
+    fn move_subcommand_parses_recursive_short_flag() {
+        let cli = Cli::try_parse_from(["vault", "move", "src_dir", "dst_dir", "-r"]);
+        assert!(cli.is_ok(), "parse error: {:?}", cli.err());
+        match cli.unwrap().command {
+            Command::Move(args) => assert!(args.recursive),
+            _ => panic!("expected Move"),
+        }
     }
 }
 
