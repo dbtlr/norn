@@ -429,7 +429,11 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Command::Move(args) => {
-            use std::io::{IsTerminal, Write};
+            use crate::applier::{apply_migration_plan, ApplyContext};
+            use crate::migration_plan::{
+                MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION,
+            };
+            use std::io::Write;
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             let mut index = crate::cache_cmd::load_graph_index(
@@ -445,110 +449,11 @@ fn run(cli: Cli) -> Result<i32> {
             // `norn move src_dir dst_dir` without -r almost certainly meant folder-move.
             let src_full = cwd.join(&args.src);
             let src_is_dir = src_full.as_std_path().is_dir();
+            let is_folder = args.recursive || src_is_dir;
 
-            if args.recursive || src_is_dir {
-                // Route through planner via a one-op MigrationPlan with kind move_folder.
-                use crate::applier::{apply_migration_plan, ApplyContext};
-                use crate::migration_plan::{
-                    MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION,
-                };
-
-                let plan = MigrationPlan {
-                    schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
-                    vault_root: cwd.to_string(),
-                    generator: None,
-                    generated_at: None,
-                    operations: vec![MigrationOp {
-                        kind: "move_folder".into(),
-                        id: None,
-                        requires: vec![],
-                        fields: serde_json::json!({
-                            "src": args.src.clone(),
-                            "dst": args.dst.clone(),
-                            "parents": args.parents,
-                        }),
-                        footnote: None,
-                    }],
-                    skipped: vec![],
-                    plan_footnote: None,
-                };
-
-                // Determine whether to apply (same TTY/yes/dry-run logic as single-file).
-                let dry_run = if args.dry_run {
-                    true
-                } else if args.yes {
-                    false
-                } else if matches!(args.format, crate::cli::MoveFormat::Json) {
-                    // --format json: non-interactive, dry-run
-                    true
-                } else if std::io::stdin().is_terminal() {
-                    use std::io::Write;
-                    let stdin = std::io::stdin();
-                    let mut reader = stdin.lock();
-                    let mut prompt_out = std::io::stderr();
-                    writeln!(prompt_out)?;
-                    let ok =
-                        crate::prompt::confirm(&mut reader, &mut prompt_out, "Proceed? [y/N] ")?;
-                    if !ok {
-                        std::process::exit(1);
-                    }
-                    false
-                } else {
-                    // Non-TTY without --yes: implicit dry-run
-                    true
-                };
-
-                let ctx = ApplyContext {
-                    dry_run,
-                    parents: args.parents,
-                };
-                let report = match apply_migration_plan(&plan, &index, ctx) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        return Ok(2);
-                    }
-                };
-
-                let exit = if report.failed > 0 { 1 } else { 0 };
-
-                // After a live (non-dry-run) folder move, clean up empty source
-                // directories. The applier moved individual .md files; the skeleton
-                // of the source tree (empty leaf dirs and their empty ancestors)
-                // should be removed so the source path no longer exists.
-                if !dry_run && exit == 0 {
-                    remove_empty_dirs(src_full.as_std_path());
-                }
-
-                let stdout = std::io::stdout();
-                let mut out = stdout.lock();
-                match args.format {
-                    crate::cli::MoveFormat::Json => {
-                        let json = serde_json::to_string_pretty(&report)?;
-                        out.write_all(json.as_bytes())?;
-                        out.write_all(b"\n")?;
-                    }
-                    crate::cli::MoveFormat::Records => {
-                        let status_label = if dry_run { "dry-run" } else { "applied" };
-                        writeln!(out, "move-folder {status_label}")?;
-                        writeln!(
-                            out,
-                            "  applied: {}  skipped: {}  failed: {}",
-                            report.applied, report.skipped, report.failed
-                        )?;
-                        for op in &report.operations {
-                            let status = format!("{:?}", op.status).to_lowercase();
-                            writeln!(out, "  [{status}] {}", op.summary)?;
-                        }
-                    }
-                }
-                return Ok(exit);
-            }
-
-            // ---- Single-file path (unchanged, except --parents handling added below) ----
-
-            // --parents: create missing destination parent directories before preflight.
-            if args.parents {
+            // --parents: for single-file moves, create missing destination parent
+            // directories before preflight. (Folder moves handle parents via the expander.)
+            if !is_folder && args.parents {
                 let dst_path = camino::Utf8Path::new(&args.dst);
                 if let Some(parent) = dst_path.parent() {
                     if !parent.as_str().is_empty() {
@@ -562,88 +467,140 @@ fn run(cli: Cli) -> Result<i32> {
                 }
             }
 
-            let cfg = crate::move_doc::PreflightConfig {
-                src: &args.src,
-                dst: &args.dst,
-                force: args.force,
-                no_link_rewrite: args.no_link_rewrite,
-                vault_root: &cwd,
-                index: &index,
+            // ----------------------------------------------------------------
+            // Pre-flight (single-file only): validate src/dst before building
+            // the MigrationPlan so we can exit 2 on refusal.
+            // ----------------------------------------------------------------
+            // For folder moves the expander handles its own validation; we only
+            // run the explicit preflight for single-file moves.
+            let (link_total, link_files) = if !is_folder {
+                let cfg = crate::move_doc::PreflightConfig {
+                    src: &args.src,
+                    dst: &args.dst,
+                    force: args.force,
+                    no_link_rewrite: args.no_link_rewrite,
+                    vault_root: &cwd,
+                    index: &index,
+                };
+                let repair_plan = match crate::move_doc::preflight_and_plan(cfg) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
+                };
+                // Compute link counts from link_risk for TTY rendering.
+                let move_op = repair_plan
+                    .changes
+                    .iter()
+                    .find(|c| c.operation == "move_document")
+                    .expect("plan must have a move_document op");
+                let (lt, lf) = if let Some(risk) = &move_op.link_risk {
+                    use std::collections::BTreeSet;
+                    let mut files: BTreeSet<&camino::Utf8Path> = BTreeSet::new();
+                    let mut total = 0usize;
+                    for a in risk
+                        .stem_links
+                        .iter()
+                        .chain(risk.path_qualified_wikilinks.iter())
+                        .chain(risk.markdown_links.iter())
+                    {
+                        files.insert(a.source_path.as_path());
+                        total += 1;
+                    }
+                    (total, files.len())
+                } else {
+                    (0, 0)
+                };
+                (lt, lf)
+            } else {
+                (0, 0)
             };
-            let plan = match crate::move_doc::preflight_and_plan(cfg) {
-                Ok(plan) => plan,
+
+            // ----------------------------------------------------------------
+            // Resolve dry_run (extracted helper logic, shared across both paths).
+            // --format json → implicit non-interactive (no apply without --yes).
+            // ----------------------------------------------------------------
+            let dry_run = resolve_move_dry_run(args.dry_run, args.yes, &args.format)?;
+
+            // ----------------------------------------------------------------
+            // Build one-op MigrationPlan.
+            // ----------------------------------------------------------------
+            let op_kind = if is_folder {
+                "move_folder"
+            } else {
+                "move_document"
+            };
+            let mut fields = serde_json::json!({
+                "src": args.src.clone(),
+                "dst": args.dst.clone(),
+                "parents": args.parents,
+            });
+            if !is_folder && args.force {
+                fields["force"] = serde_json::Value::Bool(true);
+            }
+            if !is_folder && args.no_link_rewrite {
+                fields["no_link_rewrite"] = serde_json::Value::Bool(true);
+            }
+            let migration_plan = MigrationPlan {
+                schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
+                vault_root: cwd.to_string(),
+                generator: None,
+                generated_at: None,
+                operations: vec![MigrationOp {
+                    kind: op_kind.into(),
+                    id: None,
+                    requires: vec![],
+                    fields,
+                    footnote: None,
+                }],
+                skipped: vec![],
+                plan_footnote: None,
+            };
+
+            let ctx = ApplyContext {
+                dry_run,
+                parents: args.parents,
+            };
+            let report = match apply_migration_plan(&migration_plan, &index, ctx) {
+                Ok(r) => r,
                 Err(e) => {
                     eprintln!("error: {e}");
-                    std::process::exit(2);
+                    return Ok(2);
                 }
             };
 
-            let warnings = crate::move_doc::collect_warnings(&plan, &index, &cwd);
+            let exit = if report.failed > 0 { 1 } else { 0 };
 
+            // After a live folder move, clean up empty source directories.
+            if is_folder && !dry_run && exit == 0 {
+                remove_empty_dirs(src_full.as_std_path());
+            }
+
+            // ----------------------------------------------------------------
+            // Render output.
+            // ----------------------------------------------------------------
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
-
-            // Determine whether to apply, and handle the TTY-interactive branch specially
-            // (it needs to render the preview before prompting).
-            // In JSON mode we must render exactly once — skip the preview when we're
-            // going to apply so callers never see two concatenated JSON objects.
-            let should_apply = if args.dry_run {
-                false
-            } else if args.yes {
-                true
-            } else if matches!(args.format, crate::cli::MoveFormat::Json) {
-                // --format json is implicitly non-interactive; render preview and exit.
-                let preview = crate::move_doc::build_report(&plan, false, warnings.clone());
-                crate::move_doc::render_json(&mut out, &preview)?;
-                return Ok(0);
-            } else if std::io::stdin().is_terminal() {
-                // TTY interactive: render preview first so the operator can see what
-                // they're confirming, then prompt.
-                let preview = crate::move_doc::build_report(&plan, false, warnings.clone());
-                crate::move_doc::render_records(&mut out, &preview)?;
-                let stdin = std::io::stdin();
-                let mut reader = stdin.lock();
-                let mut prompt_out = std::io::stderr();
-                writeln!(prompt_out)?;
-                let ok = crate::prompt::confirm(&mut reader, &mut prompt_out, "Proceed? [y/N] ")?;
-                if !ok {
-                    std::process::exit(1);
+            match args.format {
+                crate::cli::MoveFormat::Json => {
+                    let json = serde_json::to_string_pretty(&report)?;
+                    out.write_all(json.as_bytes())?;
+                    out.write_all(b"\n")?;
                 }
-                true
-            } else {
-                // Non-TTY without --yes = implicit dry-run: render preview and exit.
-                let preview = crate::move_doc::build_report(&plan, false, warnings.clone());
-                crate::move_doc::render_records(&mut out, &preview)?;
-                return Ok(0);
-            };
-
-            if should_apply {
-                crate::repair_apply::apply_repair_plan(
-                    &cwd, &index, &plan, /*dry_run=*/ false,
-                )?;
-                let applied = crate::move_doc::build_report(&plan, true, warnings);
-                match args.format {
-                    crate::cli::MoveFormat::Records => {
-                        crate::move_doc::render_records(&mut out, &applied)?;
-                    }
-                    crate::cli::MoveFormat::Json => {
-                        crate::move_doc::render_json(&mut out, &applied)?;
-                    }
-                }
-            } else {
-                // --dry-run: render preview respecting --format.
-                let preview = crate::move_doc::build_report(&plan, false, warnings);
-                match args.format {
-                    crate::cli::MoveFormat::Records => {
-                        crate::move_doc::render_records(&mut out, &preview)?;
-                    }
-                    crate::cli::MoveFormat::Json => {
-                        crate::move_doc::render_json(&mut out, &preview)?;
+                crate::cli::MoveFormat::Records => {
+                    if is_folder {
+                        crate::move_doc::render_folder_apply_tty(&mut out, &report, dry_run)?;
+                    } else {
+                        let applied = !dry_run && exit == 0;
+                        crate::move_doc::render_move_apply_tty(
+                            &mut out, &args.src, &args.dst, link_total, link_files, applied,
+                        )?;
                     }
                 }
             }
 
-            Ok(0)
+            Ok(exit)
         }
         Command::Delete(args) => {
             use std::io::{IsTerminal, Write};
@@ -929,6 +886,49 @@ fn run_self_update_command(args: cli::SelfUpdateArgs, color: cli::ColorWhen) -> 
             Ok(exit)
         }
     }
+}
+
+/// Resolve the `dry_run` flag for a `norn move` invocation.
+///
+/// - `--dry-run` → always dry-run.
+/// - `--yes` → apply (no prompt).
+/// - `--format json` → implicit non-interactive; apply without prompting.
+///   (JSON mode is designed for script/agent use where `--yes` is implied.)
+/// - TTY stdin → prompt the operator; exit 1 if declined.
+/// - Non-TTY, no `--yes` → implicit dry-run.
+///
+/// Returns `Ok(true)` for dry-run, `Ok(false)` for apply.
+fn resolve_move_dry_run(
+    dry_run_flag: bool,
+    yes_flag: bool,
+    format: &crate::cli::MoveFormat,
+) -> anyhow::Result<bool> {
+    use std::io::IsTerminal;
+    if dry_run_flag {
+        return Ok(true);
+    }
+    if yes_flag {
+        return Ok(false);
+    }
+    // --format json without --yes: implicit non-interactive dry-run (safe for
+    // script/agent pipelines that haven't explicitly confirmed with --yes).
+    if matches!(format, crate::cli::MoveFormat::Json) {
+        return Ok(true);
+    }
+    if std::io::stdin().is_terminal() {
+        let stdin = std::io::stdin();
+        let mut reader = stdin.lock();
+        let mut prompt_out = std::io::stderr();
+        use std::io::Write;
+        writeln!(prompt_out)?;
+        let ok = crate::prompt::confirm(&mut reader, &mut prompt_out, "Proceed? [y/N] ")?;
+        if !ok {
+            std::process::exit(1);
+        }
+        return Ok(false);
+    }
+    // Non-TTY without --yes: implicit dry-run.
+    Ok(true)
 }
 
 /// Recursively remove a directory and all of its children, but only if every

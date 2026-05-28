@@ -106,11 +106,26 @@ fn move_format_json_emits_envelope() {
     );
     let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
         .expect("output must parse as JSON");
-    assert_eq!(v["operation"], "move");
-    assert_eq!(v["source"], "b.md");
-    assert_eq!(v["destination"], "renamed.md");
-    assert_eq!(v["applied"], false);
-    assert_eq!(v["link_rewrites"]["total"], 1);
+    // ApplyReport shape (replaces MoveReport as of Plan Task 14)
+    assert_eq!(v["schema_version"], 1);
+    assert!(
+        v["dry_run"].as_bool().unwrap_or(false),
+        "dry_run should be true for implicit non-interactive"
+    );
+    let ops = v["operations"]
+        .as_array()
+        .expect("operations must be an array");
+    assert_eq!(ops.len(), 1, "exactly one move_document op");
+    assert_eq!(ops[0]["kind"], "move_document");
+    let summary = ops[0]["summary"].as_str().unwrap_or("");
+    assert!(
+        summary.contains("b.md"),
+        "summary should mention source: {summary}"
+    );
+    assert!(
+        summary.contains("renamed.md"),
+        "summary should mention destination: {summary}"
+    );
     // --format json without --yes is implicitly non-interactive; file must not move
     assert!(
         tmp.path().join("vault/b.md").exists(),
@@ -144,11 +159,26 @@ fn move_dry_run_format_json_emits_envelope() {
     let v: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_else(|e| {
         panic!("--dry-run --format json must emit a JSON envelope: {e}\ngot: {trimmed}")
     });
-    assert_eq!(v["operation"], "move");
-    assert_eq!(v["source"], "b.md");
-    assert_eq!(v["destination"], "renamed.md");
-    assert_eq!(v["applied"], false);
-    assert_eq!(v["link_rewrites"]["total"], 1);
+    // ApplyReport shape (replaces MoveReport as of Plan Task 14)
+    assert_eq!(v["schema_version"], 1);
+    assert!(
+        v["dry_run"].as_bool().unwrap_or(false),
+        "dry_run must be true"
+    );
+    let ops = v["operations"]
+        .as_array()
+        .expect("operations must be an array");
+    assert_eq!(ops.len(), 1, "exactly one move_document op");
+    assert_eq!(ops[0]["kind"], "move_document");
+    let summary = ops[0]["summary"].as_str().unwrap_or("");
+    assert!(
+        summary.contains("b.md"),
+        "summary should mention source: {summary}"
+    );
+    assert!(
+        summary.contains("renamed.md"),
+        "summary should mention destination: {summary}"
+    );
     // Dry-run must not mutate the filesystem.
     assert!(
         tmp.path().join("vault/b.md").exists(),
@@ -192,9 +222,21 @@ fn move_yes_format_json_emits_single_json_object() {
     let trimmed = trimmed.trim();
     let v: serde_json::Value = serde_json::from_str(trimmed)
         .unwrap_or_else(|e| panic!("output must be a single JSON object: {e}\ngot: {trimmed}"));
-    assert_eq!(v["operation"], "move");
-    // applied = true: the mutation was performed
-    assert_eq!(v["applied"], true);
+    // ApplyReport shape (replaces MoveReport as of Plan Task 14)
+    assert_eq!(v["schema_version"], 1);
+    // dry_run = false: the mutation was performed
+    assert_eq!(
+        v["dry_run"], false,
+        "dry_run should be false after --yes apply"
+    );
+    // applied count = 1
+    assert_eq!(v["applied"], 1, "applied count should be 1");
+    let ops = v["operations"]
+        .as_array()
+        .expect("operations must be an array");
+    assert_eq!(ops.len(), 1, "exactly one move_document op");
+    assert_eq!(ops[0]["kind"], "move_document");
+    assert_eq!(ops[0]["status"], "applied");
     // File must actually have moved
     assert!(
         !tmp.path().join("vault/b.md").exists(),

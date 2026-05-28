@@ -95,11 +95,21 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 .as_str()
                 .ok_or_else(|| anyhow!("move_document missing dst"))?;
             let parents = op.fields["parents"].as_bool().unwrap_or(false);
+            let force = op.fields["force"].as_bool().unwrap_or(false);
+            let no_link_rewrite = op.fields["no_link_rewrite"].as_bool().unwrap_or(false);
 
             let old_path: Utf8PathBuf = src.into();
             let new_path: Utf8PathBuf = dst.into();
-            let link_risk =
-                classify_link_risk(&old_path, &new_path, &index.documents, &index.files);
+            let link_risk = if no_link_rewrite {
+                None
+            } else {
+                Some(classify_link_risk(
+                    &old_path,
+                    &new_path,
+                    &index.documents,
+                    &index.files,
+                ))
+            };
 
             let change = PlannedChange {
                 change_id: format!("move-{}", src),
@@ -113,9 +123,9 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 expected_old_value: None,
                 new_value: None,
                 destination: Some(new_path),
-                link_risk: Some(link_risk),
+                link_risk,
                 warnings: Vec::new(),
-                force: false,
+                force,
                 parents,
             };
             Ok(vec![change])

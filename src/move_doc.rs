@@ -139,6 +139,73 @@ pub fn render_json<W: Write>(out: &mut W, report: &MoveReport) -> anyhow::Result
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// ApplyReport-based TTY renderer for single-file moves
+// ---------------------------------------------------------------------------
+
+/// Render a human-readable TTY summary for a single-file move.
+///
+/// `src` and `dst` are vault-relative paths. `link_total` and `link_files` are
+/// the counts derived from `link_risk` before the apply (from `classify_link_risk`).
+/// `applied` is `true` when the move was executed, `false` for dry-run/preview.
+pub fn render_move_apply_tty<W: Write>(
+    out: &mut W,
+    src: &str,
+    dst: &str,
+    link_total: usize,
+    link_files: usize,
+    applied: bool,
+) -> std::io::Result<()> {
+    if applied {
+        writeln!(out, "✓ moved {src} → {dst}")?;
+        if link_total > 0 {
+            writeln!(
+                out,
+                "✓ rewrote {} backlink{} across {} file{}",
+                link_total,
+                if link_total == 1 { "" } else { "s" },
+                link_files,
+                if link_files == 1 { "" } else { "s" },
+            )?;
+        }
+    } else {
+        writeln!(out, "norn move {src} → {dst}")?;
+        if link_total > 0 {
+            writeln!(
+                out,
+                "  {} backlink{} to rewrite across {} file{}",
+                link_total,
+                if link_total == 1 { "" } else { "s" },
+                link_files,
+                if link_files == 1 { "" } else { "s" },
+            )?;
+        } else {
+            writeln!(out, "  no backlinks to rewrite")?;
+        }
+    }
+    Ok(())
+}
+
+/// Render a human-readable TTY summary for a folder move (`ApplyReport`).
+pub fn render_folder_apply_tty<W: Write>(
+    out: &mut W,
+    report: &crate::apply_report::ApplyReport,
+    dry_run: bool,
+) -> std::io::Result<()> {
+    let status_label = if dry_run { "dry-run" } else { "applied" };
+    writeln!(out, "move-folder {status_label}")?;
+    writeln!(
+        out,
+        "  applied: {}  skipped: {}  failed: {}",
+        report.applied, report.skipped, report.failed
+    )?;
+    for op in &report.operations {
+        let status = format!("{:?}", op.status).to_lowercase();
+        writeln!(out, "  [{status}] {}", op.summary)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MovePreflightError {
     #[error("source does not exist: {0}")]
@@ -291,6 +358,7 @@ pub(crate) fn preflight_and_plan(
 /// - `CodeFenceSuspected`: an affected backlink file contains the src stem inside a fenced code block.
 /// - `OutgoingRelativePathLink`: the source document contains a relative-path Markdown link that will
 ///   break after the file moves to a different directory.
+#[allow(dead_code)] // used only in unit tests; production path removed in Task 14; deleted in Task 20
 pub(crate) fn collect_warnings(
     plan: &RepairPlan,
     index: &GraphIndex,
@@ -377,6 +445,7 @@ pub(crate) fn collect_warnings(
     warnings
 }
 
+#[allow(dead_code)] // called only by collect_warnings; both deleted in Task 20
 fn count_stem_in_code_fences(body: &str, stem: &str) -> usize {
     let mut in_fence = false;
     let mut count = 0;
