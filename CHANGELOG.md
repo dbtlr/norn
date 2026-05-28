@@ -10,11 +10,39 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Breaking changes
+
+- **`norn repair apply <plan>` removed.** Use `norn migrate <plan>` instead — it applies any migration plan, including repair-generated ones. The canonical auto-fix pipeline is now `norn repair --plan --format json | norn migrate -`. Invoking `norn repair apply` exits non-zero (the subcommand no longer exists). No migration shim.
+- **`norn repair plan` subcommand replaced by the `norn repair --plan` flag.** `norn repair --plan` generates a plan; bare `norn repair` prints a findings summary. Every prior `repair plan` flag carries over to `repair --plan`: `--format` (report/json/paths), `--out`, `--confidence`, `--skip-reason`, and the triage filters `--code` / `--severity` / `--field` / `--rule` / `--path` / `--target` / `--reason`.
+- **`MoveReport`, `DeleteReport`, and `RepairApplyReport` JSON envelopes replaced by a single `ApplyReport` (schema_version 1).** `norn move`, `norn delete`, `norn rewrite-wikilink`, and `norn migrate` all emit `ApplyReport` for `--format json`: `{ schema_version, plan_hash, vault_root, dry_run, applied, skipped, failed, remaining, operations: [{ op_id, kind, status, from?, summary, error?, footnote? }], warnings }`. Scripts that parsed the old `source` / `destination` / `link_rewrites` / `target` / `incoming_links` keys must read `operations[]` instead. No migration shim.
+- **`norn repair --plan` emits a `MigrationPlan` (schema_version 1), not a `RepairPlan` (schema_version 9).** The shape changes from `{ schema_version: 9, changes: [{operation, …}], skipped_findings, summary, source_filters }` to `{ schema_version: 1, generator: "norn-repair", generated_at, operations: [{kind, fields, footnote?}], skipped }`. Feed the new plan to `norn migrate` (the `repair apply` consumer is gone). No migration shim — regenerate any persisted plans with `norn repair --plan`.
+
+### Added
+
+- **`norn migrate <plan>`** — apply any migration plan. Reads a JSON or YAML file, or `-` for stdin (stdin defaults to JSON; override with `--input-format yaml`). Validates `schema_version == 1`, expands high-level ops via the shared planner, applies through the shared applier, and emits an `ApplyReport`. Standard `--dry-run` / `--yes` / `--format` / `--out` flags. Pre-flight failures (parse error, unsupported schema version, unresolvable op) exit 2; mid-flight failures exit 1.
+- **`norn rewrite-wikilink OLD NEW`** — graph-aware wikilink retargeting across body and frontmatter, without requiring a file move to trigger the cascade. Resolves `OLD` by stem, path, or alias; rewrites every matching body wikilink and every frontmatter wikilink field. Refuses with exit 2 when `OLD` resolves to no document. Standard `--dry-run` / `--yes` / `--format` flags.
+- **`norn move --parents` / `-p`** — creates missing destination parent directories before moving (mirrors `norn new --parents`). Without it, a move into a non-existent directory refuses with exit 2.
+- **`norn move --recursive` / `-r`** — folder-recursive move: relocates every `.md` file under a source directory to a destination directory, preserving subdirectory structure, with a single backlink-cascade pass and empty-source-directory cleanup. A directory source is auto-detected even without `--recursive`.
+- **Bare `norn repair`** — prints a findings summary (count + by-code breakdown). Placeholder for a future interactive repair walkthrough.
+- **`MigrationPlan` schema (v1)** — the unified plan artifact for both repair-generated and hand-authored plans. Two high-level intent op kinds (`move_folder`, `rewrite_wikilink`) expand into low-level ops at apply time; the eight existing low-level op kinds (`move_document`, `delete_document`, `set_frontmatter`, `add_frontmatter`, `remove_frontmatter`, `rewrite_link`, `replace_body`, `create_document`) apply directly. Crafted plans accept JSON or YAML; optional per-op `footnote` and plan-level `generator` / `generated_at` metadata distinguish generated plans from hand-authored ones.
+- **PLAN OPERATION blocks in `--help`** — `norn move`, `norn delete`, `norn set`, `norn new`, and `norn rewrite-wikilink` each show the equivalent migration-plan op in their `--help` output, so the CLI doubles as the plan-authoring reference.
+
+### Changed
+
+- **All document-mutation commands now share one planner, one applier, and one report envelope.** `norn move`, `norn delete`, `norn rewrite-wikilink`, and `norn migrate` build a migration plan, expand it through the shared planner, and apply it through the shared applier — replacing the per-command bespoke apply paths. `norn new` and `norn set` keep their existing output envelopes pending a follow-up conversion.
+- Plan-staleness errors (schema mismatch, document-hash drift, expected-old-value mismatch) and the missing-default fix hint now say `regenerate with \`norn repair --plan\`` (was `norn repair plan`).
+
 ### Fixed
 
 - `norn move` no longer aborts with `read backlinker failed: No such file or directory` (exit 1) when the moved doc contains a wikilink to itself. The Pass 3 cascade now reads each affected file from its post-move location, rewriting self-references in place and exiting 0. Surfaced by the 2026-05-27 atlas migration dogfood, which observed 5 of 212 backlinks silently missed when the moved doc's own body referenced its old stem — every entry iterated after the self-reference was skipped.
-- `norn move --dry-run --format json` and `norn delete --dry-run --format json` now emit the documented `MoveReport` / `DeleteReport` JSON envelope. Previously the dry-run branch short-circuited the format check and unconditionally rendered the human-records format, breaking scripts that piped dry-run output into other tooling.
+- `norn move --dry-run --format json` and `norn delete --dry-run --format json` now emit the documented JSON envelope (the `ApplyReport`, per Breaking changes above). Previously the dry-run branch short-circuited the format check and unconditionally rendered the human-records format, breaking scripts that piped dry-run output into other tooling.
 - `norn move` on a doc containing a sibling-relative CommonMark self-link (e.g. `[label](file.md)` referring to the moved doc itself) now rewrites the link relative to the destination so it stays self-stable. The previous rewrite computed the relative path from the old source directory, producing a dangling cross-directory traversal after the move.
+
+### Known limitations
+
+- **`norn migrate` uses pass-based op ordering, not per-op sequencing.** Ops execute grouped by kind (frontmatter mutations → link rewrites → deletes → body replaces → creates → moves → move-cascades), and within a group in plan order. For a plan whose ops have cross-pass dependencies (e.g., a `delete_document` and a `move_document` of the same path where relative order matters), split into two sequential `norn migrate` invocations. The schema reserves per-op `id` + `requires` fields for future ordering constraints; the v1 applier ignores them.
+- **`norn rewrite-wikilink` does not rewrite CommonMark `[label](target.md)` links** — only wikilinks (`[[target]]`) and frontmatter wikilink fields. Markdown links resolve by relative path rather than stem, so a stem-rename does not apply to them; they are left untouched without a warning.
+- **`norn migrate` applies all-or-nothing per op with stop-on-first-error and no rollback.** A failure mid-plan leaves preceding ops applied and reports the failing op plus the remaining un-run ops in the `ApplyReport`. Recovery is the operator's responsibility (inspect the report, fix the cause, re-run with an adjusted plan).
 
 ## v0.34.0 - 2026-05-27
 
