@@ -7,7 +7,7 @@ use crate::core::GraphIndex;
 use crate::standards::{classify_link_risk, PlannedChange};
 use anyhow::Result;
 
-#[allow(dead_code)] // wired up by the dispatcher in Plan Task 6
+#[allow(dead_code)] // wired by expand() dispatcher in Plan Task 6; called by applier in Plan Task 7
 pub(crate) struct MoveFolderOp {
     pub src: String,
     pub dst: String,
@@ -17,7 +17,7 @@ pub(crate) struct MoveFolderOp {
 /// Walk the vault index for `.md` files whose path starts with `op.src/`,
 /// produce one `move_document` PlannedChange per file (preserving relative
 /// subdirectory structure under `op.dst`), and populate `link_risk` for each.
-#[allow(dead_code)] // wired up by the dispatcher in Plan Task 6
+#[allow(dead_code)] // wired by expand() dispatcher in Plan Task 6; called by applier in Plan Task 7
 pub(crate) fn expand_move_folder(
     op: &MoveFolderOp,
     index: &GraphIndex,

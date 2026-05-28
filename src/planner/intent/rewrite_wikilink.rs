@@ -27,7 +27,7 @@ use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
 use serde_json::Value;
 
-#[allow(dead_code)] // wired in Plan Task 6
+#[allow(dead_code)] // wired by expand() dispatcher in Plan Task 6; called by applier in Plan Task 7
 pub(crate) struct RewriteWikilinkOp {
     pub old: String,
     pub new: String,
@@ -50,7 +50,7 @@ pub(crate) struct RewriteWikilinkOp {
 /// and handle them in step 4 via the frontmatter sweep.  This prevents
 /// duplicating the same reference as both a `rewrite_link` and a
 /// `set_frontmatter` op.
-#[allow(dead_code)] // wired in Plan Task 6
+#[allow(dead_code)] // wired by expand() dispatcher in Plan Task 6; called by applier in Plan Task 7
 pub(crate) fn expand_rewrite_wikilink(
     op: &RewriteWikilinkOp,
     index: &GraphIndex,
@@ -196,6 +196,7 @@ pub(crate) fn expand_rewrite_wikilink(
 /// Resolve a wikilink stem (or path-qualified target) to a document path in the
 /// index.  Matches against `doc.stem` (case-insensitive), which mirrors the
 /// resolution logic in `links/resolve.rs`.
+#[allow(dead_code)] // called by expand_rewrite_wikilink which is wired by Plan Task 7
 fn resolve_stem_to_path(stem: &str, index: &GraphIndex) -> Option<Utf8PathBuf> {
     let lower = stem.to_lowercase();
     // Try exact stem match first (most common).
