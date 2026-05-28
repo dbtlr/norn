@@ -222,6 +222,66 @@ fn delete_dry_run_format_json_emits_envelope() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// T4 — delete --rewrite-to cascade counts in JSON output
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delete_rewrite_to_cascade_counts_in_json() {
+    // Vault seeded by synth(): a.md has [[b]], b.md exists, c.md exists.
+    // Delete b.md --rewrite-to c.md → the backlink in a.md should be
+    // redirected to c.md; cascade.applied == 1, cascade.files == 1.
+    let tmp = synth();
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args([
+            "delete",
+            "b.md",
+            "--yes",
+            "--rewrite-to",
+            "c.md",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+
+    let ops = v["operations"].as_array().expect("operations array");
+    let del_op = ops
+        .iter()
+        .find(|o| o["kind"] == "delete_document")
+        .unwrap_or_else(|| panic!("delete_document op not found in: {ops:?}"));
+
+    let cascade = &del_op["cascade"];
+    assert!(
+        !cascade.is_null(),
+        "cascade must be present on delete_document op with --rewrite-to"
+    );
+    // a.md has 1 backlink to b.md that was redirected
+    assert_eq!(
+        cascade["applied"], 1,
+        "1 backlink redirect applied; cascade: {cascade}"
+    );
+    assert_eq!(cascade["files"], 1, "1 file contained the backlink");
+
+    // Verify filesystem + content mutations
+    assert!(
+        !tmp.path().join("vault/b.md").exists(),
+        "b.md should have been deleted"
+    );
+    let a = std::fs::read_to_string(tmp.path().join("vault/a.md")).unwrap();
+    assert!(a.contains("[[c]]"), "a.md should now reference c: {a}");
+}
+
 #[test]
 fn delete_format_json_emits_envelope() {
     let tmp = synth();

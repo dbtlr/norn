@@ -220,6 +220,137 @@ fn migrate_malformed_stdin_exits_non_zero() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// T5 — per-op cascade attribution across multiple move_document ops
+// ---------------------------------------------------------------------------
+
+#[test]
+fn migrate_per_op_cascade_attribution_multi_move() {
+    // Two docs (p.md and q.md), each with a DISTINCT set of backlinkers.
+    // p.md is referenced by 1 file; q.md is referenced by 2 files.
+    // After a dry-run migrate, each move_document op must carry its OWN
+    // cascade.planned — not a shared aggregate.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-migrate-cascade-t5-")
+        .tempdir()
+        .unwrap();
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir(&vault).unwrap();
+
+    // Docs being moved
+    std::fs::write(vault.join("p.md"), "---\ntype: note\n---\n# P\n").unwrap();
+    std::fs::write(vault.join("q.md"), "---\ntype: note\n---\n# Q\n").unwrap();
+    // 1 backlinker for p
+    std::fs::write(
+        vault.join("p_link1.md"),
+        "---\ntype: note\n---\n# P-link-1\n[[p]]\n",
+    )
+    .unwrap();
+    // 2 backlinkers for q
+    std::fs::write(
+        vault.join("q_link1.md"),
+        "---\ntype: note\n---\n# Q-link-1\n[[q]]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vault.join("q_link2.md"),
+        "---\ntype: note\n---\n# Q-link-2\n[[q]]\n",
+    )
+    .unwrap();
+
+    let plan = format!(
+        r#"schema_version: 1
+vault_root: {}
+operations:
+  - kind: move_document
+    fields:
+      src: p.md
+      dst: p_renamed.md
+  - kind: move_document
+    fields:
+      src: q.md
+      dst: q_renamed.md
+"#,
+        vault.to_str().unwrap()
+    );
+    let plan_path = tmp.path().join("plan.yaml");
+    std::fs::write(&plan_path, &plan).unwrap();
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["migrate"])
+        .arg(&plan_path)
+        .args(["--dry-run", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+
+    assert_eq!(report["dry_run"], true, "must be dry-run");
+
+    let ops = report["operations"].as_array().expect("operations array");
+    let move_ops: Vec<&serde_json::Value> = ops
+        .iter()
+        .filter(|o| o["kind"] == "move_document")
+        .collect();
+    assert_eq!(
+        move_ops.len(),
+        2,
+        "expected 2 move_document ops; got: {move_ops:?}"
+    );
+
+    // Find the op for p.md (summary contains "p.md")
+    let p_op = move_ops
+        .iter()
+        .find(|o| o["summary"].as_str().unwrap_or("").contains("p.md"))
+        .unwrap_or_else(|| panic!("op for p.md not found; ops: {move_ops:?}"));
+    // Find the op for q.md
+    let q_op = move_ops
+        .iter()
+        .find(|o| o["summary"].as_str().unwrap_or("").contains("q.md"))
+        .unwrap_or_else(|| panic!("op for q.md not found; ops: {move_ops:?}"));
+
+    let p_cascade = &p_op["cascade"];
+    let q_cascade = &q_op["cascade"];
+
+    assert!(
+        !p_cascade.is_null(),
+        "p.md move must carry a cascade summary"
+    );
+    assert!(
+        !q_cascade.is_null(),
+        "q.md move must carry a cascade summary"
+    );
+
+    // Per-op attribution: p has 1 backlinker, q has 2 — must NOT be aggregated
+    assert_eq!(
+        p_cascade["planned"], 1,
+        "p.md op: planned must be 1 (only p_link1.md references it); cascade: {p_cascade}"
+    );
+    assert_eq!(
+        q_cascade["planned"], 2,
+        "q.md op: planned must be 2 (q_link1.md + q_link2.md reference it); cascade: {q_cascade}"
+    );
+
+    // Dry-run must not mutate
+    assert!(
+        !vault.join("p_renamed.md").exists(),
+        "dry-run must not move p"
+    );
+    assert!(
+        !vault.join("q_renamed.md").exists(),
+        "dry-run must not move q"
+    );
+}
+
 #[test]
 fn migrate_stdin_with_input_format_yaml_works() {
     let tmp = synth();

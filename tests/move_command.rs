@@ -495,6 +495,183 @@ fn move_recursive_folder_rename() {
     assert_eq!(moves.len(), 2, "two .md files → two move_document ops");
 }
 
+// ---------------------------------------------------------------------------
+// T1 — move JSON carries cascade counts on dry-run (no --verbose → no lists)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn move_json_cascade_dry_run_counts_present_no_rewrite_list() {
+    // Seed: a.md is moved; d.md is the backlinker referencing a.md via [[a]].
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-move-cascade-t1-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+    std::fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n[[a]]\n").unwrap();
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["move", "a.md", "b.md", "--dry-run", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+
+    let ops = v["operations"].as_array().expect("operations array");
+    let move_op = ops
+        .iter()
+        .find(|o| o["kind"] == "move_document")
+        .expect("move_document op not found");
+
+    let cascade = &move_op["cascade"];
+    assert!(
+        !cascade.is_null(),
+        "cascade must be present on move_document op"
+    );
+
+    // Dry-run forecast: planned == applied == 1, files == 1
+    assert_eq!(
+        cascade["planned"], 1,
+        "planned must be 1 (d.md links to a.md)"
+    );
+    assert_eq!(
+        cascade["applied"], 1,
+        "applied must equal planned on dry-run (forecast)"
+    );
+    assert_eq!(cascade["files"], 1, "1 file contains the backlink");
+
+    // Without --verbose, rewrites list must be absent or empty
+    let rewrites = &cascade["rewrites"];
+    assert!(
+        rewrites.is_null() || rewrites.as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "rewrites must be absent/empty without --verbose; got: {rewrites}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T2 — move JSON cascade on live apply (actuals match)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn move_json_cascade_live_apply_counts_actuals() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-move-cascade-t2-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+    std::fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n[[a]]\n").unwrap();
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["move", "a.md", "b.md", "--yes", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+
+    let ops = v["operations"].as_array().expect("operations array");
+    let move_op = ops
+        .iter()
+        .find(|o| o["kind"] == "move_document")
+        .expect("move_document op not found");
+
+    let cascade = &move_op["cascade"];
+    assert!(
+        !cascade.is_null(),
+        "cascade must be present on live move_document op"
+    );
+    assert_eq!(cascade["applied"], 1, "1 backlink rewritten on live apply");
+    assert_eq!(cascade["skipped"], 0, "no skips expected");
+    assert_eq!(cascade["files"], 1, "1 file contained the backlink");
+
+    // File system state
+    assert!(!root.join("a.md").exists(), "a.md should have been moved");
+    assert!(root.join("b.md").exists(), "b.md should exist");
+    // Backlink rewritten
+    let d = std::fs::read_to_string(root.join("d.md")).unwrap();
+    assert!(d.contains("[[b]]"), "d.md should now reference [[b]]: {d}");
+}
+
+// ---------------------------------------------------------------------------
+// T3 — --verbose populates rewrites list; without it rewrites is absent/empty
+// ---------------------------------------------------------------------------
+
+#[test]
+fn move_json_verbose_populates_rewrites_list() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-move-cascade-t3-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+    std::fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n[[a]]\n").unwrap();
+
+    // With --verbose: rewrites list must be populated
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args([
+            "--verbose",
+            "move",
+            "a.md",
+            "b.md",
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+
+    let ops = v["operations"].as_array().expect("operations array");
+    let move_op = ops
+        .iter()
+        .find(|o| o["kind"] == "move_document")
+        .expect("move_document op not found");
+
+    let cascade = &move_op["cascade"];
+    let rewrites = cascade["rewrites"]
+        .as_array()
+        .expect("rewrites must be a non-null array with --verbose");
+    assert_eq!(
+        rewrites.len(),
+        1,
+        "exactly 1 rewrite expected (d.md); got: {rewrites:?}"
+    );
+    // The file field must name the backlinker
+    let rewrite_file = rewrites[0]["file"].as_str().unwrap_or("");
+    assert_eq!(
+        rewrite_file, "d.md",
+        "rewrite file must be d.md; got: {rewrite_file}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn move_case_only_difference_refuses_same_path() {
