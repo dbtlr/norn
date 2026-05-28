@@ -69,15 +69,15 @@ Wikilinks inside inline code (`` `[[example]]` ``) and fenced code blocks are no
 The product loop is four stages:
 
 1. **Detect** drift with graph facts and configured `validate.rules`. Output: findings.
-2. **Plan** supported repairs as a JSON artifact. Output: `repair.json`.
-3. **Apply** the plan explicitly via `norn repair apply`. Output: modified files + an apply report.
-4. **Verify** the vault after changes (`apply --verify`, or another `validate --summary` run).
+2. **Plan** supported repairs as a JSON artifact. Output: `plan.json`.
+3. **Apply** the plan explicitly via `norn migrate`. Output: modified files + an apply report.
+4. **Verify** the vault after changes (`--verify`, or another `validate --summary` run).
 
 Validation is read-only and does not guess repairs. Repair planning is read-only and produces only inspectable artifacts. There is no hidden write path.
 
-Two explicit write surfaces exist: `norn repair apply` is the finding-driven batch write path — it requires an explicit plan artifact. `norn new`, `norn set`, `norn move`, and `norn delete` are the operator-driven CRUD surface for direct one-document mutations. Both paths are safe-by-default (dry-run previews, `--yes` to apply) and both go through the same underlying apply machinery.
+Two explicit write surfaces exist: `norn migrate` is the finding-driven batch write path — it consumes a `MigrationPlan` artifact. `norn new`, `norn set`, `norn move`, and `norn delete` are the operator-driven CRUD surface for direct one-document mutations. Both paths are safe-by-default (dry-run previews, `--yes` to apply) and both go through the same underlying apply machinery.
 
-Repair plans are schema-versioned (`schema_version: 9` as of v0.32). Apply rejects unsupported schema versions, plans for a different vault root, stale document hashes, conflicting field changes, and expected-old-value mismatches.
+Migration plans are schema-versioned (`schema_version: 1` as of v0.33). Apply rejects unsupported schema versions, plans for a different vault root, stale document hashes, conflicting field changes, and expected-old-value mismatches.
 
 For the full repair model and supported actions, see [validation.md](validation.md).
 

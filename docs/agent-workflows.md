@@ -14,8 +14,8 @@ description: Stable JSON and JSONL contracts, agent loop patterns, and common ha
 | JSON output | `--format json` on every command | Stable across point releases; breaking changes called out in CHANGELOG. |
 | JSONL output | `--format jsonl` on every command | Same. |
 | Paths output | `--format paths` on commands that emit per-row paths | Stable; one unique vault-relative path per row. |
-| Repair plan schema | `repair plan` JSON artifact | Schema-versioned (`schema_version` field). Apply rejects mismatched versions. |
-| Apply report schema | `repair apply` JSON output | Stable across the matching plan schema version. |
+| Migration plan schema | `repair --plan` JSON artifact (`MigrationPlan`) | Schema-versioned (`schema_version` field). Apply rejects mismatched versions. |
+| Apply report schema | `migrate` JSON output (`ApplyReport`) | Stable across the matching plan schema version. |
 | Finding codes | `norn validate` output `code` field | Stable; renames are breaking changes called out in CHANGELOG. |
 
 Table output is for humans and may evolve between point releases. Agents should always pass an explicit `--format json` or `--format jsonl`.
@@ -38,10 +38,10 @@ For a typical drift-healing task:
 
 1. **Detect.** `norn validate --summary --format json` — get a finding shape before reading individuals.
 2. **Triage.** Filter by `--code`, `--field`, `--rule`, `--path` to scope the queue. Re-run `--summary` to confirm the filter's size.
-3. **Plan.** `norn repair plan --out repair.json` (with the same filters). Read the plan's `changes` and `skipped_findings`.
+3. **Plan.** `norn repair --plan --out plan.json` (with the same filters). Read the plan's `changes` and `skipped_findings`.
 4. **Review.** Confirm `changes` are intended; surface `skipped_findings` to the human or follow `next_actions`.
-5. **Dry-run.** `norn repair apply repair.json --dry-run --format json` — confirms the plan is applyable without writing. (Or pipe directly: `norn repair plan --format json | norn repair apply --dry-run --format json`.)
-6. **Apply.** `norn repair apply repair.json --verify --format json` — writes and re-validates.
+5. **Dry-run.** `norn migrate plan.json --dry-run --format json` — confirms the plan is applyable without writing. (Or pipe directly: `norn repair --plan --format json | norn migrate - --dry-run --format json`.)
+6. **Apply.** `norn migrate plan.json --verify --format json` — writes and re-validates.
 7. **Verify.** Inspect the apply report's `plan_context` and the post-apply validation summary.
 
 For a read-only inspection task (no mutation):
@@ -58,9 +58,9 @@ These commands never write to the vault. An agent can run them with confidence:
 - `norn count`
 - `norn get`
 - `norn validate` (with or without `--summary`, with or without filters)
-- `norn repair plan` (produces an artifact; does not modify the vault)
+- `norn repair --plan` (produces a `MigrationPlan` artifact; does not modify the vault)
 
-`norn new`, `norn set`, `norn move`, and `norn delete` are mutation commands; pass `--dry-run` to preview without writing. Only `norn repair apply`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The repair plan is provided via a positional file path, via `-`, or via stdin (the pipeline form `norn repair plan --format json | norn repair apply` composes plan + apply in one shot).
+`norn new`, `norn set`, `norn move`, `norn delete`, and `norn migrate` are mutation commands; pass `--dry-run` to preview without writing. Only `norn migrate`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The migration plan is provided to `norn migrate` via a positional file path, via `-`, or via stdin (the pipeline form `norn repair --plan --format json | norn migrate -` composes plan generation and apply in one shot).
 
 ## Output sketches
 
@@ -83,11 +83,11 @@ These commands never write to the vault. An agent can run them with confidence:
 {"code":"frontmatter-disallowed-value","severity":"warning","path":"tasks/triage.md","rule":"task-status","field":"status","actual_value":"someday","allowed_values":["backlog","in_progress","completed","wont_do"]}
 ```
 
-### Repair plan (JSON)
+### Migration plan (JSON)
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 1,
   "vault_root": "/abs/path/to/vault",
   "source_filters": { "code": "frontmatter-disallowed-value", "field": "status" },
   "summary": {
@@ -128,8 +128,8 @@ norn validate --code frontmatter-invalid-type --field modified --format jsonl
 
 Two rules an agent must follow:
 
-1. **Use the appropriate write surface.** For creating a new document from a schema scaffold, use `norn new`. For operator-driven one-doc mutations on existing docs, `norn set` (frontmatter + body), `norn move`, and `norn delete` are the CRUD surface. For finding-driven batch repairs, `norn repair apply` is the only path — it consumes a plan artifact and applies deterministic changes with precondition checks. Never edit vault files directly; the graph state would diverge from the cache.
-2. **Always pass the plan that matches the current vault state.** Apply checks document hashes; if a file changed since the plan was created, the change is rejected for that file. Re-plan rather than re-apply with `--force` (there is no `--force` for repair apply).
+1. **Use the appropriate write surface.** For creating a new document from a schema scaffold, use `norn new`. For operator-driven one-doc mutations on existing docs, `norn set` (frontmatter + body), `norn move`, and `norn delete` are the CRUD surface. For finding-driven batch repairs, `norn migrate` is the only path — it consumes a `MigrationPlan` artifact and applies deterministic changes with precondition checks. Never edit vault files directly; the graph state would diverge from the cache.
+2. **Always pass the plan that matches the current vault state.** Apply checks document hashes; if a file changed since the plan was created, the change is rejected for that file. Re-plan rather than re-apply with `--force` (there is no `--force` for migrate).
 
 `--dry-run` confirms the plan is applyable without writing. `--verify` runs validation after apply and includes the result in the report.
 
@@ -150,16 +150,16 @@ norn set notes/task.md --field status=backlog --yes
 norn validate --code frontmatter-disallowed-value --field status --format jsonl
 ```
 
-For batch fixes across many documents, prefer the `repair plan` → `repair apply` loop.
+For batch fixes across many documents, prefer the `repair --plan` → `migrate` loop.
 `norn set` is best for targeted one-doc mutations or when the fix does not fit a
 repair rule (e.g. updating body content with `--body-from-stdin`).
 
 ## Common pitfalls
 
 - **Don't filter by un-indexed fields.** `norn find` predicates match frontmatter scalar or list values only for field-equality flags; `--text` is for full-text substring search.
-- **Honor schema versions.** Repair plans have `schema_version: 9` as of v0.32. Older plans are rejected by apply.
+- **Honor schema versions.** Migration plans (`MigrationPlan`) have `schema_version: 1`. Older `RepairPlan` artifacts (schema 9) are rejected; re-plan with `norn repair --plan`.
 - **Don't auto-pick ambiguous link candidates.** `link-ambiguous` findings carry a `candidates` list, but the CLI does not automatically resolve them. An agent should surface the ambiguity to the human or apply a deterministic disambiguation rule documented in the vault's config.
-- **Don't redirect to a file when `--out` exists.** `norn repair plan --out repair.json` is the file-first form; shell redirection works too but `--out` makes the intent explicit and avoids partial-write footguns.
+- **Don't redirect to a file when `--out` exists.** `norn repair --plan --out plan.json` is the file-first form; shell redirection works too but `--out` makes the intent explicit and avoids partial-write footguns.
 - **User-specific vault doctrine lives in `.norn/config.yaml`.** Don't hardcode vault-specific rule names or field shapes in agent prompts; read them from the config.
 
 ## Skill installation

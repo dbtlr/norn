@@ -297,13 +297,13 @@ pub fn conceptual_sections_for(cmd_path: &str) -> Vec<(String, String)> {
                 "Codes identify validation findings. Filter with --code <code>. Glob patterns supported (--code 'link-*').\n\nlink-target-missing         A wikilink target doesn't exist in the vault.\nlink-anchor-missing         The target exists but the #anchor isn't present.\nlink-block-missing          The target exists but the ^block-ref isn't present.\nlink-ambiguous              A wikilink resolves to multiple candidates.\nfrontmatter-required-field-missing\n                            A required frontmatter field is absent.\nfrontmatter-disallowed-value\n                            A field's value is not in the configured set.\nfrontmatter-invalid-type    A field's value doesn't match its declared type.\nfrontmatter-forbidden-field A field that the rule forbids is present.\nfrontmatter-alias-shadowed-by-stem\n                            An alias matches another doc's stem; the alias is dead because stem resolution wins.\nfrontmatter-alias-duplicate-across-docs\n                            Two or more docs claim the same alias; wikilinks resolving via that alias will be ambiguous.\nfrontmatter-alias-malformed The alias field contains a non-scalar value.\ndocument-misrouted          A doc is in a directory the rule's path selector excludes.",
             ),
         ],
-        "norn repair plan" => &[(
+        "norn repair" => &[(
             "The plan/apply boundary",
-            "Repair runs in two halves. Plan reads validate findings and emits a JSON artifact describing every change it would make. Plan never writes to vault documents. Apply consumes that artifact and writes the changes; preconditions are checked before any file is touched.\n\nPlan classifies each finding as supported or skipped. Supported findings produce a `PlannedChange` — the path, the field, the new value, and the source document's hash recorded at plan time. Skipped findings carry a reason code (stable kebab-case string): `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, or `precondition-failed`. Filter skipped findings with `--skip-reason <PATTERN>`; glob patterns accepted.\n\nA planned change:\n\n{\n  \"path\": \"notes/welcome.md\",\n  \"field\": \"kind\",\n  \"new_value\": \"note\",\n  \"document_hash\": \"a3f2…\"\n}\n\nA skipped finding records the reason:\n\n{\n  \"path\": \"drafts/x.md\",\n  \"code\": \"link-ambiguous\",\n  \"skip_reason\": \"ambiguous_target\",\n  \"reason_code\": \"ambiguous-target\"\n}\n\nThe summary's `skipped` section uses a `by_reason` map: `{ \"ambiguous-target\": 3, \"no-rule-matched\": 12 }`. Zero-count buckets are omitted.\n\nOutput formats: `--format report` (human summary, TTY default), `--format json` (full envelope, pipe default), `--format paths` (one affected path per line, deduplicated).\n\nThe plan captures a vault snapshot. Each change records the document's hash at plan time; apply refuses to write if that hash has changed. Re-run plan after editing files between plan and apply.\n\nTriage filters here are the same as on `validate` — pass `--severity error` to plan only error-level findings. Filters that excluded a finding from validate also exclude it from plan.",
+            "Repair runs in two halves. `norn repair --plan` reads validate findings and emits a MigrationPlan JSON artifact describing every change it would make. Planning never writes to vault documents. `norn migrate` consumes that artifact and writes the changes; preconditions are checked before any file is touched.\n\nPlanning classifies each finding as supported or skipped. Supported findings produce a `PlannedChange` — the path, the field, the new value, and the source document's hash recorded at plan time. Skipped findings carry a reason code (stable kebab-case string): `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, or `precondition-failed`. Filter skipped findings with `--skip-reason <PATTERN>`; glob patterns accepted.\n\nA planned change:\n\n{\n  \"path\": \"notes/welcome.md\",\n  \"field\": \"kind\",\n  \"new_value\": \"note\",\n  \"document_hash\": \"a3f2…\"\n}\n\nA skipped finding records the reason:\n\n{\n  \"path\": \"drafts/x.md\",\n  \"code\": \"link-ambiguous\",\n  \"skip_reason\": \"ambiguous_target\",\n  \"reason_code\": \"ambiguous-target\"\n}\n\nThe summary's `skipped` section uses a `by_reason` map: `{ \"ambiguous-target\": 3, \"no-rule-matched\": 12 }`. Zero-count buckets are omitted.\n\nOutput formats: `--format report` (human summary, TTY default), `--format json` (full MigrationPlan envelope, pipe default), `--format paths` (one affected path per line, deduplicated).\n\nThe plan captures a vault snapshot. Each change records the document's hash at plan time; apply refuses to write if that hash has changed. Re-run `--plan` after editing files between plan and apply.\n\nTriage filters here are the same as on `validate` — pass `--severity error` to plan only error-level findings. Filters that excluded a finding from validate also exclude it from plan.",
         )],
-        "norn repair apply" => &[(
+        "norn migrate" => &[(
             "How apply writes",
-            "Apply walks the plan in this order:\n\n1. Load the plan JSON and verify its schema version.\n2. Confirm the plan's recorded vault root matches the effective cwd.\n3. Re-read each source document and verify its hash matches what the plan recorded; abort if any file changed since plan time.\n4. Verify each `expected_old_value` matches the current field value; abort on mismatch.\n5. Write the new frontmatter, preserving the Markdown body.\n6. Re-run validate when `--verify` is set.\n\nPass `--dry-run` to walk steps 1–4 without writing.",
+            "Migrate walks the MigrationPlan in this order:\n\n1. Load the plan JSON and verify its schema version.\n2. Confirm the plan's recorded vault root matches the effective cwd.\n3. Re-read each source document and verify its hash matches what the plan recorded; abort if any file changed since plan time.\n4. Verify each `expected_old_value` matches the current field value; abort on mismatch.\n5. Write the new frontmatter, preserving the Markdown body.\n6. Re-run validate when `--verify` is set.\n\nPass `--dry-run` to walk steps 1–4 without writing.",
         )],
         _ => &[],
     };
@@ -366,8 +366,8 @@ mod tests {
     }
 
     #[test]
-    fn repair_plan_has_plan_apply_boundary_section() {
-        let sections = conceptual_sections_for("norn repair plan");
+    fn repair_has_plan_apply_boundary_section() {
+        let sections = conceptual_sections_for("norn repair");
         assert!(
             sections.iter().any(|(h, _)| h == "The plan/apply boundary"),
             "expected `The plan/apply boundary` section; got headings: {:?}",
@@ -376,8 +376,8 @@ mod tests {
     }
 
     #[test]
-    fn repair_apply_has_how_apply_writes_section() {
-        let sections = conceptual_sections_for("norn repair apply");
+    fn migrate_has_how_apply_writes_section() {
+        let sections = conceptual_sections_for("norn migrate");
         assert!(
             sections.iter().any(|(h, _)| h == "How apply writes"),
             "expected `How apply writes` section; got headings: {:?}",
@@ -386,8 +386,8 @@ mod tests {
     }
 
     #[test]
-    fn repair_plan_section_mentions_supported_and_skipped() {
-        let sections = conceptual_sections_for("norn repair plan");
+    fn repair_section_mentions_supported_and_skipped() {
+        let sections = conceptual_sections_for("norn repair");
         let (_, body) = sections
             .iter()
             .find(|(h, _)| h == "The plan/apply boundary")
@@ -436,8 +436,8 @@ mod tests {
     }
 
     #[test]
-    fn repair_apply_section_is_a_numbered_sequence() {
-        let sections = conceptual_sections_for("norn repair apply");
+    fn migrate_section_is_a_numbered_sequence() {
+        let sections = conceptual_sections_for("norn migrate");
         let (_, body) = sections
             .iter()
             .find(|(h, _)| h == "How apply writes")

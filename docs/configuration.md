@@ -167,7 +167,7 @@ Findings include `rule` context when a scoped rule produced them.
 
 ## repair.rules
 
-Declarative deterministic repair rules. `norn repair plan` matches findings against `repair.rules` and converts matched findings into executable changes; unmatched findings appear in `skipped_findings` with `skip_reason: no_rule_matched`.
+Declarative deterministic repair rules. `norn repair --plan` matches findings against `repair.rules` and converts matched findings into executable changes; unmatched findings appear in `skipped_findings` with `skip_reason: no_rule_matched`.
 
 Each rule has a `match` predicate and exactly one action (`set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, or `move_document`).
 

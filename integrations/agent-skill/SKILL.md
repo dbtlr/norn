@@ -18,7 +18,7 @@ Use `norn` when you need to:
 - Validate a vault against configured rules (`required_frontmatter`, `field_types`, `allowed_values`, `allowed_paths`, etc.).
 - Audit unresolved or ambiguous links.
 - Surface frontmatter drift for review.
-- Produce an inspectable repair plan (`schema_version: 9`) and apply it explicitly.
+- Produce an inspectable migration plan (`MigrationPlan`, `schema_version: 1`) and apply it explicitly.
 
 Do not use `norn` when you need full-text or semantic search — its `find` command is exact literal substring + frontmatter + path glob.
 
@@ -40,9 +40,9 @@ None of these write to the vault:
 - `norn get <doc>`
 - `norn find`
 - `norn validate` (with or without `--summary` or filters)
-- `norn repair plan` (produces an artifact; does not modify the vault)
+- `norn repair --plan` (produces a `MigrationPlan` artifact; does not modify the vault)
 
-`norn new`, `norn set`, `norn move`, and `norn delete` are mutation commands; pass `--dry-run` to preview without writing. Only `norn repair apply`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The repair plan argument is optional — omit it (or pass `-`) to read the plan from stdin.
+`norn new`, `norn set`, `norn move`, `norn delete`, and `norn migrate` are mutation commands; pass `--dry-run` to preview without writing. Only `norn migrate`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The migration plan argument is optional — omit it (or pass `-`) to read the plan from stdin.
 
 ## Validation summary first, raw findings second
 
@@ -60,7 +60,7 @@ The same filter set works for raw output and summaries.
 
 Use `--format json` for one-shot agent dispatch (single JSON document). Use `--format jsonl` for streaming queues (one JSON object per line). Records output is for humans and may evolve between point releases — never parse it.
 
-> **Note for `norn repair plan` and `norn repair apply`:** The repair format set is separate from validate. Use `--format json` (machine, full envelope — canonical for agent consumers; default when stdout is a pipe), `--format report` (human-readable summary, TTY default), or `--format paths` (one path per line, for `xargs`-style pipelines). `--format jsonl` is not supported for repair commands.
+> **Note for `norn repair --plan` and `norn migrate`:** The plan/migrate format set is separate from validate. For `norn repair --plan`, use `--format json` (machine, full `MigrationPlan` envelope — canonical for agent consumers; default when stdout is a pipe), `--format report` (human-readable summary, TTY default), or `--format paths` (one path per line, for `xargs`-style pipelines). `--format jsonl` is not supported. For `norn migrate`, use `--format json` (full `ApplyReport` envelope), `--format records` (TTY default), or `--format paths` (changed-files list).
 >
 > `--out <PATH>` writes the JSON report/plan to a file unconditionally (always JSON). `--format` controls stdout independently — both can be set simultaneously without conflict. When `--out` is set without `--format`, stdout is silent.
 
@@ -101,24 +101,24 @@ If a vault has no config, defaults apply.
 Two write surfaces exist. Use the right one for the job:
 
 - **`norn new` / `norn set` / `norn move` / `norn delete`** — operator-driven CRUD. One document, one command. Schema-aware, safe-by-default (dry-run preview, `--yes` to apply).
-- **`norn repair apply`** — finding-driven batch repair. Consumes a plan artifact produced by `norn repair plan`. Apply checks document hashes; any precondition failure aborts the whole batch before any partial writes.
+- **`norn migrate`** — finding-driven batch apply. Consumes a `MigrationPlan` artifact produced by `norn repair --plan`. Apply checks document hashes; any precondition failure aborts the whole batch before any partial writes.
 
-1. `norn -C /path/to/vault repair plan --out repair.json`
-2. Inspect `repair.json`. Read `summary.planned_changes` count and `summary.skipped.by_reason` map for skip tallies.
-3. `norn -C /path/to/vault repair apply repair.json --dry-run --format json` — confirms the plan applies cleanly.
-4. `norn -C /path/to/vault repair apply repair.json --verify --format json` — writes and re-validates.
+1. `norn -C /path/to/vault repair --plan --out plan.json`
+2. Inspect `plan.json`. Read `summary.planned_changes` count and `summary.skipped.by_reason` map for skip tallies.
+3. `norn -C /path/to/vault migrate plan.json --dry-run --format json` — confirms the plan applies cleanly.
+4. `norn -C /path/to/vault migrate plan.json --verify --format json` — writes and re-validates.
 
 **Single-line pipeline form** (avoids `--out` round-trips):
 ```bash
-norn -C /path/to/vault repair plan --format json | norn -C /path/to/vault repair apply [--dry-run]
+norn -C /path/to/vault repair --plan --format json | norn -C /path/to/vault migrate - [--dry-run]
 ```
-`norn repair apply -` and `norn repair apply` (no positional argument) both read the plan from stdin.
+`norn migrate -` and `norn migrate` (no positional argument) both read the plan from stdin.
 
 Apply rejects:
 
 - Plans for a different norn root than the current invocation.
 - Stale document hashes (a file changed since the plan was created).
-- Unsupported schema versions (currently `9`).
+- Unsupported schema versions (currently `1`).
 - Conflicting field changes.
 - Expected-old-value mismatches.
 
@@ -138,11 +138,11 @@ norn supports seven repair actions:
 
 Agents should not invent destination paths or values for these actions. The repair rule (or closest-match algorithm for `rewrite_link`) supplies the target value at plan time — no agent judgment required.
 
-When a move action is in the plan, expect `repair apply` to write to multiple files: the moved file itself and every backlinking file that contains a rewritable link. The apply output's `moved_files` and `rewritten_links` enumerate everything that was touched.
+When a move action is in the plan, expect `norn migrate` to write to multiple files: the moved file itself and every backlinking file that contains a rewritable link. The apply output's `moved_files` and `rewritten_links` enumerate everything that was touched.
 
 ### Closest-match link rewrites
 
-For `link-target-missing` findings, `norn repair plan` proposes closest-match `rewrite_link` changes automatically:
+For `link-target-missing` findings, `norn repair --plan` proposes closest-match `rewrite_link` changes automatically:
 
 - **High-confidence** proposals: slug-normalized identity match (case, whitespace, hyphen/underscore variants). Safe to apply without review.
 - **Medium-confidence** proposals: small residual edit distance (Levenshtein ratio ≥ 0.7). Review recommended before applying.
@@ -156,7 +156,7 @@ Stable reason codes: `missing-default`, `link-decision-needed`, `no-rule-matched
 
 ### Plan footnotes
 
-Repair plans (schema v9) carry a `footnotes` array alongside `changes`. Footnotes are read-only commentary — `repair apply` ignores them entirely; they exist for LLM/operator consumers to reason about proposal quality. Each footnote for a closest-match rewrite carries:
+Migration plans (`MigrationPlan`, schema v1) carry a `footnotes` array alongside `changes`. Footnotes are read-only commentary — `norn migrate` ignores them entirely; they exist for LLM/operator consumers to reason about proposal quality. Each footnote for a closest-match rewrite carries:
 
 - `change_id` — references the corresponding change.
 - `confidence` — `high` or `medium`.
@@ -210,22 +210,22 @@ norn -C /path/to/vault validate \
   --summary --format json
 
 # 3. Plan
-norn -C /path/to/vault repair plan \
+norn -C /path/to/vault repair --plan \
   --code frontmatter-disallowed-value \
   --field status \
-  --out repair.json
+  --out plan.json
 
 # 4. Review
-# (read repair.json; surface skipped_findings to the human if non-empty)
+# (read plan.json; surface skipped_findings to the human if non-empty)
 
-# 5. Dry-run (--format json = full RepairApplyReport envelope)
-norn -C /path/to/vault repair apply repair.json --dry-run --format json
+# 5. Dry-run (--format json = full ApplyReport envelope)
+norn -C /path/to/vault migrate plan.json --dry-run --format json
 
 # 6. Apply with verification
-norn -C /path/to/vault repair apply repair.json --verify --format json
+norn -C /path/to/vault migrate plan.json --verify --format json
 
-# Alternative: single-line pipeline (skips the repair.json file entirely)
-norn -C /path/to/vault repair plan --format json | norn -C /path/to/vault repair apply --verify
+# Alternative: single-line pipeline (skips the plan.json file entirely)
+norn -C /path/to/vault repair --plan --format json | norn -C /path/to/vault migrate - --verify
 ```
 
 ## Cache
@@ -239,10 +239,10 @@ The cache is disposable — missing or corrupted caches rebuild silently. Don't 
 ## Common pitfalls
 
 - **Don't filter by un-indexed fields.** `norn find --eq FIELD:VALUE` matches frontmatter scalar or list values only. For body text matching, use `norn find --text "..."`.
-- **Honor schema versions.** Repair plans declare `schema_version`. Apply rejects mismatched versions; re-plan instead of editing the artifact.
+- **Honor schema versions.** Migration plans (`MigrationPlan`) declare `schema_version: 1`. `norn migrate` rejects mismatched versions; re-plan with `norn repair --plan` instead of editing the artifact.
 - **Don't auto-pick ambiguous link candidates.** `link-ambiguous` findings carry a `candidates` list, but the CLI does not resolve them. Surface the ambiguity to the human or apply a deterministic disambiguation rule documented in the vault's config.
-- **Use `--out` for plan artifacts.** `norn repair plan --out repair.json` writes the plan directly. Shell redirection (`> repair.json`) works but is more prone to partial-write footguns.
-- **Don't parse records output.** Records are for humans. For `norn validate`, pass `--format json` or `--format jsonl` from an agent context. For `norn repair plan` and `norn repair apply`, pass `--format json` (full envelope) or `--format paths` (changed-files list).
+- **Use `--out` for plan artifacts.** `norn repair --plan --out plan.json` writes the plan directly. Shell redirection (`> plan.json`) works but is more prone to partial-write footguns.
+- **Don't parse records output.** Records are for humans. For `norn validate`, pass `--format json` or `--format jsonl` from an agent context. For `norn repair --plan`, pass `--format json` (full `MigrationPlan` envelope) or `--format paths` (affected-paths list). For `norn migrate`, pass `--format json` (full `ApplyReport` envelope) or `--format paths` (changed-files list).
 - **Run `--summary` first.** It's cheaper than a full finding stream and tells you whether a more expensive query is worth running.
 
 ## Shell completions

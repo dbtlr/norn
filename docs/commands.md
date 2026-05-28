@@ -70,51 +70,61 @@ Filter flags: `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`,
 
 See [validation.md](validation.md) for finding codes, summary shape, and recipes.
 
-## repair plan
+## repair
 
-Read-only repair planning. Produces a JSON plan artifact for review.
+Read-only repair planning. Bare `norn repair` prints a findings summary. Add `--plan` to emit a `MigrationPlan` artifact.
 
 ```bash
-norn repair plan --format json > repair.json
-norn repair plan --out repair.json
-norn repair plan --code frontmatter-disallowed-value --field status --out repair.json
+norn repair
+norn repair --plan --out plan.json
+norn repair --plan --format json > plan.json
+norn repair --plan --code frontmatter-disallowed-value --field status --out plan.json
+norn repair --plan --format json | norn migrate -
 ```
 
 The plan has `schema_version`, `vault_root`, `source_filters`, `summary`, `changes`, and `skipped_findings`. See [validation.md](validation.md).
 
-Output formats:
+Output formats (with `--plan`):
 
 - `--format report` (TTY default) — decision-support summary with counts, skip tally, top affected files, and inline apply guidance.
-- `--format json` (pipe default) — full envelope artifact, the only format `norn repair apply` consumes.
+- `--format json` (pipe default) — full `MigrationPlan` envelope; the only format `norn migrate` consumes.
 - `--format paths` — affected document paths, one per line, sorted and deduplicated.
 
-(Note: `--format jsonl` and `--format table` were removed in v0.32; both are rejected with migration messages.)
+## migrate
 
-## repair apply
+Apply a `MigrationPlan`. Writes by default; pass `--dry-run` to preview.
 
-Apply a repair plan. Writes by default; pass `--dry-run` to preview.
-
-Plan ingress: positional path, `-` for stdin, or omit the positional to read from stdin. The pipeline form `norn repair plan --format json | norn repair apply` composes plan generation and apply in one shot.
+Plan ingress: positional path, `-` for stdin, or omit the positional to read from stdin. The pipeline form `norn repair --plan --format json | norn migrate -` composes plan generation and apply in one shot.
 
 ```bash
-norn repair apply repair.json
-norn repair apply repair.json --dry-run
-norn repair plan --format json | norn repair apply --dry-run
-norn repair apply repair.json --verify
-norn repair apply repair.json --out report.json
+norn migrate plan.json
+norn migrate plan.json --dry-run
+norn repair --plan --format json | norn migrate - --dry-run
+norn migrate plan.json --verify
+norn migrate plan.json --out report.json
 ```
 
 Output formats:
 
-- `--format report` (TTY default) — human summary: count line, severity tally, by-operation breakdown, optional warnings sub-block, footer with totals and next-step hint.
-- `--format json` (pipe default) — full `RepairApplyReport` envelope (`schema_version`, `dry_run`, `changed_files`, `applied_changes`, `moved_files`, `rewritten_links`, `warnings`, `plan_context`, optional `verification`).
+- `--format records` (TTY default) — human summary: count line, by-operation breakdown, optional warnings sub-block, footer with totals and next-step hint.
+- `--format json` (pipe default) — full `ApplyReport` envelope (`schema_version`, `dry_run`, `changed_files`, `applied_changes`, `moved_files`, `rewritten_links`, `warnings`, `plan_context`, optional `verification`).
 - `--format paths` — sorted dedup of `changed_files`, one per line. Empty (zero bytes) when no files changed.
 
 `--out <PATH>` writes the JSON report to file independently of `--format`; stdout stays silent when `--out` is set without `--format`. When both are set, both streams are honored.
 
-(Note: `--format jsonl` and `--format table` were removed in v0.32; both are rejected with migration messages.)
-
 Apply rejects mismatched vault roots, stale document hashes, unsupported schema versions, conflicting field changes, and expected-old-value mismatches. The orchestrator is atomic-at-batch-level: any precondition failure aborts the whole apply before any partial writes (stderr error, exit 1, no report rendered).
+
+## rewrite-wikilink
+
+Retarget all wikilinks matching `OLD` to `NEW` across the vault (or a path-scoped subset).
+
+```bash
+norn rewrite-wikilink notes/old-note.md notes/new-note.md
+norn rewrite-wikilink notes/old-note.md notes/new-note.md --dry-run
+norn rewrite-wikilink notes/old-note.md notes/new-note.md --yes --format json
+```
+
+Flags: `--dry-run`, `--yes`, `--format records|json|paths`.
 
 ## set
 
@@ -209,9 +219,11 @@ Move or rename a document with cascading backlink rewrites.
 norn move Inbox/task.md Projects/my-project/tasks/task.md
 norn move Inbox/task.md Projects/my-project/tasks/task.md --dry-run
 norn move Inbox/task.md Projects/my-project/tasks/task.md --yes --format json
+norn move Inbox/task.md Projects/my-project/tasks/ --parents
+norn move Archive/ Projects/ --recursive
 ```
 
-Flags: `--dry-run` (preview, no write), `--yes` (skip confirm prompt), `--no-link-rewrite` (move file only), `--force` (overwrite destination).
+Flags: `--dry-run` (preview, no write), `--yes` (skip confirm prompt), `--no-link-rewrite` (move file only), `--force` (overwrite destination), `--parents` / `-p` (create missing destination directories), `--recursive` / `-r` (move all documents in a folder).
 
 ## delete
 

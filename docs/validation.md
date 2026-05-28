@@ -5,7 +5,7 @@ description: Finding codes, summary output, triage filters, the schema-versioned
 
 # Validation and repair
 
-`norn validate` is the detection surface. `norn repair plan` and `norn repair apply` are the planning and writing surfaces. Together they form the deterministic drift-healing loop: detect, plan, apply, verify.
+`norn validate` is the detection surface. `norn repair --plan` and `norn migrate` are the planning and writing surfaces. Together they form the deterministic drift-healing loop: detect, plan, apply, verify.
 
 ## The validate command
 
@@ -108,19 +108,19 @@ norn validate --path "tasks/**/*.md" --rule task-status --format jsonl
 
 ## Repair planning
 
-`norn repair plan` runs validation, applies the same triage filters, and converts findings matched by configured `repair.rules` into an explicit JSON repair plan.
+`norn repair --plan` runs validation, applies the same triage filters, and converts findings matched by configured `repair.rules` into an explicit JSON `MigrationPlan`.
 
 ```bash
-norn repair plan --format json
-norn repair plan --out repair.json
-norn repair plan --code frontmatter-disallowed-value --field status --out repair.json
+norn repair --plan --format json
+norn repair --plan --out plan.json
+norn repair --plan --code frontmatter-disallowed-value --field status --out plan.json
 ```
 
 ### Plan schema
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 1,
   "vault_root": "/abs/path/to/vault",
   "source_filters": { "...": "..." },
   "summary": {
@@ -138,7 +138,7 @@ norn repair plan --code frontmatter-disallowed-value --field status --out repair
 
 Each planned change carries the target path, document hash precondition, finding context, operation, optional field (omitted for `move_document` changes), expected old value when available, new value when applicable, and — for moves — `destination`, `link_risk`, and any `warnings`.
 
-Skipped findings carry `skip_reason` (one of: `missing_default`, `link_decision_needed`, `no_rule_matched`, `alias_shadowed`, `graph_diagnostic`, `ambiguous_target`, `missing_hash`, `precondition_failed`) plus a stable kebab-case `reason_code` field (`missing-default`, `link-decision-needed`, etc.) — agents typically want `reason_code`. Also carries a free-form `reason`, candidates for ambiguous links, and suggested next actions. Fix the repairability problem, then rerun `repair plan`.
+Skipped findings carry `skip_reason` (one of: `missing_default`, `link_decision_needed`, `no_rule_matched`, `alias_shadowed`, `graph_diagnostic`, `ambiguous_target`, `missing_hash`, `precondition_failed`) plus a stable kebab-case `reason_code` field (`missing-default`, `link-decision-needed`, etc.) — agents typically want `reason_code`. Also carries a free-form `reason`, candidates for ambiguous links, and suggested next actions. Fix the repairability problem, then rerun `repair --plan`.
 
 ### Supported actions
 
@@ -169,20 +169,20 @@ The validate → plan → apply → verify loop closes for these finding classes
 
 Findings without a matching deterministic rule are reported as skipped fallout in the repair plan with `skip_reason: no_rule_matched`.
 
-## Repair apply
+## Migrate (apply)
 
-`norn repair apply [<plan>]` applies repair plans. Apply writes by default because the command is explicit; pass `--dry-run` to preview.
+`norn migrate [<plan>]` applies `MigrationPlan` artifacts. Apply writes by default; pass `--dry-run` to preview.
 
 The positional is optional: omit it (or pass `-`) to read the plan from stdin. The pipeline form composes plan generation and apply in one shot:
 
 ```bash
-norn repair apply repair.json --dry-run
-norn repair plan --format json | norn repair apply --dry-run
-norn repair apply repair.json --verify
-norn repair apply repair.json --out report.json
+norn migrate plan.json --dry-run
+norn repair --plan --format json | norn migrate - --dry-run
+norn migrate plan.json --verify
+norn migrate plan.json --out report.json
 ```
 
-Output formats: `--format report` (TTY default; human summary), `--format json` (pipe default; full envelope), `--format paths` (sorted dedup of changed files). `--out <PATH>` writes the JSON report to file independently of `--format`. `--format jsonl` and `--format table` were removed in v0.32; both are rejected with migration messages.
+Output formats: `--format records` (TTY default; human summary), `--format json` (pipe default; full `ApplyReport` envelope), `--format paths` (sorted dedup of changed files). `--out <PATH>` writes the JSON report to file independently of `--format`.
 
 Apply rejects:
 
@@ -219,9 +219,9 @@ Apply output includes `plan_context` so broad plans remain explainable after app
 
 ```bash
 norn validate --summary --format json
-norn repair plan --out repair.json
-norn repair apply repair.json --dry-run --format json
-norn repair apply repair.json --verify --format json
+norn repair --plan --out plan.json
+norn migrate plan.json --dry-run --format json
+norn migrate plan.json --verify --format json
 ```
 
 For live maintenance with a snapshot tag:
@@ -229,9 +229,9 @@ For live maintenance with a snapshot tag:
 ```bash
 git status --short
 git tag snapshot/vault-repair-$(date +%Y%m%d-%H%M%S)
-norn repair plan --out repair.json
-norn repair apply repair.json --dry-run --format json
-norn repair apply repair.json --verify --format json
+norn repair --plan --out plan.json
+norn migrate plan.json --dry-run --format json
+norn migrate plan.json --verify --format json
 git diff --check
 git diff
 ```

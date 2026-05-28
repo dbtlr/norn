@@ -76,15 +76,15 @@ For a typed-notes config with `validate.rules`, see [examples/config-typed-notes
 If validation surfaces a deterministic drift case (e.g., a disallowed `status` value), write a plan:
 
 ```bash
-norn -C /path/to/vault repair plan --out repair.json
-cat repair.json | head -40
+norn -C /path/to/vault repair --plan --out plan.json
+cat plan.json | head -40
 ```
 
 Inspect the plan. The `changes` array is what apply will write; `skipped_findings` is what couldn't be planned deterministically. Dry-run, then apply with verification:
 
 ```bash
-norn -C /path/to/vault repair apply repair.json --dry-run --format json
-norn -C /path/to/vault repair apply repair.json --verify --format json
+norn -C /path/to/vault migrate plan.json --dry-run --format json
+norn -C /path/to/vault migrate plan.json --verify --format json
 ```
 
 For the full repair workflow including snapshot tags and live maintenance recipes, see [validation.md](validation.md).
