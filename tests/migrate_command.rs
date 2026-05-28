@@ -94,3 +94,102 @@ operations: []
         "schema version mismatch is pre-flight refusal (exit 2)"
     );
 }
+
+#[test]
+fn migrate_reads_plan_from_stdin() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let plan_json = serde_json::json!({
+        "schema_version": 1,
+        "vault_root": vault.to_str().unwrap(),
+        "operations": [{
+            "kind": "move_document",
+            "fields": {
+                "src": "a.md",
+                "dst": "renamed.md"
+            }
+        }]
+    });
+
+    use std::io::Write;
+    let mut child = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["migrate", "-", "--dry-run", "--format", "json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(plan_json.to_string().as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["operations"][0]["kind"], "move_document");
+    assert!(
+        !vault.join("renamed.md").exists(),
+        "dry-run must not mutate"
+    );
+}
+
+#[test]
+fn migrate_stdin_with_input_format_yaml_works() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let plan_yaml = format!(
+        r#"schema_version: 1
+vault_root: {}
+operations:
+  - kind: move_document
+    fields:
+      src: a.md
+      dst: renamed.md
+"#,
+        vault.to_str().unwrap()
+    );
+
+    use std::io::Write;
+    let mut child = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&vault)
+        .args([
+            "migrate",
+            "-",
+            "--input-format",
+            "yaml",
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(plan_yaml.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["dry_run"], true);
+}
