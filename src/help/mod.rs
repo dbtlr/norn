@@ -8,6 +8,7 @@ pub mod examples;
 pub mod extract;
 pub mod find_live;
 pub mod model;
+pub mod plan_example;
 pub mod render;
 
 pub use bin_name::BIN_NAME;
