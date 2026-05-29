@@ -21,6 +21,7 @@ mod links;
 mod migrate_cmd;
 pub mod migration_plan;
 pub mod move_doc;
+mod mutation_lock;
 mod new;
 mod output;
 pub mod planner;
@@ -277,10 +278,34 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::Move(args) => {
             use crate::applier::{apply_migration_plan, ApplyContext};
+            use crate::cache::CacheError;
             use crate::migration_plan::{
                 MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION,
             };
+            use crate::mutation_lock::pending::sweep_pending;
+            use crate::mutation_lock::MutationLock;
             use std::io::Write;
+
+            // Acquire mutation lock before cache load.
+            // Note: for move, --format json is an implicit DRY-RUN (unlike migrate),
+            // so JSON format alone does NOT force is_apply here.
+            let (_, state_dir) = crate::cache::state_dir_for(&cwd)
+                .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+            sweep_pending(&state_dir);
+            let _mutation_lock = {
+                use std::io::IsTerminal;
+                let is_apply = !args.dry_run && (args.yes || std::io::stdin().is_terminal());
+                match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+                    Ok(guard) => guard,
+                    Err(CacheError::MutationLockTimeout) => {
+                        eprintln!(
+                            "error: another norn mutation is in progress against this vault (timed out after 5 s)"
+                        );
+                        return Ok(2);
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
+                }
+            };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             let mut index = crate::cache_cmd::load_graph_index(
@@ -429,10 +454,33 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::Delete(args) => {
             use crate::applier::{apply_migration_plan, ApplyContext};
+            use crate::cache::CacheError;
             use crate::migration_plan::{
                 MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION,
             };
+            use crate::mutation_lock::pending::sweep_pending;
+            use crate::mutation_lock::MutationLock;
             use std::io::Write;
+
+            // Acquire mutation lock before cache load.
+            // For delete: --format json is also an implicit dry-run.
+            let (_, state_dir) = crate::cache::state_dir_for(&cwd)
+                .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+            sweep_pending(&state_dir);
+            let _mutation_lock = {
+                use std::io::IsTerminal;
+                let is_apply = !args.dry_run && (args.yes || std::io::stdin().is_terminal());
+                match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+                    Ok(guard) => guard,
+                    Err(CacheError::MutationLockTimeout) => {
+                        eprintln!(
+                            "error: another norn mutation is in progress against this vault (timed out after 5 s)"
+                        );
+                        return Ok(2);
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
+                }
+            };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             let mut index = crate::cache_cmd::load_graph_index(
@@ -577,7 +625,30 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(exit)
         }
         Command::Set(args) => {
+            use crate::cache::CacheError;
+            use crate::mutation_lock::pending::sweep_pending;
+            use crate::mutation_lock::MutationLock;
             use std::io::{IsTerminal, Write};
+
+            // Acquire mutation lock before cache load.
+            // Set: --format json without --yes is implicit dry-run (early-return preview),
+            // so JSON alone does NOT force is_apply here.
+            let (_, state_dir) = crate::cache::state_dir_for(&cwd)
+                .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+            sweep_pending(&state_dir);
+            let _mutation_lock = {
+                let is_apply = !args.dry_run && (args.yes || std::io::stdin().is_terminal());
+                match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+                    Ok(guard) => guard,
+                    Err(CacheError::MutationLockTimeout) => {
+                        eprintln!(
+                            "error: another norn mutation is in progress against this vault (timed out after 5 s)"
+                        );
+                        return Ok(2);
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
+                }
+            };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             let mut index = crate::cache_cmd::load_graph_index(
@@ -674,16 +745,42 @@ fn run(cli: Cli) -> Result<i32> {
 
             Ok(0)
         }
-        Command::New(args) => match crate::new::preflight_and_plan(&args, &cwd) {
-            Ok(bundle) => {
-                print!("{}", bundle.rendered);
-                std::process::exit(bundle.exit_code);
+        Command::New(args) => {
+            use crate::cache::CacheError;
+            use crate::mutation_lock::pending::sweep_pending;
+            use crate::mutation_lock::MutationLock;
+
+            // Acquire mutation lock before preflight_and_plan (which does the cache load).
+            // New uses stdout for TTY detection (interactive preview shown on stdout).
+            let (_, state_dir) = crate::cache::state_dir_for(&cwd)
+                .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+            sweep_pending(&state_dir);
+            let _mutation_lock = {
+                use std::io::IsTerminal;
+                let is_apply = !args.dry_run && (args.yes || std::io::stdout().is_terminal());
+                match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+                    Ok(guard) => guard,
+                    Err(CacheError::MutationLockTimeout) => {
+                        eprintln!(
+                            "error: another norn mutation is in progress against this vault (timed out after 5 s)"
+                        );
+                        return Ok(2);
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
+                }
+            };
+            // _mutation_lock held here; dropped when arm returns.
+            match crate::new::preflight_and_plan(&args, &cwd) {
+                Ok(bundle) => {
+                    print!("{}", bundle.rendered);
+                    Ok(bundle.exit_code)
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    Ok(2)
+                }
             }
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(2);
-            }
-        },
+        }
         Command::Init(args) => init::run(&cwd, &args),
         Command::Completions(_) => {
             unreachable!("completions are handled before vault targeting")

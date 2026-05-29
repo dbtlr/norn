@@ -10,10 +10,15 @@
 
 use crate::applier::{apply_migration_plan, ApplyContext};
 use crate::apply_report::ApplyReport;
+use crate::cache::state_dir_for;
+use crate::cache::CacheError;
 use crate::cli::RewriteWikilinkFormat;
 use crate::migration_plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
+use crate::mutation_lock::pending::sweep_pending;
+use crate::mutation_lock::MutationLock;
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
+use std::io::IsTerminal;
 use std::io::Write;
 
 pub struct RewriteWikilinkRunArgs {
@@ -39,6 +44,29 @@ pub fn run(
     config_path: Option<&Utf8PathBuf>,
     verbose: bool,
 ) -> Result<i32> {
+    // ------------------------------------------------------------------
+    // 0. Acquire mutation lock before cache load.
+    // ------------------------------------------------------------------
+    let (_, state_dir) =
+        state_dir_for(cwd).map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+    sweep_pending(&state_dir);
+    let _mutation_lock = {
+        let is_apply = !args.dry_run
+            && (args.yes
+                || matches!(args.format, RewriteWikilinkFormat::Json)
+                || std::io::stdin().is_terminal());
+        match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+            Ok(guard) => guard,
+            Err(CacheError::MutationLockTimeout) => {
+                eprintln!(
+                    "error: another norn mutation is in progress against this vault (timed out after 5 s)"
+                );
+                return Ok(EXIT_PREFLIGHT);
+            }
+            Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
+        }
+    };
+
     // ------------------------------------------------------------------
     // 1. Build GraphIndex
     // ------------------------------------------------------------------
@@ -73,14 +101,11 @@ pub fn run(
     //    - TTY without --yes: prompt
     //    - Non-TTY without --yes: implicit dry-run
     // ------------------------------------------------------------------
-    use std::io::IsTerminal;
-
     let dry_run = if args.dry_run {
         true
     } else if args.yes || matches!(args.format, RewriteWikilinkFormat::Json) {
         false
     } else if std::io::stdin().is_terminal() {
-        use std::io::Write;
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
         let mut prompt_out = std::io::stderr();

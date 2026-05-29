@@ -12,8 +12,11 @@
 
 use crate::applier::{apply_migration_plan, ApplyContext};
 use crate::apply_report::ApplyReport;
+use crate::cache::state_dir_for;
 use crate::cli::{InputFormat, MigrateFormat};
 use crate::migration_plan::{MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
+use crate::mutation_lock::pending::{delete_pending_plan, save_pending_plan, sweep_pending};
+use crate::mutation_lock::MutationLock;
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use std::io::{self, Read, Write};
@@ -67,6 +70,49 @@ pub fn run(
         );
         return Ok(EXIT_PREFLIGHT);
     }
+
+    // ------------------------------------------------------------------
+    // 4a. Acquire mutation lock (apply-only; dry-run is lock-free).
+    //
+    // is_apply: --dry-run → never; --yes or JSON format → yes; stdin
+    // terminal (interactive) → yes (conservative — will confirm via TTY);
+    // non-TTY without --yes → no (implicit dry-run, treat as reader).
+    // ------------------------------------------------------------------
+    let (_, state_dir) =
+        state_dir_for(cwd).map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+    // Best-effort sweep of stale pending plans before we do any work.
+    sweep_pending(&state_dir);
+    let _mutation_lock = {
+        use std::io::IsTerminal;
+        let is_apply = !args.dry_run
+            && (args.yes
+                || matches!(args.format, MigrateFormat::Json)
+                || std::io::stdin().is_terminal());
+        match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+            Ok(guard) => guard,
+            Err(crate::cache::CacheError::MutationLockTimeout) => {
+                if args.plan_path == "-" {
+                    match save_pending_plan(&state_dir, &raw) {
+                        Ok(pending_path) => {
+                            eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
+                            eprintln!("retry with: norn migrate {pending_path}");
+                        }
+                        Err(save_err) => {
+                            eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
+                            eprintln!("warning: could not save stdin plan for retry: {save_err}");
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "error: another norn mutation is in progress against this vault (timed out after 5 s)"
+                    );
+                }
+                return Ok(EXIT_PREFLIGHT);
+            }
+            Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
+        }
+    };
+    // `_mutation_lock` is Option<MutationLock> held at function scope until run() returns.
 
     // ------------------------------------------------------------------
     // 5. Build GraphIndex
@@ -134,6 +180,14 @@ pub fn run(
     // 8. Render
     // ------------------------------------------------------------------
     render_report(&report, args.format, args.out.as_deref())?;
+
+    // Delete the pending plan on successful retry so it self-cleans.
+    if exit == EXIT_OK {
+        let path = camino::Utf8Path::new(&args.plan_path);
+        if path.as_str().contains("/pending/") && path.as_str().ends_with(".plan.json") {
+            delete_pending_plan(path);
+        }
+    }
 
     Ok(exit)
 }

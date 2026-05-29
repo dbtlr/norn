@@ -33,7 +33,7 @@ pub fn vault_identity(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, String), Ca
 /// explicitly. Output is byte-identical to the old formatter for the same
 /// input, which is load-bearing: the cache directory name is derived from
 /// this hash, so a format change would orphan every existing cache.
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push_str(&format!("{b:02x}"));
@@ -48,6 +48,33 @@ pub fn cache_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf)
     let (canonical, hash) = vault_identity(vault_root)?;
     let base = xdg_cache_home()?;
     let dir = base.join("vault").join(hash);
+    Ok((canonical, dir))
+}
+
+fn xdg_state_home() -> Result<Utf8PathBuf, CacheError> {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Ok(Utf8PathBuf::from(xdg));
+        }
+    }
+    let home = std::env::var("HOME").map_err(|_| CacheError::Io {
+        path: Utf8PathBuf::from("$HOME"),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set"),
+    })?;
+    Ok(Utf8PathBuf::from(home).join(".local").join("state"))
+}
+
+/// Returns the state directory path for a given vault root.
+/// Format: `<XDG_STATE_HOME>/norn/<sha256-of-canonical-root>/`,
+/// defaulting to `~/.local/state/norn/<hash>/` when `XDG_STATE_HOME` is unset.
+///
+/// Parallel to `cache_dir_for` but uses the state dir (persists across cache
+/// clears) and the `norn/` app folder (post-rename; independent of the cache's
+/// legacy `vault/` folder).
+pub fn state_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
+    let (canonical, hash) = vault_identity(vault_root)?;
+    let base = xdg_state_home()?;
+    let dir = base.join("norn").join(hash);
     Ok((canonical, dir))
 }
 
@@ -67,6 +94,7 @@ fn xdg_cache_home() -> Result<Utf8PathBuf, CacheError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     /// Pins the cache-identity hash format. Two guarantees we need to hold
     /// across sha2 major bumps: the output is lowercase no-separator hex,
@@ -85,5 +113,41 @@ mod tests {
         assert!(hash
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn state_dir_for_format() {
+        // state_dir_for should produce a path ending in norn/<hash> under
+        // XDG_STATE_HOME (or ~/.local/state/norn/<hash> as fallback).
+        // We use a tempdir as the vault root to get a stable canonical path.
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (_, dir) = state_dir_for(&root).unwrap();
+        assert!(
+            dir.as_str().contains("/norn/"),
+            "path should contain /norn/: {dir}"
+        );
+        // Hash component is 64-char lowercase hex.
+        let hash = dir.file_name().unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn state_dir_for_uses_xdg_state_home() {
+        let tmp = TempDir::new().unwrap();
+        let xdg_tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let xdg_str = xdg_tmp.path().to_str().unwrap().to_string();
+        std::env::set_var("XDG_STATE_HOME", &xdg_str);
+        let result = state_dir_for(&root);
+        std::env::remove_var("XDG_STATE_HOME"); // always remove before assert
+        let (_, dir) = result.unwrap();
+        assert!(
+            dir.as_str().starts_with(&xdg_str),
+            "should be under XDG_STATE_HOME: {dir}"
+        );
     }
 }
