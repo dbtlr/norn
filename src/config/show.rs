@@ -27,6 +27,7 @@ struct ShowSnapshot {
     file: Utf8PathBuf,
     vault_root: Utf8PathBuf,
     cache: Utf8PathBuf,
+    events: Utf8PathBuf,
     version: u32,
     ignore_count: usize,
     required_count: usize,
@@ -51,6 +52,7 @@ impl ShowSnapshot {
             ("file", self.file.as_str().to_string()),
             ("vault_root", self.vault_root.as_str().to_string()),
             ("cache", self.cache.as_str().to_string()),
+            ("events", self.events.as_str().to_string()),
             ("version", self.version.to_string()),
             ("ignore", format!("{} patterns", self.ignore_count)),
             ("required", format!("{} fields", self.required_count)),
@@ -130,10 +132,26 @@ fn build_snapshot(
     cache: Utf8PathBuf,
     cfg: &VaultConfig,
 ) -> ShowSnapshot {
+    // Resolve the mutation event-log dir the same way the telemetry sink does:
+    // honor a configured `telemetry.location` override, else fall back to the
+    // default `<state_dir>/events/`. The override is rarely set, so a failed
+    // default resolution (e.g. canonicalize error) degrades to an empty path
+    // rather than failing `config show`.
+    let events = cfg
+        .telemetry
+        .as_ref()
+        .and_then(|t| t.location.clone())
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|| {
+            crate::cache::events_dir_for(&vault_root)
+                .map(|(_canonical, events_dir)| events_dir)
+                .unwrap_or_default()
+        });
     ShowSnapshot {
         file,
         vault_root,
         cache,
+        events,
         version: cfg.version,
         ignore_count: cfg.files.ignore.len(),
         required_count: cfg.validate.required_frontmatter.len(),
@@ -178,6 +196,7 @@ fn json_payload(snapshot: &ShowSnapshot) -> Value {
         "file": snapshot.file.as_str(),
         "vault_root": snapshot.vault_root.as_str(),
         "cache": snapshot.cache.as_str(),
+        "events": snapshot.events.as_str(),
         "version": snapshot.version,
         "files": { "ignore_count": snapshot.ignore_count },
         "validate": {
@@ -213,6 +232,7 @@ mod tests {
             file: Utf8PathBuf::from("/v/.norn/config.yaml"),
             vault_root: Utf8PathBuf::from("/v"),
             cache: Utf8PathBuf::from("/c/cache.db"),
+            events: Utf8PathBuf::from("/s/norn/abc123/events"),
             version: 1,
             ignore_count: 2,
             required_count: 3,
@@ -249,6 +269,27 @@ mod tests {
             !text.contains("\n  file "),
             "file should be header, not field"
         );
+    }
+
+    #[test]
+    fn config_show_reports_events_dir_in_records() {
+        let snap = sample_snapshot();
+        let pairs = snap.pairs();
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| *k == "events" && v.contains("/norn/") && v.ends_with("/events")),
+            "expected an events row ending in /events: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn config_show_reports_events_dir_in_json() {
+        let snap = sample_snapshot();
+        let mut buf = Vec::new();
+        render_json(&snap, &mut buf).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(json["events"].as_str().unwrap().ends_with("/events"));
     }
 
     #[test]

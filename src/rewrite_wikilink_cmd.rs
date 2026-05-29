@@ -130,10 +130,26 @@ pub fn run(
         verbose,
     };
 
+    let argv: Vec<String> = std::env::args().collect();
+    let mut sink = crate::open_event_sink(
+        cwd,
+        dry_run,
+        loaded_config.vault_config.telemetry.as_ref(),
+        &argv,
+    );
+    crate::emit_invocation_started(
+        &mut sink,
+        "rewrite-wikilink",
+        cwd,
+        &plan.vault_root,
+        dry_run,
+        &argv,
+    );
+
     // ------------------------------------------------------------------
     // 4. Apply — pre-flight refusal on Err
     // ------------------------------------------------------------------
-    let report = match apply_migration_plan(&plan, &index, ctx) {
+    let report = match apply_migration_plan(&plan, &index, ctx, &mut sink) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -149,6 +165,8 @@ pub fn run(
     } else {
         EXIT_OK
     };
+
+    crate::emit_invocation_finished(&mut sink, "rewrite-wikilink", exit, &report);
 
     // ------------------------------------------------------------------
     // 6. Render
@@ -180,6 +198,11 @@ fn render_report(report: &ApplyReport, args: &RewriteWikilinkRunArgs) -> Result<
         }
         RewriteWikilinkFormat::Records => {
             render_records(report, &args.old, &args.new, &mut out_lock)?;
+            // TTY `trace:` footer on real apply (Records only; JSON carries
+            // trace_id as a field).
+            if !report.dry_run {
+                writeln!(out_lock, "trace: {}", report.trace_id)?;
+            }
         }
     }
     Ok(())

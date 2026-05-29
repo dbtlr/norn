@@ -32,6 +32,9 @@ pub struct VaultConfig {
     pub repair: RepairConfig,
     #[serde(default)]
     pub templates: TemplatesConfig,
+    /// Mutation-telemetry settings; wired into the applier-path event sink.
+    #[serde(default)]
+    pub telemetry: Option<TelemetryConfig>,
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
     _deprecated_graph: Option<serde_yaml::Value>,
@@ -52,6 +55,7 @@ impl Default for VaultConfig {
             validate: ValidateConfig::default(),
             repair: RepairConfig::default(),
             templates: TemplatesConfig::default(),
+            telemetry: None,
             _deprecated_graph: None,
         }
     }
@@ -81,6 +85,47 @@ fn default_date_format() -> String {
 
 fn default_time_format() -> String {
     "HH:mm".into()
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Parsed from a duration string (e.g. "90d"); None when absent or
+    /// unparseable (best-effort — a malformed value does not fail config load).
+    #[serde(default, deserialize_with = "de_opt_duration")]
+    pub retention: Option<std::time::Duration>,
+}
+
+/// Default mutation-telemetry retention when unconfigured: 90 days.
+pub const DEFAULT_RETENTION: std::time::Duration = std::time::Duration::from_secs(90 * 86_400);
+
+/// Parse a short duration string: `<n>w` weeks, `<n>d` days, `<n>h` hours,
+/// `<n>m` minutes. Returns None on anything unrecognized (best-effort). The
+/// numeric part must parse as `u64`; a missing/unknown suffix or non-numeric
+/// value yields None.
+pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    let (num, unit_secs) = match s.chars().last()? {
+        'w' => (&s[..s.len() - 1], 604_800u64),
+        'd' => (&s[..s.len() - 1], 86_400),
+        'h' => (&s[..s.len() - 1], 3_600),
+        'm' => (&s[..s.len() - 1], 60),
+        _ => return None,
+    };
+    let n: u64 = num.trim().parse().ok()?;
+    Some(std::time::Duration::from_secs(n * unit_secs))
+}
+
+/// serde adapter for `TelemetryConfig::retention`. Best-effort: a malformed
+/// duration string falls back to `None` rather than failing the whole config load.
+fn de_opt_duration<'de, D>(d: D) -> Result<Option<std::time::Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(d)?;
+    Ok(opt.and_then(|s| parse_duration(&s)))
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1084,6 +1129,49 @@ templates:
         let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         assert_eq!(cfg.templates.date_format, "YYYY-MM-DD");
         assert_eq!(cfg.templates.time_format, "HH:mm");
+    }
+
+    #[test]
+    fn telemetry_config_parses_location_and_retention() {
+        let cfg = parse("telemetry:\n  location: /tmp/foo\n  retention: 30d\n").unwrap();
+        let t = cfg.telemetry.expect("telemetry section");
+        assert_eq!(t.location.as_deref(), Some("/tmp/foo"));
+        assert_eq!(
+            t.retention,
+            Some(std::time::Duration::from_secs(30 * 86_400))
+        );
+    }
+
+    #[test]
+    fn telemetry_absent_is_none() {
+        let cfg = parse("validate: {}\n").unwrap();
+        assert!(cfg.telemetry.is_none());
+    }
+
+    #[test]
+    fn telemetry_malformed_retention_is_ignored_not_fatal() {
+        let cfg = parse("telemetry:\n  retention: not-a-duration\n").unwrap();
+        let t = cfg.telemetry.unwrap();
+        assert!(t.retention.is_none(), "bad duration -> None, no error");
+    }
+
+    #[test]
+    fn duration_parser_handles_units() {
+        assert_eq!(
+            parse_duration("90d"),
+            Some(std::time::Duration::from_secs(90 * 86_400))
+        );
+        assert_eq!(
+            parse_duration("12h"),
+            Some(std::time::Duration::from_secs(12 * 3_600))
+        );
+        assert_eq!(
+            parse_duration("2w"),
+            Some(std::time::Duration::from_secs(2 * 604_800))
+        );
+        assert_eq!(parse_duration("nonsense"), None);
+        assert_eq!(parse_duration("10"), None); // no suffix
+        assert_eq!(parse_duration(""), None);
     }
 
     #[test]

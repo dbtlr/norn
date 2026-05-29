@@ -32,7 +32,10 @@ mod status;
 mod writer;
 
 pub(crate) use change_detection::ChangeDetectOptions;
-pub(crate) use identity::{cache_dir_for, hex_lower, state_dir_for};
+// `events_dir_for` is re-exported for the telemetry sink wiring landed in a
+// later task; surfaced here now so callers use `crate::cache::events_dir_for`.
+#[allow(unused_imports)]
+pub(crate) use identity::{cache_dir_for, events_dir_for, hex_lower, state_dir_for};
 pub(crate) use lock::acquire_flock;
 pub(crate) use query_show::IncomingLink;
 

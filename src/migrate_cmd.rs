@@ -159,7 +159,16 @@ pub fn run(
         verbose,
     };
 
-    let report = match apply_migration_plan(&plan, &index, ctx) {
+    let argv: Vec<String> = std::env::args().collect();
+    let mut sink = crate::open_event_sink(
+        cwd,
+        dry_run,
+        loaded_config.vault_config.telemetry.as_ref(),
+        &argv,
+    );
+    crate::emit_invocation_started(&mut sink, "migrate", cwd, &plan.vault_root, dry_run, &argv);
+
+    let report = match apply_migration_plan(&plan, &index, ctx, &mut sink) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -175,6 +184,8 @@ pub fn run(
     } else {
         EXIT_OK
     };
+
+    crate::emit_invocation_finished(&mut sink, "migrate", exit, &report);
 
     crate::emit_cascade_failure_warnings(&report);
 
@@ -259,6 +270,11 @@ fn render_report(report: &ApplyReport, format: MigrateFormat, out: Option<&str>)
         }
         MigrateFormat::Records => {
             render_records(report, &mut out_lock)?;
+            // TTY `trace:` footer on real apply (Records only; JSON carries
+            // trace_id as a field).
+            if !report.dry_run {
+                writeln!(out_lock, "trace: {}", report.trace_id)?;
+            }
         }
     }
     Ok(())

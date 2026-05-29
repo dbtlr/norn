@@ -225,7 +225,7 @@ operations:
     let dry1_report: serde_json::Value =
         serde_json::from_str(&dry1_stdout).expect("Invocation 1 dry-run output must be valid JSON");
 
-    assert_eq!(dry1_report["schema_version"], 1);
+    assert_eq!(dry1_report["schema_version"], 2);
     assert_eq!(dry1_report["dry_run"], true);
 
     let dry1_ops = dry1_report["operations"]
@@ -385,7 +385,7 @@ operations:
     let dry2_report: serde_json::Value =
         serde_json::from_str(&dry2_stdout).expect("Invocation 2 dry-run output must be valid JSON");
 
-    assert_eq!(dry2_report["schema_version"], 1);
+    assert_eq!(dry2_report["schema_version"], 2);
     assert_eq!(dry2_report["dry_run"], true);
 
     let dry2_ops = dry2_report["operations"]

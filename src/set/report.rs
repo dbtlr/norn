@@ -10,11 +10,14 @@ use serde::Serialize;
 
 use crate::set::validate::SetWarning;
 
-pub const SET_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const SET_REPORT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SetReport {
     pub schema_version: u32,
+    /// Trace ID shared by every telemetry event emitted for this invocation.
+    /// Empty on dry-run/preview (no stream is persisted).
+    pub trace_id: String,
     pub operation: String,
     pub target: Utf8PathBuf,
     pub frontmatter_changes: Vec<FrontmatterChange>,
@@ -43,7 +46,14 @@ pub struct FrontmatterChange {
 }
 
 /// Build a SetReport from the preflight outcome + applied flag.
-pub fn build_report(outcome: &crate::set::synth::PreflightOutcome, applied: bool) -> SetReport {
+///
+/// `trace_id` is the telemetry trace ID for the invocation; pass `""` on
+/// dry-run/preview paths where no event stream is persisted.
+pub fn build_report(
+    outcome: &crate::set::synth::PreflightOutcome,
+    applied: bool,
+    trace_id: &str,
+) -> SetReport {
     let mut frontmatter_changes: Vec<FrontmatterChange> = Vec::new();
     for c in outcome
         .plan
@@ -70,6 +80,7 @@ pub fn build_report(outcome: &crate::set::synth::PreflightOutcome, applied: bool
 
     SetReport {
         schema_version: SET_REPORT_SCHEMA_VERSION,
+        trace_id: trace_id.to_string(),
         operation: "set".to_string(),
         target: outcome.target.clone(),
         frontmatter_changes,
@@ -189,7 +200,8 @@ mod tests {
     #[test]
     fn set_report_json_envelope_shape() {
         let report = SetReport {
-            schema_version: 1,
+            schema_version: 2,
+            trace_id: "".to_string(),
             operation: "set".to_string(),
             target: "notes/foo.md".into(),
             frontmatter_changes: vec![
@@ -226,7 +238,7 @@ mod tests {
         assert_eq!(parsed["body_changed"], true);
         assert_eq!(parsed["applied"], true);
         // schema_version is u32 → in JSON it's a Number
-        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["schema_version"], 2);
     }
 
     // ── Task 5.3: TTY records renderer ───────────────────────────────────────
@@ -234,7 +246,8 @@ mod tests {
     #[test]
     fn render_records_dry_run_emits_summary_and_next_step() {
         let report = SetReport {
-            schema_version: 1,
+            schema_version: 2,
+            trace_id: "".to_string(),
             operation: "set".to_string(),
             target: "notes/foo.md".into(),
             frontmatter_changes: vec![FrontmatterChange {
@@ -263,7 +276,8 @@ mod tests {
     #[test]
     fn render_records_applied_omits_yes_hint() {
         let report = SetReport {
-            schema_version: 1,
+            schema_version: 2,
+            trace_id: "".to_string(),
             operation: "set".to_string(),
             target: "notes/foo.md".into(),
             frontmatter_changes: vec![],
@@ -287,7 +301,8 @@ mod tests {
     #[test]
     fn render_records_truncates_warning_list_at_three() {
         let report = SetReport {
-            schema_version: 1,
+            schema_version: 2,
+            trace_id: "".to_string(),
             operation: "set".to_string(),
             target: "notes/foo.md".into(),
             frontmatter_changes: vec![],

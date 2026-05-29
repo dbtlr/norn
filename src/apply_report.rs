@@ -5,11 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const APPLY_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const APPLY_REPORT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyReport {
     pub schema_version: u32,
+    /// Trace ID shared by every telemetry event emitted for this invocation.
+    pub trace_id: String,
     pub plan_hash: String,
     pub vault_root: String,
     pub dry_run: bool,
@@ -127,7 +129,8 @@ mod tests {
     #[test]
     fn apply_report_serializes_with_per_op_status() {
         let report = ApplyReport {
-            schema_version: 1,
+            schema_version: 2,
+            trace_id: "".into(),
             plan_hash: "abc123".into(),
             vault_root: "/abs/vault".into(),
             dry_run: false,

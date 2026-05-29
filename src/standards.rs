@@ -11,8 +11,8 @@ mod substitution;
 mod summary;
 
 pub(crate) use config::{
-    parse_config, parse_config_compiled, CompiledConfig, RepairConfig, ValidateConfig,
-    ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION,
+    parse_config, parse_config_compiled, CompiledConfig, RepairConfig, TelemetryConfig,
+    ValidateConfig, ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION, DEFAULT_RETENTION,
 };
 // Test-only re-exports for fixtures inside norn tests.
 #[cfg(test)]

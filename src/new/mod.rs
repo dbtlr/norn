@@ -96,7 +96,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
                 crate::new::report::render_records(&plan, args.path.as_str(), applied, body_bytes)
             }
             NewFormat::Json => {
-                crate::new::report::render_json(&plan, args.path.as_str(), applied, body_bytes)?
+                crate::new::report::render_json(&plan, args.path.as_str(), applied, body_bytes, "")?
             }
         })
     };
@@ -112,7 +112,14 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
 
     if args.yes {
         // --yes: skip confirm, go straight to apply.
-        return apply_and_render(args, vault_root, &index, &plan, body_bytes, render_preview);
+        return apply_and_render(
+            args,
+            vault_root,
+            &index,
+            &plan,
+            body_bytes,
+            loaded_config.vault_config.telemetry.as_ref(),
+        );
     }
 
     if matches!(args.format, NewFormat::Json) {
@@ -142,7 +149,14 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
                 exit_code: 1,
             });
         }
-        return apply_and_render(args, vault_root, &index, &plan, body_bytes, render_preview);
+        return apply_and_render(
+            args,
+            vault_root,
+            &index,
+            &plan,
+            body_bytes,
+            loaded_config.vault_config.telemetry.as_ref(),
+        );
     }
 
     // Non-TTY without --yes: implicit dry-run.
@@ -156,13 +170,19 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
 // ── Apply path ────────────────────────────────────────────────────────────────
 
 /// Call the apply orchestrator and render the post-apply output.
+///
+/// `telemetry` is the loaded vault telemetry config, used to open a real
+/// (file-backed) event sink for the apply. `new` is a single `create_document`
+/// op, so it emits the same lifecycle → op_planned → action → finished stream
+/// as the applier-routed mutators, and the `trace_id` is threaded into the
+/// rendered report.
 fn apply_and_render(
     args: &NewArgs,
     vault_root: &Utf8Path,
     index: &crate::core::GraphIndex,
     plan: &crate::new::synth::CreateDocumentPlan,
     body_bytes: usize,
-    render_preview: impl Fn(bool) -> Result<String>,
+    telemetry: Option<&crate::standards::TelemetryConfig>,
 ) -> Result<OutputBundle> {
     use camino::Utf8PathBuf;
 
@@ -186,13 +206,47 @@ fn apply_and_render(
         parents: args.parents,
     };
     let vault_root_buf = vault_root.to_owned();
-    crate::repair_apply::apply_repair_plan_with_context(
+
+    // Real apply: open a file-backed sink and emit the full event stream.
+    let argv: Vec<String> = std::env::args().collect();
+    let mut sink = crate::open_event_sink(vault_root, /*dry_run=*/ false, telemetry, &argv);
+    crate::emit_invocation_started(
+        &mut sink,
+        "new",
+        vault_root,
+        vault_root.as_str(),
+        /*dry_run=*/ false,
+        &argv,
+    );
+
+    // Emit one op_planned for the single create_document change; collect its
+    // span so the action event (create_document) hangs off it.
+    let mut spans = std::collections::HashMap::new();
+    {
+        let change = &plan.change;
+        let span = sink.start_op(&change.operation, change.path.as_str(), None);
+        spans.insert(change.change_id.clone(), span);
+    }
+
+    let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
         &vault_root_buf,
         index,
         &repair_plan,
         /*dry_run=*/ false,
         &ctx,
-    )?;
+        &mut sink,
+        &spans,
+    );
+
+    let trace_id = sink.trace_id().to_string();
+
+    // Emit the finished lifecycle event (single create op → applied=1 on success).
+    let exit_code = match &apply_outcome {
+        Ok(_) => 0,
+        Err(_) => 2,
+    };
+    crate::emit_single_op_finished(&mut sink, "new", exit_code, apply_outcome.is_ok());
+    apply_outcome?;
 
     // Task 8.3: post-create validate hook.
     // Re-validate the new doc to surface any findings as warnings in the envelope.
@@ -202,28 +256,30 @@ fn apply_and_render(
 
     // If post-validate found additional warnings, merge them into the plan's warnings
     // for rendering. We render with a modified plan that includes post_warnings.
-    let rendered = if post_warnings.is_empty() {
-        render_preview(true)?
-    } else {
-        // Build an augmented plan with the post-validate warnings appended.
-        let mut augmented = crate::new::synth::CreateDocumentPlan {
-            change: plan.change.clone(),
-            warnings: plan.warnings.clone(),
-            field_sources: plan.field_sources.clone(),
-        };
-        augmented.warnings.extend(post_warnings);
-        match args.format {
-            crate::cli::NewFormat::Records => Ok(crate::new::report::render_records(
-                &augmented,
-                args.path.as_str(),
-                true,
-                body_bytes,
-            )),
-            crate::cli::NewFormat::Json => {
-                crate::new::report::render_json(&augmented, args.path.as_str(), true, body_bytes)
-            }
-        }?
+    let mut augmented = crate::new::synth::CreateDocumentPlan {
+        change: plan.change.clone(),
+        warnings: plan.warnings.clone(),
+        field_sources: plan.field_sources.clone(),
     };
+    augmented.warnings.extend(post_warnings);
+    let mut rendered = match args.format {
+        crate::cli::NewFormat::Records => {
+            crate::new::report::render_records(&augmented, args.path.as_str(), true, body_bytes)
+        }
+        crate::cli::NewFormat::Json => crate::new::report::render_json(
+            &augmented,
+            args.path.as_str(),
+            true,
+            body_bytes,
+            &trace_id,
+        )?,
+    };
+
+    // TTY `trace:` footer on real apply (Records format only; JSON carries
+    // trace_id as a field).
+    if matches!(args.format, crate::cli::NewFormat::Records) {
+        rendered.push_str(&format!("trace: {trace_id}\n"));
+    }
 
     Ok(OutputBundle {
         rendered,

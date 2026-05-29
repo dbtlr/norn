@@ -56,7 +56,7 @@ operations:
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["dry_run"], true);
     assert_eq!(report["operations"][0]["kind"], "move_document");
     assert!(

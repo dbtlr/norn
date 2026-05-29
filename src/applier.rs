@@ -29,6 +29,11 @@ use crate::standards::{
     PlanWarning, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary, SkippedSummary,
     REPAIR_PLAN_SCHEMA_VERSION,
 };
+use crate::telemetry::event::{
+    action_event_name, ATTR_LINK_FROM, ATTR_LINK_TO, ATTR_REASON_CODE, ATTR_REASON_MESSAGE,
+    ATTR_STATUS, ATTR_TARGET,
+};
+use crate::telemetry::Event;
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::BTreeSet;
@@ -78,6 +83,7 @@ pub(crate) fn apply_migration_plan(
     plan: &MigrationPlan,
     index: &GraphIndex,
     ctx: ApplyContext,
+    sink: &mut crate::telemetry::EventSink,
 ) -> Result<ApplyReport> {
     // ------------------------------------------------------------------
     // Phase 1: expansion + provenance tracking
@@ -94,6 +100,34 @@ pub(crate) fn apply_migration_plan(
             all_changes.push(c);
         }
     }
+
+    // Emit one `op_planned` per expanded change, collecting the returned span
+    // ids into a parallel vec (indexed like `all_changes`). `from` references
+    // the parent op index when that parent is a high-level (multi-expansion)
+    // op; otherwise `None`.
+    let span_ids: Vec<String> = all_changes
+        .iter()
+        .enumerate()
+        .map(|(i, change)| {
+            let parent_idx = provenance[i];
+            let from = if is_high_level_op(&plan.operations[parent_idx]) {
+                Some(parent_idx)
+            } else {
+                None
+            };
+            sink.start_op(&change.operation, change.path.as_str(), from)
+        })
+        .collect();
+
+    // change_id -> op span id. `hydrated` is `all_changes` mapped 1:1 (same
+    // length and order — hydration only fills empty hashes, never adds/removes
+    // changes), so its `change_id`s align with `span_ids` built from
+    // `all_changes`. We zip `all_changes` (the span_ids source) with span_ids.
+    let spans: std::collections::HashMap<String, String> = all_changes
+        .iter()
+        .zip(span_ids.iter())
+        .map(|(c, s)| (c.change_id.clone(), s.clone()))
+        .collect();
 
     // ------------------------------------------------------------------
     // Phase 2: hash hydration
@@ -146,8 +180,15 @@ pub(crate) fn apply_migration_plan(
         parents: ctx.parents,
     };
 
-    let apply_result =
-        apply_repair_plan_with_context(&vault_root, index, &repair_plan, ctx.dry_run, &create_ctx)?;
+    let apply_result = apply_repair_plan_with_context(
+        &vault_root,
+        index,
+        &repair_plan,
+        ctx.dry_run,
+        &create_ctx,
+        sink,
+        &spans,
+    )?;
 
     // ------------------------------------------------------------------
     // Phase 4: convert RepairApplyReport → ApplyReport
@@ -160,6 +201,8 @@ pub(crate) fn apply_migration_plan(
         &apply_result,
         ctx.dry_run,
         ctx.verbose,
+        &span_ids,
+        sink.events(),
     );
 
     let applied = ops
@@ -214,6 +257,13 @@ pub(crate) fn apply_migration_plan(
 
     Ok(ApplyReport {
         schema_version: APPLY_REPORT_SCHEMA_VERSION,
+        // Dry-runs persist no log, so the trace_id correlates to nothing — emit
+        // empty for symmetry with SetReport/NewReport dry-run output.
+        trace_id: if ctx.dry_run {
+            String::new()
+        } else {
+            sink.trace_id().to_string()
+        },
         plan_hash: plan.canonical_hash(),
         vault_root: plan.vault_root.clone(),
         dry_run: ctx.dry_run,
@@ -239,80 +289,6 @@ fn needs_hash_check(operation: &str) -> bool {
             | "add_frontmatter"
             | "remove_frontmatter"
     )
-}
-
-/// For a single `PlannedChange`, determine its `OpStatus` by matching against
-/// what the `RepairApplyReport` recorded.
-///
-/// The existing orchestrator does not return per-change success/failure —
-/// it either returns `Ok(report)` (all changes applied) or `Err(...)` (fatal
-/// error aborted the run). When the call returns `Ok`, every change in the
-/// report has been processed. We infer status from the report's output lists:
-///
-/// - `move_document`: appears in `moved_files` when applied (or dry-run)
-/// - `delete_document`: appears in `deleted_documents`
-/// - `create_document`: appears in `created_documents`
-/// - `replace_body`: appears in `replaced_bodies`
-/// - `rewrite_link` / frontmatter edits: appear in `changed_files`
-///
-/// For dry-run, all processed changes get `NotRun` (nothing was mutated).
-/// For live apply, every change that made it into the output list gets `Applied`.
-/// Anything not found in any output list (e.g. a change whose file didn't
-/// change because the content already matched) gets `Skipped`.
-fn infer_status(change: &PlannedChange, report: &RepairApplyReport, dry_run: bool) -> OpStatus {
-    if dry_run {
-        return OpStatus::NotRun;
-    }
-
-    match change.operation.as_str() {
-        "move_document" => {
-            let found = report.moved_files.iter().any(|m| m.from == change.path);
-            if found {
-                OpStatus::Applied
-            } else {
-                OpStatus::Skipped
-            }
-        }
-        "delete_document" => {
-            let found = report
-                .deleted_documents
-                .iter()
-                .any(|d| d.path == change.path);
-            if found {
-                OpStatus::Applied
-            } else {
-                OpStatus::Skipped
-            }
-        }
-        "create_document" => {
-            let found = report
-                .created_documents
-                .iter()
-                .any(|c| c.path == change.path);
-            if found {
-                OpStatus::Applied
-            } else {
-                OpStatus::Skipped
-            }
-        }
-        "replace_body" => {
-            let found = report.replaced_bodies.iter().any(|p| p == &change.path);
-            if found {
-                OpStatus::Applied
-            } else {
-                OpStatus::Skipped
-            }
-        }
-        // rewrite_link and frontmatter ops: check changed_files
-        _ => {
-            let found = report.changed_files.iter().any(|p| p == &change.path);
-            if found {
-                OpStatus::Applied
-            } else {
-                OpStatus::Skipped
-            }
-        }
-    }
 }
 
 /// Build a one-liner summary for an `ApplyReportOp`.
@@ -436,13 +412,107 @@ fn build_cascade_summary(rec: Option<&CascadeRecord>, verbose: bool) -> CascadeS
     }
 }
 
+/// Find an attribute value on an event by key.
+fn attr<'a>(e: &'a Event, key: &str) -> Option<&'a str> {
+    e.attributes
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// Fold a cascade summary for a move/delete op out of the in-memory event log.
+///
+/// Every `norn.action.rewrite_link` event under the op's `span` is a cascade
+/// entry (each affected backlink produces exactly one terminal event). We
+/// partition them by status into applied / skipped / failed, reproducing the
+/// same counts the old `RepairApplyReport`-derived path produced.
+fn fold_cascade_from_events(events: &[Event], span: Option<&str>, verbose: bool) -> CascadeSummary {
+    let cascade_events: Vec<&Event> = events
+        .iter()
+        .filter(|e| e.span_id.as_deref() == span && e.name == action_event_name("rewrite_link"))
+        .collect();
+
+    let applied_events: Vec<&Event> = cascade_events
+        .iter()
+        .copied()
+        .filter(|e| attr(e, ATTR_STATUS) == Some("applied"))
+        .collect();
+    let skipped_events: Vec<&Event> = cascade_events
+        .iter()
+        .copied()
+        .filter(|e| attr(e, ATTR_STATUS) == Some("skipped"))
+        .collect();
+    let failed_events: Vec<&Event> = cascade_events
+        .iter()
+        .copied()
+        .filter(|e| attr(e, ATTR_STATUS) == Some("failed"))
+        .collect();
+
+    let files: BTreeSet<&str> = applied_events
+        .iter()
+        .map(|e| attr(e, ATTR_TARGET).unwrap_or(""))
+        .collect();
+
+    let rewrites = if verbose {
+        applied_events
+            .iter()
+            .map(|e| CascadeRewrite {
+                file: attr(e, ATTR_TARGET).unwrap_or("").to_string(),
+                from: attr(e, ATTR_LINK_FROM).unwrap_or("").to_string(),
+                to: attr(e, ATTR_LINK_TO).unwrap_or("").to_string(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let skips = if verbose {
+        skipped_events
+            .iter()
+            .map(|e| CascadeSkip {
+                file: attr(e, ATTR_TARGET).unwrap_or("").to_string(),
+                from: attr(e, ATTR_LINK_FROM).unwrap_or("").to_string(),
+                to: attr(e, ATTR_LINK_TO).unwrap_or("").to_string(),
+                reason: attr(e, ATTR_REASON_CODE).unwrap_or("").to_string(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let failures = failed_events
+        .iter()
+        .map(|e| CascadeFailure {
+            file: attr(e, ATTR_TARGET).unwrap_or("").to_string(),
+            from: attr(e, ATTR_LINK_FROM).unwrap_or("").to_string(),
+            to: attr(e, ATTR_LINK_TO).unwrap_or("").to_string(),
+            reason: attr(e, ATTR_REASON_CODE).unwrap_or("").to_string(),
+            detail: attr(e, ATTR_REASON_MESSAGE).map(|s| s.to_string()),
+        })
+        .collect();
+
+    CascadeSummary {
+        planned: applied_events.len() + skipped_events.len() + failed_events.len(),
+        applied: applied_events.len(),
+        skipped: skipped_events.len(),
+        failed: failed_events.len(),
+        files: files.len(),
+        rewrites,
+        skips,
+        failures,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_report_ops(
     changes: &[PlannedChange],
     provenance: &[usize],
     plan_ops: &[MigrationOp],
-    apply_result: &RepairApplyReport,
+    apply_result: &RepairApplyReport, // still used for the dry-run cascade forecast
     dry_run: bool,
     verbose: bool,
+    span_ids: &[String],
+    events: &[Event],
 ) -> Vec<ApplyReportOp> {
     changes
         .iter()
@@ -459,17 +529,42 @@ fn build_report_ops(
                 None
             };
 
-            let status = infer_status(change, apply_result, dry_run);
+            let span = span_ids.get(i).map(|s| s.as_str());
+
+            let status = if dry_run {
+                OpStatus::NotRun
+            } else {
+                // An op is Applied iff an op-action event for THIS op's kind
+                // exists under its span with status "applied"; otherwise
+                // Skipped (processed, no realization) — matching the previous
+                // infer_status semantics.
+                let op_action_name = action_event_name(&change.operation);
+                let applied = span.is_some()
+                    && events.iter().any(|e| {
+                        e.span_id.as_deref() == span
+                            && e.name == op_action_name
+                            && attr(e, ATTR_STATUS) == Some("applied")
+                    });
+                if applied {
+                    OpStatus::Applied
+                } else {
+                    OpStatus::Skipped
+                }
+            };
+
             let summary = build_summary(change, dry_run);
 
             let cascade = match change.operation.as_str() {
-                "move_document" | "delete_document" => {
+                "move_document" | "delete_document" => Some(if dry_run {
+                    // Keep today's forecast cascade from the RepairApplyReport.
                     let rec = apply_result
                         .cascades
                         .iter()
                         .find(|c| c.source_path == change.path);
-                    Some(build_cascade_summary(rec, verbose))
-                }
+                    build_cascade_summary(rec, verbose)
+                } else {
+                    fold_cascade_from_events(events, span, verbose)
+                }),
                 _ => None,
             };
 
@@ -498,7 +593,16 @@ fn build_report_ops(
 mod tests {
     use super::*;
     use crate::migration_plan::{MigrationOp, MigrationPlan};
+    use crate::telemetry::{Clock, EventSink, IdGen};
     use camino::Utf8Path;
+
+    /// A deterministic in-memory sink for the applier unit tests.
+    fn test_sink() -> EventSink {
+        EventSink::discard(
+            IdGen::with_seed(0),
+            Clock::fixed("2026-05-29T00:00:00.000Z"),
+        )
+    }
 
     fn synth_vault() -> (tempfile::TempDir, GraphIndex) {
         let tmp = tempfile::Builder::new()
@@ -537,8 +641,8 @@ mod tests {
             parents: false,
             verbose: false,
         };
-        let report = apply_migration_plan(&plan, &index, ctx).unwrap();
-        assert_eq!(report.schema_version, 1);
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
+        assert_eq!(report.schema_version, APPLY_REPORT_SCHEMA_VERSION);
         assert!(report.dry_run);
         assert_eq!(report.operations.len(), 1);
         assert_eq!(report.operations[0].kind, "move_document");
@@ -571,7 +675,7 @@ mod tests {
             parents: false,
             verbose: false,
         };
-        let report = apply_migration_plan(&plan, &index, ctx).unwrap();
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         assert_eq!(report.applied, 1);
         assert!(matches!(
             report.operations[0].status,
@@ -616,7 +720,7 @@ mod tests {
             parents: false,
             verbose: false,
         };
-        let report = apply_migration_plan(&plan, &index, ctx).unwrap();
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         // Expanded ops should reference parent op_id 0
         for op in &report.operations {
             assert_eq!(
@@ -653,7 +757,7 @@ mod tests {
             parents: false,
             verbose: false,
         };
-        let report = apply_migration_plan(&plan, &index, ctx).unwrap();
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         let op = report
             .operations
             .iter()
@@ -692,7 +796,7 @@ mod tests {
             parents: false,
             verbose: true,
         };
-        let report = apply_migration_plan(&plan, &index, ctx).unwrap();
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         let op = report
             .operations
             .iter()

@@ -35,6 +35,7 @@ mod set;
 mod show;
 mod standards;
 mod target;
+mod telemetry;
 mod validate;
 mod validate_filter;
 
@@ -403,7 +404,24 @@ fn run(cli: Cli) -> Result<i32> {
                 parents: args.parents,
                 verbose,
             };
-            let report = match apply_migration_plan(&migration_plan, &index, ctx) {
+
+            let argv: Vec<String> = std::env::args().collect();
+            let mut sink = open_event_sink(
+                &cwd,
+                dry_run,
+                loaded_config.vault_config.telemetry.as_ref(),
+                &argv,
+            );
+            emit_invocation_started(
+                &mut sink,
+                "move",
+                &cwd,
+                &migration_plan.vault_root,
+                dry_run,
+                &argv,
+            );
+
+            let report = match apply_migration_plan(&migration_plan, &index, ctx, &mut sink) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -412,6 +430,8 @@ fn run(cli: Cli) -> Result<i32> {
             };
 
             let exit = if report.failed > 0 { 1 } else { 0 };
+
+            emit_invocation_finished(&mut sink, "move", exit, &report);
 
             emit_cascade_failure_warnings(&report);
 
@@ -448,6 +468,9 @@ fn run(cli: Cli) -> Result<i32> {
                         crate::move_doc::render_move_apply_tty(
                             &mut out, &args.src, &args.dst, link_total, link_files, applied,
                         )?;
+                    }
+                    if !dry_run {
+                        writeln!(out, "trace: {}", report.trace_id)?;
                     }
                 }
             }
@@ -581,7 +604,17 @@ fn run(cli: Cli) -> Result<i32> {
                 parents: false,
                 verbose,
             };
-            let report = match apply_migration_plan(&plan, &index, ctx) {
+
+            let argv: Vec<String> = std::env::args().collect();
+            let mut sink = open_event_sink(
+                &cwd,
+                dry_run,
+                loaded_config.vault_config.telemetry.as_ref(),
+                &argv,
+            );
+            emit_invocation_started(&mut sink, "delete", &cwd, &plan.vault_root, dry_run, &argv);
+
+            let report = match apply_migration_plan(&plan, &index, ctx, &mut sink) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -590,6 +623,8 @@ fn run(cli: Cli) -> Result<i32> {
             };
 
             let exit = if report.failed > 0 { 1 } else { 0 };
+
+            emit_invocation_finished(&mut sink, "delete", exit, &report);
 
             emit_cascade_failure_warnings(&report);
 
@@ -623,6 +658,9 @@ fn run(cli: Cli) -> Result<i32> {
                         rewrite_total,
                         applied,
                     )?;
+                    if !dry_run {
+                        writeln!(out, "trace: {}", report.trace_id)?;
+                    }
                 }
             }
 
@@ -694,13 +732,13 @@ fn run(cli: Cli) -> Result<i32> {
                 true
             } else if matches!(args.format, crate::cli::SetFormat::Json) {
                 // --format json is implicitly non-interactive; render preview and exit.
-                let preview = crate::set::report::build_report(&outcome, false);
+                let preview = crate::set::report::build_report(&outcome, false, "");
                 crate::set::report::render_json(&mut out, &preview)?;
                 return Ok(0);
             } else if std::io::stdin().is_terminal() {
                 // TTY interactive: render preview first so the operator can see what
                 // they're confirming, then prompt.
-                let preview = crate::set::report::build_report(&outcome, false);
+                let preview = crate::set::report::build_report(&outcome, false, "");
                 crate::set::report::render_records(&mut out, &preview)?;
                 let stdin = std::io::stdin();
                 let mut reader = stdin.lock();
@@ -713,22 +751,60 @@ fn run(cli: Cli) -> Result<i32> {
                 true
             } else {
                 // Non-TTY without --yes = implicit dry-run: render preview and exit.
-                let preview = crate::set::report::build_report(&outcome, false);
+                let preview = crate::set::report::build_report(&outcome, false, "");
                 crate::set::report::render_records(&mut out, &preview)?;
                 return Ok(0);
             };
 
             if should_apply {
-                crate::repair_apply::apply_repair_plan(
+                // Real apply: open a file-backed sink and emit the full event
+                // stream (lifecycle → op_planned → action → finished). Only the
+                // real-apply branch persists telemetry; dry-run/preview branches
+                // above early-return without opening a disk sink.
+                let argv: Vec<String> = std::env::args().collect();
+                let mut sink = open_event_sink(
+                    &cwd,
+                    /*dry_run=*/ false,
+                    vault_cfg.telemetry.as_ref(),
+                    &argv,
+                );
+                emit_invocation_started(
+                    &mut sink,
+                    "set",
+                    &cwd,
+                    outcome.plan.vault_root.as_str(),
+                    /*dry_run=*/ false,
+                    &argv,
+                );
+
+                let mut spans = std::collections::HashMap::new();
+                for change in &outcome.plan.changes {
+                    let span = sink.start_op(&change.operation, change.path.as_str(), None);
+                    spans.insert(change.change_id.clone(), span);
+                }
+
+                let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
                     &cwd,
                     &index,
                     &outcome.plan,
                     /*dry_run=*/ false,
-                )?;
-                let applied = crate::set::report::build_report(&outcome, true);
+                    &crate::repair_apply::CreateApplyContext::default(),
+                    &mut sink,
+                    &spans,
+                );
+
+                let trace_id = sink.trace_id().to_string();
+                let exit = if apply_outcome.is_ok() { 0 } else { 2 };
+                emit_single_op_finished(&mut sink, "set", exit, apply_outcome.is_ok());
+                apply_outcome?;
+
+                let applied = crate::set::report::build_report(&outcome, true, &trace_id);
                 match args.format {
                     crate::cli::SetFormat::Records => {
                         crate::set::report::render_records(&mut out, &applied)?;
+                        // TTY `trace:` footer on real apply (Records only; JSON
+                        // carries trace_id as a field).
+                        writeln!(out, "trace: {trace_id}")?;
                     }
                     crate::cli::SetFormat::Json => {
                         crate::set::report::render_json(&mut out, &applied)?;
@@ -736,7 +812,7 @@ fn run(cli: Cli) -> Result<i32> {
                 }
             } else {
                 // --dry-run: render preview, respecting --format.
-                let preview = crate::set::report::build_report(&outcome, false);
+                let preview = crate::set::report::build_report(&outcome, false, "");
                 match args.format {
                     crate::cli::SetFormat::Records => {
                         crate::set::report::render_records(&mut out, &preview)?;
@@ -897,6 +973,122 @@ fn emit_cascade_failure_warnings(report: &crate::apply_report::ApplyReport) {
         }
         eprintln!("  fix manually, or run `norn validate` to list dangling links.");
     }
+}
+
+/// Build the telemetry EventSink for a mutating command. Dry-runs and resolution
+/// failures yield an in-memory `discard` sink (best-effort; never fails the command).
+fn open_event_sink(
+    cwd: &camino::Utf8Path,
+    dry_run: bool,
+    telemetry: Option<&crate::standards::TelemetryConfig>,
+    _argv: &[String], // accepted for future use; argv is set on the started event by the caller
+) -> crate::telemetry::EventSink {
+    use crate::telemetry::{Clock, EventSink, IdGen};
+    let ids = IdGen::new();
+    let clock = Clock::System;
+    if dry_run {
+        return EventSink::discard(ids, clock); // dry-runs never persist
+    }
+    let start_ts = clock.now_rfc3339();
+    let dir = telemetry
+        .and_then(|t| t.location.clone())
+        .map(camino::Utf8PathBuf::from)
+        .or_else(|| crate::cache::events_dir_for(cwd).ok().map(|(_, d)| d));
+    let retention = telemetry
+        .and_then(|t| t.retention)
+        .unwrap_or(crate::standards::DEFAULT_RETENTION);
+    if let Some(dir) = dir.as_ref() {
+        let today = &start_ts[..10];
+        crate::telemetry::store::prune_events(dir, retention, today);
+        crate::telemetry::store::enforce_size_cap(
+            dir,
+            crate::telemetry::store::EVENTS_SIZE_CAP_BYTES,
+            today,
+        );
+        EventSink::open(dir, start_ts, ids, clock)
+            .unwrap_or_else(|_| EventSink::discard(IdGen::new(), Clock::System))
+    } else {
+        EventSink::discard(ids, clock)
+    }
+}
+
+/// Emit the `invocation_started` lifecycle event for a mutating command.
+fn emit_invocation_started(
+    sink: &mut crate::telemetry::EventSink,
+    cmd: &str,
+    cwd: &camino::Utf8Path,
+    vault_root: &str,
+    dry_run: bool,
+    argv: &[String],
+) {
+    use crate::telemetry::event::{
+        ATTR_ARGV, ATTR_CWD, ATTR_DRY_RUN, ATTR_VAULT_ROOT, EVENT_INVOCATION_STARTED,
+    };
+    use crate::telemetry::Severity;
+    sink.lifecycle(
+        EVENT_INVOCATION_STARTED,
+        Severity::Info,
+        format!("{cmd} started"),
+        vec![
+            (ATTR_CWD, cwd.to_string()),
+            (ATTR_VAULT_ROOT, vault_root.to_string()),
+            (ATTR_DRY_RUN, dry_run.to_string()),
+            (ATTR_ARGV, argv.join(" ")),
+        ],
+    );
+}
+
+/// Emit the `invocation_finished` lifecycle event for a mutating command.
+fn emit_invocation_finished(
+    sink: &mut crate::telemetry::EventSink,
+    cmd: &str,
+    exit_code: i32,
+    report: &crate::apply_report::ApplyReport,
+) {
+    use crate::telemetry::event::{
+        ATTR_EXIT, ATTR_TALLY_APPLIED, ATTR_TALLY_FAILED, ATTR_TALLY_SKIPPED,
+        EVENT_INVOCATION_FINISHED,
+    };
+    use crate::telemetry::Severity;
+    sink.lifecycle(
+        EVENT_INVOCATION_FINISHED,
+        Severity::Info,
+        format!("{cmd} finished"),
+        vec![
+            (ATTR_EXIT, exit_code.to_string()),
+            (ATTR_TALLY_APPLIED, report.applied.to_string()),
+            (ATTR_TALLY_SKIPPED, report.skipped.to_string()),
+            (ATTR_TALLY_FAILED, report.failed.to_string()),
+        ],
+    );
+}
+
+/// Emit the `invocation_finished` lifecycle event for a single-op mutator
+/// (`set` / `new`) that doesn't build an `ApplyReport`. Tallies are trivial:
+/// one op that either applied or failed.
+pub(crate) fn emit_single_op_finished(
+    sink: &mut crate::telemetry::EventSink,
+    cmd: &str,
+    exit_code: i32,
+    applied: bool,
+) {
+    use crate::telemetry::event::{
+        ATTR_EXIT, ATTR_TALLY_APPLIED, ATTR_TALLY_FAILED, ATTR_TALLY_SKIPPED,
+        EVENT_INVOCATION_FINISHED,
+    };
+    use crate::telemetry::Severity;
+    let (applied_n, failed_n) = if applied { (1, 0) } else { (0, 1) };
+    sink.lifecycle(
+        EVENT_INVOCATION_FINISHED,
+        Severity::Info,
+        format!("{cmd} finished"),
+        vec![
+            (ATTR_EXIT, exit_code.to_string()),
+            (ATTR_TALLY_APPLIED, applied_n.to_string()),
+            (ATTR_TALLY_SKIPPED, 0.to_string()),
+            (ATTR_TALLY_FAILED, failed_n.to_string()),
+        ],
+    );
 }
 
 /// Resolve the `dry_run` flag for a `norn move` invocation.

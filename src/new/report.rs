@@ -13,18 +13,22 @@ use crate::new::synth::{CreateDocumentPlan, FieldSourceKind, Warning};
 
 /// Render the `norn new` result as a pretty-printed JSON envelope.
 ///
-/// The envelope schema_version tracks the envelope shape itself (starts at 1).
+/// The envelope schema_version tracks the envelope shape itself. `trace_id` is
+/// the telemetry trace ID for the invocation (empty on dry-run/preview, where
+/// no event stream is persisted).
 pub fn render_json(
     plan: &CreateDocumentPlan,
     path: &str,
     applied: bool,
     body_bytes: usize,
+    trace_id: &str,
 ) -> Result<String, serde_json::Error> {
     let envelope = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "new",
         "path": path,
         "applied": applied,
+        "trace_id": trace_id,
         "frontmatter_created": plan.field_sources.iter().map(|fs| {
             let mut entry = serde_json::Map::new();
             entry.insert("field".into(), Value::String(fs.field.clone()));
@@ -229,9 +233,9 @@ mod render_json_tests {
             source: FieldSourceKind::SchemaDefault,
             rule: Some("task-rule".into()),
         }]);
-        let out = render_json(&plan, "Workspaces/foo/tasks/bar.md", true, 0).unwrap();
+        let out = render_json(&plan, "Workspaces/foo/tasks/bar.md", true, 0, "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["schema_version"], serde_json::json!(1));
+        assert_eq!(v["schema_version"], serde_json::json!(2));
         assert_eq!(v["operation"], serde_json::json!("new"));
         assert_eq!(v["path"], serde_json::json!("Workspaces/foo/tasks/bar.md"));
         assert_eq!(v["applied"], serde_json::json!(true));
@@ -255,7 +259,7 @@ mod render_json_tests {
                 rule: None,
             },
         ]);
-        let out = render_json(&plan, "p.md", true, 0).unwrap();
+        let out = render_json(&plan, "p.md", true, 0, "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let fc = v["frontmatter_created"].as_array().unwrap();
         assert_eq!(fc.len(), 2);
@@ -278,7 +282,7 @@ mod render_json_tests {
             source: FieldSourceKind::OperatorFlagJson,
             rule: None,
         }]);
-        let out = render_json(&plan, "p.md", true, 0).unwrap();
+        let out = render_json(&plan, "p.md", true, 0, "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["frontmatter_created"][0]["source"],
@@ -307,7 +311,7 @@ mod render_json_tests {
                 variable: "workspace".into(),
             },
         ];
-        let out = render_json(&plan, "p.md", true, 0).unwrap();
+        let out = render_json(&plan, "p.md", true, 0, "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let warnings = v["warnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 4);
@@ -332,7 +336,7 @@ mod render_json_tests {
     #[test]
     fn dry_run_envelope_has_applied_false() {
         let plan = plan_with_fields(vec![]);
-        let out = render_json(&plan, "p.md", false, 0).unwrap();
+        let out = render_json(&plan, "p.md", false, 0, "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["applied"], serde_json::json!(false));
     }
@@ -340,7 +344,7 @@ mod render_json_tests {
     #[test]
     fn body_bytes_threaded_through() {
         let plan = plan_with_fields(vec![]);
-        let out = render_json(&plan, "p.md", true, 1234).unwrap();
+        let out = render_json(&plan, "p.md", true, 1234, "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["body_bytes"], serde_json::json!(1234));
     }

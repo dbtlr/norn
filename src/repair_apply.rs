@@ -110,24 +110,76 @@ where
     promoted
 }
 
+/// Thin wrapper over [`apply_repair_plan_with_context`] that forwards a discard
+/// sink + empty span map. Production mutators (set/new/applier path) now open a
+/// real sink and call the `_with_context` form directly; this remains as a
+/// convenience for unit tests that don't exercise the event stream.
+#[cfg(test)]
 pub fn apply_repair_plan(
     cwd: &Utf8PathBuf,
     index: &GraphIndex,
     plan: &RepairPlan,
     dry_run: bool,
 ) -> Result<RepairApplyReport> {
-    apply_repair_plan_with_context(cwd, index, plan, dry_run, &CreateApplyContext::default())
+    let mut sink = crate::telemetry::EventSink::discard(
+        crate::telemetry::IdGen::new(),
+        crate::telemetry::Clock::System,
+    );
+    let spans = std::collections::HashMap::new();
+    apply_repair_plan_with_context(
+        cwd,
+        index,
+        plan,
+        dry_run,
+        &CreateApplyContext::default(),
+        &mut sink,
+        &spans,
+    )
+}
+
+/// Emit an action event for a change if its span is known; no-op otherwise.
+/// Status is always `applied`; callers pass any extra attributes (e.g. the
+/// move destination).
+fn emit_op_action(
+    sink: &mut crate::telemetry::EventSink,
+    spans: &std::collections::HashMap<String, String>,
+    change: &PlannedChange,
+    sev: crate::telemetry::Severity,
+    extra: Vec<(&'static str, String)>,
+) {
+    use crate::telemetry::event;
+    if let Some(span) = spans.get(&change.change_id) {
+        let span = span.clone();
+        let mut attrs = vec![
+            (event::ATTR_OP_KIND, change.operation.clone()),
+            (event::ATTR_TARGET, change.path.to_string()),
+            (event::ATTR_STATUS, "applied".to_string()),
+        ];
+        attrs.extend(extra);
+        sink.action(
+            &span,
+            sev,
+            &event::action_event_name(&change.operation),
+            format!("applied {} on {}", change.operation, change.path),
+            attrs,
+        );
+    }
 }
 
 /// Like `apply_repair_plan` but with additional context for `create_document`
-/// operations (e.g., the `-p` / `--parents` flag).
+/// operations (e.g., the `-p` / `--parents` flag) and a telemetry sink + a
+/// `change_id -> op span id` map for emitting per-action events.
 pub fn apply_repair_plan_with_context(
     cwd: &Utf8PathBuf,
     index: &GraphIndex,
     plan: &RepairPlan,
     dry_run: bool,
     ctx: &CreateApplyContext,
+    sink: &mut crate::telemetry::EventSink,
+    spans: &std::collections::HashMap<String, String>,
 ) -> Result<RepairApplyReport> {
+    use crate::telemetry::event;
+    use crate::telemetry::Severity;
     validate_plan_for_apply(cwd, plan)?;
 
     // Pass 1: per-file frontmatter edits. changes_by_path skips
@@ -158,6 +210,9 @@ pub fn apply_repair_plan_with_context(
             if !dry_run {
                 fs::write(&absolute_path, updated)
                     .with_context(|| format!("write {absolute_path}"))?;
+                for change in changes {
+                    emit_op_action(sink, spans, change, Severity::Info, Vec::new());
+                }
             }
         }
     }
@@ -209,6 +264,7 @@ pub fn apply_repair_plan_with_context(
                     to: to.to_string(),
                 });
             }
+            emit_op_action(sink, spans, change, Severity::Info, Vec::new());
         }
     }
 
@@ -268,6 +324,7 @@ pub fn apply_repair_plan_with_context(
         if !dry_run {
             let result = apply_delete(cwd, change)?;
             report.deleted_documents.push(result);
+            emit_op_action(sink, spans, change, Severity::Info, Vec::new());
         } else {
             report.deleted_documents.push(DeleteResult {
                 path: change.path.clone(),
@@ -304,6 +361,7 @@ pub fn apply_repair_plan_with_context(
             if !report.changed_files.contains(&change.path) {
                 report.changed_files.push(change.path.clone());
             }
+            emit_op_action(sink, spans, change, Severity::Info, Vec::new());
         }
         report.replaced_bodies.push(change.path.clone());
     }
@@ -396,6 +454,7 @@ pub fn apply_repair_plan_with_context(
         if !report.changed_files.contains(&change.path) {
             report.changed_files.push(change.path.clone());
         }
+        emit_op_action(sink, spans, change, Severity::Info, Vec::new());
     }
 
     // Collect move_document changes for passes 2 and 3.
@@ -417,6 +476,12 @@ pub fn apply_repair_plan_with_context(
             }
         } else {
             moves.push(apply_move(cwd, change)?);
+            let extra = change
+                .destination
+                .as_ref()
+                .map(|dst| vec![(event::ATTR_TARGET_TO, dst.to_string())])
+                .unwrap_or_default();
+            emit_op_action(sink, spans, change, Severity::Info, extra);
         }
     }
 
@@ -471,10 +536,106 @@ pub fn apply_repair_plan_with_context(
             Duration::from_millis(300),
             Duration::from_millis(900),
         ];
+        // Coarse retry signal: count failures BEFORE the retry pass so we can
+        // emit a single `norn.retry` event capturing that the retry pass ran
+        // (and added latency). Per-round events are a future refinement.
+        let failed_before: usize = report.cascades.iter().map(|c| c.failed.len()).sum();
         let recovered = retry_failed_cascades(&mut report.cascades, &backoff, |f| {
             crate::standards::apply::rewrite_one_backlink(cwd.as_path(), &f.file, &f.from, &f.to)
         });
         report.rewritten_links.extend(recovered);
+
+        if failed_before > 0 {
+            sink.lifecycle(
+                event::EVENT_RETRY,
+                Severity::Warn,
+                format!("retried {failed_before} failed backlink rewrite(s) over up to 3 rounds"),
+                vec![(event::ATTR_RETRY_ROUND, "3".to_string())],
+            );
+        }
+
+        // Cascade rewrite_link actions emitted from FINAL settled state (after
+        // retry), so a promoted-then-clean link reports as applied, not failed.
+        // The cascade source path owns the op span (move_document /
+        // delete_document); rewrite_link actions hang off that span.
+        let mut cascade_span: std::collections::HashMap<&camino::Utf8Path, &str> =
+            std::collections::HashMap::new();
+        for change in plan
+            .changes
+            .iter()
+            .filter(|c| c.operation == "move_document" || c.operation == "delete_document")
+        {
+            if let Some(s) = spans.get(&change.change_id) {
+                cascade_span.insert(change.path.as_path(), s.as_str());
+            }
+        }
+
+        for cascade in &report.cascades {
+            let Some(span) = cascade_span.get(cascade.source_path.as_path()).copied() else {
+                continue;
+            };
+            for r in &cascade.rewritten {
+                sink.action(
+                    span,
+                    Severity::Info,
+                    &event::action_event_name("rewrite_link"),
+                    format!("rewrote {} ({} -> {})", r.file, r.from, r.to),
+                    vec![
+                        (event::ATTR_OP_KIND, "rewrite_link".to_string()),
+                        (event::ATTR_TARGET, r.file.to_string()),
+                        (event::ATTR_LINK_FROM, r.from.clone()),
+                        (event::ATTR_LINK_TO, r.to.clone()),
+                        (event::ATTR_STATUS, "applied".to_string()),
+                    ],
+                );
+            }
+            for s in &cascade.skipped {
+                sink.action(
+                    span,
+                    Severity::Warn,
+                    &event::action_event_name("rewrite_link"),
+                    format!(
+                        "skipped {} ({} -> {}): {}",
+                        s.file,
+                        s.from,
+                        s.to,
+                        s.reason.code()
+                    ),
+                    vec![
+                        (event::ATTR_OP_KIND, "rewrite_link".to_string()),
+                        (event::ATTR_TARGET, s.file.to_string()),
+                        (event::ATTR_LINK_FROM, s.from.clone()),
+                        (event::ATTR_LINK_TO, s.to.clone()),
+                        (event::ATTR_STATUS, "skipped".to_string()),
+                        (event::ATTR_REASON_CODE, s.reason.code().to_string()),
+                    ],
+                );
+            }
+            for f in &cascade.failed {
+                sink.action(
+                    span,
+                    Severity::Error,
+                    &event::action_event_name("rewrite_link"),
+                    format!(
+                        "failed {} ({} -> {}): {} {}",
+                        f.file,
+                        f.from,
+                        f.to,
+                        f.reason.code(),
+                        f.detail
+                    ),
+                    vec![
+                        (event::ATTR_OP_KIND, "rewrite_link".to_string()),
+                        (event::ATTR_TARGET, f.file.to_string()),
+                        (event::ATTR_LINK_FROM, f.from.clone()),
+                        (event::ATTR_LINK_TO, f.to.clone()),
+                        (event::ATTR_STATUS, "failed".to_string()),
+                        (event::ATTR_REASON_CODE, f.reason.code().to_string()),
+                        (event::ATTR_REASON_MESSAGE, f.detail.clone()),
+                    ],
+                );
+            }
+        }
     }
 
     let warnings: Vec<RepairApplyWarning> = move_changes
@@ -503,6 +664,15 @@ mod tests {
         PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary, SkippedSummary,
         REPAIR_PLAN_SCHEMA_VERSION,
     };
+
+    /// A throwaway in-memory sink for tests that exercise the orchestrator
+    /// directly (no event assertions here — those live in the integration test).
+    fn discard_sink() -> crate::telemetry::EventSink {
+        crate::telemetry::EventSink::discard(
+            crate::telemetry::IdGen::with_seed(0),
+            crate::telemetry::Clock::fixed("2026-05-29T00:00:00.000Z"),
+        )
+    }
 
     /// Build a minimal on-disk vault with a single document and return the
     /// temp dir, the vault root as a `Utf8PathBuf`, and the `GraphIndex`.
@@ -828,8 +998,12 @@ mod tests {
         );
 
         let ctx = CreateApplyContext { parents: true };
-        let report =
-            apply_repair_plan_with_context(&root, &index, &plan, /*dry_run=*/ false, &ctx).unwrap();
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let report = apply_repair_plan_with_context(
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+        )
+        .unwrap();
 
         assert_eq!(report.created_documents.len(), 1);
         assert!(
@@ -864,8 +1038,18 @@ mod tests {
         let plan = crate::move_doc::preflight_and_plan(cfg).unwrap();
 
         let create_ctx = CreateApplyContext { parents: false };
-        let report =
-            apply_repair_plan_with_context(&root, &index, &plan, false, &create_ctx).unwrap();
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let report = apply_repair_plan_with_context(
+            &root,
+            &index,
+            &plan,
+            false,
+            &create_ctx,
+            &mut sink,
+            &spans,
+        )
+        .unwrap();
 
         let rec = report
             .cascades
@@ -890,9 +1074,12 @@ mod tests {
         );
 
         let ctx = CreateApplyContext { parents: false };
-        let err =
-            apply_repair_plan_with_context(&root, &index, &plan, /*dry_run=*/ false, &ctx)
-                .unwrap_err();
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let err = apply_repair_plan_with_context(
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("parent") || msg.contains("-p"),

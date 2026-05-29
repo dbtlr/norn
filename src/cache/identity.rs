@@ -78,6 +78,15 @@ pub fn state_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf)
     Ok((canonical, dir))
 }
 
+/// Events directory for a vault: `<state_dir>/events/`.
+///
+/// Wired into the telemetry sink; callers resolve the events dir via
+/// `crate::cache::events_dir_for`.
+pub fn events_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
+    let (canonical, state) = state_dir_for(vault_root)?;
+    Ok((canonical, state.join("events")))
+}
+
 fn xdg_cache_home() -> Result<Utf8PathBuf, CacheError> {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
         if !xdg.is_empty() {
@@ -133,6 +142,15 @@ mod tests {
         assert!(hash
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn events_dir_is_under_state_dir() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (_, dir) = events_dir_for(&root).unwrap();
+        assert!(dir.as_str().contains("/norn/"));
+        assert!(dir.as_str().ends_with("/events"));
     }
 
     #[test]
