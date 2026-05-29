@@ -32,7 +32,7 @@ mod status;
 mod writer;
 
 pub(crate) use change_detection::ChangeDetectOptions;
-pub(crate) use identity::cache_dir_for;
+pub(crate) use identity::{cache_dir_for, hex_lower};
 pub(crate) use query_show::IncomingLink;
 
 pub(crate) const SCHEMA_VERSION: u32 = 2;

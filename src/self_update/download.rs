@@ -51,7 +51,7 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
         }
         hasher.update(&buf[..n]);
     }
-    let got = hex_lower(&hasher.finalize());
+    let got = crate::cache::hex_lower(&hasher.finalize());
     if got != expected {
         return Err(anyhow!(
             "sha256 mismatch for {}: expected {expected}, got {got}",
@@ -59,14 +59,6 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 /// Extract the `norn` binary out of a cargo-dist `.tar.xz` to `dest`.
