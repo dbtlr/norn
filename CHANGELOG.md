@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.35.2 - 2026-05-29
+
+Patch release. Fixes `norn self-update`, which has been broken for every GitHub-installer install since the v0.34 rename. **One-time upgrade step:** because the broken version can't update itself, re-run the installer once to land on v0.35.2 — `self-update` works normally thereafter.
+
 ### Fixed
 
 - **`norn self-update` now finds the install receipt again.** Since the v0.34 `vault-cli → norn` rename, `norn self-update` reported `this binary does not have an install receipt` for *every* GitHub-installer install, because it looked for the receipt under the binary name (`~/.config/norn/install-receipt.json`) while cargo-dist writes it under the package name as `~/.config/norn-run/norn-run-receipt.json`. The path is now derived from `CARGO_PKG_NAME` (`<app>/<app>-receipt.json`), matching what the installer writes and staying correct across future renames. Additionally, the receipt parser no longer requires a top-level `target` field (absent in current cargo-dist receipts) — both `target` and `version` are now optional, since the update target triple comes from the compiled binary and the version from the binary itself. **Note:** because the broken detection shipped in v0.34.0–v0.35.1, upgrading *to* the fixed version requires one manual installer re-run (`curl … norn-run-installer.sh | sh`); `self-update` works normally from the fixed version onward.
