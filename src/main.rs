@@ -413,6 +413,8 @@ fn run(cli: Cli) -> Result<i32> {
 
             let exit = if report.failed > 0 { 1 } else { 0 };
 
+            emit_cascade_failure_warnings(&report);
+
             // After a live folder move, clean up empty source directories.
             if is_folder && !dry_run && exit == 0 {
                 remove_empty_dirs(src_full.as_std_path());
@@ -588,6 +590,8 @@ fn run(cli: Cli) -> Result<i32> {
             };
 
             let exit = if report.failed > 0 { 1 } else { 0 };
+
+            emit_cascade_failure_warnings(&report);
 
             // rewrite_total comes from the delete_document op's cascade.
             let rewrite_total = report
@@ -865,6 +869,30 @@ fn run_self_update_command(args: cli::SelfUpdateArgs, color: cli::ColorWhen) -> 
             }
             Ok(exit)
         }
+    }
+}
+
+/// Emit a loud stderr warning for any backlink that remained failed after the
+/// retry pass. The primary op still succeeded (exit code unaffected); this is
+/// the explainability signal the exit code deliberately doesn't carry.
+fn emit_cascade_failure_warnings(report: &crate::apply_report::ApplyReport) {
+    for op in &report.operations {
+        let Some(cascade) = op.cascade.as_ref() else {
+            continue;
+        };
+        if cascade.failed == 0 {
+            continue;
+        }
+        eprintln!(
+            "warning: {} backlink{} could not be rewritten after retries and now dangle{}:",
+            cascade.failed,
+            if cascade.failed == 1 { "" } else { "s" },
+            if cascade.failed == 1 { "s" } else { "" },
+        );
+        for f in &cascade.failures {
+            eprintln!("  {}: {} → {} ({})", f.file, f.from, f.to, f.reason);
+        }
+        eprintln!("  fix manually, or run `norn validate` to list dangling links.");
     }
 }
 
