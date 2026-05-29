@@ -186,9 +186,26 @@ pub fn build_plan(
         .map(|(k, v, kind)| (k.clone(), (v.clone(), kind.clone())))
         .collect();
 
-    // We need to know which rule contributed each schema default. The fixpoint
-    // doesn't return per-field rule attribution, so we do a best-effort scan:
-    // first matching rule that declares the field as a default gets credited.
+    // Per-field provenance: credit the first rule that BOTH matches this
+    // document (by path + resolved frontmatter) AND declares the field as a
+    // default. Scanning every rule regardless of match would mis-credit a field
+    // to a rule whose match never applies here — e.g. a tasks/ document credited
+    // to a notes-only rule that merely declares the same default earlier in the
+    // config. We re-derive the matched rule set against the fully-resolved
+    // frontmatter (config order preserved) and search only within it.
+    let resolved_fm_value = serde_json::Value::Object(
+        resolved_fm
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
+    let matched_rules = crate::standards::applicable_rules(
+        cfg,
+        compiled,
+        args.path.as_str(),
+        Some(&resolved_fm_value),
+    );
+
     let mut field_sources: Vec<FieldSource> = Vec::new();
     for (field, value) in &resolved_fm {
         if let Some((op_val, op_kind)) = operator_keys.get(field) {
@@ -199,13 +216,11 @@ pub fn build_plan(
                 rule: None,
             });
         } else {
-            // Schema default — find the first rule that provided it.
-            let rule_name = cfg
-                .validate
-                .rules
+            // Schema default — credit the first MATCHING rule that declares it.
+            let rule_name = matched_rules
                 .iter()
-                .find(|r| r.frontmatter_defaults.contains_key(field))
-                .and_then(|r| r.name.clone());
+                .find(|(r, _)| r.frontmatter_defaults.contains_key(field))
+                .and_then(|(r, _)| r.name.clone());
             field_sources.push(FieldSource {
                 field: field.clone(),
                 value: value.clone(),
@@ -407,6 +422,43 @@ validate:
 
         // No warnings expected when all required fields are filled.
         assert!(plan.warnings.is_empty(), "warnings: {:?}", plan.warnings);
+    }
+
+    #[test]
+    fn synth_default_provenance_credits_matching_rule_not_first_declared() {
+        // A notes-only rule is declared BEFORE the tasks rule and also declares
+        // `created`. For a tasks/ path the notes rule does not match, so `created`
+        // must be credited to the rule that actually governs the path
+        // (task-folder), not the earlier-declared note-folder.
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: note-folder
+      match:
+        path: "Workspaces/{{workspace}}/notes/**/*.md"
+      frontmatter_defaults:
+        created: "2026-01-01T00:00"
+    - name: task-folder
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        type: task
+        created: "2026-01-01T00:00"
+"#,
+        );
+        let a = args("Workspaces/norn/tasks/foo.md", vec![]);
+        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let created_src = plan
+            .field_sources
+            .iter()
+            .find(|fs| fs.field == "created")
+            .expect("created field present");
+        assert_eq!(
+            created_src.rule.as_deref(),
+            Some("task-folder"),
+            "created should be credited to the matching rule, not the first-declared one"
+        );
     }
 
     #[test]
