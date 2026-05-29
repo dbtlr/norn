@@ -672,6 +672,115 @@ fn move_json_verbose_populates_rewrites_list() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn move_with_unwritable_backlinker_warns_but_exits_zero() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-move-unwritable-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+
+    // target.md is the doc being moved.
+    std::fs::write(root.join("target.md"), "---\ntype: note\n---\n# Target\n").unwrap();
+    // linker.md contains a wikilink [[target]] — the stem form the move cascade
+    // rewrites (same shape as a.md → [[b]] in the existing synth() tests).
+    std::fs::write(
+        root.join("linker.md"),
+        "---\ntype: note\n---\n# Linker\n[[target]]\n",
+    )
+    .unwrap();
+
+    // Make linker.md read-only so the cascade write fails (EACCES).
+    let linker_path = root.join("linker.md");
+    std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+    // Probe: if we can still open linker.md for write, we're running as root
+    // (or some other context where unix perms are not enforced). Skip in that case.
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&linker_path)
+        .is_ok()
+    {
+        // Restore permissions before returning so tempdir cleanup works.
+        std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args([
+            "move",
+            "target.md",
+            "renamed.md",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    // Restore perms before any assertions so tempdir cleanup always works.
+    std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    // Primary move succeeded → exit 0.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "expected exit 0 (primary move succeeded); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The loud stderr warning must be present.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not be rewritten"),
+        "stderr should warn about dangling backlinks; got: {stderr}"
+    );
+
+    // JSON output: cascade.failed == 1 and failures[0].reason == "write_failed".
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}\ngot: {}", stdout.trim()));
+
+    let ops = v["operations"]
+        .as_array()
+        .expect("operations must be an array");
+    let move_op = ops
+        .iter()
+        .find(|o| o["kind"] == "move_document")
+        .expect("move_document op not found in operations");
+
+    let cascade = &move_op["cascade"];
+    assert!(
+        !cascade.is_null(),
+        "cascade must be present on move_document op"
+    );
+    assert_eq!(
+        cascade["failed"], 1,
+        "cascade.failed should be 1 (linker.md write failed)"
+    );
+    let failures = cascade["failures"]
+        .as_array()
+        .expect("failures must be an array");
+    assert_eq!(failures.len(), 1, "exactly one failure expected");
+    assert_eq!(
+        failures[0]["reason"], "write_failed",
+        "failure reason should be write_failed"
+    );
+    let detail = failures[0]["detail"]
+        .as_str()
+        .expect("failures[0].detail must be a string (the underlying io error)");
+    assert!(
+        !detail.is_empty(),
+        "failures[0].detail must be non-empty (e.g. 'Permission denied (os error 13)')"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn move_case_only_difference_refuses_same_path() {

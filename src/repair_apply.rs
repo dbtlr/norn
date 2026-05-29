@@ -1,10 +1,12 @@
 use std::fs;
+use std::time::Duration;
 
 use crate::core::GraphIndex;
 use crate::standards::apply::{
     apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
     changes_by_path, validate_plan_for_apply, ApplyError, CascadeRecord, CreateDocumentResult,
-    DeleteResult, LinkRewriteResult, MoveResult, RepairApplyWarning,
+    DeleteResult, LinkAttempt, LinkFailResult, LinkRewriteResult, LinkSkipResult, MoveResult,
+    RepairApplyWarning,
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
@@ -45,6 +47,67 @@ fn count_planned_links(change: &PlannedChange) -> usize {
     change.link_risk.as_ref().map_or(0, |r| {
         r.stem_links.len() + r.path_qualified_wikilinks.len() + r.markdown_links.len()
     })
+}
+
+/// Re-attempt every failed backlink rewrite across all cascades, up to
+/// `backoff.len()` rounds, sleeping `backoff[round]` BEFORE each round so a
+/// transient condition affecting several files clears in one wait. Recovered
+/// links migrate from `failed` to `rewritten`; survivors stay `failed` with
+/// their latest reason. Returns the recovered `LinkRewriteResult`s so the
+/// caller can extend the flat `rewritten_links` list.
+///
+/// Zero happy-path cost: if no cascade has a failure, returns immediately
+/// without sleeping or invoking `attempt`.
+fn retry_failed_cascades<F>(
+    cascades: &mut [CascadeRecord],
+    backoff: &[Duration],
+    mut attempt: F,
+) -> Vec<LinkRewriteResult>
+where
+    F: FnMut(&LinkFailResult) -> LinkAttempt,
+{
+    let mut promoted: Vec<LinkRewriteResult> = Vec::new();
+    if cascades.iter().all(|c| c.failed.is_empty()) {
+        return promoted;
+    }
+    for delay in backoff {
+        if cascades.iter().all(|c| c.failed.is_empty()) {
+            break;
+        }
+        if !delay.is_zero() {
+            std::thread::sleep(*delay);
+        }
+        for cascade in cascades.iter_mut() {
+            let still_failed = std::mem::take(&mut cascade.failed);
+            for mut f in still_failed {
+                match attempt(&f) {
+                    LinkAttempt::Rewritten => {
+                        let r = LinkRewriteResult {
+                            file: f.file.clone(),
+                            from: f.from.clone(),
+                            to: f.to.clone(),
+                        };
+                        cascade.rewritten.push(r.clone());
+                        promoted.push(r);
+                    }
+                    LinkAttempt::Skipped(reason) => {
+                        cascade.skipped.push(LinkSkipResult {
+                            file: f.file.clone(),
+                            from: f.from.clone(),
+                            to: f.to.clone(),
+                            reason,
+                        });
+                    }
+                    LinkAttempt::Failed(reason, detail) => {
+                        f.reason = reason;
+                        f.detail = detail;
+                        cascade.failed.push(f);
+                    }
+                }
+            }
+        }
+    }
+    promoted
 }
 
 pub fn apply_repair_plan(
@@ -186,6 +249,7 @@ pub fn apply_repair_plan_with_context(
                     planned,
                     rewritten,
                     skipped: Vec::new(),
+                    failed: Vec::new(),
                 });
             } else {
                 let outcome = apply_link_rewrites(cwd, change)?;
@@ -195,6 +259,7 @@ pub fn apply_repair_plan_with_context(
                     planned,
                     rewritten: outcome.rewritten,
                     skipped: outcome.skipped,
+                    failed: outcome.failed,
                 });
             }
         }
@@ -383,6 +448,7 @@ pub fn apply_repair_plan_with_context(
                 planned,
                 rewritten,
                 skipped: Vec::new(),
+                failed: Vec::new(),
             });
         } else {
             let outcome = apply_link_rewrites(cwd, change)?;
@@ -392,8 +458,23 @@ pub fn apply_repair_plan_with_context(
                 planned,
                 rewritten: outcome.rewritten,
                 skipped: outcome.skipped,
+                failed: outcome.failed,
             });
         }
+    }
+
+    // Cleanup-retry pass: transient FS failures get up to 3 retry rounds
+    // (100/300/900ms backoff) before they're left as dangling links.
+    if !dry_run {
+        let backoff = [
+            Duration::from_millis(100),
+            Duration::from_millis(300),
+            Duration::from_millis(900),
+        ];
+        let recovered = retry_failed_cascades(&mut report.cascades, &backoff, |f| {
+            crate::standards::apply::rewrite_one_backlink(cwd.as_path(), &f.file, &f.from, &f.to)
+        });
+        report.rewritten_links.extend(recovered);
     }
 
     let warnings: Vec<RepairApplyWarning> = move_changes
@@ -816,6 +897,117 @@ mod tests {
         assert!(
             msg.contains("parent") || msg.contains("-p"),
             "expected parent-missing error, got: {msg}"
+        );
+    }
+
+    // ── retry_failed_cascades tests ───────────────────────────────────────────
+
+    #[test]
+    fn retry_promotes_transient_failure_to_rewritten() {
+        use crate::standards::apply::{CascadeRecord, LinkAttempt, LinkFailReason, LinkFailResult};
+        use std::time::Duration;
+        let mut cascades = vec![CascadeRecord {
+            source_path: "m.md".into(),
+            planned: 1,
+            rewritten: vec![],
+            skipped: vec![],
+            failed: vec![LinkFailResult {
+                file: "b.md".into(),
+                from: "[[old]]".into(),
+                to: "[[new]]".into(),
+                reason: LinkFailReason::WriteFailed,
+                detail: "Resource temporarily unavailable".into(),
+            }],
+        }];
+        let mut calls = 0;
+        let promoted = retry_failed_cascades(
+            &mut cascades,
+            &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
+            |_f| {
+                calls += 1;
+                if calls == 1 {
+                    LinkAttempt::Failed(LinkFailReason::WriteFailed, "still busy".into())
+                } else {
+                    LinkAttempt::Rewritten
+                }
+            },
+        );
+        assert_eq!(
+            promoted.len(),
+            1,
+            "recovered link returned for rewritten_links"
+        );
+        assert!(
+            cascades[0].failed.is_empty(),
+            "recovered link removed from failed"
+        );
+        assert_eq!(
+            cascades[0].rewritten.len(),
+            1,
+            "recovered link moved to rewritten"
+        );
+    }
+
+    #[test]
+    fn retry_is_a_noop_when_there_are_no_failures() {
+        use crate::standards::apply::{
+            CascadeRecord, LinkAttempt, LinkFailReason, LinkRewriteResult,
+        };
+        use std::time::Duration;
+        let mut cascades = vec![CascadeRecord {
+            source_path: "m.md".into(),
+            planned: 1,
+            rewritten: vec![LinkRewriteResult {
+                file: "b.md".into(),
+                from: "[[old]]".into(),
+                to: "[[new]]".into(),
+            }],
+            skipped: vec![],
+            failed: vec![],
+        }];
+        let mut called = false;
+        let promoted = retry_failed_cascades(
+            &mut cascades,
+            &[Duration::from_secs(999)], // would hang if entered
+            |_f| {
+                called = true;
+                LinkAttempt::Failed(LinkFailReason::WriteFailed, "nope".into())
+            },
+        );
+        assert!(
+            !called,
+            "no failures => attempt closure never called, no sleep"
+        );
+        assert!(promoted.is_empty());
+    }
+
+    #[test]
+    fn retry_survivor_stays_failed_after_all_rounds() {
+        use crate::standards::apply::{CascadeRecord, LinkAttempt, LinkFailReason, LinkFailResult};
+        use std::time::Duration;
+        let mut cascades = vec![CascadeRecord {
+            source_path: "m.md".into(),
+            planned: 1,
+            rewritten: vec![],
+            skipped: vec![],
+            failed: vec![LinkFailResult {
+                file: "b.md".into(),
+                from: "[[old]]".into(),
+                to: "[[new]]".into(),
+                reason: LinkFailReason::WriteFailed,
+                detail: "busy".into(),
+            }],
+        }];
+        let promoted = retry_failed_cascades(
+            &mut cascades,
+            &[Duration::ZERO, Duration::ZERO, Duration::ZERO],
+            |_f| LinkAttempt::Failed(LinkFailReason::WriteFailed, "still busy".into()),
+        );
+        assert!(promoted.is_empty());
+        assert_eq!(
+            cascades[0].failed.len(),
+            1,
+            "survivor remains failed after 3 rounds"
         );
     }
 }

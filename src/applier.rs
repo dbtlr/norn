@@ -16,8 +16,8 @@
 //! - propagate the parent MigrationOp's `footnote` to each child ApplyReportOp
 
 use crate::apply_report::{
-    ApplyReport, ApplyReportOp, ApplyWarning, CascadeRewrite, CascadeSkip, CascadeSummary,
-    OpStatus, APPLY_REPORT_SCHEMA_VERSION,
+    ApplyReport, ApplyReportOp, ApplyWarning, CascadeFailure, CascadeRewrite, CascadeSkip,
+    CascadeSummary, OpStatus, APPLY_REPORT_SCHEMA_VERSION,
 };
 use crate::core::GraphIndex;
 use crate::migration_plan::{MigrationOp, MigrationPlan};
@@ -375,9 +375,11 @@ fn build_cascade_summary(rec: Option<&CascadeRecord>, verbose: bool) -> CascadeS
                 planned: 0,
                 applied: 0,
                 skipped: 0,
+                failed: 0,
                 files: 0,
                 rewrites: Vec::new(),
                 skips: Vec::new(),
+                failures: Vec::new(),
             }
         }
     };
@@ -407,13 +409,30 @@ fn build_cascade_summary(rec: Option<&CascadeRecord>, verbose: bool) -> CascadeS
     } else {
         Vec::new()
     };
+    let failures = rec
+        .failed
+        .iter()
+        .map(|f| CascadeFailure {
+            file: f.file.to_string(),
+            from: f.from.clone(),
+            to: f.to.clone(),
+            reason: f.reason.code().to_string(),
+            detail: if f.detail.is_empty() {
+                None
+            } else {
+                Some(f.detail.clone())
+            },
+        })
+        .collect();
     CascadeSummary {
         planned: rec.planned,
         applied: rec.rewritten.len(),
         skipped: rec.skipped.len(),
+        failed: rec.failed.len(),
         files: files.len(),
         rewrites,
         skips,
+        failures,
     }
 }
 

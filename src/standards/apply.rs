@@ -98,19 +98,23 @@ pub struct LinkRewriteResult {
     pub to: String,
 }
 
-/// Why a planned backlink rewrite did not land. v1 has only `Drifted`;
-/// extensible for a later slice's failure codes.
+/// Why a planned backlink rewrite did not land. Benign cases (no filesystem
+/// error occurred).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkSkipReason {
     /// The on-disk link text changed between plan and apply (the planned
     /// `raw` was not found in the file), so the rewrite was a no-op.
     Drifted,
+    /// The backlinker file no longer exists (deleted or moved away by
+    /// something outside this run); there is nothing to rewrite. Not retried.
+    SourceMissing,
 }
 
 impl LinkSkipReason {
     pub fn code(self) -> &'static str {
         match self {
             LinkSkipReason::Drifted => "drifted",
+            LinkSkipReason::SourceMissing => "source_missing",
         }
     }
 }
@@ -123,6 +127,35 @@ pub struct LinkSkipResult {
     pub reason: LinkSkipReason,
 }
 
+/// Why a backlink rewrite hit a real filesystem problem (as opposed to a
+/// benign skip). Everything in this set is retryable by the cleanup pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkFailReason {
+    /// Reading the backlinker file failed (non-NotFound io error).
+    ReadFailed,
+    /// Writing the rewritten backlinker file failed (non-NotFound io error).
+    WriteFailed,
+}
+
+impl LinkFailReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            LinkFailReason::ReadFailed => "read_failed",
+            LinkFailReason::WriteFailed => "write_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkFailResult {
+    pub file: Utf8PathBuf,
+    pub from: String,
+    pub to: String,
+    pub reason: LinkFailReason,
+    /// The underlying io error string, for the human-facing `what`.
+    pub detail: String,
+}
+
 /// Result of applying a move/delete backlink cascade: what landed and what
 /// was skipped (with a reason). Replaces the bare `Vec<LinkRewriteResult>`
 /// so deviations are recorded, not silently dropped.
@@ -130,6 +163,7 @@ pub struct LinkSkipResult {
 pub struct LinkRewriteOutcome {
     pub rewritten: Vec<LinkRewriteResult>,
     pub skipped: Vec<LinkSkipResult>,
+    pub failed: Vec<LinkFailResult>,
 }
 
 /// One backlink cascade attributable to a single move/delete change, keyed by
@@ -141,6 +175,7 @@ pub struct CascadeRecord {
     pub planned: usize,
     pub rewritten: Vec<LinkRewriteResult>,
     pub skipped: Vec<LinkSkipResult>,
+    pub failed: Vec<LinkFailResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -650,10 +685,53 @@ pub fn apply_delete(cwd: &Utf8Path, change: &PlannedChange) -> Result<DeleteResu
     })
 }
 
+/// Outcome of attempting one backlink rewrite. The caller sorts these into
+/// the `LinkRewriteOutcome` buckets and the retry pass re-runs this on failures.
+pub(crate) enum LinkAttempt {
+    Rewritten,
+    Skipped(LinkSkipReason),
+    /// reason + io error detail
+    Failed(LinkFailReason, String),
+}
+
+/// Read `source_path`, replace the first occurrence of `raw` with `rewritten`,
+/// write it back. Categorizes outcomes; never panics, never aborts.
+/// - NotFound (read or write) -> Skipped(SourceMissing): the file moved on.
+/// - other io error on read   -> Failed(ReadFailed, detail)
+/// - other io error on write  -> Failed(WriteFailed, detail)
+/// - planned text not present -> Skipped(Drifted)
+/// - success                  -> Rewritten
+pub(crate) fn rewrite_one_backlink(
+    cwd: &Utf8Path,
+    source_path: &Utf8Path,
+    raw: &str,
+    rewritten: &str,
+) -> LinkAttempt {
+    let abs = cwd.join(source_path);
+    let original = match fs::read_to_string(abs.as_std_path()) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return LinkAttempt::Skipped(LinkSkipReason::SourceMissing);
+        }
+        Err(e) => return LinkAttempt::Failed(LinkFailReason::ReadFailed, e.to_string()),
+    };
+    let updated = original.replacen(raw, rewritten, 1);
+    if updated == original {
+        return LinkAttempt::Skipped(LinkSkipReason::Drifted);
+    }
+    match fs::write(abs.as_std_path(), &updated) {
+        Ok(()) => LinkAttempt::Rewritten,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            LinkAttempt::Skipped(LinkSkipReason::SourceMissing)
+        }
+        Err(e) => LinkAttempt::Failed(LinkFailReason::WriteFailed, e.to_string()),
+    }
+}
+
 /// Reads every file containing an AffectedLink and replaces the raw link
-/// text with the precomputed rewritten replacement. Silent skip if the raw
-/// doesn't match (file drift between plan and apply); --verify catches any
-/// unresolved links.
+/// text with the precomputed rewritten replacement. Collect-and-continue:
+/// benign deviations are skipped (with a reason), real FS errors are recorded
+/// as failures (retried later by the cleanup pass) — neither aborts the apply.
 pub fn apply_link_rewrites(
     cwd: &Utf8Path,
     change: &PlannedChange,
@@ -669,33 +747,31 @@ pub fn apply_link_rewrites(
         .chain(risk.path_qualified_wikilinks.iter())
         .chain(risk.markdown_links.iter());
     for affected in all {
-        let abs = cwd.join(&affected.source_path);
-        let original =
-            fs::read_to_string(abs.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
-                path: affected.source_path.clone(),
-                reason: format!("read backlinker failed: {e}"),
-            })?;
-        let updated = original.replacen(&affected.raw, &affected.rewritten, 1);
-        if updated == original {
-            // Drift: the planned link text is no longer on disk. Record the
-            // deviation with a reason instead of silently skipping.
-            outcome.skipped.push(LinkSkipResult {
+        match rewrite_one_backlink(
+            cwd,
+            &affected.source_path,
+            &affected.raw,
+            &affected.rewritten,
+        ) {
+            LinkAttempt::Rewritten => outcome.rewritten.push(LinkRewriteResult {
                 file: affected.source_path.clone(),
                 from: affected.raw.clone(),
                 to: affected.rewritten.clone(),
-                reason: LinkSkipReason::Drifted,
-            });
-            continue;
+            }),
+            LinkAttempt::Skipped(reason) => outcome.skipped.push(LinkSkipResult {
+                file: affected.source_path.clone(),
+                from: affected.raw.clone(),
+                to: affected.rewritten.clone(),
+                reason,
+            }),
+            LinkAttempt::Failed(reason, detail) => outcome.failed.push(LinkFailResult {
+                file: affected.source_path.clone(),
+                from: affected.raw.clone(),
+                to: affected.rewritten.clone(),
+                reason,
+                detail,
+            }),
         }
-        fs::write(abs.as_std_path(), &updated).map_err(|e| ApplyError::CannotMinimalEdit {
-            path: affected.source_path.clone(),
-            reason: format!("write backlinker failed: {e}"),
-        })?;
-        outcome.rewritten.push(LinkRewriteResult {
-            file: affected.source_path.clone(),
-            from: affected.raw.clone(),
-            to: affected.rewritten.clone(),
-        });
     }
     Ok(outcome)
 }
@@ -1779,6 +1855,238 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("d.md")).unwrap(),
             "see [[c]] here\n"
+        );
+    }
+
+    #[test]
+    fn link_fail_and_skip_reason_codes_are_stable() {
+        assert_eq!(LinkFailReason::ReadFailed.code(), "read_failed");
+        assert_eq!(LinkFailReason::WriteFailed.code(), "write_failed");
+        assert_eq!(LinkSkipReason::Drifted.code(), "drifted");
+        assert_eq!(LinkSkipReason::SourceMissing.code(), "source_missing");
+    }
+
+    #[test]
+    fn link_rewrite_outcome_default_has_empty_failed() {
+        let o = LinkRewriteOutcome::default();
+        assert!(o.failed.is_empty());
+    }
+
+    /// Build a minimal `PlannedChange` whose `link_risk` points at one
+    /// `AffectedLink` with `source_path` relative to the vault root.
+    fn make_move_change_with_backlinker(
+        source_path: &str,
+        raw: &str,
+        rewritten: &str,
+    ) -> PlannedChange {
+        PlannedChange {
+            change_id: "test-id".into(),
+            path: camino::Utf8PathBuf::from("a.md"),
+            document_hash: String::new(),
+            finding_code: "move_document".into(),
+            finding_rule: None,
+            repair_rule: "test".into(),
+            operation: "move_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: Some(camino::Utf8PathBuf::from("b.md")),
+            link_risk: Some(crate::standards::repair::link_risk::LinkRisk {
+                stem_changed: true,
+                directory_changed: false,
+                stem_links: vec![crate::standards::repair::link_risk::AffectedLink {
+                    source_path: camino::Utf8PathBuf::from(source_path),
+                    raw: raw.into(),
+                    kind: crate::core::LinkKind::Wikilink,
+                    source_span: None,
+                    rewritten: rewritten.into(),
+                }],
+                path_qualified_wikilinks: vec![],
+                markdown_links: vec![],
+            }),
+            warnings: vec![],
+            force: false,
+            parents: false,
+        }
+    }
+
+    #[test]
+    fn apply_link_rewrites_skips_source_missing_without_failing() {
+        // Backlinker absent on disk -> read NotFound -> Skipped(SourceMissing), NOT failed.
+        let tmp = tempfile::Builder::new()
+            .prefix("apply-missing-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        // Do NOT create "ghost.md" — it must be absent to trigger NotFound.
+        let change = make_move_change_with_backlinker("ghost.md", "[[a]]", "[[b]]");
+
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(
+            outcome.rewritten.len(),
+            0,
+            "absent backlinker must not be rewritten"
+        );
+        assert_eq!(
+            outcome.failed.len(),
+            0,
+            "NotFound must not be counted as a failure"
+        );
+        assert_eq!(
+            outcome.skipped.len(),
+            1,
+            "absent backlinker must be recorded as skipped"
+        );
+        assert_eq!(outcome.skipped[0].file.as_str(), "ghost.md");
+        assert_eq!(outcome.skipped[0].reason.code(), "source_missing");
+    }
+
+    #[test]
+    fn rewrite_one_backlink_rewrites_and_drifts() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-rowb-rewrite-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let rel = camino::Utf8Path::new("b.md");
+        std::fs::write(root.join(rel), "see [[old]] here\n").unwrap();
+
+        // Success path: raw text present → Rewritten; file updated.
+        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        assert!(
+            matches!(result, LinkAttempt::Rewritten),
+            "expected Rewritten, got something else"
+        );
+        let content = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert!(
+            content.contains("[[new]]"),
+            "file should contain [[new]] after rewrite: {content}"
+        );
+        assert!(
+            !content.contains("[[old]]"),
+            "file should not contain [[old]] after rewrite: {content}"
+        );
+
+        // Drift path: raw text no longer present → Skipped(Drifted).
+        let result2 = rewrite_one_backlink(root, rel, "[[absent]]", "[[whatever]]");
+        assert!(
+            matches!(result2, LinkAttempt::Skipped(LinkSkipReason::Drifted)),
+            "expected Skipped(Drifted) when raw text absent"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rewrite_one_backlink_write_failed_on_readonly_file() {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-rowb-readonly-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let rel = camino::Utf8Path::new("b.md");
+        std::fs::write(root.join(rel), "see [[old]] here\n").unwrap();
+
+        // Make the file read-only.
+        std::fs::set_permissions(root.join(rel), Permissions::from_mode(0o444)).unwrap();
+
+        // Probe: if we can still open the file for writing, we're root or perms
+        // aren't enforced — skip the assertion rather than false-failing.
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(rel))
+            .is_ok()
+        {
+            // Running as root or filesystem doesn't enforce permissions; skip.
+            return;
+        }
+
+        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        assert!(
+            matches!(result, LinkAttempt::Failed(LinkFailReason::WriteFailed, _)),
+            "expected Failed(WriteFailed, _) for read-only file"
+        );
+    }
+
+    #[test]
+    fn apply_link_rewrites_records_hard_failure_and_continues() {
+        // Two backlinkers: first is a DIRECTORY at its path (read_to_string fails,
+        // non-NotFound); second is a real file containing [[a]].
+        // Expected: outcome.failed == 1, outcome.rewritten == 1 (loop continued).
+        let tmp = tempfile::Builder::new()
+            .prefix("apply-hardfail-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+
+        // Create a directory at "dir-backlinker.md" to make read_to_string fail
+        // with a non-NotFound error (IsADirectory / Other).
+        std::fs::create_dir(root.join("dir-backlinker.md")).unwrap();
+
+        // Create a real file that contains the raw link text.
+        std::fs::write(root.join("good-backlinker.md"), "see [[a]] here\n").unwrap();
+
+        // Build a change with two AffectedLinks: directory first, good file second.
+        let change = PlannedChange {
+            change_id: "test-hardfail-id".into(),
+            path: camino::Utf8PathBuf::from("a.md"),
+            document_hash: String::new(),
+            finding_code: "move_document".into(),
+            finding_rule: None,
+            repair_rule: "test".into(),
+            operation: "move_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: Some(camino::Utf8PathBuf::from("b.md")),
+            link_risk: Some(crate::standards::repair::link_risk::LinkRisk {
+                stem_changed: true,
+                directory_changed: false,
+                stem_links: vec![
+                    crate::standards::repair::link_risk::AffectedLink {
+                        source_path: camino::Utf8PathBuf::from("dir-backlinker.md"),
+                        raw: "[[a]]".into(),
+                        kind: crate::core::LinkKind::Wikilink,
+                        source_span: None,
+                        rewritten: "[[b]]".into(),
+                    },
+                    crate::standards::repair::link_risk::AffectedLink {
+                        source_path: camino::Utf8PathBuf::from("good-backlinker.md"),
+                        raw: "[[a]]".into(),
+                        kind: crate::core::LinkKind::Wikilink,
+                        source_span: None,
+                        rewritten: "[[b]]".into(),
+                    },
+                ],
+                path_qualified_wikilinks: vec![],
+                markdown_links: vec![],
+            }),
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(
+            outcome.failed.len(),
+            1,
+            "directory-at-path must be recorded as a failure"
+        );
+        assert_eq!(outcome.failed[0].file.as_str(), "dir-backlinker.md");
+        assert_eq!(outcome.failed[0].reason.code(), "read_failed");
+        assert_eq!(
+            outcome.rewritten.len(),
+            1,
+            "good backlinker must still be rewritten (loop continued)"
+        );
+        assert_eq!(outcome.rewritten[0].file.as_str(), "good-backlinker.md");
+        assert_eq!(outcome.skipped.len(), 0);
+        // Verify the good file was actually rewritten on disk.
+        assert_eq!(
+            std::fs::read_to_string(root.join("good-backlinker.md")).unwrap(),
+            "see [[b]] here\n"
         );
     }
 }
