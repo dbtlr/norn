@@ -98,19 +98,24 @@ pub struct LinkRewriteResult {
     pub to: String,
 }
 
-/// Why a planned backlink rewrite did not land. v1 has only `Drifted`;
-/// extensible for a later slice's failure codes.
+/// Why a planned backlink rewrite did not land. Benign cases (no filesystem
+/// error occurred).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkSkipReason {
     /// The on-disk link text changed between plan and apply (the planned
     /// `raw` was not found in the file), so the rewrite was a no-op.
     Drifted,
+    /// The backlinker file no longer exists (deleted or moved away by
+    /// something outside this run); there is nothing to rewrite. Not retried.
+    #[allow(dead_code)] // wired in a later cascade slice
+    SourceMissing,
 }
 
 impl LinkSkipReason {
     pub fn code(self) -> &'static str {
         match self {
             LinkSkipReason::Drifted => "drifted",
+            LinkSkipReason::SourceMissing => "source_missing",
         }
     }
 }
@@ -123,6 +128,38 @@ pub struct LinkSkipResult {
     pub reason: LinkSkipReason,
 }
 
+/// Why a backlink rewrite hit a real filesystem problem (as opposed to a
+/// benign skip). Everything in this set is retryable by the cleanup pass.
+#[allow(dead_code)] // wired in a later cascade slice
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkFailReason {
+    /// Reading the backlinker file failed (non-NotFound io error).
+    ReadFailed,
+    /// Writing the rewritten backlinker file failed (non-NotFound io error).
+    WriteFailed,
+}
+
+impl LinkFailReason {
+    #[allow(dead_code)] // wired in a later cascade slice
+    pub fn code(self) -> &'static str {
+        match self {
+            LinkFailReason::ReadFailed => "read_failed",
+            LinkFailReason::WriteFailed => "write_failed",
+        }
+    }
+}
+
+#[allow(dead_code)] // wired in a later cascade slice
+#[derive(Debug, Clone)]
+pub struct LinkFailResult {
+    pub file: Utf8PathBuf,
+    pub from: String,
+    pub to: String,
+    pub reason: LinkFailReason,
+    /// The underlying io error string, for the human-facing `what`.
+    pub detail: String,
+}
+
 /// Result of applying a move/delete backlink cascade: what landed and what
 /// was skipped (with a reason). Replaces the bare `Vec<LinkRewriteResult>`
 /// so deviations are recorded, not silently dropped.
@@ -130,6 +167,7 @@ pub struct LinkSkipResult {
 pub struct LinkRewriteOutcome {
     pub rewritten: Vec<LinkRewriteResult>,
     pub skipped: Vec<LinkSkipResult>,
+    pub failed: Vec<LinkFailResult>,
 }
 
 /// One backlink cascade attributable to a single move/delete change, keyed by
@@ -141,6 +179,8 @@ pub struct CascadeRecord {
     pub planned: usize,
     pub rewritten: Vec<LinkRewriteResult>,
     pub skipped: Vec<LinkSkipResult>,
+    #[allow(dead_code)] // wired in a later cascade slice
+    pub failed: Vec<LinkFailResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1780,5 +1820,19 @@ mod tests {
             std::fs::read_to_string(root.join("d.md")).unwrap(),
             "see [[c]] here\n"
         );
+    }
+
+    #[test]
+    fn link_fail_and_skip_reason_codes_are_stable() {
+        assert_eq!(LinkFailReason::ReadFailed.code(), "read_failed");
+        assert_eq!(LinkFailReason::WriteFailed.code(), "write_failed");
+        assert_eq!(LinkSkipReason::Drifted.code(), "drifted");
+        assert_eq!(LinkSkipReason::SourceMissing.code(), "source_missing");
+    }
+
+    #[test]
+    fn link_rewrite_outcome_default_has_empty_failed() {
+        let o = LinkRewriteOutcome::default();
+        assert!(o.failed.is_empty());
     }
 }

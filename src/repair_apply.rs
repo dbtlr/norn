@@ -186,6 +186,7 @@ pub fn apply_repair_plan_with_context(
                     planned,
                     rewritten,
                     skipped: Vec::new(),
+                    failed: Vec::new(),
                 });
             } else {
                 let outcome = apply_link_rewrites(cwd, change)?;
@@ -195,6 +196,7 @@ pub fn apply_repair_plan_with_context(
                     planned,
                     rewritten: outcome.rewritten,
                     skipped: outcome.skipped,
+                    failed: outcome.failed,
                 });
             }
         }
@@ -383,6 +385,7 @@ pub fn apply_repair_plan_with_context(
                 planned,
                 rewritten,
                 skipped: Vec::new(),
+                failed: Vec::new(),
             });
         } else {
             let outcome = apply_link_rewrites(cwd, change)?;
@@ -392,6 +395,7 @@ pub fn apply_repair_plan_with_context(
                 planned,
                 rewritten: outcome.rewritten,
                 skipped: outcome.skipped,
+                failed: outcome.failed,
             });
         }
     }
