@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.35.1 - 2026-05-29
+
+Patch release. Two `frontmatter_defaults` rule-matching fixes surfaced by dogfooding norn against a real vault config — they let a schema use per-folder defaults (e.g. `tasks/ → type: task` alongside `notes/ → type: note`) and make `norn new`'s provenance honest. No schema, CLI-surface, or behavior changes beyond the fixes below.
+
 ### Fixed
 
 - **`frontmatter_defaults` conflict detection is now path-aware.** `norn config validate` (and config load) previously rejected any two rules that set the same `frontmatter_defaults` field to different values, even when their `match` predicates were provably disjoint and could never apply to the same document. This blocked the natural per-folder pattern of `tasks/ → type: task` alongside `notes/ → type: note`. The check now only flags a conflict when the two rules can actually co-apply — it treats rules as disjoint when their concrete path globs diverge on a literal segment (before any `**`) or when their `match.frontmatter` predicates demand incompatible values. Genuine conflicts between rules that can overlap (e.g. two `**/*.md` rules) still error as before.
