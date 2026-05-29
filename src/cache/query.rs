@@ -35,6 +35,13 @@ pub struct DocumentQuery {
     pub date_on: Vec<(String, String)>,
     /// Body-text substring; case-insensitive. v1: SQL LIKE. v4: FTS5.
     pub body_text_contains: Option<String>,
+    /// Documents whose outgoing links resolve to ALL of these (resolved) paths.
+    /// ALL-of. Resolved-only: matched against `links.resolved_path`. Targets are
+    /// resolved to paths at the command layer (see `filter_args::resolve_links_to`).
+    pub links_to: Vec<camino::Utf8PathBuf>,
+    /// True ⇒ restrict to documents with ≥1 link whose `status = 'unresolved'`.
+    /// Ambiguous-status links are excluded (distinct state, own validate codes).
+    pub has_unresolved_links: bool,
 }
 
 /// Encode a frontmatter field name as a single quoted JSON-path segment for
@@ -763,6 +770,161 @@ mod tests {
             let result = cache.documents_matching(&query).unwrap();
 
             assert_eq!(result.len(), 0);
+        }
+
+        // ── link-relationship predicates ──────────────────────────────────
+        //
+        // Vault shape:
+        //   hub.md, side.md   — link targets (no outgoing links)
+        //   both.md (task)    — links [[hub]] and [[side]]
+        //   hubonly.md (note) — links [[hub]]
+        //   broken.md (note)  — links [[ghost]] (unresolved)
+        //   clean.md          — no links
+        fn synth_linked_vault() -> (TempDir, Utf8PathBuf) {
+            let tmp = TempDir::new().unwrap();
+            let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+                .unwrap()
+                .join("vault");
+            std::fs::create_dir(root.as_std_path()).unwrap();
+            std::fs::write(
+                root.join("hub.md").as_std_path(),
+                "---\ntype: note\n---\nhub body\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("side.md").as_std_path(),
+                "---\ntype: note\n---\nside body\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("both.md").as_std_path(),
+                "---\ntype: task\n---\nsee [[hub]] and [[side]]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("hubonly.md").as_std_path(),
+                "---\ntype: note\n---\nsee [[hub]]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("broken.md").as_std_path(),
+                "---\ntype: note\n---\nsee [[ghost]]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("clean.md").as_std_path(),
+                "---\ntype: note\n---\nno links\n",
+            )
+            .unwrap();
+            (tmp, root)
+        }
+
+        #[test]
+        fn links_to_returns_resolved_linkers() {
+            let (_tmp, root) = synth_linked_vault();
+            let cache = populate_cache(&root);
+
+            // Derive the target path via the same resolver the CLI uses, to
+            // confirm its output is byte-identical to the stored resolved_path.
+            let resolved = crate::show::target::resolve_target(&cache, "hub").unwrap();
+            assert_eq!(resolved.paths, vec![Utf8PathBuf::from("hub.md")]);
+
+            let query = DocumentQuery {
+                links_to: resolved.paths,
+                ..Default::default()
+            };
+            let result = cache.documents_matching(&query).unwrap();
+            // both.md and hubonly.md link to hub; broken/clean/side/hub do not.
+            assert_eq!(paths(&result), vec!["both.md", "hubonly.md"]);
+        }
+
+        #[test]
+        fn links_to_multiple_targets_are_anded() {
+            let (_tmp, root) = synth_linked_vault();
+            let cache = populate_cache(&root);
+
+            let query = DocumentQuery {
+                links_to: vec![Utf8PathBuf::from("hub.md"), Utf8PathBuf::from("side.md")],
+                ..Default::default()
+            };
+            let result = cache.documents_matching(&query).unwrap();
+            // Only both.md links to BOTH hub and side.
+            assert_eq!(paths(&result), vec!["both.md"]);
+        }
+
+        #[test]
+        fn links_to_excludes_dangling_only_linker() {
+            let (_tmp, root) = synth_linked_vault();
+            let cache = populate_cache(&root);
+
+            // broken.md's only link is unresolved ([[ghost]]); it is never
+            // returned by a resolved-only --links-to query for any target.
+            let query = DocumentQuery {
+                links_to: vec![Utf8PathBuf::from("hub.md")],
+                ..Default::default()
+            };
+            let result = cache.documents_matching(&query).unwrap();
+            assert!(!paths(&result).contains(&"broken.md"));
+        }
+
+        #[test]
+        fn unresolved_links_returns_docs_with_dangling_links() {
+            let (_tmp, root) = synth_linked_vault();
+            let cache = populate_cache(&root);
+
+            let query = DocumentQuery {
+                has_unresolved_links: true,
+                ..Default::default()
+            };
+            let result = cache.documents_matching(&query).unwrap();
+            // Only broken.md has an unresolved link.
+            assert_eq!(paths(&result), vec!["broken.md"]);
+        }
+
+        #[test]
+        fn links_to_composes_with_frontmatter() {
+            let (_tmp, root) = synth_linked_vault();
+            let cache = populate_cache(&root);
+
+            let query = DocumentQuery {
+                links_to: vec![Utf8PathBuf::from("hub.md")],
+                frontmatter_eq: vec![("type".to_string(), serde_json::json!("task"))],
+                ..Default::default()
+            };
+            let result = cache.documents_matching(&query).unwrap();
+            // both.md (task) links to hub; hubonly.md (note) is filtered out.
+            assert_eq!(paths(&result), vec!["both.md"]);
+        }
+
+        #[test]
+        fn links_to_query_plan_uses_resolved_index() {
+            let (_tmp, root) = synth_linked_vault();
+            let cache = populate_cache(&root);
+
+            let conn = cache.conn();
+            let mut stmt = conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN \
+                     SELECT path FROM documents \
+                     WHERE path IN (SELECT source_path FROM links WHERE resolved_path = ?)",
+                )
+                .unwrap();
+            let rows: Vec<String> = stmt
+                .query_map(["hub.md"], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+            // The inner subquery must SEARCH links via idx_links_resolved, not
+            // scan per-row. (A non-correlated LIST SUBQUERY is expected here.)
+            assert!(
+                rows.iter().any(|r| r.contains("idx_links_resolved")),
+                "links-to plan does not use idx_links_resolved: {rows:?}"
+            );
+            assert!(
+                !rows.iter().any(|r| r.contains("CORRELATED")),
+                "links-to plan has a correlated subquery: {rows:?}"
+            );
         }
     }
 }

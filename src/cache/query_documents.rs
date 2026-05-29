@@ -256,6 +256,23 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
         binds.push(SqlValue::Text(needle.clone()));
     }
 
+    // --links-to TARGET (resolved-only). One non-correlated IN-subquery per
+    // target — ALL-of, so a doc must link to every named target. Uses
+    // `idx_links_resolved`.
+    for target in &query.links_to {
+        where_clauses
+            .push("path IN (SELECT source_path FROM links WHERE resolved_path = ?)".to_string());
+        binds.push(SqlValue::Text(target.as_str().to_string()));
+    }
+
+    // --unresolved-links: docs with ≥1 link whose status = 'unresolved'.
+    // Non-correlated subquery, materialized once.
+    if query.has_unresolved_links {
+        where_clauses.push(
+            "path IN (SELECT source_path FROM links WHERE status = 'unresolved')".to_string(),
+        );
+    }
+
     let where_sql = if where_clauses.is_empty() {
         String::new()
     } else {
