@@ -35,6 +35,18 @@ pub enum CacheError {
     #[error("cache lock could not be acquired within timeout; another vault cache operation is in progress")]
     LockTimeout,
 
+    #[error("vault mutation lock could not be acquired within timeout; another norn mutation is in progress against this vault (timed out after 5 s)")]
+    #[allow(dead_code)]
+    MutationLockTimeout,
+
+    #[error("vault mutation lock io error at {path}: {source}")]
+    #[allow(dead_code)]
+    MutationLockIo {
+        path: Utf8PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("failed to read file during indexing: {path}")]
     IndexRead {
         path: Utf8PathBuf,
