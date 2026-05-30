@@ -235,7 +235,7 @@ fn run(cli: Cli) -> Result<i32> {
 
             let stderr = std::io::stderr();
             let mut stderr_lock = stderr.lock();
-            show::render::warn_unknown_cols(&args.col, &mut stderr_lock)?;
+            show::render::warn_unknown_cols(&args.col, &report, &mut stderr_lock)?;
 
             let mut any_error = false;
             for note in &report.notes {

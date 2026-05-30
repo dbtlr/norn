@@ -92,7 +92,14 @@ fn get_col_narrows_output() {
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
-        .args(["get", "a.md", "--col", "incoming_links", "--format", "json"])
+        .args([
+            "get",
+            "a.md",
+            "--col",
+            ".incoming_links",
+            "--format",
+            "json",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -105,6 +112,70 @@ fn get_col_narrows_output() {
     let record = &v[0];
     assert!(record.get("incoming_links").is_some());
     assert!(record.get("headings").is_none());
+}
+
+#[test]
+fn get_col_bare_name_projects_frontmatter_field() {
+    // The headline unification: `get --col <field>` selects a frontmatter field
+    // (like `find --col`), no longer rejected as an unknown column. Self-contained
+    // doc with two frontmatter keys so we can prove the projection filters.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-col-bare-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("a.md"),
+        "---\ntype: note\nstatus: active\n---\n# A\n",
+    )
+    .unwrap();
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["get", "a.md", "--col", "status", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unknown") && !stderr.contains("not present"),
+        "bare frontmatter field must not warn; got: {stderr}"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let fm = v[0].get("frontmatter").expect("frontmatter object present");
+    // Projected to just `status` — `type` is filtered out.
+    assert_eq!(fm.get("status").and_then(|s| s.as_str()), Some("active"));
+    assert!(
+        fm.get("type").is_none(),
+        "non-requested keys filtered; got: {fm}"
+    );
+    // Structural facets are not present unless dot-requested.
+    assert!(v[0].get("headings").is_none());
+}
+
+#[test]
+fn get_col_unknown_facet_warns() {
+    // A dot-prefixed token that isn't a known structural facet warns.
+    let tmp = synth();
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["get", "a.md", "--col", ".bogus", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(".bogus") && stderr.contains("facet"),
+        "expected unknown-facet warning; got: {stderr}"
+    );
 }
 
 #[test]

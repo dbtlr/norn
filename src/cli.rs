@@ -622,13 +622,15 @@ pub struct GetArgs {
     #[arg(long, help_heading = "Output")]
     pub body: bool,
 
-    /// Comma-separated list of fields to include. Subtractive narrowing.
-    /// Without --col, every default field is emitted. Accepts: path,
-    /// frontmatter, headings, outgoing_links, unresolved_links,
-    /// incoming_links, body (the last only meaningful with --body).
+    /// Comma-separated columns to include. Bare names select frontmatter
+    /// fields (e.g. `status,title`), exactly like `norn find`. Structural
+    /// facets are dot-prefixed: `.path`, `.frontmatter` (the whole block),
+    /// `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`,
+    /// `.body` (the last only meaningful with --body). Without --col, every
+    /// default facet is emitted.
     #[arg(
         long,
-        value_name = "FIELD1,FIELD2,...",
+        value_name = "COL1,COL2,...",
         value_delimiter = ',',
         help_heading = "Output"
     )]

@@ -7,9 +7,12 @@ use std::io::Write;
 use crate::output::palette::Palette;
 use crate::output::primitives::{record_block, separator, Field};
 
-/// The set of field names recognized by `norn show`. Used to warn on unknown
-/// `--col` values.
-const KNOWN_FIELDS: &[&str] = &[
+/// The structural facets of a document, addressed in `--col` with a leading
+/// dot (`.body`, `.headings`, …). Bare `--col` names are frontmatter field
+/// names (matching `norn find`); the dot distinguishes the fixed structural
+/// facets so a frontmatter key named e.g. `body` never collides with the body
+/// facet.
+const KNOWN_FACETS: &[&str] = &[
     "path",
     "frontmatter",
     "headings",
@@ -19,16 +22,53 @@ const KNOWN_FIELDS: &[&str] = &[
     "body",
 ];
 
-/// Warn to `stderr` for any `--col` value that is not a recognized `norn show`
-/// field name. Fires once per unknown name, not per record.
-pub fn warn_unknown_cols(cols: &[String], stderr: &mut dyn std::io::Write) -> std::io::Result<()> {
+/// Partition `--col` tokens into structural facets (dot-prefixed, dot stripped)
+/// and frontmatter field names (bare).
+fn split_cols(cols: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut facets = Vec::new();
+    let mut fields = Vec::new();
     for col in cols {
-        if !KNOWN_FIELDS.contains(&col.as_str()) {
+        match col.strip_prefix('.') {
+            Some(facet) => facets.push(facet.to_string()),
+            None => fields.push(col.clone()),
+        }
+    }
+    (facets, fields)
+}
+
+/// Warn to `stderr` for `--col` tokens that won't resolve: a dot-prefixed facet
+/// that isn't a known structural facet, or a bare frontmatter field absent from
+/// every record. Fires once per token, not per record (mirrors `norn find`).
+pub fn warn_unknown_cols(
+    cols: &[String],
+    report: &super::ShowReport,
+    stderr: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let (facets, fields) = split_cols(cols);
+    for facet in &facets {
+        if !KNOWN_FACETS.contains(&facet.as_str()) {
+            let valid = KNOWN_FACETS
+                .iter()
+                .map(|f| format!(".{f}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             writeln!(
                 stderr,
-                "warn: unknown --col field '{}' (valid: {})",
-                col,
-                KNOWN_FIELDS.join(", ")
+                "warn: unknown --col facet '.{facet}' (valid facets: {valid}; bare names select frontmatter fields)"
+            )?;
+        }
+    }
+    for field in &fields {
+        let present_in_any = report.records.iter().any(|r| {
+            r.frontmatter
+                .as_ref()
+                .and_then(|fm| fm.as_object())
+                .is_some_and(|obj| obj.contains_key(field))
+        });
+        if !present_in_any {
+            writeln!(
+                stderr,
+                "warn: --col field '{field}' not present in document (bare names select frontmatter fields; use '.{field}' for a structural facet)"
             )?;
         }
     }
@@ -57,14 +97,19 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
     if cols.is_empty() {
         serde_json::to_value(record).unwrap()
     } else {
-        let allow: HashSet<&str> = cols.iter().map(String::as_str).collect();
+        let (facets, fields) = split_cols(cols);
+        let allow: HashSet<&str> = facets.iter().map(String::as_str).collect();
         let mut obj = json!({ "path": record.path });
         let map = obj.as_object_mut().unwrap();
+        // `.frontmatter` emits the whole block; bare field names filter it to
+        // just those keys (matching `norn find`'s frontmatter projection).
         if allow.contains("frontmatter") {
             map.insert(
                 "frontmatter".into(),
                 serde_json::to_value(&record.frontmatter).unwrap(),
             );
+        } else if !fields.is_empty() {
+            map.insert("frontmatter".into(), filter_frontmatter(record, &fields));
         }
         if allow.contains("headings") {
             map.insert(
@@ -97,6 +142,22 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
     }
 }
 
+/// Project a record's frontmatter down to the named fields. Absent fields are
+/// silently dropped (the warning path flags them). Mirrors `norn find`'s
+/// `filter_frontmatter`.
+fn filter_frontmatter(record: &super::ShowRecord, fields: &[String]) -> Value {
+    let Some(Value::Object(obj)) = record.frontmatter.as_ref() else {
+        return Value::Object(serde_json::Map::new());
+    };
+    let mut filtered = serde_json::Map::new();
+    for field in fields {
+        if let Some(v) = obj.get(field) {
+            filtered.insert(field.clone(), v.clone());
+        }
+    }
+    Value::Object(filtered)
+}
+
 /// Text output with optional `--col` narrowing.
 ///
 /// Emits one records-block per [`ShowRecord`], separated by a horizontal-rule
@@ -114,8 +175,9 @@ pub fn render_text_with_col(report: &super::ShowReport, cols: &[String]) -> Stri
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
 
-    let col_set: HashSet<&str> = cols.iter().map(String::as_str).collect();
-    let all_cols = col_set.is_empty();
+    let (facets, field_cols) = split_cols(cols);
+    let facet_set: HashSet<&str> = facets.iter().map(String::as_str).collect();
+    let all_cols = cols.is_empty();
 
     let mut buf: Vec<u8> = Vec::new();
 
@@ -124,7 +186,7 @@ pub fn render_text_with_col(report: &super::ShowReport, cols: &[String]) -> Stri
             separator(&mut buf, &palette, term_width).unwrap();
         }
 
-        let owned = build_text_fields(record, all_cols, &col_set);
+        let owned = build_text_fields(record, all_cols, &facet_set, &field_cols);
         let fields: Vec<Field<'_>> = owned.iter().map(FieldOwned::as_field).collect();
         record_block(
             &mut buf,
@@ -162,11 +224,28 @@ pub fn render_text(report: &super::ShowReport) -> String {
 fn build_text_fields(
     record: &super::ShowRecord,
     all_cols: bool,
-    col_set: &HashSet<&str>,
+    facet_set: &HashSet<&str>,
+    field_cols: &[String],
 ) -> Vec<FieldOwned> {
     let mut fields: Vec<FieldOwned> = Vec::new();
 
-    if all_cols || col_set.contains("frontmatter") {
+    // Bare --col names project individual frontmatter fields as their own
+    // labeled lines (matching `norn find`), in the order requested.
+    if !field_cols.is_empty() {
+        if let Some(serde_json::Value::Object(obj)) = &record.frontmatter {
+            for key in field_cols {
+                if let Some(value) = obj.get(key) {
+                    fields.push(FieldOwned {
+                        label: key.clone(),
+                        value: json_value_inline(value),
+                    });
+                }
+            }
+        }
+    }
+
+    // `.frontmatter` (or the no-`--col` default) emits the whole block.
+    if all_cols || facet_set.contains("frontmatter") {
         if let Some(fm) = &record.frontmatter {
             let value = frontmatter_to_display(fm);
             if !value.is_empty() {
@@ -178,7 +257,7 @@ fn build_text_fields(
         }
     }
 
-    if (all_cols || col_set.contains("headings")) && !record.headings.is_empty() {
+    if (all_cols || facet_set.contains("headings")) && !record.headings.is_empty() {
         let value = headings_to_display(&record.headings);
         fields.push(FieldOwned {
             label: "headings".into(),
@@ -186,7 +265,7 @@ fn build_text_fields(
         });
     }
 
-    if (all_cols || col_set.contains("outgoing_links")) && !record.outgoing_links.is_empty() {
+    if (all_cols || facet_set.contains("outgoing_links")) && !record.outgoing_links.is_empty() {
         let value = outgoing_links_to_display(&record.outgoing_links);
         fields.push(FieldOwned {
             label: "outgoing_links".into(),
@@ -194,7 +273,7 @@ fn build_text_fields(
         });
     }
 
-    if (all_cols || col_set.contains("unresolved_links")) && !record.unresolved_links.is_empty() {
+    if (all_cols || facet_set.contains("unresolved_links")) && !record.unresolved_links.is_empty() {
         let value = unresolved_links_to_display(&record.unresolved_links);
         fields.push(FieldOwned {
             label: "unresolved_links".into(),
@@ -202,7 +281,7 @@ fn build_text_fields(
         });
     }
 
-    if (all_cols || col_set.contains("incoming_links")) && !record.incoming_links.is_empty() {
+    if (all_cols || facet_set.contains("incoming_links")) && !record.incoming_links.is_empty() {
         let value = incoming_links_to_display(&record.incoming_links);
         fields.push(FieldOwned {
             label: "incoming_links".into(),
@@ -210,7 +289,7 @@ fn build_text_fields(
         });
     }
 
-    if all_cols || col_set.contains("body") {
+    if all_cols || facet_set.contains("body") {
         if let Some(body) = &record.body {
             if !body.trim().is_empty() {
                 fields.push(FieldOwned {

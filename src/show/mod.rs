@@ -169,7 +169,7 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string()],
             body: false,
-            col: vec!["incoming_links".to_string()],
+            col: vec![".incoming_links".to_string()],
             format: crate::cli::GetFormat::Json,
         };
         let r = run(&cache, &args).unwrap();
@@ -190,7 +190,7 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string()],
             body: false,
-            col: vec!["headings".to_string(), "outgoing_links".to_string()],
+            col: vec![".headings".to_string(), ".outgoing_links".to_string()],
             format: crate::cli::GetFormat::Json,
         };
         let r = run(&cache, &args).unwrap();
