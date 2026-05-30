@@ -226,7 +226,11 @@ fn run(cli: Cli) -> Result<i32> {
 
             let stdout_text = match args.format {
                 cli::GetFormat::Json => show::render::render_json_with_col(&report, &args.col),
-                cli::GetFormat::Text => show::render::render_text_with_col(&report, &args.col),
+                cli::GetFormat::Jsonl => show::render::render_jsonl_with_col(&report, &args.col),
+                cli::GetFormat::Paths => show::render::render_paths(&report),
+                cli::GetFormat::Records => {
+                    show::render::render_records_with_col(&report, &args.col)
+                }
             };
             print!("{}", stdout_text);
             if !stdout_text.ends_with('\n') {
@@ -235,6 +239,11 @@ fn run(cli: Cli) -> Result<i32> {
 
             let stderr = std::io::stderr();
             let mut stderr_lock = stderr.lock();
+            crate::output::projection::warn_col_ignored_on_paths(
+                &args.col,
+                matches!(args.format, cli::GetFormat::Paths),
+                &mut stderr_lock,
+            )?;
             show::render::warn_unknown_cols(&args.col, &report, &mut stderr_lock)?;
 
             let mut any_error = false;

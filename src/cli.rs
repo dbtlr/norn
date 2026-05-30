@@ -636,15 +636,21 @@ pub struct GetArgs {
     )]
     pub col: Vec<String>,
 
-    /// Output format. Default text (records-block per doc).
-    #[arg(long, value_enum, default_value_t = GetFormat::Text, help_heading = "Output")]
+    /// Output format. Default records (vertical key-value block per doc).
+    #[arg(long, value_enum, default_value_t = GetFormat::Records, help_heading = "Output")]
     pub format: GetFormat,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GetFormat {
-    Text,
+    /// Vertical key-value record block per document.
+    Records,
+    /// One document path per line (`--col` is ignored).
+    Paths,
+    /// A single JSON array of record objects.
     Json,
+    /// One JSON record object per line.
+    Jsonl,
 }
 
 #[derive(Args, Debug)]
@@ -1179,10 +1185,10 @@ mod get_cli_tests {
     }
 
     #[test]
-    fn get_format_defaults_text() {
+    fn get_format_defaults_records() {
         let cli = Cli::try_parse_from(["vault", "get", "a.md"]).unwrap();
         match cli.command {
-            Command::Get(args) => assert_eq!(args.format, GetFormat::Text),
+            Command::Get(args) => assert_eq!(args.format, GetFormat::Records),
             _ => panic!("expected Get variant"),
         }
     }

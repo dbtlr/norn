@@ -211,10 +211,11 @@ pub fn warn_col_ignored_on_paths(
     format: crate::cli::FindFormat,
     stderr: &mut dyn Write,
 ) -> std::io::Result<()> {
-    if !cols.is_empty() && format == crate::cli::FindFormat::Paths {
-        writeln!(stderr, "warning: --col is ignored with --format paths")?;
-    }
-    Ok(())
+    crate::output::projection::warn_col_ignored_on_paths(
+        cols,
+        format == crate::cli::FindFormat::Paths,
+        stderr,
+    )
 }
 
 #[cfg(test)]

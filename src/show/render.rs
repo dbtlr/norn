@@ -117,18 +117,41 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
     }
 }
 
-/// Text output with optional `--col` narrowing.
+/// `paths` output: one document path per line. `--col` is inert (the caller
+/// warns); identity is all this format carries.
+pub fn render_paths(report: &super::ShowReport) -> String {
+    let mut buf = String::new();
+    for record in &report.records {
+        buf.push_str(record.path.as_str());
+        buf.push('\n');
+    }
+    buf
+}
+
+/// `jsonl` output: one JSON record object per line, `--col`-narrowed the same
+/// way as the `json` array. The line-per-record shape is the streaming sibling
+/// of [`render_json_with_col`].
+pub fn render_jsonl_with_col(report: &super::ShowReport, cols: &[String]) -> String {
+    let mut buf = String::new();
+    for record in &report.records {
+        buf.push_str(&serde_json::to_string(&narrow_to_json(record, cols)).unwrap());
+        buf.push('\n');
+    }
+    buf
+}
+
+/// `records` output with optional `--col` narrowing.
 ///
 /// Emits one records-block per [`ShowRecord`], separated by a horizontal-rule
-/// line between records. Fields in order: `frontmatter`, `headings`,
-/// `outgoing_links`, `unresolved_links`, `incoming_links`, `body` (only when
-/// present). `path` is always emitted as the record-block header.
+/// line between records. Default field order: each frontmatter field, then
+/// `headings`, `outgoing_links`, `unresolved_links`, `incoming_links`, `body`
+/// (only when present). `path` is always emitted as the record-block header.
 ///
 /// When `cols` is non-empty, only fields whose names appear in `cols` are
 /// emitted (plus `path` which is always the header).
 ///
 /// Empty fields (no headings, no links, etc.) are omitted silently.
-pub fn render_text_with_col(report: &super::ShowReport, cols: &[String]) -> String {
+pub fn render_records_with_col(report: &super::ShowReport, cols: &[String]) -> String {
     let palette = Palette::off();
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
@@ -164,11 +187,11 @@ pub fn render_text_with_col(report: &super::ShowReport, cols: &[String]) -> Stri
     String::from_utf8(buf).unwrap()
 }
 
-/// Convenience: emit text with all default fields.
+/// Convenience: emit records with all default fields.
 // Only called from unit-test helpers; suppress dead_code for non-test builds.
 #[cfg(test)]
-pub fn render_text(report: &super::ShowReport) -> String {
-    render_text_with_col(report, &[])
+pub fn render_records(report: &super::ShowReport) -> String {
+    render_records_with_col(report, &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +226,22 @@ fn build_text_fields(
         }
     }
 
-    // `.frontmatter` (or the no-`--col` default) emits the whole block.
-    if all_cols || facet_set.contains("frontmatter") {
+    // Default (no `--col`): every frontmatter key as its own labeled line,
+    // matching `norn find`'s records projection — a bare field is a column.
+    if all_cols {
+        if let Some(serde_json::Value::Object(obj)) = &record.frontmatter {
+            for (key, value) in obj {
+                fields.push(FieldOwned {
+                    label: key.clone(),
+                    value: json_value_inline(value),
+                });
+            }
+        }
+    }
+
+    // `.frontmatter` facet emits the whole consolidated block (recovers the
+    // pre-unification default form).
+    if facet_set.contains("frontmatter") {
         if let Some(fm) = &record.frontmatter {
             let value = frontmatter_to_display(fm);
             if !value.is_empty() {

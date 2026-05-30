@@ -111,7 +111,7 @@ mod tests {
             targets: targets.into_iter().map(String::from).collect(),
             body,
             col: vec![],
-            format: crate::cli::GetFormat::Text,
+            format: crate::cli::GetFormat::Records,
         }
     }
 
@@ -234,10 +234,10 @@ mod tests {
             targets: vec!["a.md".to_string()],
             body: false,
             col: vec![],
-            format: crate::cli::GetFormat::Text,
+            format: crate::cli::GetFormat::Records,
         };
         let r = run(&cache, &args).unwrap();
-        let text = render::render_text(&r);
+        let text = render::render_records(&r);
         assert!(text.contains("a.md"), "expected path in output: {text:?}");
         assert!(
             text.contains("A heading"),
@@ -271,10 +271,10 @@ mod tests {
             targets: vec!["a.md".to_string(), "b.md".to_string()],
             body: false,
             col: vec![],
-            format: crate::cli::GetFormat::Text,
+            format: crate::cli::GetFormat::Records,
         };
         let r = run(&cache, &args).unwrap();
-        let text = render::render_text(&r);
+        let text = render::render_records(&r);
         // Both paths must appear.
         assert!(text.contains("a.md"), "expected a.md in output: {text:?}");
         assert!(text.contains("b.md"), "expected b.md in output: {text:?}");

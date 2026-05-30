@@ -12,6 +12,7 @@
 //! e.g. `body` never collides with the `.body` facet.
 
 use serde_json::Value;
+use std::io::Write;
 
 /// The structural facets addressable via `--col` (dot-prefixed; dot stripped
 /// here). Bare `--col` names are frontmatter field names instead.
@@ -78,6 +79,21 @@ pub fn json_value_inline(v: &Value) -> String {
             .join(", "),
         Value::Object(_) => v.to_string(),
     }
+}
+
+/// Warn (once) that `--col` has no effect with `--format paths`. Shared by
+/// both read commands so the message stays single-sourced. `is_paths` is the
+/// caller's "is the active format paths?" test (the format enums differ per
+/// command, so the comparison happens at the call site).
+pub fn warn_col_ignored_on_paths(
+    cols: &[String],
+    is_paths: bool,
+    stderr: &mut dyn Write,
+) -> std::io::Result<()> {
+    if !cols.is_empty() && is_paths {
+        writeln!(stderr, "warning: --col is ignored with --format paths")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

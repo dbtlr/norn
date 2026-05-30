@@ -228,6 +228,116 @@ fn get_unknown_col_warns_on_stderr() {
 }
 
 #[test]
+fn get_paths_format_one_path_per_line() {
+    let tmp = synth();
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["get", "a.md", "b.md", "--format", "paths"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines, vec!["a.md", "b.md"]);
+}
+
+#[test]
+fn get_jsonl_format_one_object_per_line() {
+    let tmp = synth();
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["get", "a.md", "b.md", "--format", "jsonl"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 2);
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(first["path"], "a.md");
+    let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(second["path"], "b.md");
+}
+
+#[test]
+fn get_col_ignored_with_paths_warns() {
+    let tmp = synth();
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["get", "a.md", "--col", "status", "--format", "paths"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--col is ignored with --format paths"),
+        "expected col-ignored warning; got: {stderr}"
+    );
+    // stdout is still just the path — `--col` had no effect.
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "a.md");
+}
+
+#[test]
+fn get_records_default_frontmatter_is_per_field_lines() {
+    // Phase-2 flip: the default `records` view renders each frontmatter key as
+    // its own labeled line (matching `find`), not one consolidated
+    // `frontmatter` block. `--col .frontmatter` recovers the block form.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-records-default-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("a.md"),
+        "---\ntype: note\nstatus: active\n---\n# A\n",
+    )
+    .unwrap();
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["get", "a.md"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Both frontmatter keys appear as their own labeled lines.
+    assert!(
+        stdout.contains("type") && stdout.contains("note"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("status") && stdout.contains("active"),
+        "{stdout}"
+    );
+    // The consolidated `frontmatter` block label is gone from the default view.
+    assert!(
+        !stdout.contains("frontmatter"),
+        "default records view should not show a consolidated frontmatter block; got: {stdout}"
+    );
+}
+
+#[test]
 fn get_missing_target_partial_failure_exit() {
     let tmp = synth();
     let out = Command::new(norn_bin())
