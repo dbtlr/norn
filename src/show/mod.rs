@@ -21,6 +21,8 @@ pub struct ShowRecord {
     pub incoming_links: Vec<IncomingLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +38,13 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     let mut records: Vec<ShowRecord> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
+    // A requested heavy facet must load itself, independent of any flag.
+    // `.body` (cache-served) loads when `--body` OR `.body` is requested;
+    // `.raw` (disk read) loads when `.raw` is requested.
+    let (facets, _fields) = crate::output::projection::split_cols(&args.col);
+    let wants_body = args.body || facets.iter().any(|f| f == "body");
+    let wants_raw = facets.iter().any(|f| f == "raw");
+
     for raw in &args.targets {
         let resolved = target::resolve_target(cache, raw)?;
         if resolved.paths.is_empty() {
@@ -50,12 +59,17 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
             ));
         }
         for path in &resolved.paths {
-            let Some(deep) = cache.document_with_connections(path.as_path(), args.body)? else {
+            let Some(deep) = cache.document_with_connections(path.as_path(), wants_body)? else {
                 notes.push(format!(
                     "error: '{}' missing from cache after resolution",
                     path
                 ));
                 continue;
+            };
+            let raw = if wants_raw {
+                crate::output::projection::read_raw(&cache.vault_root, &deep.path)
+            } else {
+                None
             };
             records.push(ShowRecord {
                 path: deep.path,
@@ -65,6 +79,7 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
                 unresolved_links: deep.unresolved_links,
                 incoming_links: deep.incoming_links,
                 body: deep.body,
+                raw,
             });
         }
     }

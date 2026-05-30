@@ -355,3 +355,98 @@ fn get_missing_target_partial_failure_exit() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("nonexistent"));
 }
+
+#[test]
+fn get_col_body_without_body_flag_shows_body() {
+    // Regression: `get --col .body` (no `--body`) used to show nothing because
+    // the body only loaded when `--body` was passed. A requested heavy facet
+    // must load itself.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-col-body-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("a.md"),
+        "---\ntype: note\n---\n# A heading\n\nthe body text\n",
+    )
+    .unwrap();
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["get", "a.md", "--col", ".body", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(
+        v[0]["body"].as_str().unwrap().contains("the body text"),
+        "expected body without --body flag: {}",
+        v
+    );
+}
+
+#[test]
+fn get_col_raw_reads_disk_byte_faithful() {
+    // `.raw` reads the whole source file verbatim — frontmatter block, comment,
+    // body, and trailing whitespace all preserved — even with no `--body`.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-col-raw-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    let contents =
+        "---\ntype: note\ntitle: Alpha\n# a yaml comment\n---\n\n# Heading\n\nbody text\n\n   \n";
+    std::fs::write(root.join("a.md"), contents).unwrap();
+
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["get", "a.md", "--col", ".raw", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let file_bytes = std::fs::read_to_string(root.join("a.md")).unwrap();
+    assert_eq!(
+        v[0]["raw"].as_str().unwrap(),
+        file_bytes,
+        "raw facet must equal exact file bytes"
+    );
+}
+
+#[test]
+fn get_default_no_col_omits_raw() {
+    let tmp = synth();
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["get", "a.md", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(
+        v[0].get("raw").is_none(),
+        "raw must not appear by default: {}",
+        v
+    );
+}

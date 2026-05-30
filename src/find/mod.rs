@@ -96,6 +96,19 @@ pub fn run(
         Vec::new()
     };
 
+    // `.raw` self-loads its per-match disk read only when requested — the
+    // default path does zero disk reads.
+    let wants_raw = facets.iter().any(|f| f == "raw");
+    let raw: Vec<Option<String>> = if wants_raw {
+        result
+            .matches
+            .iter()
+            .map(|doc| crate::output::projection::read_raw(cwd, &doc.path))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let format = resolve_format(args.format);
     let palette = crate::output::palette::resolve(color);
 
@@ -118,6 +131,7 @@ pub fn run(
     self::render::render(
         &result,
         &deep,
+        &raw,
         &args,
         format,
         sort_field,

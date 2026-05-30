@@ -109,6 +109,13 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
         if allow.contains("body") {
             map.insert("body".into(), serde_json::to_value(&record.body).unwrap());
         }
+        // `.raw` last: the heaviest/most-derived facet (whole source file from
+        // disk). Omit the key when the file was unreadable.
+        if allow.contains("raw") {
+            if let Some(raw) = &record.raw {
+                map.insert("raw".into(), serde_json::Value::String(raw.clone()));
+            }
+        }
         obj
     }
 }
@@ -287,6 +294,18 @@ fn build_text_fields(
                 fields.push(FieldOwned {
                     label: "body".into(),
                     value: body.trim().to_string(),
+                });
+            }
+        }
+    }
+
+    // `.raw` last, and never in the default dump (heavy/disk; opt-in by name).
+    if facet_set.contains("raw") {
+        if let Some(raw) = &record.raw {
+            if !raw.is_empty() {
+                fields.push(FieldOwned {
+                    label: "raw".into(),
+                    value: raw.clone(),
                 });
             }
         }

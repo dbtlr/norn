@@ -11,6 +11,7 @@
 //! The dot distinguishes the fixed structural facets so a frontmatter key named
 //! e.g. `body` never collides with the `.body` facet.
 
+use camino::Utf8Path;
 use serde_json::Value;
 use std::io::Write;
 
@@ -24,7 +25,18 @@ pub const KNOWN_FACETS: &[&str] = &[
     "unresolved_links",
     "incoming_links",
     "body",
+    "raw",
 ];
+
+/// Read a document's source file verbatim from disk. `rel_path` is the
+/// cache-stored path (relative to the vault root). Returns None if unreadable
+/// (treated as an absent facet). `.raw` is read at query time from disk — in a
+/// row mixing cache-served facets with `.raw`, the cache fields and `.raw` are
+/// momentarily inconsistent if the file changed since the last cache build; the
+/// pre-query cache refresh normally closes this (same assumption every read makes).
+pub fn read_raw(vault_root: &Utf8Path, rel_path: &Utf8Path) -> Option<String> {
+    std::fs::read_to_string(vault_root.join(rel_path)).ok()
+}
 
 /// Partition `--col` tokens into structural facets (dot-prefixed, dot stripped)
 /// and frontmatter field names (bare).

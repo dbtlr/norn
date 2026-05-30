@@ -316,3 +316,52 @@ fn absent_bare_field_warns_with_find_wording() {
         "expected find's absent-field wording: {stderr}"
     );
 }
+
+#[test]
+fn col_raw_facet_reads_disk_byte_faithful() {
+    // `.raw` reads the whole source file verbatim from disk — frontmatter
+    // block, body, comments, and trailing whitespace all preserved.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-find-col-raw-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    let contents =
+        "---\ntype: note\ntitle: Alpha\n# a yaml comment\n---\n\n# Heading\n\nbody text\n\n   \n";
+    std::fs::write(root.join("a.md"), contents).unwrap();
+
+    let v = json_out(
+        &tmp,
+        &[
+            "find",
+            "--eq",
+            "title:Alpha",
+            "--col",
+            ".raw",
+            "--format",
+            "json",
+        ],
+    );
+    let a = doc_a(&v);
+    let file_bytes = std::fs::read_to_string(root.join("a.md")).unwrap();
+    assert_eq!(
+        a["raw"].as_str().unwrap(),
+        file_bytes,
+        "raw facet must equal exact file bytes"
+    );
+    // Only the requested facet (plus identity).
+    assert!(a.get("frontmatter").is_none());
+    assert!(a.get("body").is_none());
+}
+
+#[test]
+fn default_no_col_omits_raw() {
+    let tmp = synth_vault();
+    let v = json_out(&tmp, &["find", "--eq", "title:Alpha", "--format", "json"]);
+    let a = doc_a(&v);
+    assert!(
+        a.get("raw").is_none(),
+        "raw must not appear by default: {a}"
+    );
+}
