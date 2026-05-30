@@ -5,6 +5,7 @@ use std::io::Write;
 
 use crate::cli::{FindArgs, FindFormat};
 use crate::output::primitives::{count_line, record_block, separator, Field};
+use crate::output::projection::{filter_frontmatter, json_value_inline};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -73,23 +74,6 @@ fn render_json(
         "documents": documents,
     });
     writeln!(stdout, "{}", serde_json::to_string_pretty(&payload)?)
-}
-
-/// Apply --col filtering to a frontmatter object. Empty `cols` = no filter.
-fn filter_frontmatter(fm: Option<&serde_json::Value>, cols: &[String]) -> serde_json::Value {
-    if cols.is_empty() {
-        return fm.cloned().unwrap_or(serde_json::Value::Null);
-    }
-    let Some(serde_json::Value::Object(obj)) = fm else {
-        return serde_json::Value::Object(serde_json::Map::new());
-    };
-    let mut filtered = serde_json::Map::new();
-    for col in cols {
-        if let Some(v) = obj.get(col) {
-            filtered.insert(col.clone(), v.clone());
-        }
-    }
-    serde_json::Value::Object(filtered)
 }
 
 fn render_jsonl(
@@ -194,25 +178,10 @@ fn build_record_pairs(
     let mut pairs = Vec::new();
     for field in &field_iter {
         if let Some(value) = fm_object.and_then(|obj| obj.get(field)) {
-            pairs.push((field.clone(), json_value_to_display_string(value)));
+            pairs.push((field.clone(), json_value_inline(value)));
         }
     }
     pairs
-}
-
-fn json_value_to_display_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .map(json_value_to_display_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        serde_json::Value::Object(_) => value.to_string(),
-    }
 }
 
 pub fn warn_absent_cols(

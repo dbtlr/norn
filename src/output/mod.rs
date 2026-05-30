@@ -5,3 +5,4 @@ pub mod glyphs;
 pub mod pager;
 pub mod palette;
 pub mod primitives;
+pub mod projection;

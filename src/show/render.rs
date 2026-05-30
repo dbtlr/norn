@@ -6,35 +6,7 @@ use std::io::Write;
 
 use crate::output::palette::Palette;
 use crate::output::primitives::{record_block, separator, Field};
-
-/// The structural facets of a document, addressed in `--col` with a leading
-/// dot (`.body`, `.headings`, …). Bare `--col` names are frontmatter field
-/// names (matching `norn find`); the dot distinguishes the fixed structural
-/// facets so a frontmatter key named e.g. `body` never collides with the body
-/// facet.
-const KNOWN_FACETS: &[&str] = &[
-    "path",
-    "frontmatter",
-    "headings",
-    "outgoing_links",
-    "unresolved_links",
-    "incoming_links",
-    "body",
-];
-
-/// Partition `--col` tokens into structural facets (dot-prefixed, dot stripped)
-/// and frontmatter field names (bare).
-fn split_cols(cols: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut facets = Vec::new();
-    let mut fields = Vec::new();
-    for col in cols {
-        match col.strip_prefix('.') {
-            Some(facet) => facets.push(facet.to_string()),
-            None => fields.push(col.clone()),
-        }
-    }
-    (facets, fields)
-}
+use crate::output::projection::{filter_frontmatter, json_value_inline, split_cols, KNOWN_FACETS};
 
 /// Warn to `stderr` for `--col` tokens that won't resolve: a dot-prefixed facet
 /// that isn't a known structural facet, or a bare frontmatter field absent from
@@ -109,7 +81,10 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
                 serde_json::to_value(&record.frontmatter).unwrap(),
             );
         } else if !fields.is_empty() {
-            map.insert("frontmatter".into(), filter_frontmatter(record, &fields));
+            map.insert(
+                "frontmatter".into(),
+                filter_frontmatter(record.frontmatter.as_ref(), &fields),
+            );
         }
         if allow.contains("headings") {
             map.insert(
@@ -140,22 +115,6 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
         }
         obj
     }
-}
-
-/// Project a record's frontmatter down to the named fields. Absent fields are
-/// silently dropped (the warning path flags them). Mirrors `norn find`'s
-/// `filter_frontmatter`.
-fn filter_frontmatter(record: &super::ShowRecord, fields: &[String]) -> Value {
-    let Some(Value::Object(obj)) = record.frontmatter.as_ref() else {
-        return Value::Object(serde_json::Map::new());
-    };
-    let mut filtered = serde_json::Map::new();
-    for field in fields {
-        if let Some(v) = obj.get(field) {
-            filtered.insert(field.clone(), v.clone());
-        }
-    }
-    Value::Object(filtered)
 }
 
 /// Text output with optional `--col` narrowing.
@@ -328,22 +287,6 @@ fn frontmatter_to_display(fm: &serde_json::Value) -> String {
             lines.join("\n")
         }
         other => other.to_string(),
-    }
-}
-
-/// Format a JSON value as a concise single-line string for display.
-fn json_value_inline(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .map(json_value_inline)
-            .collect::<Vec<_>>()
-            .join(", "),
-        serde_json::Value::Object(_) => v.to_string(),
     }
 }
 
