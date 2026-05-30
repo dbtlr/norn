@@ -560,12 +560,15 @@ pub struct FindArgs {
     #[arg(long = "all-cols", conflicts_with = "col", help_heading = "Output")]
     pub all_cols: bool,
 
-    /// Comma-separated list of frontmatter fields to include in output.
-    /// Default: frontmatter only (records/json/jsonl). Ignored with warning
-    /// on paths format.
+    /// Comma-separated columns to include. Bare names select frontmatter
+    /// fields (e.g. `status,title`), exactly like `norn get`. Structural
+    /// facets are dot-prefixed: `.path`, `.frontmatter` (the whole block),
+    /// `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`,
+    /// `.body`, `.raw`. Default (no --col): frontmatter only. Ignored with a
+    /// warning on paths format.
     #[arg(
         long,
-        value_name = "FIELD1,FIELD2,...",
+        value_name = "COL1,COL2,...",
         value_delimiter = ',',
         help_heading = "Output"
     )]
