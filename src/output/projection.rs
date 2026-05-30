@@ -81,6 +81,97 @@ pub fn json_value_inline(v: &Value) -> String {
     }
 }
 
+/// Build the standard "unknown `--col` facet" warning message body (no severity
+/// prefix; callers prepend their own `warn:`/`warning:` style). Single-sourced
+/// so `find` and `get` can't drift on wording.
+pub fn unknown_facet_message(facet: &str) -> String {
+    let valid = KNOWN_FACETS
+        .iter()
+        .map(|f| format!(".{f}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("unknown --col facet '.{facet}' (valid facets: {valid}; bare names select frontmatter fields)")
+}
+
+// ---------------------------------------------------------------------------
+// Per-facet display helpers (shared records-format leaf rendering)
+// ---------------------------------------------------------------------------
+
+/// Flatten frontmatter into `key: value\nkey: value\n…` lines.
+///
+/// For a JSON object, each key-value pair is one `key: value` line where the
+/// value is displayed as its natural string form. For non-object JSON (rare),
+/// falls back to the raw JSON string.
+pub fn frontmatter_to_display(fm: &Value) -> String {
+    match fm {
+        Value::Object(obj) => {
+            let lines: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, json_value_inline(v)))
+                .collect();
+            lines.join("\n")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Render headings as `#`-prefixed lines, one per heading.
+pub fn headings_to_display(headings: &[crate::core::Heading]) -> String {
+    headings
+        .iter()
+        .map(|h| {
+            let prefix = "#".repeat(h.level as usize);
+            format!("{} {}", prefix, h.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render outgoing (resolved) links: `target → resolved_path`.
+pub fn outgoing_links_to_display(links: &[crate::core::Link]) -> String {
+    links
+        .iter()
+        .map(|l| {
+            if let Some(resolved) = &l.resolved_path {
+                format!("{}  →  {}", l.target, resolved)
+            } else {
+                l.target.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render unresolved links: `target  (unresolved: reason)`.
+pub fn unresolved_links_to_display(links: &[crate::core::Link]) -> String {
+    links
+        .iter()
+        .map(|l| {
+            let reason = l
+                .unresolved_reason
+                .as_ref()
+                .map(|r| match r {
+                    crate::core::UnresolvedReason::TargetMissing => "target-missing",
+                    crate::core::UnresolvedReason::AnchorMissing => "anchor-missing",
+                    crate::core::UnresolvedReason::BlockRefMissing => "block-ref-missing",
+                    crate::core::UnresolvedReason::Ambiguous => "ambiguous",
+                })
+                .unwrap_or("unknown");
+            format!("{}  (unresolved: {})", l.target, reason)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render incoming links: `source_path  raw_link_text`.
+pub fn incoming_links_to_display(links: &[crate::cache::IncomingLink]) -> String {
+    links
+        .iter()
+        .map(|il| format!("{}  {}", il.source_path, il.link.raw))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Warn (once) that `--col` has no effect with `--format paths`. Shared by
 /// both read commands so the message stays single-sourced. `is_paths` is the
 /// caller's "is the active format paths?" test (the format enums differ per

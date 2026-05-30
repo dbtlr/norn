@@ -1,15 +1,27 @@
 //! Format-specific output renderers (paths / records / json / jsonl).
 
-use crate::cache::FindResult;
+use crate::cache::{DocumentDeep, FindResult};
+use std::collections::HashSet;
 use std::io::Write;
 
 use crate::cli::{FindArgs, FindFormat};
 use crate::output::primitives::{count_line, record_block, separator, Field};
-use crate::output::projection::{filter_frontmatter, json_value_inline};
+use crate::output::projection::{
+    filter_frontmatter, frontmatter_to_display, headings_to_display, incoming_links_to_display,
+    json_value_inline, outgoing_links_to_display, split_cols, unresolved_links_to_display,
+};
+
+/// Fetch the deep record for the match at `i`, if a deep fetch was performed
+/// and it succeeded. Returns `None` both when no deep fetch ran (cheap-facet
+/// path) and when the fetch yielded nothing for this doc (treated as empty).
+fn deep_at(deep: &[Option<DocumentDeep>], i: usize) -> Option<&DocumentDeep> {
+    deep.get(i).and_then(|d| d.as_ref())
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     result: &FindResult,
+    deep: &[Option<DocumentDeep>],
     args: &FindArgs,
     format: FindFormat,
     sort_field: Option<&str>,
@@ -21,11 +33,17 @@ pub fn render(
 ) -> std::io::Result<()> {
     match format {
         FindFormat::Paths => render_paths(result, stdout, stderr),
-        FindFormat::Json => {
-            render_json(result, args, sort_field, sort_direction, starts_at, stdout)
-        }
-        FindFormat::Jsonl => render_jsonl(result, args, stdout, stderr),
-        FindFormat::Records => render_records(result, args, palette, stdout, stderr),
+        FindFormat::Json => render_json(
+            result,
+            deep,
+            args,
+            sort_field,
+            sort_direction,
+            starts_at,
+            stdout,
+        ),
+        FindFormat::Jsonl => render_jsonl(result, deep, args, stdout, stderr),
+        FindFormat::Records => render_records(result, deep, args, palette, stdout, stderr),
     }
 }
 
@@ -47,8 +65,80 @@ fn render_paths(
     Ok(())
 }
 
+/// Build the JSON object for a single matched document under `--col`.
+///
+/// Mirrors `get`'s `narrow_to_json` shape and key ordering. With no `--col`,
+/// the legacy find shape is preserved: `{path, frontmatter}` with the whole
+/// frontmatter block. With `--col`, only the requested facets / fields appear
+/// (plus `path` as identity). Cheap facets (`.frontmatter`, `.body`) read from
+/// the `DocumentSummary`; join-backed facets read from `deep`.
+fn doc_to_json(
+    doc: &crate::core::DocumentSummary,
+    deep: Option<&DocumentDeep>,
+    cols: &[String],
+) -> serde_json::Value {
+    if cols.is_empty() {
+        return serde_json::json!({
+            "path": doc.path.as_str(),
+            "frontmatter": filter_frontmatter(doc.frontmatter.as_ref(), &[]),
+        });
+    }
+
+    let (facets, fields) = split_cols(cols);
+    let allow: HashSet<&str> = facets.iter().map(String::as_str).collect();
+    let mut obj = serde_json::json!({ "path": doc.path.as_str() });
+    let map = obj.as_object_mut().unwrap();
+
+    // `.frontmatter` emits the whole block; bare field names filter it.
+    if allow.contains("frontmatter") {
+        map.insert(
+            "frontmatter".into(),
+            filter_frontmatter(doc.frontmatter.as_ref(), &[]),
+        );
+    } else if !fields.is_empty() {
+        map.insert(
+            "frontmatter".into(),
+            filter_frontmatter(doc.frontmatter.as_ref(), &fields),
+        );
+    }
+    if allow.contains("headings") {
+        let headings = deep.map(|d| d.headings.as_slice()).unwrap_or(&[]);
+        map.insert("headings".into(), serde_json::to_value(headings).unwrap());
+    }
+    if allow.contains("outgoing_links") {
+        let links = deep.map(|d| d.outgoing_links.as_slice()).unwrap_or(&[]);
+        map.insert(
+            "outgoing_links".into(),
+            serde_json::to_value(links).unwrap(),
+        );
+    }
+    if allow.contains("unresolved_links") {
+        let links = deep.map(|d| d.unresolved_links.as_slice()).unwrap_or(&[]);
+        map.insert(
+            "unresolved_links".into(),
+            serde_json::to_value(links).unwrap(),
+        );
+    }
+    if allow.contains("incoming_links") {
+        let links = deep.map(|d| d.incoming_links.as_slice()).unwrap_or(&[]);
+        map.insert(
+            "incoming_links".into(),
+            serde_json::to_value(links).unwrap(),
+        );
+    }
+    if allow.contains("body") {
+        map.insert(
+            "body".into(),
+            serde_json::Value::String(doc.body_text.clone()),
+        );
+    }
+    obj
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_json(
     result: &FindResult,
+    deep: &[Option<DocumentDeep>],
     args: &FindArgs,
     _sort_field: Option<&str>,
     _sort_direction: Option<&str>,
@@ -58,13 +148,8 @@ fn render_json(
     let documents: Vec<serde_json::Value> = result
         .matches
         .iter()
-        .map(|d| {
-            let frontmatter = filter_frontmatter(d.frontmatter.as_ref(), &args.col);
-            serde_json::json!({
-                "path": d.path.as_str(),
-                "frontmatter": frontmatter,
-            })
-        })
+        .enumerate()
+        .map(|(i, d)| doc_to_json(d, deep_at(deep, i), &args.col))
         .collect();
 
     let payload = serde_json::json!({
@@ -78,16 +163,13 @@ fn render_json(
 
 fn render_jsonl(
     result: &FindResult,
+    deep: &[Option<DocumentDeep>],
     args: &FindArgs,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> std::io::Result<()> {
-    for doc in &result.matches {
-        let frontmatter = filter_frontmatter(doc.frontmatter.as_ref(), &args.col);
-        let line = serde_json::json!({
-            "path": doc.path.as_str(),
-            "frontmatter": frontmatter,
-        });
+    for (i, doc) in result.matches.iter().enumerate() {
+        let line = doc_to_json(doc, deep_at(deep, i), &args.col);
         writeln!(stdout, "{}", serde_json::to_string(&line)?)?;
     }
     if result.truncated {
@@ -102,6 +184,7 @@ fn render_jsonl(
 
 fn render_records(
     result: &FindResult,
+    deep: &[Option<DocumentDeep>],
     args: &FindArgs,
     palette: &crate::output::palette::Palette,
     stdout: &mut dyn Write,
@@ -130,7 +213,7 @@ fn render_records(
         if i > 0 {
             separator(stdout, palette, term_width)?;
         }
-        let pairs = build_record_pairs(doc, &args.col);
+        let pairs = build_record_pairs(doc, deep_at(deep, i), &args.col);
         let fields: Vec<Field<'_>> = pairs
             .iter()
             .map(|(k, v)| Field {
@@ -163,43 +246,123 @@ fn render_records(
     Ok(())
 }
 
+/// Build the ordered `(label, value)` record rows for a single matched doc.
+///
+/// No `--col`: every frontmatter key as its own labeled row (legacy behavior).
+/// With `--col`: bare fields project individual frontmatter keys (in requested
+/// order), then the structural facets in `get`'s canonical order — frontmatter,
+/// headings, outgoing_links, unresolved_links, incoming_links, body. Cheap
+/// facets read from the `DocumentSummary`; join-backed facets read from `deep`
+/// (treated as empty when the fetch yielded nothing). Empty facets are omitted.
 fn build_record_pairs(
     doc: &crate::core::DocumentSummary,
+    deep: Option<&DocumentDeep>,
     cols: &[String],
 ) -> Vec<(String, String)> {
     let fm_object = doc.frontmatter.as_ref().and_then(|fm| fm.as_object());
-    let field_iter: Vec<String> = if cols.is_empty() {
-        fm_object
-            .map(|obj| obj.keys().cloned().collect())
-            .unwrap_or_default()
-    } else {
-        cols.to_vec()
-    };
+
+    if cols.is_empty() {
+        // Legacy default: every frontmatter key as its own labeled row.
+        let mut pairs = Vec::new();
+        if let Some(obj) = fm_object {
+            for (key, value) in obj {
+                pairs.push((key.clone(), json_value_inline(value)));
+            }
+        }
+        return pairs;
+    }
+
+    let (facets, fields) = split_cols(cols);
+    let facet_set: HashSet<&str> = facets.iter().map(String::as_str).collect();
     let mut pairs = Vec::new();
-    for field in &field_iter {
+
+    // Bare fields: individual frontmatter keys, in requested order.
+    for field in &fields {
         if let Some(value) = fm_object.and_then(|obj| obj.get(field)) {
             pairs.push((field.clone(), json_value_inline(value)));
         }
     }
+
+    // `.frontmatter`: the whole consolidated block.
+    if facet_set.contains("frontmatter") {
+        if let Some(fm) = &doc.frontmatter {
+            let value = frontmatter_to_display(fm);
+            if !value.is_empty() {
+                pairs.push(("frontmatter".into(), value));
+            }
+        }
+    }
+
+    if facet_set.contains("headings") {
+        let headings = deep.map(|d| d.headings.as_slice()).unwrap_or(&[]);
+        if !headings.is_empty() {
+            pairs.push(("headings".into(), headings_to_display(headings)));
+        }
+    }
+
+    if facet_set.contains("outgoing_links") {
+        let links = deep.map(|d| d.outgoing_links.as_slice()).unwrap_or(&[]);
+        if !links.is_empty() {
+            pairs.push(("outgoing_links".into(), outgoing_links_to_display(links)));
+        }
+    }
+
+    if facet_set.contains("unresolved_links") {
+        let links = deep.map(|d| d.unresolved_links.as_slice()).unwrap_or(&[]);
+        if !links.is_empty() {
+            pairs.push((
+                "unresolved_links".into(),
+                unresolved_links_to_display(links),
+            ));
+        }
+    }
+
+    if facet_set.contains("incoming_links") {
+        let links = deep.map(|d| d.incoming_links.as_slice()).unwrap_or(&[]);
+        if !links.is_empty() {
+            pairs.push(("incoming_links".into(), incoming_links_to_display(links)));
+        }
+    }
+
+    if facet_set.contains("body") {
+        let body = doc.body_text.trim();
+        if !body.is_empty() {
+            pairs.push(("body".into(), body.to_string()));
+        }
+    }
+
     pairs
 }
 
-pub fn warn_absent_cols(
+/// Warn for `--col` tokens that won't resolve: a dot-prefixed facet that isn't
+/// a known structural facet, or a bare frontmatter field absent from every
+/// matching document. Fires once per token (mirrors `norn get`).
+pub fn warn_unknown_cols(
     result: &FindResult,
     cols: &[String],
     stderr: &mut dyn Write,
 ) -> std::io::Result<()> {
-    for col in cols {
+    let (facets, fields) = split_cols(cols);
+    for facet in &facets {
+        if !crate::output::projection::KNOWN_FACETS.contains(&facet.as_str()) {
+            writeln!(
+                stderr,
+                "warning: {}",
+                crate::output::projection::unknown_facet_message(facet)
+            )?;
+        }
+    }
+    for field in &fields {
         let present_in_any = result.matches.iter().any(|d| {
             d.frontmatter
                 .as_ref()
                 .and_then(|fm| fm.as_object())
-                .is_some_and(|obj| obj.contains_key(col))
+                .is_some_and(|obj| obj.contains_key(field))
         });
         if !present_in_any {
             writeln!(
                 stderr,
-                "warning: --col field `{col}` not present in any matching document"
+                "warning: --col field `{field}` not present in any matching document"
             )?;
         }
     }
@@ -292,7 +455,7 @@ mod tests {
         let result = sample_result();
         let mut stdout = Vec::new();
         let args = sample_args();
-        render_json(&result, &args, None, None, 1, &mut stdout).unwrap();
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(parsed["total"], 2);
         assert_eq!(parsed["returned"], 2);
@@ -314,6 +477,7 @@ mod tests {
         let args = sample_args();
         render_json(
             &result,
+            &[],
             &args,
             Some("modified"),
             Some("desc"),
@@ -338,7 +502,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut args = sample_args();
         args.col = vec!["type".to_string()];
-        render_json(&result, &args, None, None, 1, &mut stdout).unwrap();
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(parsed["documents"][0]["frontmatter"]["type"], "note");
     }
@@ -349,7 +513,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        render_jsonl(&result, &args, &mut stdout, &mut stderr).unwrap();
+        render_jsonl(&result, &[], &args, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -365,7 +529,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        render_jsonl(&result, &args, &mut stdout, &mut stderr).unwrap();
+        render_jsonl(&result, &[], &args, &mut stdout, &mut stderr).unwrap();
         let s = std::str::from_utf8(&stderr).unwrap();
         assert!(s.starts_with("note: showing "));
         assert!(s.contains("2 of 5"));
@@ -378,7 +542,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         let first_line = text.lines().next().unwrap();
         assert!(
@@ -396,7 +560,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         let first_line = text.lines().next().unwrap();
         assert!(
@@ -417,7 +581,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // Field rows look like "  type    note" — starts with 2-space indent.
         assert!(
@@ -433,7 +597,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // No blank-line padding around the horizontal rule.
         assert!(!text.contains("\n\n─"), "blank before separator: {text:?}");
@@ -447,7 +611,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // b.md has no frontmatter; it should show the placeholder line.
         assert!(
@@ -465,7 +629,7 @@ mod tests {
         // a.md has type=note but no `nonexistent` field.
         args.col = vec!["nonexistent".to_string()];
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(
             text.contains("a.md\n  (no matching fields)\n"),
@@ -491,7 +655,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::on();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // Dim renders as ANSI 256 #244.
         assert!(
@@ -507,7 +671,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // The path "a.md" appears as a header line at column 0, not as a "  path  a.md" field row.
         // lines[0] = count line, lines[1] = blank, lines[2] = first record header.
@@ -528,7 +692,7 @@ mod tests {
         let result = sample_result();
         let mut stderr = Vec::new();
         let cols = vec!["nonexistent_field".to_string()];
-        warn_absent_cols(&result, &cols, &mut stderr).unwrap();
+        warn_unknown_cols(&result, &cols, &mut stderr).unwrap();
         let s = std::str::from_utf8(&stderr).unwrap();
         assert!(s.starts_with("warning: --col field "), "got: {s:?}");
         assert!(s.contains("`nonexistent_field`"), "got: {s:?}");
@@ -558,7 +722,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(
             !text.contains("\x1b["),
@@ -574,12 +738,121 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::on();
-        render_records(&result, &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(
             text.contains("\x1b["),
             "expected ANSI escapes, got: {}",
             text
         );
+    }
+
+    // ---- facet rendering (cheap facets need no deep fetch) ----
+
+    fn result_with_body() -> FindResult {
+        FindResult {
+            matches: vec![DocumentSummary {
+                path: Utf8PathBuf::from("a.md"),
+                stem: "a".to_string(),
+                hash: "h1".to_string(),
+                frontmatter: Some(serde_json::json!({"type": "note", "title": "Alpha"})),
+                body_text: "  alpha body  ".to_string(),
+            }],
+            total: 1,
+            returned: 1,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn json_body_facet_reads_from_summary_no_deep() {
+        let result = result_with_body();
+        let mut stdout = Vec::new();
+        let mut args = sample_args();
+        args.col = vec![".body".to_string()];
+        // No deep slice supplied — `.body` must still resolve from body_text.
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        let doc = &v["documents"][0];
+        assert_eq!(doc["body"], "  alpha body  ");
+        assert!(doc.get("frontmatter").is_none());
+    }
+
+    #[test]
+    fn json_frontmatter_facet_emits_whole_block() {
+        let result = result_with_body();
+        let mut stdout = Vec::new();
+        let mut args = sample_args();
+        args.col = vec![".frontmatter".to_string()];
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        let doc = &v["documents"][0];
+        assert_eq!(doc["frontmatter"]["type"], "note");
+        assert_eq!(doc["frontmatter"]["title"], "Alpha");
+    }
+
+    #[test]
+    fn records_body_facet_trims_and_labels() {
+        let result = result_with_body();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut args = sample_args();
+        args.col = vec![".body".to_string()];
+        let palette = crate::output::palette::Palette::off();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        // Trimmed body under a `body` label, no surrounding whitespace.
+        assert!(
+            text.contains("\n  body"),
+            "expected body field row: {text:?}"
+        );
+        assert!(
+            text.contains("alpha body"),
+            "expected body content: {text:?}"
+        );
+    }
+
+    #[test]
+    fn records_mixed_bare_field_and_frontmatter_facet() {
+        let result = result_with_body();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut args = sample_args();
+        args.col = vec!["title".to_string(), ".frontmatter".to_string()];
+        let palette = crate::output::palette::Palette::off();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        let text = std::str::from_utf8(&stdout).unwrap();
+        // Bare `title` row first, then the consolidated `frontmatter` block.
+        assert!(text.contains("\n  title"), "expected title row: {text:?}");
+        assert!(
+            text.contains("\n  frontmatter"),
+            "expected frontmatter block: {text:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_facet_warns_with_find_prefix() {
+        let result = sample_result();
+        let mut stderr = Vec::new();
+        let cols = vec![".bogus".to_string()];
+        warn_unknown_cols(&result, &cols, &mut stderr).unwrap();
+        let s = std::str::from_utf8(&stderr).unwrap();
+        assert!(
+            s.starts_with("warning: unknown --col facet '.bogus'"),
+            "got: {s:?}"
+        );
+        assert!(
+            s.contains("bare names select frontmatter fields"),
+            "got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn known_facet_does_not_warn() {
+        let result = sample_result();
+        let mut stderr = Vec::new();
+        let cols = vec![".headings".to_string()];
+        warn_unknown_cols(&result, &cols, &mut stderr).unwrap();
+        assert_eq!(stderr.len(), 0, "known facet should not warn");
     }
 }

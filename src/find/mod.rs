@@ -74,6 +74,28 @@ pub fn run(
         crate::filter_args::resolve_links_to(&cache, &args.filters.links_to)?;
     let result = cache.find_documents(&query)?;
 
+    // Join-backed facets (`.headings` and the link sets) require a per-doc deep
+    // fetch; the cheap facets (`.frontmatter`, `.body`, `.path`) are already on
+    // each `DocumentSummary`. Only pay the join cost when a deep facet is asked
+    // for — the default frontmatter-only path stays at zero extra queries.
+    let (facets, _fields) = crate::output::projection::split_cols(&args.col);
+    let needs_deep = facets.iter().any(|f| {
+        matches!(
+            f.as_str(),
+            "headings" | "outgoing_links" | "unresolved_links" | "incoming_links"
+        )
+    });
+    let deep: Vec<Option<crate::cache::DocumentDeep>> = if needs_deep {
+        let mut out = Vec::with_capacity(result.matches.len());
+        for doc in &result.matches {
+            // body not needed — find already carries `body_text`.
+            out.push(cache.document_with_connections(doc.path.as_path(), false)?);
+        }
+        out
+    } else {
+        Vec::new()
+    };
+
     let format = resolve_format(args.format);
     let palette = crate::output::palette::resolve(color);
 
@@ -95,6 +117,7 @@ pub fn run(
     let mut buffer: Vec<u8> = Vec::new();
     self::render::render(
         &result,
+        &deep,
         &args,
         format,
         sort_field,
@@ -123,7 +146,7 @@ pub fn run(
     }
 
     self::render::warn_col_ignored_on_paths(&args.col, format, &mut stderr_lock)?;
-    self::render::warn_absent_cols(&result, &args.col, &mut stderr_lock)?;
+    self::render::warn_unknown_cols(&result, &args.col, &mut stderr_lock)?;
 
     let exit = if cache.has_diagnostic_errors()? { 2 } else { 0 };
     Ok(exit)

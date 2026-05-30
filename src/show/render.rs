@@ -6,7 +6,11 @@ use std::io::Write;
 
 use crate::output::palette::Palette;
 use crate::output::primitives::{record_block, separator, Field};
-use crate::output::projection::{filter_frontmatter, json_value_inline, split_cols, KNOWN_FACETS};
+use crate::output::projection::{
+    filter_frontmatter, frontmatter_to_display, headings_to_display, incoming_links_to_display,
+    json_value_inline, outgoing_links_to_display, split_cols, unknown_facet_message,
+    unresolved_links_to_display, KNOWN_FACETS,
+};
 
 /// Warn to `stderr` for `--col` tokens that won't resolve: a dot-prefixed facet
 /// that isn't a known structural facet, or a bare frontmatter field absent from
@@ -19,15 +23,7 @@ pub fn warn_unknown_cols(
     let (facets, fields) = split_cols(cols);
     for facet in &facets {
         if !KNOWN_FACETS.contains(&facet.as_str()) {
-            let valid = KNOWN_FACETS
-                .iter()
-                .map(|f| format!(".{f}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(
-                stderr,
-                "warn: unknown --col facet '.{facet}' (valid facets: {valid}; bare names select frontmatter fields)"
-            )?;
+            writeln!(stderr, "warn: {}", unknown_facet_message(facet))?;
         }
     }
     for field in &fields {
@@ -303,85 +299,6 @@ fn build_text_fields(
 struct FieldOwned {
     label: String,
     value: String,
-}
-
-// ---------------------------------------------------------------------------
-// Per-field display helpers
-// ---------------------------------------------------------------------------
-
-/// Flatten frontmatter into `key: value\nkey: value\n…` lines.
-///
-/// For a JSON object, each key-value pair is one `key: value` line where the
-/// value is displayed as its natural string form.  For non-object JSON (rare),
-/// falls back to the raw JSON string.
-fn frontmatter_to_display(fm: &serde_json::Value) -> String {
-    match fm {
-        serde_json::Value::Object(obj) => {
-            let lines: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, json_value_inline(v)))
-                .collect();
-            lines.join("\n")
-        }
-        other => other.to_string(),
-    }
-}
-
-/// Render headings as `#`-prefixed lines, one per heading.
-fn headings_to_display(headings: &[crate::core::Heading]) -> String {
-    headings
-        .iter()
-        .map(|h| {
-            let prefix = "#".repeat(h.level as usize);
-            format!("{} {}", prefix, h.text)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Render outgoing (resolved) links: `target → resolved_path`.
-fn outgoing_links_to_display(links: &[crate::core::Link]) -> String {
-    links
-        .iter()
-        .map(|l| {
-            if let Some(resolved) = &l.resolved_path {
-                format!("{}  →  {}", l.target, resolved)
-            } else {
-                l.target.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Render unresolved links: `target  (unresolved: reason)`.
-fn unresolved_links_to_display(links: &[crate::core::Link]) -> String {
-    links
-        .iter()
-        .map(|l| {
-            let reason = l
-                .unresolved_reason
-                .as_ref()
-                .map(|r| match r {
-                    crate::core::UnresolvedReason::TargetMissing => "target-missing",
-                    crate::core::UnresolvedReason::AnchorMissing => "anchor-missing",
-                    crate::core::UnresolvedReason::BlockRefMissing => "block-ref-missing",
-                    crate::core::UnresolvedReason::Ambiguous => "ambiguous",
-                })
-                .unwrap_or("unknown");
-            format!("{}  (unresolved: {})", l.target, reason)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Render incoming links: `source_path  raw_link_text`.
-fn incoming_links_to_display(links: &[crate::cache::IncomingLink]) -> String {
-    links
-        .iter()
-        .map(|il| format!("{}  {}", il.source_path, il.link.raw))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
