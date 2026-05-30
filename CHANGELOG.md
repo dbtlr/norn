@@ -28,6 +28,8 @@ Patch release. Fixes `norn self-update`, which has been broken for every GitHub-
 
 - **`norn self-update` now finds the install receipt again.** Since the v0.34 `vault-cli → norn` rename, `norn self-update` reported `this binary does not have an install receipt` for *every* GitHub-installer install, because it looked for the receipt under the binary name (`~/.config/norn/install-receipt.json`) while cargo-dist writes it under the package name as `~/.config/norn-run/norn-run-receipt.json`. The path is now derived from `CARGO_PKG_NAME` (`<app>/<app>-receipt.json`), matching what the installer writes and staying correct across future renames. Additionally, the receipt parser no longer requires a top-level `target` field (absent in current cargo-dist receipts) — both `target` and `version` are now optional, since the update target triple comes from the compiled binary and the version from the binary itself. **Note:** because the broken detection shipped in v0.34.0–v0.35.1, upgrading *to* the fixed version requires one manual installer re-run (`curl … norn-run-installer.sh | sh`); `self-update` works normally from the fixed version onward.
 
+## v0.35.1 - 2026-05-29
+
 Patch release. Two `frontmatter_defaults` rule-matching fixes surfaced by dogfooding norn against a real vault config — they let a schema use per-folder defaults (e.g. `tasks/ → type: task` alongside `notes/ → type: note`) and make `norn new`'s provenance honest. No schema, CLI-surface, or behavior changes beyond the fixes below.
 
 ### Fixed
