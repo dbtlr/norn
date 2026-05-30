@@ -65,6 +65,16 @@ fn warning_to_json(w: &Warning) -> Value {
             "field": field,
             "target": target,
         }),
+        Warning::AmbiguousWikilink {
+            field,
+            target,
+            candidates,
+        } => json!({
+            "kind": "ambiguous-wikilink",
+            "field": field,
+            "target": target,
+            "candidates": candidates.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        }),
         Warning::StemCollision { stem, locations } => json!({
             "kind": "stem-collision",
             "stem": stem,
@@ -183,6 +193,22 @@ fn warning_label(w: &Warning) -> String {
         }
         Warning::UnresolvedWikilink { field, target } => {
             format!("unresolved-wikilink: {} → {}", field, target)
+        }
+        Warning::AmbiguousWikilink {
+            field,
+            target,
+            candidates,
+        } => {
+            format!(
+                "ambiguous-wikilink: {} → \"{}\" (candidates: {})",
+                field,
+                target,
+                candidates
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
         Warning::StemCollision { stem, locations } => {
             format!("stem-collision: {} ({} locations)", stem, locations.len())

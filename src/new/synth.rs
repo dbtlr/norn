@@ -52,6 +52,11 @@ pub enum Warning {
         field: String,
         target: String,
     },
+    AmbiguousWikilink {
+        field: String,
+        target: String,
+        candidates: Vec<camino::Utf8PathBuf>,
+    },
     StemCollision {
         stem: String,
         locations: Vec<camino::Utf8PathBuf>,
@@ -249,13 +254,15 @@ pub fn build_plan(
                             crate::set::validate::SetWarning::WikilinkAmbiguous {
                                 field,
                                 target,
-                                ..
-                            } => {
-                                // Ambiguous is surfaced as UnresolvedWikilink for v1;
-                                // a dedicated variant can be added later if the operator
-                                // needs to distinguish not-found from multi-match.
-                                warnings.push(Warning::UnresolvedWikilink { field, target })
-                            }
+                                candidates,
+                            } => warnings.push(Warning::AmbiguousWikilink {
+                                field,
+                                target,
+                                candidates: candidates
+                                    .into_iter()
+                                    .map(camino::Utf8PathBuf::from)
+                                    .collect(),
+                            }),
                             _ => {}
                         }
                     }
@@ -597,6 +604,54 @@ validate:
         let fm = &plan.change.new_value.as_ref().unwrap()["frontmatter"];
         // Auto-wrapped: "norn" → "[[norn]]"
         assert_eq!(fm["workspace"], serde_json::json!("[[norn]]"));
+    }
+
+    #[test]
+    fn synth_routes_ambiguous_wikilink_to_its_own_variant() {
+        // A wikilink stem resolving to >1 doc must map to Warning::AmbiguousWikilink
+        // (carrying the candidates), NOT collapse into UnresolvedWikilink.
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-new-ambiguous-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path())
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+        std::fs::write(tmp.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        for p in ["a/shared.md", "b/shared.md"] {
+            let path = tmp.path().join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "---\ntype: note\n---\n").unwrap();
+        }
+        let index = crate::graph::build_index(&root).unwrap();
+
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      field_types:
+        workspace: wikilink
+"#,
+        );
+        let a = args("foo.md", vec!["workspace=shared"]);
+        let plan = build_plan(&a, &cfg, &compiled, Some(&index), String::new()).unwrap();
+        let ambiguous = plan
+            .warnings
+            .iter()
+            .find_map(|w| match w {
+                Warning::AmbiguousWikilink { candidates, .. } => Some(candidates),
+                _ => None,
+            })
+            .expect("expected an AmbiguousWikilink warning");
+        assert_eq!(ambiguous.len(), 2, "both shared-stem docs are candidates");
+        assert!(!plan
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::UnresolvedWikilink { .. })));
     }
 
     #[test]

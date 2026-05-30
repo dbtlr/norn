@@ -319,6 +319,74 @@ validate:
     );
 }
 
+#[test]
+fn process_level_ambiguous_wikilink_warns_with_candidates() {
+    // A wikilink whose stem resolves to MULTIPLE docs is a distinct warning kind
+    // (`ambiguous-wikilink`) from the no-candidates case — and carries the
+    // candidate paths so the operator can disambiguate. Warn only, never refuse.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      field_types:
+        workspace: wikilink
+"#,
+    );
+    // Two docs sharing the stem `shared` in different directories.
+    fs::create_dir_all(vault.path().join("a")).unwrap();
+    fs::create_dir_all(vault.path().join("b")).unwrap();
+    fs::write(
+        vault.path().join("a/shared.md"),
+        "---\ntype: note\n---\n# A\n",
+    )
+    .unwrap();
+    fs::write(
+        vault.path().join("b/shared.md"),
+        "---\ntype: note\n---\n# B\n",
+    )
+    .unwrap();
+
+    let output = vault_cmd(&vault)
+        .args([
+            "new",
+            "foo.md",
+            "--yes",
+            "--format",
+            "json",
+            "--field",
+            "workspace=shared",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success (warn only), stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    let warnings = envelope["warnings"].as_array().unwrap();
+    let ambiguous = warnings
+        .iter()
+        .find(|w| w["kind"].as_str() == Some("ambiguous-wikilink"))
+        .unwrap_or_else(|| panic!("expected ambiguous-wikilink warning, got: {warnings:?}"));
+    let candidates: Vec<&str> = ambiguous["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(
+        candidates.contains(&"a/shared.md") && candidates.contains(&"b/shared.md"),
+        "expected both candidate paths, got: {candidates:?}"
+    );
+}
+
 // ── Task 10.4: config-load failures ──────────────────────────────────────────
 
 #[test]
