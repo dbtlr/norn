@@ -14,6 +14,11 @@ use crate::cli::GetArgs;
 #[derive(Debug, Serialize)]
 pub struct ShowRecord {
     pub path: camino::Utf8PathBuf,
+    /// Filename stem. Carried for the opt-in `.stem` facet and `--sort stem`;
+    /// skipped from the default serialize so `get --format json` (no `--col`)
+    /// stays byte-identical and stem surfaces only when `--col .stem` asks.
+    #[serde(skip)]
+    pub stem: String,
     pub frontmatter: Option<serde_json::Value>,
     pub headings: Vec<Heading>,
     pub outgoing_links: Vec<Link>,
@@ -74,6 +79,7 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
             };
             records.push(ShowRecord {
                 path: deep.path,
+                stem: deep.stem,
                 frontmatter: deep.frontmatter,
                 headings: deep.headings,
                 outgoing_links: deep.outgoing_links,
@@ -108,6 +114,9 @@ fn apply_sort(records: &mut [ShowRecord], field: Option<&str>, desc: bool) {
     let key = |r: &ShowRecord| -> Option<String> {
         if field == "path" {
             return Some(r.path.as_str().to_string());
+        }
+        if field == "stem" {
+            return Some(r.stem.clone());
         }
         r.frontmatter
             .as_ref()
@@ -398,8 +407,11 @@ mod tests {
     // ---- sort / limit / paging (in-memory, post-resolution) ----
 
     fn rec(path: &str, fm: serde_json::Value) -> ShowRecord {
+        let path = Utf8PathBuf::from(path);
+        let stem = path.file_stem().unwrap_or_default().to_string();
         ShowRecord {
-            path: Utf8PathBuf::from(path),
+            stem,
+            path,
             frontmatter: Some(fm),
             headings: vec![],
             outgoing_links: vec![],
@@ -443,6 +455,20 @@ mod tests {
         apply_sort(&mut records, Some("path"), false);
         let paths: Vec<&str> = records.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(paths, vec!["a.md", "b.md", "c.md"]);
+    }
+
+    #[test]
+    fn sort_by_stem_identity() {
+        // Paths chosen so stem order (a, b, c) differs from path order — proves
+        // the sort keys on the stem, not the full path.
+        let mut records = vec![
+            rec("z/a.md", serde_json::json!({})),
+            rec("a/b.md", serde_json::json!({})),
+            rec("m/c.md", serde_json::json!({})),
+        ];
+        apply_sort(&mut records, Some("stem"), false);
+        let paths: Vec<&str> = records.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["z/a.md", "a/b.md", "m/c.md"]);
     }
 
     #[test]

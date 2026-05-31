@@ -562,10 +562,10 @@ pub struct FindArgs {
 
     /// Comma-separated columns to include. Bare names select frontmatter
     /// fields (e.g. `status,title`), exactly like `norn get`. Structural
-    /// facets are dot-prefixed: `.path`, `.frontmatter` (the whole block),
-    /// `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`,
-    /// `.body`, `.raw`. Default (no --col): frontmatter only. Ignored with a
-    /// warning on paths format.
+    /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
+    /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
+    /// `.incoming_links`, `.body`, `.raw`. Default (no --col): frontmatter
+    /// only. Ignored with a warning on paths format.
     #[arg(
         long,
         value_name = "COL1,COL2,...",
@@ -676,10 +676,10 @@ pub struct GetArgs {
 
     /// Comma-separated columns to include. Bare names select frontmatter
     /// fields (e.g. `status,title`), exactly like `norn find`. Structural
-    /// facets are dot-prefixed: `.path`, `.frontmatter` (the whole block),
-    /// `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`,
-    /// `.body`, `.raw`. Without --col, frontmatter + headings + links are
-    /// emitted (body only with --all-cols or `--col .body`).
+    /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
+    /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
+    /// `.incoming_links`, `.body`, `.raw`. Without --col, frontmatter +
+    /// headings + links are emitted (body only with --all-cols or `--col .body`).
     #[arg(
         long,
         value_name = "COL1,COL2,...",

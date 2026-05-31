@@ -69,6 +69,11 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
         let allow: HashSet<&str> = facets.iter().map(String::as_str).collect();
         let mut obj = json!({ "path": record.path });
         let map = obj.as_object_mut().unwrap();
+        // `.stem` is identity-class (like `.path`): opt-in only, never in the
+        // default dump. Placed right after `path`.
+        if allow.contains("stem") {
+            map.insert("stem".into(), Value::String(record.stem.clone()));
+        }
         // `.frontmatter` emits the whole block; bare field names filter it to
         // just those keys (matching `norn find`'s frontmatter projection).
         if allow.contains("frontmatter") {
@@ -213,6 +218,15 @@ fn build_text_fields(
     field_cols: &[String],
 ) -> Vec<FieldOwned> {
     let mut fields: Vec<FieldOwned> = Vec::new();
+
+    // `.stem` is identity-class (like `.path`): opt-in only, never in the
+    // default dump. Emitted first so it sits adjacent to the path header.
+    if facet_set.contains("stem") {
+        fields.push(FieldOwned {
+            label: "stem".into(),
+            value: record.stem.clone(),
+        });
+    }
 
     // Bare --col names project individual frontmatter fields as their own
     // labeled lines (matching `norn find`), in the order requested.

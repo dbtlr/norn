@@ -295,6 +295,88 @@ fn get_sort_orders_records() {
 }
 
 #[test]
+fn get_col_stem_facet_and_sort_by_stem() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-stem-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    // Subdirs so stem order (apple, banana, cherry) differs from path order
+    // (a/…, m/…, z/…) — proving `.stem` and `--sort stem` key on the stem.
+    std::fs::create_dir_all(root.join("z")).unwrap();
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("m")).unwrap();
+    std::fs::write(root.join("z/apple.md"), "---\ntype: note\n---\n").unwrap();
+    std::fs::write(root.join("a/cherry.md"), "---\ntype: note\n---\n").unwrap();
+    std::fs::write(root.join("m/banana.md"), "---\ntype: note\n---\n").unwrap();
+
+    // `--col .stem`: the bare stem alongside the path identity.
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["get", "z/apple.md", "--col", ".stem", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v[0]["path"], "z/apple.md");
+    assert_eq!(v[0]["stem"], "apple");
+    assert!(
+        v[0].get("frontmatter").is_none(),
+        "only the requested .stem facet should appear"
+    );
+
+    // Opt-in: default `get --format json` (no --col) carries no stem key.
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["get", "z/apple.md", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(
+        v[0].get("stem").is_none(),
+        "stem must be opt-in — absent from the default dump"
+    );
+
+    // `--sort stem`: stems ascending, distinct from path order.
+    let out = Command::new(norn_bin())
+        .args(["--cwd"])
+        .arg(&root)
+        .args([
+            "get",
+            "z/apple.md",
+            "a/cherry.md",
+            "m/banana.md",
+            "--sort",
+            "stem",
+            "--format",
+            "jsonl",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            v["path"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(paths, vec!["z/apple.md", "m/banana.md", "a/cherry.md"]);
+}
+
+#[test]
 fn get_unknown_col_warns_on_stderr() {
     let tmp = synth();
     let out = Command::new(norn_bin())

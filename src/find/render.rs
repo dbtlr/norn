@@ -100,6 +100,12 @@ fn doc_to_json(
     let mut obj = serde_json::json!({ "path": doc.path.as_str() });
     let map = obj.as_object_mut().unwrap();
 
+    // `.stem` is identity-class (like `.path`): opt-in only, never in the
+    // default or `--all-cols` dump. Placed right after `path`.
+    if allow.contains("stem") {
+        map.insert("stem".into(), serde_json::Value::String(doc.stem.clone()));
+    }
+
     // `--all-cols`: whole frontmatter + every cache-served facet + body.
     // `.frontmatter` emits the whole block; bare field names filter it.
     if all_cols || allow.contains("frontmatter") {
@@ -319,6 +325,12 @@ fn build_record_pairs(
     let (facets, fields) = split_cols(cols);
     let facet_set: HashSet<&str> = facets.iter().map(String::as_str).collect();
     let mut pairs = Vec::new();
+
+    // `.stem` is identity-class (like `.path`): opt-in only, never in the
+    // default or `--all-cols` dump. Emitted first, adjacent to the path header.
+    if facet_set.contains("stem") {
+        pairs.push(("stem".into(), doc.stem.clone()));
+    }
 
     // `--all-cols`: per-field frontmatter rows (like the default), then every
     // cache-served facet. No consolidated `.frontmatter` block, no `.raw`.
@@ -841,6 +853,31 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         let doc = &v["documents"][0];
         assert_eq!(doc["body"], "  alpha body  ");
+        assert!(doc.get("frontmatter").is_none());
+    }
+
+    #[test]
+    fn json_stem_facet_opt_in_and_omitted_by_default() {
+        let result = result_with_body();
+
+        // Default (no --col): identity `path` only, no `stem` key.
+        let mut out_default = Vec::new();
+        let args_default = sample_args();
+        render_json(&result, &[], &[], &args_default, None, None, 1, &mut out_default).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out_default).unwrap();
+        assert!(
+            v["documents"][0].get("stem").is_none(),
+            "stem must be opt-in — absent from the default dump"
+        );
+
+        // `--col .stem`: stem present, frontmatter absent.
+        let mut out_stem = Vec::new();
+        let mut args = sample_args();
+        args.col = vec![".stem".to_string()];
+        render_json(&result, &[], &[], &args, None, None, 1, &mut out_stem).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out_stem).unwrap();
+        let doc = &v["documents"][0];
+        assert_eq!(doc["stem"], "a");
         assert!(doc.get("frontmatter").is_none());
     }
 

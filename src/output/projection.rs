@@ -19,6 +19,7 @@ use std::io::Write;
 /// here). Bare `--col` names are frontmatter field names instead.
 pub const KNOWN_FACETS: &[&str] = &[
     "path",
+    "stem",
     "frontmatter",
     "headings",
     "outgoing_links",
