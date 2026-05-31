@@ -1,4 +1,4 @@
-//! Phase 10 process-level integration tests for `vault new`.
+//! Phase 10 process-level integration tests for `norn new`.
 //!
 //! Tasks 10.1 (scaffolding + happy-path), 10.2 (--force and -p coverage),
 //! 10.3 (schema-aware refusal paths), 10.4 (config-load failures),
@@ -15,7 +15,7 @@ fn norn_bin() -> &'static str {
 /// Create a minimal tempdir vault with the given YAML in `.norn/config.yaml`.
 fn build_vault(config_yaml: &str) -> tempfile::TempDir {
     let dir = Builder::new()
-        .prefix("vault-new-process-")
+        .prefix("norn-new-process-")
         .tempdir()
         .unwrap();
     let vault_config_dir = dir.path().join(".norn");
@@ -24,8 +24,8 @@ fn build_vault(config_yaml: &str) -> tempfile::TempDir {
     dir
 }
 
-/// Build a `vault` Command with `--cwd` pointing at the vault tempdir.
-fn vault_cmd(vault: &tempfile::TempDir) -> Command {
+/// Build a `norn` Command with `--cwd` pointing at the vault tempdir.
+fn norn_cmd(vault: &tempfile::TempDir) -> Command {
     let mut c = Command::new(norn_bin());
     c.arg("--cwd").arg(vault.path());
     c
@@ -50,7 +50,7 @@ validate:
 "#,
     );
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "Workspaces/foo/tasks/bar.md",
@@ -91,7 +91,7 @@ validate:
 fn process_level_apply_writes_file_with_yes() {
     let vault = build_vault("validate: {}\n");
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "foo.md", "--yes", "--field", "type=note"])
         .output()
         .unwrap();
@@ -114,7 +114,7 @@ fn process_level_refuses_existing_path_without_force() {
     let vault = build_vault("validate: {}\n");
     fs::write(vault.path().join("exists.md"), "old content").unwrap();
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "exists.md", "--yes", "--field", "type=note"])
         .output()
         .unwrap();
@@ -133,7 +133,7 @@ fn process_level_force_overwrites_existing_path() {
     let vault = build_vault("validate: {}\n");
     fs::write(vault.path().join("exists.md"), "old content").unwrap();
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "exists.md",
@@ -160,7 +160,7 @@ fn process_level_force_overwrites_existing_path() {
 fn process_level_refuses_missing_parent_without_parents_flag() {
     let vault = build_vault("validate: {}\n");
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "deep/nested/foo.md", "--yes", "--field", "type=note"])
         .output()
         .unwrap();
@@ -177,7 +177,7 @@ fn process_level_refuses_missing_parent_without_parents_flag() {
 fn process_level_parents_flag_creates_intermediate_dirs() {
     let vault = build_vault("validate: {}\n");
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "deep/nested/foo.md",
@@ -201,7 +201,7 @@ fn process_level_parents_flag_creates_intermediate_dirs() {
 fn process_level_force_and_parents_combined() {
     let vault = build_vault("validate: {}\n");
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "fresh/dir/foo.md",
@@ -229,7 +229,7 @@ fn process_level_invalid_field_format_refuses() {
     let vault = build_vault("validate: {}\n");
 
     // --field key=value is required; passing "no_equals" should refuse.
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "foo.md", "--yes", "--field", "no_equals_sign"])
         .output()
         .unwrap();
@@ -246,7 +246,7 @@ fn process_level_invalid_field_format_refuses() {
 fn process_level_invalid_field_json_refuses() {
     let vault = build_vault("validate: {}\n");
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "foo.md",
@@ -287,7 +287,7 @@ validate:
     )
     .unwrap();
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "foo.md",
@@ -349,7 +349,7 @@ validate:
     )
     .unwrap();
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "foo.md",
@@ -404,7 +404,7 @@ validate:
 "#,
     );
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "foo.md", "--dry-run"])
         .output()
         .unwrap();
@@ -437,7 +437,7 @@ validate:
 "#,
     );
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "foo.md", "--dry-run"])
         .output()
         .unwrap();
@@ -475,7 +475,7 @@ validate:
 "#,
     );
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "foo.md", "--dry-run"])
         .output()
         .unwrap();
@@ -511,7 +511,7 @@ validate:
 "#,
     );
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args(["new", "foo.md", "--yes", "--format", "json"])
         .output()
         .unwrap();
@@ -553,7 +553,7 @@ validate:
 "#,
     );
 
-    let output = vault_cmd(&vault)
+    let output = norn_cmd(&vault)
         .args([
             "new",
             "foo.md",

@@ -16,7 +16,7 @@ A clear description of the expected behavior.
 
 ## Reproducer
 
-The minimum set of files and commands that reproduce the issue. A few Markdown files in a temp directory, plus the exact `vault` command line, is usually enough.
+The minimum set of files and commands that reproduce the issue. A few Markdown files in a temp directory, plus the exact `norn` command line, is usually enough.
 
 ```bash
 # Setup
@@ -24,7 +24,7 @@ mkdir /tmp/repro && cd /tmp/repro
 # ... commands to create the failing state ...
 
 # Command that triggers the bug
-vault -C . validate --summary --format json
+norn -C . validate --summary --format json
 ```
 
 ## Output
@@ -37,7 +37,7 @@ The actual output (paste verbatim, redact anything sensitive). For JSON or JSONL
 
 ## Environment
 
-- `vault --version`:
+- `norn --version`:
 - OS and version (e.g. macOS 14.5, Ubuntu 24.04):
 - Install method (shell installer / `cargo install` / source build):
 - Rust version (`rustc --version`) if built from source:

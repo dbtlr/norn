@@ -42,12 +42,12 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 }
 
 /// Returns the cache directory path for a given vault root.
-/// Format: `<XDG_CACHE_HOME>/vault/<sha256-of-canonical-root>/`, defaulting
-/// to `~/.cache/vault/<hash>/` when `XDG_CACHE_HOME` is unset.
+/// Format: `<XDG_CACHE_HOME>/norn/<sha256-of-canonical-root>/`, defaulting
+/// to `~/.cache/norn/<hash>/` when `XDG_CACHE_HOME` is unset.
 pub fn cache_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
     let (canonical, hash) = vault_identity(vault_root)?;
     let base = xdg_cache_home()?;
-    let dir = base.join("vault").join(hash);
+    let dir = base.join("norn").join(hash);
     Ok((canonical, dir))
 }
 
@@ -112,11 +112,11 @@ mod tests {
     #[test]
     fn hex_lower_matches_reference_sha256() {
         let mut hasher = Sha256::new();
-        hasher.update(b"vault-cli-test-input");
+        hasher.update(b"norn-test-input");
         let hash = hex_lower(hasher.finalize().as_ref());
         assert_eq!(
             hash,
-            "950f0173de000add567cf53b9ccb4806f8750a7c33113b5e61109c0ca7a7dc11"
+            "6bf80c1353552aed7d974919d3c43a2ed39dacb57ada8019d625cc2efda0c844"
         );
         assert_eq!(hash.len(), 64);
         assert!(hash

@@ -1144,7 +1144,7 @@ mod count_cli_tests {
 
     #[test]
     fn count_parses_with_by_flag() {
-        let cli = Cli::try_parse_from(["vault", "count", "--by", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "count", "--by", "status"]).unwrap();
         match cli.command {
             Command::Count(args) => {
                 assert_eq!(args.by.as_deref(), Some("status"));
@@ -1155,14 +1155,14 @@ mod count_cli_tests {
 
     #[test]
     fn count_parses_without_by() {
-        let cli = Cli::try_parse_from(["vault", "count"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "count"]).unwrap();
         assert!(matches!(cli.command, Command::Count(_)));
     }
 
     #[test]
     fn count_inherits_filter_flags() {
         let cli =
-            Cli::try_parse_from(["vault", "count", "--eq", "type:note", "--by", "status"]).unwrap();
+            Cli::try_parse_from(["norn", "count", "--eq", "type:note", "--by", "status"]).unwrap();
         match cli.command {
             Command::Count(args) => {
                 assert_eq!(args.filters.eq, vec!["type:note".to_string()]);
@@ -1180,12 +1180,12 @@ mod get_cli_tests {
 
     #[test]
     fn get_requires_at_least_one_target() {
-        assert!(Cli::try_parse_from(["vault", "get"]).is_err());
+        assert!(Cli::try_parse_from(["norn", "get"]).is_err());
     }
 
     #[test]
     fn get_parses_single_target() {
-        let cli = Cli::try_parse_from(["vault", "get", "Notes.md"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "get", "Notes.md"]).unwrap();
         match cli.command {
             Command::Get(args) => assert_eq!(args.targets, vec!["Notes.md".to_string()]),
             _ => panic!("expected Get variant"),
@@ -1194,7 +1194,7 @@ mod get_cli_tests {
 
     #[test]
     fn get_parses_multiple_targets() {
-        let cli = Cli::try_parse_from(["vault", "get", "a.md", "b.md", "c.md"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "get", "a.md", "b.md", "c.md"]).unwrap();
         match cli.command {
             Command::Get(args) => assert_eq!(args.targets.len(), 3),
             _ => panic!("expected Get variant"),
@@ -1205,13 +1205,13 @@ mod get_cli_tests {
     fn get_body_flag_is_removed() {
         // Breaking change: `--body` no longer exists. Body now comes via
         // `--all-cols` (full dump) or `--col .body` (body only).
-        let res = Cli::try_parse_from(["vault", "get", "a.md", "--body"]);
+        let res = Cli::try_parse_from(["norn", "get", "a.md", "--body"]);
         assert!(res.is_err(), "expected --body to be an unknown flag");
     }
 
     #[test]
     fn get_parses_all_cols_flag() {
-        let cli = Cli::try_parse_from(["vault", "get", "a.md", "--all-cols"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "get", "a.md", "--all-cols"]).unwrap();
         match cli.command {
             Command::Get(args) => assert!(args.all_cols),
             _ => panic!("expected Get variant"),
@@ -1220,14 +1220,14 @@ mod get_cli_tests {
 
     #[test]
     fn get_all_cols_conflicts_with_col() {
-        let res = Cli::try_parse_from(["vault", "get", "a.md", "--all-cols", "--col", "type"]);
+        let res = Cli::try_parse_from(["norn", "get", "a.md", "--all-cols", "--col", "type"]);
         assert!(res.is_err(), "--all-cols and --col are mutually exclusive");
     }
 
     #[test]
     fn get_parses_sort_and_paging() {
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "get",
             "a.md",
             "--sort",
@@ -1252,7 +1252,7 @@ mod get_cli_tests {
 
     #[test]
     fn get_limit_conflicts_with_no_limit() {
-        let res = Cli::try_parse_from(["vault", "get", "a.md", "--limit", "5", "--no-limit"]);
+        let res = Cli::try_parse_from(["norn", "get", "a.md", "--limit", "5", "--no-limit"]);
         assert!(
             res.is_err(),
             "--limit and --no-limit are mutually exclusive"
@@ -1261,7 +1261,7 @@ mod get_cli_tests {
 
     #[test]
     fn get_parses_col_narrowing() {
-        let cli = Cli::try_parse_from(["vault", "get", "a.md", "--col", "incoming_links"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "get", "a.md", "--col", "incoming_links"]).unwrap();
         match cli.command {
             Command::Get(args) => {
                 assert_eq!(args.col, vec!["incoming_links".to_string()]);
@@ -1272,7 +1272,7 @@ mod get_cli_tests {
 
     #[test]
     fn get_format_defaults_records() {
-        let cli = Cli::try_parse_from(["vault", "get", "a.md"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "get", "a.md"]).unwrap();
         match cli.command {
             Command::Get(args) => assert_eq!(args.format, GetFormat::Records),
             _ => panic!("expected Get variant"),
@@ -1287,12 +1287,12 @@ mod set_cli_tests {
 
     #[test]
     fn set_requires_a_doc_argument() {
-        assert!(Cli::try_parse_from(["vault", "set"]).is_err());
+        assert!(Cli::try_parse_from(["norn", "set"]).is_err());
     }
 
     #[test]
     fn set_accepts_field_flag() {
-        let cli = Cli::try_parse_from(["vault", "set", "Notes/foo.md", "--field", "status=active"])
+        let cli = Cli::try_parse_from(["norn", "set", "Notes/foo.md", "--field", "status=active"])
             .unwrap();
         match cli.command {
             Command::Set(args) => {
@@ -1306,7 +1306,7 @@ mod set_cli_tests {
     #[test]
     fn set_accepts_push_pop_remove_flags() {
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "set",
             "doc.md",
             "--push",
@@ -1330,7 +1330,7 @@ mod set_cli_tests {
     #[test]
     fn set_accepts_field_json_and_body_from_stdin_and_force_and_yes_and_dry_run() {
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "set",
             "doc.md",
             "--field-json",
@@ -1365,7 +1365,7 @@ mod move_cli_tests {
     #[test]
     fn move_subcommand_parses_with_all_flags() {
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "move",
             "src.md",
             "dst.md",
@@ -1383,7 +1383,7 @@ mod move_cli_tests {
 
     #[test]
     fn move_subcommand_parses_parents_short_flag() {
-        let cli = Cli::try_parse_from(["vault", "move", "src.md", "dst.md", "-p"]);
+        let cli = Cli::try_parse_from(["norn", "move", "src.md", "dst.md", "-p"]);
         assert!(cli.is_ok(), "parse error: {:?}", cli.err());
         match cli.unwrap().command {
             Command::Move(args) => assert!(args.parents),
@@ -1393,7 +1393,7 @@ mod move_cli_tests {
 
     #[test]
     fn move_subcommand_parses_recursive_short_flag() {
-        let cli = Cli::try_parse_from(["vault", "move", "src_dir", "dst_dir", "-r"]);
+        let cli = Cli::try_parse_from(["norn", "move", "src_dir", "dst_dir", "-r"]);
         assert!(cli.is_ok(), "parse error: {:?}", cli.err());
         match cli.unwrap().command {
             Command::Move(args) => assert!(args.recursive),
@@ -1412,7 +1412,7 @@ mod delete_cli_tests {
         // --allow-broken-links and --rewrite-to conflict; test each combo separately.
         // This variant exercises --rewrite-to path.
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "delete",
             "old.md",
             "--yes",
@@ -1426,7 +1426,7 @@ mod delete_cli_tests {
 
         // Also verify --allow-broken-links path (without --rewrite-to).
         let cli2 = Cli::try_parse_from([
-            "vault",
+            "norn",
             "delete",
             "old.md",
             "--yes",
@@ -1441,7 +1441,7 @@ mod delete_cli_tests {
     #[test]
     fn delete_allow_broken_links_and_rewrite_to_are_mutually_exclusive() {
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "delete",
             "old.md",
             "--allow-broken-links",
@@ -1460,7 +1460,7 @@ mod new_cli_tests {
     #[test]
     fn parses_new_with_path_and_fields() {
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "new",
             "Workspaces/foo/tasks/bar.md",
             "--field",
@@ -1480,7 +1480,7 @@ mod new_cli_tests {
 
     #[test]
     fn parses_new_with_parents_short_flag() {
-        let cli = Cli::try_parse_from(["vault", "new", "a/b/c.md", "-p"]).unwrap();
+        let cli = Cli::try_parse_from(["norn", "new", "a/b/c.md", "-p"]).unwrap();
         match cli.command {
             Command::New(args) => assert!(args.parents),
             _ => panic!("expected Command::New"),
@@ -1490,7 +1490,7 @@ mod new_cli_tests {
     #[test]
     fn parses_new_with_force_body_stdin_yes_dryrun() {
         let cli = Cli::try_parse_from([
-            "vault",
+            "norn",
             "new",
             "a.md",
             "--force",
@@ -1512,9 +1512,8 @@ mod new_cli_tests {
 
     #[test]
     fn parses_new_with_field_json() {
-        let cli =
-            Cli::try_parse_from(["vault", "new", "a.md", "--field-json", r#"tags=["a","b"]"#])
-                .unwrap();
+        let cli = Cli::try_parse_from(["norn", "new", "a.md", "--field-json", r#"tags=["a","b"]"#])
+            .unwrap();
         match cli.command {
             Command::New(args) => {
                 assert_eq!(args.field_json.len(), 1);

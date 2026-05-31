@@ -20,6 +20,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 ### Changed
 
+- **The cache directory moved from `~/.cache/vault/` to `~/.cache/norn/`.** The cache-identity path still carried the pre-v0.34 product name `vault`, while the sibling state directory (mutation lock, event stream) already used `~/.local/state/norn/` — an inconsistency and a leftover from the rename. `cache_dir_for` now resolves `<XDG_CACHE_HOME>/norn/<hash>/` (honoring `$XDG_CACHE_HOME`), matching the state dir and what `norn config show` reports. The cache is a disposable read-acceleration store, so the only effect is a one-time transparent rebuild on the next run; any old `~/.cache/vault/` directory is now orphaned and can be deleted.
 - **`find` and `get` now share one `--sort` / `--limit` / `--no-limit` / `--starts-at` definition (internal single-sourcing).** Behavior is unchanged — `find` still defaults `--limit` to 10 and sorts in SQL; `get` still returns every named target by default and sorts in-memory — but the flags are now defined once and flattened into both commands so the surface can't drift. The only visible effect is lightly reworded `--help` text (e.g. the `--limit` help names both commands' defaults).
 
 ## v0.36.0 - 2026-05-30
