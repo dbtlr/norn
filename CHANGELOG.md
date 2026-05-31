@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.36.1 - 2026-05-31
+
+A maintenance release: a `norn self-update` fix plus the find/get unification follow-ups and a rename-leftover cleanup. The headline is self-update — its archive extractor still looked for the pre-rename `vault` binary, so it couldn't unpack any post-rename release. (Because a broken self-update can't repair itself, upgrading to this release needs one manual installer re-run; self-updates work normally after.) Also completes find/get parity with the `.stem` facet, single-sources the shared sort/paging flags, and moves the cache directory from the leftover `~/.cache/vault/` to `~/.cache/norn/`.
+
 ### Fixed
 
 - **`norn self-update` no longer fails to extract the new binary from the release archive.** The archive extractor searched each tarball entry for a file named `vault` — the pre-v0.34 binary name — so against any post-rename release it found no match and aborted with `archive … did not contain a norn binary`. The binary cargo-dist ships has been `norn` since v0.34.0. This is the third rename-leftover of the same class (after the help literals and the v0.35.2 receipt-path fix), and it stayed hidden because the unit test fixture used the same stale `vault` name and because same-version self-updates short-circuit before downloading. The extractor (and the temp-file fallback name) now key on the bin target name via `CARGO_BIN_NAME`, so a future rename can't desync them again; the test fixtures use the real cargo-dist layout (`norn-run-<target>/norn`) with a regression guard that the stale `vault` name is *not* matched. **As with the v0.35.2 fix, an already-broken install can't repair itself** — upgrading to a release carrying this fix needs one manual installer re-run; self-updates work normally thereafter.
