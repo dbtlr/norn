@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Fixed
+
+- **`norn self-update` no longer fails to extract the new binary from the release archive.** The archive extractor searched each tarball entry for a file named `vault` — the pre-v0.34 binary name — so against any post-rename release it found no match and aborted with `archive … did not contain a norn binary`. The binary cargo-dist ships has been `norn` since v0.34.0. This is the third rename-leftover of the same class (after the help literals and the v0.35.2 receipt-path fix), and it stayed hidden because the unit test fixture used the same stale `vault` name and because same-version self-updates short-circuit before downloading. The extractor (and the temp-file fallback name) now key on the bin target name via `CARGO_BIN_NAME`, so a future rename can't desync them again; the test fixtures use the real cargo-dist layout (`norn-run-<target>/norn`) with a regression guard that the stale `vault` name is *not* matched. **As with the v0.35.2 fix, an already-broken install can't repair itself** — upgrading to a release carrying this fix needs one manual installer re-run; self-updates work normally thereafter.
+
 ### Added
 
 - **`.stem` facet on `--col` for both `norn find` and `norn get`, and `get --sort stem`.** The filename stem (the document name without its `.md` extension) is now addressable as the `.stem` structural facet — `find --col .stem` / `get --col .stem` emit it as a labeled `stem` row (records) or `"stem"` key (json/jsonl) alongside the `path` identity. Like `.path`, it is **identity-class**: opt-in by name only, never included in the default view or `--all-cols`, so existing dumps are byte-unchanged. `get` also gains `--sort stem` to match `find`, which already sorted by stem — completing stem parity across the shared read contract.

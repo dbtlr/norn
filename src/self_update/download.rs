@@ -7,6 +7,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 
+/// The binary's own name as cargo-dist ships it inside the release archive.
+/// Sourced from the bin target name (`CARGO_BIN_NAME` — the package is
+/// `norn-run`, the binary is `norn`) so a future rename can't silently desync
+/// the extractor from what the archive contains. That exact desync — a `"vault"`
+/// literal left behind after the norn rename — is what shipped a broken
+/// self-update here. Falls back to the literal for build contexts where
+/// `CARGO_BIN_NAME` is not set (e.g. some test builds).
+const BIN_NAME: &str = match option_env!("CARGO_BIN_NAME") {
+    Some(name) => name,
+    None => "norn",
+};
+
 /// Download `url` into `dest`. Streams the body to disk; does not buffer
 /// the whole tarball in memory.
 pub fn download_to(url: &str, dest: &Path) -> Result<()> {
@@ -72,7 +84,7 @@ pub fn extract_binary(archive: &Path, dest: &Path) -> Result<()> {
     for entry in tar.entries().map_err(|e| anyhow!("read archive: {e}"))? {
         let mut entry = entry.map_err(|e| anyhow!("read archive entry: {e}"))?;
         let path = entry.path().map_err(|e| anyhow!("read entry path: {e}"))?;
-        if path.file_name().and_then(|s| s.to_str()) == Some("vault") {
+        if path.file_name().and_then(|s| s.to_str()) == Some(BIN_NAME) {
             let mut out =
                 fs::File::create(dest).map_err(|e| anyhow!("create {}: {e}", dest.display()))?;
             std::io::copy(&mut entry, &mut out)
@@ -92,20 +104,28 @@ pub fn extract_binary(archive: &Path, dest: &Path) -> Result<()> {
     ))
 }
 
-/// Temp path adjacent to `install_path`, with a `.vault-self-update-*` prefix.
+/// Temp path adjacent to `install_path`, with a `.norn-self-update-*` prefix.
 /// Same-filesystem placement is required for atomic rename.
 pub fn sibling_temp_path(install_path: &Path, suffix: &str) -> PathBuf {
     let parent = install_path.parent().unwrap_or_else(|| Path::new("."));
     let stem = install_path
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or("vault");
+        .unwrap_or(BIN_NAME);
     parent.join(format!(".{stem}-self-update-{suffix}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bin_name_is_norn() {
+        // The archive entry the extractor matches must be the shipped binary
+        // name. If the bin target is ever renamed, update the release/install
+        // path alongside — this pins the two together.
+        assert_eq!(BIN_NAME, "norn");
+    }
 
     #[test]
     fn download_writes_body_to_destination() {
@@ -143,34 +163,56 @@ mod tests {
         assert!(msg.contains("sha256"), "expected sha256 mention: {msg}");
     }
 
-    #[test]
-    fn extract_binary_pulls_vault_from_tarball() {
-        let tmp = tempfile::tempdir().unwrap();
-        let archive_path = tmp.path().join("release.tar.xz");
-
-        // Build a tar.xz containing `vault-foo/vault` and a noise file.
-        let xz_writer = xz2::write::XzEncoder::new(fs::File::create(&archive_path).unwrap(), 6);
+    /// Build a tar.xz containing one `<dir>/<name>` entry plus a noise file.
+    fn tarball_with_entry(archive_path: &Path, entry: &str) {
+        let xz_writer = xz2::write::XzEncoder::new(fs::File::create(archive_path).unwrap(), 6);
         let mut builder = tar::Builder::new(xz_writer);
 
         let mut header = tar::Header::new_gnu();
-        header.set_path("vault-foo/vault").unwrap();
+        header.set_path(entry).unwrap();
         header.set_size(11);
         header.set_mode(0o755);
         header.set_cksum();
         builder.append(&header, &b"fake binary"[..]).unwrap();
 
         let mut header = tar::Header::new_gnu();
-        header.set_path("vault-foo/README.md").unwrap();
+        header.set_path("noise/README.md").unwrap();
         header.set_size(5);
         header.set_mode(0o644);
         header.set_cksum();
         builder.append(&header, &b"noise"[..]).unwrap();
 
         builder.into_inner().unwrap().finish().unwrap();
+    }
 
-        let dest = tmp.path().join("vault.new");
+    #[test]
+    fn extract_binary_pulls_norn_from_tarball() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("release.tar.xz");
+        // The real cargo-dist layout: `norn-run-<target>/norn`.
+        tarball_with_entry(&archive_path, "norn-run-aarch64-apple-darwin/norn");
+
+        let dest = tmp.path().join("norn.new");
         extract_binary(&archive_path, &dest).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"fake binary");
+    }
+
+    #[test]
+    fn extract_binary_ignores_stale_vault_name() {
+        // Regression guard: a tarball whose binary is named `vault` (the
+        // pre-rename name) must NOT be extracted — the extractor keys on the
+        // current bin target name, not the historical literal. This is the
+        // bug that shipped a broken self-update after the norn rename.
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("stale.tar.xz");
+        tarball_with_entry(&archive_path, "vault-foo/vault");
+
+        let dest = tmp.path().join("norn.new");
+        let err = extract_binary(&archive_path, &dest).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("did not contain"),
+            "stale `vault` binary should not match: {err:#}"
+        );
     }
 
     #[test]
