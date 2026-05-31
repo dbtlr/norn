@@ -504,6 +504,45 @@ pub struct FilterArgs {
     pub unresolved_links: bool,
 }
 
+/// Shared sort / limit / paging flags for the read commands (`find` / `get`),
+/// single-sourced so the surface can't drift. The two deliberate behavioral
+/// divergences live in each command's consumption, not here: `find` defaults an
+/// absent `--limit` to 10 and sorts in SQL collation; `get` returns every named
+/// target by default and sorts in-memory by display string.
+#[derive(Args, Debug)]
+pub struct SortPaginateArgs {
+    /// Sort by field (frontmatter key, `path`, or `stem`). Ascending by default.
+    #[arg(long, value_name = "FIELD", help_heading = "Sort and paging")]
+    pub sort: Option<String>,
+
+    /// Sort descending (only meaningful with --sort).
+    #[arg(long, help_heading = "Sort and paging")]
+    pub desc: bool,
+
+    /// Maximum number of records to return. `find` defaults to 10; `get`
+    /// returns every named target.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with = "no_limit",
+        help_heading = "Sort and paging"
+    )]
+    pub limit: Option<usize>,
+
+    /// Return all records; no limit. Overrides --limit.
+    #[arg(long = "no-limit", help_heading = "Sort and paging")]
+    pub no_limit: bool,
+
+    /// 1-indexed starting offset for paging. Default 1.
+    #[arg(
+        long = "starts-at",
+        value_name = "N",
+        default_value = "1",
+        help_heading = "Sort and paging"
+    )]
+    pub starts_at: usize,
+}
+
 #[derive(Args, Debug)]
 pub struct FindArgs {
     // ── Filter predicates ──────────────────────────────────────────────
@@ -516,37 +555,11 @@ pub struct FindArgs {
     #[arg(long, help_heading = "Filter options")]
     pub all: bool,
 
-    // ── Sort / limit / paging ───────────────────────────────────────────
-    /// Sort by field (frontmatter key, `path`, or `stem`). Ascending by default.
-    #[arg(long, value_name = "FIELD", help_heading = "Sort and paging")]
-    pub sort: Option<String>,
-
-    /// Sort descending (only meaningful with --sort).
-    #[arg(long, help_heading = "Sort and paging")]
-    pub desc: bool,
-
-    /// Maximum number of matches to return. Default 10.
-    #[arg(
-        long,
-        value_name = "N",
-        default_value = "10",
-        conflicts_with = "no_limit",
-        help_heading = "Sort and paging"
-    )]
-    pub limit: usize,
-
-    /// Return all matches; no limit. Overrides --limit.
-    #[arg(long = "no-limit", help_heading = "Sort and paging")]
-    pub no_limit: bool,
-
-    /// 1-indexed starting offset for paging. Default 1.
-    #[arg(
-        long = "starts-at",
-        value_name = "N",
-        default_value = "1",
-        help_heading = "Sort and paging"
-    )]
-    pub starts_at: usize,
+    // ── Sort / limit / paging (shared with `get`) ───────────────────────
+    // find defaults an absent --limit to 10 (applied in find::query) and
+    // sorts in SQL collation.
+    #[command(flatten)]
+    pub paging: SortPaginateArgs,
 
     // ── Output ───────────────────────────────────────────────────────────
     /// Output format. Default auto-detects: TTY → records, piped → paths.
@@ -629,42 +642,11 @@ pub struct GetArgs {
     #[arg(required = true, num_args = 1.., value_name = "DOC")]
     pub targets: Vec<String>,
 
-    // ── Sort / limit / paging ───────────────────────────────────────────
-    // NOTE: these mirror `FindArgs`'s sort/limit/paging fields. find models
-    // them as direct fields (`limit: usize` with default 10); get's default
-    // is no-limit (the caller named the targets, truncating would surprise),
-    // so `limit` is `Option<usize>` (default None). A future refactor could
-    // extract a shared `SortPaginateArgs` for both commands.
-    /// Sort by field (frontmatter key or `path`). Ascending by default.
-    #[arg(long, value_name = "FIELD", help_heading = "Sort and paging")]
-    pub sort: Option<String>,
-
-    /// Sort descending (only meaningful with --sort).
-    #[arg(long, help_heading = "Sort and paging")]
-    pub desc: bool,
-
-    /// Maximum number of records to return. Default: no limit (all named
-    /// targets) — unlike `norn find`, which defaults to 10.
-    #[arg(
-        long,
-        value_name = "N",
-        conflicts_with = "no_limit",
-        help_heading = "Sort and paging"
-    )]
-    pub limit: Option<usize>,
-
-    /// Return all records; no limit. (The default already implies this.)
-    #[arg(long = "no-limit", help_heading = "Sort and paging")]
-    pub no_limit: bool,
-
-    /// 1-indexed starting offset for paging. Default 1.
-    #[arg(
-        long = "starts-at",
-        value_name = "N",
-        default_value = "1",
-        help_heading = "Sort and paging"
-    )]
-    pub starts_at: usize,
+    // ── Sort / limit / paging (shared with `find`) ─────────────────────
+    // get's default --limit is None → return every named target (truncating
+    // a named set would surprise); sort is applied in-memory in show::run.
+    #[command(flatten)]
+    pub paging: SortPaginateArgs,
 
     // ── Output ───────────────────────────────────────────────────────────
     /// Emit the full structured dump: every frontmatter field plus every
@@ -1259,10 +1241,10 @@ mod get_cli_tests {
         .unwrap();
         match cli.command {
             Command::Get(args) => {
-                assert_eq!(args.sort.as_deref(), Some("modified"));
-                assert!(args.desc);
-                assert_eq!(args.limit, Some(5));
-                assert_eq!(args.starts_at, 2);
+                assert_eq!(args.paging.sort.as_deref(), Some("modified"));
+                assert!(args.paging.desc);
+                assert_eq!(args.paging.limit, Some(5));
+                assert_eq!(args.paging.starts_at, 2);
             }
             _ => panic!("expected Get variant"),
         }

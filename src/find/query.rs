@@ -9,25 +9,26 @@ use crate::cli::FindArgs;
 pub fn build_find_query(args: &FindArgs) -> Result<FindQuery> {
     let predicates = crate::filter_args::build_document_query(&args.filters)?;
 
-    let sort = args.sort.as_ref().map(|field| SortClause {
+    let sort = args.paging.sort.as_ref().map(|field| SortClause {
         field: field.clone(),
-        direction: if args.desc {
+        direction: if args.paging.desc {
             SortDirection::Desc
         } else {
             SortDirection::Asc
         },
     });
-    let limit = if args.no_limit {
+    // find's divergence: an absent --limit defaults to 10 (get returns all).
+    let limit = if args.paging.no_limit {
         None
     } else {
-        Some(args.limit)
+        Some(args.paging.limit.unwrap_or(10))
     };
 
     Ok(FindQuery {
         predicates,
         sort,
         limit,
-        starts_at: args.starts_at.max(1),
+        starts_at: args.paging.starts_at.max(1),
     })
 }
 
@@ -38,11 +39,13 @@ mod tests {
     fn empty_args() -> FindArgs {
         FindArgs {
             filters: crate::filter_args::FilterArgs::default(),
-            sort: None,
-            desc: false,
-            limit: 10,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             format: None,
             all_cols: false,
             col: vec![],
@@ -70,8 +73,8 @@ mod tests {
     #[test]
     fn no_limit_overrides_limit() {
         let mut args = empty_args();
-        args.no_limit = true;
-        args.limit = 42;
+        args.paging.no_limit = true;
+        args.paging.limit = Some(42);
         let q = build_find_query(&args).unwrap();
         assert!(q.limit.is_none());
     }
@@ -79,8 +82,8 @@ mod tests {
     #[test]
     fn sort_desc_flag() {
         let mut args = empty_args();
-        args.sort = Some("created".to_string());
-        args.desc = true;
+        args.paging.sort = Some("created".to_string());
+        args.paging.desc = true;
         let q = build_find_query(&args).unwrap();
         let sort = q.sort.unwrap();
         assert_eq!(sort.field, "created");
@@ -90,7 +93,7 @@ mod tests {
     #[test]
     fn starts_at_floors_at_one() {
         let mut args = empty_args();
-        args.starts_at = 0;
+        args.paging.starts_at = 0;
         let q = build_find_query(&args).unwrap();
         assert_eq!(q.starts_at, 1);
     }

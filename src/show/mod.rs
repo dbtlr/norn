@@ -97,8 +97,8 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     // For `markdown` they're irrelevant (it returns a single byte-faithful
     // doc and still errors on >1 selected); skip so limit can't mask that.
     if !matches!(args.format, crate::cli::GetFormat::Markdown) {
-        apply_sort(&mut records, args.sort.as_deref(), args.desc);
-        apply_paging(&mut records, args.starts_at, args.limit);
+        apply_sort(&mut records, args.paging.sort.as_deref(), args.paging.desc);
+        apply_paging(&mut records, args.paging.starts_at, args.paging.limit);
     }
 
     Ok(ShowReport { records, notes })
@@ -194,11 +194,13 @@ mod tests {
             all_cols,
             col: vec![],
             format: crate::cli::GetFormat::Records,
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
         }
     }
 
@@ -256,11 +258,13 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string()],
             all_cols: false,
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             col: vec![".incoming_links".to_string()],
             format: crate::cli::GetFormat::Json,
         };
@@ -282,11 +286,13 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string()],
             all_cols: false,
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             col: vec![".headings".to_string(), ".outgoing_links".to_string()],
             format: crate::cli::GetFormat::Json,
         };
@@ -306,11 +312,13 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string()],
             all_cols: false,
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             col: vec![],
             format: crate::cli::GetFormat::Json,
         };
@@ -335,11 +343,13 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string()],
             all_cols: false,
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             col: vec![],
             format: crate::cli::GetFormat::Records,
         };
@@ -359,11 +369,13 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string()],
             all_cols: false,
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             col: vec!["nonexistent_field".to_string()],
             format: crate::cli::GetFormat::Json,
         };
@@ -382,11 +394,13 @@ mod tests {
         let args = crate::cli::GetArgs {
             targets: vec!["a.md".to_string(), "b.md".to_string()],
             all_cols: false,
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             col: vec![],
             format: crate::cli::GetFormat::Records,
         };

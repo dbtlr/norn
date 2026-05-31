@@ -14,6 +14,10 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 - **`.stem` facet on `--col` for both `norn find` and `norn get`, and `get --sort stem`.** The filename stem (the document name without its `.md` extension) is now addressable as the `.stem` structural facet — `find --col .stem` / `get --col .stem` emit it as a labeled `stem` row (records) or `"stem"` key (json/jsonl) alongside the `path` identity. Like `.path`, it is **identity-class**: opt-in by name only, never included in the default view or `--all-cols`, so existing dumps are byte-unchanged. `get` also gains `--sort stem` to match `find`, which already sorted by stem — completing stem parity across the shared read contract.
 
+### Changed
+
+- **`find` and `get` now share one `--sort` / `--limit` / `--no-limit` / `--starts-at` definition (internal single-sourcing).** Behavior is unchanged — `find` still defaults `--limit` to 10 and sorts in SQL; `get` still returns every named target by default and sorts in-memory — but the flags are now defined once and flattened into both commands so the surface can't drift. The only visible effect is lightly reworded `--help` text (e.g. the `--limit` help names both commands' defaults).
+
 ## v0.36.0 - 2026-05-30
 
 The unified `find` / `get` output contract — plus the warning/mutation-channel fixes accumulated since v0.35.2. `find` (predicate selection, broad) and `get` (identity selection, targeted) now differ only in *how they pick documents*; everything downstream is one shared, identical contract: `--col` projection (bare names = frontmatter fields, dot-prefixed = structural facets), the `records` / `paths` / `json` / `jsonl` formats, `--all-cols`, and sort / limit / paging. Facets render identically on both, single-sourced so the two can't drift again. The one principled divergence is `get --format markdown` (a single byte-faithful document — selection-bound, so get-only). Most of the breaking surface is `get` catching up to `find`'s output model.

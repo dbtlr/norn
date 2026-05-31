@@ -241,7 +241,7 @@ fn render_records(
         palette,
         result.total,
         result.returned,
-        args.starts_at,
+        args.paging.starts_at,
         "documents",
     )?;
 
@@ -249,7 +249,7 @@ fn render_records(
         writeln!(stdout)?;
     }
 
-    let sort_field = args.sort.as_deref();
+    let sort_field = args.paging.sort.as_deref();
 
     for (i, doc) in result.matches.iter().enumerate() {
         if i > 0 {
@@ -514,11 +514,13 @@ mod tests {
     fn sample_args() -> FindArgs {
         FindArgs {
             filters: crate::filter_args::FilterArgs::default(),
-            sort: None,
-            desc: false,
-            limit: 10,
-            no_limit: false,
-            starts_at: 1,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
             format: None,
             all_cols: false,
             col: vec![],
@@ -863,7 +865,17 @@ mod tests {
         // Default (no --col): identity `path` only, no `stem` key.
         let mut out_default = Vec::new();
         let args_default = sample_args();
-        render_json(&result, &[], &[], &args_default, None, None, 1, &mut out_default).unwrap();
+        render_json(
+            &result,
+            &[],
+            &[],
+            &args_default,
+            None,
+            None,
+            1,
+            &mut out_default,
+        )
+        .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out_default).unwrap();
         assert!(
             v["documents"][0].get("stem").is_none(),
