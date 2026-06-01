@@ -12,7 +12,7 @@ Obsidian gives you a GUI over your Markdown vault. Norn gives you the same vault
 
 Norn is the deterministic layer underneath. Humans write freely; agents handle the maintenance. One call to query the graph, one call to find every drift, one call to plan a migration. The agent decides; Norn enumerates.
 
-**Keep Obsidian's superpowers without the lock-in.** Wikilink renames, frontmatter-driven views, graph navigation — these are the features that make Obsidian feel powerful, and they're the reason it's hard to leave. Norn implements them headlessly, against a deterministic graph: rename a note and an agent can rewrite every reference correctly, query notes the way Obsidian's bases would, and trace the link graph from the command line. Use Obsidian if you like it. Use something else if you don't. Your vault, and its superpowers, come with you either way.
+**Keep Obsidian's superpowers without the lock-in.** Note renames, frontmatter-driven views, graph navigation — these are the features that make Obsidian feel powerful, and they're the reason it's hard to leave. Norn implements them headlessly, against a deterministic graph: rename a note and an agent can rewrite every reference correctly, query notes the way Obsidian's bases would, and trace the link graph from the command line. Use Obsidian if you like it. Use something else if you don't. Your vault, and its superpowers, come with you either way.
 
 **Query your vault like a database.** Filter notes by frontmatter (`norn find --eq type:task --eq status:backlog`), trace backlinks, find unresolved links, search across documents. Records output for your eyes, JSON for your scripts and agents. A cron-driven agent can triage your new notes every morning with zero ambiguity about what's new.
 
@@ -74,17 +74,18 @@ For a deeper walkthrough including scoped rules and a first repair plan, see [do
 
 | Workflow | Command shape | Docs |
 | --- | --- | --- |
-| Inventory documents | `norn find --all --format records` | [commands.md](docs/commands.md) |
-| Inspect one document | `norn get <path-or-stem>` | [commands.md](docs/commands.md) |
-| Walk unresolved links | `norn validate --code 'link-*'` | [commands.md](docs/commands.md) |
-| Validate against rules | `norn validate --summary` | [validation.md](docs/validation.md) |
-| Plan a repair | `norn repair plan --out repair.json` | [validation.md](docs/validation.md) |
-| Apply a repair | `norn repair apply repair.json --verify` | [validation.md](docs/validation.md) |
-| Create a document | `norn new <path>` | [commands.md](docs/commands.md) |
-| Update frontmatter | `norn set <doc> --field k=v` | [commands.md](docs/commands.md) |
-| Move a document | `norn move <src> <dst>` | [commands.md](docs/commands.md) |
-| Delete a document | `norn delete <doc>` | [commands.md](docs/commands.md) |
-| Find | `norn find --text "..." --eq k:v` | [commands.md](docs/commands.md) |
+| Inventory documents | `norn find --all --format records` | [find](docs/commands/find.md) |
+| Find | `norn find --text "..." --eq k:v` | [find](docs/commands/find.md) |
+| Count / group | `norn count --by status` | [count](docs/commands/count.md) |
+| Inspect one document | `norn get <path-or-stem>` | [get](docs/commands/get.md) |
+| Walk unresolved links | `norn validate --code 'link-*'` | [validate](docs/commands/validate.md) |
+| Validate against rules | `norn validate --summary` | [validate](docs/commands/validate.md) |
+| Plan a repair | `norn repair --plan --out plan.json` | [repair](docs/commands/repair.md) |
+| Apply a repair | `norn migrate plan.json` | [migrate](docs/commands/migrate.md) |
+| Create a document | `norn new <path>` | [new](docs/commands/new.md) |
+| Update frontmatter | `norn set <doc> --field k=v` | [set](docs/commands/set.md) |
+| Move a document | `norn move <src> <dst>` | [move](docs/commands/move.md) |
+| Delete a document | `norn delete <doc>` | [delete](docs/commands/delete.md) |
 
 Commands accept `--format json|jsonl` (stable contracts) plus format-specific human-readable options (`records`, `text`, `paths`). JSON and JSONL contracts are stable across point releases; human-readable formats may evolve.
 

@@ -1,0 +1,108 @@
+---
+title: find
+description: Find documents in the vault — full-text and metadata filters with sort, limit, and paging.
+---
+
+# norn find
+
+Find documents in the vault by frontmatter, body text, path, or link relationship. `find` returns a set; pair it with `get` to inspect a single document in depth. A query needs at least one filter or `--all` — a bare `norn find` prints its help instead of dumping the whole vault.
+
+## Examples
+
+```bash
+norn find --eq type:note --limit 5
+# at most 5 documents with type: note
+
+norn find --text "reorg" --format paths
+# full-text body search; one vault-relative path per line
+
+norn find --eq status:draft --col title,status
+# narrow the fields shown to title and status
+
+norn find --has aliases --col title,aliases
+# documents that declare an aliases field
+
+norn find --in type:note,log --sort modified --desc
+# two types in one query, newest first
+
+norn find --eq type:task --links-to notes/my-note.md --format paths
+# tasks that link to a document (by path; stem or [[wikilink]] also accepted)
+
+norn find --unresolved-links --format paths
+# documents with at least one broken link
+
+norn find --all --all-cols --format jsonl
+# whole-vault structured dump, one JSON object per line
+```
+
+## Filters
+
+All filters are ANDed together. Within `--in` and `--not-in`, comma-separated values are ORed.
+
+| Filter | Matches |
+|---|---|
+| `--text <NEEDLE>` | Case-insensitive body substring. An empty string is a no-op. |
+| `--eq <FIELD:VALUE>` | Frontmatter `field` equals `value` (JSON-typed). |
+| `--not-eq <FIELD:VALUE>` | Frontmatter `field` does not equal `value`. |
+| `--in <FIELD:V1,V2,…>` | Frontmatter `field` is one of the listed values. |
+| `--not-in <FIELD:V1,V2,…>` | Frontmatter `field` is none of the listed values. |
+| `--has <FIELD>` | Frontmatter `field` is present and non-null. |
+| `--missing <FIELD>` | Frontmatter `field` is absent or null. |
+| `--before <FIELD:DATE>` | Date `field` is before `DATE` (ISO 8601). |
+| `--after <FIELD:DATE>` | Date `field` is after `DATE`. |
+| `--on <FIELD:DATE>` | Date `field` equals `DATE`. Accepts `today`. |
+| `--path <GLOB>` | Vault-relative path glob. |
+| `--links-to <TARGET>` | Documents whose outgoing links resolve to `TARGET` (path, stem, or `[[wikilink]]`). Repeatable; multiple targets are ANDed. Resolved-only — `TARGET` must resolve to an existing document. |
+| `--unresolved-links` | Documents with at least one unresolved link. |
+| `--all` | Return every document. The escape hatch when no predicate fits; a full-vault dump is almost always a mistake, so it requires opt-in. |
+
+## Selecting fields — `--col` and `--all-cols`
+
+By default `find` shows frontmatter only. `--col` narrows or extends that selection; the vocabulary is shared with `norn get`.
+
+- **Bare names select frontmatter fields:** `--col status,title`.
+- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter` (the whole block), `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.raw`.
+- **`--all-cols`** emits the full structured dump — whole frontmatter plus every cache-served facet. It excludes `.raw`, so a broad query never fans out to N file reads. Mutually exclusive with `--col`.
+
+`.body` comes from the cache; `.raw` is the file's exact bytes from disk. On `paths` format `--col` is ignored with a warning — paths output is a single path per line by definition.
+
+## Sorting and paging
+
+| Flag | Effect |
+|---|---|
+| `--sort <FIELD>` | Sort by a frontmatter key, `path`, or `stem`. Ascending by default. |
+| `--desc` | Sort descending (only meaningful with `--sort`). |
+| `--limit <N>` | Maximum records to return. `find` defaults to 10. |
+| `--no-limit` | Return all records. Overrides `--limit`. |
+| `--starts-at <N>` | 1-indexed paging offset. Default 1. |
+
+## Output formats
+
+`--format` auto-detects by destination: a TTY gets `records`, a pipe gets `paths`.
+
+| Format | Shape | Stable contract |
+|---|---|---|
+| `records` | Human-legible key-value blocks, colored on a TTY. | No — never parse it. |
+| `paths` | One vault-relative path per line. | Yes. |
+| `json` | A single object: `{ total, returned, starts_at, documents[] }`. | Yes, versioned. |
+| `jsonl` | One JSON object per line, no wrapper. | Yes. |
+
+## Recipes
+
+```bash
+# Feed matches into another tool
+norn find --eq type:task --format paths | xargs -I{} norn get {}
+
+# Count instead of list — same filter surface
+norn count --eq type:note --by status
+
+# Find broken links, then plan repairs
+norn find --unresolved-links --format paths
+```
+
+## See also
+
+- [`get`](get.md) — inspect a single document in full, with the same `--col` vocabulary.
+- [`count`](count.md) — grouped or total counts over the same filters.
+- [`validate`](validate.md) — find documents that violate configured rules.
+- Run `norn find --help` for the full, always-current flag reference (`-h` for the compact version).

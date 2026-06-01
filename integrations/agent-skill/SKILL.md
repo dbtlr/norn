@@ -1,263 +1,220 @@
 ---
 name: norn
-description: Use when inspecting, validating, or auditing Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, and validation workflows.
-version: 1.0.0
+description: Use when inspecting, querying, validating, or mutating Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, query, and validation/repair workflows.
+version: 1.1.0
 author: Drew Butler <hi@dbtlr.com>
 license: MIT
 ---
 
 # norn skill
 
-A deterministic Markdown vault CLI. Use it for graph, link, frontmatter, and validation work against a vault on disk. This skill is harness-independent — every coding agent that follows the standard `.agents/skills/` convention (or `.claude/skills/` for Claude Code) can use it.
+A deterministic Markdown vault CLI. Use it to query, validate, and mutate a vault on disk — frontmatter, links, headings, and the document graph — without grep/jq/sed pipelines. This skill is harness-independent: every coding agent that follows the standard `.agents/skills/` convention (or `.claude/skills/` for Claude Code) can use it.
 
 ## When to use norn
 
 Use `norn` when you need to:
 
-- Inspect a Markdown vault's document inventory, frontmatter, or link graph deterministically.
-- Validate a vault against configured rules (`required_frontmatter`, `field_types`, `allowed_values`, `allowed_paths`, etc.).
-- Audit unresolved or ambiguous links.
-- Surface frontmatter drift for review.
-- Produce an inspectable migration plan (`MigrationPlan`, `schema_version: 1`) and apply it explicitly.
+- Query a vault's documents by frontmatter, body text, path, or link relationship — and project exactly the fields you want.
+- Inspect one document's frontmatter, headings, and links.
+- Create, update, move, or delete documents with schema-aware, safe-by-default mutations.
+- Validate a vault against configured rules (`required_frontmatter`, `field_types`, `allowed_values`, path scoping) and audit unresolved or ambiguous links.
+- Produce an inspectable `MigrationPlan` and apply it explicitly.
 
-Do not use `norn` when you need full-text or semantic search — its `find` command is exact literal substring + frontmatter + path glob.
+Do not use `norn` for full-text relevance or semantic search — `find --text` is exact, case-insensitive substring matching, not ranked retrieval.
 
 ## Vault root targeting
 
-Before running any command, pick a vault root. Two ways:
+Pick a vault root before running anything. Two ways:
 
-1. **Explicit path.** `norn -C /path/to/vault validate --summary --format json` (long form: `--cwd /path/to/vault`).
-2. **Process cwd.** If `-C` is not set, `norn` runs against the current directory and discovers `.norn/config.yaml` if it exists.
+1. **Explicit path.** `norn -C /path/to/vault validate --summary --format json` (long form `--cwd`).
+2. **Process cwd.** Without `-C`, `norn` runs against the current directory and discovers `.norn/config.yaml` if present.
 
-When in doubt, use `-C <path>`.
+When in doubt, pass `-C <path>`.
 
-## Read-only commands (safe to run anytime)
+## Query and read — the everyday surface
 
-None of these write to the vault:
+`find` selects a *set* of documents by predicate; `get` selects *named* documents by identity. They share one output contract: the same `--col` vocabulary, the same formats, the same sort/paging. Learn it once.
 
-- `norn find --all` (document inventory)
-- `norn count` / `norn count --by FIELD`
-- `norn get <doc>`
-- `norn find`
-- `norn validate` (with or without `--summary` or filters)
-- `norn repair --plan` (produces a `MigrationPlan` artifact; does not modify the vault)
-
-`norn new`, `norn set`, `norn move`, `norn delete`, and `norn migrate` are mutation commands; pass `--dry-run` to preview without writing. Only `norn migrate`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The migration plan argument is optional — omit it (or pass `-`) to read the plan from stdin.
-
-## Validation summary first, raw findings second
-
-`norn validate --summary --format json` returns grouped counts (by code, severity, rule, field, disallowed value, path prefix). Always run the summary first to size the work, then re-run without `--summary` to read individual findings.
+### find
 
 ```bash
-norn -C /path/to/vault validate --summary --format json
-norn -C /path/to/vault validate --code frontmatter-disallowed-value --field status --summary --format json
-norn -C /path/to/vault validate --code frontmatter-disallowed-value --field status --format jsonl
+norn find --eq type:note --limit 5            # frontmatter equality; find defaults to 10
+norn find --text "reorg" --format paths       # case-insensitive body substring
+norn find --has aliases --col title,aliases   # narrow the fields shown
+norn find --in type:note,log --sort modified --desc
+norn find --links-to notes/my-note.md --format paths
+norn find --unresolved-links --format paths   # documents with broken links
+norn find --all --all-cols --format jsonl     # whole-vault structured dump
 ```
 
-The same filter set works for raw output and summaries.
+Predicates (all ANDed; comma-separated values inside `--in`/`--not-in` are ORed): `--text`, `--eq`, `--not-eq`, `--in`, `--not-in`, `--has`, `--missing`, `--before`, `--after`, `--on` (accepts `today`), `--path` (glob), `--links-to`, `--unresolved-links`. A bare `norn find` with no predicate prints its help — pass `--all` to dump the whole vault on purpose.
 
-## Stable JSON / JSONL contracts
+### get
 
-Use `--format json` for one-shot agent dispatch (single JSON document). Use `--format jsonl` for streaming queues (one JSON object per line). Records output is for humans and may evolve between point releases — never parse it.
-
-> **Note for `norn repair --plan` and `norn migrate`:** The plan/migrate format set is separate from validate. For `norn repair --plan`, use `--format json` (machine, full `MigrationPlan` envelope — canonical for agent consumers; default when stdout is a pipe), `--format report` (human-readable summary, TTY default), or `--format paths` (one path per line, for `xargs`-style pipelines). `--format jsonl` is not supported. For `norn migrate`, use `--format json` (full `ApplyReport` envelope), `--format records` (TTY default), or `--format paths` (changed-files list).
->
-> `--out <PATH>` writes the JSON report/plan to a file unconditionally (always JSON). `--format` controls stdout independently — both can be set simultaneously without conflict. When `--out` is set without `--format`, stdout is silent.
-
-Findings come back wrapped as `{"total": N, "findings": [...]}`; iterate `.findings` for individual entries.
-
-Finding codes are stable. Renames are called out as breaking changes in the project's CHANGELOG.
-
-## Filter-based triage
-
-`norn validate` filters apply to both raw output and `--summary`:
-
-| Filter | Matches |
-|---|---|
-| `--code` | Finding code. |
-| `--severity` | `warning` or `error`. |
-| `--field` | Frontmatter field name. |
-| `--rule` | Rule name. |
-| `--path` | Vault-relative path glob. |
-| `--target` | Raw parsed link target string (exact match). |
-| `--reason` | Unresolved-link reason. |
-
-Comma-separated values within one filter are ORed (`--code link-target-missing,link-ambiguous`), and glob patterns work (`--code 'link-*'`); different filters are ANDed.
-
-## User-specific vault doctrine lives in .norn/config.yaml
-
-Don't hardcode vault-specific rule names, field shapes, or status vocabularies into agent prompts. Read them from `<vault-root>/.norn/config.yaml`. The config declares:
-
-- `files.ignore` — graph-level ignores.
-- `validate.ignore` — validate-skip patterns (the files stay in the graph).
-- `validate.required_frontmatter` — global presence requirement.
-- `validate.rules` — scoped rules with selectors and constraints.
-- `repair.rules` — deterministic frontmatter repairs.
-
-If a vault has no config, defaults apply.
-
-## Plan/apply boundary
-
-Two write surfaces exist. Use the right one for the job:
-
-- **`norn new` / `norn set` / `norn move` / `norn delete`** — operator-driven CRUD. One document, one command. Schema-aware, safe-by-default (dry-run preview, `--yes` to apply).
-- **`norn migrate`** — finding-driven batch apply. Consumes a `MigrationPlan` artifact produced by `norn repair --plan`. Apply checks document hashes; any precondition failure aborts the whole batch before any partial writes.
-
-1. `norn -C /path/to/vault repair --plan --out plan.json`
-2. Inspect `plan.json`. Read `summary.planned_changes` count and `summary.skipped.by_reason` map for skip tallies.
-3. `norn -C /path/to/vault migrate plan.json --dry-run --format json` — confirms the plan applies cleanly.
-4. `norn -C /path/to/vault migrate plan.json --verify --format json` — writes and re-validates.
-
-**Single-line pipeline form** (avoids `--out` round-trips):
 ```bash
-norn -C /path/to/vault repair --plan --format json | norn -C /path/to/vault migrate - [--dry-run]
+norn get notes/my-note.md                     # frontmatter + headings + links
+norn get "My Note"                            # resolve by stem (case-insensitive)
+norn get a.md b.md --col title,status         # several docs, narrowed
+norn get notes/my-note.md --col .incoming_links
+norn get notes/my-note.md --all-cols --format json
+norn get notes/my-note.md --format markdown   # rebuild the doc as Markdown (get-only)
 ```
-`norn migrate -` and `norn migrate` (no positional argument) both read the plan from stdin.
 
-Apply rejects:
+A target is a path, a unique stem, or a wikilink-shaped string. `get` returns every named target (no default limit), unlike `find`.
 
-- Plans for a different norn root than the current invocation.
-- Stale document hashes (a file changed since the plan was created).
-- Unsupported schema versions (currently `1`).
-- Conflicting field changes.
-- Expected-old-value mismatches.
+### Selecting fields — `--col`, facets, `--all-cols`
 
-Re-plan rather than retrying. There is no `--force` flag.
+Shared by `find` and `get`:
 
-### Repair action shapes
+- **Bare names select frontmatter fields:** `--col status,title`.
+- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter` (whole block), `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.raw`.
+- **`--all-cols`** dumps everything cache-served (frontmatter + every facet incl. `.body`), excluding `.raw` so a broad query never fans out to N file reads. Mutually exclusive with `--col`.
+- `.body` is the parsed body from the cache; `.raw` is the file's exact bytes from disk.
 
-norn supports seven repair actions:
-
-- `set_frontmatter` — replace an existing frontmatter field's value.
-- `remove_frontmatter` — remove a frontmatter field.
-- `add_frontmatter` — insert a missing frontmatter field.
-- `move_document` — relocate (or rename) a file to a new path, with automatic backlink rewriting.
-- `rewrite_link` — rewrite a broken wikilink in the source document to a new target. Preserves display text (`[[X|label]]`), anchor (`[[X#section]]`), and block-ref (`[[X^block-id]]`) suffixes. All matching occurrences in the source are rewritten.
-- `replace_body` — wholesale replacement of the document body. **Emitted only by `norn set --body-from-stdin`; this is not a config-rule-triggerable action.** Operators cannot write `replace_body` in a `repair.rules` config entry.
-- `create_document` — create a brand-new document with synthesized frontmatter and body. Emitted exclusively by `norn new`; not config-rule-triggerable. (Sibling to `replace_body`, which is `norn set --body-from-stdin`'s plan op.)
-
-Agents should not invent destination paths or values for these actions. The repair rule (or closest-match algorithm for `rewrite_link`) supplies the target value at plan time — no agent judgment required.
-
-When a move action is in the plan, expect `norn migrate` to write to multiple files: the moved file itself and every backlinking file that contains a rewritable link. The apply output's `moved_files` and `rewritten_links` enumerate everything that was touched.
-
-### Closest-match link rewrites
-
-For `link-target-missing` findings, `norn repair --plan` proposes closest-match `rewrite_link` changes automatically:
-
-- **High-confidence** proposals: slug-normalized identity match (case, whitespace, hyphen/underscore variants). Safe to apply without review.
-- **Medium-confidence** proposals: small residual edit distance (Levenshtein ratio ≥ 0.7). Review recommended before applying.
-- **Ties** (multiple equally-close candidates): skipped with `reason_code: "ambiguous-target"` (Rust-side: `SkipReason::AmbiguousTarget`); the candidate list is populated for human review.
-
-Use `--confidence high` to filter the plan to only high-confidence proposals (drops medium proposals and their footnotes). Default emits all confidence bands.
-
-Use `--skip-reason <PATTERN>` to filter the `skipped_findings` list by stable reason code. Useful for triage: `--skip-reason 'link-*'` shows only link-related skips; `--skip-reason ambiguous-target` isolates multi-candidate ties. Glob patterns accepted. Repeatable. Does not affect planned changes.
-
-Stable reason codes: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`.
-
-### Plan footnotes
-
-Migration plans (`MigrationPlan`, schema v1) carry a `footnotes` array alongside `changes`. Footnotes are read-only commentary — `norn migrate` ignores them entirely; they exist for LLM/operator consumers to reason about proposal quality. Each footnote for a closest-match rewrite carries:
-
-- `change_id` — references the corresponding change.
-- `confidence` — `high` or `medium`.
-- `original_target`, `normalized_target`, `candidate_stem` — the raw and normalized forms.
-- `normalized_distance` — Levenshtein ratio (1.0 = exact slug match).
-- `slug_normalized_identity` — `true` when the match is case/whitespace/hyphen-only.
-
-## norn set — targeted frontmatter and body mutation
-
-`norn set` is the operator-facing write surface for single-document updates. Use it when
-`norn validate` surfaces drift on a known document and you want to fix it without a full
-repair-plan cycle, or when no repair rule covers the needed change (e.g. body replacement).
+### count
 
 ```bash
-# Update a frontmatter field
-norn set notes/task.md --field status=active --dry-run
+norn count                                    # total
+norn count --eq type:note --by status         # grouped; same filters as find
+norn count --path 'notes/**/*.md' --by type
+```
+
+`count` shares the full `find` filter surface. Formats: `text` (default) and `json` only.
+
+### Output formats
+
+`find`/`get` auto-detect by destination: TTY → `records`, pipe → `paths`. Override with `--format`.
+
+- `records` — human-legible blocks. **Never parse it; not a stable contract.**
+- `paths` — one vault-relative path per line. Stable.
+- `json` — `find` emits one object: `{ total, returned, starts_at, documents[] }`. `get` emits a bare array of records (no wrapper). Stable, versioned.
+- `jsonl` — one object per line, no wrapper. Stable; for streaming/early-close consumers.
+- `markdown` — `get`-only, one document, rebuilt as Markdown.
+
+Use `json` for one-shot dispatch, `jsonl` for queues. `paths`/`json`/`jsonl` never emit color.
+
+## Links — relative Markdown first, wikilinks opt-in
+
+norn is **link-syntax-neutral**. It treats relative Markdown links (`[label](../notes/foo.md)`) as the default idiom and Obsidian wikilinks (`[[target]]`) as a fully-supported opt-in form. Both participate equally in resolution, `find --links-to` / `--unresolved-links`, `get` link facets, `validate` link findings, and `move`/`delete` cascade rewrites. Lead with relative links unless the vault is Obsidian-flavored.
+
+One asymmetry to know: `rewrite-wikilink` retargets wikilinks only. Relative Markdown links are rewritten automatically by `move`/`delete` when their target relocates.
+
+## Mutation — safe by default
+
+`new`, `set`, `move`, `delete` are single-document, schema-aware writes. `migrate` applies a batch plan. All are safe-by-default, but the exact trigger differs — read the table before scripting them.
+
+### The apply-model table
+
+| Command | TTY, no flag | Non-TTY, no `--yes` | `--yes` | `--dry-run` | `--format json` |
+|---|---|---|---|---|---|
+| `new` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, JSON report |
+| `set` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `SetReport` |
+| `move` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
+| `delete` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
+| `migrate` | confirm | applies (consumes a plan) | apply | preview | `ApplyReport` |
+| `rewrite-wikilink` | confirm | applies | apply | preview | `ApplyReport` |
+
+**Footgun:** for `new`/`set`/`move`/`delete`, running without `--yes` in a non-TTY context (i.e. from an agent) **writes nothing** — it dry-runs. Always pass `--yes` from an agent when you intend to apply.
+
+### set
+
+```bash
 norn set notes/task.md --field status=active --yes
-
-# Append to an array-typed field
-norn set notes/task.md --push tags=work --yes
-
-# Remove a field
-norn set notes/task.md --remove old_key --yes
-
-# Wholesale body replacement
-echo "new body content" | norn set notes/task.md --body-from-stdin --yes
-
-# JSON output for agent consumers
-norn set notes/task.md --field status=active --yes --format json
+norn set notes/task.md --field status=active --dry-run     # preview only
+norn set notes/task.md --push tags=work --yes              # append to a list
+norn set notes/task.md --pop tags=old --yes               # remove from a list
+norn set notes/task.md --remove priority --yes            # drop a key
+norn set notes/task.md --field-json meta='{"n":1}' --yes  # structured value
+echo "new body" | norn set notes/task.md --body-from-stdin --yes
 ```
 
-Safe-by-default: in a TTY, `norn set` shows a preview and prompts for confirmation.
-Without `--yes` in a non-TTY context, it prints a dry-run summary and exits.
+Schema-aware: `field_types` validation runs before apply; `wikilink`-typed fields auto-wrap (`norn` → `[[norn]]`); a value outside `allowed_values` is refused (exit 2) unless `--force`; removing a required field needs `--force`. Exit codes: `0` ok/dry-run, `1` cancelled, `2` refusal.
 
-Schema enforcement: when `field_types` is configured, type validation runs before apply.
-Use `--force` to bypass schema enforcement (not recommended unless you know the type mismatch
-is intentional).
-
-Exit codes: 0 success or dry-run, 1 operator-cancelled, 2 pre-flight refusal.
-
-## Typical agent loop
+### new
 
 ```bash
-# 1. Detect
-norn -C /path/to/vault validate --summary --format json
-
-# 2. Triage (size the queue)
-norn -C /path/to/vault validate \
-  --code frontmatter-disallowed-value \
-  --field status \
-  --summary --format json
-
-# 3. Plan
-norn -C /path/to/vault repair --plan \
-  --code frontmatter-disallowed-value \
-  --field status \
-  --out plan.json
-
-# 4. Review
-# (read plan.json; surface skipped_findings to the human if non-empty)
-
-# 5. Dry-run (--format json = full ApplyReport envelope)
-norn -C /path/to/vault migrate plan.json --dry-run --format json
-
-# 6. Apply with verification
-norn -C /path/to/vault migrate plan.json --verify --format json
-
-# Alternative: single-line pipeline (skips the plan.json file entirely)
-norn -C /path/to/vault repair --plan --format json | norn -C /path/to/vault migrate - --verify
+norn new notes/my-note.md --yes                          # schema defaults fill required fields
+norn new notes/my-note.md --field description="…" --yes  # override one field
+norn new inbox/draft.md --parents --yes                  # create missing ancestor dirs
+norn new notes/my-note.md --dry-run                      # preview scaffold + defaults
+echo "# Heading" | norn new notes/my-note.md --body-from-stdin --yes
 ```
 
-## Cache
+`new` fills `frontmatter_defaults` from the schema rule matching the path, runs substitution (`{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`), and lets `--field` overrides win. It refuses if the path exists (unless `--force`) or a parent dir is missing (unless `-p`). After writing, `validate` runs against the new doc; findings surface as report warnings.
 
-`norn` maintains a SQLite cache of the graph (documents, links, headings, frontmatter, body text). Query commands automatically refresh the cache before reading; agents don't need to run `norn cache index` explicitly in the common case.
+### move / delete
 
-If you observe stale results, try `norn cache rebuild` to force a clean state.
+```bash
+norn move inbox/task.md projects/task.md --yes           # rewrites both link syntaxes
+norn move archive/ projects/ --recursive --yes
+norn delete notes/old.md --rewrite-to notes/new.md --yes # redirect backlinks, then delete
+norn delete notes/old.md --allow-broken-links --yes      # delete; let backlinks break
+```
 
-The cache is disposable — missing or corrupted caches rebuild silently. Don't program around cache-error retries; surface them as bugs to fix.
+`move` rewrites every incoming link (relative + wikilink). `delete` refuses (exit 2) when the doc has incoming links unless `--rewrite-to <ALT>` or `--allow-broken-links` is given.
+
+## Validate first, then repair, then migrate
+
+### validate (read-only)
+
+```bash
+norn -C /path/to/vault validate --summary --format json   # size the work first
+norn -C /path/to/vault validate --code 'link-*' --format jsonl
+norn -C /path/to/vault validate --severity error --path 'notes/**' --format json
+```
+
+`--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (pipe default — a finding has no path), `json` (`{ total, findings[] }`), `paths` (unique source paths). Exit code is `1` when any finding is an error, else `0` — gate pipelines on it.
+
+Stable finding codes: `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-disallowed-value`, `frontmatter-invalid-type`, `frontmatter-forbidden-field`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`, `frontmatter-alias-malformed`, `document-misrouted`. Renames are CHANGELOG breaking changes.
+
+### The plan/apply loop
+
+```bash
+# 1. detect + size
+norn -C /vault validate --summary --format json
+
+# 2. plan (read-only; never writes)
+norn -C /vault repair --plan --code frontmatter-disallowed-value --field status --out plan.json
+
+# 3. review plan.json — read summary.planned_changes and the skipped section
+
+# 4. dry-run the apply (checks preconditions, writes nothing)
+norn -C /vault migrate plan.json --dry-run --format json
+
+# 5. apply
+norn -C /vault migrate plan.json --yes --format json
+
+# 6. re-validate as a follow-up step
+norn -C /vault validate --summary --format json
+```
+
+Single-line pipeline (skips the artifact file): `norn -C /vault repair --plan --format json | norn -C /vault migrate - --yes`. `norn migrate -` and bare `norn migrate` both read the plan from stdin.
+
+`migrate` is the batch write surface. It verifies the plan's vault root, re-reads each source doc and checks its recorded hash, and verifies each `expected_old_value` before writing — any precondition failure aborts the whole batch before any partial write. Re-plan rather than retrying; there is no `--force`. (There is no `--verify` flag — re-validate with a separate `norn validate` call as in step 6.)
+
+### Repair plan shape
+
+`repair --plan` formats: `report` (human, TTY default), `json` (full `MigrationPlan`, the only format `migrate` consumes; pipe default), `paths` (affected paths). Supported findings become `PlannedChange`s (path, field, new value, document hash). Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter with `--skip-reason <PATTERN>` (globs).
+
+Repair-action kinds in a plan: `set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, `move_document`, `rewrite_link`, `replace_body` (emitted only by `set --body-from-stdin`), `create_document` (emitted only by `new`). Closest-match `rewrite_link` proposals are confidence-banded (`high` = slug-identity, safe; `medium` = small edit distance, review). Use `--confidence high` to keep only high-confidence proposals. Ties skip with `ambiguous-target`; never auto-pick them.
+
+## User vault doctrine lives in .norn/config.yaml
+
+Don't hardcode a vault's rule names, field shapes, or status vocabularies into prompts — read them from `<vault-root>/.norn/config.yaml`. It declares `files.ignore`, `validate.ignore`, `validate.required_frontmatter`, `validate.rules`, and `repair.rules`. No config → defaults apply. Inspect it with `norn config show`.
 
 ## Common pitfalls
 
-- **Don't filter by un-indexed fields.** `norn find --eq FIELD:VALUE` matches frontmatter scalar or list values only. For body text matching, use `norn find --text "..."`.
-- **Honor schema versions.** Migration plans (`MigrationPlan`) declare `schema_version: 1`. `norn migrate` rejects mismatched versions; re-plan with `norn repair --plan` instead of editing the artifact.
-- **Don't auto-pick ambiguous link candidates.** `link-ambiguous` findings carry a `candidates` list, but the CLI does not resolve them. Surface the ambiguity to the human or apply a deterministic disambiguation rule documented in the vault's config.
-- **Use `--out` for plan artifacts.** `norn repair --plan --out plan.json` writes the plan directly. Shell redirection (`> plan.json`) works but is more prone to partial-write footguns.
-- **Don't parse records output.** Records are for humans. For `norn validate`, pass `--format json` or `--format jsonl` from an agent context. For `norn repair --plan`, pass `--format json` (full `MigrationPlan` envelope) or `--format paths` (affected-paths list). For `norn migrate`, pass `--format json` (full `ApplyReport` envelope) or `--format paths` (changed-files list).
-- **Run `--summary` first.** It's cheaper than a full finding stream and tells you whether a more expensive query is worth running.
+- **Pass `--yes` from an agent.** A non-TTY mutation without `--yes` dry-runs and writes nothing.
+- **Don't parse `records`.** It's for humans. Use `json`/`jsonl` (data) or `paths` (lists).
+- **`--text` is substring, not search.** For frontmatter, use `--eq`/`--in`/etc.; for relevance ranking, norn is the wrong tool.
+- **Don't auto-resolve `link-ambiguous`.** The `candidates` list is for a human or a documented disambiguation rule.
+- **Re-plan, don't retry.** A stale-hash or mismatch abort means the vault changed; regenerate the plan.
+- **Cache is disposable.** Query commands refresh it implicitly; if results look stale, `norn cache rebuild`. Treat cache errors as bugs, not retry states.
 
-## Shell completions
+## Reference and escape hatches
 
-If you're driving norn on a user's machine and they want norn commands tab-completable, run:
+The skill is self-sufficient offline. For depth beyond it:
 
-```bash
-norn completions install
-```
-
-This auto-detects the user's shell from `$SHELL` and wires completions into their shell config idempotently. Pass `--print` to preview without writing.
-
-## Reference
-
-- CLI command surface: `norn --help`, `norn <subcommand> --help`.
+- `norn <command> --help` — authoritative, always-current flag reference (`-h` for the compact form). Offline.
+- Per-command docs: https://github.com/dbtlr/norn/tree/main/docs/commands (moving to norn.run).
 - Repository: https://github.com/dbtlr/norn
-- Documentation: https://github.com/dbtlr/norn/tree/main/docs
-- Agent workflow guide: https://github.com/dbtlr/norn/blob/main/docs/agent-workflows.md
