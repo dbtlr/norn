@@ -4,9 +4,24 @@ Project-level instructions for agents working in this repo. Workspace-private se
 
 ## Northstar
 
-**norn is the agent's query primitive, not a stage in a pipeline.** Every output / filter / sort / limit / paging / column-selection decision must hold against this. When the instinct says "agents can just pipe to jq for this," push back — norn should do it natively. Filter, sort, limit, paging, column selection, and (eventually) grouping all native by default.
+**norn is the deterministic substrate that lets humans and agents share one Markdown vault — keeping it consistent while minimizing the agent effort to maintain it.** It began with a concrete pain: having an agent maintain, migrate, and query a real vault took 20–30 minutes of tool calls per task, and something was always missed.
 
-Drew named this during the `norn find` brainstorm: *"prevent agent piping and turns where possible… we can't stop it completely day one, but that is a long term northstar."* It's the design constraint that should shape every new command and every output format choice.
+The chain, each link the reason the next one holds:
+
+- **User-defined rules → a consistent vault.** Standards are declared and enforced, not hoped for.
+- **A consistent vault → accurate queries.** You can trust `status=backlog` because the schema guarantees `status` exists and means what you defined.
+- **Accurate queries + native primitives → fewer agent turns.** One call to filter / sort / page / trace-links / validate / repair — not a grep+jq+sed pile that drifts and misses cases.
+- **Fewer, more-native decisions → less drift.** A focused agent re-consolidates the vault instead of eroding it.
+
+**Consistency is the end; agent-efficiency is the mechanism.** When a feature trades them off, the trustworthy vault wins.
+
+Design *principles* serving the mission (not the mission itself):
+
+- **Native, not piped.** Minimize reliance on jq/grep/sed for *daily* vault operations — filter, sort, limit, paging, column selection, and (eventually) grouping native by default. This governs daily operations, not one-off auditing (piping to jq for a one-time audit is fine). Drew named it during the `norn find` brainstorm: *"prevent agent piping and turns where possible… we can't stop it completely day one, but that is a long term northstar."*
+- **Deterministic, no LLM in the loop.** Same input, same output; validation runs headless in CI. The agent decides; norn enumerates.
+- **Plan, then apply.** Mutation is always a reviewable plan plus an apply step.
+
+These principles shape every new command and every output-format choice — but weigh each candidate against the chain above: does doing it natively reduce drift or turns on the *daily* path?
 
 ## Per-task verification (Rust workspace)
 
