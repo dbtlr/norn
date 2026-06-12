@@ -1,6 +1,7 @@
 //! `norn cache` subcommand handlers and the cache-backed read path for
 //! query commands.
 
+use crate::cache::prune::{EvictReason, EvictedEntry, PruneOptions, PruneReport};
 use crate::cache::{Cache, CacheError, ChangeDetectOptions};
 use crate::core::GraphIndex;
 use crate::graph::IndexOptions;
@@ -8,7 +9,7 @@ use crate::standards::path_match::PathPattern;
 use anyhow::Result;
 use camino::Utf8Path;
 
-use crate::cli::{CacheIndexArgs, CacheOutputFormat, CacheStatusArgs};
+use crate::cli::{CacheIndexArgs, CacheOutputFormat, CachePruneArgs, CacheStatusArgs};
 
 /// Load the graph index for a query command. Opens the per-vault cache,
 /// optionally runs an implicit incremental refresh, then reconstructs the
@@ -142,6 +143,115 @@ pub fn run_clear(vault_root: &Utf8Path) -> Result<()> {
     cache.clear()?;
     eprintln!("vault: cache cleared");
     Ok(())
+}
+
+pub fn run_prune(
+    vault_root: &Utf8Path,
+    cache_cfg: Option<&crate::standards::CacheConfig>,
+    args: &CachePruneArgs,
+) -> Result<()> {
+    let cache_tree = crate::cache::cache_tree_root()?;
+    let state_tree = crate::cache::state_tree_root()?;
+    let retention = args
+        .retention
+        .or_else(|| cache_cfg.and_then(|c| c.retention))
+        .unwrap_or(crate::standards::DEFAULT_CACHE_RETENTION);
+    // Best-effort: an un-canonicalizable cwd just means no exemption.
+    let exempt_hash = crate::cache::vault_identity_hash(vault_root);
+    let opts = PruneOptions {
+        retention,
+        cap_bytes: crate::cache::prune::CACHE_TREE_SIZE_CAP_BYTES,
+        dry_run: args.dry_run,
+        exempt_hash,
+    };
+    let report = crate::cache::prune::sweep(&cache_tree, &state_tree, &opts);
+    if !args.dry_run {
+        crate::cache::prune::touch_marker(&cache_tree);
+    }
+    match args.format {
+        CacheOutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        CacheOutputFormat::Text => render_prune_text(&report),
+    }
+    Ok(())
+}
+
+fn render_prune_text(report: &PruneReport) {
+    let verb = if report.dry_run {
+        "would be evicted"
+    } else {
+        "evicted"
+    };
+    let freed = if report.dry_run {
+        "would be freed"
+    } else {
+        "freed"
+    };
+    let header = if report.dry_run {
+        "would be evicted:"
+    } else {
+        "evicted:"
+    };
+    for (label, tree) in [("cache", &report.cache), ("state", &report.state)] {
+        let mut notes = Vec::new();
+        if tree.skipped_locked > 0 {
+            notes.push(format!("{} skipped: locked", tree.skipped_locked));
+        }
+        if tree.kept_unknown > 0 {
+            notes.push(format!("{} kept: root unknown", tree.kept_unknown));
+        }
+        let notes = if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", notes.join(", "))
+        };
+        println!(
+            "{label}  {} {} {verb}, {} {freed}{notes}",
+            tree.evicted.len(),
+            if tree.evicted.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            },
+            format_bytes(tree.bytes_freed),
+        );
+    }
+    let all: Vec<(&str, &EvictedEntry)> = report
+        .cache
+        .evicted
+        .iter()
+        .map(|e| ("cache", e))
+        .chain(report.state.evicted.iter().map(|e| ("state", e)))
+        .collect();
+    if !all.is_empty() {
+        println!();
+        println!("{header}");
+        for (tree, e) in all {
+            let root = e.root.as_deref().unwrap_or("(root unknown)");
+            let reason = match e.reason {
+                EvictReason::DeadRoot => "dead root".to_string(),
+                EvictReason::Unreadable => "unreadable".to_string(),
+                EvictReason::Empty => "empty".to_string(),
+                EvictReason::Aged => match e.age_days {
+                    Some(d) => format!("aged {d}d"),
+                    None => "aged".to_string(),
+                },
+                EvictReason::OverCap => "over cap".to_string(),
+            };
+            println!("  [{tree}] {root}  {reason}  {}", format_bytes(e.bytes));
+        }
+    }
+}
+
+fn format_bytes(b: u64) -> String {
+    const UNITS: [(&str, u64); 3] = [("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)];
+    for (unit, size) in UNITS {
+        if b >= size {
+            return format!("{:.1} {unit}", b as f64 / size as f64);
+        }
+    }
+    format!("{b} B")
 }
 
 pub fn run_status(

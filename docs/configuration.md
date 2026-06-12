@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: The .norn/config.yaml schema covering file ignores, validate rules, and repair rules, with worked examples.
+description: The .norn/config.yaml schema covering file ignores, validate rules, repair rules, and cache lifecycle settings, with worked examples.
 ---
 
 # Configuration
@@ -59,6 +59,9 @@ repair:
       # or:
       move_document:
         to_directory: ...   # OR to_path: ...
+cache:
+  retention: 90d    # age-eviction window for cache prune (default 90d)
+  prune: lazy       # lazy (default) | manual
 ```
 
 ## files.ignore
@@ -256,6 +259,19 @@ Apply automatically rewrites backlinks alongside the move:
 **Known v0.28.0 limitation:** when a backlinking file contains multiple identical link occurrences pointing at the moved file, only the first occurrence is rewritten. Subsequent identical raw occurrences remain unchanged; running `norn validate` after apply will flag them as unresolved.
 
 A rename whose new stem already exists elsewhere produces a non-blocking `StemCollisionAfterMove` warning attached to the planned change.
+
+## cache
+
+Cache-lifecycle settings for [`norn cache prune`](commands/cache.md#pruning) and the per-invocation lazy sweep. Both keys are optional; absent means the defaults below.
+
+```yaml
+cache:
+  retention: 90d    # age-eviction window (default 90d)
+  prune: lazy       # lazy (default) | manual
+```
+
+- `retention` — how old a vault's cache entry may grow (newest-file-mtime metric) before the prune sweep evicts it. Duration strings: `<n>w`, `<n>d`, `<n>h`, `<n>m` (e.g. `90d`, `12w`, `24h`). Parsing is best-effort: a malformed value is ignored and the 90d default applies; config load never fails on it. The `--retention` flag on `norn cache prune` overrides this value.
+- `prune` — `lazy` (default) runs the cross-vault prune sweep on norn invocations, at most once per 24h; `manual` disables the automatic sweep for vaults run with this config (the explicit `norn cache prune` always works). An unknown value warns on stderr and defaults to `lazy`.
 
 ## Templates
 

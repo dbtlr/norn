@@ -7,7 +7,9 @@
 //! The CLI surface is reused via `#[path = "src/cli.rs"]` so this script
 //! tracks the real `clap` definitions automatically. `cli.rs` is kept free
 //! of intra-crate dependencies (see commit history) to make the include
-//! trick viable.
+//! trick viable — except `crate::standards::parse_duration`, satisfied here
+//! by including the self-contained `src/standards/duration.rs` as a module
+//! named `standards`.
 
 use std::env;
 use std::path::PathBuf;
@@ -20,6 +22,12 @@ use clap_mangen::Man;
 #[path = "src/cli.rs"]
 #[allow(dead_code)]
 mod cli;
+
+// Resolves cli.rs's `crate::standards::parse_duration` (the `--retention`
+// value parser) inside the build-script crate.
+#[path = "src/standards/duration.rs"]
+#[allow(dead_code)]
+mod standards;
 
 fn main() -> std::io::Result<()> {
     // CARGO_MANIFEST_DIR is the repo root, so cargo-dist's `include` entries
@@ -47,6 +55,7 @@ fn main() -> std::io::Result<()> {
     std::fs::write(man_dir.join("norn.1"), buffer)?;
 
     println!("cargo:rerun-if-changed=src/cli.rs");
+    println!("cargo:rerun-if-changed=src/standards/duration.rs");
     println!("cargo:rerun-if-changed=build.rs");
     Ok(())
 }

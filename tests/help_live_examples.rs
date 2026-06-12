@@ -11,8 +11,18 @@ use std::process::Command;
 use camino::Utf8PathBuf;
 use tempfile::TempDir;
 
-fn norn_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_norn"))
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// hidden subdirs of the fixture tempdir (hidden so the vault walker skips
+/// them), so the binary never reads or sweeps the developer's real
+/// cache/state trees. Keying isolation off the fixture root means the
+/// `cache rebuild` in `fixture_vault` and the test's own invocation share
+/// one isolated cache — required because the live-examples generator only
+/// opens the cache, never rebuilds it.
+fn norn_bin(fixture_root: &std::path::Path) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_norn"));
+    c.env("XDG_CACHE_HOME", fixture_root.join(".xdg-cache"))
+        .env("XDG_STATE_HOME", fixture_root.join(".xdg-state"));
+    c
 }
 
 /// Build a small fixture vault on disk: empty `.norn/` so it's recognized
@@ -52,7 +62,7 @@ fn fixture_vault() -> TempDir {
     for (path, body) in docs {
         std::fs::write(root.join(path).as_std_path(), body).unwrap();
     }
-    let out = norn_bin()
+    let out = norn_bin(tmp.path())
         .args(["--cwd", tmp.path().to_str().unwrap(), "cache", "rebuild"])
         .output()
         .unwrap();
@@ -67,7 +77,7 @@ fn fixture_vault() -> TempDir {
 #[test]
 fn long_help_inside_vault_emits_live_examples_block() {
     let vault = fixture_vault();
-    let out = norn_bin()
+    let out = norn_bin(vault.path())
         .env("NO_COLOR", "1")
         .env("PAGER", "cat")
         .args(["--cwd", vault.path().to_str().unwrap(), "find", "--help"])
@@ -103,7 +113,7 @@ fn long_help_inside_vault_emits_live_examples_block() {
 fn long_help_deterministic_across_runs() {
     let vault = fixture_vault();
     let run = || {
-        let out = norn_bin()
+        let out = norn_bin(vault.path())
             .env("NO_COLOR", "1")
             .env("PAGER", "cat")
             .args(["--cwd", vault.path().to_str().unwrap(), "find", "--help"])
@@ -126,7 +136,7 @@ fn long_help_outside_vault_has_no_live_examples() {
         .prefix("norn-help-no-vault-")
         .tempdir()
         .unwrap();
-    let out = norn_bin()
+    let out = norn_bin(tmp.path())
         .env("NO_COLOR", "1")
         .env("PAGER", "cat")
         .args(["--cwd", tmp.path().to_str().unwrap(), "find", "--help"])
@@ -143,7 +153,7 @@ fn long_help_outside_vault_has_no_live_examples() {
 #[test]
 fn short_help_never_emits_live_examples() {
     let vault = fixture_vault();
-    let out = norn_bin()
+    let out = norn_bin(vault.path())
         .env("NO_COLOR", "1")
         .args(["--cwd", vault.path().to_str().unwrap(), "find", "-h"])
         .output()
@@ -159,7 +169,7 @@ fn short_help_never_emits_live_examples() {
 #[test]
 fn long_help_ascii_marker_under_norn_ascii() {
     let vault = fixture_vault();
-    let out = norn_bin()
+    let out = norn_bin(vault.path())
         .env("NO_COLOR", "1")
         .env("NORN_ASCII", "1")
         .env("PAGER", "cat")
@@ -181,7 +191,7 @@ fn long_help_ascii_marker_under_norn_ascii() {
 #[test]
 fn long_help_no_color_includes_live_tag() {
     let vault = fixture_vault();
-    let out = norn_bin()
+    let out = norn_bin(vault.path())
         .env("NO_COLOR", "1")
         .env("PAGER", "cat")
         .args(["--cwd", vault.path().to_str().unwrap(), "find", "--help"])

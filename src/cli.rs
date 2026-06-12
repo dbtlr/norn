@@ -267,6 +267,12 @@ pub enum CacheSubcommand {
         about = "Show cache path, size, document and link counts, and schema version"
     )]
     Status(CacheStatusArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Evict dead, aged, and over-cap cache entries across all vaults",
+        long_about = "Evict dead, aged, and over-cap cache entries across all vaults.\n\nScans the global cache tree (~/.cache/norn/) and state tree (~/.local/state/norn/). Cache entries are evicted when their vault root no longer exists, they are unreadable or empty (lock-file-only entries count as empty), they exceed the retention window (default 90d), or the tree exceeds its 1 GiB cap (oldest first). State entries (the mutation event stream) are evicted only when their vault root no longer exists (or the entry is empty). The current vault's entries are never evicted."
+    )]
+    Prune(CachePruneArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -293,6 +299,25 @@ pub struct CacheStatusArgs {
 pub enum CacheOutputFormat {
     Text,
     Json,
+}
+
+#[derive(Debug, Parser)]
+pub struct CachePruneArgs {
+    #[arg(long, help = "Report what would be evicted without deleting anything")]
+    pub dry_run: bool,
+    #[arg(
+        long,
+        value_parser = parse_retention_arg,
+        help = "Age-eviction window override (e.g. 90d, 12w, 24h)"
+    )]
+    pub retention: Option<std::time::Duration>,
+    #[arg(long, value_enum, default_value_t = CacheOutputFormat::Text, help = "Stdout format")]
+    pub format: CacheOutputFormat,
+}
+
+fn parse_retention_arg(s: &str) -> Result<std::time::Duration, String> {
+    crate::standards::parse_duration(s)
+        .ok_or_else(|| format!("invalid duration '{s}' (expected e.g. 90d, 12w, 24h, 30m)"))
 }
 
 #[derive(Debug, Clone, clap::Args)]

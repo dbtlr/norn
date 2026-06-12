@@ -4,6 +4,7 @@ use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::standards::duration::parse_duration;
 use crate::standards::path_match::{PathPattern, PathPatternError};
 
 #[derive(Debug, Error)]
@@ -35,6 +36,9 @@ pub struct VaultConfig {
     /// Mutation-telemetry settings; wired into the applier-path event sink.
     #[serde(default)]
     pub telemetry: Option<TelemetryConfig>,
+    /// Cache-lifecycle settings; see CacheConfig.
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
     _deprecated_graph: Option<serde_yaml::Value>,
@@ -56,6 +60,7 @@ impl Default for VaultConfig {
             repair: RepairConfig::default(),
             templates: TemplatesConfig::default(),
             telemetry: None,
+            cache: None,
             _deprecated_graph: None,
         }
     }
@@ -101,25 +106,42 @@ pub struct TelemetryConfig {
 /// Default mutation-telemetry retention when unconfigured: 90 days.
 pub const DEFAULT_RETENTION: std::time::Duration = std::time::Duration::from_secs(90 * 86_400);
 
-/// Parse a short duration string: `<n>w` weeks, `<n>d` days, `<n>h` hours,
-/// `<n>m` minutes. Returns None on anything unrecognized (best-effort). The
-/// numeric part must parse as `u64`; a missing/unknown suffix or non-numeric
-/// value yields None.
-pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
-    let s = s.trim();
-    let (num, unit_secs) = match s.chars().last()? {
-        'w' => (&s[..s.len() - 1], 604_800u64),
-        'd' => (&s[..s.len() - 1], 86_400),
-        'h' => (&s[..s.len() - 1], 3_600),
-        'm' => (&s[..s.len() - 1], 60),
-        _ => return None,
-    };
-    let n: u64 = num.trim().parse().ok()?;
-    Some(std::time::Duration::from_secs(n * unit_secs))
+/// Cache-lifecycle settings; wired into `norn cache prune` and the lazy sweep.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Age-eviction window, parsed from a duration string (e.g. "90d");
+    /// None when absent or unparseable (best-effort, like telemetry.retention).
+    #[serde(default, deserialize_with = "de_opt_duration")]
+    pub retention: Option<std::time::Duration>,
+    /// "lazy" (default) or "manual". Unknown values fall back to lazy.
+    #[serde(default)]
+    pub prune: Option<String>,
 }
 
-/// serde adapter for `TelemetryConfig::retention`. Best-effort: a malformed
-/// duration string falls back to `None` rather than failing the whole config load.
+impl CacheConfig {
+    /// Whether the per-invocation lazy sweep is enabled. Unknown values
+    /// warn (stderr) and default to lazy, per the warn-don't-block posture.
+    pub fn lazy_prune_enabled(&self) -> bool {
+        match self.prune.as_deref() {
+            Some("manual") => false,
+            None | Some("lazy") => true,
+            Some(other) => {
+                eprintln!("warn: unknown cache.prune value '{other}' (expected lazy|manual); defaulting to lazy");
+                true
+            }
+        }
+    }
+}
+
+/// Default cache age-eviction window when unconfigured: 90 days.
+/// Deliberately its own constant — `DEFAULT_RETENTION` stays event-scoped.
+pub const DEFAULT_CACHE_RETENTION: std::time::Duration =
+    std::time::Duration::from_secs(90 * 86_400);
+
+/// serde adapter for the duration-string fields `TelemetryConfig::retention`
+/// and `CacheConfig::retention`. Best-effort: a malformed duration string
+/// falls back to `None` rather than failing the whole config load.
 fn de_opt_duration<'de, D>(d: D) -> Result<Option<std::time::Duration>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1274,25 +1296,6 @@ templates:
     }
 
     #[test]
-    fn duration_parser_handles_units() {
-        assert_eq!(
-            parse_duration("90d"),
-            Some(std::time::Duration::from_secs(90 * 86_400))
-        );
-        assert_eq!(
-            parse_duration("12h"),
-            Some(std::time::Duration::from_secs(12 * 3_600))
-        );
-        assert_eq!(
-            parse_duration("2w"),
-            Some(std::time::Duration::from_secs(2 * 604_800))
-        );
-        assert_eq!(parse_duration("nonsense"), None);
-        assert_eq!(parse_duration("10"), None); // no suffix
-        assert_eq!(parse_duration(""), None);
-    }
-
-    #[test]
     fn templates_config_block_partial_uses_defaults() {
         // Only date_format specified — time_format should fall back to default.
         let yaml = r#"
@@ -1302,5 +1305,34 @@ templates:
         let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         assert_eq!(cfg.templates.date_format, "DD/MM/YYYY");
         assert_eq!(cfg.templates.time_format, "HH:mm");
+    }
+
+    #[test]
+    fn cache_block_parses_retention_and_prune() {
+        let yaml = "version: 1\ncache:\n  retention: 30d\n  prune: manual\n";
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
+        let cache = cfg.cache.expect("cache block should parse");
+        assert_eq!(
+            cache.retention,
+            Some(std::time::Duration::from_secs(30 * 86_400))
+        );
+        assert!(!cache.lazy_prune_enabled());
+    }
+
+    #[test]
+    fn cache_block_defaults_and_malformed_retention() {
+        // Absent block → None; malformed retention → None (best-effort);
+        // absent/unknown prune → lazy enabled.
+        let cfg = parse_config("version: 1\n", camino::Utf8Path::new(".norn/config.yaml")).unwrap();
+        assert!(cfg.cache.is_none());
+
+        let yaml = "version: 1\ncache:\n  retention: nonsense\n  prune: sometimes\n";
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
+        let cache = cfg.cache.expect("block parses despite malformed values");
+        assert_eq!(cache.retention, None);
+        assert!(
+            cache.lazy_prune_enabled(),
+            "unknown prune value falls back to lazy"
+        );
     }
 }

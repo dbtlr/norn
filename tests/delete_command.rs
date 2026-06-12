@@ -28,10 +28,20 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
+fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    let mut c = Command::new(norn_bin());
+    c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
+    c
+}
+
 #[test]
 fn delete_leaf_dry_run_no_op() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "d.md", "--dry-run"])
@@ -56,7 +66,7 @@ fn delete_leaf_dry_run_no_op() {
 #[test]
 fn delete_leaf_yes_removes_file() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "d.md", "--yes"])
@@ -81,7 +91,7 @@ fn delete_leaf_yes_removes_file() {
 #[test]
 fn delete_with_incoming_links_refused() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "b.md", "--yes"])
@@ -98,7 +108,7 @@ fn delete_with_incoming_links_refused() {
 #[test]
 fn delete_with_allow_broken_links_succeeds() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "b.md", "--yes", "--allow-broken-links"])
@@ -121,7 +131,7 @@ fn delete_with_allow_broken_links_succeeds() {
 #[test]
 fn delete_with_rewrite_to_redirects_backlinks() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "b.md", "--yes", "--rewrite-to", "c.md"])
@@ -147,7 +157,7 @@ fn delete_with_rewrite_to_redirects_backlinks() {
 #[test]
 fn delete_yes_format_json_emits_single_json_object() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "d.md", "--yes", "--format", "json"])
@@ -187,7 +197,7 @@ fn delete_yes_format_json_emits_single_json_object() {
 #[test]
 fn delete_dry_run_format_json_emits_envelope() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "d.md", "--dry-run", "--format", "json"])
@@ -232,7 +242,7 @@ fn delete_rewrite_to_cascade_counts_in_json() {
     // Delete b.md --rewrite-to c.md → the backlink in a.md should be
     // redirected to c.md; cascade.applied == 1, cascade.files == 1.
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args([
@@ -285,7 +295,7 @@ fn delete_rewrite_to_cascade_counts_in_json() {
 #[test]
 fn delete_format_json_emits_envelope() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["delete", "b.md", "--allow-broken-links", "--format", "json"])

@@ -17,7 +17,7 @@ fn vault_root(prefix: &str) -> PathBuf {
     path
 }
 
-/// Runs `vault repair plan` with the given extra args, isolated cache and NO_COLOR.
+/// Runs `vault repair plan` with the given extra args, isolated XDG cache/state trees and NO_COLOR.
 /// Returns the raw `Output` (stdout bytes, exit status).
 fn run_command(root: &Path, config_path: &Path, extra_args: &[&str]) -> Output {
     let cache_dir = tempfile::Builder::new()
@@ -36,6 +36,7 @@ fn run_command(root: &Path, config_path: &Path, extra_args: &[&str]) -> Output {
     ]);
     cmd.args(extra_args);
     cmd.env("XDG_CACHE_HOME", cache_dir.path())
+        .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1");
 
     cmd.output().expect("vault command should execute")

@@ -23,6 +23,16 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
+fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    let mut c = Command::new(norn_bin());
+    c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
+    c
+}
+
 #[test]
 fn migrate_dry_run_returns_apply_report() {
     let tmp = synth();
@@ -41,7 +51,7 @@ operations:
     let plan_path = tmp.path().join("plan.yaml");
     std::fs::write(&plan_path, plan).unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate"])
@@ -79,7 +89,7 @@ operations: []
     let plan_path = tmp.path().join("plan.yaml");
     std::fs::write(&plan_path, plan).unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate"])
@@ -112,7 +122,7 @@ fn migrate_reads_plan_from_stdin() {
     });
 
     use std::io::Write;
-    let mut child = Command::new(norn_bin())
+    let mut child = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate", "-", "--dry-run", "--format", "json"])
@@ -160,7 +170,7 @@ operations: []
     std::fs::write(&plan_path, plan).unwrap();
     let out_path = tmp.path().join("report.json");
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate"])
@@ -195,7 +205,7 @@ fn migrate_malformed_stdin_exits_non_zero() {
     let vault = tmp.path().join("vault");
 
     use std::io::Write;
-    let mut child = Command::new(norn_bin())
+    let mut child = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate", "-", "--dry-run", "--format", "json"])
@@ -276,7 +286,7 @@ operations:
     let plan_path = tmp.path().join("plan.yaml");
     std::fs::write(&plan_path, &plan).unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate"])
@@ -368,7 +378,7 @@ operations:
     );
 
     use std::io::Write;
-    let mut child = Command::new(norn_bin())
+    let mut child = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args([

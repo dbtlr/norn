@@ -68,6 +68,7 @@ fn run_plan(root: &Path, config_path: &Path, extra_args: &[&str]) -> std::proces
     ]);
     cmd.args(extra_args);
     cmd.env("XDG_CACHE_HOME", cache_dir.path())
+        .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1");
 
     cmd.output().expect("vault command should execute")

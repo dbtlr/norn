@@ -2,6 +2,7 @@ pub(crate) mod apply;
 mod checks;
 mod config;
 mod defaults;
+mod duration;
 pub(crate) mod engine;
 mod findings;
 pub(crate) mod path_match;
@@ -11,9 +12,11 @@ mod substitution;
 mod summary;
 
 pub(crate) use config::{
-    parse_config, parse_config_compiled, CompiledConfig, RepairConfig, TelemetryConfig,
-    ValidateConfig, ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION, DEFAULT_RETENTION,
+    parse_config, parse_config_compiled, CacheConfig, CompiledConfig, RepairConfig,
+    TelemetryConfig, ValidateConfig, ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION,
+    DEFAULT_CACHE_RETENTION, DEFAULT_RETENTION,
 };
+pub(crate) use duration::parse_duration;
 // Test-only re-exports for fixtures inside norn tests.
 #[cfg(test)]
 pub(crate) use config::{RuleExclude, RuleSelector};

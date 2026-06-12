@@ -23,10 +23,20 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
+fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    let mut c = Command::new(norn_bin());
+    c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
+    c
+}
+
 #[test]
 fn move_dry_run_prints_preview_and_exits_clean() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["move", "b.md", "renamed.md", "--dry-run"])
@@ -59,7 +69,7 @@ fn move_dry_run_prints_preview_and_exits_clean() {
 #[test]
 fn move_yes_applies_and_rewrites_backlinks() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["move", "b.md", "renamed.md", "--yes"])
@@ -93,7 +103,7 @@ fn move_yes_applies_and_rewrites_backlinks() {
 #[test]
 fn move_format_json_emits_envelope() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["move", "b.md", "renamed.md", "--format", "json"])
@@ -136,7 +146,7 @@ fn move_format_json_emits_envelope() {
 #[test]
 fn move_dry_run_format_json_emits_envelope() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args([
@@ -193,7 +203,7 @@ fn move_dry_run_format_json_emits_envelope() {
 #[test]
 fn move_destination_exists_refused() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md"])
@@ -206,7 +216,7 @@ fn move_destination_exists_refused() {
 #[test]
 fn move_yes_format_json_emits_single_json_object() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["move", "b.md", "renamed.md", "--yes", "--format", "json"])
@@ -257,7 +267,7 @@ fn move_destination_exists_with_force_succeeds() {
         "---\ntype: note\n---\n# C\n[[a]]\n",
     )
     .unwrap();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md", "--force", "--yes"])
@@ -302,7 +312,7 @@ fn move_doc_with_self_reference_cascades_and_exits_clean() {
         "---\ntype: note\n---\n# Intro\n\nLearn more in [[vault-cli]].\n",
     )
     .unwrap();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["move", "vault-cli.md", "norn.md", "--yes"])
@@ -375,7 +385,7 @@ fn move_cascade_covers_mixed_contexts_with_self_reference() {
         "---\ntype: note\n---\n# List\n\n- bullet one\n- see [[source]]\n- bullet three\n",
     )
     .unwrap();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["move", "source.md", "renamed.md", "--yes"])
@@ -425,7 +435,7 @@ fn synth_folder_vault() -> TempDir {
 fn move_with_parents_creates_missing_dst_dirs() {
     let tmp = synth(); // existing synth() — single-vault with a.md + b.md
     let vault = tmp.path().join("vault");
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["move", "b.md", "deep/nested/new.md", "--parents", "--yes"])
@@ -443,7 +453,7 @@ fn move_with_parents_creates_missing_dst_dirs() {
 fn move_without_parents_refuses_when_dst_parent_missing() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["move", "b.md", "deep/nested/new.md", "--yes"])
@@ -460,7 +470,7 @@ fn move_without_parents_refuses_when_dst_parent_missing() {
 fn move_recursive_folder_rename() {
     let tmp = synth_folder_vault();
     let vault = tmp.path().join("vault");
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args([
@@ -511,7 +521,7 @@ fn move_json_cascade_dry_run_counts_present_no_rewrite_list() {
     std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
     std::fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n[[a]]\n").unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["move", "a.md", "b.md", "--dry-run", "--format", "json"])
@@ -572,7 +582,7 @@ fn move_json_cascade_live_apply_counts_actuals() {
     std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
     std::fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n[[a]]\n").unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["move", "a.md", "b.md", "--yes", "--format", "json"])
@@ -626,7 +636,7 @@ fn move_json_verbose_populates_rewrites_list() {
     std::fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n[[a]]\n").unwrap();
 
     // With --verbose: rewrites list must be populated
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args([
@@ -710,7 +720,7 @@ fn move_with_unwritable_backlinker_warns_but_exits_zero() {
         return;
     }
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args([
@@ -785,7 +795,7 @@ fn move_with_unwritable_backlinker_warns_but_exits_zero() {
 #[test]
 fn move_case_only_difference_refuses_same_path() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "A.md"])

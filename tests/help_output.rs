@@ -7,11 +7,21 @@
 
 use std::process::Command;
 
+/// Per-invocation `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolation so the binary
+/// never reads or sweeps the developer's real cache/state trees.
+fn isolate_xdg(command: &mut Command) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp xdg dir should be created");
+    command.env("XDG_CACHE_HOME", dir.path().join("cache"));
+    command.env("XDG_STATE_HOME", dir.path().join("state"));
+    dir
+}
+
 fn norn_help(args: &[&str]) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
     command.args(args);
     // NO_COLOR strips ANSI so assertions match against plain text.
     command.env("NO_COLOR", "1");
+    let _xdg = isolate_xdg(&mut command);
     let output = command.output().expect("norn command should run");
     assert!(
         output.status.success(),
@@ -208,6 +218,7 @@ fn ascii_fallback_via_env() {
     command.args(["find", "-h"]);
     command.env("NO_COLOR", "1");
     command.env("NORN_ASCII", "1");
+    let _xdg = isolate_xdg(&mut command);
     let output = command.output().expect("norn command should run");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();

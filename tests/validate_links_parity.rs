@@ -28,9 +28,13 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Wraps a vault invocation with per-test `XDG_CACHE_HOME` and
+/// `XDG_STATE_HOME` trees so the binary never reads or sweeps the
+/// developer's real cache/state trees.
 fn isolate_cache(command: &mut Command) -> TempDir {
     let dir = tempfile::tempdir().expect("temp cache dir should be created");
     command.env("XDG_CACHE_HOME", dir.path());
+    command.env("XDG_STATE_HOME", dir.path().join("state"));
     dir
 }
 

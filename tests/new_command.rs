@@ -24,10 +24,14 @@ fn build_vault(config_yaml: &str) -> tempfile::TempDir {
     dir
 }
 
-/// Build a `norn` Command with `--cwd` pointing at the vault tempdir.
+/// Build a `norn` Command with `--cwd` pointing at the vault tempdir, and
+/// `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to hidden subdirs of it so the
+/// binary never reads or sweeps the developer's real cache/state trees.
 fn norn_cmd(vault: &tempfile::TempDir) -> Command {
     let mut c = Command::new(norn_bin());
     c.arg("--cwd").arg(vault.path());
+    c.env("XDG_CACHE_HOME", vault.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", vault.path().join(".xdg-state"));
     c
 }
 

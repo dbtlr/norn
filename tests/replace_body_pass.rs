@@ -54,15 +54,21 @@ fn plan_json(vault_root: &str, note_rel: &str, document_hash: &str, new_body: &s
 }
 
 /// Run `norn migrate -` feeding `plan` on stdin, with the given extra args.
+/// `XDG_CACHE_HOME`/`XDG_STATE_HOME` are isolated to hidden subdirs of the
+/// vault root so the binary never reads or sweeps the developer's real
+/// cache/state trees.
 fn run_migrate(vault_root: &str, plan: &str, extra: &[&str]) -> std::process::Output {
     let mut args: Vec<&str> = vec!["--cwd", vault_root, "migrate", "-"];
     args.extend_from_slice(extra);
+    let xdg_root = std::path::Path::new(vault_root);
     let mut cmd = Command::new(norn_bin())
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("NO_COLOR", "1")
+        .env("XDG_CACHE_HOME", xdg_root.join(".xdg-cache"))
+        .env("XDG_STATE_HOME", xdg_root.join(".xdg-state"))
         .spawn()
         .unwrap();
     cmd.stdin

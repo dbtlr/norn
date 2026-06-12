@@ -32,11 +32,21 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
+fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    let mut c = Command::new(norn_bin());
+    c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
+    c
+}
+
 #[test]
 fn rewrite_wikilink_dry_run_shows_body_and_frontmatter() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args([
@@ -70,7 +80,7 @@ fn rewrite_wikilink_dry_run_shows_body_and_frontmatter() {
 fn rewrite_wikilink_refuses_when_old_unresolvable() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args([

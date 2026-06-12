@@ -24,6 +24,23 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// The per-test `XDG_STATE_HOME` tree, rooted in the test tempdir so the
+/// binary and the lock-holding test code agree on the lock location and
+/// never touch the developer's real state tree.
+fn state_home(tmp: &TempDir) -> std::path::PathBuf {
+    tmp.path().join(".xdg-state")
+}
+
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
+fn norn_cmd(tmp: &TempDir) -> Command {
+    let mut c = Command::new(norn_bin());
+    c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", state_home(tmp));
+    c
+}
+
 fn synth_vault(tmp: &TempDir) -> std::path::PathBuf {
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
@@ -32,20 +49,17 @@ fn synth_vault(tmp: &TempDir) -> std::path::PathBuf {
     root
 }
 
-/// Acquire the mutation lock for a vault at `vault_root`.
+/// Acquire the mutation lock for a vault at `vault_root`, inside the
+/// per-test `state_base` tree (the same tree `norn_cmd` hands the binary).
 /// Returns the held file — drop it to release.
-fn hold_mutation_lock(vault_root: &std::path::Path) -> std::fs::File {
+fn hold_mutation_lock(vault_root: &std::path::Path, state_base: &std::path::Path) -> std::fs::File {
     use sha2::{Digest, Sha256};
     let canonical = std::fs::canonicalize(vault_root).unwrap();
     let canonical_str = canonical.to_str().unwrap();
     let mut hasher = Sha256::new();
     hasher.update(canonical_str.as_bytes());
     let hash = hex_lower(hasher.finalize().as_ref());
-    let state_base = std::env::var("XDG_STATE_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/state", std::env::var("HOME").unwrap()));
-    let lock_dir = std::path::PathBuf::from(state_base)
-        .join("norn")
-        .join(&hash);
+    let lock_dir = state_base.join("norn").join(&hash);
     std::fs::create_dir_all(&lock_dir).unwrap();
     let lock_path = lock_dir.join(".mutation.lock");
     let file = std::fs::OpenOptions::new()
@@ -77,9 +91,9 @@ fn migrate_file_blocked_by_held_lock_exits_2() {
     let plan_path = tmp.path().join("plan.json");
     std::fs::write(&plan_path, &plan_json).unwrap();
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate", "--yes"])
@@ -105,9 +119,9 @@ fn migrate_stdin_blocked_saves_pending_and_prints_retry() {
     let vault = synth_vault(&tmp);
     let plan_json = minimal_plan_json(&vault);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let mut child = Command::new(norn_bin())
+    let mut child = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate", "-", "--yes"])
@@ -144,12 +158,7 @@ fn migrate_stdin_blocked_saves_pending_and_prints_retry() {
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_str().unwrap().as_bytes());
     let hash = hex_lower(hasher.finalize().as_ref());
-    let state_base = std::env::var("XDG_STATE_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/state", std::env::var("HOME").unwrap()));
-    let pending_dir = std::path::PathBuf::from(state_base)
-        .join("norn")
-        .join(&hash)
-        .join("pending");
+    let pending_dir = state_home(&tmp).join("norn").join(&hash).join("pending");
     let entries: Vec<_> = std::fs::read_dir(&pending_dir)
         .unwrap_or_else(|_| panic!("pending dir not found at {}", pending_dir.display()))
         .flatten()
@@ -168,9 +177,9 @@ fn migrate_dry_run_not_blocked_by_held_lock() {
     let plan_path = tmp.path().join("plan.json");
     std::fs::write(&plan_path, &plan_json).unwrap();
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["migrate", "--dry-run"])
@@ -190,9 +199,9 @@ fn validate_not_blocked_by_held_mutation_lock() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["validate"])
@@ -219,9 +228,9 @@ fn rewrite_wikilink_blocked_by_held_lock_exits_2() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["rewrite-wikilink", "a", "alpha", "--yes"])
@@ -243,9 +252,9 @@ fn move_blocked_by_held_lock_exits_2() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["move", "a.md", "alpha.md", "--yes"])
@@ -266,9 +275,9 @@ fn move_dry_run_not_blocked_by_held_lock() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["move", "a.md", "alpha.md", "--dry-run"])
@@ -289,9 +298,9 @@ fn set_blocked_by_held_lock_exits_2() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["set", "a.md", "--field", "title=Test", "--yes"])
@@ -313,9 +322,9 @@ fn new_blocked_by_held_lock_exits_2() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["new", "new-doc.md", "--yes"])
@@ -341,9 +350,9 @@ fn delete_blocked_by_held_lock_exits_2() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
 
-    let _held = hold_mutation_lock(&vault);
+    let _held = hold_mutation_lock(&vault, &state_home(&tmp));
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["delete", "a.md", "--allow-broken-links", "--yes"])

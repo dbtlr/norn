@@ -209,7 +209,7 @@ Don't hardcode a vault's rule names, field shapes, or status vocabularies into p
 - **`--text` is substring, not search.** For frontmatter, use `--eq`/`--in`/etc.; for relevance ranking, norn is the wrong tool.
 - **Don't auto-resolve `link-ambiguous`.** The `candidates` list is for a human or a documented disambiguation rule.
 - **Re-plan, don't retry.** A stale-hash or mismatch abort means the vault changed; regenerate the plan.
-- **Cache is disposable.** Query commands refresh it implicitly; if results look stale, `norn cache rebuild`. Treat cache errors as bugs, not retry states.
+- **Cache is disposable.** Query commands refresh it implicitly; if results look stale, `norn cache rebuild`. Treat cache errors as bugs, not retry states. `norn cache prune` evicts dead/aged cache entries across all vaults — run with `--dry-run` first.
 
 ## Reference and escape hatches
 

@@ -10,6 +10,16 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Added
+
+- **`norn cache prune` — cross-vault GC for the global cache and state trees.** Scans the cache tree (`~/.cache/norn/`, one entry per vault) and the state tree (`~/.local/state/norn/`). Cache entries are evicted when their vault root no longer exists, they are unreadable or empty (lock-file-only entries count as empty), they exceed the retention window (default 90d, newest-file-mtime metric), or they push the cache tree over its internal 1 GiB cap (oldest first); state entries (the mutation event stream — a record, not a rebuildable cache) are evicted only when their vault root is gone (or the entry is empty), never by age or size. The current vault's entries are never evicted. Flags: `--dry-run` (report, delete nothing), `--retention <dur>` (overrides config and the 90d default), `--format text|json` (the JSON report is a stable `{dry_run, cache, state, total_bytes_freed}` object with kebab-case eviction reasons: `dead-root`, `unreadable`, `empty`, `aged`, `over-cap`). Exit 0 includes nothing-to-prune.
+- **Lazy cache GC: every norn invocation now runs the prune sweep at most once per 24h** (throttled by the `~/.cache/norn/.last-prune` marker file). **norn now deletes stale entries under `~/.cache/norn/` and `~/.local/state/norn/` that it previously left in place forever.** The sweep is the same GC as `norn cache prune`: the current vault's entries are always exempt, and state entries are removed only when their vault root is gone (or the entry is empty). Opt out per vault with `cache: { prune: manual }` in `.norn/config.yaml` — the explicit `norn cache prune` always works regardless.
+- **New `cache:` config block** with `retention` (a `90d`-style duration string — `<n>w|d|h|m`; a malformed value falls back to the 90d default, best-effort) and `prune` (`lazy` default | `manual`), mirroring the `telemetry:` block's shape and best-effort parsing.
+
+### Changed
+
+- **norn invocations now garbage-collect the global cache and state trees** (at most once per 24h) — see the lazy-GC entry under Added for the full eviction rules and the per-vault opt-out.
+
 ## v0.36.1 - 2026-05-31
 
 A maintenance release: a `norn self-update` fix plus the find/get unification follow-ups and a rename-leftover cleanup. The headline is self-update — its archive extractor still looked for the pre-rename `vault` binary, so it couldn't unpack any post-rename release. (Because a broken self-update can't repair itself, upgrading to this release needs one manual installer re-run; self-updates work normally after.) Also completes find/get parity with the `.stem` facet, single-sources the shared sort/paging flags, and moves the cache directory from the leftover `~/.cache/vault/` to `~/.cache/norn/`.

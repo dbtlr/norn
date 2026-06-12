@@ -26,9 +26,10 @@ norn cache index --force-hash  # skip mtime cheap-check; hash every file
 norn cache rebuild             # explicit alias for `index --rebuild`
 norn cache clear               # delete the cache; next command rebuilds
 norn cache status              # path, size, doc/link/file counts, schema version
+norn cache prune               # cross-vault GC; --dry-run to preview
 ```
 
-Every cache subcommand accepts the global `-C` and `--config` flags; `status` accepts `--format json|table` like other query commands.
+Every cache subcommand accepts the global `-C` and `--config` flags; `status` accepts `--format text|json` like other query commands.
 
 ## When the cache rebuilds automatically
 
@@ -42,6 +43,10 @@ The cache is *disposable*. Any of the following triggers an automatic silent reb
 A cache with a *newer* schema version than the binary supports is the one case that hard-errors — interpreting unknown future fields would be unsafe. Upgrade `norn` to read it.
 
 The current `schema_version` is `2`. It is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
+
+## Lifecycle
+
+The cache tree is self-maintaining. Every `norn` invocation runs a cross-vault prune sweep at most once per 24h (throttled by the `~/.cache/norn/.last-prune` marker): cache entries whose vault root no longer exists, that are unreadable or empty, that are older than the retention window (default 90d), or that push the tree over its internal 1 GiB cap are deleted. The current vault's entries never are. State entries (`~/.local/state/norn/`, the mutation event stream) are removed only when their vault root is gone (or the entry is empty) — they are a record, not a rebuildable cache. Opt out per vault with `cache: { prune: manual }` in `.norn/config.yaml`; run the sweep on demand with [`norn cache prune`](commands/cache.md#pruning).
 
 ## `--force-hash`
 

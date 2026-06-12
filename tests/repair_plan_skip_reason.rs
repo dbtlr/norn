@@ -20,17 +20,19 @@ fn vault_root() -> PathBuf {
     path
 }
 
-/// Runs `vault` with the given args. Isolates the XDG cache so tests don't
-/// share SQLite state.
+/// Runs `vault` with the given args. Isolates the XDG cache and state trees
+/// so tests don't share SQLite state and never read or sweep the developer's
+/// real cache/state trees.
 fn vault_json(args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
     command.args(args);
-    // Isolate cache per run.
+    // Isolate cache + state per run.
     let cache_dir = tempfile::Builder::new()
         .prefix("norn-cache-")
         .tempdir()
         .expect("cache temp dir should be created");
     command.env("XDG_CACHE_HOME", cache_dir.path());
+    command.env("XDG_STATE_HOME", cache_dir.path().join("state"));
 
     let output = command.output().expect("vault command should run");
     assert!(

@@ -46,8 +46,13 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Runs the binary with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
 fn run(tmp: &TempDir, args: &[&str]) -> std::process::Output {
     Command::new(norn_bin())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"))
         .arg("--cwd")
         .arg(tmp.path().join("vault"))
         .args(args)

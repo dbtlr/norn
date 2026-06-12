@@ -22,20 +22,21 @@ mod identity;
 mod invalidation;
 mod lock;
 mod open;
+pub(crate) mod prune;
 mod query_diagnostics;
 mod query_documents;
 mod query_links;
 mod query_show;
 mod reader;
-mod schema;
+pub(crate) mod schema;
 mod status;
 mod writer;
 
 pub(crate) use change_detection::ChangeDetectOptions;
-// `events_dir_for` is re-exported for the telemetry sink wiring landed in a
-// later task; surfaced here now so callers use `crate::cache::events_dir_for`.
-#[allow(unused_imports)]
-pub(crate) use identity::{cache_dir_for, events_dir_for, hex_lower, state_dir_for};
+pub(crate) use identity::{
+    cache_dir_for, cache_tree_root, events_dir_for, hex_lower, state_dir_for, state_tree_root,
+    vault_identity_hash,
+};
 pub(crate) use lock::acquire_flock;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 

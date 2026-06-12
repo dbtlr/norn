@@ -36,10 +36,20 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
+fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    let mut c = Command::new(norn_bin());
+    c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
+    c
+}
+
 #[test]
 fn count_total_only_emits_total() {
     let tmp = synth_vault();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["count", "--format", "json"])
@@ -59,7 +69,7 @@ fn count_total_only_emits_total() {
 #[test]
 fn count_by_field_groups() {
     let tmp = synth_vault();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["count", "--by", "status", "--format", "json"])
@@ -81,7 +91,7 @@ fn count_by_field_groups() {
 #[test]
 fn count_filter_then_by_narrows() {
     let tmp = synth_vault();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args([

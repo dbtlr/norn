@@ -4,7 +4,9 @@
 //! `invocation_started` + `op_planned` + `invocation_finished` lines to a
 //! per-vault JSONL event stream on a REAL apply, and writes nothing on a
 //! dry-run. The stream lands under `$XDG_STATE_HOME/norn/<hash>/events/`, so we
-//! isolate each test with a fresh tempdir as `XDG_STATE_HOME`.
+//! isolate each test with a fresh tempdir as `XDG_STATE_HOME`. `XDG_CACHE_HOME`
+//! is isolated too (to a hidden subdir of the vault tempdir) so the binary
+//! never reads or sweeps the developer's real cache tree.
 
 use std::path::Path;
 use std::process::Command;
@@ -82,6 +84,7 @@ fn move_apply_writes_invocation_and_planned_events_to_stream() {
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md", "--yes", "--format", "json"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -127,6 +130,7 @@ fn dry_run_writes_no_events_to_disk() {
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md", "--dry-run", "--format", "json"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -151,6 +155,7 @@ fn move_emits_applied_action_events() {
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md", "--yes", "--format", "json"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -204,6 +209,7 @@ fn dry_run_emits_no_action_events() {
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md", "--dry-run", "--format", "json"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -264,6 +270,7 @@ fn move_with_unwritable_backlinker_emits_failed_action_and_retry() {
             "json",
         ])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
 
@@ -348,6 +355,7 @@ fn apply_report_op_tallies_equal_fold_of_on_disk_stream() {
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md", "--yes", "--format", "json"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -451,6 +459,7 @@ fn set_apply_emits_events_and_report_carries_trace_id() {
             "json",
         ])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -500,6 +509,7 @@ fn set_dry_run_writes_no_events() {
             "json",
         ])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -532,6 +542,7 @@ fn new_apply_emits_events_and_report_carries_trace_id() {
             "json",
         ])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -573,6 +584,7 @@ fn new_records_apply_prints_trace_footer() {
         .arg(tmp.path().join("vault"))
         .args(["new", "notes/y.md", "--parents", "--yes"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -605,6 +617,7 @@ fn set_report_schema_version_is_2() {
             "json",
         ])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(
@@ -629,6 +642,7 @@ fn dry_run_move_report_keeps_forecast_cascade_and_not_run_status() {
         .arg(tmp.path().join("vault"))
         .args(["move", "a.md", "b.md", "--dry-run", "--format", "json"])
         .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .output()
         .unwrap();
     assert_eq!(

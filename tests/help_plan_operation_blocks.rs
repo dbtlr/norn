@@ -11,6 +11,11 @@ fn norn_long_help(verb: &str) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_norn"));
     cmd.args([verb, "--help"]);
     cmd.env("NO_COLOR", "1");
+    // Isolate XDG cache/state trees so the binary never reads or sweeps the
+    // developer's real `~/.cache/norn` / `~/.local/state/norn`.
+    let xdg = tempfile::tempdir().expect("temp xdg dir should be created");
+    cmd.env("XDG_CACHE_HOME", xdg.path().join("cache"));
+    cmd.env("XDG_STATE_HOME", xdg.path().join("state"));
     let out = cmd.output().expect("norn should run");
     assert!(
         out.status.success(),

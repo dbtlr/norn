@@ -61,6 +61,7 @@ fn run(root: &Path, config_path: &Path, extra: &[&str]) -> std::process::Output 
     ]);
     cmd.args(extra);
     cmd.env("XDG_CACHE_HOME", cache_dir.path())
+        .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1");
     cmd.output().expect("vault command should execute")
 }
@@ -141,9 +142,12 @@ fn bare_repair_prints_findings_summary() {
 
 #[test]
 fn old_repair_plan_subcommand_is_gone() {
+    let xdg = tempfile::tempdir().expect("temp xdg dir should be created");
     let out = Command::new(env!("CARGO_BIN_EXE_norn"))
         .args(["repair", "plan", "--format", "json"])
         .env("NO_COLOR", "1")
+        .env("XDG_CACHE_HOME", xdg.path().join("cache"))
+        .env("XDG_STATE_HOME", xdg.path().join("state"))
         .output()
         .unwrap();
     assert!(
@@ -154,9 +158,12 @@ fn old_repair_plan_subcommand_is_gone() {
 
 #[test]
 fn old_repair_apply_subcommand_is_gone() {
+    let xdg = tempfile::tempdir().expect("temp xdg dir should be created");
     let out = Command::new(env!("CARGO_BIN_EXE_norn"))
         .args(["repair", "apply"])
         .env("NO_COLOR", "1")
+        .env("XDG_CACHE_HOME", xdg.path().join("cache"))
+        .env("XDG_STATE_HOME", xdg.path().join("state"))
         .output()
         .unwrap();
     assert!(

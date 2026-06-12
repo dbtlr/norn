@@ -98,7 +98,15 @@ fn run(cli: Cli) -> Result<i32> {
     let cwd = effective_cwd(cwd.as_ref())?;
     let config_path = config;
 
-    match command {
+    // The explicit `cache prune` manages the sweep itself (and a --dry-run
+    // must not be followed by a real sweep in the same invocation), so the
+    // tail-hook lazy sweep is skipped for it.
+    let is_explicit_prune = matches!(
+        &command,
+        Command::Cache(c) if matches!(c.command, CacheSubcommand::Prune(_))
+    );
+
+    let outcome = match command {
         Command::Migrate(args) => {
             let run_args = MigrateRunArgs {
                 plan_path: args.plan_path,
@@ -158,6 +166,11 @@ fn run(cli: Cli) -> Result<i32> {
                 CacheSubcommand::Status(args) => {
                     crate::cache_cmd::run_status(&cwd, alias_field, args)?
                 }
+                CacheSubcommand::Prune(args) => crate::cache_cmd::run_prune(
+                    &cwd,
+                    loaded_config.vault_config.cache.as_ref(),
+                    args,
+                )?,
             }
             Ok(0)
         }
@@ -922,7 +935,19 @@ fn run(cli: Cli) -> Result<i32> {
         Command::SelfUpdate(_) => {
             unreachable!("self-update is handled before vault targeting")
         }
+    };
+    // Per-invocation throttled lazy GC: best-effort, never affects the
+    // command's outcome or exit code. Arms that early-`return` or call
+    // `process::exit` (completions, self-update, markdown get, TTY prompt
+    // decline) skip the sweep by design — the 24 h throttle self-heals on
+    // the next invocation. The sweep must remain the last thing before
+    // returning `outcome`; do not insert post-dispatch work after it.
+    // Explicit `cache prune` is also skipped: it manages the sweep itself,
+    // and a --dry-run must never be followed by a real sweep.
+    if !is_explicit_prune {
+        crate::cache::prune::lazy_sweep(&cwd, config_path.as_ref());
     }
+    outcome
 }
 
 fn run_completions_command(cmd: crate::cli::CompletionsCommand) -> Result<i32> {

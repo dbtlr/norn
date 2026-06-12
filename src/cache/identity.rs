@@ -27,6 +27,12 @@ pub fn vault_identity(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, String), Ca
     Ok((canonical, hash))
 }
 
+/// Best-effort identity hash for a vault root; None when the root cannot
+/// be canonicalized (deleted, permission-denied). Used for prune exemption.
+pub(crate) fn vault_identity_hash(vault_root: &Utf8Path) -> Option<String> {
+    vault_identity(vault_root).ok().map(|(_, h)| h)
+}
+
 /// Lowercase hex encoding of a byte slice. Matches the format previously
 /// emitted by `format!("{:x}", GenericArray<u8, …>)` on sha2 ≤ 0.10 — the
 /// digest type lost its `LowerHex` impl in sha2 0.11, so we encode bytes
@@ -49,6 +55,16 @@ pub fn cache_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf)
     let base = xdg_cache_home()?;
     let dir = base.join("norn").join(hash);
     Ok((canonical, dir))
+}
+
+/// Root of the global cache tree: `<XDG_CACHE_HOME>/norn/`.
+pub(crate) fn cache_tree_root() -> Result<Utf8PathBuf, CacheError> {
+    Ok(xdg_cache_home()?.join("norn"))
+}
+
+/// Root of the global state tree: `<XDG_STATE_HOME>/norn/`.
+pub(crate) fn state_tree_root() -> Result<Utf8PathBuf, CacheError> {
+    Ok(xdg_state_home()?.join("norn"))
 }
 
 fn xdg_state_home() -> Result<Utf8PathBuf, CacheError> {

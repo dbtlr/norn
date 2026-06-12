@@ -3,13 +3,14 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-/// Wraps a vault invocation with a per-test `XDG_CACHE_HOME` so each test
-/// gets a fresh SQLite cache. Without this, tests leak orphan cache dirs
-/// under `~/.cache/vault/<hash>/` on every run. Mirrors the helper in
-/// `tests/cli_output.rs`.
+/// Wraps a vault invocation with per-test `XDG_CACHE_HOME` and
+/// `XDG_STATE_HOME` trees so each test gets a fresh SQLite cache and the
+/// binary never reads or sweeps the developer's real cache/state trees.
+/// Mirrors the helper in `tests/cli_output.rs`.
 fn isolate_cache(command: &mut Command) -> TempDir {
     let dir = tempfile::tempdir().expect("temp cache dir should be created");
     command.env("XDG_CACHE_HOME", dir.path());
+    command.env("XDG_STATE_HOME", dir.path().join("state"));
     dir
 }
 

@@ -17,7 +17,7 @@ fn vault_root(prefix: &str) -> PathBuf {
     path
 }
 
-/// Runs `norn repair plan --format report` with isolated cache and NO_COLOR.
+/// Runs `norn repair plan --format report` with isolated XDG cache/state trees and NO_COLOR.
 /// Returns the raw stdout string.
 fn run_plan(root: &Path, config_path: &Path, extra_args: &[&str]) -> String {
     let cache_dir = tempfile::Builder::new()
@@ -38,6 +38,7 @@ fn run_plan(root: &Path, config_path: &Path, extra_args: &[&str]) -> String {
     ]);
     cmd.args(extra_args);
     cmd.env("XDG_CACHE_HOME", cache_dir.path())
+        .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1");
 
     let out = cmd.output().unwrap();
@@ -556,6 +557,7 @@ fn piped_default_is_json_explicit_format_overrides() {
             "--plan",
         ])
         .env("XDG_CACHE_HOME", cache_dir.path())
+        .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1")
         .output()
         .expect("piped run should execute");
@@ -592,6 +594,7 @@ fn piped_default_is_json_explicit_format_overrides() {
             "report",
         ])
         .env("XDG_CACHE_HOME", cache_dir.path())
+        .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1")
         .output()
         .expect("report run should execute");

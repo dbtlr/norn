@@ -12,12 +12,15 @@ fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/basic")
 }
 
-/// Wraps a vault invocation with a per-test `XDG_CACHE_HOME` so each test
-/// gets a fresh SQLite cache. Without this, tests against the same vault
-/// root (e.g. `fixtures/basic`) would share — and race on — the cache.
+/// Wraps a vault invocation with per-test `XDG_CACHE_HOME` and
+/// `XDG_STATE_HOME` trees so each test gets a fresh SQLite cache and the
+/// binary never reads or sweeps the developer's real cache/state trees.
+/// Without this, tests against the same vault root (e.g. `fixtures/basic`)
+/// would share — and race on — the cache.
 fn isolate_cache(command: &mut Command) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp cache dir should be created");
     command.env("XDG_CACHE_HOME", dir.path());
+    command.env("XDG_STATE_HOME", dir.path().join("state"));
     dir
 }
 
@@ -48,9 +51,12 @@ fn vault_success_env(args: &[&str], envs: &[(&str, &str)]) -> (String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
     command.args(args);
     let _cache_dir = if envs.iter().any(|(k, _)| *k == "XDG_CACHE_HOME") {
-        None
+        // Caller controls the cache tree; still isolate the state tree.
+        let dir = tempfile::tempdir().expect("temp state dir should be created");
+        command.env("XDG_STATE_HOME", dir.path().join("state"));
+        dir
     } else {
-        Some(isolate_cache(&mut command))
+        isolate_cache(&mut command)
     };
     for (key, value) in envs {
         command.env(key, value);
@@ -1746,6 +1752,8 @@ fn completions_runs_without_a_vault_root() {
     fs::create_dir_all(&scratch).expect("create scratch dir");
     let output = Command::new(env!("CARGO_BIN_EXE_norn"))
         .current_dir(&scratch)
+        .env("XDG_CACHE_HOME", scratch.join("xdg-cache"))
+        .env("XDG_STATE_HOME", scratch.join("xdg-state"))
         .args(["completions", "init", "bash"])
         .output()
         .expect("vault command should run");
@@ -1772,6 +1780,8 @@ fn manpage_runs_without_a_vault_root() {
     fs::create_dir_all(&scratch).expect("create scratch dir");
     let output = Command::new(env!("CARGO_BIN_EXE_norn"))
         .current_dir(&scratch)
+        .env("XDG_CACHE_HOME", scratch.join("xdg-cache"))
+        .env("XDG_STATE_HOME", scratch.join("xdg-state"))
         .args(["manpage"])
         .output()
         .expect("vault command should run");
@@ -1855,11 +1865,10 @@ fn completions_install_unsupported_shell_errors_cleanly() {
 
 #[test]
 fn completions_install_no_arg_and_no_shell_env_errors() {
-    let output = Command::new(env!("CARGO_BIN_EXE_norn"))
-        .args(["completions", "install"])
-        .env_remove("SHELL")
-        .output()
-        .expect("vault command should run");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
+    command.args(["completions", "install"]).env_remove("SHELL");
+    let _cache_dir = isolate_cache(&mut command);
+    let output = command.output().expect("vault command should run");
     assert!(
         !output.status.success(),
         "expected failure with no SHELL set"
@@ -1880,6 +1889,8 @@ fn install_in_tempdir(
     cmd.args(["completions", "install", shell]);
     cmd.env("HOME", dir.path());
     cmd.env("XDG_CONFIG_HOME", dir.path().join(".config"));
+    cmd.env("XDG_CACHE_HOME", dir.path().join(".cache"));
+    cmd.env("XDG_STATE_HOME", dir.path().join(".local/state"));
     for (k, v) in env_overrides {
         cmd.env(k, v);
     }
@@ -1958,6 +1969,8 @@ fn completions_install_is_idempotent() {
         .args(["completions", "install", "bash"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .output()
         .unwrap();
     assert!(output2.status.success());
@@ -1986,6 +1999,8 @@ fn completions_install_force_replaces_marker_block() {
         .args(["completions", "install", "bash", "--force"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .output()
         .unwrap();
     assert!(
@@ -2047,6 +2062,8 @@ fn completions_install_nushell_idempotent() {
         .args(["completions", "install", "nushell"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .output()
         .unwrap();
     assert!(output2.status.success());
@@ -2069,6 +2086,8 @@ fn completions_install_fish_overwrites_script() {
         .args(["completions", "install", "fish"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .output()
         .unwrap();
     assert!(
@@ -2110,6 +2129,8 @@ fn completions_install_powershell_honors_profile_env() {
         .args(["completions", "install", "powershell"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .env("POWERSHELL_PROFILE", &custom_profile)
         .output()
         .unwrap();
@@ -2125,6 +2146,8 @@ fn completions_install_auto_detects_from_shell_env() {
         .args(["completions", "install"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .env("SHELL", "/bin/zsh")
         .env_remove("ZDOTDIR")
         .output()
@@ -2146,6 +2169,8 @@ fn completions_install_print_for_nushell_shows_both_targets() {
         .args(["completions", "install", "nushell", "--print"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -2240,6 +2265,8 @@ fn completions_install_print_does_not_write() {
         .args(["completions", "install", "bash", "--print"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".config"))
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .env("XDG_STATE_HOME", dir.path().join(".local/state"))
         .output()
         .unwrap();
     assert!(output.status.success());

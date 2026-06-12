@@ -27,10 +27,20 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
+/// per-test subdirs of the test tempdir, so the binary never reads or sweeps
+/// the developer's real cache/state trees.
+fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    let mut c = Command::new(norn_bin());
+    c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
+    c
+}
+
 #[test]
 fn get_single_target_json() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "--format", "json"])
@@ -51,7 +61,7 @@ fn get_single_target_json() {
 #[test]
 fn get_wikilink_target() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "[[a]]", "--format", "json"])
@@ -70,7 +80,7 @@ fn get_wikilink_target() {
 #[test]
 fn get_multiple_targets_returns_array() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "b.md", "--format", "json"])
@@ -89,7 +99,7 @@ fn get_multiple_targets_returns_array() {
 #[test]
 fn get_col_narrows_output() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args([
@@ -131,7 +141,7 @@ fn get_col_bare_name_projects_frontmatter_field() {
     )
     .unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["get", "a.md", "--col", "status", "--format", "json"])
@@ -164,7 +174,7 @@ fn get_col_bare_name_projects_frontmatter_field() {
 fn get_col_unknown_facet_warns() {
     // A dot-prefixed token that isn't a known structural facet warns.
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "--col", ".bogus", "--format", "json"])
@@ -182,7 +192,7 @@ fn get_col_unknown_facet_warns() {
 fn get_all_cols_includes_body_content() {
     // `--body` is gone; body now comes via `--all-cols` (full dump).
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "--all-cols", "--format", "json"])
@@ -207,7 +217,7 @@ fn get_all_cols_includes_body_content() {
 fn get_body_flag_is_removed() {
     // Breaking change: `--body` no longer exists; clap rejects it.
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "--body"])
@@ -224,7 +234,7 @@ fn get_body_flag_is_removed() {
 #[test]
 fn get_all_cols_conflicts_with_col() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "--all-cols", "--col", "type"])
@@ -253,7 +263,7 @@ fn get_sort_orders_records() {
     let run = |extra: &[&str]| -> Vec<String> {
         let mut args = vec!["get", "a.md", "b.md", "c.md", "--format", "jsonl"];
         args.extend_from_slice(extra);
-        let out = Command::new(norn_bin())
+        let out = norn_cmd(&tmp)
             .args(["--cwd"])
             .arg(&root)
             .args(&args)
@@ -311,7 +321,7 @@ fn get_col_stem_facet_and_sort_by_stem() {
     std::fs::write(root.join("m/banana.md"), "---\ntype: note\n---\n").unwrap();
 
     // `--col .stem`: the bare stem alongside the path identity.
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["get", "z/apple.md", "--col", ".stem", "--format", "json"])
@@ -332,7 +342,7 @@ fn get_col_stem_facet_and_sort_by_stem() {
     );
 
     // Opt-in: default `get --format json` (no --col) carries no stem key.
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["get", "z/apple.md", "--format", "json"])
@@ -346,7 +356,7 @@ fn get_col_stem_facet_and_sort_by_stem() {
     );
 
     // `--sort stem`: stems ascending, distinct from path order.
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args([
@@ -379,7 +389,7 @@ fn get_col_stem_facet_and_sort_by_stem() {
 #[test]
 fn get_unknown_col_warns_on_stderr() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args([
@@ -409,7 +419,7 @@ fn get_unknown_col_warns_on_stderr() {
 #[test]
 fn get_paths_format_one_path_per_line() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "b.md", "--format", "paths"])
@@ -428,7 +438,7 @@ fn get_paths_format_one_path_per_line() {
 #[test]
 fn get_jsonl_format_one_object_per_line() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "b.md", "--format", "jsonl"])
@@ -451,7 +461,7 @@ fn get_jsonl_format_one_object_per_line() {
 #[test]
 fn get_col_ignored_with_paths_warns() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "--col", "status", "--format", "paths"])
@@ -488,7 +498,7 @@ fn get_records_default_frontmatter_is_per_field_lines() {
     )
     .unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["get", "a.md"])
@@ -519,7 +529,7 @@ fn get_records_default_frontmatter_is_per_field_lines() {
 #[test]
 fn get_missing_target_partial_failure_exit() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "nonexistent", "--format", "json"])
@@ -552,7 +562,7 @@ fn get_col_body_without_body_flag_shows_body() {
     )
     .unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["get", "a.md", "--col", ".body", "--format", "json"])
@@ -586,7 +596,7 @@ fn get_col_raw_reads_disk_byte_faithful() {
         "---\ntype: note\ntitle: Alpha\n# a yaml comment\n---\n\n# Heading\n\nbody text\n\n   \n";
     std::fs::write(root.join("a.md"), contents).unwrap();
 
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&root)
         .args(["get", "a.md", "--col", ".raw", "--format", "json"])
@@ -610,7 +620,7 @@ fn get_col_raw_reads_disk_byte_faithful() {
 #[test]
 fn get_default_no_col_omits_raw() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "--format", "json"])
@@ -634,7 +644,7 @@ fn get_default_no_col_omits_raw() {
 fn get_markdown_single_doc_is_byte_faithful() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["get", "a.md", "--format", "markdown"])
@@ -653,7 +663,7 @@ fn get_markdown_single_doc_is_byte_faithful() {
 #[test]
 fn get_markdown_multiple_targets_errors() {
     let tmp = synth();
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
         .args(["get", "a.md", "b.md", "--format", "markdown"])
@@ -673,7 +683,7 @@ fn get_markdown_multiple_targets_errors() {
 fn get_markdown_col_is_inert_and_warns() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
-    let out = Command::new(norn_bin())
+    let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
         .args(["get", "a.md", "--col", "type", "--format", "markdown"])
