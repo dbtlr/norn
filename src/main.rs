@@ -18,6 +18,7 @@ mod help;
 mod init;
 mod init_scan;
 mod links;
+mod mcp;
 mod migrate_cmd;
 pub mod migration_plan;
 pub mod move_doc;
@@ -97,6 +98,14 @@ fn run(cli: Cli) -> Result<i32> {
 
     let cwd = effective_cwd(cwd.as_ref())?;
     let config_path = config;
+
+    // The MCP server owns its own tokio runtime and vault open, so it is
+    // pre-handled here — after cwd/config resolution but before the
+    // cache-opening match arms below.
+    if let Command::Mcp(args) = &command {
+        crate::mcp::run(args, &cwd, config_path.as_ref())?;
+        return Ok(0);
+    }
 
     // The explicit `cache prune` manages the sweep itself (and a --dry-run
     // must not be followed by a real sweep in the same invocation), so the
@@ -934,6 +943,9 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::SelfUpdate(_) => {
             unreachable!("self-update is handled before vault targeting")
+        }
+        Command::Mcp(_) => {
+            unreachable!("mcp is handled before the cache-opening dispatch")
         }
     };
     // Per-invocation throttled lazy GC: best-effort, never affects the

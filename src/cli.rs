@@ -237,6 +237,15 @@ Exit codes: 0 success or dry-run, 1 runtime failure, 2 pre-flight refusal."
             scriptable \"is an update available?\" checks."
     )]
     SelfUpdate(SelfUpdateArgs),
+    /// Run norn as a Model Context Protocol (MCP) stdio server over the vault at --cwd.
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct McpArgs {
+    /// Expose only read tools; drop all mutation tools from tools/list.
+    #[arg(long)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Parser)]
