@@ -1101,7 +1101,7 @@ fn open_event_sink(
 }
 
 /// Emit the `invocation_started` lifecycle event for a mutating command.
-fn emit_invocation_started(
+pub(crate) fn emit_invocation_started(
     sink: &mut crate::telemetry::EventSink,
     cmd: &str,
     cwd: &camino::Utf8Path,

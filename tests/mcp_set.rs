@@ -22,6 +22,7 @@
 //! sequential calls apply in request order, so the disk reads are deterministic.
 
 use std::io::Write as _;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -302,5 +303,165 @@ fn dry_run_alone_writes_nothing() {
     assert_eq!(
         before, after,
         "dry-run (confirm:false) must leave the file byte-for-byte unchanged"
+    );
+}
+
+// ── Audit trail: MCP mutations write the event stream like the CLI (NRN-33) ────
+//
+// The defect these tests pin: a `vault.set confirm:true` MUST write the same
+// append-only event stream `norn set --yes` writes — that audit trail is how an
+// off-filesystem MCP client is "audited for free." Before the fix the confirm
+// path used `EventSink::discard`, so NO event file was written. These tests fail
+// with the old discard sink and pass once the confirm path opens a real sink.
+//
+// State isolation: the server is driven as a child process with an isolated
+// `XDG_STATE_HOME` (a subdir of the vault tempdir), so the event stream lands
+// under that tempdir and never touches the developer's real `~/.local/state`,
+// and there is no in-process `set_var` race with sibling tests.
+
+/// Recursively collect every `events-*.jsonl` file under `dir`.
+fn find_event_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(find_event_files(&path));
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with("events-") && name.ends_with(".jsonl") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Parse every JSON line of every event file under `state_root`.
+fn read_all_event_lines(state_root: &Path) -> Vec<serde_json::Value> {
+    let mut events = Vec::new();
+    for f in find_event_files(state_root) {
+        let body = std::fs::read_to_string(&f).unwrap();
+        for l in body.lines() {
+            if l.trim().is_empty() {
+                continue;
+            }
+            events.push(serde_json::from_str(l).expect("each event line must parse as JSON"));
+        }
+    }
+    events
+}
+
+/// Spawn `norn mcp` with the given state dir, send `initialize` + one
+/// `vault.set` call (the caller supplies `confirm`), then close stdin and wait.
+fn run_set_call(vault: &TempDir, state_dir: &Path, confirm: bool) {
+    let mut child = Command::new(norn_bin())
+        .arg("--cwd")
+        .arg(vault.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("XDG_CACHE_HOME", vault.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", state_dir)
+        .spawn()
+        .expect("failed to spawn norn mcp");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not captured");
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "norn-set-audit", "version": "0.0.1" }
+                }
+            })))
+            .unwrap();
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.set",
+                    "arguments": {
+                        "target": "task",
+                        "set": { "status": "active" },
+                        "confirm": confirm
+                    }
+                }
+            })))
+            .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait on norn mcp");
+    assert!(
+        output.status.success(),
+        "norn mcp exited non-zero\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The audit regression: a `confirm:true` MCP mutation writes the event stream.
+/// At least one `events-*.jsonl` file exists and carries `invocation.started`
+/// plus an `action` event — byte-for-byte the audit trail `norn set --yes`
+/// leaves. (Fails with the pre-fix `EventSink::discard` confirm path.)
+#[test]
+fn confirm_writes_audit_event_stream() {
+    let vault = seeded_vault();
+    prebuild_cache(&vault);
+    let state = vault.path().join(".xdg-state");
+
+    run_set_call(&vault, &state, /*confirm=*/ true);
+
+    let files = find_event_files(&state);
+    assert!(
+        !files.is_empty(),
+        "confirm:true must write at least one events-*.jsonl file under {}",
+        state.display()
+    );
+
+    let events = read_all_event_lines(&state);
+    assert!(
+        events
+            .iter()
+            .any(|e| e["EventName"] == "norn.invocation.started"),
+        "audited mutation must record invocation.started; events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e["EventName"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("norn.action."))),
+        "audited mutation must record an op action event; events: {events:?}"
+    );
+
+    // Every event shares one trace id (the same id the report carries).
+    let trace = events[0]["TraceId"].as_str().unwrap();
+    assert!(
+        events.iter().all(|e| e["TraceId"] == trace),
+        "all audit events must share one trace id"
+    );
+    assert_eq!(trace.len(), 32, "trace id must be a 32-hex trace id");
+}
+
+/// The dry-run audit invariant: a `confirm:false` MCP call (the default) must
+/// persist NO event file — dry-runs stay silent, exactly like the CLI.
+#[test]
+fn dry_run_writes_no_audit_events() {
+    let vault = seeded_vault();
+    prebuild_cache(&vault);
+    let state = vault.path().join(".xdg-state");
+
+    run_set_call(&vault, &state, /*confirm=*/ false);
+
+    assert!(
+        find_event_files(&state).is_empty(),
+        "dry-run (confirm:false) must persist no events-*.jsonl file"
     );
 }
