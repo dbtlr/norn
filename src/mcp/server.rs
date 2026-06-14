@@ -31,6 +31,7 @@ use crate::mcp::tools::get::GetOutput;
 use crate::mcp::tools::move_doc::MoveOutput;
 use crate::mcp::tools::new::NewOutput;
 use crate::mcp::tools::repair_plan::RepairPlanOutput;
+use crate::mcp::tools::rewrite_wikilink::RewriteWikilinkOutput;
 use crate::mcp::tools::set::SetOutput;
 use crate::mcp::tools::validate::ValidateOutput;
 
@@ -298,6 +299,27 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::delete::DeleteParams>,
     ) -> Result<Json<DeleteOutput>, rmcp::ErrorData> {
         self.run_tool(|ctx| crate::mcp::tools::delete::handle_output(ctx, p))
+            .await
+    }
+
+    /// `vault.rewrite_wikilink` — retarget a wikilink across the vault, no move.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::rewrite_wikilink`, which mirrors the CLI
+    /// `norn rewrite-wikilink` non-TTY path: one-op `rewrite_wikilink`
+    /// `MigrationPlan` → DRY-RUN unless `confirm` → on confirm acquire the
+    /// per-vault mutation lock, open the event sink, and apply via the shared
+    /// `applier::apply_migration_plan` (whose planner fans the op out into
+    /// per-file body + frontmatter rewrites). No file is moved.
+    #[tool(
+        name = "vault.rewrite_wikilink",
+        description = "Rewrite all occurrences of a wikilink target across the vault (body + frontmatter), without moving any file. DRY-RUN by default; confirm:true to apply."
+    )]
+    async fn rewrite_wikilink(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams>,
+    ) -> Result<Json<RewriteWikilinkOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p))
             .await
     }
 }
