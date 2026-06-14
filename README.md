@@ -30,6 +30,7 @@ Norn is the deterministic layer underneath. Humans write freely; agents handle t
 - Configurable validation, driven by `validate.rules` in `.norn/config.yaml`.
 - A plan-then-apply repair loop with schema-versioned JSON plans.
 - Stable JSON and JSONL contracts so the same output drives humans, scripts, and agents.
+- **A CLI _and_ an MCP server**, both backed by the same deterministic primitives. Run `norn <command>` from a shell, or `norn mcp` to expose the vault to a Model Context Protocol client as a set of tools (see [MCP server](#mcp-server) below). Norn is not a daemon, sync service, or file watcher — the MCP server is a stdio process you launch per harness, holding one vault per instance; there is no background process and no network sync.
 
 ## Install
 
@@ -100,6 +101,31 @@ Norn is designed to be a first-class tool for coding agents:
 
 For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-workflows.md). To install the agent skill into your coding agent of choice, see [integrations/agent-skill/README.md](integrations/agent-skill/README.md).
 
+## MCP server
+
+`norn mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io/) server over stdio, exposing the same deterministic primitives as the CLI to any MCP client — a query-and-mutate surface for an agent whose vault may be remote or off-filesystem.
+
+```sh
+norn mcp --cwd /path/to/vault
+```
+
+It serves 12 tools: six read (`vault.find`, `vault.count`, `vault.get`, `vault.validate`, `vault.repair_plan`, `vault.describe`) and six mutation (`vault.new`, `vault.set`, `vault.move`, `vault.delete`, `vault.rewrite_wikilink`, `vault.apply_plan`). Every mutation tool is **dry-run by default** — it returns the planned change and writes nothing until you pass `confirm: true`, at which point the change is applied under the per-vault mutation lock and audited to the same append-only event stream as the CLI. Pass `--read-only` to drop the six mutation tools entirely for a query-only server.
+
+Register it with an MCP client by pointing the client's server config at the binary. For a Claude Code / generic `mcpServers` entry:
+
+```json
+{
+  "mcpServers": {
+    "norn": {
+      "command": "norn",
+      "args": ["mcp", "--cwd", "/path/to/vault"]
+    }
+  }
+}
+```
+
+One server instance serves one vault. See [docs/mcp-server.md](docs/mcp-server.md) for the full tool catalog, the document-placement workflow (`vault.describe` → construct path → `vault.new`), and the warm-cache and call-ordering notes.
+
 ## Documentation
 
 | Topic | Page |
@@ -112,6 +138,7 @@ For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-wor
 | Validation and repair | [docs/validation.md](docs/validation.md) |
 | Validate rule shape (selectors + constraints) | [docs/rule-shape.md](docs/rule-shape.md) |
 | Agent workflows | [docs/agent-workflows.md](docs/agent-workflows.md) |
+| MCP server | [docs/mcp-server.md](docs/mcp-server.md) |
 | Development | [docs/development.md](docs/development.md) |
 | Releases and versioning | [docs/releases.md](docs/releases.md) |
 
