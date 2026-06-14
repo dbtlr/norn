@@ -162,6 +162,12 @@ repair rule (e.g. updating body content with `--body-from-stdin`).
 - **Don't redirect to a file when `--out` exists.** `norn repair --plan --out plan.json` is the file-first form; shell redirection works too but `--out` makes the intent explicit and avoids partial-write footguns.
 - **User-specific vault doctrine lives in `.norn/config.yaml`.** Don't hardcode vault-specific rule names or field shapes in agent prompts; read them from the config.
 
+## MCP server
+
+Beyond the CLI, norn can expose the vault to an MCP client as a set of tools via `norn mcp` — the same deterministic primitives (find, count, get, validate, repair-plan, plus the full mutation surface) reachable over stdio by an agent whose vault may be remote or off-filesystem. The mutation tools are dry-run by default and apply (under the per-vault mutation lock, audited to the event stream) only on `confirm: true` — the MCP analog of the CLI's `--dry-run` / apply split. Pass `--read-only` for a query-only server.
+
+See [MCP server](mcp-server.md) for the 12-tool catalog, the document-placement workflow (`vault.describe` → construct path → `vault.new`), and the warm-cache and call-ordering notes.
+
 ## Skill installation
 
 For per-harness install instructions (Claude Code, Codex, Open Code, OpenClaw, Hermes, PI), see [integrations/agent-skill/README.md](../integrations/agent-skill/README.md). The skill body itself is harness-independent and lives at [integrations/agent-skill/SKILL.md](../integrations/agent-skill/SKILL.md).
@@ -169,5 +175,6 @@ For per-harness install instructions (Claude Code, Codex, Open Code, OpenClaw, H
 ## See also
 
 - [Commands](commands.md) — the full subcommand surface.
+- [MCP server](mcp-server.md) — driving the same primitives as MCP tools.
 - [Validation and repair](validation.md) — finding codes and the apply contract.
 - [Configuration](configuration.md) — config keys an agent might read.
