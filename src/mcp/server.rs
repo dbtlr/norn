@@ -1,8 +1,12 @@
 //! The MCP server handler.
 //!
 //! Task 1 is the scaffold: an empty tool router with zero `#[tool]` methods, so
-//! `tools/list` answers with an empty array. Later tasks add `#[tool]` methods to
-//! the `#[tool_router]` impl block below.
+//! `tools/list` answers with an empty array. Later tasks add `#[tool]` methods.
+//!
+//! Task 13 splits the tools into two `#[tool_router]` blocks — `read_router`
+//! (the 6 read tools) and `mutate_router` (the 6 mutation tools) — so
+//! `McpServer::new` can build a read-only server by merging in `mutate_router`
+//! only when `!read_only`. See `new` and `run_mutation` for the two-layer gate.
 //!
 //! Task 2 wires in a warm [`VaultContext`] so tool implementations can call
 //! `self.ctx.query_cache()` to open a fresh cache handle on each invocation —
@@ -57,15 +61,36 @@ pub struct McpServer {
     /// exactly "one vault operation at a time". (`spawn_blocking` is a possible
     /// v2 optimization, deliberately out of scope here.)
     call_lock: Arc<tokio::sync::Mutex<()>>,
+    /// When true the server is read-only: the 6 mutation tools are absent from
+    /// `tools/list` (the `mutate_router` is never merged in — see `new`) AND any
+    /// mutation handler refuses at runtime via `run_mutation` (defense in depth).
+    read_only: bool,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpServer {
-    pub fn new(ctx: Arc<VaultContext>) -> Self {
+    /// Build the server. `read_only` gates the mutation surface two ways:
+    ///
+    /// 1. **Drop from `tools/list` (structural).** The `#[tool]` methods are split
+    ///    into two routers — `read_router()` (6 read tools) and `mutate_router()`
+    ///    (6 mutation tools). We always build `read_router()`; we `merge` in
+    ///    `mutate_router()` only when `!read_only`. So under read-only the mutation
+    ///    tools are genuinely never registered — the generated `ServerHandler`'s
+    ///    `list_tools` can only return what the stored router holds.
+    /// 2. **Refuse at runtime (defense in depth).** Each mutation handler funnels
+    ///    through `run_mutation`, which returns a read-only error before touching
+    ///    the lock or the vault — so even a client that calls a tool absent from
+    ///    the list mutates nothing.
+    pub fn new(ctx: Arc<VaultContext>, read_only: bool) -> Self {
+        let mut router = Self::read_router();
+        if !read_only {
+            router.merge(Self::mutate_router());
+        }
         Self {
             ctx,
             call_lock: Arc::new(tokio::sync::Mutex::new(())),
-            tool_router: Self::tool_router(),
+            read_only,
+            tool_router: router,
         }
     }
 
@@ -88,9 +113,40 @@ impl McpServer {
         let _guard = self.call_lock.lock().await;
         f(&self.ctx).map(Json).map_err(to_mcp_error)
     }
+
+    /// Run a *mutation* tool handler — like [`run_tool`](Self::run_tool), but
+    /// refuses up-front when the server is read-only.
+    ///
+    /// The read-only check runs FIRST, before acquiring `call_lock` or touching
+    /// the vault: a refused mutation must observe nothing and mutate nothing. When
+    /// not read-only, the body is identical to `run_tool` — it acquires the
+    /// NRN-55 serialization lock and maps the result. The 6 mutation tools call
+    /// this; the 6 read tools keep calling `run_tool`. This split also documents
+    /// the read/mutate boundary in code (mirroring the two `#[tool_router]`
+    /// blocks).
+    ///
+    /// Under `--read-only` the mutation tools are also absent from `tools/list`
+    /// (see [`new`](Self::new)), so this runtime guard is defense in depth for a
+    /// client that calls a tool it was never advertised.
+    async fn run_mutation<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
+    where
+        T: serde::Serialize + schemars::JsonSchema,
+        F: FnOnce(&VaultContext) -> anyhow::Result<T>,
+    {
+        if self.read_only {
+            return Err(rmcp::ErrorData::invalid_request(
+                "vault is read-only: mutation tools are disabled",
+                None,
+            ));
+        }
+        let _guard = self.call_lock.lock().await;
+        f(&self.ctx).map(Json).map_err(to_mcp_error)
+    }
 }
 
-#[tool_router]
+/// The 6 READ tools — always registered, even under `--read-only`. The macro
+/// generates `fn read_router() -> ToolRouter<Self>` holding exactly these.
+#[tool_router(router = read_router)]
 impl McpServer {
     /// `vault.get` — fetch one or more documents with full connection context.
     ///
@@ -195,28 +251,6 @@ impl McpServer {
             .await
     }
 
-    /// `vault.apply_plan` — apply a `MigrationPlan` (e.g. from `vault.repair_plan`).
-    ///
-    /// Thin wrapper: deserialize params, call the pure handler, map the result.
-    /// All logic lives in `tools::apply_plan`, which mirrors `norn migrate`'s
-    /// non-TTY path: validate `schema_version` → DRY-RUN unless `confirm` → on
-    /// confirm acquire the per-vault mutation lock, open the event sink, and apply
-    /// via the shared `applier::apply_migration_plan`. The plan is accepted inline
-    /// (as a `serde_json::Value`), so callers can pipe `vault.repair_plan`'s
-    /// `result.structuredContent.plan` directly here without writing to a file.
-    /// Same mutation-safety + audit contract as `vault.move` / `vault.delete`.
-    #[tool(
-        name = "vault.apply_plan",
-        description = "Apply a MigrationPlan (e.g. from vault.repair_plan) to the vault — moves, deletes, link rewrites, frontmatter ops. DRY-RUN by default (forecasts the apply); pass confirm:true to execute."
-    )]
-    async fn apply_plan(
-        &self,
-        Parameters(p): Parameters<crate::mcp::tools::apply_plan::ApplyPlanParams>,
-    ) -> Result<Json<ApplyPlanOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::apply_plan::handle_output(ctx, p))
-            .await
-    }
-
     /// `vault.describe` — describe this vault for an off-filesystem client.
     ///
     /// Thin wrapper: deserialize params, call the pure handler, map the result.
@@ -236,7 +270,15 @@ impl McpServer {
     ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
         self.run_tool(crate::mcp::tools::describe::handle).await
     }
+}
 
+/// The 6 MUTATION tools — registered only when NOT read-only. The macro generates
+/// `fn mutate_router() -> ToolRouter<Self>` holding exactly these; `new` merges it
+/// into the stored router only when `!read_only`, so under `--read-only` these are
+/// absent from `tools/list`. Each handler also funnels through `run_mutation`,
+/// which refuses at runtime when read-only (defense in depth).
+#[tool_router(router = mutate_router)]
+impl McpServer {
     /// `vault.new` — create a new document with schema-scaffolded frontmatter.
     ///
     /// Thin wrapper: deserialize params, call the pure handler, map the result.
@@ -255,7 +297,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::new::NewParams>,
     ) -> Result<Json<NewOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::new::handle_output(ctx, p))
+        self.run_mutation(|ctx| crate::mcp::tools::new::handle_output(ctx, p))
             .await
     }
 
@@ -269,8 +311,9 @@ impl McpServer {
     /// returned [`SetOutput`] is a typed envelope with a `type: object` root
     /// (rmcp rejects a non-object `outputSchema`); the `SetReport` payload stays
     /// generic JSON because it carries a `Utf8PathBuf` with no `JsonSchema` impl.
-    /// This handler funnels through `run_tool` like every other tool, so the
-    /// process-wide `call_lock` serializes it; the per-vault mutation lock it
+    /// This handler funnels through `run_mutation` like every other mutation
+    /// tool, so the read-only refusal runs first and then the process-wide
+    /// `call_lock` serializes it; the per-vault mutation lock it
     /// acquires inside `handle` (confirm path only) is a different, inner lock.
     #[tool(
         name = "vault.set",
@@ -280,7 +323,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
     ) -> Result<Json<SetOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
+        self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
             .await
     }
 
@@ -300,7 +343,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::move_doc::MoveParams>,
     ) -> Result<Json<MoveOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::move_doc::handle_output(ctx, p))
+        self.run_mutation(|ctx| crate::mcp::tools::move_doc::handle_output(ctx, p))
             .await
     }
 
@@ -321,7 +364,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::delete::DeleteParams>,
     ) -> Result<Json<DeleteOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::delete::handle_output(ctx, p))
+        self.run_mutation(|ctx| crate::mcp::tools::delete::handle_output(ctx, p))
             .await
     }
 
@@ -342,7 +385,29 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams>,
     ) -> Result<Json<RewriteWikilinkOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p))
+        self.run_mutation(|ctx| crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p))
+            .await
+    }
+
+    /// `vault.apply_plan` — apply a `MigrationPlan` (e.g. from `vault.repair_plan`).
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::apply_plan`, which mirrors `norn migrate`'s
+    /// non-TTY path: validate `schema_version` → DRY-RUN unless `confirm` → on
+    /// confirm acquire the per-vault mutation lock, open the event sink, and apply
+    /// via the shared `applier::apply_migration_plan`. The plan is accepted inline
+    /// (as a `serde_json::Value`), so callers can pipe `vault.repair_plan`'s
+    /// `result.structuredContent.plan` directly here without writing to a file.
+    /// Same mutation-safety + audit contract as `vault.move` / `vault.delete`.
+    #[tool(
+        name = "vault.apply_plan",
+        description = "Apply a MigrationPlan (e.g. from vault.repair_plan) to the vault — moves, deletes, link rewrites, frontmatter ops. DRY-RUN by default (forecasts the apply); pass confirm:true to execute."
+    )]
+    async fn apply_plan(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::apply_plan::ApplyPlanParams>,
+    ) -> Result<Json<ApplyPlanOutput>, rmcp::ErrorData> {
+        self.run_mutation(|ctx| crate::mcp::tools::apply_plan::handle_output(ctx, p))
             .await
     }
 }
@@ -414,7 +479,7 @@ mod tests {
     async fn concurrent_cold_start_calls_all_succeed() {
         let (_tmp, root) = cold_seeded_vault();
         let ctx = Arc::new(VaultContext::open(&root, None).expect("VaultContext::open"));
-        let server = McpServer::new(ctx);
+        let server = McpServer::new(ctx, /*read_only=*/ false);
 
         const N: usize = 8;
         let mut set = tokio::task::JoinSet::new();
