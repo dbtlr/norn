@@ -28,6 +28,7 @@ use crate::mcp::tools::describe::DescribeOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
 use crate::mcp::tools::repair_plan::RepairPlanOutput;
+use crate::mcp::tools::set::SetOutput;
 use crate::mcp::tools::validate::ValidateOutput;
 
 #[derive(Clone)]
@@ -207,6 +208,31 @@ impl McpServer {
         Parameters(_p): Parameters<crate::mcp::tools::describe::DescribeParams>,
     ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
         self.run_tool(crate::mcp::tools::describe::handle).await
+    }
+
+    /// `vault.set` — the first MCP mutation tool; establishes the
+    /// mutation-safety contract (default dry-run; `confirm:true` writes).
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::set`, which mirrors `norn set`'s dispatch
+    /// (`preflight_and_plan` → DRY-RUN unless `confirm` → on confirm acquire the
+    /// per-vault mutation lock and apply via the shared repair applier). The
+    /// returned [`SetOutput`] is a typed envelope with a `type: object` root
+    /// (rmcp rejects a non-object `outputSchema`); the `SetReport` payload stays
+    /// generic JSON because it carries a `Utf8PathBuf` with no `JsonSchema` impl.
+    /// This handler funnels through `run_tool` like every other tool, so the
+    /// process-wide `call_lock` serializes it; the per-vault mutation lock it
+    /// acquires inside `handle` (confirm path only) is a different, inner lock.
+    #[tool(
+        name = "vault.set",
+        description = "Update one document's frontmatter (and optionally replace its body), schema-aware. DRY-RUN by default — returns the planned change without writing. Pass confirm:true to apply."
+    )]
+    async fn set(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
+    ) -> Result<Json<SetOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
+            .await
     }
 }
 

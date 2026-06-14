@@ -20,4 +20,5 @@ pub mod describe;
 pub mod find;
 pub mod get;
 pub mod repair_plan;
+pub mod set;
 pub mod validate;
