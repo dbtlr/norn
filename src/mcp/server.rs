@@ -24,6 +24,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use super::context::VaultContext;
 use super::to_mcp_error;
 use crate::mcp::tools::count::CountEnvelope;
+use crate::mcp::tools::describe::DescribeOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
 use crate::mcp::tools::repair_plan::RepairPlanOutput;
@@ -152,6 +153,28 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::repair_plan::RepairPlanParams>,
     ) -> Result<Json<RepairPlanOutput>, rmcp::ErrorData> {
         crate::mcp::tools::repair_plan::handle(&self.ctx, p)
+            .map(Json)
+            .map_err(to_mcp_error)
+    }
+
+    /// `vault.describe` — describe this vault for an off-filesystem client.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::describe`, which assembles the folder tree
+    /// (from a paths query), the declared path rules, and the frontmatter schema
+    /// from `ctx.config`. The returned [`DescribeOutput`] derives `JsonSchema`
+    /// directly (its fields are `Vec<String>` + structs of `String`/`Value`), so
+    /// no Value-only envelope is needed; the root is still `type: object`.
+    /// Read-only: it never opens the vault for mutation.
+    #[tool(
+        name = "vault.describe",
+        description = "Describe this vault for an off-filesystem client: the folder tree, the declared path rules (which glob gets which frontmatter defaults — i.e. where each kind of doc lives), and the frontmatter schema (field types, allowed values, required fields). Use it to construct the correct path for a new document, then call vault.new."
+    )]
+    async fn describe(
+        &self,
+        Parameters(_p): Parameters<crate::mcp::tools::describe::DescribeParams>,
+    ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
+        crate::mcp::tools::describe::handle(&self.ctx)
             .map(Json)
             .map_err(to_mcp_error)
     }

@@ -16,6 +16,7 @@
 //! `vault.get` (this module) establishes the pattern the later read tools copy.
 
 pub mod count;
+pub mod describe;
 pub mod find;
 pub mod get;
 pub mod repair_plan;
