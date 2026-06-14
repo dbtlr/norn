@@ -2,7 +2,9 @@
 //!
 //! Task 1 is the scaffold: build a tokio runtime, construct the (toolless)
 //! [`McpServer`], serve it over stdio, and wait. Later tasks add the actual
-//! read/mutation tools and wire `--read-only` to the exposed tool set.
+//! read/mutation tools; Task 13 wires `--read-only` (from [`McpArgs`]) through
+//! `serve` into [`McpServer::new`], which drops the mutation tools from the
+//! exposed set and refuses them at runtime.
 //!
 //! Task 2 adds a warm [`VaultContext`] that the server holds across tool calls:
 //! config is parsed once at startup; the cache is re-opened per tool call so
@@ -38,7 +40,7 @@ use self::server::McpServer;
 /// until the client disconnects. Fails fast with a non-zero exit if the vault
 /// context cannot be opened.
 pub fn run(
-    _args: &crate::cli::McpArgs,
+    args: &crate::cli::McpArgs,
     cwd: &Utf8PathBuf,
     config_path: Option<&Utf8PathBuf>,
 ) -> anyhow::Result<()> {
@@ -51,11 +53,11 @@ pub fn run(
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(ctx))
+    runtime.block_on(serve(ctx, args.read_only))
 }
 
-async fn serve(ctx: Arc<VaultContext>) -> anyhow::Result<()> {
-    let service = McpServer::new(ctx).serve(stdio()).await?;
+async fn serve(ctx: Arc<VaultContext>, read_only: bool) -> anyhow::Result<()> {
+    let service = McpServer::new(ctx, read_only).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
