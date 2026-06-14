@@ -23,6 +23,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use super::context::VaultContext;
 use super::to_mcp_error;
+use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::get::GetOutput;
 
 #[derive(Clone)]
@@ -61,6 +62,26 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::get::GetParams>,
     ) -> Result<Json<GetOutput>, rmcp::ErrorData> {
         crate::mcp::tools::get::handle_output(&self.ctx, p)
+            .map(Json)
+            .map_err(to_mcp_error)
+    }
+
+    /// `vault.count` — count documents in the vault, total or grouped.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::count`; this only bridges rmcp ↔ `anyhow`. The
+    /// returned [`CountEnvelope`] is a typed flat object whose root schema is
+    /// `type: object` (rmcp rejects non-object `outputSchema`). See `tools::count`
+    /// for why `CountOutput`'s untagged enum is projected into the envelope.
+    #[tool(
+        name = "vault.count",
+        description = "Count documents in the vault — total, or grouped by a frontmatter field — with the find filter surface."
+    )]
+    async fn count(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::count::CountParams>,
+    ) -> Result<Json<CountEnvelope>, rmcp::ErrorData> {
+        crate::mcp::tools::count::handle(&self.ctx, p)
             .map(Json)
             .map_err(to_mcp_error)
     }
