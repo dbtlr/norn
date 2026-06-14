@@ -18,4 +18,5 @@
 pub mod count;
 pub mod find;
 pub mod get;
+pub mod repair_plan;
 pub mod validate;

@@ -26,6 +26,7 @@ use super::to_mcp_error;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
+use crate::mcp::tools::repair_plan::RepairPlanOutput;
 use crate::mcp::tools::validate::ValidateOutput;
 
 #[derive(Clone)]
@@ -128,6 +129,29 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::validate::ValidateParams>,
     ) -> Result<Json<ValidateOutput>, rmcp::ErrorData> {
         crate::mcp::tools::validate::handle(&self.ctx, p)
+            .map(Json)
+            .map_err(to_mcp_error)
+    }
+
+    /// `vault.repair_plan` — produce a deterministic MigrationPlan without applying it.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::repair_plan`, which drives the same pipeline as
+    /// `norn repair --plan` (cache → graph index → findings → `plan_from_findings`)
+    /// and returns the in-memory `MigrationPlan` serialized as `serde_json::Value`
+    /// in the [`RepairPlanOutput`] envelope. The plan JSON is identical to what
+    /// `norn repair --plan --format json` emits — `vault.apply_plan` (Task 12)
+    /// can consume it unchanged. The tool is READ-ONLY: it never writes files,
+    /// never calls the applier, and never mutates the vault.
+    #[tool(
+        name = "vault.repair_plan",
+        description = "Produce a deterministic repair MigrationPlan (closest-match link rewrites, frontmatter fixes) without applying it. Feed the plan to vault.apply_plan to execute."
+    )]
+    async fn repair_plan(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::repair_plan::RepairPlanParams>,
+    ) -> Result<Json<RepairPlanOutput>, rmcp::ErrorData> {
+        crate::mcp::tools::repair_plan::handle(&self.ctx, p)
             .map(Json)
             .map_err(to_mcp_error)
     }
