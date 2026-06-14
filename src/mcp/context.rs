@@ -34,10 +34,8 @@ use crate::config_loader::{load_config, LoadedConfig};
 /// docs for the full design rationale).
 pub(crate) struct VaultContext {
     /// Absolute path to the vault root, as passed to `run()` via `--cwd`.
-    #[allow(dead_code)] // used by tool implementations added in later tasks
     pub(crate) vault_root: Utf8PathBuf,
     /// Parsed and compiled config, held warm for the server's lifetime.
-    #[allow(dead_code)] // used by tool implementations added in later tasks
     pub(crate) config: LoadedConfig,
 }
 
@@ -61,7 +59,6 @@ impl VaultContext {
     ///
     /// Callers should open a cache at the start of each tool call and drop it
     /// when done — do not cache the returned `Cache` handle across calls.
-    #[allow(dead_code)] // used by tool implementations added in later tasks
     pub(crate) fn query_cache(&self) -> Result<Cache> {
         open_for_query(
             &self.vault_root,

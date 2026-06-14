@@ -11,6 +11,7 @@
 
 pub mod context;
 pub mod server;
+pub mod tools;
 
 use std::sync::Arc;
 
@@ -18,6 +19,16 @@ use anyhow::Context as _;
 use camino::Utf8PathBuf;
 use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
+
+/// Map an `anyhow::Error` to an rmcp internal-error response carrying the message.
+///
+/// Shared by every `#[tool]` wrapper: the pure handlers return `anyhow::Result`,
+/// and this is the single seam that turns a failure into a JSON-RPC error. The
+/// message is rendered to an owned `String` (which satisfies the constructor's
+/// `Into<Cow<'static, str>>` bound); no structured `data` payload for v1.
+pub(crate) fn to_mcp_error(e: anyhow::Error) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(e.to_string(), None)
+}
 
 use self::context::VaultContext;
 use self::server::McpServer;

@@ -9,9 +9,12 @@
 //! minimal temp vault, perform the MCP `initialize` handshake, and assert the
 //! server advertises the tools capability and lists zero tools.
 //!
-//! The contract being tested is unchanged from Task 1: the scaffold must respond
-//! to `initialize` and `tools/list` (zero tools). Task 2 only changes HOW the
-//! binary is exercised (in-process → child process).
+//! The contract being tested: the server must respond to `initialize` (with the
+//! tools capability advertised) and to `tools/list`. Task 2 changed HOW the
+//! binary is exercised (in-process → child process); Task 3 added the first real
+//! tool (`vault.get`), so the list is no longer empty — this smoke test now
+//! asserts the server lists at least its registered tool(s). The full `vault.get`
+//! list+call round-trip lives in `tests/mcp_get.rs`.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -64,7 +67,7 @@ fn tools_list_request() -> Vec<u8> {
 }
 
 #[test]
-fn server_initializes_and_lists_zero_tools() {
+fn server_initializes_and_lists_tools() {
     let vault = make_minimal_vault();
 
     let mut child = Command::new(norn_bin())
@@ -135,7 +138,7 @@ fn server_initializes_and_lists_zero_tools() {
         )
     });
 
-    // Task 1 scaffold contract: zero tools listed.
+    // tools/list must be a non-empty array now that Task 3 registered vault.get.
     let tools = tools_resp["result"]["tools"].as_array().unwrap_or_else(|| {
         panic!(
             "tools/list result.tools must be an array, got: {}",
@@ -144,9 +147,10 @@ fn server_initializes_and_lists_zero_tools() {
     });
 
     assert!(
-        tools.is_empty(),
-        "Task 1 scaffold must expose zero tools, got {} tool(s): {:?}",
-        tools.len(),
+        tools
+            .iter()
+            .any(|t| t["name"].as_str() == Some("vault.get")),
+        "tools/list must include vault.get, got: {:?}",
         tools
             .iter()
             .map(|t| t["name"].as_str().unwrap_or("?"))
