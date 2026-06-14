@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache_cmd::load_graph_index;
 use crate::cli::{ConfidenceArg, RepairArgs, ValidateTriageArgs};
-use crate::config_loader::load_config;
 use crate::mcp::context::VaultContext;
 use crate::planner::findings::plan_from_findings;
 use crate::repair::skip_reasons::code_matches_any;
@@ -118,17 +117,18 @@ pub struct RepairPlanOutput {
 /// that `files.ignore` patterns are honoured at index-load time, matching the
 /// CLI's `norn repair` behaviour.
 pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutput> {
-    // Load config and graph index via the same entry point the CLI uses.
+    // Load the graph index via the same entry point the CLI uses.
     // `false` means "allow cache refresh if stale" (mirrors `no_cache_refresh = false`).
-    let loaded_config = load_config(&ctx.vault_root, None)?;
-    let index = load_graph_index(&ctx.vault_root, &loaded_config.index_options, false)?;
+    // Use the warm server-lifetime config (ctx.config) — consistent with `validate.rs`
+    // and matching `norn repair`'s approach where config is loaded once per invocation.
+    let index = load_graph_index(&ctx.vault_root, &ctx.config.index_options, false)?;
 
-    // Collect all validation findings.
+    // Collect all validation findings using the warm server-lifetime config.
     let findings = validate_with_compiled(
         &index,
-        &loaded_config.validate,
-        &loaded_config.compiled,
-        loaded_config.index_options.alias_field.as_deref(),
+        &ctx.config.validate,
+        &ctx.config.compiled,
+        ctx.config.index_options.alias_field.as_deref(),
     );
 
     // Build a RepairArgs equivalent from the MCP params for the shared filter helpers.
@@ -187,7 +187,7 @@ pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutpu
         ctx.vault_root.clone(),
         plan_filters,
         filtered_findings,
-        &loaded_config.repair,
+        &ctx.config.repair,
         &index,
     );
 
