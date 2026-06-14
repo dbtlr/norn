@@ -2,11 +2,11 @@
 //!
 //! The pure handler drives the same pipeline as `norn validate`:
 //!
-//! 1. Open a fresh query cache (per-call freshness, same as the CLI).
-//! 2. Reconstruct the `GraphIndex` from cache rows via `cache.load_graph_index()`.
-//! 3. Call `validate_with_compiled` with the warm server-lifetime config.
-//! 4. Filter findings via `filter_findings` (triage filters from params).
-//! 5. Serialize each `Finding` as `serde_json::Value` into the output envelope.
+//! 1. Reconstruct the `GraphIndex` via `cache_cmd::load_graph_index`, applying
+//!    `files.ignore` patterns and an implicit incremental cache refresh.
+//! 2. Call `validate_with_compiled` with the warm server-lifetime config.
+//! 3. Filter findings via `filter_findings` (triage filters from params).
+//! 4. Serialize each `Finding` as `serde_json::Value` into the output envelope.
 //!
 //! **No seam extraction needed:** the validate logic is already expressed through
 //! the public functions `validate_with_compiled` (in `src/standards/engine.rs`) and
@@ -28,6 +28,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::cache_cmd::load_graph_index;
 use crate::mcp::context::VaultContext;
 use crate::standards::engine::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
@@ -87,13 +88,17 @@ pub struct ValidateOutput {
 
 /// Pure handler for `vault.validate`.
 ///
-/// Opens a fresh query cache (per-call freshness), reconstructs the graph index,
-/// runs validation with the server-lifetime compiled config, applies triage
-/// filters, and returns the findings as serialized JSON values in the envelope.
+/// Reconstructs the graph index via the same entry point the CLI validate uses
+/// (`cache_cmd::load_graph_index`), which applies `files.ignore` patterns at
+/// read time and handles lock-timeout-tolerant cache refresh. This keeps the
+/// MCP tool consistent with `norn validate` on vaults that configure
+/// `files.ignore`.
 pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
-    // Open cache (per-call freshness) and reconstruct the graph index.
-    let cache = ctx.query_cache()?;
-    let index = cache.load_graph_index()?;
+    // Route through cache_cmd::load_graph_index — the same entry point the CLI
+    // validate uses — so that `files.ignore` patterns are applied via
+    // `apply_ignore_filter`. The old `ctx.query_cache()? + cache.load_graph_index()`
+    // path hardcoded `ignored_files: Vec::new()` and silently skipped the filter.
+    let index = load_graph_index(&ctx.vault_root, &ctx.config.index_options, false)?;
 
     // Run validation using the warm server-lifetime config — same config path
     // as `norn validate` (load_config is called once at server start, held in ctx).
@@ -269,6 +274,122 @@ mod tests {
             out.findings.len(),
             0,
             "filter for frontmatter-required-field-missing should return 0 findings in a link-only vault"
+        );
+    }
+
+    /// Regression test: `files.ignore` must be applied by the handler so that
+    /// broken wikilinks inside ignored directories do NOT appear in findings.
+    ///
+    /// Before the fix, `handle` loaded the graph index via
+    /// `cache.load_graph_index()` (the cache reader), which hardcodes
+    /// `ignored_files: Vec::new()` and never calls `apply_ignore_filter`.
+    /// Result: a broken link under `templates/` would surface as a
+    /// `link-target-missing` finding even when the vault config declares
+    /// `files.ignore: ["templates/**"]`.
+    ///
+    /// After the fix the handler routes through
+    /// `cache_cmd::load_graph_index(…)` — the same entry point as
+    /// `norn validate` — which calls `apply_ignore_filter` at read time.
+    #[test]
+    fn handle_files_ignore_suppresses_findings_from_ignored_directory() {
+        // Build a vault with:
+        //   - .norn/config.yaml  → files.ignore: ["templates/**"]
+        //   - templates/tpl.md   → broken wikilink [[MissingTarget]]
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-validate-ignore-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+
+        // Config: ignore the templates directory at index load time.
+        let config_dir = root.join(".norn");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.yaml"),
+            "files:\n  ignore:\n    - \"templates/**\"\n",
+        )
+        .unwrap();
+
+        // A doc inside the ignored directory with a broken wikilink.
+        let templates_dir = root.join("templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        std::fs::write(
+            templates_dir.join("tpl.md"),
+            "---\ntype: note\ntitle: Template\n---\n\nSee [[MissingTarget]] for details.\n",
+        )
+        .unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let out = handle(&ctx, ValidateParams::default())
+            .expect("handle should succeed on ignored vault");
+
+        assert_eq!(
+            out.findings.len(),
+            0,
+            "broken wikilink in files.ignore-d directory must produce 0 findings; \
+             got {} finding(s): {:?}",
+            out.findings.len(),
+            out.findings
+                .iter()
+                .map(|f| f["code"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Companion to the `files.ignore` regression: a broken link in a NON-ignored
+    /// doc must still surface a finding even when `files.ignore` is configured.
+    ///
+    /// This guards against an overly-broad fix that drops ALL findings when an
+    /// ignore pattern is present.
+    #[test]
+    fn handle_files_ignore_does_not_suppress_findings_outside_ignored_directory() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-validate-ignore-nonmatching-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+
+        // Config: ignore the templates directory.
+        let config_dir = root.join(".norn");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.yaml"),
+            "files:\n  ignore:\n    - \"templates/**\"\n",
+        )
+        .unwrap();
+
+        // A doc OUTSIDE the ignored directory with a broken wikilink — must still
+        // produce a finding.
+        std::fs::write(
+            root.join("source.md"),
+            "---\ntype: note\ntitle: Source\n---\n\nSee [[MissingTarget]] for details.\n",
+        )
+        .unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let out = handle(&ctx, ValidateParams::default())
+            .expect("handle should succeed on vault with non-ignored broken link");
+
+        assert!(
+            !out.findings.is_empty(),
+            "broken wikilink in non-ignored doc must still produce findings when files.ignore \
+             is configured; got 0 findings"
+        );
+
+        let has_link_finding = out.findings.iter().any(|f| {
+            f["code"]
+                .as_str()
+                .map(|c| c.starts_with("link-"))
+                .unwrap_or(false)
+        });
+        assert!(
+            has_link_finding,
+            "expected a link-* finding for the broken wikilink outside the ignored directory, \
+             got: {:?}",
+            out.findings
+                .iter()
+                .map(|f| f["code"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
         );
     }
 }
