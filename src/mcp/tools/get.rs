@@ -15,17 +15,20 @@ use crate::show::ShowReport;
 /// Parameters for `vault.get`.
 ///
 /// Mirrors the daily-useful slice of `norn get`'s flags: one or more targets and
-/// an optional column projection. The heavier CLI knobs (`--all-cols`, paging,
-/// the byte-faithful `markdown` format) are intentionally omitted from v1 — the
-/// MCP client always gets the full structured record set (frontmatter, headings,
-/// all three link sets), then narrows with `col` if it wants less.
+/// an optional column request. The heavier CLI knobs (`--all-cols`, paging, the
+/// byte-faithful `markdown` format) are intentionally omitted from v1 — the MCP
+/// client always gets the full structured record set (frontmatter, headings, all
+/// three link sets), and `col` only opts the heavy `.body`/`.raw` facets *in*.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct GetParams {
     /// One or more document targets (stem or path), as `norn get` accepts.
     pub targets: Vec<String>,
-    /// Optional column projection: a comma-separated list of bare frontmatter
-    /// fields (e.g. `status,title`) and/or dot-prefixed facets (`.body`,
-    /// `.headings`, `.outgoing_links`, …), exactly as `norn get --col` accepts.
+    /// Optional column request, comma-separated, in `norn get --col` syntax (bare
+    /// frontmatter fields like `status,title`; dot-prefixed facets like `.body`,
+    /// `.headings`). NOTE (v1): this only controls whether the heavy `.body`/`.raw`
+    /// facets are *included* — it does NOT narrow the payload. Every record always
+    /// ships its full structured shape (dump-everything default); bare-field /
+    /// facet narrowing is not applied to the MCP envelope.
     #[serde(default)]
     pub col: Option<String>,
 }
