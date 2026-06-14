@@ -192,15 +192,34 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         Err(e) => anyhow::bail!("mutation lock error: {e}"),
     };
 
-    // Mint a trace id the same way the CLI does (an EventSink owns the id). We use
-    // a discard sink: telemetry-to-disk is a CLI-stderr concern the MCP read tools
-    // also forgo. The applier still runs identically.
-    let mut sink = crate::telemetry::EventSink::discard(
-        crate::telemetry::IdGen::new(),
-        crate::telemetry::Clock::System,
+    // Open a REAL, file-backed event sink on the apply path — the same audit
+    // trail `norn set --yes` writes (lifecycle → op_planned → action → finished).
+    // This is what makes an MCP-applied mutation "audited for free": an
+    // off-filesystem client still leaves the append-only event stream a CLI
+    // mutation would. Best-effort by contract (falls back to discard if the file
+    // can't be opened), so telemetry never blocks the mutation. The sink also
+    // owns the trace id stamped into the report.
+    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
+    crate::emit_invocation_started(
+        &mut sink,
+        "set",
+        &cwd,
+        outcome.plan.vault_root.as_str(),
+        /*dry_run=*/ false,
+        &["set".to_string(), p.target.clone()],
     );
-    let spans = std::collections::HashMap::new();
-    crate::repair_apply::apply_repair_plan_with_context(
+
+    // Pre-stamp an op span per planned change, exactly as the CLI does, so the
+    // applier's per-op action events thread under their `op_planned` span. The
+    // applier emits the actions; passing a real sink + spans is what makes them
+    // flow to disk.
+    let mut spans = std::collections::HashMap::new();
+    for change in &outcome.plan.changes {
+        let span = sink.start_op(&change.operation, change.path.as_str(), None);
+        spans.insert(change.change_id.clone(), span);
+    }
+
+    let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
         &cwd,
         &index,
         &outcome.plan,
@@ -208,8 +227,11 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         &crate::repair_apply::CreateApplyContext::default(),
         &mut sink,
         &spans,
-    )?;
+    );
     let trace_id = sink.trace_id().to_string();
+    let exit = if apply_outcome.is_ok() { 0 } else { 2 };
+    crate::emit_single_op_finished(&mut sink, "set", exit, apply_outcome.is_ok());
+    apply_outcome?;
 
     Ok(build_report(&outcome, true, &trace_id))
 }

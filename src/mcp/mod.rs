@@ -10,6 +10,7 @@
 //! watcher.
 
 pub mod context;
+pub mod mutate;
 pub mod server;
 pub mod tools;
 
