@@ -26,6 +26,7 @@ use super::to_mcp_error;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
+use crate::mcp::tools::validate::ValidateOutput;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -105,6 +106,28 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::find::FindParams>,
     ) -> Result<Json<FindOutput>, rmcp::ErrorData> {
         crate::mcp::tools::find::handle(&self.ctx, p)
+            .map(Json)
+            .map_err(to_mcp_error)
+    }
+
+    /// `vault.validate` — validate vault graph facts and configured frontmatter/link rules.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::validate`, which drives the same pipeline as
+    /// `norn validate` (cache → graph index → `validate_with_compiled` →
+    /// `filter_findings`) and returns findings as serialized JSON values in the
+    /// [`ValidateOutput`] envelope. The envelope root is `type: object` (rmcp
+    /// rejects a non-object `outputSchema`); per-finding payload stays generic
+    /// JSON because `Finding` carries `Utf8PathBuf` which has no `JsonSchema` impl.
+    #[tool(
+        name = "vault.validate",
+        description = "Validate vault graph facts and configured frontmatter/link rules; returns structured findings."
+    )]
+    async fn validate(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::validate::ValidateParams>,
+    ) -> Result<Json<ValidateOutput>, rmcp::ErrorData> {
+        crate::mcp::tools::validate::handle(&self.ctx, p)
             .map(Json)
             .map_err(to_mcp_error)
     }
