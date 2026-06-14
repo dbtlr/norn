@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.37.0 - 2026-06-14
+
+The agent-integration release. norn becomes an **MCP server** and the global cache/state trees gain **cross-vault garbage collection**. `norn mcp` exposes the vault to coding-agent harnesses as 12 structured tools (6 read, 6 mutation) over stdio — mutations are dry-run by default with event-stream auditing, a `--read-only` flag yields a query-only surface, and `vault.describe` lets off-filesystem clients place new documents. `norn cache prune` (plus a throttled lazy sweep) reclaims the per-vault cache/state dirs norn previously kept forever.
+
 ### Added
 
 - **`norn mcp` — a stdio Model Context Protocol server exposing the vault as 12 tools.** The same deterministic primitives behind the CLI, now reachable by any MCP client (Claude Code, Codex, or a generic harness) over JSON-RPC on stdio. One vault per server, resolved from `-C`/`--cwd`; the cache is held warm across calls (with the CLI's per-invocation freshness check on each call). The tool catalog:
