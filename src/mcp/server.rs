@@ -24,6 +24,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use super::context::VaultContext;
 use super::to_mcp_error;
 use crate::mcp::tools::count::CountEnvelope;
+use crate::mcp::tools::delete::DeleteOutput;
 use crate::mcp::tools::describe::DescribeOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
@@ -276,6 +277,27 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::move_doc::MoveParams>,
     ) -> Result<Json<MoveOutput>, rmcp::ErrorData> {
         self.run_tool(|ctx| crate::mcp::tools::move_doc::handle_output(ctx, p))
+            .await
+    }
+
+    /// `vault.delete` — delete a document, optionally redirecting incoming links.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::delete`, which mirrors the CLI `norn delete`
+    /// non-TTY path: preflight (backlink-policy refusal) → one-op
+    /// `delete_document` `MigrationPlan` → DRY-RUN unless `confirm` → on confirm
+    /// acquire the per-vault mutation lock, open the event sink, and apply via the
+    /// shared `applier::apply_migration_plan` (deleting + optionally redirecting
+    /// incoming links). DESTRUCTIVE: the `confirm:false` dry-run removes nothing.
+    #[tool(
+        name = "vault.delete",
+        description = "Delete a document, optionally redirecting incoming links to an alternate target. DRY-RUN by default; confirm:true to apply."
+    )]
+    async fn delete(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::delete::DeleteParams>,
+    ) -> Result<Json<DeleteOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::delete::handle_output(ctx, p))
             .await
     }
 }
