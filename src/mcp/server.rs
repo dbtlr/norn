@@ -27,6 +27,7 @@ use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::describe::DescribeOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
+use crate::mcp::tools::move_doc::MoveOutput;
 use crate::mcp::tools::new::NewOutput;
 use crate::mcp::tools::repair_plan::RepairPlanOutput;
 use crate::mcp::tools::set::SetOutput;
@@ -255,6 +256,26 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
     ) -> Result<Json<SetOutput>, rmcp::ErrorData> {
         self.run_tool(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
+            .await
+    }
+
+    /// `vault.move` — move/rename a document, cascading backlink rewrites.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::move_doc`, which mirrors the CLI `norn move`
+    /// non-TTY path: preflight → one-op `MigrationPlan` → DRY-RUN unless `confirm`
+    /// → on confirm acquire the per-vault mutation lock, open the event sink, and
+    /// apply via the shared `applier::apply_migration_plan` (which cascades the
+    /// backlink rewrites). Same mutation-safety + audit contract as `vault.set`.
+    #[tool(
+        name = "vault.move",
+        description = "Move/rename a document, cascading backlink rewrites across the vault. DRY-RUN by default; confirm:true to apply."
+    )]
+    async fn move_doc(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::move_doc::MoveParams>,
+    ) -> Result<Json<MoveOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::move_doc::handle_output(ctx, p))
             .await
     }
 }
