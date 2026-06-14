@@ -19,6 +19,7 @@ pub mod count;
 pub mod describe;
 pub mod find;
 pub mod get;
+pub mod move_doc;
 pub mod new;
 pub mod repair_plan;
 pub mod set;

@@ -1127,7 +1127,7 @@ pub(crate) fn emit_invocation_started(
 }
 
 /// Emit the `invocation_finished` lifecycle event for a mutating command.
-fn emit_invocation_finished(
+pub(crate) fn emit_invocation_finished(
     sink: &mut crate::telemetry::EventSink,
     cmd: &str,
     exit_code: i32,
@@ -1268,7 +1268,7 @@ fn resolve_delete_dry_run(
 /// .md file that failed to move), the directory is left intact.
 ///
 /// Called after a `move_folder` apply to clean up the empty source tree.
-fn remove_empty_dirs(path: &std::path::Path) {
+pub(crate) fn remove_empty_dirs(path: &std::path::Path) {
     if !path.is_dir() {
         return;
     }
