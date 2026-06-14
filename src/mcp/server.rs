@@ -23,6 +23,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use super::context::VaultContext;
 use super::to_mcp_error;
+use crate::mcp::tools::apply_plan::ApplyPlanOutput;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::delete::DeleteOutput;
 use crate::mcp::tools::describe::DescribeOutput;
@@ -191,6 +192,28 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::repair_plan::RepairPlanParams>,
     ) -> Result<Json<RepairPlanOutput>, rmcp::ErrorData> {
         self.run_tool(|ctx| crate::mcp::tools::repair_plan::handle(ctx, p))
+            .await
+    }
+
+    /// `vault.apply_plan` — apply a `MigrationPlan` (e.g. from `vault.repair_plan`).
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::apply_plan`, which mirrors `norn migrate`'s
+    /// non-TTY path: validate `schema_version` → DRY-RUN unless `confirm` → on
+    /// confirm acquire the per-vault mutation lock, open the event sink, and apply
+    /// via the shared `applier::apply_migration_plan`. The plan is accepted inline
+    /// (as a `serde_json::Value`), so callers can pipe `vault.repair_plan`'s
+    /// `result.structuredContent.plan` directly here without writing to a file.
+    /// Same mutation-safety + audit contract as `vault.move` / `vault.delete`.
+    #[tool(
+        name = "vault.apply_plan",
+        description = "Apply a MigrationPlan (e.g. from vault.repair_plan) to the vault — moves, deletes, link rewrites, frontmatter ops. DRY-RUN by default (forecasts the apply); pass confirm:true to execute."
+    )]
+    async fn apply_plan(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::apply_plan::ApplyPlanParams>,
+    ) -> Result<Json<ApplyPlanOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::apply_plan::handle_output(ctx, p))
             .await
     }
 
