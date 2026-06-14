@@ -67,51 +67,15 @@ pub fn run(
     }
 
     let cache = crate::cache_cmd::open_for_query(cwd, alias_field, no_cache_refresh)?;
-    let mut query = self::query::build_find_query(&args)?;
-    // `--links-to` targets resolve against the cache (stem/alias lookup), so
-    // resolution happens here rather than in the pure query builder.
-    query.predicates.links_to =
-        crate::filter_args::resolve_links_to(&cache, &args.filters.links_to)?;
-    let result = cache.find_documents(&query)?;
 
-    // Join-backed facets (`.headings` and the link sets) require a per-doc deep
-    // fetch; the cheap facets (`.frontmatter`, `.body`, `.path`) are already on
-    // each `DocumentSummary`. Only pay the join cost when a deep facet is asked
-    // for — the default frontmatter-only path stays at zero extra queries.
-    let (facets, _fields) = crate::output::projection::split_cols(&args.col);
-    // `--all-cols` dumps every cache-served facet, so it implies the deep fetch
-    // (headings + link sets). Body comes from `DocumentSummary.body_text`; raw
-    // is excluded by design, so `--all-cols` never triggers a disk read.
-    let needs_deep = args.all_cols
-        || facets.iter().any(|f| {
-            matches!(
-                f.as_str(),
-                "headings" | "outgoing_links" | "unresolved_links" | "incoming_links"
-            )
-        });
-    let deep: Vec<Option<crate::cache::DocumentDeep>> = if needs_deep {
-        let mut out = Vec::with_capacity(result.matches.len());
-        for doc in &result.matches {
-            // body not needed — find already carries `body_text`.
-            out.push(cache.document_with_connections(doc.path.as_path(), false)?);
-        }
-        out
-    } else {
-        Vec::new()
-    };
+    // Shared selection seam: matched docs + deep/raw fetches. The MCP
+    // `vault.find` tool consumes the same `select`/`query` path, so the two
+    // surfaces can't drift on which documents match or what gets fetched.
+    let self::query::Selection { result, deep, raw } = self::query::select(&cache, &args)?;
 
-    // `.raw` self-loads its per-match disk read only when requested — the
-    // default path does zero disk reads.
-    let wants_raw = facets.iter().any(|f| f == "raw");
-    let raw: Vec<Option<String>> = if wants_raw {
-        result
-            .matches
-            .iter()
-            .map(|doc| crate::output::projection::read_raw(cwd, &doc.path))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Recompute the sort echo for the renderers (`build_find_query` is cheap and
+    // pure; `select` already validated it succeeds).
+    let query = self::query::build_find_query(&args)?;
 
     let format = resolve_format(args.format);
     let palette = crate::output::palette::resolve(color);

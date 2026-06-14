@@ -24,6 +24,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use super::context::VaultContext;
 use super::to_mcp_error;
 use crate::mcp::tools::count::CountEnvelope;
+use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
 
 #[derive(Clone)]
@@ -82,6 +83,28 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::count::CountParams>,
     ) -> Result<Json<CountEnvelope>, rmcp::ErrorData> {
         crate::mcp::tools::count::handle(&self.ctx, p)
+            .map(Json)
+            .map_err(to_mcp_error)
+    }
+
+    /// `vault.find` — full-text + metadata document search.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::find`, which runs the shared `find::query`
+    /// seam (the same selection/JSON path behind `norn find --format json`), so
+    /// the MCP tool and the CLI can't drift on filtering, sort, limit, or `--col`.
+    /// The returned [`FindOutput`] is a typed envelope with a `type: object` root
+    /// (rmcp rejects a non-object `outputSchema`); the per-document payload stays
+    /// generic JSON, matching the `vault.get` shape.
+    #[tool(
+        name = "vault.find",
+        description = "Find documents in the vault — full-text + metadata filters with sort, limit, and paging."
+    )]
+    async fn find(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::find::FindParams>,
+    ) -> Result<Json<FindOutput>, rmcp::ErrorData> {
+        crate::mcp::tools::find::handle(&self.ctx, p)
             .map(Json)
             .map_err(to_mcp_error)
     }

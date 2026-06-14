@@ -81,7 +81,7 @@ fn render_paths(
 /// frontmatter block. With `--col`, only the requested facets / fields appear
 /// (plus `path` as identity). Cheap facets (`.frontmatter`, `.body`) read from
 /// the `DocumentSummary`; join-backed facets read from `deep`.
-fn doc_to_json(
+pub(crate) fn doc_to_json(
     doc: &crate::core::DocumentSummary,
     deep: Option<&DocumentDeep>,
     raw: Option<&str>,
