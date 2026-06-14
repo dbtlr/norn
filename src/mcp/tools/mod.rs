@@ -18,3 +18,4 @@
 pub mod count;
 pub mod find;
 pub mod get;
+pub mod validate;
