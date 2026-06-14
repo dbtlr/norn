@@ -17,16 +17,18 @@
 use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
+use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ServerCapabilities, ServerInfo};
-use rmcp::{tool_handler, tool_router, ServerHandler};
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use super::context::VaultContext;
+use super::to_mcp_error;
+use crate::mcp::tools::get::GetOutput;
 
 #[derive(Clone)]
 pub struct McpServer {
     /// Warm vault context: config held for the server lifetime; cache opened
     /// fresh per tool call via `self.ctx.query_cache()`.
-    #[allow(dead_code)] // used by tool implementations added in later tasks
     pub(crate) ctx: Arc<VaultContext>,
     tool_router: ToolRouter<Self>,
 }
@@ -40,10 +42,29 @@ impl McpServer {
     }
 }
 
-// No `#[tool]` methods yet → the generated `tool_router()` builds an empty
-// router, so `tools/list` returns zero tools.
 #[tool_router]
-impl McpServer {}
+impl McpServer {
+    /// `vault.get` — fetch one or more documents with full connection context.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::get`; this only bridges rmcp ↔ `anyhow`. The
+    /// returned [`GetOutput`] is a typed envelope whose root schema is `object`
+    /// (rmcp rejects a non-object `outputSchema`); see `tools::get` for why the
+    /// per-record payload stays generic JSON rather than a full `JsonSchema`
+    /// derive across the core types. Later read tools copy this thin shape.
+    #[tool(
+        name = "vault.get",
+        description = "Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally body."
+    )]
+    async fn get(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::get::GetParams>,
+    ) -> Result<Json<GetOutput>, rmcp::ErrorData> {
+        crate::mcp::tools::get::handle_output(&self.ctx, p)
+            .map(Json)
+            .map_err(to_mcp_error)
+    }
+}
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
