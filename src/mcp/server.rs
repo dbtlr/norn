@@ -27,6 +27,7 @@ use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::describe::DescribeOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
+use crate::mcp::tools::new::NewOutput;
 use crate::mcp::tools::repair_plan::RepairPlanOutput;
 use crate::mcp::tools::set::SetOutput;
 use crate::mcp::tools::validate::ValidateOutput;
@@ -208,6 +209,28 @@ impl McpServer {
         Parameters(_p): Parameters<crate::mcp::tools::describe::DescribeParams>,
     ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
         self.run_tool(crate::mcp::tools::describe::handle).await
+    }
+
+    /// `vault.new` — create a new document with schema-scaffolded frontmatter.
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::new`, which mirrors the CLI `norn new` non-TTY
+    /// path: preflight → `build_plan` → DRY-RUN unless `confirm` → on confirm
+    /// acquire the per-vault mutation lock, open the event sink, apply via the
+    /// shared `repair_apply::apply_repair_plan_with_context` with a single
+    /// `create_document` change, and return the JSON envelope. The mutation-safety
+    /// contract (`confirm:false` = plan-only, no file created; `confirm:true` =
+    /// file created, audited) is the same as `vault.set`.
+    #[tool(
+        name = "vault.new",
+        description = "Create a new document with schema-scaffolded frontmatter from its path. DRY-RUN by default (returns the planned creation without writing); pass confirm:true to create the file."
+    )]
+    async fn new_document(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::new::NewParams>,
+    ) -> Result<Json<NewOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::new::handle_output(ctx, p))
+            .await
     }
 
     /// `vault.set` — the first MCP mutation tool; establishes the
