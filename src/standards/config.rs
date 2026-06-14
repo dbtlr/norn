@@ -164,7 +164,7 @@ pub struct LinksConfig {
     pub alias_field: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateConfig {
     #[serde(default)]
@@ -175,7 +175,7 @@ pub struct ValidateConfig {
     pub rules: Vec<ValidateRule>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateRule {
     pub name: Option<String>,
@@ -197,7 +197,7 @@ pub struct ValidateRule {
     pub frontmatter_defaults: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleSelector {
     pub path: Option<String>,
@@ -206,7 +206,7 @@ pub struct RuleSelector {
     pub frontmatter: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleExclude {
     pub path: Option<String>,
