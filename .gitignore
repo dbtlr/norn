@@ -3,5 +3,6 @@ target/
 agents.local.md
 .worktrees/
 CLAUDE.local.md
+.saga.toml
 .claude/settings.local.json
 .claude/worktrees/
