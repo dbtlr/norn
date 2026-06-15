@@ -153,7 +153,7 @@ The CHANGELOG is one of three layers; the others kick in when you need to recove
 
 1. **`CHANGELOG.md` `## [Unreleased]`** — human-curated release notes. The primary surface for operators.
 2. **Squash commit bodies** — when squash-merging a feature branch, include the per-task narrative inline with original commit SHAs. `git log -1 <squash-sha>` then recovers everything that landed. Especially valuable when the feature branch gets deleted post-merge.
-3. **Atlas vault `agent-artifacts/`** — design spec, implementation plan, dev log. The deepest archive, capturing rationale + alternatives considered + risks.
+3. **Atlas vault workspace + session logs** — durable design knowledge in `Workspaces/norn/` (`decisions/`, `notes/`) plus the Saga session logs in `artifacts/session-logs/`. The deepest archive, capturing rationale + alternatives considered + risks. (Specs/plans are transient — reviewed in `artifacts/scratch/`, deleted on merge.)
 
 Don't duplicate effort across layers. Each answers a different question:
 - "What shipped in this release?" → CHANGELOG
