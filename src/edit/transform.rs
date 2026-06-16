@@ -110,8 +110,108 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
             };
             Ok(Some(count))
         }
-        // Structural ops land in Tasks 3–5.
-        _ => unimplemented!("structural ops"),
+        EditOp::ReplaceSection { heading, content } => {
+            let span = resolve_section(body, heading, index, op.kind())?;
+            *body = splice(body, span.body_start..span.end, &block(content));
+            Ok(None)
+        }
+        EditOp::DeleteSection { heading } => {
+            let span = resolve_section(body, heading, index, op.kind())?;
+            *body = splice(body, span.heading_start..span.end, "");
+            Ok(None)
+        }
+        _ => unimplemented!("append/insert ops"),
+    }
+}
+
+/// A normalized text block: trailing newlines stripped, then exactly one `\n`
+/// appended — unless empty (stays ""). Used at every insertion/replace seam so
+/// an op never produces a missing or doubled newline. `content` is otherwise
+/// inserted verbatim (norn does not reflow it).
+fn block(content: &str) -> String {
+    let trimmed = content.trim_end_matches('\n');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
+    }
+}
+
+fn splice(body: &str, range: std::ops::Range<usize>, replacement: &str) -> String {
+    let mut s = String::with_capacity(body.len() - (range.end - range.start) + replacement.len());
+    s.push_str(&body[..range.start]);
+    s.push_str(replacement);
+    s.push_str(&body[range.end..]);
+    s
+}
+
+/// Byte ranges describing a section addressed by exact heading text.
+struct SectionSpan {
+    /// Start of the heading line (the `#`).
+    heading_start: usize,
+    /// Start of the section body (just after the heading line's `\n`).
+    body_start: usize,
+    /// End of the section: start of the next same-or-higher-level heading, or EOF.
+    end: usize,
+}
+
+/// Resolve a unique section by exact heading text against the CURRENT body.
+/// Re-parsed per op (sequential semantics) — cheap for vault-scale docs and
+/// avoids cross-op offset bookkeeping. Fence-safe: `pulldown_cmark` never emits
+/// a heading for `#` inside a fenced code block.
+fn resolve_section(
+    body: &str,
+    heading: &str,
+    index: usize,
+    kind: &'static str,
+) -> Result<SectionSpan, EditError> {
+    // content == body, body_start == 0 → spans are body-relative.
+    let (headings, _links) =
+        crate::links::parse_commonmark(camino::Utf8Path::new("edit"), body, body, 0);
+    let matches: Vec<usize> = headings
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.text == heading)
+        .map(|(i, _)| i)
+        .collect();
+    match matches.len() {
+        0 => Err(EditError::HeadingNotFound {
+            index,
+            kind,
+            heading: heading.to_string(),
+        }),
+        1 => {
+            let i = matches[0];
+            let level = headings[i].level;
+            let heading_start = headings[i]
+                .source_span
+                .as_ref()
+                .map(|s| s.byte_offset)
+                .unwrap_or(0);
+            // Body begins after the heading line's newline.
+            let body_start = match body[heading_start..].find('\n') {
+                Some(nl) => heading_start + nl + 1,
+                None => body.len(),
+            };
+            // Section ends at the next heading whose level <= this one.
+            let end = headings[i + 1..]
+                .iter()
+                .find(|h| h.level <= level)
+                .and_then(|h| h.source_span.as_ref())
+                .map(|s| s.byte_offset)
+                .unwrap_or(body.len());
+            Ok(SectionSpan {
+                heading_start,
+                body_start,
+                end,
+            })
+        }
+        n => Err(EditError::HeadingAmbiguous {
+            index,
+            kind,
+            heading: heading.to_string(),
+            count: n,
+        }),
     }
 }
 
@@ -165,5 +265,78 @@ mod tests {
     fn str_replace_empty_old_refuses() {
         let err = apply_edits("x", &[str_replace("", "y", false)]).unwrap_err();
         assert!(matches!(err, EditError::InvalidOp { index: 0, .. }));
+    }
+
+    const DOC: &str = "intro\n\n## Alpha\na1\na2\n\n## Beta\nb1\n";
+
+    #[test]
+    fn replace_section_swaps_body_keeps_heading() {
+        let op = EditOp::ReplaceSection {
+            heading: "Alpha".into(),
+            content: "new alpha".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n## Alpha\nnew alpha\n## Beta\nb1\n");
+    }
+
+    #[test]
+    fn delete_section_removes_heading_and_body() {
+        let op = EditOp::DeleteSection {
+            heading: "Alpha".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n## Beta\nb1\n");
+    }
+
+    #[test]
+    fn last_section_runs_to_eof() {
+        let op = EditOp::ReplaceSection {
+            heading: "Beta".into(),
+            content: "B".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n## Alpha\na1\na2\n\n## Beta\nB\n");
+    }
+
+    #[test]
+    fn heading_not_found_refuses() {
+        let op = EditOp::DeleteSection {
+            heading: "Gamma".into(),
+        };
+        assert!(matches!(
+            apply_edits(DOC, &[op]).unwrap_err(),
+            EditError::HeadingNotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_heading_is_ambiguous() {
+        let doc = "## Dup\nx\n## Dup\ny\n";
+        let op = EditOp::DeleteSection {
+            heading: "Dup".into(),
+        };
+        assert!(matches!(
+            apply_edits(doc, &[op]).unwrap_err(),
+            EditError::HeadingAmbiguous { count: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn hash_inside_fence_is_not_a_heading() {
+        let doc = "## Real\n```\n## Fake\n```\nbody\n";
+        // "Fake" must not resolve.
+        let op = EditOp::DeleteSection {
+            heading: "Fake".into(),
+        };
+        assert!(matches!(
+            apply_edits(doc, &[op]).unwrap_err(),
+            EditError::HeadingNotFound { .. }
+        ));
+        // "Real" owns the whole doc including the fence.
+        let op2 = EditOp::ReplaceSection {
+            heading: "Real".into(),
+            content: "z".into(),
+        };
+        assert_eq!(apply_edits(doc, &[op2]).unwrap().new_body, "## Real\nz\n");
     }
 }
