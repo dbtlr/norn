@@ -33,6 +33,7 @@ When `--config` is omitted, norn discovers `<cwd>/.norn/config.yaml` if it exist
 |---|---|
 | [`new`](commands/new.md) | Create a document with frontmatter pre-filled from path rules. |
 | [`set`](commands/set.md) | Update one document's frontmatter or body. |
+| [`edit`](commands/edit.md) | Edit one document's body with atomic, content-anchored partial edits. |
 | [`move`](commands/move.md) | Move or rename a document, rewriting incoming links. |
 | [`delete`](commands/delete.md) | Delete a document, optionally redirecting its backlinks. |
 | [`rewrite-wikilink`](commands/rewrite-wikilink.md) | Retarget a wikilink across the vault without moving a file. |
