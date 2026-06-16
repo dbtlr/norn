@@ -9,4 +9,5 @@
 
 pub mod ops;
 pub mod report;
+pub mod synth;
 pub mod transform;
