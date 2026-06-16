@@ -631,6 +631,57 @@ pub fn synth_body_op(current_body: &str, new_body: &str) -> Option<PlannedChange
     })
 }
 
+/// Read the target on disk, synthesize a `replace_body` op for `new_body`, and
+/// stamp it (path + blake3 doc hash + change_id) exactly as preflight step 9
+/// does. No-op (leaves `body_changed = false`) when the body is unchanged.
+/// Shared by `vault.set` (MCP `body`) and `norn edit`.
+pub(crate) fn inject_body_change(
+    cwd: &camino::Utf8Path,
+    outcome: &mut PreflightOutcome,
+    new_body: &str,
+) -> anyhow::Result<()> {
+    let full_path = cwd.join(&outcome.target);
+    let content = std::fs::read_to_string(full_path.as_std_path())
+        .map_err(|e| anyhow::anyhow!("failed to read {full_path}: {e}"))?;
+    let current_body = body_after_frontmatter(&content);
+
+    let Some(mut op) = synth_body_op(&current_body, new_body) else {
+        return Ok(());
+    };
+
+    let doc_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    op.path = outcome.target.clone();
+    op.document_hash = doc_hash;
+    if op.change_id.is_empty() {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(op.path.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(op.operation.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(op.field.as_deref().unwrap_or("").as_bytes());
+        let digest = hasher.finalize();
+        op.change_id = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    }
+
+    outcome.body_changed = true;
+    outcome.body_bytes_old = current_body.len();
+    outcome.body_bytes_new = Some(new_body.len());
+    outcome.plan.changes.push(op);
+    outcome.plan.summary.findings = outcome.plan.changes.len();
+    outcome.plan.summary.planned_changes = outcome.plan.changes.len();
+    Ok(())
+}
+
+/// Body portion of `content` (everything after the closing frontmatter),
+/// matching `parse_doc`'s body slice.
+pub(crate) fn body_after_frontmatter(content: &str) -> String {
+    let mut diagnostics = Vec::new();
+    let (_fm, _range, _body, body_start) =
+        crate::frontmatter::extract_frontmatter(content, &mut diagnostics);
+    content[body_start..].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
