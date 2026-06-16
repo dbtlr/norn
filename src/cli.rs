@@ -116,6 +116,31 @@ Exit codes: 0 success or dry-run, 1 operator-cancelled, 2 pre-flight refusal."
     Set(SetArgs),
     #[command(
         disable_help_flag = true,
+        about = "Edit one document's body — atomic content-anchored partial edits",
+        long_about = "Edit one document's body with atomic, content-anchored partial edits.\n\
+\n\
+The edits are an ordered JSON array of ops applied all-or-nothing, each against \
+the result of the prior. Supply it via --edits-json or on stdin. For wholesale \
+body replacement use `norn set --body-from-stdin`; for frontmatter use `norn set`.\n\
+\n\
+Ops (tagged by \"op\"):\n  \
+str_replace {old,new,replace_all?}   Replace literal text. Unique-match-or-refuse unless replace_all.\n  \
+replace_section {heading,content}    Replace a section's body (heading kept).\n  \
+append_to_section {heading,content}  Append to a section's body.\n  \
+delete_section {heading}             Remove a heading and its body.\n  \
+insert_before_heading {heading,content} / insert_after_heading {heading,content}\n\
+\n\
+Headings are addressed by exact text; a duplicated heading refuses as ambiguous. \
+Any anchor failure refuses the whole batch (exit 2) and writes nothing.\n\
+\n\
+Safety: destructive. In a TTY it previews and prompts; without --yes in a \
+non-TTY, nothing is written (preview is your dry-run). --dry-run forces preview.\n\
+\n\
+Exit codes: 0 success or dry-run, 1 operator-cancelled, 2 pre-flight refusal."
+    )]
+    Edit(EditArgs),
+    #[command(
+        disable_help_flag = true,
         about = "Create a new document — schema-aware frontmatter pre-fill from path rules",
         long_about = "Create a new Markdown document with frontmatter pre-filled from the path's schema rules.\n\
 \n\
@@ -779,6 +804,37 @@ pub struct SetArgs {
 pub enum SetFormat {
     Records,
     Json,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EditFormat {
+    Records,
+    Json,
+}
+
+#[derive(Args, Debug)]
+pub struct EditArgs {
+    /// The doc to edit. Path, stem, or wikilink-shaped (with or without [[]]).
+    #[arg(value_name = "DOC")]
+    pub target: String,
+
+    /// The edits as a JSON array of ops (e.g.
+    /// `[{"op":"str_replace","old":"a","new":"b"}]`). Mutually exclusive with
+    /// stdin; if omitted, the array is read from stdin.
+    #[arg(long = "edits-json", value_name = "JSON")]
+    pub edits_json: Option<String>,
+
+    /// Apply the edits without an interactive confirm prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Preview the edits without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = EditFormat::Records)]
+    pub format: EditFormat,
 }
 
 #[derive(Args, Debug)]
