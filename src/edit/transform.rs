@@ -120,7 +120,26 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
             *body = splice(body, span.heading_start..span.end, "");
             Ok(None)
         }
-        _ => unimplemented!("append/insert ops"),
+        EditOp::AppendToSection { heading, content } => {
+            let span = resolve_section(body, heading, index, op.kind())?;
+            let existing = &body[span.body_start..span.end];
+            // Preserve the section's trailing whitespace (e.g. the blank line
+            // before the next heading): split into the body up to the last
+            // non-blank char (`head`) and the trailing whitespace (`tail`), then
+            // splice the new line in between.
+            let head_len = existing.trim_end().len();
+            let head = &existing[..head_len];
+            let tail = &existing[head_len..];
+            let line = content.trim_matches('\n');
+            let region = if head.is_empty() {
+                format!("{line}{tail}")
+            } else {
+                format!("{head}\n{line}{tail}")
+            };
+            *body = splice(body, span.body_start..span.end, &region);
+            Ok(None)
+        }
+        _ => unimplemented!("insert ops"),
     }
 }
 
@@ -338,5 +357,31 @@ mod tests {
             content: "z".into(),
         };
         assert_eq!(apply_edits(doc, &[op2]).unwrap().new_body, "## Real\nz\n");
+    }
+
+    #[test]
+    fn append_to_section_adds_after_last_nonblank_line() {
+        let op = EditOp::AppendToSection {
+            heading: "Alpha".into(),
+            content: "- new".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(
+            out.new_body,
+            "intro\n\n## Alpha\na1\na2\n- new\n\n## Beta\nb1\n"
+        );
+    }
+
+    #[test]
+    fn append_to_empty_section() {
+        let doc = "## Empty\n\n## Next\nx\n";
+        let op = EditOp::AppendToSection {
+            heading: "Empty".into(),
+            content: "first".into(),
+        };
+        let out = apply_edits(doc, &[op]).unwrap();
+        // The section's single separating newline is its only whitespace, so the
+        // appended line consumes it; sections stay adjacent (deterministic).
+        assert_eq!(out.new_body, "## Empty\nfirst\n## Next\nx\n");
     }
 }
