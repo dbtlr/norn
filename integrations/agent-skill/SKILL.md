@@ -1,7 +1,7 @@
 ---
 name: norn
 description: Use when inspecting, querying, validating, or mutating Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, query, and validation/repair workflows.
-version: 1.1.0
+version: 1.2.0
 author: Drew Butler <hi@dbtlr.com>
 license: MIT
 ---
@@ -101,7 +101,7 @@ One asymmetry to know: `rewrite-wikilink` retargets wikilinks only. Relative Mar
 
 ## Mutation — safe by default
 
-`new`, `set`, `move`, `delete` are single-document, schema-aware writes. `migrate` applies a batch plan. All are safe-by-default, but the exact trigger differs — read the table before scripting them.
+`new`, `set`, `edit`, `move`, `delete` are single-document, schema-aware writes. `migrate` applies a batch plan. All are safe-by-default, but the exact trigger differs — read the table before scripting them.
 
 ### The apply-model table
 
@@ -109,6 +109,7 @@ One asymmetry to know: `rewrite-wikilink` retargets wikilinks only. Relative Mar
 |---|---|---|---|---|---|
 | `new` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, JSON report |
 | `set` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `SetReport` |
+| `edit` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `EditReport` |
 | `move` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
 | `delete` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
 | `migrate` | confirm | applies (consumes a plan) | apply | preview | `ApplyReport` |
@@ -129,6 +130,29 @@ echo "new body" | norn set notes/task.md --body-from-stdin --yes
 ```
 
 Schema-aware: `field_types` validation runs before apply; `wikilink`-typed fields auto-wrap (`norn` → `[[norn]]`); a value outside `allowed_values` is refused (exit 2) unless `--force`; removing a required field needs `--force`. Exit codes: `0` ok/dry-run, `1` cancelled, `2` refusal.
+
+### edit
+
+`edit` makes surgical, content-anchored changes to a document's **body** — the rest stays byte-for-byte intact. Use it instead of `set --body-from-stdin` (wholesale body replacement) when you want to touch one phrase or one section. Frontmatter stays with `set`.
+
+```bash
+norn edit notes/task.md \
+  --edits-json '[{"op":"str_replace","old":"draft","new":"final"}]' --yes
+echo '[{"op":"append_to_section","heading":"Tasks","content":"- [ ] ship"}]' \
+  | norn edit notes/task.md --yes      # array on stdin when --edits-json is absent
+```
+
+The edits are an **ordered JSON array** of ops, applied **all-or-nothing**: each op runs against the result of the prior, and any anchor failure refuses the whole batch with no partial write. Ops (tagged by `op`):
+
+- `str_replace {old, new, replace_all?}` — literal replace; unique-match-or-refuse unless `replace_all`.
+- `replace_section {heading, content}` — swap a section's body, heading kept.
+- `append_to_section {heading, content}` — append to a section's body.
+- `delete_section {heading}` — remove a heading and its body.
+- `insert_before_heading` / `insert_after_heading {heading, content}` — positional insert.
+
+Sections are addressed by **exact heading text**; a duplicated heading refuses as ambiguous (exit 2), and headings inside fenced code blocks are not matched. Exit codes: `0` ok/dry-run, `1` cancelled, `2` refusal. Output: `EditReport` (`schema_version: 1`).
+
+**MCP (`vault.edit`):** the tool carries the identical op array, dry-run by default, `confirm: true` to write (refused under `--read-only`). For a non-idempotent op like `str_replace`, an MCP client must **read the dry-run response before sending `confirm: true`** — the confirm consumes the same anchor, so resending the op blind after it already applied would fail to re-match.
 
 ### new
 
