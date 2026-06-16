@@ -44,7 +44,9 @@ pub enum EditError {
         kind: &'static str,
         heading: String,
     },
-    #[error("edit {index} ({kind}): {count} headings named {heading:?}; heading must be unambiguous")]
+    #[error(
+        "edit {index} ({kind}): {count} headings named {heading:?}; heading must be unambiguous"
+    )]
     HeadingAmbiguous {
         index: usize,
         kind: &'static str,
@@ -139,7 +141,20 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
             *body = splice(body, span.body_start..span.end, &region);
             Ok(None)
         }
-        _ => unimplemented!("insert ops"),
+        EditOp::InsertBeforeHeading { heading, content } => {
+            let span = resolve_section(body, heading, index, op.kind())?;
+            *body = splice(
+                body,
+                span.heading_start..span.heading_start,
+                &block(content),
+            );
+            Ok(None)
+        }
+        EditOp::InsertAfterHeading { heading, content } => {
+            let span = resolve_section(body, heading, index, op.kind())?;
+            *body = splice(body, span.body_start..span.body_start, &block(content));
+            Ok(None)
+        }
     }
 }
 
@@ -383,5 +398,71 @@ mod tests {
         // The section's single separating newline is its only whitespace, so the
         // appended line consumes it; sections stay adjacent (deterministic).
         assert_eq!(out.new_body, "## Empty\nfirst\n## Next\nx\n");
+    }
+
+    #[test]
+    fn insert_before_heading_places_content_above() {
+        let op = EditOp::InsertBeforeHeading {
+            heading: "Beta".into(),
+            content: "BRIDGE".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(
+            out.new_body,
+            "intro\n\n## Alpha\na1\na2\n\nBRIDGE\n## Beta\nb1\n"
+        );
+    }
+
+    #[test]
+    fn insert_after_heading_places_content_below_heading() {
+        let op = EditOp::InsertAfterHeading {
+            heading: "Beta".into(),
+            content: "LEAD".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(
+            out.new_body,
+            "intro\n\n## Alpha\na1\na2\n\n## Beta\nLEAD\nb1\n"
+        );
+    }
+
+    #[test]
+    fn ops_apply_sequentially_each_sees_prior_result() {
+        // Op 1 renames the heading; op 2 must anchor on the NEW name.
+        let ops = vec![
+            EditOp::StrReplace {
+                old: "## Alpha".into(),
+                new: "## Renamed".into(),
+                replace_all: false,
+            },
+            EditOp::AppendToSection {
+                heading: "Renamed".into(),
+                content: "tail".into(),
+            },
+        ];
+        let out = apply_edits(DOC, &ops).unwrap();
+        assert_eq!(
+            out.new_body,
+            "intro\n\n## Renamed\na1\na2\ntail\n\n## Beta\nb1\n"
+        );
+    }
+
+    #[test]
+    fn batch_is_atomic_failure_yields_no_partial() {
+        // Op 1 would succeed; op 2 fails — apply_edits returns Err and the caller
+        // gets nothing (the returned body is discarded). We assert the error is
+        // attributed to op index 1.
+        let ops = vec![
+            EditOp::StrReplace {
+                old: "intro".into(),
+                new: "INTRO".into(),
+                replace_all: false,
+            },
+            EditOp::DeleteSection {
+                heading: "Missing".into(),
+            },
+        ];
+        let err = apply_edits(DOC, &ops).unwrap_err();
+        assert!(matches!(err, EditError::HeadingNotFound { index: 1, .. }));
     }
 }
