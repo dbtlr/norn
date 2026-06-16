@@ -899,6 +899,173 @@ fn run(cli: Cli) -> Result<i32> {
 
             Ok(0)
         }
+        Command::Edit(args) => {
+            use crate::cache::CacheError;
+            use crate::mutation_lock::pending::sweep_pending;
+            use crate::mutation_lock::MutationLock;
+            use std::io::{IsTerminal, Read, Write};
+
+            // Parse the edits array first (from --edits-json or stdin), so a
+            // malformed array fails fast before any lock/cache work.
+            let raw = match &args.edits_json {
+                Some(s) => s.clone(),
+                None => {
+                    let mut buf = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .map_err(|e| anyhow::anyhow!("failed to read edits from stdin: {e}"))?;
+                    buf
+                }
+            };
+            let ops: Vec<crate::edit::ops::EditOp> = match serde_json::from_str(&raw) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: invalid edits JSON: {e}");
+                    return Ok(2);
+                }
+            };
+            if ops.is_empty() {
+                eprintln!("error: edits array is empty");
+                return Ok(2);
+            }
+
+            let (_, state_dir) = crate::cache::state_dir_for(&cwd)
+                .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+            sweep_pending(&state_dir);
+            let _mutation_lock = {
+                let is_apply = !args.dry_run && (args.yes || std::io::stdin().is_terminal());
+                match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+                    Ok(guard) => guard,
+                    Err(CacheError::MutationLockTimeout) => {
+                        eprintln!(
+                            "error: another norn mutation is in progress against this vault (timed out after 5 s)"
+                        );
+                        return Ok(2);
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
+                }
+            };
+
+            let loaded_config = load_config(&cwd, config_path.as_ref())?;
+            let mut index = crate::cache_cmd::load_graph_index(
+                &cwd,
+                &loaded_config.index_options,
+                no_cache_refresh,
+            )?;
+            trim_diagnostics(&mut index, verbose);
+            let cache = crate::cache_cmd::open_for_query(
+                &cwd,
+                loaded_config.index_options.alias_field.as_deref(),
+                no_cache_refresh,
+            )?;
+            let vault_cfg = loaded_config.vault_config;
+
+            let pre = match crate::edit::synth::preflight_and_plan(
+                &cwd,
+                &cache,
+                &index,
+                &vault_cfg,
+                &args.target,
+                &ops,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Ok(2);
+                }
+            };
+
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+
+            let should_apply = if args.dry_run {
+                false
+            } else if args.yes {
+                true
+            } else if matches!(args.format, crate::cli::EditFormat::Json) {
+                let preview =
+                    crate::edit::report::build_report(&pre.outcome, &pre.descriptors, false, "");
+                crate::edit::report::render_json(&mut out, &preview)?;
+                return Ok(0);
+            } else if std::io::stdin().is_terminal() {
+                let preview =
+                    crate::edit::report::build_report(&pre.outcome, &pre.descriptors, false, "");
+                crate::edit::report::render_records(&mut out, &preview)?;
+                let stdin = std::io::stdin();
+                let mut reader = stdin.lock();
+                let mut prompt_out = std::io::stderr();
+                writeln!(prompt_out)?;
+                let ok = crate::prompt::confirm(&mut reader, &mut prompt_out, "Proceed? [y/N] ")?;
+                if !ok {
+                    std::process::exit(1);
+                }
+                true
+            } else {
+                let preview =
+                    crate::edit::report::build_report(&pre.outcome, &pre.descriptors, false, "");
+                crate::edit::report::render_records(&mut out, &preview)?;
+                return Ok(0);
+            };
+
+            if should_apply {
+                let argv: Vec<String> = std::env::args().collect();
+                let mut sink = open_event_sink(&cwd, false, vault_cfg.telemetry.as_ref(), &argv);
+                emit_invocation_started(
+                    &mut sink,
+                    "edit",
+                    &cwd,
+                    pre.outcome.plan.vault_root.as_str(),
+                    false,
+                    &argv,
+                );
+                let mut spans = std::collections::HashMap::new();
+                for change in &pre.outcome.plan.changes {
+                    let span = sink.start_op(&change.operation, change.path.as_str(), None);
+                    spans.insert(change.change_id.clone(), span);
+                }
+                let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
+                    &cwd,
+                    &index,
+                    &pre.outcome.plan,
+                    false,
+                    &crate::repair_apply::CreateApplyContext::default(),
+                    &mut sink,
+                    &spans,
+                );
+                let trace_id = sink.trace_id().to_string();
+                let exit = if apply_outcome.is_ok() { 0 } else { 2 };
+                emit_single_op_finished(&mut sink, "edit", exit, apply_outcome.is_ok());
+                apply_outcome?;
+
+                let applied = crate::edit::report::build_report(
+                    &pre.outcome,
+                    &pre.descriptors,
+                    true,
+                    &trace_id,
+                );
+                match args.format {
+                    crate::cli::EditFormat::Records => {
+                        crate::edit::report::render_records(&mut out, &applied)?;
+                        writeln!(out, "trace: {trace_id}")?;
+                    }
+                    crate::cli::EditFormat::Json => {
+                        crate::edit::report::render_json(&mut out, &applied)?;
+                    }
+                }
+            } else {
+                let preview =
+                    crate::edit::report::build_report(&pre.outcome, &pre.descriptors, false, "");
+                match args.format {
+                    crate::cli::EditFormat::Records => {
+                        crate::edit::report::render_records(&mut out, &preview)?
+                    }
+                    crate::cli::EditFormat::Json => {
+                        crate::edit::report::render_json(&mut out, &preview)?
+                    }
+                }
+            }
+            Ok(0)
+        }
         Command::New(args) => {
             use crate::cache::CacheError;
             use crate::mutation_lock::pending::sweep_pending;
