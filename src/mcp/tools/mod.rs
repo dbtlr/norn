@@ -19,6 +19,7 @@ pub mod apply_plan;
 pub mod count;
 pub mod delete;
 pub mod describe;
+pub mod edit;
 pub mod find;
 pub mod get;
 pub mod move_doc;
