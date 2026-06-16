@@ -31,6 +31,7 @@ use crate::mcp::tools::apply_plan::ApplyPlanOutput;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::delete::DeleteOutput;
 use crate::mcp::tools::describe::DescribeOutput;
+use crate::mcp::tools::edit::EditOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
 use crate::mcp::tools::move_doc::MoveOutput;
@@ -272,7 +273,7 @@ impl McpServer {
     }
 }
 
-/// The 6 MUTATION tools — registered only when NOT read-only. The macro generates
+/// The 7 MUTATION tools — registered only when NOT read-only. The macro generates
 /// `fn mutate_router() -> ToolRouter<Self>` holding exactly these; `new` merges it
 /// into the stored router only when `!read_only`, so under `--read-only` these are
 /// absent from `tools/list`. Each handler also funnels through `run_mutation`,
@@ -324,6 +325,27 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
     ) -> Result<Json<SetOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
+            .await
+    }
+
+    /// `vault.edit` — sub-document partial edits (str_replace + structural
+    /// section ops). DRY-RUN by default; `confirm:true` applies. Funnels through
+    /// `run_mutation` like every mutation tool (read-only refusal + call_lock).
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::edit`, which mirrors `norn edit`'s dispatch via
+    /// the shared `edit::synth` preflight; the returned [`EditOutput`] is the same
+    /// typed-envelope shape as [`SetOutput`] (a `type: object` root wrapping the
+    /// `EditReport` as generic JSON, since the report carries a `Utf8PathBuf`).
+    #[tool(
+        name = "vault.edit",
+        description = "Edit one document's body with atomic content-anchored partial edits (str_replace + section ops). DRY-RUN by default — returns the plan without writing. Pass confirm:true to apply."
+    )]
+    async fn edit(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::edit::EditParams>,
+    ) -> Result<Json<EditOutput>, rmcp::ErrorData> {
+        self.run_mutation(|ctx| crate::mcp::tools::edit::handle_output(ctx, p))
             .await
     }
 

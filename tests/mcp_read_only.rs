@@ -4,11 +4,11 @@
 //! vault, exercising the read-only contract end-to-end over JSON-RPC:
 //!
 //! 1. With `--read-only`: `tools/list` advertises EXACTLY the 6 read tools and
-//!    NONE of the 6 mutation tools (drop-from-list, requirement 1).
+//!    NONE of the 7 mutation tools (drop-from-list, requirement 1).
 //! 2. With `--read-only`: a `tools/call` for a mutation tool (`vault.set`) ERRORS
 //!    AND the file on disk is byte-for-byte UNCHANGED (runtime refusal + writes
 //!    nothing, requirement 2).
-//! 3. Without the flag (default): `tools/list` advertises ALL 12 tools — the
+//! 3. Without the flag (default): `tools/list` advertises ALL 13 tools — the
 //!    non-read-only path is unchanged (requirement 3, the regression guard).
 //!
 //! Child-process driven, cache pre-built, XDG isolated — same shape as the other
@@ -29,10 +29,11 @@ const READ_TOOLS: &[&str] = &[
     "vault.describe",
 ];
 
-/// The 6 mutation tools — dropped from `tools/list` under `--read-only`.
+/// The 7 mutation tools — dropped from `tools/list` under `--read-only`.
 const MUTATION_TOOLS: &[&str] = &[
     "vault.new",
     "vault.set",
+    "vault.edit",
     "vault.move",
     "vault.delete",
     "vault.rewrite_wikilink",
@@ -239,9 +240,9 @@ fn read_only_refuses_mutation_call_and_writes_nothing() {
     );
 }
 
-/// Default (no flag): `tools/list` advertises ALL 12 tools — path unchanged.
+/// Default (no flag): `tools/list` advertises ALL 13 tools — path unchanged.
 #[test]
-fn default_lists_all_twelve_tools() {
+fn default_lists_all_thirteen_tools() {
     let vault = seeded_vault();
     prebuild_cache(&vault);
 
@@ -261,6 +262,6 @@ fn default_lists_all_twelve_tools() {
     assert_eq!(
         names.len(),
         READ_TOOLS.len() + MUTATION_TOOLS.len(),
-        "default tools/list must advertise all 12 tools, got: {names:?}"
+        "default tools/list must advertise all 13 tools, got: {names:?}"
     );
 }
