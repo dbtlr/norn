@@ -33,6 +33,7 @@ mod repair_apply;
 mod rewrite_wikilink_cmd;
 mod self_update;
 mod set;
+mod edit;
 mod show;
 mod standards;
 mod target;
