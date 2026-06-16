@@ -168,7 +168,7 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     // change_id). This keeps `vault.set` body semantics byte-identical to
     // `norn set --body-from-stdin`.
     if let Some(new_body) = p.body.as_deref() {
-        inject_body_change(&cwd, &mut outcome, new_body)?;
+        crate::set::synth::inject_body_change(&cwd, &mut outcome, new_body)?;
     }
 
     // DRY-RUN (default): no lock, no apply, no write.
@@ -234,60 +234,6 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     apply_outcome?;
 
     Ok(build_report(&outcome, true, &trace_id))
-}
-
-/// Synthesize and stamp a `replace_body` change for an in-memory body string,
-/// mirroring steps 8–9 of `set::synth::preflight_and_plan` (which only fires for
-/// the CLI's `--body-from-stdin` path). Re-reads the file to compute the current
-/// body and the blake3 document hash, exactly as preflight does, so the op groups
-/// with frontmatter changes on the same path and passes the applier's hash check.
-fn inject_body_change(
-    cwd: &camino::Utf8Path,
-    outcome: &mut crate::set::synth::PreflightOutcome,
-    new_body: &str,
-) -> Result<()> {
-    let full_path = cwd.join(&outcome.target);
-    let content = std::fs::read_to_string(full_path.as_std_path())
-        .map_err(|e| anyhow::anyhow!("failed to read {full_path}: {e}"))?;
-    let current_body = body_after_frontmatter(&content);
-
-    let Some(mut op) = crate::set::synth::synth_body_op(&current_body, new_body) else {
-        // Identical body: no-op, leaving body_changed = false (preflight default).
-        return Ok(());
-    };
-
-    // Stamp path + document_hash + change_id exactly as preflight step 9 does.
-    let doc_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-    op.path = outcome.target.clone();
-    op.document_hash = doc_hash;
-    if op.change_id.is_empty() {
-        use sha2::Digest as _;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(op.path.as_str().as_bytes());
-        hasher.update(b"\0");
-        hasher.update(op.operation.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(op.field.as_deref().unwrap_or("").as_bytes());
-        let digest = hasher.finalize();
-        op.change_id = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    }
-
-    outcome.body_changed = true;
-    outcome.body_bytes_old = current_body.len();
-    outcome.body_bytes_new = Some(new_body.len());
-    outcome.plan.changes.push(op);
-    outcome.plan.summary.findings = outcome.plan.changes.len();
-    outcome.plan.summary.planned_changes = outcome.plan.changes.len();
-    Ok(())
-}
-
-/// Return the body portion of `content` (everything after the closing frontmatter
-/// `---\n`), matching `set::synth::parse_doc`'s body slice.
-fn body_after_frontmatter(content: &str) -> String {
-    let mut diagnostics = Vec::new();
-    let (_fm, _range, _body, body_start) =
-        crate::frontmatter::extract_frontmatter(content, &mut diagnostics);
-    content[body_start..].to_string()
 }
 
 #[cfg(test)]
