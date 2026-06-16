@@ -85,10 +85,9 @@ mod tests {
 
     #[test]
     fn deserializes_structural_ops() {
-        let op: EditOp = serde_json::from_str(
-            r#"{"op":"append_to_section","heading":"Tasks","content":"- x"}"#,
-        )
-        .unwrap();
+        let op: EditOp =
+            serde_json::from_str(r#"{"op":"append_to_section","heading":"Tasks","content":"- x"}"#)
+                .unwrap();
         assert_eq!(op.kind(), "append_to_section");
         assert_eq!(op.anchor_desc(), r#"heading="Tasks""#);
     }
