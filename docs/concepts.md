@@ -5,7 +5,7 @@ description: The deterministic graph, document inventory, frontmatter model, Obs
 
 # Concepts
 
-`norn` is built around a few small ideas. This page explains them once so the command reference and validation guide can stay tight.
+`norn` is built around a few small ideas, defined here once.
 
 ## The vault graph
 

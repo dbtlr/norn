@@ -65,7 +65,7 @@ mod tests {
             latest_version: "0.33.1".to_string(),
             target_version: "0.33.1".to_string(),
             target_triple: "aarch64-apple-darwin".to_string(),
-            install_path: "/Users/drew/.cargo/bin/vault".to_string(),
+            install_path: "/home/user/.cargo/bin/norn".to_string(),
             asset_url: Some("https://example/v0.33.1/vault-arm64.tar.xz".to_string()),
             asset_sha256: Some("abc123".to_string()),
             dry_run: true,

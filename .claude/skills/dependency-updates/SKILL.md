@@ -171,7 +171,7 @@ Push the call-site fix to dependabot's branch (same as A, but the PR is dependab
 
 **Recommendation:** prefer C when the PR is still open; fall back to A (fresh PR from the same branch) if the dep PR was closed.
 
-### Concrete trade-off prompt to use with Drew
+### Concrete trade-off prompt for the maintainer
 
 When the migration is non-trivial, surface the three shapes explicitly before picking one. Example shape:
 
