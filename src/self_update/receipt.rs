@@ -93,7 +93,7 @@ mod tests {
 
     const SAMPLE_RECEIPT: &str = r#"{
         "binaries": ["norn"],
-        "install_prefix": "/Users/drew/.cargo",
+        "install_prefix": "/home/user/.cargo",
         "binary_aliases": {},
         "cargo_dist_version": "0.32.0",
         "install_layout": "flat",
@@ -119,7 +119,7 @@ mod tests {
     const CURRENT_RECEIPT: &str = r#"{
         "binaries": ["norn"],
         "binary_aliases": {},
-        "install_prefix": "/Users/drew/.cargo",
+        "install_prefix": "/home/user/.cargo",
         "install_layout": "cargo-home",
         "modify_path": true,
         "provider": { "source": "cargo-dist", "version": "0.32.0" },

@@ -49,7 +49,7 @@ norn -C /path/to/vault find --all --format paths | head
 norn -C /path/to/vault validate --summary --format records
 ```
 
-Out of the box `norn` parses Obsidian-compatible internal links: body wikilinks, embeds, frontmatter wikilinks, URL-decoded Markdown links, extensionless Markdown note links, heading anchors, and block references.
+`norn` recognizes Obsidian-compatible internal links: body wikilinks, embeds, frontmatter wikilinks, URL-decoded Markdown links, extensionless Markdown note links, heading anchors, and block references.
 
 ## Targeting a vault
 
