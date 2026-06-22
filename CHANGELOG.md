@@ -15,6 +15,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 - Bumped `camino` 1.2.2 → 1.2.3 (patch).
 - Bumped `chrono` 0.4.44 → 0.4.45 (patch).
 - Bumped `regex` 1.12.3 → 1.12.4 (patch; pulls `regex-syntax` 0.8.10 → 0.8.11).
+- Bumped `rusqlite` 0.39.0 → 0.40.1 (still `features = ["bundled"]`; ships newer bundled SQLite). No source changes: 0.40's breaking changes are confined to the virtual-table API, which norn does not use, and 0.40.1's SAVEPOINT-name SQL-injection fix does not apply (norn issues no SAVEPOINTs). Cache schema and on-disk format unchanged; Atlas dogfood reads held at ~32ms. Pulls `libsqlite3-sys` 0.37 → 0.38 and `hashlink` 0.11 → 0.12 (the latter adds a second `foldhash` version transitively — a cargo-deny `multiple-versions` warning, not an error).
 
 ## v0.38.0 - 2026-06-16
 
