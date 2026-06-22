@@ -10,6 +10,12 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Changed
+
+- Bumped `camino` 1.2.2 → 1.2.3 (patch).
+- Bumped `chrono` 0.4.44 → 0.4.45 (patch).
+- Bumped `regex` 1.12.3 → 1.12.4 (patch; pulls `regex-syntax` 0.8.10 → 0.8.11).
+
 ## v0.38.0 - 2026-06-16
 
 The sub-document-edit release. `norn edit` and the `vault.edit` MCP tool add atomic, content-anchored partial edits to a document body — closing the last vault-mutation gap with no filesystem-free path, so an agent driving a remote/off-filesystem MCP vault can now make surgical body edits (not just whole-document operations). The CLI and MCP surfaces are capability-isomorphic, and the feature rides the existing safe-mutation machinery (dry-run/confirm, per-vault lock, event-stream audit).
