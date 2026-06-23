@@ -6,6 +6,7 @@
 
 pub mod event;
 pub mod ids;
+pub mod read;
 pub mod store;
 
 pub use event::{Event, Severity};
