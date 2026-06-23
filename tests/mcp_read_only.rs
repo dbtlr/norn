@@ -243,7 +243,7 @@ fn read_only_refuses_mutation_call_and_writes_nothing() {
 
 /// Default (no flag): `tools/list` advertises ALL 14 tools — path unchanged.
 #[test]
-fn default_lists_all_thirteen_tools() {
+fn default_lists_all_fourteen_tools() {
     let vault = seeded_vault();
     prebuild_cache(&vault);
 
