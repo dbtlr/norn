@@ -1,5 +1,6 @@
 pub mod applier;
 pub mod apply_report;
+mod audit;
 mod cache;
 mod cache_cmd;
 mod cli;
@@ -1096,6 +1097,23 @@ fn run(cli: Cli) -> Result<i32> {
             }
         }
         Command::Init(args) => init::run(&cwd, &args),
+        Command::Audit(args) => {
+            let (_, events_dir) = crate::cache::events_dir_for(&cwd)?;
+            let filter = match crate::audit::build_filter(&args) {
+                Ok(f) => f,
+                Err(msg) => {
+                    eprintln!("error: {msg}");
+                    std::process::exit(2);
+                }
+            };
+            let events = crate::telemetry::read::read_events(&events_dir, &filter, args.limit);
+            let out = crate::audit::render(&events, &args);
+            print!("{out}");
+            if !out.ends_with('\n') {
+                println!();
+            }
+            Ok(0)
+        }
         Command::Completions(_) => {
             unreachable!("completions are handled before vault targeting")
         }

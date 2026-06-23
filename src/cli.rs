@@ -264,6 +264,11 @@ Exit codes: 0 success or dry-run, 1 runtime failure, 2 pre-flight refusal."
     SelfUpdate(SelfUpdateArgs),
     /// Run norn as a Model Context Protocol (MCP) stdio server over the vault at --cwd.
     Mcp(McpArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Read the vault mutation audit trail (the append-only event stream): recent mutations with status / target / trace, filterable"
+    )]
+    Audit(AuditArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -747,6 +752,74 @@ pub enum GetFormat {
     /// The single selected document, byte-faithful from disk. Errors unless
     /// exactly one document is selected; `--col` is ignored.
     Markdown,
+}
+
+#[derive(Args, Debug)]
+pub struct AuditArgs {
+    /// Only events from this invocation trace id (one mutation command).
+    #[arg(long, value_name = "ID", help_heading = "Filters")]
+    pub trace: Option<String>,
+
+    /// Only per-action events with this status. Excludes lifecycle/planned
+    /// events (which have no status).
+    #[arg(long, value_enum, help_heading = "Filters")]
+    pub status: Option<AuditStatus>,
+
+    /// Only events touching this vault-relative path (matches a move's source
+    /// or destination).
+    #[arg(long, value_name = "PATH", help_heading = "Filters")]
+    pub target: Option<String>,
+
+    /// Lower time bound. `YYYY-MM-DD` (start of UTC day) or full RFC-3339.
+    #[arg(long, value_name = "WHEN", help_heading = "Filters")]
+    pub since: Option<String>,
+
+    /// Upper time bound. `YYYY-MM-DD` (end of UTC day) or full RFC-3339.
+    #[arg(long, value_name = "WHEN", help_heading = "Filters")]
+    pub until: Option<String>,
+
+    /// Maximum number of events to return, newest-first.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 20,
+        help_heading = "Sort and paging"
+    )]
+    pub limit: usize,
+
+    /// Emit the stored OTEL event objects verbatim instead of the flattened
+    /// projection. Affects `--format json` only (ignored by `records`).
+    #[arg(long, help_heading = "Output")]
+    pub raw: bool,
+
+    /// Output format. Default records (vertical key-value block per event).
+    #[arg(long, value_enum, default_value_t = AuditFormat::Records, help_heading = "Output")]
+    pub format: AuditFormat,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditFormat {
+    /// Vertical key-value record block per event.
+    Records,
+    /// A single JSON array of event objects.
+    Json,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditStatus {
+    Applied,
+    Skipped,
+    Failed,
+}
+
+impl AuditStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
