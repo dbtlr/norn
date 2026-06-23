@@ -18,10 +18,6 @@ categories = ["command-line-utilities"]
 keywords = ["markdown", "obsidian", "vault", "cli", "validation"]
 build = "build.rs"
 
-[lib]
-name = "norn_lib"
-path = "src/lib.rs"
-
 [[bin]]
 name = "norn"
 path = "src/main.rs"
