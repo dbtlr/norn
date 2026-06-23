@@ -222,6 +222,26 @@ Single-line pipeline (skips the artifact file): `norn -C /vault repair --plan --
 
 Repair-action kinds in a plan: `set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, `move_document`, `rewrite_link`, `replace_body` (emitted only by `set --body-from-stdin`), `create_document` (emitted only by `new`). Closest-match `rewrite_link` proposals are confidence-banded (`high` = slug-identity, safe; `medium` = small edit distance, review). Use `--confidence high` to keep only high-confidence proposals. Ties skip with `ambiguous-target`; never auto-pick them.
 
+## Audit trail
+
+```bash
+norn audit                                    # newest 20 events, records format
+norn audit --trace a1b2c3d4                   # all events from one invocation
+norn audit --status applied --limit 10        # applied mutations only
+norn audit --target notes/my-note.md          # events touching a specific path
+norn audit --since 2026-06-01 --until 2026-06-15  # UTC day range
+norn audit --format json --limit 5            # stable JSON array
+norn audit --raw --limit 5                    # stored OTEL Logs objects verbatim
+```
+
+`audit` reads the per-vault append-only mutation event stream. Only confirmed mutations are recorded (dry-runs and reads are not). An empty or absent stream returns `[]` with exit 0. Results are newest-first.
+
+Filters (all AND-combined): `--trace <ID>` (one invocation), `--status applied|skipped|failed`, `--target <PATH>` (source or destination of a move), `--since`/`--until` (`YYYY-MM-DD` → UTC day bounds; RFC-3339 for precision), `--limit <N>` (default 20).
+
+Output is a **flattened norn-native projection**: hot fields `trace`, `status`, `target`, and `target_to` promoted to top-level; remaining `norn.*` attributes in a generic `attributes` bag (prefix stripped, dots→underscores). `--raw` returns the stored OTEL Logs objects verbatim.
+
+**MCP (`vault.audit`):** the tool carries the identical filter surface, returns `{ events: [...] }`, and — being read-only — is available even under `norn mcp --read-only`.
+
 ## User vault doctrine lives in .norn/config.yaml
 
 Don't hardcode a vault's rule names, field shapes, or status vocabularies into prompts — read them from `<vault-root>/.norn/config.yaml`. It declares `files.ignore`, `validate.ignore`, `validate.required_frontmatter`, `validate.rules`, and `repair.rules`. No config → defaults apply. Inspect it with `norn config show`.

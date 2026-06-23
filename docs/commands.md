@@ -26,6 +26,7 @@ When `--config` is omitted, norn discovers `<cwd>/.norn/config.yaml` if it exist
 | [`find`](commands/find.md) | Find documents by frontmatter, body text, path, or link relationship. |
 | [`count`](commands/count.md) | Count documents, total or grouped, over the find filter surface. |
 | [`get`](commands/get.md) | Get one or more documents in full — frontmatter, headings, links. |
+| [`audit`](commands/audit.md) | Read the per-vault mutation audit trail (append-only event stream). |
 
 ## Create and mutate
 
