@@ -258,8 +258,8 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     // Post-create validate: surface any missing-required-field findings as
     // warnings in the output envelope — mirrors `apply_and_render`'s
     // `post_create_validate` call.
-    let post_warnings =
-        post_create_validate(&cwd, &args, &plan.warnings, body_bytes).unwrap_or_default();
+    let post_warnings = crate::new::post_create_validate(&cwd, &args, &plan.warnings, body_bytes)
+        .unwrap_or_default();
     let mut augmented = crate::new::synth::CreateDocumentPlan {
         change: plan.change.clone(),
         warnings: plan.warnings.clone(),
@@ -269,61 +269,6 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
 
     crate::new::report::render_json(&augmented, &p.path, true, body_bytes, &trace_id)
         .map_err(|e| anyhow::anyhow!("render_json: {e}"))
-}
-
-/// Re-validate the newly created document and return any missing-required-field
-/// findings as additional warnings. Mirrors `src/new/mod.rs::post_create_validate`.
-fn post_create_validate(
-    vault_root: &camino::Utf8Path,
-    args: &NewArgs,
-    existing_warnings: &[crate::new::synth::Warning],
-    _body_bytes: usize,
-) -> Result<Vec<crate::new::synth::Warning>> {
-    use crate::new::synth::Warning;
-
-    let vault_root_buf = vault_root.to_owned();
-    let loaded = crate::config_loader::load_config(&vault_root_buf, None)
-        .map_err(|e| anyhow::anyhow!("post-create validate: config error: {e}"))?;
-    let index = crate::cache_cmd::load_graph_index(
-        &vault_root_buf,
-        &loaded.index_options,
-        /*no_cache_refresh=*/ false,
-    )?;
-
-    let findings = crate::standards::validate_with_compiled(
-        &index,
-        &loaded.vault_config.validate,
-        &loaded.compiled,
-        None,
-    );
-
-    let new_path = args.path.as_str();
-    let relevant: Vec<_> = findings
-        .iter()
-        .filter(|f| f.path.as_str() == new_path)
-        .collect();
-
-    let already_warned: std::collections::BTreeSet<String> = existing_warnings
-        .iter()
-        .filter_map(|w| match w {
-            Warning::MissingRequiredField { field, .. } => Some(field.clone()),
-            _ => None,
-        })
-        .collect();
-
-    let mut extra = Vec::new();
-    for f in relevant {
-        if let crate::standards::FindingBody::RequiredFrontmatterMissing { field, rule } = &f.body {
-            if !already_warned.contains(field) {
-                extra.push(Warning::MissingRequiredField {
-                    field: field.clone(),
-                    rules: rule.as_ref().map(|r| vec![r.clone()]).unwrap_or_default(),
-                });
-            }
-        }
-    }
-
-    Ok(extra)
 }
 
 #[cfg(test)]

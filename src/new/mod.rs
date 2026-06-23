@@ -295,7 +295,9 @@ fn apply_and_render(
 /// vault-standards, so the rebuild is the straightforward option. The 50ms
 /// perf budget applies only to the primary query path — post-create validate
 /// is a one-shot operation and is acceptable to be slightly slower.
-fn post_create_validate(
+/// Shared by the CLI `apply_and_render` path and the `vault.new` MCP handler so
+/// post-create validation stays byte-identical across both surfaces.
+pub(crate) fn post_create_validate(
     vault_root: &Utf8Path,
     args: &NewArgs,
     existing_warnings: &[crate::new::synth::Warning],
