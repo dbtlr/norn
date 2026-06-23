@@ -28,6 +28,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use super::context::VaultContext;
 use super::to_mcp_error;
 use crate::mcp::tools::apply_plan::ApplyPlanOutput;
+use crate::mcp::tools::audit::AuditOutput;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::delete::DeleteOutput;
 use crate::mcp::tools::describe::DescribeOutput;
@@ -166,6 +167,24 @@ impl McpServer {
         Parameters(p): Parameters<crate::mcp::tools::get::GetParams>,
     ) -> Result<Json<GetOutput>, rmcp::ErrorData> {
         self.run_tool(|ctx| crate::mcp::tools::get::handle_output(ctx, p))
+            .await
+    }
+
+    /// `vault.audit` — read the mutation audit trail (event stream).
+    ///
+    /// Thin wrapper: deserialize params, call the pure handler, map the result.
+    /// All logic lives in `tools::audit`, which builds a `Filter` from the params,
+    /// resolves the events dir via `cache::events_dir_for`, and calls `read_events`.
+    /// Read-only: it never writes files or mutates the vault.
+    #[tool(
+        name = "vault.audit",
+        description = "Read the vault mutation audit trail (event stream): recent mutations with status/target/trace, newest-first and filterable. Read-only."
+    )]
+    async fn audit(
+        &self,
+        Parameters(p): Parameters<crate::mcp::tools::audit::AuditParams>,
+    ) -> Result<Json<AuditOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::audit::handle_output(ctx, p))
             .await
     }
 
