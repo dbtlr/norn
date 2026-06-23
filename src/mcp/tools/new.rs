@@ -195,20 +195,7 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     // ── CONFIRM: acquire mutation lock, open sink, apply ───────────────────────
 
     // Acquire mutation lock — same pattern as `Command::New` in main.rs.
-    let (_, state_dir) = crate::cache::state_dir_for(&cwd)
-        .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
-    crate::mutation_lock::pending::sweep_pending(&state_dir);
-    let _mutation_lock = match crate::mutation_lock::MutationLock::acquire_if_mutating(
-        &state_dir, /*is_apply=*/ true,
-    ) {
-        Ok(guard) => guard,
-        Err(crate::cache::CacheError::MutationLockTimeout) => {
-            anyhow::bail!(
-                "another norn mutation is in progress against this vault (timed out after 5 s)"
-            );
-        }
-        Err(e) => anyhow::bail!("mutation lock error: {e}"),
-    };
+    let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
 
     // Open a real, file-backed event sink — the same audit trail `norn new --yes`
     // writes via `apply_and_render` → `open_event_sink`. The MCP analogue is

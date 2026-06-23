@@ -14,7 +14,32 @@
 //! never block or fail a mutation.
 
 use crate::mcp::context::VaultContext;
+use crate::mutation_lock::MutationLock;
 use crate::telemetry::{Clock, EventSink, IdGen};
+use camino::Utf8Path;
+
+/// Acquire the per-vault mutation lock on an MCP mutation's CONFIRM/apply path.
+///
+/// Sweeps stale pending markers, then acquires the lock with `is_apply = true` —
+/// every MCP mutation reaches this only after its dry-run early-return, so the
+/// apply is always real. Returns the RAII guard the caller must hold for the
+/// duration of the apply; a timeout or lock error becomes an `anyhow` error.
+///
+/// This is the MCP analogue of the CLI's lock block in `main.rs`, which differs
+/// deliberately: the CLI maps a timeout to exit code 2 + a stderr line, whereas
+/// an MCP tool surfaces it as a tool error.
+pub(crate) fn acquire_mutation_lock(cwd: &Utf8Path) -> anyhow::Result<Option<MutationLock>> {
+    let (_, state_dir) = crate::cache::state_dir_for(cwd)
+        .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+    crate::mutation_lock::pending::sweep_pending(&state_dir);
+    match MutationLock::acquire_if_mutating(&state_dir, /*is_apply=*/ true) {
+        Ok(guard) => Ok(guard),
+        Err(crate::cache::CacheError::MutationLockTimeout) => anyhow::bail!(
+            "another norn mutation is in progress against this vault (timed out after 5 s)"
+        ),
+        Err(e) => anyhow::bail!("mutation lock error: {e}"),
+    }
+}
 
 /// Open a real, file-backed event sink for an MCP mutation's CONFIRM/apply path,
 /// mirroring `main.rs::open_event_sink`'s real-apply branch exactly:
