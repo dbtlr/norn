@@ -180,7 +180,7 @@ pub fn read_events(dir: &Utf8Path, filter: &Filter, limit: usize) -> Vec<StoredE
         };
         files.push((date, entry.path()));
     }
-    files.sort_by(|a, b| b.0.cmp(&a.0)); // date descending (newest file first)
+    files.sort_by_key(|f| std::cmp::Reverse(f.0)); // date descending (newest file first)
 
     let since_date = filter.since.map(|s| s.date_naive());
     for (date, path) in files {
