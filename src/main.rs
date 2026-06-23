@@ -851,11 +851,7 @@ fn run(cli: Cli) -> Result<i32> {
                     &argv,
                 );
 
-                let mut spans = std::collections::HashMap::new();
-                for change in &outcome.plan.changes {
-                    let span = sink.start_op(&change.operation, change.path.as_str(), None);
-                    spans.insert(change.change_id.clone(), span);
-                }
+                let spans = crate::repair_apply::build_op_spans(&mut sink, &outcome.plan.changes);
 
                 let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
                     &cwd,
@@ -1018,11 +1014,8 @@ fn run(cli: Cli) -> Result<i32> {
                     false,
                     &argv,
                 );
-                let mut spans = std::collections::HashMap::new();
-                for change in &pre.outcome.plan.changes {
-                    let span = sink.start_op(&change.operation, change.path.as_str(), None);
-                    spans.insert(change.change_id.clone(), span);
-                }
+                let spans =
+                    crate::repair_apply::build_op_spans(&mut sink, &pre.outcome.plan.changes);
                 let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
                     &cwd,
                     &index,
