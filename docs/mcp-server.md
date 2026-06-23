@@ -1,6 +1,6 @@
 ---
 title: MCP server
-description: Run norn as a Model Context Protocol stdio server — the 12-tool catalog, the dry-run/confirm mutation contract, the document-placement workflow, --read-only, and the warm-cache and call-ordering notes.
+description: Run norn as a Model Context Protocol stdio server — the 14-tool catalog, the dry-run/confirm mutation contract, the document-placement workflow, --read-only, and the warm-cache and call-ordering notes.
 ---
 
 # MCP server
@@ -38,7 +38,7 @@ Add `"--read-only"` to the `args` array for a query-only server (see [Read-only 
 
 ## Tool catalog
 
-Twelve tools, split into six read and six mutation.
+Fourteen tools, split into seven read and seven mutation.
 
 ### Read tools
 
@@ -50,6 +50,7 @@ Twelve tools, split into six read and six mutation.
 | `vault.validate` | Validate graph facts and configured frontmatter/link rules; returns structured findings. |
 | `vault.repair_plan` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply_plan`. |
 | `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
+| `vault.audit` | Read the per-vault mutation audit trail (append-only event stream). Filters: `trace`, `status`, `target`, `since`, `until`, `limit`. Returns flattened event records or raw OTEL objects. Available under `--read-only`. |
 
 ### Mutation tools
 
@@ -57,6 +58,7 @@ Twelve tools, split into six read and six mutation.
 |---|---|
 | `vault.new` | Create a new document with schema-scaffolded frontmatter from its path. |
 | `vault.set` | Update one document's frontmatter (and optionally replace its body), schema-aware. |
+| `vault.edit` | Edit one document's body with atomic, content-anchored partial edits (an ordered JSON array of ops, all-or-nothing). |
 | `vault.move` | Move/rename a document, cascading backlink rewrites across the vault. |
 | `vault.delete` | Delete a document, optionally redirecting incoming links to an alternate target. |
 | `vault.rewrite_wikilink` | Retarget every occurrence of a wikilink across the vault (body + frontmatter), without moving any file. |
@@ -88,7 +90,7 @@ This mirrors the CLI's `--dry-run` / apply split: the dry-run is a reviewable fo
 norn mcp --cwd /path/to/vault --read-only
 ```
 
-Under `--read-only`, the six mutation tools are **dropped from `tools/list`** (never registered) and **refused at runtime** if a client calls one anyway (defense in depth). The result is a query-only surface: an agent can find, count, get, validate, and plan, but cannot write.
+Under `--read-only`, the seven mutation tools are **dropped from `tools/list`** (never registered) and **refused at runtime** if a client calls one anyway (defense in depth). The result is a query-only surface: an agent can find, count, get, validate, plan, and read the audit trail — but cannot write.
 
 ## Placing a new document
 
