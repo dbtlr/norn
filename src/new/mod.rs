@@ -221,12 +221,7 @@ fn apply_and_render(
 
     // Emit one op_planned for the single create_document change; collect its
     // span so the action event (create_document) hangs off it.
-    let mut spans = std::collections::HashMap::new();
-    {
-        let change = &plan.change;
-        let span = sink.start_op(&change.operation, change.path.as_str(), None);
-        spans.insert(change.change_id.clone(), span);
-    }
+    let spans = crate::repair_apply::build_op_spans(&mut sink, std::slice::from_ref(&plan.change));
 
     let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
         &vault_root_buf,

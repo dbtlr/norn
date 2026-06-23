@@ -196,15 +196,9 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         &["set".to_string(), p.target.clone()],
     );
 
-    // Pre-stamp an op span per planned change, exactly as the CLI does, so the
-    // applier's per-op action events thread under their `op_planned` span. The
-    // applier emits the actions; passing a real sink + spans is what makes them
-    // flow to disk.
-    let mut spans = std::collections::HashMap::new();
-    for change in &outcome.plan.changes {
-        let span = sink.start_op(&change.operation, change.path.as_str(), None);
-        spans.insert(change.change_id.clone(), span);
-    }
+    // Pre-stamp an op span per planned change so the applier's per-op action
+    // events thread under their `op_planned` span — same as the CLI path.
+    let spans = crate::repair_apply::build_op_spans(&mut sink, &outcome.plan.changes);
 
     let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
         &cwd,

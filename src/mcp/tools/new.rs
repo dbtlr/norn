@@ -231,14 +231,9 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     // Thread `-p` / `--parents` through to the `create_document` applier arm.
     let apply_ctx = crate::repair_apply::CreateApplyContext { parents: p.parents };
 
-    // Emit one op_planned span per change so action events hang off it — mirrors
-    // `apply_and_render`'s span construction loop.
-    let mut spans = std::collections::HashMap::new();
-    {
-        let change = &plan.change;
-        let span = sink.start_op(&change.operation, change.path.as_str(), None);
-        spans.insert(change.change_id.clone(), span);
-    }
+    // Emit one op_planned span for the single create_document change so action
+    // events hang off it — mirrors `apply_and_render`'s span construction.
+    let spans = crate::repair_apply::build_op_spans(&mut sink, std::slice::from_ref(&plan.change));
 
     let apply_outcome = crate::repair_apply::apply_repair_plan_with_context(
         &cwd,

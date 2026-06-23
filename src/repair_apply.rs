@@ -24,6 +24,22 @@ pub struct CreateApplyContext {
 
 pub use crate::standards::apply::RepairApplyReport;
 
+/// Pre-stamp an `op_planned` span per planned change so the applier's per-op
+/// `action` events thread under the right span. Returns the `change_id → span`
+/// map [`apply_repair_plan_with_context`] expects. Shared by the CLI and MCP
+/// set / new / edit paths so span construction stays identical across surfaces.
+pub(crate) fn build_op_spans(
+    sink: &mut crate::telemetry::EventSink,
+    changes: &[PlannedChange],
+) -> std::collections::HashMap<String, String> {
+    let mut spans = std::collections::HashMap::new();
+    for change in changes {
+        let span = sink.start_op(&change.operation, change.path.as_str(), None);
+        spans.insert(change.change_id.clone(), span);
+    }
+    spans
+}
+
 fn check_hash(
     current_hashes: &std::collections::BTreeMap<Utf8PathBuf, String>,
     change: &PlannedChange,
