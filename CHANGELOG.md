@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.39.0 - 2026-06-23
+
+The audit-reader release. norn gains a native read surface over its append-only mutation event stream — the source of truth for every confirmed mutation, previously inspectable only by `cat`-ing files under the state dir. `norn audit` and the capability-isomorphic `vault.audit` MCP tool close the last off-filesystem read gap, so an MCP-only agent can finally read back the audit log it could never reach. Also folds in four runtime dependency bumps.
+
 ### Added
 
 - **`norn audit` and the `vault.audit` MCP tool — a native reader over the per-vault mutation event stream.** The append-only JSONL stream (the source of truth for every confirmed mutation) was previously inspectable only by `cat`-ing files under the state dir — impossible for an off-filesystem/MCP-only client. `norn audit` reads it back newest-first with AND-combined filters: `--trace` (one invocation), `--status applied|skipped|failed`, `--target` (matches a move's source or destination), `--since`/`--until` (`YYYY-MM-DD` or RFC-3339), and `--limit` (default 20). Output is a flattened norn-native projection (hot fields `trace`/`status`/`target` promoted to top-level, the rest in a generic `attributes` bag) or, with `--raw`, the stored OTEL Logs objects verbatim; `--format records|json`. The `vault.audit` MCP tool carries the identical filter surface, is capability-isomorphic with the CLI, and — being read-only — is available even under `norn mcp --read-only`. Only confirmed mutations are recorded (dry-runs and reads are not); an empty or absent stream returns `[]` with exit 0.

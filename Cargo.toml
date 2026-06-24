@@ -8,7 +8,7 @@
 name = "norn-run"
 edition = "2021"
 license = "MIT"
-version = "0.38.0"
+version = "0.39.0"
 authors = ["Drew Butler <hi@dbtlr.com>"]
 description = "Deterministic Markdown vault graph, link, and validation tooling for terminals and agents"
 repository = "https://github.com/dbtlr/norn"
