@@ -208,6 +208,13 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     // ── Step 4: Build the plan ─────────────────────────────────────────────────
     // Construct NewArgs inline from NewParams — the same pattern set.rs uses for
     // SetArgs. `yes` / `dry_run` / `body_from_stdin` are CLI-TTY knobs inert here.
+    //
+    // `as_rule: None` and `path: Some(doc_path)` are intentional: mode resolution
+    // (path / rule-targeted / inbox) already happened above in `resolve_target`,
+    // which produced the concrete `doc_path`. `build_plan` only consumes `field`,
+    // `field_json`, `force`, and `parents` from NewArgs — it never re-reads
+    // `as_rule` or re-resolves the path — so passing the already-resolved path
+    // with `as_rule: None` is correct and avoids a second resolution round-trip.
     let args = NewArgs {
         path: Some(doc_path.clone()),
         as_rule: None,
