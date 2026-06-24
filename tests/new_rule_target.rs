@@ -267,6 +267,68 @@ validate:
     );
 }
 
+// ── NRN-51: inbox-mode frontmatter substitution uses --var values ─────────────
+//
+// Mode C (inbox fallback) must thread `--var` into `build_plan`'s
+// `extra_path_vars` so that frontmatter defaults referencing `{{var.X}}`
+// resolve to the supplied value rather than an empty string.
+
+#[test]
+fn inbox_mode_var_resolves_in_frontmatter_defaults() {
+    let vault = build_vault(
+        r#"
+inbox:
+  path: Inbox
+validate:
+  rules:
+    - name: inbox-watcher
+      match:
+        path: "Inbox/**/*.md"
+      frontmatter_defaults:
+        type: inbox
+        project: "{{var.project}}"
+"#,
+    );
+
+    // The Inbox directory must exist (no -p given).
+    fs::create_dir_all(vault.path().join("Inbox")).unwrap();
+
+    let output = norn_cmd(&vault)
+        .args([
+            "new",
+            "--title",
+            "My Inbox Note",
+            "--var",
+            "project=norn",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected_path = vault.path().join("Inbox/my-inbox-note.md");
+    assert!(
+        expected_path.exists(),
+        "expected file at Inbox/my-inbox-note.md"
+    );
+
+    let written = fs::read_to_string(&expected_path).unwrap();
+
+    // The key assertion: `project` must contain the resolved value `norn`,
+    // not an empty string (which would appear as `project: ''` or `project: ""`).
+    assert!(
+        written.contains("project: norn"),
+        "expected 'project: norn' in frontmatter (var must resolve in inbox mode), got:\n{written}"
+    );
+}
+
 // ── Error: both path and --as given → exit 2 ─────────────────────────────────
 
 #[test]

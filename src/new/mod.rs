@@ -116,7 +116,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
                 };
                 let generated = crate::new::generate::generate_path(&target, &inputs, cfg)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                (Utf8PathBuf::from(generated), BTreeMap::new())
+                (Utf8PathBuf::from(generated), vars.clone())
             }
         };
 
