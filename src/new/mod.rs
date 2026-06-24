@@ -69,14 +69,21 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     //   - `generate_path` fails: missing var or missing title
     //   - Inbox fallback: no inbox configured or no --title
     let cfg = &loaded_config.vault_config;
-    let (doc_path, path_vars): (Utf8PathBuf, BTreeMap<String, String>) =
+    // rule_body_scaffold: the raw `body` template from the targeted rule (Mode B only).
+    // Carried out of the match so the substitution can happen after path resolution,
+    // using the same title + path_vars context used for path generation.
+    let (doc_path, path_vars, rule_body_scaffold): (
+        Utf8PathBuf,
+        BTreeMap<String, String>,
+        Option<String>,
+    ) =
         match (&args.path, &args.as_rule) {
             (Some(_), Some(_)) => {
                 return Err(anyhow::anyhow!("pass either a path or --as, not both"));
             }
             (Some(p), None) => {
                 // Explicit path — path_vars come purely from pattern captures in synth.
-                (p.clone(), BTreeMap::new())
+                (p.clone(), BTreeMap::new(), None)
             }
             (None, Some(name)) => {
                 // Rule-targeted mode: look up the rule by name and generate the path.
@@ -95,7 +102,9 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
                 };
                 let generated = crate::new::generate::generate_path(target, &inputs, cfg)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                (Utf8PathBuf::from(generated), vars.clone())
+                // Capture the rule's body scaffold template (if present) for later rendering.
+                let scaffold = rule.body.clone();
+                (Utf8PathBuf::from(generated), vars.clone(), scaffold)
             }
             (None, None) => {
                 // Inbox fallback.
@@ -116,7 +125,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
                 };
                 let generated = crate::new::generate::generate_path(&target, &inputs, cfg)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                (Utf8PathBuf::from(generated), vars.clone())
+                (Utf8PathBuf::from(generated), vars.clone(), None)
             }
         };
 
@@ -129,11 +138,28 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // ── Step 5: Body from stdin ───────────────────────────────────────────────
+    // ── Step 5: Body resolution (highest → lowest precedence) ─────────────────
+    //   1. `--body-from-stdin`   — operator supplies explicit content (existing).
+    //   2. Rule `body` scaffold  — targeted rule's inline template, rendered with
+    //                              the same substitution context used for path
+    //                              generation (title + path_vars + date/time).
+    //   3. Empty string          — existing default.
     let body = if args.body_from_stdin {
         let raw = std::io::read_to_string(std::io::stdin())?;
         // Trim a single trailing newline to match shell convention (echo adds one).
         raw.strip_suffix('\n').unwrap_or(&raw).to_string()
+    } else if let Some(scaffold) = rule_body_scaffold {
+        // Render the scaffold with the same Context used in path generation so
+        // that `{{title}}` and `{{var.X}}` substitutions are byte-identical.
+        let ctx = crate::standards::substitution::Context {
+            now: chrono::Local::now().naive_local(),
+            title: args.title.clone().unwrap_or_default(),
+            path_vars: path_vars.clone(),
+            date_format: cfg.templates.date_format.clone(),
+            time_format: cfg.templates.time_format.clone(),
+        };
+        crate::standards::substitution::render(&scaffold, &ctx)
+            .map_err(|e| anyhow::anyhow!("body scaffold render error: {e}"))?
     } else {
         String::new()
     };

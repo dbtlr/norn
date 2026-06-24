@@ -329,6 +329,137 @@ validate:
     );
 }
 
+// ── NRN-51 Task 6: Inline body scaffold from rule.body ───────────────────────
+
+#[test]
+fn rule_body_scaffold_is_seeded_and_substituted() {
+    // Config rule has an inline `body` scaffold with a `{{title}}` placeholder.
+    // Use YAML block scalar (|) so the newlines are literal in the YAML value.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/{{title|slugify}}.md"
+      body: |
+        # {{title}}
+
+        ## Context
+      frontmatter_defaults:
+        type: task
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args([
+            "new",
+            "--as",
+            "task",
+            "--title",
+            "Fix Audit Reader",
+            "--yes",
+            "-p",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected_path = vault.path().join("tasks/fix-audit-reader.md");
+    assert!(
+        expected_path.exists(),
+        "expected file at tasks/fix-audit-reader.md"
+    );
+
+    let written = fs::read_to_string(&expected_path).unwrap();
+    // The body scaffold should be rendered with the title substituted.
+    assert!(
+        written.contains("# Fix Audit Reader"),
+        "expected scaffold body with title substituted, got:\n{written}"
+    );
+    assert!(
+        written.contains("## Context"),
+        "expected ## Context section in scaffold body, got:\n{written}"
+    );
+}
+
+#[test]
+fn explicit_body_from_stdin_overrides_scaffold() {
+    // Config rule has an inline `body` scaffold, but stdin body should win.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/{{title|slugify}}.md"
+      body: |
+        # {{title}}
+
+        ## Context
+      frontmatter_defaults:
+        type: task
+"#,
+    );
+
+    let mut child = norn_cmd(&vault)
+        .args([
+            "new",
+            "--as",
+            "task",
+            "--title",
+            "Fix Audit Reader",
+            "--body-from-stdin",
+            "--yes",
+            "-p",
+            "--format",
+            "json",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"custom body content")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected_path = vault.path().join("tasks/fix-audit-reader.md");
+    assert!(
+        expected_path.exists(),
+        "expected file at tasks/fix-audit-reader.md"
+    );
+
+    let written = fs::read_to_string(&expected_path).unwrap();
+    // The explicit stdin body must win over the scaffold.
+    assert!(
+        written.contains("custom body content"),
+        "expected stdin body in file, got:\n{written}"
+    );
+    assert!(
+        !written.contains("## Context"),
+        "scaffold body must NOT appear when stdin body is given, got:\n{written}"
+    );
+}
+
 // ── Error: both path and --as given → exit 2 ─────────────────────────────────
 
 #[test]
