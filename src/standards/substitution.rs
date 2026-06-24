@@ -403,6 +403,10 @@ fn render_var(expr: &str, ctx: &Context) -> Result<String, RenderError> {
             // Empty string for unknown path var — caller surfaces warning.
             Ok(ctx.path_vars.get(key).cloned().unwrap_or_default())
         }
+        n if n.starts_with("var.") => {
+            let key = &n["var.".len()..];
+            Ok(ctx.path_vars.get(key).cloned().unwrap_or_default())
+        }
         other => Err(RenderError::UnknownVariable(other.into())),
     }
 }
@@ -629,6 +633,15 @@ mod transform_tests {
             render("{{title | lower | slugify}}", &c).unwrap(),
             "foo-bar"
         );
+    }
+
+    #[test]
+    fn var_namespace_reads_path_vars_bag() {
+        let mut c = ctx();
+        c.path_vars.insert("workspace".into(), "norn".into());
+        assert_eq!(render("{{var.workspace}}", &c).unwrap(), "norn");
+        assert_eq!(render("{{var.workspace | slugify}}", &c).unwrap(), "norn");
+        assert_eq!(render("{{var.unknown}}", &c).unwrap(), "");
     }
 }
 
