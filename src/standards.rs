@@ -8,7 +8,7 @@ mod findings;
 pub(crate) mod path_match;
 pub(crate) mod predicates;
 mod repair;
-mod substitution;
+pub(crate) mod substitution;
 mod summary;
 
 pub(crate) use config::{

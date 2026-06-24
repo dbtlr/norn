@@ -1,5 +1,6 @@
 //! `norn new` orchestration glue. Mirror of `src/set/mod.rs`.
 
+pub mod generate;
 pub mod report;
 pub mod synth;
 pub mod validate;
