@@ -2,7 +2,7 @@ use crate::core::{Document, DocumentSummary, GraphIndex};
 
 use crate::standards::config::{CompiledConfig, CompiledRule, ValidateConfig, ValidateRule};
 use crate::standards::findings::Finding;
-use crate::standards::path_match::PathPattern;
+use crate::standards::path_match::{effective_match_glob, PathPattern};
 use crate::standards::predicates::frontmatter_predicates_match;
 
 // Superseded by validate_with_compiled (hot path); retained for the in-file
@@ -258,8 +258,11 @@ fn matching_rules_compiled<'a>(
 }
 
 pub fn rule_matches(document: &Document, rule: &ValidateRule) -> bool {
-    if let Some(path_pattern) = &rule.r#match.path {
-        let matches = PathPattern::parse(path_pattern)
+    // Use the effective path glob — `match.path` for conventional rules, the
+    // glob derived from `target` for creatable rules — so that a creatable rule
+    // does NOT match documents outside its target path hierarchy.
+    if let Some(glob) = effective_match_glob(rule.r#match.path.as_deref(), rule.target.as_deref()) {
+        let matches = PathPattern::parse(&glob)
             .map(|p| p.match_path(document.path.as_str()).is_some())
             .unwrap_or(false);
         if !matches {

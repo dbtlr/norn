@@ -826,4 +826,99 @@ validate:
             .iter()
             .any(|w| matches!(w, SetWarning::ForceBypass { .. })));
     }
+
+    // ── Fix 1: creatable-rule path-blindness in norn set ─────────────────────
+
+    /// A config with a single creatable (target-based) task rule that constrains
+    /// `allowed_values.status` to `[todo, done]` on paths matching
+    /// `Workspaces/*/tasks/*.md`.
+    fn fixture_config_with_creatable_task_rule() -> VaultConfig {
+        let yaml = r#"
+validate:
+  rules:
+    - name: task
+      target: "Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"
+      allowed_values:
+        status:
+          - todo
+          - done
+"#;
+        crate::standards::parse_config(yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config should parse")
+    }
+
+    fn doc_at(path: &str) -> Document {
+        Document {
+            path: Utf8PathBuf::from(path),
+            stem: camino::Utf8Path::new(path)
+                .file_stem()
+                .unwrap_or("")
+                .to_string(),
+            hash: "h".into(),
+            frontmatter: Some(json!({})),
+            body_text: String::new(),
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
+        }
+    }
+
+    /// The creatable task rule must NOT govern documents outside its target
+    /// path hierarchy — setting `status=anything` on a note must be allowed.
+    #[test]
+    fn creatable_rule_does_not_govern_non_matching_path() {
+        let cfg = fixture_config_with_creatable_task_rule();
+        // This path does NOT match Workspaces/*/tasks/*.md
+        let doc = doc_at("Workspaces/x/notes/foo.md");
+        let fm = current_fm(&doc);
+
+        // Without Fix 1 this would error because the rule (with match.path==None)
+        // would apply to every document, treating "anything" as outside [todo, done].
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &fm,
+            &["status=anything".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "creatable task rule must not constrain a non-matching path; got: {:?}",
+            result.err()
+        );
+    }
+
+    /// The same creatable task rule MUST govern documents that do match its
+    /// target path hierarchy — setting a disallowed status must be refused.
+    #[test]
+    fn creatable_rule_governs_matching_path() {
+        let cfg = fixture_config_with_creatable_task_rule();
+        // This path DOES match Workspaces/*/tasks/*.md
+        let doc = doc_at("Workspaces/x/tasks/foo.md");
+        let fm = current_fm(&doc);
+
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &fm,
+            &["status=bogus".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "creatable task rule must refuse a disallowed status on a matching path"
+        );
+        assert!(result.unwrap_err().to_string().contains("not allowed"));
+    }
 }

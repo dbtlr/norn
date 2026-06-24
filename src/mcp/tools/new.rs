@@ -66,7 +66,8 @@ use crate::mcp::context::VaultContext;
 /// `force` allows overwriting an existing file.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct NewParams {
-    /// Vault-relative path of the new document (must end in `.md`).
+    /// Vault-relative path of the new document (must end in `.md` when supplied).
+    /// Optional: omit when using `rule` (Mode B) or the inbox fallback (Mode C).
     /// Mutually exclusive with `rule`. Supply one or the other, not both.
     #[serde(default)]
     pub path: Option<String>,

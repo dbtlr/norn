@@ -223,6 +223,22 @@ fn build_regex_with_captures(pattern: &str) -> Result<(Regex, Vec<String>), Path
     Ok((regex, declared))
 }
 
+/// Return the effective path glob for a validate rule.
+///
+/// For a conventional rule (`match.path` present), that glob is returned as-is.
+/// For a creatable rule (`match.path` absent, `target` present), the glob is
+/// derived from the target template via [`glob_from_target`].  When neither is
+/// set, `None` is returned (the rule is path-unconstrained).
+///
+/// This is the single, canonical derivation used by both `engine::rule_matches`
+/// and the conflict-check in `config::post_validate` — keep the logic here, not
+/// inlined in callers.
+pub fn effective_match_glob(match_path: Option<&str>, target: Option<&str>) -> Option<String> {
+    match_path
+        .map(|p| p.to_string())
+        .or_else(|| target.and_then(|t| glob_from_target(t).ok()))
+}
+
 /// Lower a generative `target` template into a glob string.
 ///
 /// Bare `{{var.NAME}}` / `{{path.NAME}}` segments become named captures
