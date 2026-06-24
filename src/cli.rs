@@ -913,7 +913,20 @@ pub struct EditArgs {
 #[derive(Args, Debug)]
 pub struct NewArgs {
     /// Vault-relative path of the new document (must end in .md).
-    pub path: camino::Utf8PathBuf,
+    /// Optional: omit when using --as or the inbox fallback.
+    pub path: Option<camino::Utf8PathBuf>,
+
+    /// Create into a named, creatable rule; derives the path from its target template.
+    #[arg(long = "as", value_name = "RULE")]
+    pub as_rule: Option<String>,
+
+    /// Document title — drives the filename and is available to templates as {{title}}.
+    #[arg(long = "title", value_name = "TEXT")]
+    pub title: Option<String>,
+
+    /// Template variable, repeatable. Format: KEY=VALUE. Fills {{var.KEY}} holes.
+    #[arg(long = "var", value_name = "KEY=VALUE")]
+    pub var: Vec<String>,
 
     /// Frontmatter field override, repeatable. Format: KEY=VALUE.
     #[arg(long = "field", value_name = "KEY=VALUE")]
@@ -1634,7 +1647,10 @@ mod new_cli_tests {
         .unwrap();
         match cli.command {
             Command::New(args) => {
-                assert_eq!(args.path.as_str(), "Workspaces/foo/tasks/bar.md");
+                assert_eq!(
+                    args.path.as_ref().map(|p| p.as_str()),
+                    Some("Workspaces/foo/tasks/bar.md")
+                );
                 assert_eq!(args.field.len(), 2);
             }
             _ => panic!("expected Command::New"),

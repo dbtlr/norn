@@ -1,9 +1,5 @@
 //! Synthesize a `create_document` RepairPlan from CLI args + schema.
 //! Filled in Task 7.4.
-//
-// `dead_code` silenced: public types + `build_plan` will be wired into the
-// orchestrator in Task 7.7. Remove these allows there.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -61,6 +57,8 @@ pub enum Warning {
         stem: String,
         locations: Vec<camino::Utf8PathBuf>,
     },
+    // Reserved for future path-variable substitution diagnostics.
+    #[allow(dead_code)]
     PathVariableUnresolved {
         field: String,
         variable: String,
@@ -84,8 +82,14 @@ pub enum SynthError {
 
 /// Synthesize a [`CreateDocumentPlan`] from CLI args + compiled schema + optional index.
 ///
+/// # Parameters
+/// - `doc_path`: the resolved concrete document path (vault-relative).
+/// - `extra_path_vars`: caller-supplied variable bag (e.g. from `--var KEY=VALUE` in
+///   rule/inbox mode). These are merged into the path-vars extracted from pattern
+///   captures so that frontmatter defaults can reference `{{var.KEY}}` holes.
+///
 /// # Build sequence
-/// 1. Extract path variables from matching rules.
+/// 1. Extract path variables from matching rules; merge `extra_path_vars` (no override).
 /// 2. Parse operator overrides (`--field`, `--field-json`).
 /// 3. Apply schema-aware coercion to operator overrides (unless `--force`).
 /// 4. Call `resolve_to_fixpoint` to expand schema defaults.
@@ -95,20 +99,32 @@ pub enum SynthError {
 /// 8. Construct the `PlannedChange`.
 pub fn build_plan(
     args: &crate::cli::NewArgs,
+    doc_path: &camino::Utf8Path,
+    extra_path_vars: &BTreeMap<String, String>,
     cfg: &crate::standards::VaultConfig,
     compiled: &crate::standards::CompiledConfig,
     index: Option<&crate::core::GraphIndex>,
     body: String,
 ) -> Result<CreateDocumentPlan, SynthError> {
+    let doc_path_buf = doc_path.to_owned();
+
     // ── Step 1: path variable extraction ─────────────────────────────────────
     // Walk compiled rules; for each whose path pattern matches, extract captures.
     // First-rule-wins on collisions.
+    // Then merge extra_path_vars (caller-supplied via --var) so that
+    // frontmatter defaults referencing {{var.KEY}} resolve correctly when the
+    // path is generated from a rule target rather than parsed from a real path.
     let mut path_vars: BTreeMap<String, String> = BTreeMap::new();
     for compiled_rule in &compiled.rules {
-        let captures = crate::standards::path_variables(compiled_rule, args.path.as_str());
+        let captures = crate::standards::path_variables(compiled_rule, doc_path.as_str());
         for (k, v) in captures {
             path_vars.entry(k).or_insert(v);
         }
+    }
+    // Merge extra vars (--var bag). Pattern-derived captures take precedence;
+    // extra_path_vars fill in any remaining holes.
+    for (k, v) in extra_path_vars {
+        path_vars.entry(k.clone()).or_insert_with(|| v.clone());
     }
 
     // ── Step 2: operator overrides parsing ────────────────────────────────────
@@ -139,7 +155,7 @@ pub fn build_plan(
     // document doesn't exist yet, we use applicable_rules with path-only matching
     // (frontmatter = None for the first pass — same as resolve_to_fixpoint does).
     let path_only_rules =
-        crate::standards::applicable_rules(cfg, compiled, args.path.as_str(), None);
+        crate::standards::applicable_rules(cfg, compiled, doc_path.as_str(), None);
 
     let mut operator_overrides: BTreeMap<String, Value> = BTreeMap::new();
     let mut operator_sources: Vec<(String, Value, FieldSourceKind)> = Vec::new();
@@ -178,7 +194,7 @@ pub fn build_plan(
     let (resolved_fm, applied_rule_names) = crate::standards::resolve_to_fixpoint(
         cfg,
         compiled,
-        args.path.as_str(),
+        doc_path.as_str(),
         &operator_overrides,
         &path_vars,
     )
@@ -207,7 +223,7 @@ pub fn build_plan(
     let matched_rules = crate::standards::applicable_rules(
         cfg,
         compiled,
-        args.path.as_str(),
+        doc_path.as_str(),
         Some(&resolved_fm_value),
     );
 
@@ -295,11 +311,11 @@ pub fn build_plan(
 
     // ── Step 7: stem collision warning ────────────────────────────────────────
     if let Some(idx) = index {
-        let new_stem = args.path.file_stem().unwrap_or("").to_lowercase();
+        let new_stem = doc_path.file_stem().unwrap_or("").to_lowercase();
         let collisions: Vec<Utf8PathBuf> = idx
             .documents
             .iter()
-            .filter(|d| d.path != args.path)
+            .filter(|d| d.path != doc_path_buf)
             .filter(|d| d.stem.to_lowercase() == new_stem)
             .map(|d| d.path.clone())
             .collect();
@@ -319,11 +335,11 @@ pub fn build_plan(
         "body": body,
     });
 
-    let change_id = derive_change_id(&args.path, "create_document");
+    let change_id = derive_change_id(&doc_path_buf, "create_document");
 
     let change = crate::standards::PlannedChange {
         change_id,
-        path: args.path.clone(),
+        path: doc_path_buf,
         document_hash: String::new(), // no existing hash for a brand-new file
         finding_code: "operator-mutation".to_string(),
         finding_rule: None,
@@ -383,9 +399,12 @@ mod tests {
         parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).unwrap()
     }
 
-    fn args(path: &str, fields: Vec<&str>) -> crate::cli::NewArgs {
-        crate::cli::NewArgs {
-            path: path.into(),
+    fn args(path: &str, fields: Vec<&str>) -> (crate::cli::NewArgs, camino::Utf8PathBuf) {
+        let a = crate::cli::NewArgs {
+            path: Some(path.into()),
+            as_rule: None,
+            title: None,
+            var: vec![],
             field: fields.iter().map(|s| s.to_string()).collect(),
             field_json: vec![],
             body_from_stdin: false,
@@ -394,7 +413,9 @@ mod tests {
             yes: false,
             dry_run: false,
             format: crate::cli::NewFormat::Records,
-        }
+        };
+        let p = camino::Utf8PathBuf::from(path);
+        (a, p)
     }
 
     #[test]
@@ -413,8 +434,17 @@ validate:
         workspace: "[[{{path.workspace}}]]"
 "#,
         );
-        let a = args("Workspaces/norn/tasks/foo.md", vec![]);
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let (a, p) = args("Workspaces/norn/tasks/foo.md", vec![]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
 
         // Operation
         assert_eq!(plan.change.operation, "create_document");
@@ -454,8 +484,17 @@ validate:
         created: "2026-01-01T00:00"
 "#,
         );
-        let a = args("Workspaces/norn/tasks/foo.md", vec![]);
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let (a, p) = args("Workspaces/norn/tasks/foo.md", vec![]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
         let created_src = plan
             .field_sources
             .iter()
@@ -482,8 +521,17 @@ validate:
         status: backlog
 "#,
         );
-        let a = args("foo.md", vec!["type=custom"]);
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let (a, p) = args("foo.md", vec!["type=custom"]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
         let fm = &plan.change.new_value.as_ref().unwrap()["frontmatter"];
         assert_eq!(fm["type"], serde_json::json!("custom"));
         assert_eq!(fm["status"], serde_json::json!("backlog"));
@@ -492,9 +540,18 @@ validate:
     #[test]
     fn synth_field_json_parses_arrays() {
         let (cfg, compiled) = build("validate: {}\n");
-        let mut a = args("foo.md", vec![]);
+        let (mut a, p) = args("foo.md", vec![]);
         a.field_json = vec![r#"tags=["a","b"]"#.to_string()];
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
         let fm = &plan.change.new_value.as_ref().unwrap()["frontmatter"];
         assert_eq!(fm["tags"], serde_json::json!(["a", "b"]));
     }
@@ -513,8 +570,17 @@ validate:
         type: note
 "#,
         );
-        let a = args("foo.md", vec![]);
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let (a, p) = args("foo.md", vec![]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
         let missing: Vec<&str> = plan
             .warnings
             .iter()
@@ -529,18 +595,36 @@ validate:
     #[test]
     fn synth_invalid_field_format_errors() {
         let (cfg, compiled) = build("validate: {}\n");
-        let mut a = args("foo.md", vec![]);
+        let (mut a, p) = args("foo.md", vec![]);
         a.field = vec!["no_equals_sign".into()];
-        let err = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap_err();
+        let err = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap_err();
         assert!(matches!(err, SynthError::InvalidField(_)), "got: {err:?}");
     }
 
     #[test]
     fn synth_invalid_field_json_errors() {
         let (cfg, compiled) = build("validate: {}\n");
-        let mut a = args("foo.md", vec![]);
+        let (mut a, p) = args("foo.md", vec![]);
         a.field_json = vec!["key={not valid json".into()];
-        let err = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap_err();
+        let err = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, SynthError::InvalidFieldJson { .. }),
             "got: {err:?}"
@@ -550,8 +634,17 @@ validate:
     #[test]
     fn synth_carries_body_in_new_value() {
         let (cfg, compiled) = build("validate: {}\n");
-        let a = args("foo.md", vec![]);
-        let plan = build_plan(&a, &cfg, &compiled, None, "# Hello\nbody\n".to_string()).unwrap();
+        let (a, p) = args("foo.md", vec![]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            "# Hello\nbody\n".to_string(),
+        )
+        .unwrap();
         let nv = plan.change.new_value.as_ref().unwrap();
         assert_eq!(nv["body"].as_str().unwrap(), "# Hello\nbody\n");
     }
@@ -569,8 +662,17 @@ validate:
         type: note
 "#,
         );
-        let a = args("foo.md", vec!["title=My Note"]);
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let (a, p) = args("foo.md", vec!["title=My Note"]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
 
         // Schema-default for `type`, operator-flag for `title`.
         let by_field: std::collections::HashMap<_, _> = plan
@@ -599,8 +701,17 @@ validate:
         workspace: wikilink
 "#,
         );
-        let a = args("foo.md", vec!["workspace=norn"]);
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let (a, p) = args("foo.md", vec!["workspace=norn"]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
         let fm = &plan.change.new_value.as_ref().unwrap()["frontmatter"];
         // Auto-wrapped: "norn" → "[[norn]]"
         assert_eq!(fm["workspace"], serde_json::json!("[[norn]]"));
@@ -637,8 +748,17 @@ validate:
         workspace: wikilink
 "#,
         );
-        let a = args("foo.md", vec!["workspace=shared"]);
-        let plan = build_plan(&a, &cfg, &compiled, Some(&index), String::new()).unwrap();
+        let (a, p) = args("foo.md", vec!["workspace=shared"]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            Some(&index),
+            String::new(),
+        )
+        .unwrap();
         let ambiguous = plan
             .warnings
             .iter()
@@ -668,9 +788,18 @@ validate:
         created: datetime
 "#,
         );
-        let mut a = args("foo.md", vec!["created=not-a-date"]);
+        let (mut a, p) = args("foo.md", vec!["created=not-a-date"]);
         a.force = true;
-        let plan = build_plan(&a, &cfg, &compiled, None, String::new()).unwrap();
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
         let fm = &plan.change.new_value.as_ref().unwrap()["frontmatter"];
         assert_eq!(fm["created"], serde_json::json!("not-a-date"));
     }

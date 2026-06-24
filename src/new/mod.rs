@@ -5,10 +5,11 @@ pub mod report;
 pub mod synth;
 pub mod validate;
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 
 use anyhow::Result;
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cli::{NewArgs, NewFormat};
 
@@ -52,16 +53,83 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         /*no_cache_refresh=*/ false,
     )?;
 
-    // ── Step 3: Preflight ─────────────────────────────────────────────────────
+    // ── Step 2.5: Parse --var KEY=VALUE into a BTreeMap ───────────────────────
+    let vars: BTreeMap<String, String> = parse_var_args(&args.var)?;
+
+    // ── Step 3: Three-mode path resolution ───────────────────────────────────
+    //
+    // Mode A: explicit path positional arg
+    // Mode B: --as RULE → derive path from rule's `target` template
+    // Mode C: no path, no --as → inbox fallback using --title
+    //
+    // Refusal (exit 2) if:
+    //   - Both path and --as are given
+    //   - --as names an unknown rule
+    //   - Rule has no `target` field (non-creatable)
+    //   - `generate_path` fails: missing var or missing title
+    //   - Inbox fallback: no inbox configured or no --title
+    let cfg = &loaded_config.vault_config;
+    let (doc_path, path_vars): (Utf8PathBuf, BTreeMap<String, String>) =
+        match (&args.path, &args.as_rule) {
+            (Some(_), Some(_)) => {
+                return Err(anyhow::anyhow!("pass either a path or --as, not both"));
+            }
+            (Some(p), None) => {
+                // Explicit path — path_vars come purely from pattern captures in synth.
+                (p.clone(), BTreeMap::new())
+            }
+            (None, Some(name)) => {
+                // Rule-targeted mode: look up the rule by name and generate the path.
+                let rule = cfg
+                    .validate
+                    .rules
+                    .iter()
+                    .find(|r| r.name.as_deref() == Some(name.as_str()))
+                    .ok_or_else(|| anyhow::anyhow!("unknown rule `{name}`"))?;
+                let target = rule.target.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("rule `{name}` is not creatable (no `target`)")
+                })?;
+                let inputs = crate::new::generate::GenerateInputs {
+                    title: args.title.as_deref(),
+                    vars: &vars,
+                };
+                let generated = crate::new::generate::generate_path(target, &inputs, cfg)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                (Utf8PathBuf::from(generated), vars.clone())
+            }
+            (None, None) => {
+                // Inbox fallback.
+                let inbox =
+                    cfg.inbox.path.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("no path, no --as, and no inbox configured")
+                    })?;
+                let title = args
+                    .title
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("inbox creation requires --title"))?;
+                // Build the inbox path by generating the slug via the substitution engine.
+                // This ensures slugify behaviour is byte-identical to the template engine.
+                let target = format!("{inbox}/{{{{title|slugify}}}}.md");
+                let inputs = crate::new::generate::GenerateInputs {
+                    title: Some(title),
+                    vars: &vars,
+                };
+                let generated = crate::new::generate::generate_path(&target, &inputs, cfg)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                (Utf8PathBuf::from(generated), BTreeMap::new())
+            }
+        };
+
+    // ── Step 4: Preflight ─────────────────────────────────────────────────────
     crate::new::validate::preflight(
         vault_root.as_str(),
-        args.path.as_str(),
+        doc_path.as_str(),
         args.force,
         args.parents,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // ── Step 4: Body from stdin ───────────────────────────────────────────────
+    // ── Step 5: Body from stdin ───────────────────────────────────────────────
     let body = if args.body_from_stdin {
         let raw = std::io::read_to_string(std::io::stdin())?;
         // Trim a single trailing newline to match shell convention (echo adds one).
@@ -70,9 +138,11 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         String::new()
     };
 
-    // ── Step 5: Synthesize the plan ───────────────────────────────────────────
+    // ── Step 6: Synthesize the plan ───────────────────────────────────────────
     let plan = crate::new::synth::build_plan(
         args,
+        &doc_path,
+        &path_vars,
         &loaded_config.vault_config,
         &loaded_config.compiled,
         Some(&index),
@@ -81,8 +151,9 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let body_bytes = body.len();
+    let doc_path_str = doc_path.as_str().to_owned();
 
-    // ── Step 6: Decide dry-run vs. apply ──────────────────────────────────────
+    // ── Step 7: Decide dry-run vs. apply ──────────────────────────────────────
     //
     // Decision tree (mirrors Command::Set logic in main.rs):
     //   --dry-run           → always dry-run
@@ -94,10 +165,10 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     let render_preview = |applied: bool| -> Result<String> {
         Ok(match args.format {
             NewFormat::Records => {
-                crate::new::report::render_records(&plan, args.path.as_str(), applied, body_bytes)
+                crate::new::report::render_records(&plan, &doc_path_str, applied, body_bytes)
             }
             NewFormat::Json => {
-                crate::new::report::render_json(&plan, args.path.as_str(), applied, body_bytes, "")?
+                crate::new::report::render_json(&plan, &doc_path_str, applied, body_bytes, "")?
             }
         })
     };
@@ -115,6 +186,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         // --yes: skip confirm, go straight to apply.
         return apply_and_render(
             args,
+            &doc_path,
             vault_root,
             &index,
             &plan,
@@ -152,6 +224,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         }
         return apply_and_render(
             args,
+            &doc_path,
             vault_root,
             &index,
             &plan,
@@ -168,6 +241,24 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     })
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Parse `--var KEY=VALUE` arguments into a `BTreeMap`.
+/// Returns exit-2 error on malformed entries (no `=`).
+fn parse_var_args(var_args: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut map = BTreeMap::new();
+    for kv in var_args {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --var format (expected KEY=VALUE): {kv}"))?;
+        if k.is_empty() {
+            return Err(anyhow::anyhow!("invalid --var format (key is empty): {kv}"));
+        }
+        map.insert(k.to_string(), v.to_string());
+    }
+    Ok(map)
+}
+
 // ── Apply path ────────────────────────────────────────────────────────────────
 
 /// Call the apply orchestrator and render the post-apply output.
@@ -179,6 +270,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
 /// rendered report.
 fn apply_and_render(
     args: &NewArgs,
+    doc_path: &Utf8Path,
     vault_root: &Utf8Path,
     index: &crate::core::GraphIndex,
     plan: &crate::new::synth::CreateDocumentPlan,
@@ -248,7 +340,8 @@ fn apply_and_render(
     // Re-validate the new doc to surface any findings as warnings in the envelope.
     // We reload the index to include the newly created file.
     let post_warnings =
-        post_create_validate(vault_root, args, &plan.warnings, body_bytes).unwrap_or_default();
+        post_create_validate(vault_root, doc_path.as_str(), &plan.warnings, body_bytes)
+            .unwrap_or_default();
 
     // If post-validate found additional warnings, merge them into the plan's warnings
     // for rendering. We render with a modified plan that includes post_warnings.
@@ -260,11 +353,11 @@ fn apply_and_render(
     augmented.warnings.extend(post_warnings);
     let mut rendered = match args.format {
         crate::cli::NewFormat::Records => {
-            crate::new::report::render_records(&augmented, args.path.as_str(), true, body_bytes)
+            crate::new::report::render_records(&augmented, doc_path.as_str(), true, body_bytes)
         }
         crate::cli::NewFormat::Json => crate::new::report::render_json(
             &augmented,
-            args.path.as_str(),
+            doc_path.as_str(),
             true,
             body_bytes,
             &trace_id,
@@ -295,7 +388,7 @@ fn apply_and_render(
 /// post-create validation stays byte-identical across both surfaces.
 pub(crate) fn post_create_validate(
     vault_root: &Utf8Path,
-    args: &NewArgs,
+    doc_path: &str,
     existing_warnings: &[crate::new::synth::Warning],
     _body_bytes: usize,
 ) -> Result<Vec<crate::new::synth::Warning>> {
@@ -319,7 +412,7 @@ pub(crate) fn post_create_validate(
     );
 
     // Filter to only findings for the newly created document.
-    let new_path = args.path.as_str();
+    let new_path = doc_path;
     let relevant: Vec<_> = findings
         .iter()
         .filter(|f| f.path.as_str() == new_path)
@@ -370,7 +463,10 @@ mod tests {
 
     fn args_for(path: &str) -> crate::cli::NewArgs {
         crate::cli::NewArgs {
-            path: path.into(),
+            path: Some(path.into()),
+            as_rule: None,
+            title: None,
+            var: vec![],
             field: vec![],
             field_json: vec![],
             body_from_stdin: false,

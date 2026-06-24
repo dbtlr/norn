@@ -1,8 +1,5 @@
 //! Forward path generation — render a concrete document path from a rule's
 //! `target` template plus caller-supplied inputs.
-// `dead_code` silenced: public types + functions will be wired into the
-// rule-targeted creation flow (NRN-51 Task 5+).
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
