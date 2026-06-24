@@ -49,14 +49,14 @@ Fourteen tools, split into seven read and seven mutation.
 | `vault.get` | Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally the body. |
 | `vault.validate` | Validate graph facts and configured frontmatter/link rules; returns structured findings. |
 | `vault.repair_plan` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply_plan`. |
-| `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
+| `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, creatable rules, inbox, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
 | `vault.audit` | Read the per-vault mutation audit trail (append-only event stream). Filters: `trace`, `status`, `target`, `since`, `until`, `limit`. Returns flattened event records or raw OTEL objects. Available under `--read-only`. |
 
 ### Mutation tools
 
 | Tool | What it does |
 |---|---|
-| `vault.new` | Create a new document with schema-scaffolded frontmatter from its path. |
+| `vault.new` | Create a new document in three modes: explicit `path`, rule-targeted (`rule`/`title`/`vars`), or inbox fallback (`title` only). |
 | `vault.set` | Update one document's frontmatter (and optionally replace its body), schema-aware. |
 | `vault.edit` | Edit one document's body with atomic, content-anchored partial edits (an ordered JSON array of ops, all-or-nothing). |
 | `vault.move` | Move/rename a document, cascading backlink rewrites across the vault. |
@@ -94,11 +94,44 @@ Under `--read-only`, the seven mutation tools are **dropped from `tools/list`** 
 
 ## Placing a new document
 
-An MCP client that can't `ls` the vault or read sibling files needs a way to learn where a new document belongs and what frontmatter it should carry. The workflow:
+An MCP client that can't `ls` the vault or read sibling files needs a way to learn where a new document belongs and what frontmatter it should carry. Two workflows:
 
-1. **`vault.describe`** — returns the folder tree (so the agent sees where each kind of doc lives), the declared path rules (which path glob gets which frontmatter defaults), and the frontmatter schema (field types, allowed values, required fields).
+### Path-construction workflow (manual path)
+
+1. **`vault.describe`** — returns the folder tree (`folders`), the declared path rules (`path_rules`: which path glob gets which frontmatter defaults), and the frontmatter schema. Also returns `creatable_rules` and `inbox` (see below).
 2. **Construct the path** from the path rules — e.g. a task belongs under `tasks/`, a note under `notes/`.
-3. **`vault.new`** — create the document at that path. `vault.new` scaffolds the schema-declared frontmatter for the matching rule, so the new doc starts schema-valid.
+3. **`vault.new { path: "...", confirm: true }`** — create the document at that path.
+
+### Rule-targeted workflow (recommended for off-filesystem agents)
+
+When the vault declares creatable rules, the agent can skip path construction entirely:
+
+1. **`vault.describe`** — inspect `creatable_rules`. Each entry carries `name` (the rule handle), `target` (the path template), `required_vars` (variable names the template needs), `frontmatter_defaults`, and `body` (optional body scaffold).
+2. **`vault.new { rule: "task", title: "…", vars: { "workspace": "norn" }, confirm: true }`** — norn derives the concrete path from the rule's `target` template, applies `frontmatter_defaults`, and seeds the body from the `body` scaffold. No path guessing needed.
+
+If `vault.describe` returns a non-null `inbox`, an agent can also use **`vault.new { title: "…", confirm: true }`** (no `path`, no `rule`) to place a document in the inbox as `<inbox>/<title|slugify>.md`.
+
+`vault.new` parameters:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `path` | string (optional) | Vault-relative path. Mutually exclusive with `rule`. |
+| `rule` | string (optional) | Name of a creatable rule (from `vault.describe` `creatable_rules`). Mutually exclusive with `path`. |
+| `title` | string (optional) | Document title; fills `{{title}}` in templates. Required when the target template references `{{title}}` and for inbox mode. |
+| `vars` | object (optional) | Template variable bag; keys fill `{{var.KEY}}` in the rule's target and body templates. Supply every name listed in `required_vars`. |
+| `field` | string[] (optional) | Frontmatter overrides in `KEY=VALUE` format. |
+| `field_json` | string[] (optional) | Frontmatter overrides in `KEY=JSON` format. |
+| `body` | string (optional) | Explicit body content; takes precedence over the rule's body scaffold. |
+| `parents` | bool (optional) | Auto-create missing parent directories. |
+| `force` | bool (optional) | Overwrite an existing file. |
+| `confirm` | bool (default `false`) | `false` = dry-run (returns plan, writes nothing); `true` = apply. |
+
+`vault.describe` output includes two new fields alongside `folders`, `path_rules`, and `schema`:
+
+| Field | Type | Description |
+|---|---|---|
+| `creatable_rules` | array | Rules that support `vault.new { rule: "…" }`. Each: `name`, `target`, `required_vars`, `frontmatter_defaults`, `body`. |
+| `inbox` | string or null | The configured `inbox.path`, if any. When non-null, `vault.new { title: "…" }` routes the doc there. |
 
 Like every mutation tool, `vault.new` is dry-run by default; pass `confirm: true` to write the file.
 
@@ -113,7 +146,6 @@ These are intentional v1 boundaries, tracked under the ongoing MCP initiative:
 
 - **No prose-body / sub-document edit tool.** `vault.set` replaces a document's whole body; there is no surgical in-body edit yet (that awaits `norn edit`).
 - **No HTTP / remote transport.** stdio and local-process only.
-- **No declared doc-kind placement templates.** Use `vault.describe` + construct the path rather than naming a doc "kind" and getting a path back.
 
 ## See also
 

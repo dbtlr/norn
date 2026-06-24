@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Added
+
+- **Rule-targeted document creation (`norn new --as <rule>` + `vault.new {rule}`).** A validation rule that declares a `target:` path template and (optionally) an inline `body:` scaffold becomes *creatable*: `norn new --as task --title "…" [--var k=v]` derives the path, applies the rule's `frontmatter_defaults`, and seeds the body — no hand-built path. The rule `name` is the handle; the validation matcher is derived from `target` so a generated doc always satisfies its own rule. A standalone `inbox:` config block (`inbox.path`) is the default target for unrouted creates (`norn new --title "…"`). `vault.new` gains `rule`/`title`/`vars` (mutually exclusive with `path`); `vault.describe` now lists each creatable rule (name, target, required vars, frontmatter defaults, body) plus `inbox`, so an off-filesystem MCP agent can place a fully-formed doc with no path guessing. New `{{var.X}}` template namespace mirrors `{{path.X}}`. Refusals (exit 2): unknown/non-creatable rule, missing required `--var`, missing `--title` where the template needs it.
+
 ## v0.39.0 - 2026-06-23
 
 The audit-reader release. norn gains a native read surface over its append-only mutation event stream — the source of truth for every confirmed mutation, previously inspectable only by `cat`-ing files under the state dir. `norn audit` and the capability-isomorphic `vault.audit` MCP tool close the last off-filesystem read gap, so an MCP-only agent can finally read back the audit log it could never reach. Also folds in four runtime dependency bumps.
