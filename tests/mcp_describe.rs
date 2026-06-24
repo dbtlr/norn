@@ -8,6 +8,10 @@
 //! 2. `tools/call` for `vault.describe` returns `folders`, `path_rules`, and
 //!    `schema`, with the seeded notes glob → `type: note` default present and the
 //!    notes folder present in the tree.
+//! 3. `tools/call` for `vault.describe` against a vault with a creatable rule and
+//!    an inbox returns `creatable_rules` with the expected name, target,
+//!    `required_vars`, `frontmatter_defaults`, and `body`; and `inbox` equals the
+//!    configured path. (NRN-51, Task 7 wire-level coverage.)
 //!
 //! The pure handler is unit-tested separately inside
 //! `src/mcp/tools/describe.rs`; this test covers the rmcp wiring (router
@@ -221,5 +225,210 @@ fn lists_and_calls_vault_describe() {
     assert!(
         schema_str.contains("allowed_values") && schema_str.contains("backlog"),
         "schema must carry the status allowed_values, got: {schema_str}"
+    );
+}
+
+/// Vault with a creatable rule (`name` + `target` + `body` + `frontmatter_defaults`)
+/// and an `inbox.path`. The `target` references `{{var.workspace}}` and
+/// `{{title|slugify}}` so that `required_vars` extraction is exercised at the
+/// wire level. Cache is pre-built before spawning the MCP child.
+fn seeded_vault_with_creatable_rule() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-mcp-describe-creatable-rt-")
+        .tempdir()
+        .unwrap();
+
+    // Seed a doc so `collect_folders` has something to scan.
+    let tasks_dir = tmp.path().join("Workspaces/norn/tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::write(
+        tasks_dir.join("task1.md"),
+        "---\ntype: task\ntitle: Task One\n---\nbody\n",
+    )
+    .unwrap();
+
+    let config_dir = tmp.path().join(".norn");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    // One creatable rule ("task": has `name` + `target` + `body` +
+    // `frontmatter_defaults`) and an inbox. The `notes` rule is a path-only rule
+    // (match.path, no target) to confirm it does NOT bleed into `creatable_rules`.
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        "inbox:\n  path: Inbox\nvalidate:\n  rules:\n    - name: task\n      target: \"Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md\"\n      body: \"## Context\\n\"\n      frontmatter_defaults:\n        type: task\n    - name: notes\n      match:\n        path: \"Workspaces/norn/notes/*.md\"\n      frontmatter_defaults:\n        source: notes\n",
+    )
+    .unwrap();
+
+    let rebuild = Command::new(norn_bin())
+        .arg("--cwd")
+        .arg(tmp.path())
+        .arg("cache")
+        .arg("rebuild")
+        .env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"))
+        .output()
+        .expect("failed to run norn cache rebuild");
+    assert!(
+        rebuild.status.success(),
+        "norn cache rebuild failed: {}",
+        String::from_utf8_lossy(&rebuild.stderr)
+    );
+
+    tmp
+}
+
+/// Wire-level contract for `vault.describe`'s `creatable_rules` and `inbox`
+/// fields (NRN-51, Task 7).
+///
+/// Drives the real MCP binary against a vault with:
+///   - a creatable rule named "task" with `target`, `body`, and
+///     `frontmatter_defaults` (type: task),
+///   - a path-only rule "notes" (no target, not creatable),
+///   - `inbox.path: Inbox`.
+///
+/// Asserts at the JSON-RPC wire level:
+///   - `creatable_rules` contains exactly one entry with `name = "task"`,
+///     `target = "Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"`,
+///     `required_vars = ["workspace"]`, `frontmatter_defaults.type = "task"`,
+///     and a non-empty `body`.
+///   - `inbox = "Inbox"`.
+#[test]
+fn vault_describe_returns_creatable_rules_and_inbox() {
+    let vault = seeded_vault_with_creatable_rule();
+
+    let mut child = Command::new(norn_bin())
+        .arg("--cwd")
+        .arg(vault.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("XDG_CACHE_HOME", vault.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", vault.path().join(".xdg-state"))
+        .spawn()
+        .expect("failed to spawn norn mcp");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not captured");
+
+        // 1. initialize
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "norn-creatable-client", "version": "0.0.1" }
+                }
+            })))
+            .unwrap();
+
+        // 2. vault.describe
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.describe",
+                    "arguments": {}
+                }
+            })))
+            .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait on norn mcp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "norn mcp exited non-zero ({})\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+
+    let responses: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    // ── tools/call (id=2): vault.describe result ─────────────────────────────
+    let describe_resp = responses.iter().find(|r| r["id"] == 2).unwrap_or_else(|| {
+        panic!("no tools/call (id=2) response\nstdout: {stdout}\nstderr: {stderr}")
+    });
+
+    assert!(
+        describe_resp.get("error").is_none(),
+        "vault.describe call must not error, got: {describe_resp}"
+    );
+
+    let result = &describe_resp["result"]["structuredContent"];
+
+    // ── creatable_rules: exactly one entry ("task") ──────────────────────────
+    let creatable_rules = result["creatable_rules"].as_array().unwrap_or_else(|| {
+        panic!("describe result must carry a creatable_rules array, got: {result}")
+    });
+    assert_eq!(
+        creatable_rules.len(),
+        1,
+        "expected exactly one creatable rule, got: {creatable_rules:?}"
+    );
+    let task_rule = &creatable_rules[0];
+
+    // name
+    assert_eq!(
+        task_rule["name"].as_str(),
+        Some("task"),
+        "creatable rule name must be \"task\", got: {task_rule}"
+    );
+
+    // target template (verbatim)
+    assert_eq!(
+        task_rule["target"].as_str(),
+        Some("Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"),
+        "creatable rule target mismatch, got: {task_rule}"
+    );
+
+    // required_vars: ["workspace"] extracted from {{var.workspace}}
+    let required_vars = task_rule["required_vars"]
+        .as_array()
+        .unwrap_or_else(|| panic!("required_vars must be an array, got: {task_rule}"));
+    assert_eq!(
+        required_vars.len(),
+        1,
+        "expected one required var (workspace), got: {required_vars:?}"
+    );
+    assert_eq!(
+        required_vars[0].as_str(),
+        Some("workspace"),
+        "required_vars[0] must be \"workspace\", got: {required_vars:?}"
+    );
+
+    // frontmatter_defaults: type = "task"
+    assert_eq!(
+        task_rule["frontmatter_defaults"]["type"].as_str(),
+        Some("task"),
+        "creatable rule frontmatter_defaults.type must be \"task\", got: {task_rule}"
+    );
+
+    // body scaffold present and non-empty
+    let body = task_rule["body"]
+        .as_str()
+        .unwrap_or_else(|| panic!("creatable rule body must be a string, got: {task_rule}"));
+    assert!(
+        !body.is_empty() && body.contains("Context"),
+        "creatable rule body must be non-empty and contain \"Context\", got: {body:?}"
+    );
+
+    // ── inbox: "Inbox" ───────────────────────────────────────────────────────
+    assert_eq!(
+        result["inbox"].as_str(),
+        Some("Inbox"),
+        "inbox must be \"Inbox\", got: {:?}",
+        result["inbox"]
     );
 }
