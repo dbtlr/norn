@@ -118,6 +118,7 @@ mod tests {
             allowed_values: HashMap::new(),
             allowed_paths: vec![],
             frontmatter_defaults: HashMap::new(),
+            ..Default::default()
         };
 
         let q = rule_scope_query(&rule);

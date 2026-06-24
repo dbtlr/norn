@@ -39,6 +39,11 @@ pub struct VaultConfig {
     /// Cache-lifecycle settings; see CacheConfig.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+    /// Inbox settings for document creation routing.
+    // Consumed by the `new` command path (NRN-51); no live consumer yet.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub inbox: InboxConfig,
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
     _deprecated_graph: Option<serde_yaml::Value>,
@@ -61,6 +66,7 @@ impl Default for VaultConfig {
             templates: TemplatesConfig::default(),
             telemetry: None,
             cache: None,
+            inbox: InboxConfig::default(),
             _deprecated_graph: None,
         }
     }
@@ -166,6 +172,13 @@ pub struct LinksConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct InboxConfig {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
@@ -195,6 +208,10 @@ pub struct ValidateRule {
     pub allowed_paths: Vec<String>,
     #[serde(default)]
     pub frontmatter_defaults: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -568,6 +585,25 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                         ),
                     });
                 }
+            }
+        }
+
+        // target: requires name; mutually exclusive with match.path.
+        if rule.target.is_some() {
+            if rule.name.is_none() {
+                return Err(ConfigError::Invalid {
+                    source_path: source_path.to_owned(),
+                    message: "a rule declaring `target` must also declare `name` (target is the creation handle)".into(),
+                });
+            }
+            if rule.r#match.path.is_some() {
+                return Err(ConfigError::Invalid {
+                    source_path: source_path.to_owned(),
+                    message: format!(
+                        "rule `{}` declares both `target` and `match.path`; they are mutually exclusive (the matcher is derived from `target`)",
+                        rule.name.as_deref().unwrap_or("?")
+                    ),
+                });
             }
         }
     }
@@ -1333,6 +1369,68 @@ templates:
         assert!(
             cache.lazy_prune_enabled(),
             "unknown prune value falls back to lazy"
+        );
+    }
+
+    #[test]
+    fn rule_accepts_target_and_body() {
+        let yaml = r###"
+validate:
+  rules:
+    - name: task
+      target: "Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"
+      body: "## Context\n"
+      frontmatter_defaults:
+        type: task
+"###;
+        let (cfg, _compiled) =
+            parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).expect("parses");
+        let r = &cfg.validate.rules[0];
+        assert_eq!(
+            r.target.as_deref(),
+            Some("Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md")
+        );
+        // In YAML double-quoted strings, \n is a newline escape.
+        assert_eq!(r.body.as_deref(), Some("## Context\n"));
+    }
+
+    #[test]
+    fn inbox_block_parses() {
+        let yaml = "inbox:\n  path: Inbox\n";
+        let (cfg, _) =
+            parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).expect("parses");
+        assert_eq!(cfg.inbox.path.as_deref(), Some("Inbox"));
+    }
+
+    #[test]
+    fn target_without_name_is_rejected() {
+        let yaml = r#"
+validate:
+  rules:
+    - target: "tasks/{{title|slugify}}.md"
+"#;
+        let err = parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("target") && err.contains("name"), "got: {err}");
+    }
+
+    #[test]
+    fn target_with_match_path_is_rejected() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/{{title|slugify}}.md"
+      match:
+        path: "tasks/*.md"
+"#;
+        let err = parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("target") && err.contains("match.path"),
+            "got: {err}"
         );
     }
 }
