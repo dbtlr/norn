@@ -1,7 +1,7 @@
 ---
 name: norn
 description: Use when inspecting, querying, validating, or mutating Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, query, and validation/repair workflows.
-version: 1.2.0
+version: 1.3.0
 author: Drew Butler <hi@dbtlr.com>
 license: MIT
 ---
@@ -159,12 +159,17 @@ Sections are addressed by **exact heading text**; a duplicated heading refuses a
 ```bash
 norn new notes/my-note.md --yes                          # schema defaults fill required fields
 norn new notes/my-note.md --field description="…" --yes  # override one field
-norn new inbox/draft.md --parents --yes                  # create missing ancestor dirs
 norn new notes/my-note.md --dry-run                      # preview scaffold + defaults
 echo "# Heading" | norn new notes/my-note.md --body-from-stdin --yes
+
+# Rule-targeted: derive path from a named creatable rule
+norn new --as task --title "Fix the cache" --var workspace=norn --yes
+norn new --title "Quick capture" --yes                   # inbox fallback (inbox.path required)
 ```
 
-`new` fills `frontmatter_defaults` from the schema rule matching the path, runs substitution (`{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`), and lets `--field` overrides win. It refuses if the path exists (unless `--force`) or a parent dir is missing (unless `-p`). After writing, `validate` runs against the new doc; findings surface as report warnings.
+`new` operates in three modes: (A) explicit path — supply the vault-relative path directly; (B) rule-targeted (`--as <rule>`) — derives the path from the named rule's `target` template, applies the rule's `frontmatter_defaults`, and seeds the body from its `body` scaffold; (C) inbox fallback — no path and no `--as`, routes to `inbox.path/<title|slugify>.md`. Template placeholders: `{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`, `{{var.KEY}}` (filled by `--var KEY=VALUE`). `--field` overrides always win. Refuses (exit 2) when a required `{{var.KEY}}` is missing, `--title` is absent where the template needs it, the rule is unknown or non-creatable, or the inbox is unconfigured for Mode C. Also refuses if the path exists (unless `--force`) or a parent dir is missing (unless `-p`). After writing, `validate` runs against the new doc; findings surface as report warnings.
+
+**MCP off-filesystem placement:** call `vault.describe` to inspect `creatable_rules` (each carries `name`, `target`, `required_vars`, `frontmatter_defaults`, `body`) and `inbox`. Then call `vault.new { rule: "task", title: "…", vars: { "workspace": "norn" }, confirm: true }` — norn derives the concrete path from the rule's template with no path guessing.
 
 ### move / delete
 
