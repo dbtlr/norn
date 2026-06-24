@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::standards::duration::parse_duration;
-use crate::standards::path_match::{PathPattern, PathPatternError};
+use crate::standards::path_match::{glob_from_target, PathPattern, PathPatternError};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -663,6 +663,20 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         // concrete path globs that cannot intersect. `exclude` / `path_not` are
         // ignored — they only shrink a rule's match set, so skipping them keeps
         // the test conservative (it never under-reports possible overlap).
+        //
+        // For creatable (target-based) rules, match.path is None but the effective
+        // path glob is derived from the target template via glob_from_target.
+        // We use that derived glob for disjointness testing so that a notes-scoped
+        // target rule is correctly seen as disjoint from a tasks-scoped match.path
+        // rule, instead of being treated as path-unconstrained.
+        fn effective_glob(rule: &ValidateRule) -> Option<String> {
+            rule.r#match.path.clone().or_else(|| {
+                rule.target
+                    .as_deref()
+                    .and_then(|t| glob_from_target(t).ok())
+            })
+        }
+
         fn rules_can_coapply(a: &ValidateRule, b: &ValidateRule) -> bool {
             for (k, va) in &a.r#match.frontmatter {
                 if let Some(vb) = b.r#match.frontmatter.get(k) {
@@ -671,10 +685,11 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                     }
                 }
             }
-            !matches!(
-                (&a.r#match.path, &b.r#match.path),
-                (Some(pa), Some(pb)) if path_globs_disjoint(pa, pb)
-            )
+            match (effective_glob(a), effective_glob(b)) {
+                (Some(pa), Some(pb)) => !path_globs_disjoint(&pa, &pb),
+                // Either rule is genuinely unconstrained — conservatively assume overlap.
+                _ => true,
+            }
         }
 
         let rules = &cfg.validate.rules;
@@ -1451,6 +1466,62 @@ validate:
         assert!(
             err.contains("target") && err.contains("match.path"),
             "got: {err}"
+        );
+    }
+
+    // Regression: a target-based (creatable) rule must not falsely conflict with
+    // a match.path rule when their effective path globs are disjoint.
+    // Before the fix, target rules had match.path == None, causing rules_can_coapply
+    // to treat them as path-unconstrained and trigger a false conflict error.
+    #[test]
+    fn target_based_rule_disjoint_from_match_path_rule_no_false_conflict() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: notes
+      target: "Workspaces/{{var.workspace}}/notes/{{title|slugify}}.md"
+      frontmatter_defaults:
+        type: note
+    - name: tasks
+      match:
+        path: "Workspaces/{{workspace}}/tasks/*.md"
+      frontmatter_defaults:
+        type: task
+"#;
+        // notes/ and tasks/ are disjoint literal segments — config must load OK.
+        parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml"))
+            .expect("disjoint target and match.path rules should not conflict");
+    }
+
+    // Negative: a target-based rule and a match.path rule whose effective paths
+    // DO overlap declaring different values for the same field must still error.
+    #[test]
+    fn target_based_rule_overlapping_path_still_conflicts() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: notes-creatable
+      target: "Workspaces/{{var.workspace}}/notes/{{title|slugify}}.md"
+      frontmatter_defaults:
+        type: note
+    - name: notes-matcher
+      match:
+        path: "Workspaces/{{workspace}}/notes/*.md"
+      frontmatter_defaults:
+        type: article
+"#;
+        // Both rules target the notes/ folder — their effective globs overlap.
+        // Different values for `type` must still be detected as a conflict.
+        let err = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("conflict") || err.contains("conflicting"),
+            "expected conflict error, got: {err}"
+        );
+        assert!(
+            err.contains("type"),
+            "expected 'type' field in error, got: {err}"
         );
     }
 }
