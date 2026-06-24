@@ -12,6 +12,7 @@ use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cli::{NewArgs, NewFormat};
+use crate::standards::VaultConfig;
 
 // ── Public surface ─────────────────────────────────────────────────────────────
 
@@ -21,6 +22,95 @@ use crate::cli::{NewArgs, NewFormat};
 pub struct OutputBundle {
     pub rendered: String,
     pub exit_code: i32,
+}
+
+/// The result of three-mode path resolution.
+///
+/// Carries everything the caller needs to call `synth::build_plan` and
+/// resolve the body scaffold — without depending on `NewArgs` or CLI types.
+#[derive(Debug)]
+pub struct ResolvedTarget {
+    /// Vault-relative path of the new document.
+    pub path: Utf8PathBuf,
+    /// Caller-supplied (and rule-derived) template variable bag.
+    pub path_vars: BTreeMap<String, String>,
+    /// Raw `body` scaffold template from the targeted rule, if present.
+    /// Must be rendered with the substitution engine before use.
+    pub body_scaffold: Option<String>,
+}
+
+/// Resolve the creation target from primitive inputs — no dependency on `NewArgs`.
+///
+/// Implements three-mode resolution:
+///
+/// - **Mode A:** `doc_path` is `Some` and `as_rule` is `None` → use the path as-is.
+/// - **Mode B:** `doc_path` is `None` and `as_rule` is `Some` → look up the rule
+///   by name, generate path from its `target` template.
+/// - **Mode C:** both `None` → inbox fallback, requires `title` and `cfg.inbox.path`.
+///
+/// Returns `Err` (exit-2 class) on all refusal conditions:
+/// - Both path and rule supplied.
+/// - Unknown rule name.
+/// - Rule has no `target` (non-creatable).
+/// - `generate_path` fails: missing var, missing title.
+/// - Inbox fallback: no inbox configured, or no title.
+/// - Malformed var entries (caller responsibility; `BTreeMap` is pre-parsed).
+pub fn resolve_target(
+    cfg: &VaultConfig,
+    doc_path: Option<&Utf8Path>,
+    as_rule: Option<&str>,
+    title: Option<&str>,
+    vars: &BTreeMap<String, String>,
+) -> Result<ResolvedTarget> {
+    match (doc_path, as_rule) {
+        (Some(_), Some(_)) => Err(anyhow::anyhow!("pass either a path or --as, not both")),
+        (Some(p), None) => Ok(ResolvedTarget {
+            path: p.to_owned(),
+            path_vars: BTreeMap::new(),
+            body_scaffold: None,
+        }),
+        (None, Some(name)) => {
+            let rule = cfg
+                .validate
+                .rules
+                .iter()
+                .find(|r| r.name.as_deref() == Some(name))
+                .ok_or_else(|| anyhow::anyhow!("unknown rule `{name}`"))?;
+            let target = rule
+                .target
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("rule `{name}` is not creatable (no `target`)"))?;
+            let inputs = crate::new::generate::GenerateInputs { title, vars };
+            let generated = crate::new::generate::generate_path(target, &inputs, cfg)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let scaffold = rule.body.clone();
+            Ok(ResolvedTarget {
+                path: Utf8PathBuf::from(generated),
+                path_vars: vars.clone(),
+                body_scaffold: scaffold,
+            })
+        }
+        (None, None) => {
+            let inbox = cfg
+                .inbox
+                .path
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("no path, no --as, and no inbox configured"))?;
+            let t = title.ok_or_else(|| anyhow::anyhow!("inbox creation requires --title"))?;
+            let target = format!("{inbox}/{{{{title|slugify}}}}.md");
+            let inputs = crate::new::generate::GenerateInputs {
+                title: Some(t),
+                vars,
+            };
+            let generated = crate::new::generate::generate_path(&target, &inputs, cfg)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(ResolvedTarget {
+                path: Utf8PathBuf::from(generated),
+                path_vars: vars.clone(),
+                body_scaffold: None,
+            })
+        }
+    }
 }
 
 /// Orchestration entry for `norn new`.
@@ -58,76 +148,21 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
 
     // ── Step 3: Three-mode path resolution ───────────────────────────────────
     //
-    // Mode A: explicit path positional arg
-    // Mode B: --as RULE → derive path from rule's `target` template
-    // Mode C: no path, no --as → inbox fallback using --title
-    //
-    // Refusal (exit 2) if:
-    //   - Both path and --as are given
-    //   - --as names an unknown rule
-    //   - Rule has no `target` field (non-creatable)
-    //   - `generate_path` fails: missing var or missing title
-    //   - Inbox fallback: no inbox configured or no --title
+    // Delegated to the shared `resolve_target` function so CLI and MCP stay
+    // capability-isomorphic (NRN-56). The refusal conditions (unknown rule,
+    // non-creatable rule, missing var, missing title, both path+rule,
+    // inbox unconfigured) live entirely inside `resolve_target`.
     let cfg = &loaded_config.vault_config;
-    // rule_body_scaffold: the raw `body` template from the targeted rule (Mode B only).
-    // Carried out of the match so the substitution can happen after path resolution,
-    // using the same title + path_vars context used for path generation.
-    let (doc_path, path_vars, rule_body_scaffold): (
-        Utf8PathBuf,
-        BTreeMap<String, String>,
-        Option<String>,
-    ) =
-        match (&args.path, &args.as_rule) {
-            (Some(_), Some(_)) => {
-                return Err(anyhow::anyhow!("pass either a path or --as, not both"));
-            }
-            (Some(p), None) => {
-                // Explicit path — path_vars come purely from pattern captures in synth.
-                (p.clone(), BTreeMap::new(), None)
-            }
-            (None, Some(name)) => {
-                // Rule-targeted mode: look up the rule by name and generate the path.
-                let rule = cfg
-                    .validate
-                    .rules
-                    .iter()
-                    .find(|r| r.name.as_deref() == Some(name.as_str()))
-                    .ok_or_else(|| anyhow::anyhow!("unknown rule `{name}`"))?;
-                let target = rule.target.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("rule `{name}` is not creatable (no `target`)")
-                })?;
-                let inputs = crate::new::generate::GenerateInputs {
-                    title: args.title.as_deref(),
-                    vars: &vars,
-                };
-                let generated = crate::new::generate::generate_path(target, &inputs, cfg)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                // Capture the rule's body scaffold template (if present) for later rendering.
-                let scaffold = rule.body.clone();
-                (Utf8PathBuf::from(generated), vars.clone(), scaffold)
-            }
-            (None, None) => {
-                // Inbox fallback.
-                let inbox =
-                    cfg.inbox.path.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!("no path, no --as, and no inbox configured")
-                    })?;
-                let title = args
-                    .title
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("inbox creation requires --title"))?;
-                // Build the inbox path by generating the slug via the substitution engine.
-                // This ensures slugify behaviour is byte-identical to the template engine.
-                let target = format!("{inbox}/{{{{title|slugify}}}}.md");
-                let inputs = crate::new::generate::GenerateInputs {
-                    title: Some(title),
-                    vars: &vars,
-                };
-                let generated = crate::new::generate::generate_path(&target, &inputs, cfg)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                (Utf8PathBuf::from(generated), vars.clone(), None)
-            }
-        };
+    let resolved = resolve_target(
+        cfg,
+        args.path.as_deref(),
+        args.as_rule.as_deref(),
+        args.title.as_deref(),
+        &vars,
+    )?;
+    let doc_path = resolved.path;
+    let path_vars = resolved.path_vars;
+    let rule_body_scaffold = resolved.body_scaffold;
 
     // ── Step 4: Preflight ─────────────────────────────────────────────────────
     crate::new::validate::preflight(
