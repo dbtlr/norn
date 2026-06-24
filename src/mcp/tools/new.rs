@@ -162,8 +162,13 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     // ── Step 3: Build the plan ─────────────────────────────────────────────────
     // Construct NewArgs inline from NewParams — the same pattern set.rs uses for
     // SetArgs. `yes` / `dry_run` / `body_from_stdin` are CLI-TTY knobs inert here.
+    // The MCP tool receives an explicit path so mode resolution is pre-done.
+    let doc_path = Utf8PathBuf::from(&p.path);
     let args = NewArgs {
-        path: Utf8PathBuf::from(&p.path),
+        path: Some(doc_path.clone()),
+        as_rule: None,
+        title: None,
+        var: vec![],
         field: p.field.clone(),
         field_json: p.field_json.clone(),
         body_from_stdin: false,
@@ -177,8 +182,11 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     let body = p.body.clone().unwrap_or_default();
     let body_bytes = body.len();
 
+    let empty_vars = std::collections::BTreeMap::new();
     let plan = crate::new::synth::build_plan(
         &args,
+        &doc_path,
+        &empty_vars,
         &loaded_config.vault_config,
         &loaded_config.compiled,
         Some(&index),
@@ -253,8 +261,9 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     // Post-create validate: surface any missing-required-field findings as
     // warnings in the output envelope — mirrors `apply_and_render`'s
     // `post_create_validate` call.
-    let post_warnings = crate::new::post_create_validate(&cwd, &args, &plan.warnings, body_bytes)
-        .unwrap_or_default();
+    let post_warnings =
+        crate::new::post_create_validate(&cwd, doc_path.as_str(), &plan.warnings, body_bytes)
+            .unwrap_or_default();
     let mut augmented = crate::new::synth::CreateDocumentPlan {
         change: plan.change.clone(),
         warnings: plan.warnings.clone(),
