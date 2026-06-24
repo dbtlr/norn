@@ -65,6 +65,29 @@ pub struct PathRule {
     pub frontmatter_defaults: serde_json::Value,
 }
 
+/// A rule that can be used to create a new document via `vault.new { rule: "..." }`.
+///
+/// Only rules that declare BOTH a `name` AND a `target` template are creatable.
+/// An agent can call `vault.new { rule: name, title: "...", vars: {...} }` to
+/// create a document at the path derived from `target`, without knowing the
+/// concrete path in advance.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct CreatableRule {
+    /// The rule's declared name — pass this as `vault.new { rule: name }`.
+    pub name: String,
+    /// The path template (e.g. `Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md`).
+    /// Shows the agent what the concrete path will look like once rendered.
+    pub target: String,
+    /// Variable names (from `{{var.X}}` / `{{path.X}}` tokens) the template requires.
+    /// The agent must supply these via `vault.new { vars: { "workspace": "..." } }`.
+    pub required_vars: Vec<String>,
+    /// The frontmatter defaults a doc created with this rule inherits.
+    pub frontmatter_defaults: serde_json::Value,
+    /// Optional body scaffold template for the new document's body.
+    /// Rendered with the same substitution context used for path generation.
+    pub body: Option<String>,
+}
+
 /// Structured output for `vault.describe`. Root is `type: object`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct DescribeOutput {
@@ -75,6 +98,16 @@ pub struct DescribeOutput {
     /// Declared path rules: for each config rule with a `match.path`, the glob
     /// plus the frontmatter defaults a doc at a matching path inherits.
     pub path_rules: Vec<PathRule>,
+    /// Rules that can be used with `vault.new { rule: "name" }` to create a
+    /// document at a derived path. Each entry carries the rule name, its target
+    /// template, the required variable names, frontmatter defaults, and optional
+    /// body scaffold. Separate from `path_rules` so the existing contract is
+    /// undisturbed — an agent that already parses `path_rules` keeps working.
+    pub creatable_rules: Vec<CreatableRule>,
+    /// Configured inbox path (from `inbox.path` in the vault config), if any.
+    /// When present, `vault.new { title: "..." }` (no path, no rule) routes the
+    /// new document to `<inbox>/<title|slugify>.md`.
+    pub inbox: Option<String>,
     /// The full configured frontmatter schema/standards — the `validate` config
     /// serialized verbatim (required/forbidden fields, field types, allowed
     /// values, per-rule selectors). `serde_json::Value` so no standard is lost.
@@ -107,11 +140,41 @@ pub fn handle(ctx: &VaultContext) -> Result<DescribeOutput> {
         })
         .collect();
 
+    // Creatable rules: rules that have BOTH a `name` AND a `target` template.
+    // These are the rules an agent can pass to `vault.new { rule: "..." }`.
+    // We use a separate `creatable_rules` field rather than extending `PathRule`
+    // to keep the existing `path_rules` contract undisturbed — agents that already
+    // parse `path_rules` continue to work unchanged.
+    let creatable_rules = ctx
+        .config
+        .validate
+        .rules
+        .iter()
+        .filter_map(|rule| {
+            // A rule is creatable iff it has both `name` and `target`.
+            let name = rule.name.as_ref()?;
+            let target = rule.target.as_ref()?;
+            let required_vars = crate::new::generate::referenced_vars(target);
+            Some(CreatableRule {
+                name: name.clone(),
+                target: target.clone(),
+                required_vars,
+                frontmatter_defaults: serde_json::to_value(&rule.frontmatter_defaults)
+                    .unwrap_or(serde_json::Value::Null),
+                body: rule.body.clone(),
+            })
+        })
+        .collect();
+
+    let inbox = ctx.config.vault_config.inbox.path.clone();
+
     let schema = serde_json::to_value(&ctx.config.validate)?;
 
     Ok(DescribeOutput {
         folders,
         path_rules,
+        creatable_rules,
+        inbox,
         schema,
     })
 }
@@ -305,6 +368,126 @@ mod tests {
             out.folders.iter().any(|f| f.is_empty()),
             "a top-level doc should contribute the empty-string folder, got: {:?}",
             out.folders
+        );
+        // No config → no creatable rules and no inbox.
+        assert!(
+            out.creatable_rules.is_empty(),
+            "unconfigured vault has no creatable rules, got: {:?}",
+            out.creatable_rules
+                .iter()
+                .map(|r| &r.name)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            out.inbox.is_none(),
+            "unconfigured vault has no inbox, got: {:?}",
+            out.inbox
+        );
+    }
+
+    /// Seed a vault with a creatable rule (has `name` + `target`) plus a non-creatable
+    /// path rule (has `match.path` but no `target`). Also configure an inbox.
+    fn vault_with_creatable_rule() -> (TempDir, Utf8PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-describe-creatable-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+
+        // Create a doc so collect_folders has something to work with.
+        let tasks_dir = root.join("Workspaces/norn/tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("task1.md"),
+            "---\ntype: task\ntitle: Task One\n---\nbody\n",
+        )
+        .unwrap();
+
+        let config_dir = root.join(".norn");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        // Two rules: `task` uses `target` (creatable, no match.path), `notes`
+        // uses `match.path` (path rule only). To avoid the conflict-defaults
+        // guard (which can't prove disjointness when one rule uses `target`),
+        // the `notes` rule only sets `source: notes` (a non-conflicting field).
+        std::fs::write(
+            config_dir.join("config.yaml"),
+            "inbox:\n  path: Inbox\nvalidate:\n  rules:\n    - name: task\n      target: \"Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md\"\n      body: \"## Context\\n\"\n      frontmatter_defaults:\n        type: task\n    - name: notes\n      match:\n        path: \"Workspaces/norn/notes/*.md\"\n      frontmatter_defaults:\n        source: notes\n",
+        )
+        .unwrap();
+
+        (tmp, root)
+    }
+
+    #[test]
+    fn describe_surfaces_creatable_rule_and_inbox() {
+        let (_tmp, root) = vault_with_creatable_rule();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(&ctx).expect("handle should succeed");
+
+        // ── creatable_rules: the "task" rule with target is present ──────────
+        assert_eq!(
+            out.creatable_rules.len(),
+            1,
+            "expected one creatable rule (task), got: {:?}",
+            out.creatable_rules
+                .iter()
+                .map(|r| &r.name)
+                .collect::<Vec<_>>()
+        );
+        let task_rule = &out.creatable_rules[0];
+        assert_eq!(task_rule.name, "task");
+        assert_eq!(
+            task_rule.target,
+            "Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"
+        );
+        // required_vars: "workspace" extracted from {{var.workspace}}.
+        assert_eq!(
+            task_rule.required_vars,
+            vec!["workspace".to_string()],
+            "required_vars should be [\"workspace\"], got: {:?}",
+            task_rule.required_vars
+        );
+        // frontmatter_defaults carries type: task.
+        assert_eq!(
+            task_rule.frontmatter_defaults.get("type"),
+            Some(&serde_json::json!("task")),
+            "creatable rule should give type: task, got: {:?}",
+            task_rule.frontmatter_defaults
+        );
+        // body scaffold is present.
+        assert!(
+            task_rule.body.is_some(),
+            "creatable rule should carry a body scaffold"
+        );
+        assert!(
+            task_rule.body.as_deref().unwrap().contains("Context"),
+            "body scaffold should contain 'Context', got: {:?}",
+            task_rule.body
+        );
+
+        // ── inbox: present and set to "Inbox" ────────────────────────────────
+        assert_eq!(
+            out.inbox.as_deref(),
+            Some("Inbox"),
+            "inbox should be Some(\"Inbox\"), got: {:?}",
+            out.inbox
+        );
+
+        // ── path_rules: the non-creatable notes rule is in path_rules ────────
+        // (the task rule has target, not match.path, so it does NOT appear in path_rules)
+        assert!(
+            out.path_rules
+                .iter()
+                .any(|r| r.glob == "Workspaces/norn/notes/*.md"),
+            "path_rules should include the notes glob, got: {:?}",
+            out.path_rules.iter().map(|r| &r.glob).collect::<Vec<_>>()
+        );
+        assert!(
+            !out.path_rules
+                .iter()
+                .any(|r| r.name.as_deref() == Some("task")),
+            "task (creatable) rule must NOT appear in path_rules"
         );
     }
 }

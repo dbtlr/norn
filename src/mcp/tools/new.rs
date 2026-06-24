@@ -40,7 +40,6 @@
 //! matching the CLI's non-`--yes` branch.
 
 use anyhow::Result;
-use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -49,15 +48,45 @@ use crate::mcp::context::VaultContext;
 
 /// Parameters for `vault.new`.
 ///
-/// `path` is the vault-relative path of the new document (must end in `.md`).
+/// Three creation modes (mirrors `norn new`):
+///
+/// - **Mode A — explicit path:** supply `path`. The document is created at that
+///   vault-relative path.
+/// - **Mode B — rule-targeted:** supply `rule` (+ optional `title` + `vars`).
+///   The path is derived from the named rule's `target` template. Use
+///   `vault.describe` to see available rules and their required variables.
+/// - **Mode C — inbox fallback:** supply neither `path` nor `rule`, but DO
+///   supply `title`. The document is placed in the configured inbox folder as
+///   `<inbox>/<title|slugify>.md`.
+///
 /// Frontmatter overrides travel via `field` (KEY=VALUE strings) and `field_json`
 /// (KEY=JSON strings), feeding through the same `--field` / `--field-json` seam
-/// `norn new` uses. `body` seeds the document body. `parents` auto-creates missing
-/// parent directories. `force` allows overwriting an existing file.
+/// `norn new` uses. `body` seeds the document body (takes precedence over any
+/// rule body scaffold). `parents` auto-creates missing parent directories.
+/// `force` allows overwriting an existing file.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct NewParams {
     /// Vault-relative path of the new document (must end in `.md`).
-    pub path: String,
+    /// Mutually exclusive with `rule`. Supply one or the other, not both.
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Name of a creatable rule to use for path derivation (from `vault.describe`
+    /// `creatable_rules`). The concrete path is rendered from the rule's `target`
+    /// template using `title` and `vars`. Mutually exclusive with `path`.
+    #[serde(default)]
+    pub rule: Option<String>,
+
+    /// Document title, used to render `{{title|slugify}}` in a rule target or
+    /// inbox path. Required for Mode B (rule with `{{title}}`) and Mode C (inbox).
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Template variable bag for rule-targeted creation. Pass values for every
+    /// name listed in `vault.describe`'s `creatable_rules[*].required_vars`.
+    /// E.g. `{"workspace": "norn"}` for a rule referencing `{{var.workspace}}`.
+    #[serde(default)]
+    pub vars: std::collections::BTreeMap<String, String>,
 
     /// Frontmatter field overrides in `KEY=VALUE` format, repeatable.
     /// Feeds through `norn new --field KEY=VALUE` (string coercion).
@@ -69,7 +98,10 @@ pub struct NewParams {
     #[serde(default)]
     pub field_json: Vec<String>,
 
-    /// Seed the document body with this string. Absent = empty body.
+    /// Seed the document body with this string. When supplied alongside a rule
+    /// that declares a `body` scaffold, this explicit value takes precedence
+    /// (equivalent to piping stdin in the CLI).
+    /// Absent = use rule body scaffold if available, else empty.
     #[serde(default)]
     pub body: Option<String>,
 
@@ -155,19 +187,31 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
 
     let index = crate::cache_cmd::load_graph_index(&cwd, &loaded_config.index_options, false)?;
 
-    // ── Step 2: Preflight ──────────────────────────────────────────────────────
-    crate::new::validate::preflight(cwd.as_str(), &p.path, p.force, p.parents)
+    // ── Step 2: Three-mode path resolution via the shared `resolve_target` fn ─
+    // Mirrors the CLI's `preflight_and_plan` mode resolution (NRN-56).
+    // The doc_path drives the param; explicit `body` overrides the rule scaffold
+    // (stdin-equivalent precedence: explicit body > rule scaffold > empty).
+    let doc_path_opt = p.path.as_deref().map(camino::Utf8Path::new);
+    let resolved = crate::new::resolve_target(
+        &loaded_config.vault_config,
+        doc_path_opt,
+        p.rule.as_deref(),
+        p.title.as_deref(),
+        &p.vars,
+    )?;
+    let doc_path = resolved.path;
+
+    // ── Step 3: Preflight ──────────────────────────────────────────────────────
+    crate::new::validate::preflight(cwd.as_str(), doc_path.as_str(), p.force, p.parents)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // ── Step 3: Build the plan ─────────────────────────────────────────────────
+    // ── Step 4: Build the plan ─────────────────────────────────────────────────
     // Construct NewArgs inline from NewParams — the same pattern set.rs uses for
     // SetArgs. `yes` / `dry_run` / `body_from_stdin` are CLI-TTY knobs inert here.
-    // The MCP tool receives an explicit path so mode resolution is pre-done.
-    let doc_path = Utf8PathBuf::from(&p.path);
     let args = NewArgs {
         path: Some(doc_path.clone()),
         as_rule: None,
-        title: None,
+        title: p.title.clone(),
         var: vec![],
         field: p.field.clone(),
         field_json: p.field_json.clone(),
@@ -179,14 +223,33 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         format: NewFormat::Json,
     };
 
-    let body = p.body.clone().unwrap_or_default();
+    // Body resolution: explicit `body` param > rule body scaffold > empty.
+    // This mirrors the CLI's stdin > scaffold > empty precedence.
+    let body = if let Some(explicit_body) = p.body.clone() {
+        explicit_body
+    } else if let Some(scaffold) = resolved.body_scaffold {
+        // Render the scaffold with the same Context used in path generation so
+        // that `{{title}}` and `{{var.X}}` substitutions are byte-identical.
+        let cfg = &loaded_config.vault_config;
+        let ctx_sub = crate::standards::substitution::Context {
+            now: chrono::Local::now().naive_local(),
+            title: p.title.clone().unwrap_or_default(),
+            path_vars: resolved.path_vars.clone(),
+            date_format: cfg.templates.date_format.clone(),
+            time_format: cfg.templates.time_format.clone(),
+        };
+        crate::standards::substitution::render(&scaffold, &ctx_sub)
+            .map_err(|e| anyhow::anyhow!("body scaffold render error: {e}"))?
+    } else {
+        String::new()
+    };
+
     let body_bytes = body.len();
 
-    let empty_vars = std::collections::BTreeMap::new();
     let plan = crate::new::synth::build_plan(
         &args,
         &doc_path,
-        &empty_vars,
+        &resolved.path_vars,
         &loaded_config.vault_config,
         &loaded_config.compiled,
         Some(&index),
@@ -194,9 +257,11 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let doc_path_str = doc_path.as_str().to_owned();
+
     // ── DRY-RUN (default): no lock, no apply, no write ─────────────────────────
     if !p.confirm {
-        return crate::new::report::render_json(&plan, &p.path, false, body_bytes, "")
+        return crate::new::report::render_json(&plan, &doc_path_str, false, body_bytes, "")
             .map_err(|e| anyhow::anyhow!("render_json: {e}"));
     }
 
@@ -217,7 +282,7 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         &cwd,
         cwd.as_str(),
         /*dry_run=*/ false,
-        &["new".to_string(), p.path.clone()],
+        &["new".to_string(), doc_path_str.clone()],
     );
 
     // Build the single-change RepairPlan the applier expects — mirrors
@@ -271,7 +336,7 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     };
     augmented.warnings.extend(post_warnings);
 
-    crate::new::report::render_json(&augmented, &p.path, true, body_bytes, &trace_id)
+    crate::new::report::render_json(&augmented, &doc_path_str, true, body_bytes, &trace_id)
         .map_err(|e| anyhow::anyhow!("render_json: {e}"))
 }
 
@@ -316,7 +381,7 @@ validate:
         let json = handle(
             &ctx,
             NewParams {
-                path: new_path.to_string(),
+                path: Some(new_path.to_string()),
                 parents: true,
                 confirm: false,
                 ..Default::default()
@@ -350,7 +415,7 @@ validate:
         let json = handle(
             &ctx,
             NewParams {
-                path: new_path.to_string(),
+                path: Some(new_path.to_string()),
                 parents: true,
                 confirm: true,
                 ..Default::default()
@@ -390,7 +455,7 @@ validate:
         let json = handle(
             &ctx,
             NewParams {
-                path: new_path.to_string(),
+                path: Some(new_path.to_string()),
                 confirm: false,
                 ..Default::default()
             },
@@ -415,7 +480,7 @@ validate:
         let json = handle(
             &ctx,
             NewParams {
-                path: "another.md".to_string(),
+                path: Some("another.md".to_string()),
                 confirm: true,
                 ..Default::default()
             },
@@ -443,7 +508,7 @@ validate:
         handle(
             &ctx,
             NewParams {
-                path: "overridden.md".to_string(),
+                path: Some("overridden.md".to_string()),
                 field: vec!["title=My Override".to_string()],
                 confirm: true,
                 ..Default::default()
@@ -455,6 +520,144 @@ validate:
         assert!(
             content.contains("title: My Override"),
             "field override must appear in frontmatter:\n{content}"
+        );
+    }
+
+    /// Seed a vault with a creatable rule for rule-targeted creation tests.
+    fn vault_with_rule() -> (TempDir, Utf8PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-new-rule-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let norn_dir = root.join(".norn");
+        std::fs::create_dir_all(&norn_dir).unwrap();
+        std::fs::write(
+            norn_dir.join("config.yaml"),
+            "validate:\n  rules:\n    - name: task\n      target: \"Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md\"\n      body: \"## Context\\n\"\n      frontmatter_defaults:\n        type: task\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    /// Rule-targeted dry-run: vault.new { rule: "task", title: "Fix It",
+    /// vars: {workspace: "norn"} } → applied:false, path derives to
+    /// Workspaces/norn/tasks/fix-it.md, file NOT written.
+    #[test]
+    fn mcp_new_by_rule_dry_run_returns_derived_path() {
+        let (_tmp, root) = vault_with_rule();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("workspace".to_string(), "norn".to_string());
+
+        // dry-run (confirm:false default).
+        let json = handle(
+            &ctx,
+            NewParams {
+                rule: Some("task".to_string()),
+                title: Some("Fix It".to_string()),
+                vars,
+                parents: true, // Workspaces/norn/tasks/ doesn't exist yet.
+                confirm: false,
+                ..Default::default()
+            },
+        )
+        .expect("handle (dry-run by rule) should succeed");
+
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["applied"].as_bool(),
+            Some(false),
+            "dry-run must have applied == false"
+        );
+        // Path must be derived from the rule's target template.
+        let path = v["path"].as_str().unwrap_or("");
+        assert!(
+            path.contains("Workspaces/norn/tasks/fix-it.md"),
+            "path must resolve to Workspaces/norn/tasks/fix-it.md, got: {path}"
+        );
+        // File must NOT be on disk.
+        assert!(
+            !root.join("Workspaces/norn/tasks/fix-it.md").exists(),
+            "dry-run must NOT create the file on disk"
+        );
+    }
+
+    /// Rule-targeted confirm: after dry-run returns derived path, confirm:true
+    /// must create the file at the derived path.
+    ///
+    /// Sequencing: send dry-run → drain response → send confirm → drain.
+    /// (The in-process call lock is NOT FIFO; do not interleave concurrently.)
+    #[test]
+    fn mcp_new_by_rule_dry_run_then_confirm_writes_file() {
+        let (_tmp, root) = vault_with_rule();
+
+        // ── dry-run ───────────────────────────────────────────────────────────
+        let ctx_dry = VaultContext::open(&root, None).expect("open ctx for dry-run");
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("workspace".to_string(), "norn".to_string());
+
+        let json_dry = handle(
+            &ctx_dry,
+            NewParams {
+                rule: Some("task".to_string()),
+                title: Some("Fix It".to_string()),
+                vars: vars.clone(),
+                parents: true,
+                confirm: false,
+                ..Default::default()
+            },
+        )
+        .expect("dry-run should succeed");
+
+        let v_dry: serde_json::Value = serde_json::from_str(&json_dry).unwrap();
+        assert_eq!(v_dry["applied"].as_bool(), Some(false));
+        let derived_path = v_dry["path"].as_str().expect("path in dry-run response");
+        assert!(
+            derived_path.contains("fix-it.md"),
+            "derived path should contain fix-it.md, got: {derived_path}"
+        );
+        // File still doesn't exist after dry-run.
+        assert!(
+            !root.join(derived_path).exists(),
+            "dry-run must not create the file"
+        );
+
+        // ── confirm: drain dry-run first, then send confirm ───────────────────
+        let ctx_confirm = VaultContext::open(&root, None).expect("open ctx for confirm");
+        let json_confirm = handle(
+            &ctx_confirm,
+            NewParams {
+                rule: Some("task".to_string()),
+                title: Some("Fix It".to_string()),
+                vars,
+                parents: true,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("confirm should succeed");
+
+        let v_confirm: serde_json::Value = serde_json::from_str(&json_confirm).unwrap();
+        assert_eq!(
+            v_confirm["applied"].as_bool(),
+            Some(true),
+            "confirm must have applied == true"
+        );
+
+        // File must now exist at the derived path.
+        let expected_path = root.join("Workspaces/norn/tasks/fix-it.md");
+        assert!(
+            expected_path.exists(),
+            "confirm must create the file at {expected_path}"
+        );
+
+        // Frontmatter must include the rule's type: task default.
+        let content = std::fs::read_to_string(&expected_path).unwrap();
+        assert!(
+            content.contains("type: task"),
+            "frontmatter must include type: task from rule default:\n{content}"
         );
     }
 }
