@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::standards::duration::parse_duration;
-use crate::standards::path_match::{glob_from_target, PathPattern, PathPatternError};
+use crate::standards::path_match::{effective_match_glob, PathPattern, PathPatternError};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -40,9 +40,7 @@ pub struct VaultConfig {
     #[serde(default)]
     pub cache: Option<CacheConfig>,
     /// Inbox settings for document creation routing.
-    // Consumed by the `new` command path (NRN-51); no live consumer yet.
     #[serde(default)]
-    #[allow(dead_code)]
     pub inbox: InboxConfig,
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
@@ -608,8 +606,11 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             }
         }
 
-        // target: requires name; mutually exclusive with match.path.
-        if rule.target.is_some() {
+        // target: requires name; mutually exclusive with match.path; must not
+        // start with `/` (vault paths are relative — a leading slash would cause
+        // the derived matcher to strip it while generate_path does not, breaking
+        // the round-trip between generation and matching).
+        if let Some(target) = &rule.target {
             if rule.name.is_none() {
                 return Err(ConfigError::Invalid {
                     source_path: source_path.to_owned(),
@@ -621,6 +622,15 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                     source_path: source_path.to_owned(),
                     message: format!(
                         "rule `{}` declares both `target` and `match.path`; they are mutually exclusive (the matcher is derived from `target`)",
+                        rule.name.as_deref().unwrap_or("?")
+                    ),
+                });
+            }
+            if target.starts_with('/') {
+                return Err(ConfigError::Invalid {
+                    source_path: source_path.to_owned(),
+                    message: format!(
+                        "rule `{}`: `target` must be a relative vault path (remove the leading '/')",
                         rule.name.as_deref().unwrap_or("?")
                     ),
                 });
@@ -665,18 +675,10 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         // the test conservative (it never under-reports possible overlap).
         //
         // For creatable (target-based) rules, match.path is None but the effective
-        // path glob is derived from the target template via glob_from_target.
-        // We use that derived glob for disjointness testing so that a notes-scoped
-        // target rule is correctly seen as disjoint from a tasks-scoped match.path
-        // rule, instead of being treated as path-unconstrained.
-        fn effective_glob(rule: &ValidateRule) -> Option<String> {
-            rule.r#match.path.clone().or_else(|| {
-                rule.target
-                    .as_deref()
-                    .and_then(|t| glob_from_target(t).ok())
-            })
-        }
-
+        // path glob is derived from the target template by effective_match_glob
+        // (the shared helper in path_match). Using it here keeps the notes-scoped
+        // target rule correctly disjoint from a tasks-scoped match.path rule,
+        // instead of treating it as path-unconstrained.
         fn rules_can_coapply(a: &ValidateRule, b: &ValidateRule) -> bool {
             for (k, va) in &a.r#match.frontmatter {
                 if let Some(vb) = b.r#match.frontmatter.get(k) {
@@ -685,7 +687,9 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                     }
                 }
             }
-            match (effective_glob(a), effective_glob(b)) {
+            let ea = effective_match_glob(a.r#match.path.as_deref(), a.target.as_deref());
+            let eb = effective_match_glob(b.r#match.path.as_deref(), b.target.as_deref());
+            match (ea, eb) {
                 (Some(pa), Some(pb)) => !path_globs_disjoint(&pa, &pb),
                 // Either rule is genuinely unconstrained — conservatively assume overlap.
                 _ => true,
@@ -1523,5 +1527,29 @@ validate:
             err.contains("type"),
             "expected 'type' field in error, got: {err}"
         );
+    }
+
+    // ── Fix 3: leading-slash target is rejected ──────────────────────────────
+
+    #[test]
+    fn target_with_leading_slash_is_rejected() {
+        let err = parse(
+            "validate:\n  rules:\n    - name: tasks\n      target: \"/Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md\"\n"
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("relative") || msg.contains("leading '/'"),
+            "expected leading-slash rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn target_without_leading_slash_is_accepted() {
+        let cfg = parse(
+            "validate:\n  rules:\n    - name: tasks\n      target: \"Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md\"\n"
+        )
+        .expect("relative target must be accepted");
+        assert_eq!(cfg.validate.rules.len(), 1);
     }
 }
