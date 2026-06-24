@@ -449,11 +449,31 @@ pub fn parse_config_compiled(
     let mut compiled_rules = Vec::with_capacity(cfg.validate.rules.len());
     for rule in &cfg.validate.rules {
         let rule_label = rule.name.as_deref().unwrap_or("unnamed validate rule");
-        let path = compile_optional(
-            &rule.r#match.path,
-            &format!("rule {rule_label}: match.path"),
-            source_path,
-        )?;
+        // Derive the path matcher from `target` when `match.path` is absent.
+        // post_validate already enforces that they are mutually exclusive, so
+        // only one of these two branches can produce a Some(_).
+        let path = if rule.r#match.path.is_none() {
+            if let Some(target) = &rule.target {
+                Some(
+                    crate::standards::path_match::pattern_from_target(target).map_err(
+                        |e: PathPatternError| ConfigError::Invalid {
+                            source_path: source_path.to_owned(),
+                            message: format!(
+                                "rule {rule_label}: target `{target}` produced invalid path pattern: {e}"
+                            ),
+                        },
+                    )?,
+                )
+            } else {
+                None
+            }
+        } else {
+            compile_optional(
+                &rule.r#match.path,
+                &format!("rule {rule_label}: match.path"),
+                source_path,
+            )?
+        };
         let path_not = compile_optional(
             &rule.r#match.path_not,
             &format!("rule {rule_label}: match.path_not"),
