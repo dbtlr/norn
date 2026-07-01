@@ -5,7 +5,7 @@ description: The .norn/config.yaml schema covering file ignores, validate rules,
 
 # Configuration
 
-Config is discovered relative to `--cwd` (or `$PWD` if unset). `norn` looks for `.norn/config.yaml` at that root; missing config is fine — defaults apply.
+Config is discovered relative to `--cwd` (or `$NORN_ROOT`, else `$PWD`, if unset). `norn` looks for `.norn/config.yaml` at that root; missing config is fine — defaults apply.
 
 Pass `--config <path>` to point at an explicit file. Relative paths resolve against the effective cwd.
 

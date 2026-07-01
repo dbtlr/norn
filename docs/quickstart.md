@@ -53,7 +53,7 @@ norn -C /path/to/vault validate --summary --format records
 
 ## Targeting a vault
 
-Pass `-C <path>` (alias `--cwd`) to run any command against an arbitrary vault directory. When `-C` is omitted, `norn` runs against the current directory. Either way, `.norn/config.yaml` is discovered at the effective root if it exists.
+Pass `-C <path>` (alias `--cwd`) to run any command against an arbitrary vault directory. When `-C` is omitted, `norn` falls back to `$NORN_ROOT` if set, otherwise the current directory — so exporting `NORN_ROOT=/path/to/vault` lets you run `norn` from anywhere without repeating `-C`. Either way, `.norn/config.yaml` is discovered at the effective root if it exists.
 
 ## A first config
 
