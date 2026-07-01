@@ -24,10 +24,11 @@ Do not use `norn` for full-text relevance or semantic search — `find --text` i
 
 ## Vault root targeting
 
-Pick a vault root before running anything. Two ways:
+Pick a vault root before running anything. Three ways, in precedence order:
 
 1. **Explicit path.** `norn -C /path/to/vault validate --summary --format json` (long form `--cwd`).
-2. **Process cwd.** Without `-C`, `norn` runs against the current directory and discovers `.norn/config.yaml` if present.
+2. **`NORN_ROOT` env var.** Export `NORN_ROOT=/path/to/vault` to make that the default root for every invocation, so `norn` runs against it from any directory without `-C`.
+3. **Process cwd.** With neither set, `norn` runs against the current directory and discovers `.norn/config.yaml` if present.
 
 When in doubt, pass `-C <path>`.
 

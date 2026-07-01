@@ -11,13 +11,15 @@ Every norn command, each linking to its own page with examples, options, and out
 
 | Flag | Description |
 |---|---|
-| `-C, --cwd <dir>` | Run against `<dir>` instead of the process current directory. |
+| `-C, --cwd <dir>` | Run against `<dir>` instead of the process current directory. Defaults to `$NORN_ROOT` when set, else the process cwd. |
 | `--config <path>` | Explicit `.norn/config.yaml` path. Relative paths resolve against the effective cwd. |
 | `--verbose` | Verbose stderr logging. |
 | `--no-cache-refresh` | Skip the implicit cache refresh before reading the graph. |
 | `--color <when>` | Color output. Honors `NO_COLOR` / `CLICOLOR_FORCE`. |
 
 When `--config` is omitted, norn discovers `<cwd>/.norn/config.yaml` if it exists; a missing discovered config is fine and uses defaults.
+
+Set `NORN_ROOT` to a vault path to make that the default root for every invocation, so you can run `norn` from anywhere without repeating `-C`. Precedence is `-C/--cwd` > `$NORN_ROOT` > the process cwd; a relative `$NORN_ROOT` resolves against the process cwd, an empty value is ignored.
 
 ## Query and read
 

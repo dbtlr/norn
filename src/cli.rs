@@ -13,7 +13,7 @@ pub struct Cli {
         long,
         global = true,
         help_heading = "Global options",
-        help = "Run as if norn started in this directory"
+        help = "Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)"
     )]
     pub cwd: Option<Utf8PathBuf>,
     #[arg(
