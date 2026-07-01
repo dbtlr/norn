@@ -37,6 +37,17 @@ fn requested_root(explicit: Option<&Utf8PathBuf>, env_root: Option<&str>) -> Opt
     })
 }
 
+/// Ground a non-absolute requested root against the process cwd: a relative
+/// request is joined to `current_dir`, and `None` (nothing requested) yields
+/// `current_dir` itself. Callers handle absolute requests before this point,
+/// so they never reach here.
+fn ground_relative(requested: Option<Utf8PathBuf>, current_dir: &Utf8PathBuf) -> Utf8PathBuf {
+    match requested {
+        Some(relative) => current_dir.join(relative),
+        None => current_dir.clone(),
+    }
+}
+
 /// Resolve the effective vault root.
 ///
 /// Precedence: `-C/--cwd` > `$NORN_ROOT` > the process working directory. A
@@ -59,10 +70,7 @@ pub fn effective_cwd(cwd: Option<&Utf8PathBuf>) -> Result<Utf8PathBuf> {
         anyhow::anyhow!("current directory is not valid UTF-8: {}", path.display())
     })?;
 
-    Ok(match requested {
-        Some(relative) => current_dir.join(relative),
-        None => current_dir,
-    })
+    Ok(ground_relative(requested, &current_dir))
 }
 
 pub fn resolve_path(cwd: &Utf8PathBuf, path: &Utf8PathBuf) -> Utf8PathBuf {
@@ -176,5 +184,20 @@ mod tests {
             requested_root(None, Some("  /padded  ")),
             Some(Utf8PathBuf::from("/padded"))
         );
+    }
+
+    #[test]
+    fn ground_relative_joins_relative_request_against_cwd() {
+        let cwd = Utf8PathBuf::from("/base/dir");
+        assert_eq!(
+            ground_relative(Some(Utf8PathBuf::from("vaults/atlas")), &cwd),
+            Utf8PathBuf::from("/base/dir/vaults/atlas")
+        );
+    }
+
+    #[test]
+    fn ground_relative_yields_cwd_when_nothing_requested() {
+        let cwd = Utf8PathBuf::from("/base/dir");
+        assert_eq!(ground_relative(None, &cwd), cwd);
     }
 }
