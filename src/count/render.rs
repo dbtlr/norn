@@ -24,7 +24,9 @@ pub fn render_text(out: &CountOutput) -> String {
         CountOutput::GroupedMulti { by, total, groups } => {
             writeln!(s, "total      {}", total).unwrap();
             writeln!(s).unwrap();
-            writeln!(s, "{}  count", by.join(" / ")).unwrap();
+            // No `count` column label here — leaf counts align within each
+            // sibling group, not against a global column.
+            writeln!(s, "{}", by.join(" / ")).unwrap();
             render_group_tree(&mut s, groups, 0);
         }
     }

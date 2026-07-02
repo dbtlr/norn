@@ -123,10 +123,46 @@ pub struct CountEnvelope {
     pub total: usize,
     /// Grouping key(s): a string for single-key grouping, an array of
     /// strings for multi-key (set when `by` was requested).
+    #[schemars(schema_with = "by_schema")]
     pub by: Option<serde_json::Value>,
     /// Per-value document counts, sorted by field value: flat for one key,
     /// nested for several (set when `by` was requested).
+    #[schemars(schema_with = "groups_schema")]
     pub groups: Option<serde_json::Value>,
+}
+
+/// Typed schema for `by`: string (one key) | string array (several) | null.
+/// The Rust type is `serde_json::Value` (which schemars would render as
+/// untyped `any`); this keeps the published contract concrete.
+fn by_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } },
+            { "type": "null" }
+        ]
+    })
+}
+
+/// Typed schema for `groups`: a map whose values are counts (one key) or
+/// nested maps bottoming out in counts (several), or null when no grouping
+/// was requested. Typed to two levels; deeper nesting stays an object (a
+/// root-relative `$ref` would not survive embedding as a property subschema).
+fn groups_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            {
+                "type": "object",
+                "additionalProperties": {
+                    "anyOf": [
+                        { "type": "integer", "minimum": 0 },
+                        { "type": "object" }
+                    ]
+                }
+            },
+            { "type": "null" }
+        ]
+    })
 }
 
 impl CountEnvelope {
