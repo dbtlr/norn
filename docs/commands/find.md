@@ -62,7 +62,7 @@ All filters are ANDed together. Within `--in` and `--not-in`, comma-separated va
 | `--unresolved-links` | Documents with at least one unresolved link. |
 | `--all` | Return every document. The escape hatch when no predicate fits; a full-vault dump is almost always a mistake, so it requires opt-in. |
 
-String-valued predicates (`--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains`) are array-aware — an array-valued field matches when any element matches — and collapse `[[wikilink]]` brackets on both sides, so `--starts-with depends_on:NRN-` matches a stored `"[[NRN-123]]"`. The three string operators compare literal text (no bool/number coercion of the value, no wildcards or regex); non-string stored values are compared by their text rendering.
+String-valued predicates (`--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains`) are array-aware — an array-valued field matches when any element matches — and collapse `[[wikilink]]` brackets on both sides, so `--starts-with depends_on:NRN-` matches a stored `"[[NRN-123]]"`. The three string operators compare literal text: no bool/number coercion of the value, no whitespace trimming (a quoted `'title:done '` keeps its trailing space), and no wildcards or regex. Non-string stored values compare by their JSON text rendering — booleans as `true`/`false`, numbers in canonical form (a stored `2.50` is the value `2.5`).
 
 ## Selecting fields — `--col` and `--all-cols`
 

@@ -159,13 +159,14 @@ fn parse_field_value_list(spec: &str, flag: &str) -> Result<(String, Vec<Value>)
 
 /// Parse a `field:VALUE` token for the anchored string operators. The value
 /// stays a literal string — no bool/number coercion (a `--contains prio:1`
-/// needle is the text "1").
+/// needle is the text "1") and no whitespace trimming: for anchored
+/// operators the boundary characters are exactly what the user asserts, so
+/// `--ends-with 'title:done '` keeps its trailing space.
 fn parse_field_text(spec: &str, flag: &str) -> Result<(String, String)> {
     let (field, raw) = spec
         .split_once(':')
         .ok_or_else(|| anyhow!("invalid {} value, expected field:value: {}", flag, spec))?;
     let field = field.trim().to_string();
-    let raw = raw.trim();
     if field.is_empty() || raw.is_empty() {
         return Err(anyhow!(
             "invalid {} value, expected non-empty field and value: {}",
@@ -378,7 +379,7 @@ mod tests {
 
     #[test]
     fn string_operator_empty_value_errors() {
-        for spec in ["tags:", "tags:  ", ":release", "nocolon"] {
+        for spec in ["tags:", ":release", "nocolon"] {
             let mut a = empty();
             a.starts_with = vec![spec.into()];
             assert!(
@@ -386,6 +387,24 @@ mod tests {
                 "spec {spec:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn string_operator_preserves_needle_whitespace() {
+        // Anchored operators assert boundary characters — trimming would
+        // silently change the predicate.
+        let mut a = empty();
+        a.ends_with = vec!["title:done ".into()];
+        a.contains = vec!["title:  ".into()];
+        let q = build_document_query(&a).unwrap();
+        assert_eq!(
+            q.frontmatter_ends_with,
+            vec![("title".to_string(), "done ".to_string())]
+        );
+        assert_eq!(
+            q.frontmatter_contains,
+            vec![("title".to_string(), "  ".to_string())]
+        );
     }
 
     #[test]
