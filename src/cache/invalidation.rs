@@ -12,6 +12,7 @@ pub(crate) fn drop_document(tx: &Transaction, path: &Utf8Path) -> Result<(), Cac
         "DELETE FROM documents WHERE path = ?",
         params![path.as_str()],
     )?;
+    crate::cache::document_fields::delete_rows(tx, path.as_str())?;
     tx.execute(
         "DELETE FROM headings WHERE doc_path = ?",
         params![path.as_str()],

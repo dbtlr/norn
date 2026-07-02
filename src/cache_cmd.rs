@@ -25,7 +25,12 @@ pub fn load_graph_index(
     options: &IndexOptions,
     no_cache_refresh: bool,
 ) -> Result<GraphIndex> {
-    let mut cache = Cache::open_with_config(vault_root, options.alias_field.as_deref())?;
+    let mut cache = Cache::open_with_index(
+        vault_root,
+        options.alias_field.as_deref(),
+        &options.resolved_index_set,
+        &options.resolved_index_set_hash,
+    )?;
     if !no_cache_refresh {
         match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
             Ok(_) => {}
@@ -50,10 +55,15 @@ pub fn load_graph_index(
 #[allow(dead_code)]
 pub fn open_for_query(
     vault_root: &Utf8Path,
-    alias_field: Option<&str>,
+    options: &IndexOptions,
     no_cache_refresh: bool,
 ) -> Result<Cache> {
-    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
+    let mut cache = Cache::open_with_index(
+        vault_root,
+        options.alias_field.as_deref(),
+        &options.resolved_index_set,
+        &options.resolved_index_set_hash,
+    )?;
     if !no_cache_refresh {
         match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
             Ok(_) => {}
@@ -101,10 +111,15 @@ fn apply_ignore_filter(index: &mut GraphIndex, ignore: &[String]) {
 
 pub fn run_index(
     vault_root: &Utf8Path,
-    alias_field: Option<&str>,
+    options: &IndexOptions,
     args: &CacheIndexArgs,
 ) -> Result<()> {
-    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
+    let mut cache = Cache::open_with_index(
+        vault_root,
+        options.alias_field.as_deref(),
+        &options.resolved_index_set,
+        &options.resolved_index_set_hash,
+    )?;
     if args.rebuild {
         let report = cache.rebuild(vault_root)?;
         eprintln!(
@@ -126,8 +141,13 @@ pub fn run_index(
     Ok(())
 }
 
-pub fn run_rebuild(vault_root: &Utf8Path, alias_field: Option<&str>) -> Result<()> {
-    let mut cache = Cache::open_with_config(vault_root, alias_field)?;
+pub fn run_rebuild(vault_root: &Utf8Path, options: &IndexOptions) -> Result<()> {
+    let mut cache = Cache::open_with_index(
+        vault_root,
+        options.alias_field.as_deref(),
+        &options.resolved_index_set,
+        &options.resolved_index_set_hash,
+    )?;
     let report = cache.rebuild(vault_root)?;
     eprintln!(
         "vault: cache rebuilt {} docs, {} links in {}ms",
@@ -256,10 +276,15 @@ fn format_bytes(b: u64) -> String {
 
 pub fn run_status(
     vault_root: &Utf8Path,
-    alias_field: Option<&str>,
+    options: &IndexOptions,
     args: &CacheStatusArgs,
 ) -> Result<()> {
-    let cache = Cache::open_with_config(vault_root, alias_field)?;
+    let cache = Cache::open_with_index(
+        vault_root,
+        options.alias_field.as_deref(),
+        &options.resolved_index_set,
+        &options.resolved_index_set_hash,
+    )?;
     let status = cache.status()?;
     match args.format {
         CacheOutputFormat::Json => {

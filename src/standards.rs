@@ -20,7 +20,6 @@ pub(crate) use config::{
 // No production caller yet — the cache writer and query router tasks wire
 // this in. Re-exported now so those tasks land as call-site-only changes.
 pub(crate) use duration::parse_duration;
-#[allow(unused_imports)]
 pub(crate) use index_policy::resolved_index_set;
 // Test-only re-exports for fixtures inside norn tests.
 #[cfg(test)]

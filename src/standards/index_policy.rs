@@ -1,11 +1,8 @@
 //! Resolved index-field set for the Wave 2 derived frontmatter index (EAV
-//! narrow table). Pure config→policy function: no cache/SQL here — later
-//! tasks (cache writer, query router) consume `resolved_index_set` to decide
-//! which frontmatter fields get an indexed row.
-
-// `resolved_index_set` has no production caller yet — this task is config
-// surface only. The cache writer and query router tasks wire it in.
-#![allow(dead_code)]
+//! narrow table). Pure config→policy function: no cache/SQL here —
+//! `crate::graph::IndexOptions::default()` and `config_loader::load_config`
+//! call this to thread the resolved set into `Cache::open_with_index`, which
+//! decides which frontmatter fields the `document_fields` writer indexes.
 
 use std::collections::{BTreeSet, HashMap};
 

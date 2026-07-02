@@ -8,6 +8,7 @@ use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::OptionalExtension;
 
+use crate::cache::canonical::strip_wikilink_brackets;
 use crate::cache::error::CacheError;
 use crate::cache::query::{json_path_for, DocumentQuery};
 
@@ -501,15 +502,6 @@ fn push_array_aware_clause(
     binds.push(SqlValue::Text(path.clone()));
     binds.push(SqlValue::Text(path));
     binds.extend(scalar_binds.iter().cloned());
-}
-
-/// Strip Obsidian-style `[[…]]` wikilink brackets from a value so that
-/// `--eq workspaces:norn` matches a stored `["[[norn]]"]` without
-/// the user having to escape brackets in their shell. Both occurrences are
-/// removed (no balance check) — values that legitimately contain `[[` or
-/// `]]` outside wikilink syntax are vanishingly rare in vault frontmatter.
-fn strip_wikilink_brackets(s: &str) -> String {
-    s.replace("[[", "").replace("]]", "")
 }
 
 /// Convert a `serde_json::Value` scalar to the native SQLite type that

@@ -16,7 +16,9 @@ pub(crate) use find::{FindQuery, FindResult, SortClause, SortDirection};
 pub(crate) use live_examples::{count_matching, field_statistics, FieldStats};
 pub(crate) use query::DocumentQuery;
 
+mod canonical;
 mod change_detection;
+mod document_fields;
 mod find;
 mod identity;
 mod invalidation;
@@ -40,17 +42,24 @@ pub(crate) use identity::{
 pub(crate) use lock::acquire_flock;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 /// Handle to an opened cache. Holds a rusqlite Connection plus the resolved
 /// vault root and cache directory path. `alias_field` is the value passed
 /// in via `Cache::open_with_config`; it gets written to the `links_alias_field`
 /// meta row on every rebuild so subsequent opens can detect config drift.
+/// `index_set`/`index_set_hash` are the resolved Wave-2 frontmatter-index
+/// field set (see `crate::standards::index_policy::resolved_index_set`),
+/// passed in via `Cache::open_with_index`; they drive what the
+/// `document_fields` EAV writer indexes and are compared against the cached
+/// `index_set_hash` meta row on open to decide whether to re-shred.
 pub(crate) struct Cache {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) vault_root: camino::Utf8PathBuf,
     pub(crate) cache_dir: camino::Utf8PathBuf,
     pub(crate) alias_field: Option<String>,
+    pub(crate) index_set: std::collections::BTreeSet<String>,
+    pub(crate) index_set_hash: String,
 }
 
 impl Cache {
