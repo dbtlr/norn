@@ -12,11 +12,13 @@
 
 use std::collections::BTreeSet;
 
+use camino::Utf8Path;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, Transaction};
 
 use crate::cache::canonical::canonicalize_scalar;
 use crate::cache::error::CacheError;
+use crate::cache::lock::WriteLock;
 
 /// Sentinel marking "field absent from frontmatter, or present with a null
 /// value" (including frontmatter that failed to parse entirely, which is
@@ -36,11 +38,19 @@ fn field_row_values(frontmatter: Option<&serde_json::Value>, field: &str) -> Vec
             if items.is_empty() {
                 vec![SqlValue::Null]
             } else {
-                items
+                let non_null: Vec<SqlValue> = items
                     .iter()
                     .filter(|v| !v.is_null())
                     .map(canonicalize_scalar)
-                    .collect()
+                    .collect();
+                if non_null.is_empty() {
+                    // Non-empty array, but every element was null: same
+                    // "present, no scalar" meaning as an empty array — emit
+                    // the single NULL presence row rather than zero rows.
+                    vec![SqlValue::Null]
+                } else {
+                    non_null
+                }
             }
         }
         Some(other) => vec![canonicalize_scalar(other)],
@@ -107,22 +117,34 @@ fn reshred_all(tx: &Transaction, index_set: &BTreeSet<String>) -> Result<(), Cac
 /// `index_set_hash` meta row is missing entirely (caches that predate this
 /// column). Silent: no user-facing output, matching the cache's normal
 /// "disposable, self-healing" posture. A no-op (hash already matches) skips
-/// the transaction and the `ANALYZE` entirely. The `ANALYZE` is scoped to
-/// `document_fields` alone so it refreshes that table's own planner stats
-/// without perturbing existing planner decisions for `links`/`documents`.
+/// the lock, the transaction, and the `ANALYZE` entirely — the fast path
+/// never blocks. The `ANALYZE` is scoped to `document_fields` alone so it
+/// refreshes that table's own planner stats without perturbing existing
+/// planner decisions for `links`/`documents`.
+///
+/// Callers must be authoritative (see `Cache::open_with_index`) — this is
+/// the only place a re-shred is initiated on open.
+///
+/// Takes the per-vault `WriteLock` before mutating, exactly like
+/// `Cache::rebuild`/`index_incremental`: the initial hash check above is a
+/// cheap unlocked pre-check, so once the lock is held the stored hash is
+/// re-read and re-compared (TOCTOU guard) in case a concurrent process
+/// already reconciled while this one was waiting.
 pub(crate) fn reshred_if_needed(
     conn: &mut Connection,
+    cache_dir: &Utf8Path,
     index_set: &BTreeSet<String>,
     index_set_hash: &str,
 ) -> Result<(), CacheError> {
-    let cached_hash: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'index_set_hash'",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
-    if cached_hash.as_deref() == Some(index_set_hash) {
+    if stored_index_set_hash(conn) == Some(index_set_hash.to_string()) {
+        return Ok(());
+    }
+
+    let _lock = WriteLock::acquire(cache_dir, std::time::Duration::from_secs(5))?;
+
+    // Re-check inside the lock: another process may have already reconciled
+    // the hash while we were waiting for it to release.
+    if stored_index_set_hash(conn) == Some(index_set_hash.to_string()) {
         return Ok(());
     }
 
@@ -136,6 +158,15 @@ pub(crate) fn reshred_if_needed(
     tx.commit()?;
     conn.execute("ANALYZE document_fields", [])?;
     Ok(())
+}
+
+fn stored_index_set_hash(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = 'index_set_hash'",
+        [],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 #[cfg(test)]
@@ -169,6 +200,15 @@ mod tests {
 
     fn set(fields: &[&str]) -> BTreeSet<String> {
         fields.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `reshred_if_needed` acquires the `WriteLock` on a hash mismatch, which
+    /// needs a real filesystem directory for the `.lock` file — independent
+    /// of the (often in-memory) `Connection` under test.
+    fn temp_cache_dir() -> (tempfile::TempDir, camino::Utf8PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        (tmp, dir)
     }
 
     #[test]
@@ -229,6 +269,23 @@ mod tests {
                 SqlValue::Text("a".to_string()),
                 SqlValue::Text("b".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn array_with_all_null_elements_gets_one_null_row() {
+        let mut conn = open_with_documents_table();
+        let tx = conn.transaction().unwrap();
+        let fm: serde_json::Value = serde_json::json!({"tags": [null, null]});
+        insert_rows(&tx, "a.md", Some(&fm), &set(&["tags"])).unwrap();
+        tx.commit().unwrap();
+
+        let rows = rows_for(&conn, "a.md", "tags");
+        assert_eq!(
+            rows,
+            vec![SqlValue::Null],
+            "non-empty array whose elements are all null must still get the \
+             single NULL presence row, same as a genuinely empty array"
         );
     }
 
@@ -327,8 +384,9 @@ mod tests {
         let mut conn = open_with_documents_table();
         insert_doc(&conn, "a.md", Some(r#"{"status": "active"}"#));
         insert_doc(&conn, "b.md", Some(r#"{"other": "x"}"#));
+        let (_tmp, cache_dir) = temp_cache_dir();
 
-        reshred_if_needed(&mut conn, &set(&["status"]), "hash-1").unwrap();
+        reshred_if_needed(&mut conn, &cache_dir, &set(&["status"]), "hash-1").unwrap();
 
         assert_eq!(
             rows_for(&conn, "a.md", "status"),
@@ -350,7 +408,8 @@ mod tests {
     fn reshred_if_needed_is_a_no_op_when_hash_matches() {
         let mut conn = open_with_documents_table();
         insert_doc(&conn, "a.md", Some(r#"{"status": "active"}"#));
-        reshred_if_needed(&mut conn, &set(&["status"]), "hash-1").unwrap();
+        let (_tmp, cache_dir) = temp_cache_dir();
+        reshred_if_needed(&mut conn, &cache_dir, &set(&["status"]), "hash-1").unwrap();
 
         // Tamper with a row directly; if reshred runs again it would be
         // regenerated back to the real value, so an unchanged tamper proves
@@ -361,7 +420,7 @@ mod tests {
         )
         .unwrap();
 
-        reshred_if_needed(&mut conn, &set(&["status"]), "hash-1").unwrap();
+        reshred_if_needed(&mut conn, &cache_dir, &set(&["status"]), "hash-1").unwrap();
 
         assert_eq!(
             rows_for(&conn, "a.md", "status"),
@@ -373,9 +432,45 @@ mod tests {
     fn reshred_if_needed_runs_when_hash_missing() {
         let mut conn = open_with_documents_table();
         insert_doc(&conn, "a.md", Some(r#"{"status": "active"}"#));
+        let (_tmp, cache_dir) = temp_cache_dir();
         // No prior index_set_hash meta row at all.
-        reshred_if_needed(&mut conn, &set(&["status"]), "hash-1").unwrap();
+        reshred_if_needed(&mut conn, &cache_dir, &set(&["status"]), "hash-1").unwrap();
 
+        assert_eq!(
+            rows_for(&conn, "a.md", "status"),
+            vec![SqlValue::Text("active".to_string())]
+        );
+    }
+
+    // Concurrency/TOCTOU regression: a hash mismatch must acquire the
+    // per-vault `WriteLock` before mutating, exactly like `Cache::rebuild`.
+    // Holds the lock externally for a short window and asserts
+    // `reshred_if_needed` blocks for (at least) that window rather than
+    // racing straight into DELETE+INSERT.
+    #[test]
+    fn reshred_if_needed_waits_for_write_lock_held_by_another_holder() {
+        let mut conn = open_with_documents_table();
+        insert_doc(&conn, "a.md", Some(r#"{"status": "active"}"#));
+        let (_tmp, cache_dir) = temp_cache_dir();
+
+        let lock_path = cache_dir.join(".lock");
+        let held =
+            crate::cache::acquire_flock(&lock_path, std::time::Duration::from_millis(100)).unwrap();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(held);
+        });
+
+        let start = std::time::Instant::now();
+        reshred_if_needed(&mut conn, &cache_dir, &set(&["status"]), "hash-1").unwrap();
+        let elapsed = start.elapsed();
+        holder.join().unwrap();
+
+        assert!(
+            elapsed >= std::time::Duration::from_millis(150),
+            "reshred_if_needed should have waited for the external lock \
+             holder to release, elapsed={elapsed:?}"
+        );
         assert_eq!(
             rows_for(&conn, "a.md", "status"),
             vec![SqlValue::Text("active".to_string())]

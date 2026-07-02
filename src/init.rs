@@ -132,8 +132,18 @@ fn run_to(cwd: &Utf8Path, args: &InitArgs, out: &mut dyn Write) -> Result<i32> {
 /// top-level frontmatter keys. A fresh rebuild is the cleanest approach:
 /// it's deterministic and the resulting cache is immediately reusable by
 /// the operator's next `norn find` / `validate` invocation.
+///
+/// This is a production write path (`rebuild`), so it must open via
+/// `Cache::open_with_index` rather than the non-authoritative `Cache::open` —
+/// see the invariant documented on `Cache::open`. There's no `.norn/config.yaml`
+/// yet (that's what this command is about to create), so the resolved index
+/// set is the same unconfigured-default empty set `Cache::open_with_config`
+/// would compute; passing it through `open_with_index` just makes this open
+/// authoritative for that (correct, because genuinely unconfigured) set.
 fn scan_vault(cwd: &Utf8Path) -> Result<ScanResult> {
-    let mut cache = Cache::open(cwd)?;
+    let (index_set, index_set_hash) =
+        crate::standards::resolved_index_set(&crate::standards::VaultConfig::default());
+    let mut cache = Cache::open_with_index(cwd, None, &index_set, &index_set_hash)?;
     cache.rebuild(cwd)?;
     let docs = cache.documents_matching(&DocumentQuery::default())?;
     let total = docs.len();

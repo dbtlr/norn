@@ -53,6 +53,16 @@ pub(crate) const SCHEMA_VERSION: u32 = 3;
 /// passed in via `Cache::open_with_index`; they drive what the
 /// `document_fields` EAV writer indexes and are compared against the cached
 /// `index_set_hash` meta row on open to decide whether to re-shred.
+///
+/// `index_authoritative` records whether `index_set`/`index_set_hash` came
+/// from real config knowledge (`Cache::open_with_index`, `true`) or are just
+/// the unconfigured-default empty set (`Cache::open` / `open_with_config`,
+/// `false`). Only an authoritative open may reconcile `document_fields`
+/// against `index_set` — see `document_fields::reshred_if_needed` — or stamp
+/// the `index_set_hash` meta row on rebuild/incremental index. A
+/// non-authoritative open simply doesn't know the operator's real declared
+/// field set, so treating its empty default as ground truth would delete a
+/// previously-shredded index and stamp a hash that doesn't reflect config.
 pub(crate) struct Cache {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) vault_root: camino::Utf8PathBuf,
@@ -60,6 +70,7 @@ pub(crate) struct Cache {
     pub(crate) alias_field: Option<String>,
     pub(crate) index_set: std::collections::BTreeSet<String>,
     pub(crate) index_set_hash: String,
+    pub(crate) index_authoritative: bool,
 }
 
 impl Cache {
