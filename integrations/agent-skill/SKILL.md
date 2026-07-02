@@ -1,7 +1,7 @@
 ---
 name: norn
 description: Use when inspecting, querying, validating, or mutating Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, query, and validation/repair workflows.
-version: 1.3.0
+version: 1.3.1
 author: Drew Butler <hi@dbtlr.com>
 license: MIT
 ---
@@ -49,7 +49,7 @@ norn find --unresolved-links --format paths   # documents with broken links
 norn find --all --all-cols --format jsonl     # whole-vault structured dump
 ```
 
-Predicates (all ANDed; comma-separated values inside `--in`/`--not-in` are ORed): `--text`, `--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains` (anchored string operators on a frontmatter field or its array elements; case-sensitive, literal — `--contains` is frontmatter-scoped, body substring is `--text`), `--has`, `--missing`, `--before`, `--after`, `--on` (accepts `today`), `--path` (glob), `--links-to`, `--unresolved-links`. String predicates match array elements and collapse `[[wikilink]]` brackets on both sides. A bare `norn find` with no predicate prints its help — pass `--all` to dump the whole vault on purpose.
+Predicates (all ANDed; comma-separated values inside `--in`/`--not-in` are ORed): `--text`, `--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains` (anchored string operators on a frontmatter field or its array elements; case-sensitive, literal — `--contains` is frontmatter-scoped, body substring is `--text`), `--has`, `--missing`, `--before`, `--after`, `--on` (accepts `today`), `--path` (glob), `--links-to`, `--unresolved-links`. Every value-comparing predicate matches array elements (any element satisfies; negations require none to); string and date values collapse `[[wikilink]]` brackets on both sides, and number/bool values compare typed (`--eq n:5` matches `5`, `5.0`, or `[5]`, never `"5"`). A bare `norn find` with no predicate prints its help — pass `--all` to dump the whole vault on purpose.
 
 ### get
 
