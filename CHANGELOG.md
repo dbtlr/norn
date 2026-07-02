@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.40.0 - 2026-07-02
+
+The query-and-rule-parity release (Wave 1 of the relational-engine enablement arc). The `find`/`count` filter grammar gains anchored string operators and multi-key grouped counts; the rules vocabulary gains any-of selectors and typed-reference constraints — together the four parity primitives an external work-state consumer (Mimir) asked for, each shipped CLI+MCP isomorphic. Also folds in rule-targeted creation, the `NORN_ROOT` default root, and a security dep bump.
+
 ### Added
 
 - **`NORN_ROOT` environment variable — a default for the vault root.** When `-C/--cwd` is omitted, `norn` now falls back to `$NORN_ROOT` before the process cwd, so exporting `NORN_ROOT=/path/to/vault` lets every invocation target that vault from any directory without repeating `-C`. Precedence is `-C/--cwd` > `$NORN_ROOT` > the process cwd; a relative `$NORN_ROOT` resolves against the process cwd (like a relative `-C`), and an empty/whitespace value is ignored. Applies uniformly to the CLI and `norn mcp` (both resolve the root through the same path).
