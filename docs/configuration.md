@@ -120,6 +120,9 @@ Constraints (independent and additive):
 | `field_types` | `frontmatter-invalid-type` | Present value doesn't match declared shape. |
 | `allowed_values` | `frontmatter-disallowed-value` | Present value isn't one of the declared values. |
 | `allowed_paths` | `document-misrouted` | Document path matches no declared glob. |
+| `field_references` | `frontmatter-reference-type` | A field’s wikilink resolves to a document whose `type` is outside the declared `target_type` set. |
+
+`field_references` declares typed references per field: `field_references: { parent: { target_type: [phase, initiative] } }` (scalar or any-of list, like `match.frontmatter`). Only resolved frontmatter wikilinks are judged — broken references stay `link-*` findings; a resolved target without `type` reports as `(missing)`. Validate-time only.
 
 Supported `field_types`: `datetime`, `date`, `list_of_strings`, `wikilink`, `wikilink_or_list`. Field-type checks only run when the field is present — combine with `required_frontmatter` when presence is also required.
 

@@ -43,6 +43,32 @@ emissions.
 | `field_types` | `frontmatter-invalid-type` | Present value doesn't match declared shape |
 | `allowed_values` | `frontmatter-disallowed-value` | Present value isn't one of the declared values |
 | `allowed_paths` | `document-misrouted` | Document path matches no declared glob |
+| `field_references` | `frontmatter-reference-type` | A field’s wikilink resolves to a document whose `type` is outside the allowed set |
+
+### Typed references — `field_references`
+
+`field_references` is the typed half of referential integrity: link validation
+already checks that a wikilink *resolves*; this constraint checks that the
+target is the right *kind* of document.
+
+```yaml
+- name: task
+  match:
+    frontmatter:
+      type: task
+  field_references:
+    parent:
+      target_type: [phase, initiative]   # any-of, like match.frontmatter
+    depends_on:
+      target_type: task                  # scalar = one-element set
+```
+
+The check judges only **resolved** frontmatter wikilinks in the named field
+(scalar or array element alike): unresolved and ambiguous references stay
+link validation's findings (`link-*`), never a reference-type violation. A
+resolved target without a `type` field is outside every allowed set and
+reports as `(missing)`. The constraint is validate-time only — `norn set`
+does not resolve references at write time.
 
 ## Combining
 

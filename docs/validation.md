@@ -34,6 +34,7 @@ norn validate --rule typed-note --path "notes/**/*.md" --format jsonl
 | `frontmatter-invalid-type` | warning | Present field doesn't match declared `field_types` shape. Carries `field`, `expected_type`, `rule`. |
 | `frontmatter-disallowed-value` | warning | Present scalar field value isn't in `allowed_values`. Carries `field`, `actual_value`, `allowed_values`, `rule`. |
 | `document-misrouted` | warning | Document path matches no `allowed_paths` glob. Carries `allowed_paths`, `rule`. |
+| `frontmatter-reference-type` | warning | A frontmatter wikilink resolves to a document whose `type` is outside the field’s `field_references.target_type` set. Carries `field`, `reference`, `target`, `actual_type`, `allowed_types`, `rule`. |
 
 For the selector + constraint model that produces these codes, see [rule-shape.md](rule-shape.md).
 

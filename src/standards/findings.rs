@@ -47,6 +47,14 @@ pub enum FindingBody {
         rule: Option<String>,
         allowed_paths: Vec<String>,
     },
+    ReferenceType {
+        rule: Option<String>,
+        field: String,
+        reference: String,
+        target: Utf8PathBuf,
+        actual_type: String,
+        allowed_types: Vec<String>,
+    },
     AliasMalformed {
         field: String,
         invalid_entries: Vec<Value>,
@@ -153,6 +161,37 @@ impl Finding {
                 field,
                 actual_value,
                 allowed_values,
+            },
+        }
+    }
+
+    /// A frontmatter wikilink resolves to a document whose `type` is outside
+    /// the field's `field_references.target_type` set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frontmatter_reference_type(
+        path: Utf8PathBuf,
+        rule: Option<String>,
+        field: String,
+        reference: String,
+        target: Utf8PathBuf,
+        actual_type: String,
+        allowed_types: Vec<String>,
+    ) -> Self {
+        let message = format!(
+            "frontmatter field references a document of a disallowed type: {field} → {target} (type: {actual_type})"
+        );
+        Self {
+            code: "frontmatter-reference-type".to_string(),
+            severity: Severity::Warning,
+            path,
+            message,
+            body: FindingBody::ReferenceType {
+                rule,
+                field,
+                reference,
+                target,
+                actual_type,
+                allowed_types,
             },
         }
     }
