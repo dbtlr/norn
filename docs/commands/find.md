@@ -25,6 +25,9 @@ norn find --has aliases --col title,aliases
 norn find --in type:note,log --sort modified --desc
 # two types in one query, newest first
 
+norn find --starts-with tags:release: --col title,tags
+# namespace enumeration: every document carrying a release:* tag
+
 norn find --eq type:task --links-to notes/my-note.md --format paths
 # tasks that link to a document (by path; stem or [[wikilink]] also accepted)
 
@@ -46,6 +49,9 @@ All filters are ANDed together. Within `--in` and `--not-in`, comma-separated va
 | `--not-eq <FIELD:VALUE>` | Frontmatter `field` does not equal `value`. |
 | `--in <FIELD:V1,V2,…>` | Frontmatter `field` is one of the listed values. |
 | `--not-in <FIELD:V1,V2,…>` | Frontmatter `field` is none of the listed values. |
+| `--starts-with <FIELD:VALUE>` | Frontmatter `field` (or any array element) starts with `VALUE`. Case-sensitive; `%`/`_` are literal. |
+| `--ends-with <FIELD:VALUE>` | Frontmatter `field` (or any array element) ends with `VALUE`. |
+| `--contains <FIELD:VALUE>` | Frontmatter `field` (or any array element) contains `VALUE` as a substring. Frontmatter-scoped — body substring search is `--text`. |
 | `--has <FIELD>` | Frontmatter `field` is present and non-null. |
 | `--missing <FIELD>` | Frontmatter `field` is absent or null. |
 | `--before <FIELD:DATE>` | Date `field` is before `DATE` (ISO 8601). |
@@ -55,6 +61,8 @@ All filters are ANDed together. Within `--in` and `--not-in`, comma-separated va
 | `--links-to <TARGET>` | Documents whose outgoing links resolve to `TARGET` (path, stem, or `[[wikilink]]`). Repeatable; multiple targets are ANDed. Resolved-only — `TARGET` must resolve to an existing document. |
 | `--unresolved-links` | Documents with at least one unresolved link. |
 | `--all` | Return every document. The escape hatch when no predicate fits; a full-vault dump is almost always a mistake, so it requires opt-in. |
+
+String-valued predicates (`--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains`) are array-aware — an array-valued field matches when any element matches — and collapse `[[wikilink]]` brackets on both sides, so `--starts-with depends_on:NRN-` matches a stored `"[[NRN-123]]"`. The three string operators compare literal text (no bool/number coercion of the value, no wildcards or regex); non-string stored values are compared by their text rendering.
 
 ## Selecting fields — `--col` and `--all-cols`
 

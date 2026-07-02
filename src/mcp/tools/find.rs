@@ -57,6 +57,21 @@ pub struct FindParams {
     #[serde(default)]
     pub not_in: Vec<String>,
 
+    /// Frontmatter prefix predicates `field:VALUE` — the field (or any array
+    /// element) starts with VALUE. Case-sensitive. Repeatable; all must match.
+    #[serde(default)]
+    pub starts_with: Vec<String>,
+
+    /// Frontmatter suffix predicates `field:VALUE` — the field (or any array
+    /// element) ends with VALUE. Case-sensitive. Repeatable.
+    #[serde(default)]
+    pub ends_with: Vec<String>,
+
+    /// Frontmatter substring predicates `field:VALUE` — the field (or any
+    /// array element) contains VALUE. Case-sensitive. Repeatable.
+    #[serde(default)]
+    pub contains: Vec<String>,
+
     /// Frontmatter fields that must be present (non-null). Repeatable.
     #[serde(default)]
     pub has: Vec<String>,
@@ -152,6 +167,9 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
             not_eq: p.not_eq,
             r#in: p.r#in,
             not_in: p.not_in,
+            starts_with: p.starts_with,
+            ends_with: p.ends_with,
+            contains: p.contains,
             has: p.has,
             missing: p.missing,
             before: p.before,
@@ -248,6 +266,28 @@ mod tests {
                 "every returned doc is type:note: {doc}"
             );
         }
+    }
+
+    #[test]
+    fn handle_starts_with_filters_by_prefix() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            FindParams {
+                starts_with: vec!["title:Note".into()],
+                ..FindParams::default()
+            },
+        )
+        .expect("handle should succeed");
+
+        assert_eq!(
+            out.documents.len(),
+            2,
+            "starts_with title:Note should return the 2 notes, got {}",
+            out.documents.len()
+        );
     }
 
     #[test]

@@ -27,6 +27,18 @@ pub struct DocumentQuery {
     pub frontmatter_in: Vec<(String, Vec<Value>)>,
     /// `(field, disallowed_values)` — frontmatter field is NOT one of the values.
     pub frontmatter_not_in: Vec<(String, Vec<Value>)>,
+    /// `(field, needle)` — `field` starts with `needle`. ALL-of. Anchored
+    /// string operator: case-sensitive, array-aware (any element may match),
+    /// wikilink-bracket-collapsed on both sides like `frontmatter_eq`.
+    /// Non-string stored values coerce to their SQLite text rendering. A
+    /// needle that is empty after bracket-stripping matches nothing.
+    pub frontmatter_starts_with: Vec<(String, String)>,
+    /// `(field, needle)` — `field` ends with `needle`. Same semantics as
+    /// `frontmatter_starts_with`.
+    pub frontmatter_ends_with: Vec<(String, String)>,
+    /// `(field, needle)` — `field` contains `needle` as a substring. Same
+    /// semantics as `frontmatter_starts_with`.
+    pub frontmatter_contains: Vec<(String, String)>,
     /// `(field, date_string)` — `field` < `date_string` (lexical, ISO 8601).
     pub date_before: Vec<(String, String)>,
     /// `(field, date_string)` — `field` > `date_string`.
@@ -317,6 +329,65 @@ mod tests {
                 result.is_empty(),
                 "expected array-wikilinks excluded: {result:?}"
             );
+        }
+
+        #[test]
+        fn string_operator_bracket_only_needle_matches_nothing() {
+            let (_tmp, root) = synth_vault_wikilink_shapes();
+            let cache = populate_cache(&root);
+            // "[[]]" strips to the empty needle, which has no meaningful
+            // anchored-match semantics — deterministically match nothing.
+            let query = DocumentQuery {
+                frontmatter_starts_with: vec![("workspace".to_string(), "[[]]".to_string())],
+                ..Default::default()
+            };
+            assert!(cache.documents_matching(&query).unwrap().is_empty());
+        }
+
+        #[test]
+        fn string_operator_coerces_non_string_scalar_to_text() {
+            let tmp = TempDir::new().unwrap();
+            let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+                .unwrap()
+                .join("vault");
+            std::fs::create_dir(root.as_std_path()).unwrap();
+            std::fs::write(
+                root.join("num.md").as_std_path(),
+                "---\npriority: 123\n---\n",
+            )
+            .unwrap();
+            let mut cache = Cache::open(&root).unwrap();
+            cache.rebuild(&root).unwrap();
+
+            // Documented text-coercion contract: 123 renders as "123".
+            let query = DocumentQuery {
+                frontmatter_contains: vec![("priority".to_string(), "2".to_string())],
+                ..Default::default()
+            };
+            assert_eq!(
+                paths(&cache.documents_matching(&query).unwrap()),
+                vec!["num.md"]
+            );
+
+            let query = DocumentQuery {
+                frontmatter_starts_with: vec![("priority".to_string(), "12".to_string())],
+                ..Default::default()
+            };
+            assert_eq!(
+                paths(&cache.documents_matching(&query).unwrap()),
+                vec!["num.md"]
+            );
+        }
+
+        #[test]
+        fn string_operator_missing_field_never_matches() {
+            let (_tmp, root) = synth_vault();
+            let cache = populate_cache(&root);
+            let query = DocumentQuery {
+                frontmatter_contains: vec![("nonexistent".to_string(), "x".to_string())],
+                ..Default::default()
+            };
+            assert!(cache.documents_matching(&query).unwrap().is_empty());
         }
 
         #[test]

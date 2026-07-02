@@ -43,12 +43,13 @@ norn find --eq type:note --limit 5            # frontmatter equality; find defau
 norn find --text "reorg" --format paths       # case-insensitive body substring
 norn find --has aliases --col title,aliases   # narrow the fields shown
 norn find --in type:note,log --sort modified --desc
+norn find --starts-with tags:release: --col title,tags   # enumerate a tag namespace
 norn find --links-to notes/my-note.md --format paths
 norn find --unresolved-links --format paths   # documents with broken links
 norn find --all --all-cols --format jsonl     # whole-vault structured dump
 ```
 
-Predicates (all ANDed; comma-separated values inside `--in`/`--not-in` are ORed): `--text`, `--eq`, `--not-eq`, `--in`, `--not-in`, `--has`, `--missing`, `--before`, `--after`, `--on` (accepts `today`), `--path` (glob), `--links-to`, `--unresolved-links`. A bare `norn find` with no predicate prints its help — pass `--all` to dump the whole vault on purpose.
+Predicates (all ANDed; comma-separated values inside `--in`/`--not-in` are ORed): `--text`, `--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains` (anchored string operators on a frontmatter field or its array elements; case-sensitive, literal — `--contains` is frontmatter-scoped, body substring is `--text`), `--has`, `--missing`, `--before`, `--after`, `--on` (accepts `today`), `--path` (glob), `--links-to`, `--unresolved-links`. String predicates match array elements and collapse `[[wikilink]]` brackets on both sides. A bare `norn find` with no predicate prints its help — pass `--all` to dump the whole vault on purpose.
 
 ### get
 

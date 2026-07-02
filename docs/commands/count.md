@@ -29,7 +29,7 @@ norn count --eq type:task --format json
 
 ## Filters
 
-`count` accepts the same predicates as `find`, ANDed together: `--text`, `--eq`, `--not-eq`, `--in`, `--not-in`, `--has`, `--missing`, `--before`, `--after`, `--on`, `--path`, `--links-to`, `--unresolved-links`. See [`find`](find.md) for the full table.
+`count` accepts the same predicates as `find`, ANDed together: `--text`, `--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains`, `--has`, `--missing`, `--before`, `--after`, `--on`, `--path`, `--links-to`, `--unresolved-links`. See [`find`](find.md) for the full table.
 
 ## Output formats
 
