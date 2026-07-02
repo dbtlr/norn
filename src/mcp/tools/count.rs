@@ -24,9 +24,10 @@ use crate::mcp::context::VaultContext;
 /// Parameters for `vault.count`.
 ///
 /// Mirrors the agent-useful slice of `norn count`'s flags: the full find-filter
-/// surface (text, eq, not_eq, in, not_in, has, missing, before, after, on, path,
-/// links_to, unresolved_links) plus `by` for grouping. `--format` is omitted from
-/// v1 — the MCP tool always returns the structured envelope.
+/// surface (text, eq, not_eq, in, not_in, starts_with, ends_with, contains, has,
+/// missing, before, after, on, path, links_to, unresolved_links) plus `by` for
+/// grouping. `--format` is omitted from v1 — the MCP tool always returns the
+/// structured envelope.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct CountParams {
     /// Frontmatter field to group counts by. Without `by`, only the total is

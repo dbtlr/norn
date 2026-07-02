@@ -380,6 +380,52 @@ mod tests {
         }
 
         #[test]
+        fn string_operator_matches_boolean_source_text() {
+            let tmp = TempDir::new().unwrap();
+            let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+                .unwrap()
+                .join("vault");
+            std::fs::create_dir(root.as_std_path()).unwrap();
+            std::fs::write(
+                root.join("bool.md").as_std_path(),
+                "---\narchived: true\nflags:\n  - false\n---\n",
+            )
+            .unwrap();
+            let mut cache = Cache::open(&root).unwrap();
+            cache.rebuild(&root).unwrap();
+
+            // Booleans compare as their source text `true`/`false`, not
+            // SQLite's 1/0 extraction.
+            let query = DocumentQuery {
+                frontmatter_contains: vec![("archived".to_string(), "true".to_string())],
+                ..Default::default()
+            };
+            assert_eq!(
+                paths(&cache.documents_matching(&query).unwrap()),
+                vec!["bool.md"]
+            );
+
+            let query = DocumentQuery {
+                frontmatter_contains: vec![("archived".to_string(), "1".to_string())],
+                ..Default::default()
+            };
+            assert!(
+                cache.documents_matching(&query).unwrap().is_empty(),
+                "the SQLite integer rendering must not leak into matching"
+            );
+
+            // Array elements get the same treatment.
+            let query = DocumentQuery {
+                frontmatter_starts_with: vec![("flags".to_string(), "fal".to_string())],
+                ..Default::default()
+            };
+            assert_eq!(
+                paths(&cache.documents_matching(&query).unwrap()),
+                vec!["bool.md"]
+            );
+        }
+
+        #[test]
         fn string_operator_missing_field_never_matches() {
             let (_tmp, root) = synth_vault();
             let cache = populate_cache(&root);

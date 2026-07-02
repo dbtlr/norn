@@ -13,23 +13,17 @@ use crate::cli::FindArgs;
 /// True when the user supplied at least one predicate that constrains the
 /// result set. Sort, limit, format, and --col are output modifiers, not
 /// predicates; running with only those would dump the whole vault.
+///
+/// Compares against the default (empty) filter set rather than enumerating
+/// fields, so a filter flag added to `FilterArgs` can never be silently
+/// missing here. The one normalization: `--text ""` is documented as a
+/// no-op, not a predicate.
 fn has_predicate(args: &FindArgs) -> bool {
-    args.filters.text.as_deref().is_some_and(|t| !t.is_empty())
-        || !args.filters.eq.is_empty()
-        || !args.filters.not_eq.is_empty()
-        || !args.filters.r#in.is_empty()
-        || !args.filters.not_in.is_empty()
-        || !args.filters.starts_with.is_empty()
-        || !args.filters.ends_with.is_empty()
-        || !args.filters.contains.is_empty()
-        || !args.filters.has.is_empty()
-        || !args.filters.missing.is_empty()
-        || !args.filters.before.is_empty()
-        || !args.filters.after.is_empty()
-        || !args.filters.on.is_empty()
-        || !args.filters.path.is_empty()
-        || !args.filters.links_to.is_empty()
-        || args.filters.unresolved_links
+    let mut filters = args.filters.clone();
+    if filters.text.as_deref().is_some_and(str::is_empty) {
+        filters.text = None;
+    }
+    filters != crate::cli::FilterArgs::default()
 }
 
 /// Print `norn find --help` to stderr. Used as the "missing predicate" gate.

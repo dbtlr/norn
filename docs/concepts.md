@@ -25,6 +25,7 @@ Graph construction is read-only and stateless. The same vault produces the same 
 - `--path "<glob>"` — vault-relative path glob (path-segment semantics; see [Glob matching](#glob-matching) below).
 - `--eq field:value` / `--not-eq field:value` — frontmatter equality / inequality.
 - `--in field:v1,v2` / `--not-in field:v1,v2` — set membership.
+- `--starts-with field:value` / `--ends-with field:value` / `--contains field:value` — anchored string matching on a frontmatter field or its array elements (case-sensitive, literal).
 - `--has <field>` / `--missing <field>` — frontmatter field presence.
 - `--text <substring>` — case-insensitive body text substring.
 

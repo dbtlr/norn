@@ -325,25 +325,22 @@ fn push_equality(
     negate: bool,
 ) {
     if let serde_json::Value::String(raw) = value {
-        let path = json_path_for(field);
         let stripped = strip_wikilink_brackets(raw);
-        let array_test = if negate { "NOT EXISTS" } else { "EXISTS" };
+        let array_exists = if negate { "NOT EXISTS" } else { "EXISTS" };
         let scalar_op = if negate { "!=" } else { "=" };
-        where_clauses.push(format!(
-            "((json_type(frontmatter_json, ?) = 'array' \
-              AND {array_test} (SELECT 1 FROM json_each(frontmatter_json, ?) \
-                                WHERE replace(replace(value, '[[', ''), ']]', '') = ?)) \
-              OR \
-              ((json_type(frontmatter_json, ?) IS NULL OR json_type(frontmatter_json, ?) != 'array') \
-               AND replace(replace(json_extract(frontmatter_json, ?), '[[', ''), ']]', '') {scalar_op} ?))"
-        ));
-        binds.push(SqlValue::Text(path.clone()));
-        binds.push(SqlValue::Text(path.clone()));
-        binds.push(SqlValue::Text(stripped.clone()));
-        binds.push(SqlValue::Text(path.clone()));
-        binds.push(SqlValue::Text(path.clone()));
-        binds.push(SqlValue::Text(path));
-        binds.push(SqlValue::Text(stripped));
+        push_array_aware_clause(
+            where_clauses,
+            binds,
+            field,
+            array_exists,
+            &format!("{STRIPPED_ARRAY_ELEMENT} = ?"),
+            &[SqlValue::Text(stripped.clone())],
+            &format!("{STRIPPED_SCALAR} {scalar_op} ?"),
+            &[
+                SqlValue::Text(json_path_for(field)),
+                SqlValue::Text(stripped),
+            ],
+        );
     } else {
         let op = if negate { "!=" } else { "=" };
         where_clauses.push(format!("json_extract(frontmatter_json, ?) {op} ?"));
@@ -363,35 +360,28 @@ fn push_string_membership(
     values: &[serde_json::Value],
     negate: bool,
 ) {
-    let path = json_path_for(field);
     let placeholders = std::iter::repeat_n("?", values.len())
         .collect::<Vec<_>>()
         .join(", ");
-    let stripped: Vec<String> = values
+    let stripped: Vec<SqlValue> = values
         .iter()
         .filter_map(|v| v.as_str().map(strip_wikilink_brackets))
+        .map(SqlValue::Text)
         .collect();
-    let array_test = if negate { "NOT EXISTS" } else { "EXISTS" };
+    let array_exists = if negate { "NOT EXISTS" } else { "EXISTS" };
     let scalar_op = if negate { "NOT IN" } else { "IN" };
-    where_clauses.push(format!(
-        "((json_type(frontmatter_json, ?) = 'array' \
-          AND {array_test} (SELECT 1 FROM json_each(frontmatter_json, ?) \
-                            WHERE replace(replace(value, '[[', ''), ']]', '') IN ({placeholders}))) \
-          OR \
-          ((json_type(frontmatter_json, ?) IS NULL OR json_type(frontmatter_json, ?) != 'array') \
-           AND replace(replace(json_extract(frontmatter_json, ?), '[[', ''), ']]', '') {scalar_op} ({placeholders})))"
-    ));
-    binds.push(SqlValue::Text(path.clone()));
-    binds.push(SqlValue::Text(path.clone()));
-    for v in &stripped {
-        binds.push(SqlValue::Text(v.clone()));
-    }
-    binds.push(SqlValue::Text(path.clone()));
-    binds.push(SqlValue::Text(path.clone()));
-    binds.push(SqlValue::Text(path));
-    for v in &stripped {
-        binds.push(SqlValue::Text(v.clone()));
-    }
+    let mut scalar_binds = vec![SqlValue::Text(json_path_for(field))];
+    scalar_binds.extend(stripped.iter().cloned());
+    push_array_aware_clause(
+        where_clauses,
+        binds,
+        field,
+        array_exists,
+        &format!("{STRIPPED_ARRAY_ELEMENT} IN ({placeholders})"),
+        &stripped,
+        &format!("{STRIPPED_SCALAR} {scalar_op} ({placeholders})"),
+        &scalar_binds,
+    );
 }
 
 /// Anchored string operators for `--starts-with` / `--ends-with` / `--contains`.
@@ -423,12 +413,13 @@ impl StringOperator {
     }
 }
 
-/// Build the WHERE clause for one anchored string operator. Mirrors the
-/// array-aware + bracket-stripped compound shape of the string `--eq` branch
-/// (`push_equality`): any array element may satisfy the operator; scalar
-/// fields are tested directly. Both the stored value and the needle are
-/// wikilink-bracket-collapsed. Non-string stored scalars coerce to SQLite's
-/// text rendering (e.g. `123` matches a `"2"` substring needle).
+/// Build the WHERE clause for one anchored string operator. Uses the shared
+/// array-aware + bracket-stripped compound shape: any array element may
+/// satisfy the operator; scalar fields are tested directly. Both the stored
+/// value and the needle are wikilink-bracket-collapsed. Non-string stored
+/// values compare by their JSON text rendering: booleans as `true`/`false`
+/// (via `json_type`, since SQLite extracts them as 1/0) and numbers in JSON's
+/// canonical form (`2.50` is stored and rendered as `2.5`).
 fn push_string_operator(
     where_clauses: &mut Vec<String>,
     binds: &mut Vec<SqlValue>,
@@ -444,14 +435,61 @@ fn push_string_operator(
         where_clauses.push("0".to_string());
         return;
     }
-    let path = json_path_for(field);
-    let array_test = op.test("replace(replace(value, '[[', ''), ']]', '')");
-    let scalar_test = op.test(
-        "replace(replace(CAST(json_extract(frontmatter_json, ?) AS TEXT), '[[', ''), ']]', '')",
+    // Render booleans as their JSON/YAML source text, not SQLite's 1/0.
+    let element_text = format!(
+        "CASE WHEN json_each.type IN ('true', 'false') THEN json_each.type \
+          ELSE {STRIPPED_ARRAY_ELEMENT} END"
     );
+    let scalar_text = "CASE WHEN json_type(frontmatter_json, ?) IN ('true', 'false') \
+          THEN json_type(frontmatter_json, ?) \
+          ELSE replace(replace(CAST(json_extract(frontmatter_json, ?) AS TEXT), '[[', ''), ']]', '') END";
+    let path = json_path_for(field);
+    let needle_bind = SqlValue::Text(stripped);
+    let array_binds = vec![needle_bind.clone(); op.needle_binds()];
+    let mut scalar_binds = vec![SqlValue::Text(path); 3];
+    scalar_binds.extend(vec![needle_bind; op.needle_binds()]);
+    push_array_aware_clause(
+        where_clauses,
+        binds,
+        field,
+        "EXISTS",
+        &op.test(&element_text),
+        &array_binds,
+        &op.test(scalar_text),
+        &scalar_binds,
+    );
+}
+
+/// Bracket-stripped text of a `json_each` array element.
+const STRIPPED_ARRAY_ELEMENT: &str = "replace(replace(value, '[[', ''), ']]', '')";
+
+/// Bracket-stripped text of a scalar field; consumes one JSON-path bind.
+const STRIPPED_SCALAR: &str =
+    "replace(replace(json_extract(frontmatter_json, ?), '[[', ''), ']]', '')";
+
+/// Push the compound array-aware WHERE skeleton shared by the string forms of
+/// `--eq`/`--not-eq`, `--in`/`--not-in`, and the anchored string operators: an
+/// array-valued field matches when any `json_each` element passes `array_test`
+/// (quantified by `array_exists`), a non-array field when it passes
+/// `scalar_test`. The skeleton's four `json_type` path binds are pushed here;
+/// callers pass the binds their test expressions consume, in textual order
+/// (any `?` inside the expression — e.g. `STRIPPED_SCALAR`'s JSON path —
+/// before the comparison operands).
+#[allow(clippy::too_many_arguments)]
+fn push_array_aware_clause(
+    where_clauses: &mut Vec<String>,
+    binds: &mut Vec<SqlValue>,
+    field: &str,
+    array_exists: &str,
+    array_test: &str,
+    array_binds: &[SqlValue],
+    scalar_test: &str,
+    scalar_binds: &[SqlValue],
+) {
+    let path = json_path_for(field);
     where_clauses.push(format!(
         "((json_type(frontmatter_json, ?) = 'array' \
-          AND EXISTS (SELECT 1 FROM json_each(frontmatter_json, ?) \
+          AND {array_exists} (SELECT 1 FROM json_each(frontmatter_json, ?) \
                             WHERE {array_test})) \
           OR \
           ((json_type(frontmatter_json, ?) IS NULL OR json_type(frontmatter_json, ?) != 'array') \
@@ -459,15 +497,10 @@ fn push_string_operator(
     ));
     binds.push(SqlValue::Text(path.clone()));
     binds.push(SqlValue::Text(path.clone()));
-    for _ in 0..op.needle_binds() {
-        binds.push(SqlValue::Text(stripped.clone()));
-    }
-    binds.push(SqlValue::Text(path.clone()));
+    binds.extend(array_binds.iter().cloned());
     binds.push(SqlValue::Text(path.clone()));
     binds.push(SqlValue::Text(path));
-    for _ in 0..op.needle_binds() {
-        binds.push(SqlValue::Text(stripped.clone()));
-    }
+    binds.extend(scalar_binds.iter().cloned());
 }
 
 /// Strip Obsidian-style `[[…]]` wikilink brackets from a value so that

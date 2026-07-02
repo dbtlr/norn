@@ -475,7 +475,7 @@ pub struct GraphArgs {
 /// Kept in `cli.rs` so the build script (`build.rs`) can include this file
 /// without intra-crate deps — `FilterArgs` only derives `clap::Args`.
 /// The translation logic (`build_document_query`) lives in `filter_args.rs`.
-#[derive(Args, Debug, Default)]
+#[derive(Args, Debug, Default, Clone, PartialEq, Eq)]
 pub struct FilterArgs {
     /// Full-text body substring. Case-insensitive. Empty string is a no-op.
     #[arg(long, value_name = "NEEDLE", help_heading = "Filter options")]

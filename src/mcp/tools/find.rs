@@ -23,11 +23,11 @@ use crate::mcp::context::VaultContext;
 /// Parameters for `vault.find`.
 ///
 /// Mirrors the agent-relevant slice of `norn find`'s flags: the full find-filter
-/// surface (text, eq, not_eq, in, not_in, has, missing, before, after, on, path,
-/// links_to, unresolved_links), the sort/limit/paging knobs (sort, desc, limit,
-/// no_limit, starts_at), and the column projection (col, all_cols). `--format`
-/// and `--no-pager` are CLI-only — the MCP tool always returns the structured
-/// document array.
+/// surface (text, eq, not_eq, in, not_in, starts_with, ends_with, contains, has,
+/// missing, before, after, on, path, links_to, unresolved_links), the
+/// sort/limit/paging knobs (sort, desc, limit, no_limit, starts_at), and the
+/// column projection (col, all_cols). `--format` and `--no-pager` are CLI-only —
+/// the MCP tool always returns the structured document array.
 ///
 /// **Default fidelity:** an omitted `limit` defaults to 10, exactly like
 /// `norn find` (constructed in [`handle`] via the shared `find::query` path).
