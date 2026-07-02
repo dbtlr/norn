@@ -10,6 +10,16 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Breaking changes
+
+- **`list_of_strings` elements are now bounded (default 64 chars, same as `string`).** Previously a `list_of_strings` field accepted elements of any length; each element is now checked against the field's `max_length` (declared or the 64-char default), and an over-length element reports a `frontmatter-invalid-type` finding just like any other type mismatch. Raise the bound per field with the extended `field_types` form (`tags: { type: list_of_strings, max_length: 200 }`, up to the 256-char ceiling) if a vault's existing values need more room.
+
+### Added
+
+- **`string` and `text` frontmatter field types.** `field_types` gains two new scalar types: `string` (bounded, default max length 64, raisable to a 256-char ceiling via `max_length`) and `text` (unbounded, no `max_length` allowed). Both apply everywhere `field_types` is enforced — `validate`, `norn set`, and `norn new`'s schema-aware coercion. An over-length `string`/`list_of_strings` value, or a `max_length` declared outside 1–256, is a config load error.
+- **Extended `field_types` declaration form.** Alongside the existing bare `field: type_name` shorthand, a field can now declare `field: { type: type_name, max_length: N, indexed: BOOL }`. `max_length` is only valid on `string`/`list_of_strings`; `indexed` is valid on any type and is consumed by the (upcoming) derived frontmatter index to force a field in or out of the index regardless of its type. Unknown keys in the object form, or `max_length` on a type that doesn't carry a length bound, are config load errors.
+- **`index.auto` config toggle.** A new top-level `index:` config section gains `auto` (default `true`), the global switch for automatic indexing of bounded-type frontmatter fields in the upcoming derived frontmatter index. No query-facing behavior yet — this release is the config surface only; the cache writer and query router land in follow-up releases.
+
 ## v0.40.0 - 2026-07-02
 
 The query-and-rule-parity release (Wave 1 of the relational-engine enablement arc). The `find`/`count` filter grammar gains anchored string operators and multi-key grouped counts; the rules vocabulary gains any-of selectors and typed-reference constraints — together the four parity primitives an external work-state consumer (Mimir) asked for, each shipped CLI+MCP isomorphic. Also folds in rule-targeted creation, the `NORN_ROOT` default root, and a security dep bump.

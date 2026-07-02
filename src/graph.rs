@@ -14,10 +14,25 @@ pub(crate) enum IndexError {
     NonUtf8Path(String),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct IndexOptions {
     pub ignore: Vec<String>,
     pub alias_field: Option<String>,
+    /// Global auto-index toggle for the derived frontmatter index (Wave 2);
+    /// defaults to true. Consumed by the cache writer and query router
+    /// (later tasks) — not read anywhere in this task's scope.
+    #[allow(dead_code)]
+    pub auto: bool,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            ignore: Vec::new(),
+            alias_field: None,
+            auto: true,
+        }
+    }
 }
 
 pub(crate) use aliases::parse_aliases;

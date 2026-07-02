@@ -25,13 +25,24 @@ pub(crate) fn frontmatter_predicate_matches(actual: &Value, expected: &Value) ->
     }
 }
 
-pub fn frontmatter_type_matches(value: &Value, expected_type: &str) -> bool {
+/// Does `value` satisfy `expected_type`? `max_length` is the bound applied
+/// to `string` (the whole value) and `list_of_strings` (each element); it is
+/// ignored for every other type.
+pub fn frontmatter_type_matches(
+    value: &Value,
+    expected_type: &str,
+    max_length: Option<u32>,
+) -> bool {
     match expected_type {
         "datetime" => value.as_str().is_some_and(is_datetime_string),
         "date" => value.as_str().is_some_and(is_date_string),
-        "list_of_strings" => value
-            .as_array()
-            .is_some_and(|values| values.iter().all(|value| value.as_str().is_some())),
+        "list_of_strings" => value.as_array().is_some_and(|values| {
+            values.iter().all(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|s| within_max_length(s, max_length))
+            })
+        }),
         "wikilink" => value.as_str().is_some_and(is_wikilink_string),
         "wikilink_or_list" => {
             value.as_str().is_some_and(is_wikilink_string)
@@ -41,7 +52,18 @@ pub fn frontmatter_type_matches(value: &Value, expected_type: &str) -> bool {
                         .all(|value| value.as_str().is_some_and(is_wikilink_string))
                 })
         }
+        "string" => value
+            .as_str()
+            .is_some_and(|s| within_max_length(s, max_length)),
+        "text" => value.as_str().is_some(),
         _ => false,
+    }
+}
+
+fn within_max_length(value: &str, max_length: Option<u32>) -> bool {
+    match max_length {
+        Some(bound) => value.chars().count() <= bound as usize,
+        None => true,
     }
 }
 
@@ -221,7 +243,70 @@ pub(crate) fn frontmatter_predicates_match(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_date_string, is_datetime_string};
+    use super::{frontmatter_type_matches, is_date_string, is_datetime_string};
+    use serde_json::json;
+
+    #[test]
+    fn string_type_accepts_within_bound() {
+        assert!(frontmatter_type_matches(&json!("abc"), "string", Some(3)));
+    }
+
+    #[test]
+    fn string_type_rejects_over_bound() {
+        assert!(!frontmatter_type_matches(&json!("abcd"), "string", Some(3)));
+    }
+
+    #[test]
+    fn string_type_rejects_non_string_value() {
+        assert!(!frontmatter_type_matches(&json!(3), "string", Some(64)));
+    }
+
+    #[test]
+    fn string_type_with_no_bound_accepts_any_length() {
+        let long = "x".repeat(1000);
+        assert!(frontmatter_type_matches(&json!(long), "string", None));
+    }
+
+    #[test]
+    fn text_type_accepts_any_length_string() {
+        let long = "x".repeat(10_000);
+        assert!(frontmatter_type_matches(&json!(long), "text", None));
+        assert!(frontmatter_type_matches(&json!(long), "text", Some(64)));
+    }
+
+    #[test]
+    fn text_type_rejects_non_string_value() {
+        assert!(!frontmatter_type_matches(&json!(3), "text", None));
+    }
+
+    #[test]
+    fn list_of_strings_bounds_each_element() {
+        assert!(frontmatter_type_matches(
+            &json!(["ab", "cd"]),
+            "list_of_strings",
+            Some(2)
+        ));
+        assert!(!frontmatter_type_matches(
+            &json!(["ab", "cde"]),
+            "list_of_strings",
+            Some(2)
+        ));
+    }
+
+    #[test]
+    fn list_of_strings_with_no_bound_accepts_any_length_elements() {
+        let long = "x".repeat(1000);
+        assert!(frontmatter_type_matches(
+            &json!([long.clone()]),
+            "list_of_strings",
+            None
+        ));
+    }
+
+    #[test]
+    fn unknown_type_rejects() {
+        assert!(!frontmatter_type_matches(&json!("x"), "bogus", None));
+    }
 
     #[test]
     fn datetime_accepts_common_iso_and_yaml_forms() {

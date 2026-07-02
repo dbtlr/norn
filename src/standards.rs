@@ -5,6 +5,7 @@ mod defaults;
 mod duration;
 pub(crate) mod engine;
 mod findings;
+mod index_policy;
 pub(crate) mod path_match;
 pub(crate) mod predicates;
 mod repair;
@@ -16,7 +17,11 @@ pub(crate) use config::{
     TelemetryConfig, ValidateConfig, ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION,
     DEFAULT_CACHE_RETENTION, DEFAULT_RETENTION,
 };
+// No production caller yet — the cache writer and query router tasks wire
+// this in. Re-exported now so those tasks land as call-site-only changes.
 pub(crate) use duration::parse_duration;
+#[allow(unused_imports)]
+pub(crate) use index_policy::resolved_index_set;
 // Test-only re-exports for fixtures inside norn tests.
 #[cfg(test)]
 pub(crate) use config::{RuleExclude, RuleSelector};

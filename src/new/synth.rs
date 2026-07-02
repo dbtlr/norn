@@ -169,14 +169,15 @@ pub fn build_plan(
                 .find_map(|(rule, _)| rule.field_types.get(&key))
                 .cloned();
             match field_type {
-                Some(ty) => {
-                    crate::set::validate::coerce_value_for_type(&ty, raw_str).map_err(|e| {
-                        SynthError::Coercion {
-                            field: key.clone(),
-                            message: e.to_string(),
-                        }
-                    })?
-                }
+                Some(spec) => crate::set::validate::coerce_value_for_type(
+                    spec.type_name(),
+                    raw_str,
+                    spec.effective_max_length(),
+                )
+                .map_err(|e| SynthError::Coercion {
+                    field: key.clone(),
+                    message: e.to_string(),
+                })?,
                 None => {
                     // Unknown field — fall back to light type inference.
                     crate::set::synth::infer_scalar(raw_str)

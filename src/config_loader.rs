@@ -108,6 +108,7 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
         index_options: IndexOptions {
             ignore: config.files.ignore.clone(),
             alias_field: config.links.alias_field.clone(),
+            auto: config.index.auto,
         },
         validate: config.validate.clone(),
         repair: config.repair.clone(),
@@ -137,6 +138,32 @@ mod tests {
 
         let loaded = load_config(&root, None).unwrap();
         assert_eq!(loaded.index_options.alias_field.as_deref(), Some("aliases"));
+    }
+
+    #[test]
+    fn index_auto_defaults_true_when_no_config_present() {
+        let dir = tempfile::Builder::new()
+            .prefix("norn-index-auto-default-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let loaded = load_config(&root, None).unwrap();
+        assert!(loaded.index_options.auto);
+    }
+
+    #[test]
+    fn index_auto_false_propagates_from_config() {
+        let dir = tempfile::Builder::new()
+            .prefix("norn-index-auto-false-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let config_dir = root.join(".norn");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.yaml"), "index:\n  auto: false\n").unwrap();
+
+        let loaded = load_config(&root, None).unwrap();
+        assert!(!loaded.index_options.auto);
     }
 
     #[test]
