@@ -492,11 +492,8 @@ pub(crate) fn build_documents_matching_sql_parts_scan(
             where_clauses.push("0".to_string());
             continue;
         }
-        if values
-            .iter()
-            .all(|v| matches!(v, serde_json::Value::String(_)))
-        {
-            push_string_membership(
+        if all_scalar_values(values) {
+            push_scalar_membership(
                 &mut where_clauses,
                 &mut binds,
                 field,
@@ -524,11 +521,8 @@ pub(crate) fn build_documents_matching_sql_parts_scan(
             // `--not-in field:` with no values is a no-op.
             continue;
         }
-        if values
-            .iter()
-            .all(|v| matches!(v, serde_json::Value::String(_)))
-        {
-            push_string_membership(
+        if all_scalar_values(values) {
+            push_scalar_membership(
                 &mut where_clauses,
                 &mut binds,
                 field,
@@ -608,25 +602,21 @@ fn push_shared_tail_clauses(
     binds: &mut Vec<SqlValue>,
     query: &DocumentQuery,
 ) {
-    // --before field:DATE
+    // --before / --after / --on field:DATE — array-aware, bracket-stripped
+    // text comparison on both sides (NRN-82): an array-valued field matches
+    // when ANY element's stripped text satisfies the comparison, a scalar
+    // field when its own stripped text does. The strip makes Obsidian
+    // daily-note links (`created: "[[2026-01-01]]"`) compare as their
+    // dates; ISO date strings order lexically = chronologically. See
+    // `scan_semantics_probe`'s date section for the pinned truths.
     for (field, date) in &query.date_before {
-        where_clauses.push("json_extract(frontmatter_json, ?) < ?".to_string());
-        binds.push(SqlValue::Text(json_path_for(field)));
-        binds.push(SqlValue::Text(date.clone()));
+        push_date_op(&mut *where_clauses, &mut *binds, field, date, "<");
     }
-
-    // --after field:DATE
     for (field, date) in &query.date_after {
-        where_clauses.push("json_extract(frontmatter_json, ?) > ?".to_string());
-        binds.push(SqlValue::Text(json_path_for(field)));
-        binds.push(SqlValue::Text(date.clone()));
+        push_date_op(&mut *where_clauses, &mut *binds, field, date, ">");
     }
-
-    // --on field:DATE
     for (field, date) in &query.date_on {
-        where_clauses.push("json_extract(frontmatter_json, ?) = ?".to_string());
-        binds.push(SqlValue::Text(json_path_for(field)));
-        binds.push(SqlValue::Text(date.clone()));
+        push_date_op(&mut *where_clauses, &mut *binds, field, date, "=");
     }
 
     // body_text_contains: case-insensitive substring on body_text.
@@ -653,12 +643,45 @@ fn push_shared_tail_clauses(
     }
 }
 
+/// Build the WHERE clause for one date operator (`--before` `<`, `--after`
+/// `>`, `--on` `=`). Array-aware EXISTS-any over the same skeleton as
+/// string `--eq`, comparing bracket-stripped text on both sides — SQLite's
+/// `replace()` casts non-text values to their text rendering, so numeric
+/// stored values compare lexically as text (see
+/// `date_ops_on_non_string_scalar_compare_by_text_rendering`).
+fn push_date_op(
+    where_clauses: &mut Vec<String>,
+    binds: &mut Vec<SqlValue>,
+    field: &str,
+    date: &str,
+    op: &str,
+) {
+    let stripped = strip_wikilink_brackets(date);
+    push_array_aware_clause(
+        where_clauses,
+        binds,
+        field,
+        "EXISTS",
+        &format!("{STRIPPED_ARRAY_ELEMENT} {op} ?"),
+        &[SqlValue::Text(stripped.clone())],
+        &format!("{STRIPPED_SCALAR} {op} ?"),
+        &[
+            SqlValue::Text(json_path_for(field)),
+            SqlValue::Text(stripped),
+        ],
+    );
+}
+
 /// Build the WHERE clause for `--eq` (negate=false) or `--not-eq` (negate=true).
-/// String values get the array-aware + bracket-stripped treatment (matches
-/// scalar fields by equality AND array fields via `json_each`, with `[[...]]`
-/// wrappers stripped from stored values). Non-string predicates (bool, number,
-/// null) keep the simple scalar equality — JSON-typed comparisons there are
-/// unambiguous.
+/// Every scalar-typed value is array-aware (NRN-81): string values match by
+/// bracket-stripped text (scalar fields by equality, array fields via any
+/// `json_each` element, `[[...]]` wrappers collapsed on both sides); number
+/// and bool values match by SQLite's typed comparison over the same
+/// array-aware skeleton (INTEGER/REAL compare numerically, TEXT never
+/// equals a numeric bind). Null/object/array query values keep the bare
+/// scalar equality — they are unreachable from the CLI/MCP parsers (see
+/// `filter_args::coerce_value`), and the array-aware negation of a null
+/// bind would surprise (`NOT EXISTS(element = NULL)` is vacuously true).
 fn push_equality(
     where_clauses: &mut Vec<String>,
     binds: &mut Vec<SqlValue>,
@@ -666,62 +689,145 @@ fn push_equality(
     value: &serde_json::Value,
     negate: bool,
 ) {
-    if let serde_json::Value::String(raw) = value {
-        let stripped = strip_wikilink_brackets(raw);
-        let array_exists = if negate { "NOT EXISTS" } else { "EXISTS" };
-        let scalar_op = if negate { "!=" } else { "=" };
-        push_array_aware_clause(
-            where_clauses,
-            binds,
-            field,
-            array_exists,
-            &format!("{STRIPPED_ARRAY_ELEMENT} = ?"),
-            &[SqlValue::Text(stripped.clone())],
-            &format!("{STRIPPED_SCALAR} {scalar_op} ?"),
-            &[
-                SqlValue::Text(json_path_for(field)),
-                SqlValue::Text(stripped),
-            ],
-        );
-    } else {
-        let op = if negate { "!=" } else { "=" };
-        where_clauses.push(format!("json_extract(frontmatter_json, ?) {op} ?"));
-        binds.push(SqlValue::Text(json_path_for(field)));
-        binds.push(json_value_to_sql(value));
+    let array_exists = if negate { "NOT EXISTS" } else { "EXISTS" };
+    let scalar_op = if negate { "!=" } else { "=" };
+    match value {
+        serde_json::Value::String(raw) => {
+            let stripped = strip_wikilink_brackets(raw);
+            push_array_aware_clause(
+                where_clauses,
+                binds,
+                field,
+                array_exists,
+                &format!("{STRIPPED_ARRAY_ELEMENT} = ?"),
+                &[SqlValue::Text(stripped.clone())],
+                &format!("{STRIPPED_SCALAR} {scalar_op} ?"),
+                &[
+                    SqlValue::Text(json_path_for(field)),
+                    SqlValue::Text(stripped),
+                ],
+            );
+        }
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
+            let typed = json_value_to_sql(value);
+            push_array_aware_clause(
+                where_clauses,
+                binds,
+                field,
+                array_exists,
+                "value = ?",
+                &[typed.clone()],
+                &format!("json_extract(frontmatter_json, ?) {scalar_op} ?"),
+                &[SqlValue::Text(json_path_for(field)), typed],
+            );
+        }
+        _ => {
+            let op = if negate { "!=" } else { "=" };
+            where_clauses.push(format!("json_extract(frontmatter_json, ?) {op} ?"));
+            binds.push(SqlValue::Text(json_path_for(field)));
+            binds.push(json_value_to_sql(value));
+        }
     }
 }
 
+/// True when a `--in`/`--not-in` value list qualifies for the array-aware
+/// membership compile: every value is a scalar (string, number, or bool).
+/// Lists carrying null/object/array values — unreachable from the CLI/MCP
+/// parsers (see `filter_args::coerce_value`) — keep the legacy bare
+/// `json_extract(...) IN (...)` form.
+fn all_scalar_values(values: &[serde_json::Value]) -> bool {
+    values.iter().all(|v| {
+        matches!(
+            v,
+            serde_json::Value::String(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::Bool(_)
+        )
+    })
+}
+
 /// Build the WHERE clause for `--in` (negate=false) or `--not-in` (negate=true)
-/// when every value in the list is a string. Same array-aware + bracket-stripped
-/// shape as the string `--eq` branch: matches scalar fields with a stripped
-/// equality test, matches array fields by iterating elements via `json_each`.
-fn push_string_membership(
+/// when every value in the list is a scalar (`all_scalar_values`). Same
+/// array-aware skeleton as `--eq`, generalized to N values with each value
+/// compared by its own rules (NRN-81): string values by bracket-stripped
+/// text, number/bool values typed. A doc matches `--in` when its scalar —
+/// or any array element — matches ANY listed value; `--not-in` when NONE
+/// do. For an all-string list this compiles byte-identically to the
+/// pre-NRN-81 string-membership form (the typed bucket vanishes), which the
+/// EAV router's provability argument relies on.
+fn push_scalar_membership(
     where_clauses: &mut Vec<String>,
     binds: &mut Vec<SqlValue>,
     field: &str,
     values: &[serde_json::Value],
     negate: bool,
 ) {
-    let placeholders = std::iter::repeat_n("?", values.len())
-        .collect::<Vec<_>>()
-        .join(", ");
     let stripped: Vec<SqlValue> = values
         .iter()
         .filter_map(|v| v.as_str().map(strip_wikilink_brackets))
         .map(SqlValue::Text)
         .collect();
+    let typed: Vec<SqlValue> = values
+        .iter()
+        .filter(|v| !v.is_string())
+        .map(json_value_to_sql)
+        .collect();
+    let ph = |n: usize| std::iter::repeat_n("?", n).collect::<Vec<_>>().join(", ");
+    let (s_ph, t_ph) = (ph(stripped.len()), ph(typed.len()));
+
     let array_exists = if negate { "NOT EXISTS" } else { "EXISTS" };
     let scalar_op = if negate { "NOT IN" } else { "IN" };
-    let mut scalar_binds = vec![SqlValue::Text(json_path_for(field))];
-    scalar_binds.extend(stripped.iter().cloned());
+    let path = SqlValue::Text(json_path_for(field));
+
+    let (array_test, array_binds, scalar_test, scalar_binds): (
+        String,
+        Vec<SqlValue>,
+        String,
+        Vec<SqlValue>,
+    ) = match (stripped.is_empty(), typed.is_empty()) {
+        (false, true) => (
+            format!("{STRIPPED_ARRAY_ELEMENT} IN ({s_ph})"),
+            stripped.clone(),
+            format!("{STRIPPED_SCALAR} {scalar_op} ({s_ph})"),
+            std::iter::once(path).chain(stripped).collect(),
+        ),
+        (true, false) => (
+            format!("value IN ({t_ph})"),
+            typed.clone(),
+            format!("json_extract(frontmatter_json, ?) {scalar_op} ({t_ph})"),
+            std::iter::once(path).chain(typed).collect(),
+        ),
+        (false, false) => {
+            let compound_scalar = format!(
+                "({STRIPPED_SCALAR} IN ({s_ph}) OR json_extract(frontmatter_json, ?) IN ({t_ph}))"
+            );
+            let scalar_test = if negate {
+                format!("NOT {compound_scalar}")
+            } else {
+                compound_scalar
+            };
+            let mut scalar_binds = vec![path.clone()];
+            scalar_binds.extend(stripped.iter().cloned());
+            scalar_binds.push(path);
+            scalar_binds.extend(typed.iter().cloned());
+            (
+                format!("({STRIPPED_ARRAY_ELEMENT} IN ({s_ph}) OR value IN ({t_ph}))"),
+                stripped.iter().cloned().chain(typed).collect(),
+                scalar_test,
+                scalar_binds,
+            )
+        }
+        (true, true) => unreachable!("caller guarantees a non-empty value list"),
+    };
+
     push_array_aware_clause(
         where_clauses,
         binds,
         field,
         array_exists,
-        &format!("{STRIPPED_ARRAY_ELEMENT} IN ({placeholders})"),
-        &stripped,
-        &format!("{STRIPPED_SCALAR} {scalar_op} ({placeholders})"),
+        &array_test,
+        &array_binds,
+        &scalar_test,
         &scalar_binds,
     );
 }

@@ -21,7 +21,10 @@
 //! Do NOT "fix" a surprising assertion in this file — if the scan path's
 //! behavior looks like a bug, pin it as-is and file it separately. Changing
 //! an assertion here to what looks "more correct" silently changes what the
-//! router is allowed to promise.
+//! router is allowed to promise. (NRN-81/NRN-82 are the worked example of
+//! the legitimate path: the original probe pinned the non-string
+//! asymmetry and the whole-array date compare as-is, filed both, and the
+//! assertions changed only when the scan semantics themselves did.)
 
 #[cfg(test)]
 mod tests {
@@ -111,56 +114,147 @@ mod tests {
         );
     }
 
-    // ── non-string --eq is NOT array-aware ──────────────────────────────
+    // ── scalar-typed --eq/--in values are array-aware (NRN-81) ──────────
     //
-    // `push_equality`'s non-string branch is a bare
-    // `json_extract(frontmatter_json, ?) = ?` with no array_each treatment
-    // at all (unlike the string branch). This means a typed --eq can never
-    // match inside an array, even a single-element array — this is the
-    // reason non-string --eq/--in/--not-in fall back to the scan path
-    // instead of routing through document_fields (which stores one row per
-    // array element regardless of type, and so WOULD match).
+    // `push_equality`'s number/bool branch uses the same array-aware
+    // skeleton as the string branch, with typed comparison instead of
+    // bracket-stripped text: an array-valued field matches when any element
+    // equals the value under SQLite's typed rules (INTEGER/REAL compare
+    // numerically; TEXT never equals a numeric bind). Pre-NRN-81 this
+    // branch was a bare scalar `json_extract(...) = ?` — `n: [5]` never
+    // matched `--eq n:5` while `s: [x]` matched `--eq s:x`, an asymmetry
+    // with no design rationale. Null/object/array query values keep the
+    // bare scalar form (unreachable from the CLI/MCP parsers — see
+    // `filter_args::coerce_value`).
 
     #[test]
-    fn eq_integer_is_not_array_aware() {
+    fn eq_integer_is_array_aware() {
         let (_tmp, root) = vault_with(&[
             ("scalar.md", "---\nn: 5\n---\n"),
             ("array.md", "---\nn: [5, 6]\n---\n"),
             ("singleton.md", "---\nn: [5]\n---\n"),
+            ("other.md", "---\nn: [7]\n---\n"),
+            ("text.md", "---\nn: [\"5\"]\n---\n"),
         ]);
         let cache = open(&root);
         assert_eq!(
             matched(&cache, eq("n", serde_json::json!(5))),
-            vec!["scalar.md"],
-            "integer --eq must not match array or singleton-array elements"
+            vec!["array.md", "scalar.md", "singleton.md"],
+            "integer --eq matches scalar and any array element numerically; \
+             a TEXT element \"5\" never equals a numeric bind"
         );
     }
 
     #[test]
-    fn eq_boolean_is_not_array_aware() {
+    fn eq_float_matches_integer_array_element_numerically() {
+        // SQLite compares INTEGER and REAL numerically inside json_each
+        // exactly as it does for scalars (see
+        // `eq_integer_matches_stored_float_numerically`).
+        let (_tmp, root) = vault_with(&[("a.md", "---\nn: [5.0]\n---\n")]);
+        let cache = open(&root);
+        assert_eq!(matched(&cache, eq("n", serde_json::json!(5))), vec!["a.md"]);
+    }
+
+    #[test]
+    fn eq_boolean_is_array_aware() {
         let (_tmp, root) = vault_with(&[
             ("scalar.md", "---\nb: true\n---\n"),
             ("array.md", "---\nb: [true, false]\n---\n"),
+            ("no.md", "---\nb: [false]\n---\n"),
         ]);
         let cache = open(&root);
         assert_eq!(
             matched(&cache, eq("b", serde_json::json!(true))),
-            vec!["scalar.md"]
+            vec!["array.md", "scalar.md"]
         );
     }
 
     #[test]
-    fn in_non_string_values_is_not_array_aware() {
+    fn not_eq_integer_is_array_aware() {
+        // Negation mirrors the string branch: an array matches --not-eq
+        // only when NO element equals the value; missing fields stay
+        // excluded (see `not_eq_excludes_missing_field_by_default`).
+        let (_tmp, root) = vault_with(&[
+            ("hit.md", "---\nn: [5, 6]\n---\n"),
+            ("clean.md", "---\nn: [6, 7]\n---\n"),
+            ("scalar_other.md", "---\nn: 9\n---\n"),
+            ("missing.md", "---\nother: x\n---\n"),
+        ]);
+        let cache = open(&root);
+        let not_eq = DocumentQuery {
+            frontmatter_not_eq: vec![("n".to_string(), serde_json::json!(5))],
+            ..Default::default()
+        };
+        assert_eq!(
+            matched(&cache, not_eq),
+            vec!["clean.md", "scalar_other.md"]
+        );
+    }
+
+    #[test]
+    fn in_non_string_values_is_array_aware() {
         let (_tmp, root) = vault_with(&[
             ("scalar.md", "---\nn: 5\n---\n"),
             ("array.md", "---\nn: [5, 6]\n---\n"),
+            ("other.md", "---\nn: [7]\n---\n"),
         ]);
         let cache = open(&root);
-        // Mixed/non-string --in falls through to the same non-array-aware
-        // `json_extract(...) IN (...)` form as scalar --eq.
         assert_eq!(
             matched(&cache, in_("n", vec![serde_json::json!(5)])),
-            vec!["scalar.md"]
+            vec!["array.md", "scalar.md"]
+        );
+    }
+
+    #[test]
+    fn in_mixed_type_values_match_each_by_their_own_rules() {
+        // A mixed --in list applies each value's own comparison: string
+        // values get the bracket-stripped text treatment, number/bool
+        // values compare typed — per element and per scalar alike.
+        let (_tmp, root) = vault_with(&[
+            ("str_scalar.md", "---\nf: five\n---\n"),
+            ("str_array.md", "---\nf: [five, six]\n---\n"),
+            ("wiki.md", "---\nf: \"[[five]]\"\n---\n"),
+            ("int_scalar.md", "---\nf: 5\n---\n"),
+            ("int_array.md", "---\nf: [5]\n---\n"),
+            ("neither.md", "---\nf: [seven, 8]\n---\n"),
+        ]);
+        let cache = open(&root);
+        assert_eq!(
+            matched(
+                &cache,
+                in_("f", vec![serde_json::json!("five"), serde_json::json!(5)])
+            ),
+            vec![
+                "int_array.md",
+                "int_scalar.md",
+                "str_array.md",
+                "str_scalar.md",
+                "wiki.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn not_in_mixed_type_values_exclude_any_element_match() {
+        let (_tmp, root) = vault_with(&[
+            ("hit_str.md", "---\nf: [five, other]\n---\n"),
+            ("hit_int.md", "---\nf: [5, 9]\n---\n"),
+            ("clean.md", "---\nf: [seven, 8]\n---\n"),
+            ("missing.md", "---\nother: x\n---\n"),
+        ]);
+        let cache = open(&root);
+        let not_in = DocumentQuery {
+            frontmatter_not_in: vec![(
+                "f".to_string(),
+                vec![serde_json::json!("five"), serde_json::json!(5)],
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            matched(&cache, not_in),
+            vec!["clean.md"],
+            "any element matching any listed value excludes the doc; \
+             missing fields stay excluded"
         );
     }
 
@@ -238,31 +332,28 @@ mod tests {
         assert_eq!(matched(&cache, starts_with_false), vec!["a.md"]);
     }
 
-    // ── date ops are scalar-only: arrays compare as JSON array text ──────
+    // ── date ops compare per element, bracket-stripped (NRN-82) ─────────
     //
-    // `date_before`/`date_after`/`date_on` push a bare
-    // `json_extract(frontmatter_json, ?) OP ?` with NO array-awareness at
-    // all (unlike --eq's string branch). For an array-valued field,
-    // json_extract returns the whole array's JSON-encoded text (e.g.
-    // `["2025-01-01"]`), which is compared as TEXT against the date-string
-    // bind. Since document_fields stores one row per array ELEMENT (typed,
-    // canonicalized), a naive EAV compilation of date ops would test each
-    // element's date value individually — a completely different result
-    // from comparing the whole array's JSON text. This divergence is why
-    // date ops always fall back to the scan path in the router.
+    // `date_before`/`date_after`/`date_on` use the same array-aware
+    // skeleton as string --eq: an array-valued field matches when ANY
+    // element's bracket-stripped text satisfies the comparison; a scalar
+    // field compares its own bracket-stripped text. Both sides collapse
+    // `[[...]]`, so Obsidian daily-note links (`created: "[[2026-01-01]]"`)
+    // compare as their dates. Pre-NRN-82 the compile was a bare
+    // `json_extract(...) OP ?`, which for an array-valued field lexically
+    // compared the WHOLE array's JSON-encoded text (`'["2020-01-01"]'`
+    // sorts after any plain date string — meaningless), and `[[wikilinked]]`
+    // dates compared with their brackets on.
 
     #[test]
-    fn date_before_on_array_field_compares_json_array_text_not_elements() {
+    fn date_ops_on_array_fields_compare_per_element() {
         let (_tmp, root) = vault_with(&[
-            // Every element is chronologically before the query date, but
-            // the array's JSON text ("[...]") sorts AFTER any plain
-            // date-string lexically ('[' > any ASCII digit) — the reverse
-            // of what a per-element scan would produce.
             (
                 "array.md",
                 "---\ncreated:\n  - 2020-01-01\n  - 2021-01-01\n---\n",
             ),
             ("scalar.md", "---\ncreated: 2020-01-01\n---\n"),
+            ("empty.md", "---\ncreated: []\n---\n"),
         ]);
         let cache = open(&root);
 
@@ -272,27 +363,57 @@ mod tests {
         };
         assert_eq!(
             matched(&cache, before),
-            vec!["scalar.md"],
-            "array-valued date field must NOT match --before via per-element \
-             comparison — the scan path compares the whole array's JSON text"
+            vec!["array.md", "scalar.md"],
+            "every element of array.md is before the query date; an empty \
+             array has no element to satisfy any date op"
         );
 
+        // Only array.md has an element after 2020-06-01 (its 2021 entry) —
+        // per-element ANY semantics, not whole-array text ordering.
         let after = DocumentQuery {
-            date_after: vec![("created".to_string(), "2019-01-01".to_string())],
+            date_after: vec![("created".to_string(), "2020-06-01".to_string())],
             ..Default::default()
         };
-        // The array's JSON text sorts after any plain date string, so
-        // --after matches it too (for the wrong reason — text ordering, not
-        // date semantics). Pinning this exact quirk.
-        assert_eq!(matched(&cache, after), vec!["array.md", "scalar.md"]);
+        assert_eq!(matched(&cache, after), vec!["array.md"]);
+
+        let on = DocumentQuery {
+            date_on: vec![("created".to_string(), "2021-01-01".to_string())],
+            ..Default::default()
+        };
+        assert_eq!(matched(&cache, on), vec!["array.md"]);
     }
 
     #[test]
-    fn date_ops_on_non_string_scalar_compare_by_sqlite_storage_class() {
-        // json_extract returns INTEGER/REAL for numeric scalars; comparing
-        // INTEGER/REAL to a TEXT bind follows SQLite's storage-class
-        // ordering (NULL < INTEGER/REAL < TEXT < BLOB) — a numeric value is
-        // always "less than" any text bind, never equal or greater.
+    fn date_ops_collapse_wikilink_brackets_on_both_sides() {
+        let (_tmp, root) = vault_with(&[
+            ("wiki.md", "---\ncreated: \"[[2020-01-01]]\"\n---\n"),
+            ("wiki_array.md", "---\ncreated: [\"[[2021-01-01]]\"]\n---\n"),
+            ("plain.md", "---\ncreated: 2022-01-01\n---\n"),
+        ]);
+        let cache = open(&root);
+
+        let on = DocumentQuery {
+            date_on: vec![("created".to_string(), "2020-01-01".to_string())],
+            ..Default::default()
+        };
+        assert_eq!(matched(&cache, on), vec!["wiki.md"]);
+
+        // The query side strips too: `--before created:[[2021-06-01]]`.
+        let before = DocumentQuery {
+            date_before: vec![("created".to_string(), "[[2021-06-01]]".to_string())],
+            ..Default::default()
+        };
+        assert_eq!(matched(&cache, before), vec!["wiki.md", "wiki_array.md"]);
+    }
+
+    #[test]
+    fn date_ops_on_non_string_scalar_compare_by_text_rendering() {
+        // The bracket-strip (SQLite `replace()`) casts non-text values to
+        // TEXT, so a numeric stored value compares by its text rendering,
+        // lexically. Pre-NRN-82 the un-stripped compile followed SQLite's
+        // storage-class ordering instead (INTEGER < any TEXT bind, never
+        // equal) — both are garbage-in cases; the text rendering at least
+        // matches digits-for-digits on --on.
         let (_tmp, root) = vault_with(&[("a.md", "---\ncreated: 20260101\n---\n")]);
         let cache = open(&root);
 
@@ -300,25 +421,25 @@ mod tests {
             date_before: vec![("created".to_string(), "2020-01-01".to_string())],
             ..Default::default()
         };
-        assert_eq!(
-            matched(&cache, before),
-            vec!["a.md"],
-            "an INTEGER stored value is always < any TEXT date bind"
+        assert!(
+            matched(&cache, before).is_empty(),
+            "'20260101' sorts lexically after '2020-01-01' (digit 4 differs)"
         );
 
         let after = DocumentQuery {
             date_after: vec![("created".to_string(), "2020-01-01".to_string())],
             ..Default::default()
         };
-        assert!(matched(&cache, after).is_empty());
+        assert_eq!(matched(&cache, after), vec!["a.md"]);
 
         let on = DocumentQuery {
             date_on: vec![("created".to_string(), "20260101".to_string())],
             ..Default::default()
         };
-        assert!(
-            matched(&cache, on).is_empty(),
-            "INTEGER never equals a TEXT bind even with matching digits"
+        assert_eq!(
+            matched(&cache, on),
+            vec!["a.md"],
+            "matching digits equal by text rendering"
         );
     }
 
