@@ -45,16 +45,40 @@ pub enum GroupNode {
     Branch(BTreeMap<String, GroupNode>),
 }
 
+/// Grouping-depth bound: each field adds one recursion level in grouping,
+/// serialization, and rendering, so an unbounded list would let a hostile
+/// `by` value abort the process (stack overflow) instead of erroring.
+const MAX_BY_FIELDS: usize = 16;
+
 pub fn run(cache: &Cache, args: &CountArgs) -> Result<CountOutput> {
-    if args.by.iter().any(|field| field.trim().is_empty()) {
-        anyhow::bail!("invalid --by value: empty field name");
+    // Normalize once for both surfaces (CLI flag and MCP `by` token):
+    // segments are trimmed so `--by "project, lifecycle"` groups on the
+    // intended field, not on " lifecycle".
+    let by: Vec<String> = args
+        .by
+        .iter()
+        .map(|field| field.trim().to_string())
+        .collect();
+    if by.iter().any(String::is_empty) {
+        anyhow::bail!("invalid by field list: empty field name");
     }
+    if by.len() > MAX_BY_FIELDS {
+        anyhow::bail!(
+            "invalid by field list: at most {MAX_BY_FIELDS} fields supported (got {})",
+            by.len()
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(duplicate) = by.iter().find(|field| !seen.insert(field.as_str())) {
+        anyhow::bail!("invalid by field list: duplicate field `{duplicate}`");
+    }
+
     let mut query = build_document_query(&args.filters)?;
     query.links_to = crate::filter_args::resolve_links_to(cache, &args.filters.links_to)?;
     let docs = cache.documents_matching(&query)?;
     let total = docs.len();
 
-    match args.by.as_slice() {
+    match by.as_slice() {
         [] => Ok(CountOutput::Total { total }),
         [field] => Ok(CountOutput::Grouped {
             by: field.clone(),
@@ -62,9 +86,9 @@ pub fn run(cache: &Cache, args: &CountArgs) -> Result<CountOutput> {
             groups: group_by(&docs, field),
         }),
         fields => Ok(CountOutput::GroupedMulti {
-            by: fields.to_vec(),
-            total,
             groups: group_by_multi(&docs, fields),
+            by: by.clone(),
+            total,
         }),
     }
 }

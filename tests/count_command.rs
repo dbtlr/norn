@@ -172,6 +172,78 @@ fn count_by_missing_field_nests_missing_marker() {
 }
 
 #[test]
+fn count_by_whitespace_padded_keys_are_trimmed() {
+    let tmp = synth_vault();
+    // The natural comma-space spelling must group on `status`, not " status".
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["count", "--by", "type, status", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["by"], serde_json::json!(["type", "status"]));
+    assert_eq!(v["groups"]["note"]["active"], 1);
+    assert_eq!(v["groups"]["log"]["backlog"], 1);
+}
+
+#[test]
+fn count_by_duplicate_key_errors() {
+    let tmp = synth_vault();
+    // Both spellings of a duplicate: inside one token and via a repeated flag.
+    for args in [
+        vec!["count", "--by", "status,status"],
+        vec!["count", "--by", "status", "--by", "status"],
+    ] {
+        let out = norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(tmp.path().join("vault"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{args:?} should be rejected, stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("duplicate field"),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn count_by_too_many_keys_errors_cleanly() {
+    let tmp = synth_vault();
+    let many = vec!["k"; 17]
+        .iter()
+        .enumerate()
+        .map(|(i, k)| format!("{k}{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["count", "--by", &many])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "17 keys should be rejected");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("at most 16"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn count_by_empty_key_errors() {
     let tmp = synth_vault();
     for by in ["type,", ",type", "type,,status", ""] {
