@@ -108,7 +108,7 @@ Selectors (all ANDed):
 
 - `match.path` — vault-relative path glob.
 - `match.path_not` — exclude matching paths.
-- `match.frontmatter` — top-level scalar equality (exact, type-sensitive; missing fields do not match).
+- `match.frontmatter` — top-level scalar equality (exact, type-sensitive; missing fields do not match). A list value is an **any-of** selector: `type: [task, phase]` fires the rule when the field equals any listed scalar (candidate values, not array containment). An empty list is a config error.
 - `exclude.path` — equivalent to `match.path_not`, named for carving out from a broader `match.path`.
 
 Constraints (independent and additive):

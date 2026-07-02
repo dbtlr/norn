@@ -364,6 +364,72 @@ mod tests {
     }
 
     #[test]
+    fn rule_with_list_selector_matches_any_listed_value() {
+        let mut rule = empty_rule("base");
+        rule.r#match
+            .frontmatter
+            .insert("type".into(), json!(["task", "phase"]));
+
+        assert!(rule_matches(
+            &document("a.md", Some(json!({"type": "task"}))),
+            &rule
+        ));
+        assert!(rule_matches(
+            &document("b.md", Some(json!({"type": "phase"}))),
+            &rule
+        ));
+        assert!(!rule_matches(
+            &document("c.md", Some(json!({"type": "note"}))),
+            &rule
+        ));
+        assert!(!rule_matches(&document("d.md", Some(json!({}))), &rule));
+        assert!(!rule_matches(&document("e.md", None), &rule));
+    }
+
+    #[test]
+    fn list_selector_matches_bool_and_number_options() {
+        let mut rule = empty_rule("levels");
+        rule.r#match
+            .frontmatter
+            .insert("level".into(), json!([1, 2]));
+        assert!(rule_matches(
+            &document("a.md", Some(json!({"level": 2}))),
+            &rule
+        ));
+        assert!(!rule_matches(
+            &document("b.md", Some(json!({"level": 3}))),
+            &rule
+        ));
+
+        let mut rule = empty_rule("flag");
+        rule.r#match
+            .frontmatter
+            .insert("draft".into(), json!([true]));
+        assert!(rule_matches(
+            &document("c.md", Some(json!({"draft": true}))),
+            &rule
+        ));
+        assert!(!rule_matches(
+            &document("d.md", Some(json!({"draft": false}))),
+            &rule
+        ));
+    }
+
+    #[test]
+    fn list_selector_does_not_match_array_valued_field() {
+        // Any-of lists the *candidate scalar values*; it is not containment
+        // over an array-valued document field.
+        let mut rule = empty_rule("base");
+        rule.r#match
+            .frontmatter
+            .insert("type".into(), json!(["task"]));
+        assert!(!rule_matches(
+            &document("a.md", Some(json!({"type": ["task"]}))),
+            &rule
+        ));
+    }
+
+    #[test]
     fn validate_with_no_config_emits_no_findings_on_clean_document() {
         let index = index_with(vec![document("a.md", Some(json!({"title": "hi"})))]);
         let config = ValidateConfig {
