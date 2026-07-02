@@ -725,9 +725,9 @@ fn push_equality(
                 field,
                 array_exists,
                 "value = ?",
-                &[typed.clone()],
+                std::slice::from_ref(&typed),
                 &format!("json_extract(frontmatter_json, ?) {scalar_op} ?"),
-                &[SqlValue::Text(json_path_for(field)), typed],
+                &[SqlValue::Text(json_path_for(field)), typed.clone()],
             );
         }
         _ => {
