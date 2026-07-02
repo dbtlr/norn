@@ -145,6 +145,11 @@ const STR_POOL: &[&str] = &[
     "charlie",
     "UPPER",
     "[[a]] and [[b]]",
+    // Empty string is a valid stored shape (`scalar_candidates` filters it
+    // out of query-operand generation — `field:` is a CLI parse error — but
+    // it must still be exercised as frontmatter data: it's a real
+    // `document_fields` row shape, distinct from an absent field).
+    "",
 ];
 const DATE_POOL: &[&str] = &["2026-01-01", "2026-06-15", "2026-12-31", "2025-03-10"];
 const ARRSTR_POOL: &[&[&str]] = &[
