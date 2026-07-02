@@ -219,19 +219,25 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 /// doesn't (yet) prove equivalent to the scan path.
 ///
 /// EAV-provable (see `scan_semantics_probe` for the pinned truths):
-/// - `--eq`/`--not-eq` with a STRING value: the scan path's string branch is
-///   already array-aware and bracket-stripped, exactly matching the
-///   `document_fields` row-per-element writer.
+/// - `--eq`/`--not-eq` with a STRING value: array-aware, bracket-stripped,
+///   and text-strict (NRN-85) — a string bind matches TEXT rows and the
+///   JSON-text rows structured values canonicalize to, never numeric/bool
+///   rows, which is exactly what the `document_fields` writer stores
+///   (`canonicalize_scalar`) and the no-affinity `value` column compares.
 /// - `--eq`/`--not-eq` with a NUMBER/BOOL value (NRN-81): the scan path's
 ///   typed branch is array-aware with SQLite's typed comparison, and
 ///   `canonicalize_scalar` stores exactly the `json_value_to_sql` value the
 ///   scan side binds — INTEGER/REAL rows compare numerically in both paths,
 ///   and a typed bind can never compare true against ANY text, so the
 ///   writer's bracket-strip on text rows is unobservable to it.
-/// - `--in`/`--not-in` where every value is a STRING, or every value is a
-///   NUMBER/BOOL: the corresponding single-bucket array-aware form
-///   (`push_scalar_membership`), N-value generalizations of the two `--eq`
-///   branches above with the same provability arguments.
+/// - `--in`/`--not-in` where every value is a STRING, NUMBER, or BOOL
+///   (mixed lists included since NRN-85 made the string bucket
+///   text-strict): `push_scalar_membership`, N-value generalizations of
+///   the `--eq` branches with the same provability arguments — the EAV
+///   `value IN (...)` list carries each value canonicalized by its own
+///   rule, and with strict scan semantics text binds match exactly the
+///   rows text/structured values canonicalize to while typed binds never
+///   cross-match text, so the buckets partition identically on both paths.
 /// - `--has`/`--missing`: pure presence, driven by the absent-sentinel row.
 /// - `--starts-with`/`--ends-with`/`--contains`: compiled as a two-branch
 ///   union (`push_string_operator_eav`) rather than a single index lookup —
@@ -246,16 +252,6 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 ///   whole-query fallback.
 ///
 /// NOT EAV-provable in this task (always falls back, per predicate class):
-/// - `--in`/`--not-in` lists MIXING string and number/bool values: the scan
-///   path's string bucket compares `replace(replace(value, ...), ...)`, and
-///   SQLite's `replace()` casts INTEGER/REAL stored values to TEXT — so a
-///   string bind like `"5"` (reachable via `--in n:[[5]],9`; bare `5`
-///   coerces to a number) matches a stored number `5` on scan, while the
-///   EAV `value IN (...)` on the no-affinity column never cross-matches
-///   TEXT binds against numeric rows. The same seam exists for pure-string
-///   values against numeric storage on BOTH `--eq` and all-string `--in`
-///   (pre-existing, tracked as NRN-85); this gate just avoids widening it.
-///   Lift when NRN-85 settles the canonical semantics.
 /// - `--eq`/`--not-eq`/`--in`/`--not-in` with a NULL/OBJECT/ARRAY value:
 ///   the scan path keeps the legacy bare scalar form for these (see
 ///   `push_equality` / `all_scalar_values` — unreachable from the CLI/MCP
@@ -283,16 +279,6 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
                 | serde_json::Value::Bool(_)
         )
     };
-    // Provable membership lists are single-bucket: all strings or all
-    // number/bool — a mixed list's string bucket can cross-match numeric
-    // rows on the scan side (see the mixed-list NOT-provable entry above).
-    let eav_list = |values: &[serde_json::Value]| {
-        values.iter().all(|v| v.is_string())
-            || values
-                .iter()
-                .all(|v| matches!(v, serde_json::Value::Number(_) | serde_json::Value::Bool(_)))
-    };
-
     let mut fields: BTreeSet<String> = BTreeSet::new();
 
     fields.extend(query.frontmatter_starts_with.iter().map(|(f, _)| f.clone()));
@@ -320,7 +306,7 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
             // no index-membership requirement.
             continue;
         }
-        if !eav_list(values) {
+        if !values.iter().all(&eav_scalar) {
             return None;
         }
         fields.insert(field.clone());
@@ -330,7 +316,7 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
             // `--not-in field:` with no values is a no-op in both builders.
             continue;
         }
-        if !eav_list(values) {
+        if !values.iter().all(&eav_scalar) {
             return None;
         }
         fields.insert(field.clone());
@@ -721,18 +707,50 @@ fn push_equality(
     match value {
         serde_json::Value::String(raw) => {
             let stripped = strip_wikilink_brackets(raw);
+            let path = json_path_for(field);
+            let array_test = format!(
+                "(json_each.type IN {STRING_MATCHABLE_TYPES} AND {STRIPPED_ARRAY_ELEMENT} = ?)"
+            );
+            // Negation counts a number/bool value as unequal-to-any-string
+            // (it matches --not-eq), while missing and null-valued fields
+            // stay excluded: `json_type` is SQL NULL for a missing field
+            // (NULL propagates out) and 'null' for a stored YAML null.
+            let (scalar_test, scalar_binds): (String, Vec<SqlValue>) = if negate {
+                (
+                    format!(
+                        "(json_type(frontmatter_json, ?) NOT IN ('null') \
+                         AND NOT (json_type(frontmatter_json, ?) IN {STRING_MATCHABLE_TYPES} \
+                                  AND {STRIPPED_SCALAR} = ?))"
+                    ),
+                    vec![
+                        SqlValue::Text(path.clone()),
+                        SqlValue::Text(path.clone()),
+                        SqlValue::Text(path),
+                        SqlValue::Text(stripped.clone()),
+                    ],
+                )
+            } else {
+                (
+                    format!(
+                        "(json_type(frontmatter_json, ?) IN {STRING_MATCHABLE_TYPES} \
+                         AND {STRIPPED_SCALAR} {scalar_op} ?)"
+                    ),
+                    vec![
+                        SqlValue::Text(path.clone()),
+                        SqlValue::Text(path),
+                        SqlValue::Text(stripped.clone()),
+                    ],
+                )
+            };
             push_array_aware_clause(
                 where_clauses,
                 binds,
                 field,
                 array_exists,
-                &format!("{STRIPPED_ARRAY_ELEMENT} = ?"),
-                &[SqlValue::Text(stripped.clone())],
-                &format!("{STRIPPED_SCALAR} {scalar_op} ?"),
-                &[
-                    SqlValue::Text(json_path_for(field)),
-                    SqlValue::Text(stripped),
-                ],
+                &array_test,
+                &[SqlValue::Text(stripped)],
+                &scalar_test,
+                &scalar_binds,
             );
         }
         serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
@@ -806,18 +824,43 @@ fn push_scalar_membership(
     let scalar_op = if negate { "NOT IN" } else { "IN" };
     let path = SqlValue::Text(json_path_for(field));
 
+    // The string bucket carries the NRN-85 strictness guards (see
+    // `push_equality`'s string branch for the semantics); the typed bucket
+    // is naturally strict. String-carrying negations use structural
+    // negation (`NOT (...)`) with the same present-and-not-null gate as
+    // `--not-eq`.
     let (array_test, array_binds, scalar_test, scalar_binds): (
         String,
         Vec<SqlValue>,
         String,
         Vec<SqlValue>,
     ) = match (stripped.is_empty(), typed.is_empty()) {
-        (false, true) => (
-            format!("{STRIPPED_ARRAY_ELEMENT} IN ({s_ph})"),
-            stripped.clone(),
-            format!("{STRIPPED_SCALAR} {scalar_op} ({s_ph})"),
-            std::iter::once(path).chain(stripped).collect(),
-        ),
+        (false, true) => {
+            let positive_scalar = format!(
+                "(json_type(frontmatter_json, ?) IN {STRING_MATCHABLE_TYPES} \
+                 AND {STRIPPED_SCALAR} IN ({s_ph}))"
+            );
+            let (scalar_test, mut scalar_binds) = if negate {
+                (
+                    format!(
+                        "(json_type(frontmatter_json, ?) NOT IN ('null') AND NOT {positive_scalar})"
+                    ),
+                    vec![path.clone(), path.clone(), path],
+                )
+            } else {
+                (positive_scalar, vec![path.clone(), path])
+            };
+            scalar_binds.extend(stripped.iter().cloned());
+            (
+                format!(
+                    "(json_each.type IN {STRING_MATCHABLE_TYPES} \
+                     AND {STRIPPED_ARRAY_ELEMENT} IN ({s_ph}))"
+                ),
+                stripped,
+                scalar_test,
+                scalar_binds,
+            )
+        }
         (true, false) => (
             format!("value IN ({t_ph})"),
             typed.clone(),
@@ -825,20 +868,30 @@ fn push_scalar_membership(
             std::iter::once(path).chain(typed).collect(),
         ),
         (false, false) => {
-            let compound_scalar = format!(
-                "({STRIPPED_SCALAR} IN ({s_ph}) OR json_extract(frontmatter_json, ?) IN ({t_ph}))"
+            let positive_scalar = format!(
+                "((json_type(frontmatter_json, ?) IN {STRING_MATCHABLE_TYPES} \
+                   AND {STRIPPED_SCALAR} IN ({s_ph})) \
+                  OR json_extract(frontmatter_json, ?) IN ({t_ph}))"
             );
-            let scalar_test = if negate {
-                format!("NOT {compound_scalar}")
+            let (scalar_test, mut scalar_binds) = if negate {
+                (
+                    format!(
+                        "(json_type(frontmatter_json, ?) NOT IN ('null') AND NOT {positive_scalar})"
+                    ),
+                    vec![path.clone(), path.clone(), path.clone()],
+                )
             } else {
-                compound_scalar
+                (positive_scalar, vec![path.clone(), path.clone()])
             };
-            let mut scalar_binds = vec![path.clone()];
             scalar_binds.extend(stripped.iter().cloned());
             scalar_binds.push(path);
             scalar_binds.extend(typed.iter().cloned());
             (
-                format!("({STRIPPED_ARRAY_ELEMENT} IN ({s_ph}) OR value IN ({t_ph}))"),
+                format!(
+                    "((json_each.type IN {STRING_MATCHABLE_TYPES} \
+                       AND {STRIPPED_ARRAY_ELEMENT} IN ({s_ph})) \
+                      OR value IN ({t_ph}))"
+                ),
                 stripped.iter().cloned().chain(typed).collect(),
                 scalar_test,
                 scalar_binds,
@@ -1081,6 +1134,15 @@ fn bump_char(c: char) -> Option<char> {
     };
     char::from_u32(next)
 }
+
+/// Storage types a STRING query value may match (NRN-85 typed
+/// strictness): text, plus structured values compared by their
+/// bracket-stripped JSON text (the only query interface to objects — see
+/// `canonicalize_scalar`, which stores exactly these as TEXT rows). Never
+/// numbers or booleans: the pre-NRN-85 cross-match was an accident of
+/// SQLite `replace()` casting them to text, and the EAV route never
+/// reproduced it.
+const STRING_MATCHABLE_TYPES: &str = "('text', 'object', 'array')";
 
 /// Bracket-stripped text of a `json_each` array element.
 const STRIPPED_ARRAY_ELEMENT: &str = "replace(replace(value, '[[', ''), ']]', '')";
@@ -1658,13 +1720,70 @@ mod router_tests {
     }
 
     #[test]
-    fn mixed_string_typed_membership_lists_fall_back_to_scan() {
-        // A mixed list's string bucket can cross-match numeric rows on the
-        // scan side (SQLite `replace()` casts INTEGER/REAL to TEXT), which
-        // the EAV `value IN (...)` never reproduces — so mixed lists are
-        // not EAV-provable (see NRN-85 for the underlying seam). The
-        // adversarial-review repro: `--in n:[[5]],9` must return the same
-        // documents whether or not `n` is indexed.
+    fn string_binds_are_text_strict_on_both_routes() {
+        // The NRN-85 seam repro: a string bind "5" (via `--eq n:[[5]]`)
+        // must match only TEXT-typed storage — never the stored number 5 —
+        // identically on the routed and scan paths.
+        let (_tmp, root) = typed_vault();
+        let indexed = open_authoritative(&root, &["n"]);
+        let scanned = Cache::open(&root).unwrap();
+
+        let cases: Vec<DocumentQuery> = vec![
+            DocumentQuery {
+                frontmatter_eq: vec![("n".to_string(), serde_json::json!("5"))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_not_eq: vec![("n".to_string(), serde_json::json!("5"))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_in: vec![("n".to_string(), vec![serde_json::json!("5")])],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_not_in: vec![("n".to_string(), vec![serde_json::json!("5")])],
+                ..Default::default()
+            },
+        ];
+        for query in cases {
+            assert_eq!(
+                paths(&indexed.documents_matching(&query).unwrap()),
+                paths(&scanned.documents_matching(&query).unwrap()),
+                "EAV and scan routes diverged for {query:?}"
+            );
+        }
+
+        let eq_str_five = DocumentQuery {
+            frontmatter_eq: vec![("n".to_string(), serde_json::json!("5"))],
+            ..Default::default()
+        };
+        assert_eq!(
+            paths(&scanned.documents_matching(&eq_str_five).unwrap()),
+            vec!["text_five.md"],
+            "string \"5\" matches only the TEXT-typed storage"
+        );
+        let not_eq_str_five = DocumentQuery {
+            frontmatter_not_eq: vec![("n".to_string(), serde_json::json!("5"))],
+            ..Default::default()
+        };
+        assert_eq!(
+            paths(&scanned.documents_matching(&not_eq_str_five).unwrap()),
+            vec![
+                "empty_array.md",
+                "float_array.md",
+                "int_array.md",
+                "int_scalar.md",
+                "mixed_array.md",
+            ],
+            "numeric storage counts as unequal-to-any-string; missing stays excluded"
+        );
+    }
+
+    #[test]
+    fn mixed_membership_lists_route_and_agree_with_scan() {
+        // With the string bucket text-strict (NRN-85), mixed lists became
+        // EAV-provable — the gate added during the NRN-81 review is lifted.
         let (_tmp, root) = typed_vault();
         let indexed = open_authoritative(&root, &["n"]);
         let scanned = Cache::open(&root).unwrap();
@@ -1672,48 +1791,46 @@ mod router_tests {
         for values in [
             vec![serde_json::json!("[[5]]"), serde_json::json!(9)],
             vec![serde_json::json!("seven"), serde_json::json!(5)],
+            vec![serde_json::json!("5"), serde_json::json!(8)],
         ] {
-            let in_query = DocumentQuery {
-                frontmatter_in: vec![("n".to_string(), values.clone())],
-                ..Default::default()
-            };
-            let (where_sql, _binds) = build_documents_matching_sql_parts(&indexed, &in_query);
-            assert!(
-                !where_sql.contains("document_fields"),
-                "mixed --in lists must fall back to scan: {where_sql}"
-            );
-            let not_in_query = DocumentQuery {
-                frontmatter_not_in: vec![("n".to_string(), values)],
-                ..Default::default()
-            };
-            let (where_sql, _binds) = build_documents_matching_sql_parts(&indexed, &not_in_query);
-            assert!(
-                !where_sql.contains("document_fields"),
-                "mixed --not-in lists must fall back to scan: {where_sql}"
-            );
-
-            assert_eq!(
-                paths(&indexed.documents_matching(&in_query).unwrap()),
-                paths(&scanned.documents_matching(&in_query).unwrap()),
-                "routes diverged for {in_query:?}"
-            );
+            for negate in [false, true] {
+                let query = if negate {
+                    DocumentQuery {
+                        frontmatter_not_in: vec![("n".to_string(), values.clone())],
+                        ..Default::default()
+                    }
+                } else {
+                    DocumentQuery {
+                        frontmatter_in: vec![("n".to_string(), values.clone())],
+                        ..Default::default()
+                    }
+                };
+                let (where_sql, _binds) = build_documents_matching_sql_parts(&indexed, &query);
+                assert!(
+                    where_sql.contains("document_fields"),
+                    "mixed lists on an indexed field must route: {where_sql}"
+                );
+                assert_eq!(
+                    paths(&indexed.documents_matching(&query).unwrap()),
+                    paths(&scanned.documents_matching(&query).unwrap()),
+                    "routes diverged for {query:?}"
+                );
+            }
         }
 
-        // Single-bucket lists still route.
-        for values in [
-            vec![serde_json::json!(5), serde_json::json!(9)],
-            vec![serde_json::json!("a"), serde_json::json!("b")],
-        ] {
-            let query = DocumentQuery {
-                frontmatter_in: vec![("n".to_string(), values)],
-                ..Default::default()
-            };
-            let (where_sql, _binds) = build_documents_matching_sql_parts(&indexed, &query);
-            assert!(
-                where_sql.contains("document_fields"),
-                "single-bucket --in lists on an indexed field must route: {where_sql}"
-            );
-        }
+        // Pin the review repro's actual matched set: "[[5]]" strips to the
+        // string "5", which matches only text storage; 9 matches nothing.
+        let query = DocumentQuery {
+            frontmatter_in: vec![(
+                "n".to_string(),
+                vec![serde_json::json!("[[5]]"), serde_json::json!(9)],
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            paths(&scanned.documents_matching(&query).unwrap()),
+            vec!["text_five.md"]
+        );
     }
 
     #[test]
