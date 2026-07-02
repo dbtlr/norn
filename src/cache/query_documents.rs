@@ -251,6 +251,15 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 ///   construction, not by argument, so string ops no longer need to force a
 ///   whole-query fallback.
 ///
+/// - `--before`/`--after`/`--on` (NRN-84): two-branch union like the
+///   string operators (`push_date_op_eav`) — TEXT-typed rows compare
+///   directly (the writer stores text and structured values' JSON text
+///   bracket-stripped, exactly what the scan side's stripped comparison
+///   sees for those shapes) as an index range/probe, and non-text rows
+///   re-evaluate `push_date_op`'s exact scan fragment against the joined
+///   document (numbers/bools render via `replace()`'s text cast — only the
+///   fragment itself can reproduce that).
+///
 /// NOT EAV-provable in this task (always falls back, per predicate class):
 /// - `--eq`/`--not-eq`/`--in`/`--not-in` with a NULL/OBJECT/ARRAY value:
 ///   the scan path keeps the legacy bare scalar form for these (see
@@ -259,18 +268,7 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 ///   row per array element — an EAV compilation would (wrongly) match
 ///   inside arrays where the scan path never does. Objects/arrays
 ///   additionally diverge on the writer's bracket-strip of their JSON text.
-/// - `--before`/`--after`/`--on`: per-element semantics (NRN-82) are now
-///   EAV-shaped in principle, but the scan side compares the
-///   bracket-STRIPPED text of every element regardless of type, while
-///   `document_fields` rows keep typed INTEGER/REAL values whose text
-///   renderings the index can't range-compare without a per-row cast — a
-///   provable-parity compile needs the two-branch union treatment string
-///   operators got (`push_string_operator_eav`). Deferred; see NRN-84.
 fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
-    if !query.date_before.is_empty() || !query.date_after.is_empty() || !query.date_on.is_empty() {
-        return None;
-    }
-
     let eav_scalar = |v: &serde_json::Value| {
         matches!(
             v,
@@ -284,6 +282,9 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
     fields.extend(query.frontmatter_starts_with.iter().map(|(f, _)| f.clone()));
     fields.extend(query.frontmatter_ends_with.iter().map(|(f, _)| f.clone()));
     fields.extend(query.frontmatter_contains.iter().map(|(f, _)| f.clone()));
+    fields.extend(query.date_before.iter().map(|(f, _)| f.clone()));
+    fields.extend(query.date_after.iter().map(|(f, _)| f.clone()));
+    fields.extend(query.date_on.iter().map(|(f, _)| f.clone()));
 
     for (field, value) in &query.frontmatter_eq {
         if !eav_scalar(value) {
@@ -450,6 +451,18 @@ fn build_documents_matching_sql_parts_eav(query: &DocumentQuery) -> (String, Vec
         );
     }
 
+    // Date operators: two-branch union per predicate (`push_date_op_eav`),
+    // provable per `eav_eligible_fields`'s doc comment.
+    for (field, date) in &query.date_before {
+        push_date_op_eav(&mut where_clauses, &mut binds, field, date, "<");
+    }
+    for (field, date) in &query.date_after {
+        push_date_op_eav(&mut where_clauses, &mut binds, field, date, ">");
+    }
+    for (field, date) in &query.date_on {
+        push_date_op_eav(&mut where_clauses, &mut binds, field, date, "=");
+    }
+
     push_shared_tail_clauses(&mut where_clauses, &mut binds, query);
 
     let where_sql = if where_clauses.is_empty() {
@@ -586,6 +599,23 @@ pub(crate) fn build_documents_matching_sql_parts_scan(
         );
     }
 
+    // --before / --after / --on field:DATE — array-aware, bracket-stripped
+    // text comparison on both sides (NRN-82): an array-valued field matches
+    // when ANY element's stripped text satisfies the comparison, a scalar
+    // field when its own stripped text does. The strip makes Obsidian
+    // daily-note links (`created: "[[2026-01-01]]"`) compare as their
+    // dates; ISO date strings order lexically = chronologically. See
+    // `scan_semantics_probe`'s date section for the pinned truths.
+    for (field, date) in &query.date_before {
+        push_date_op(&mut where_clauses, &mut binds, field, date, "<");
+    }
+    for (field, date) in &query.date_after {
+        push_date_op(&mut where_clauses, &mut binds, field, date, ">");
+    }
+    for (field, date) in &query.date_on {
+        push_date_op(&mut where_clauses, &mut binds, field, date, "=");
+    }
+
     push_shared_tail_clauses(&mut where_clauses, &mut binds, query);
 
     let where_sql = if where_clauses.is_empty() {
@@ -597,41 +627,19 @@ pub(crate) fn build_documents_matching_sql_parts_scan(
     (where_sql, binds)
 }
 
-/// Predicate classes never gated by EAV eligibility: they either never touch
-/// `document_fields` at all (body-text, links-to, unresolved-links), or this
-/// router always falls the whole query back to scan when they're present
-/// (date ops — see `eav_eligible_fields`'s doc comment for why). Shared
-/// verbatim between `build_documents_matching_sql_parts_scan` and
+/// Predicate classes that never touch `document_fields` at all (body-text,
+/// links-to, unresolved-links), shared verbatim between
+/// `build_documents_matching_sql_parts_scan` and
 /// `build_documents_matching_sql_parts_eav` so the two builders can't drift
-/// on the pieces they both need unchanged; for the EAV builder the date
-/// vectors are guaranteed empty by the eligibility gate, so this is a no-op
-/// there beyond body-text/links. Anchored string operators
-/// (starts-with/ends-with/contains) are NOT here — they're EAV-eligible now,
-/// so each builder compiles them its own way: the scan builder via
-/// `push_string_operator` (see `push_string_operators_scan_form`), the EAV
-/// builder via `push_string_operator_eav`.
+/// on the pieces they both need unchanged. Predicates each builder compiles
+/// its own way are NOT here: anchored string operators
+/// (`push_string_operator` / `push_string_operator_eav`) and, since NRN-84,
+/// the date operators (`push_date_op` / `push_date_op_eav`).
 fn push_shared_tail_clauses(
     where_clauses: &mut Vec<String>,
     binds: &mut Vec<SqlValue>,
     query: &DocumentQuery,
 ) {
-    // --before / --after / --on field:DATE — array-aware, bracket-stripped
-    // text comparison on both sides (NRN-82): an array-valued field matches
-    // when ANY element's stripped text satisfies the comparison, a scalar
-    // field when its own stripped text does. The strip makes Obsidian
-    // daily-note links (`created: "[[2026-01-01]]"`) compare as their
-    // dates; ISO date strings order lexically = chronologically. See
-    // `scan_semantics_probe`'s date section for the pinned truths.
-    for (field, date) in &query.date_before {
-        push_date_op(&mut *where_clauses, &mut *binds, field, date, "<");
-    }
-    for (field, date) in &query.date_after {
-        push_date_op(&mut *where_clauses, &mut *binds, field, date, ">");
-    }
-    for (field, date) in &query.date_on {
-        push_date_op(&mut *where_clauses, &mut *binds, field, date, "=");
-    }
-
     // body_text_contains: case-insensitive substring on body_text.
     if let Some(needle) = &query.body_text_contains {
         where_clauses.push("LOWER(body_text) LIKE '%' || LOWER(?) || '%'".to_string());
@@ -683,6 +691,58 @@ fn push_date_op(
             SqlValue::Text(stripped),
         ],
     );
+}
+
+/// EAV compilation of one date operator: a two-branch UNION inside a
+/// single driving subquery, mirroring `push_string_operator_eav`.
+///
+/// - Branch 1 compares TEXT-typed `document_fields` rows directly — the
+///   writer stores strings (and structured values' JSON text)
+///   bracket-stripped, which is exactly the text `push_date_op`'s stripped
+///   comparison sees for those shapes — as a range (`--before`/`--after`)
+///   or probe (`--on`) that drives `idx_document_fields_kv`. The typeof
+///   guard is load-bearing: numeric rows sort below all TEXT and the BLOB
+///   absent-sentinel above it, so an unguarded range would sweep both in.
+/// - Branch 2 catches docs holding a NON-text row for the key —
+///   numbers/bools, whose scan-side rendering is `replace()`'s text cast —
+///   and re-evaluates `push_date_op`'s EXACT fragment against the joined
+///   document, so any future change to the scan-side date compare
+///   propagates here automatically.
+fn push_date_op_eav(
+    where_clauses: &mut Vec<String>,
+    binds: &mut Vec<SqlValue>,
+    field: &str,
+    date: &str,
+    op: &str,
+) {
+    let stripped = strip_wikilink_brackets(date);
+
+    // Branch 2: reuse `push_date_op`'s clause verbatim — it always pushes
+    // exactly one clause.
+    let mut scan_clauses: Vec<String> = Vec::new();
+    let mut scan_binds: Vec<SqlValue> = Vec::new();
+    push_date_op(&mut scan_clauses, &mut scan_binds, field, date, op);
+    let scan_fragment = scan_clauses
+        .pop()
+        .expect("push_date_op pushes exactly one clause");
+
+    // UNION ALL, not UNION: inside `path IN (...)` duplicate rows are
+    // harmless, and UNION's dedup forces a MERGE-sorted plan that pushes
+    // the planner onto a full covering-index scan (path order for free)
+    // instead of the (key, value) range this branch exists to drive.
+    where_clauses.push(format!(
+        "path IN ( \
+            SELECT path FROM document_fields \
+             WHERE key = ? AND typeof(value) = 'text' AND value {op} ? \
+            UNION ALL \
+            SELECT f.path FROM document_fields f JOIN documents dd ON dd.path = f.path \
+             WHERE f.key = ? AND typeof(f.value) NOT IN ('text', 'blob', 'null') AND ({scan_fragment}) \
+         )"
+    ));
+    binds.push(SqlValue::Text(field.to_string()));
+    binds.push(SqlValue::Text(stripped));
+    binds.push(SqlValue::Text(field.to_string()));
+    binds.extend(scan_binds);
 }
 
 /// Build the WHERE clause for `--eq` (negate=false) or `--not-eq` (negate=true).
@@ -1833,19 +1893,166 @@ mod router_tests {
         );
     }
 
+    // ── date-operator routing (NRN-84) ───────────────────────────────────
+    //
+    // `--before`/`--after`/`--on` route via `push_date_op_eav`'s two-branch
+    // union. Parity across the value shapes the branches split on, plus
+    // EXPLAIN guards proving the driving branch is an index range.
+
+    fn dates_vault() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        let docs: &[(&str, &str)] = &[
+            ("scalar_2020.md", "---\ncreated: 2020-01-01\n---\n"),
+            ("scalar_2024.md", "---\ncreated: 2024-06-15\n---\n"),
+            (
+                "array.md",
+                "---\ncreated:\n  - 2020-01-01\n  - 2021-01-01\n---\n",
+            ),
+            ("wiki.md", "---\ncreated: \"[[2022-03-03]]\"\n---\n"),
+            ("wiki_array.md", "---\ncreated: [\"[[2023-05-05]]\"]\n---\n"),
+            ("numeric.md", "---\ncreated: 20260101\n---\n"),
+            ("num_array.md", "---\ncreated: [20190101, 5]\n---\n"),
+            ("bool.md", "---\ncreated: true\n---\n"),
+            ("empty.md", "---\ncreated: []\n---\n"),
+            ("null_field.md", "---\ncreated: null\n---\n"),
+            ("missing.md", "---\nother: x\n---\n"),
+            ("datetime.md", "---\ncreated: 2024-06-15T09:30\n---\n"),
+        ];
+        for (name, body) in docs {
+            std::fs::write(root.join(name).as_std_path(), body).unwrap();
+        }
+        (tmp, root)
+    }
+
     #[test]
-    fn date_ops_still_fall_back_to_scan() {
-        let (_tmp, root) = typed_vault();
-        let cache = open_authoritative(&root, &["n"]);
+    fn date_ops_route_and_agree_with_scan_across_value_shapes() {
+        let (_tmp, root) = dates_vault();
+        let indexed = open_authoritative(&root, &["created"]);
+        let scanned = Cache::open(&root).unwrap();
+
+        let mk = |before: Option<&str>, after: Option<&str>, on: Option<&str>| DocumentQuery {
+            date_before: before
+                .map(|d| vec![("created".to_string(), d.to_string())])
+                .unwrap_or_default(),
+            date_after: after
+                .map(|d| vec![("created".to_string(), d.to_string())])
+                .unwrap_or_default(),
+            date_on: on
+                .map(|d| vec![("created".to_string(), d.to_string())])
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+
+        let cases: Vec<DocumentQuery> = vec![
+            mk(Some("2026-01-01"), None, None),
+            mk(Some("2021-06-01"), None, None),
+            mk(None, Some("2019-01-01"), None),
+            mk(None, Some("2022-01-01"), None),
+            mk(None, None, Some("2021-01-01")),
+            mk(None, None, Some("2022-03-03")),
+            // Wikilink-bracketed query date — stripped on both sides.
+            mk(Some("[[2023-01-01]]"), None, None),
+            // Range window: --after + --before on the same field.
+            mk(Some("2024-01-01"), Some("2020-06-01"), None),
+            // Combined with an equality predicate on the same field.
+            DocumentQuery {
+                frontmatter_has: vec!["created".to_string()],
+                date_before: vec![("created".to_string(), "2026-01-01".to_string())],
+                ..Default::default()
+            },
+        ];
+
+        for query in cases {
+            assert_eq!(
+                paths(&indexed.documents_matching(&query).unwrap()),
+                paths(&scanned.documents_matching(&query).unwrap()),
+                "EAV and scan routes diverged for {query:?}"
+            );
+        }
+
+        // Pin an actual matched set, not just agreement: --before 2021-06-01
+        // matches the 2020 scalar, the array (2020/2021 elements), the
+        // numeric-element array (replace() renders 20190101/5 as text, both
+        // lexically below "2021-06-01"), and the bool (json_extract yields
+        // INTEGER 1, text-rendered '1' — a garbage-in shape, pinned) —
+        // never the empty array, the bare 20260101 (text-rendered above),
+        // null, or missing.
+        let before = mk(Some("2021-06-01"), None, None);
+        assert_eq!(
+            paths(&scanned.documents_matching(&before).unwrap()),
+            vec!["array.md", "bool.md", "num_array.md", "scalar_2020.md"]
+        );
+    }
+
+    #[test]
+    fn date_query_routes_and_drives_kv_index() {
+        // The writer ANALYZEs document_fields after every shred, so on a
+        // dozen-row vault the planner legitimately prefers a scan over the
+        // kv range — the SEARCH-at-scale property this guard exists for
+        // only shows once the stats say the range is selective. Generate
+        // enough docs for the stats to flip.
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        for i in 0..150 {
+            std::fs::write(
+                root.join(format!("d{i:03}.md")).as_std_path(),
+                format!(
+                    "---\ncreated: 2025-{:02}-{:02}\n---\n",
+                    (i % 12) + 1,
+                    (i % 28) + 1
+                ),
+            )
+            .unwrap();
+        }
+        let cache = open_authoritative(&root, &["created"]);
+
         let query = DocumentQuery {
-            frontmatter_eq: vec![("n".to_string(), serde_json::json!(5))],
-            date_before: vec![("n".to_string(), "2026-01-01".to_string())],
+            date_before: vec![("created".to_string(), "2025-02-01".to_string())],
+            ..Default::default()
+        };
+        let (where_sql, binds) = build_documents_matching_sql_parts(&cache, &query);
+        assert!(
+            where_sql.contains("document_fields"),
+            "a date op on an indexed field must route: {where_sql}"
+        );
+        let sql = format!("SELECT path FROM documents{where_sql}");
+        let rows = explain_plan(&cache, &sql, &binds);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("SEARCH") && r.contains("idx_document_fields_kv")),
+            "expected a driving SEARCH range on idx_document_fields_kv: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN documents")),
+            "must not SCAN documents: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN document_fields")),
+            "must not SCAN document_fields: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn date_op_on_unindexed_field_falls_back_and_warns_path() {
+        // With dates now eligible, an unindexed date field is an ordinary
+        // unindexed-field fallback (scan SQL, no document_fields).
+        let (_tmp, root) = dates_vault();
+        let cache = open_authoritative(&root, &["other"]);
+        let query = DocumentQuery {
+            date_before: vec![("created".to_string(), "2026-01-01".to_string())],
             ..Default::default()
         };
         let (where_sql, _binds) = build_documents_matching_sql_parts(&cache, &query);
         assert!(
             !where_sql.contains("document_fields"),
-            "any date op must force the whole query to the scan path: {where_sql}"
+            "unindexed date field must fall back to scan: {where_sql}"
         );
     }
 
