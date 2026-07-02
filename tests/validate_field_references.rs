@@ -184,6 +184,97 @@ fn array_valued_field_checks_each_element() {
 }
 
 #[test]
+fn non_string_target_type_reports_its_rendering_not_missing() {
+    let vault = build_vault();
+    fs::write(
+        vault.path().join("weird.md"),
+        "---\ntype: [note, reference]\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        vault.path().join("task-weird.md"),
+        "---\ntype: task\nparent: \"[[weird]]\"\n---\n",
+    )
+    .unwrap();
+    let findings = validate_findings(&vault);
+    let weird = reference_findings(&findings)
+        .into_iter()
+        .find(|f| f["path"] == "task-weird.md")
+        .expect("array-typed target cannot satisfy a type-name set");
+    assert_eq!(
+        weird["actual_type"], "[\"note\",\"reference\"]",
+        "non-string types report their JSON rendering, not (missing)"
+    );
+}
+
+#[test]
+fn references_to_ignored_documents_are_not_judged() {
+    let vault = build_vault();
+    // Rewrite the config with an ignore for templates/** and point a task at
+    // a template whose `type` is an unvalidated placeholder.
+    fs::write(
+        vault.path().join(".norn/config.yaml"),
+        concat!(
+            "validate:\n",
+            "  ignore:\n",
+            "    - \"templates/**\"\n",
+            "  rules:\n",
+            "    - name: task-refs\n",
+            "      match:\n",
+            "        frontmatter:\n",
+            "          type: task\n",
+            "      field_references:\n",
+            "        parent:\n",
+            "          target_type: [phase, initiative]\n",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(vault.path().join("templates")).unwrap();
+    fs::write(
+        vault.path().join("templates/task-template.md"),
+        "---\ntype: \"{{type}}\"\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        vault.path().join("task-tmpl.md"),
+        "---\ntype: task\nparent: \"[[task-template]]\"\n---\n",
+    )
+    .unwrap();
+    let findings = validate_findings(&vault);
+    assert!(
+        !reference_findings(&findings)
+            .iter()
+            .any(|f| f["path"] == "task-tmpl.md"),
+        "ignored targets are outside the validation contract; no judgment"
+    );
+}
+
+#[test]
+fn missing_sentinel_is_rejected_in_config() {
+    let vault = build_vault();
+    fs::write(
+        vault.path().join(".norn/config.yaml"),
+        concat!(
+            "validate:\n",
+            "  rules:\n",
+            "    - name: r\n",
+            "      field_references:\n",
+            "        parent:\n",
+            "          target_type: [task, \"(missing)\"]\n",
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
+    command.arg("-C").arg(vault.path());
+    command.args(["validate", "--format", "json"]);
+    let _cache = isolate_cache(&mut command);
+    let output = command.output().expect("norn validate should run");
+    assert!(!output.status.success(), "(missing) is reserved");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("reserved"), "stderr: {stderr}");
+}
+
+#[test]
 fn scalar_target_type_is_a_one_element_set() {
     // depends_on's constraint is written as a scalar (`target_type: task`);
     // it must behave exactly like `[task]`.

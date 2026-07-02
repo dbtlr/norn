@@ -250,11 +250,14 @@ pub(crate) fn check_alias_duplicate_across_docs(
 /// is in the allowed set. Only **resolved** links are judged — unresolved
 /// and ambiguous references are link validation's findings (`link-*`), not
 /// a reference-type violation. A resolved target without a `type` field is
-/// outside every set and reports as `(missing)`.
+/// outside every set and reports as `(missing)`; a non-string `type` cannot
+/// satisfy any set and reports its JSON rendering. Targets absent from
+/// `type_by_path` (documents excluded by `validate.ignore`) are skipped —
+/// their frontmatter is explicitly outside the validation contract.
 pub(crate) fn check_field_references(
     document: &Document,
     field_references: &HashMap<String, crate::standards::config::FieldReferenceConstraint>,
-    type_by_path: &std::collections::BTreeMap<&camino::Utf8Path, Option<&str>>,
+    type_by_path: &std::collections::BTreeMap<&camino::Utf8Path, Option<&Value>>,
     rule: Option<&str>,
 ) -> Vec<Finding> {
     if field_references.is_empty() {
@@ -279,19 +282,30 @@ pub(crate) fn check_field_references(
             let Some(target) = link.resolved_path.as_ref() else {
                 continue;
             };
-            let actual = type_by_path
-                .get(target.as_path())
-                .copied()
-                .flatten()
-                .unwrap_or("(missing)");
-            if !allowed.iter().any(|ty| ty == actual) {
+            // Map miss = the target is outside the validation contract
+            // (validate.ignore) — never judged. A present-but-None entry is
+            // a validated doc without a `type` field.
+            let Some(target_type) = type_by_path.get(target.as_path()) else {
+                continue;
+            };
+            let satisfied = target_type
+                .and_then(|value| value.as_str())
+                .is_some_and(|actual| allowed.iter().any(|ty| ty == actual));
+            if !satisfied {
+                let actual = match target_type {
+                    None => "(missing)".to_string(),
+                    Some(Value::String(actual)) => (*actual).clone(),
+                    // Non-string types can never satisfy a set of type
+                    // names; report their JSON rendering honestly.
+                    Some(other) => other.to_string(),
+                };
                 findings.push(Finding::frontmatter_reference_type(
                     document.path.clone(),
                     rule.map(str::to_string),
                     field.clone(),
                     link.raw.clone(),
                     target.clone(),
-                    actual.to_string(),
+                    actual,
                     allowed.clone(),
                 ));
             }

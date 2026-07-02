@@ -43,7 +43,7 @@ emissions.
 | `field_types` | `frontmatter-invalid-type` | Present value doesn't match declared shape |
 | `allowed_values` | `frontmatter-disallowed-value` | Present value isn't one of the declared values |
 | `allowed_paths` | `document-misrouted` | Document path matches no declared glob |
-| `field_references` | `frontmatter-reference-type` | A field’s wikilink resolves to a document whose `type` is outside the allowed set |
+| `field_references` | `frontmatter-reference-type` | A field's wikilink resolves to a document whose `type` is outside the allowed set |
 
 ### Typed references — `field_references`
 

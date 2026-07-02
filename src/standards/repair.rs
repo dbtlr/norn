@@ -379,6 +379,15 @@ pub fn plan_repairs(
     let mut occurrence_counts: BTreeMap<(Utf8PathBuf, String, String), u32> = BTreeMap::new();
 
     for finding in &findings {
+        // Typed-reference violations are never auto-repairable: the right fix
+        // is a judgment call (repoint the reference vs retype the target), so
+        // they must not be matchable by field-/rule-scoped repair rules —
+        // a code-less `match: { field: parent }` rule would otherwise
+        // overwrite the reference with a fixed value.
+        if matches!(finding.body, FindingBody::ReferenceType { .. }) {
+            skipped.push(skipped_finding(finding, SkipReason::NoRuleMatched, None));
+            continue;
+        }
         match matching_repair_rule(finding, &config.rules) {
             Some((rule, action)) => {
                 let occ_key = (
@@ -1040,6 +1049,56 @@ mod tests {
         assert_eq!(plan.changes[0].new_value, Some(json!("backlog")));
         assert_eq!(plan.changes[0].expected_old_value, Some(json!("someday")));
         assert_eq!(plan.changes[0].document_hash, "hash-task.md");
+    }
+
+    #[test]
+    fn reference_type_finding_never_matches_a_repair_rule() {
+        // A field-scoped repair rule (no code selector) must NOT capture the
+        // typed-reference finding — the documented contract is "not
+        // auto-repairable": auto-overwriting the reference with a fixed value
+        // would silently destroy a link that merely pointed at the wrong
+        // document type.
+        let finding = Finding::frontmatter_reference_type(
+            "task.md".into(),
+            Some("task-refs".into()),
+            "parent".into(),
+            "[[note-1]]".into(),
+            "note-1.md".into(),
+            "note".into(),
+            vec!["phase".into()],
+        );
+        let config = RepairConfig {
+            rules: vec![make_rule(
+                "reset-parent",
+                "frontmatter-reference-type",
+                Some("parent"),
+                None,
+                RepairAction::SetFrontmatter {
+                    field: "parent".into(),
+                    value: json!("[[inbox]]"),
+                },
+            )],
+        };
+        let index = index_for(&["task.md"]);
+        let plan = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert_eq!(
+            plan.changes.len(),
+            0,
+            "reference-type findings must never plan changes: {:?}",
+            plan.changes
+        );
+        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(
+            plan.skipped_findings[0].skip_reason,
+            SkipReason::NoRuleMatched
+        );
+        assert_eq!(plan.skipped_findings[0].field.as_deref(), Some("parent"));
     }
 
     #[test]

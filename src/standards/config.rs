@@ -616,23 +616,30 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         }
 
         // field_references: target_type must be a non-empty string or a
-        // non-empty list of non-empty strings.
-        for (field, constraint) in &rule.field_references {
+        // non-empty list of non-empty strings. "(missing)" is reserved — it
+        // is the finding sentinel for a target without a `type` field, and
+        // allowing it in config would silently pass every untyped target.
+        // Fields sorted for deterministic error output.
+        let mut reference_fields: Vec<(&String, &FieldReferenceConstraint)> =
+            rule.field_references.iter().collect();
+        reference_fields.sort_by_key(|(field, _)| field.as_str());
+        for (field, constraint) in reference_fields {
+            let is_valid_name = |value: &serde_json::Value| {
+                value
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s != "(missing)")
+            };
             let valid = match &constraint.target_type {
-                serde_json::Value::String(value) => !value.is_empty(),
                 serde_json::Value::Array(values) => {
-                    !values.is_empty()
-                        && values
-                            .iter()
-                            .all(|value| value.as_str().is_some_and(|s| !s.is_empty()))
+                    !values.is_empty() && values.iter().all(is_valid_name)
                 }
-                _ => false,
+                value => is_valid_name(value),
             };
             if !valid {
                 return Err(ConfigError::Invalid {
                     source_path: source_path.to_owned(),
                     message: format!(
-                        "rule {rule_label}: field_references.{field}.target_type must be a type name or a non-empty list of type names"
+                        "rule {rule_label}: field_references.{field}.target_type must be a type name or a non-empty list of type names (\"(missing)\" is reserved)"
                     ),
                 });
             }
