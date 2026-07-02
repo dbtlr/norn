@@ -1,6 +1,6 @@
-# norn — working principles for Claude
+# norn — working principles for Agents
 
-Project-level instructions for agents working in this repo. Workspace-private setup details live in `CLAUDE.local.md` (gitignored). This file is the durable middle layer: norn-specific habits learned from real CI failures and the project's stated design constraints.
+Project-level instructions for agents working in this repo. Workspace-private setup details live in `CLAUDE.local.md` (IMPORTANT: gitignored, load it if present). This file is the durable middle layer: norn-specific habits learned from real CI failures and the project's stated design constraints.
 
 ## Northstar
 
@@ -58,9 +58,13 @@ When CI failures or downstream tests surface a v1-parity gap during a redesign, 
 
 ## Dogfood against a representative real vault
 
+If a specific vault path for dogfooding has been defined in the `CLAUDE.local.md` then follow the dogfood instructions:
+
+### Dogfood Instructions
+
 Every shipped command runs against a representative real-world Markdown vault before merge — both for correctness (output shape, exit codes) and for timing (the 50ms target for typical queries). Don't ship if a command exceeds the perf budget on real-vault scale data, or surface the regression deliberately in the CHANGELOG if it's intentional.
 
-`EXPLAIN QUERY PLAN` against `documents` / `links` / `headings` is the standard tool for diagnosing slow queries. Guard tests verify the plan stays a single SCAN/SEARCH (no per-row sub-queries). The specific dogfood vault path and current baseline numbers are in `CLAUDE.local.md`.
+`EXPLAIN QUERY PLAN` against `documents` / `links` / `headings` is the standard tool for diagnosing slow queries. Guard tests verify the plan stays a single SCAN/SEARCH (no per-row sub-queries).
 
 ## Subagent dispatch patterns
 
@@ -69,22 +73,6 @@ When dispatching a TDD-shaped subagent:
 - **Include the anti-pattern callout:** *"Do NOT silently change test assertions to make tests pass. If a test fails because of a real semantics issue, stop and report DONE_WITH_CONCERNS."* Given this instruction explicitly, implementers investigate real plan bugs instead of fudging them.
 - **Request raw output, not summary:** ask for `cargo test --workspace 2>&1 | grep "test result"` verbatim lines, not a verbal sum. Subagent counts have been wrong multiple times; independent re-counting catches the drift.
 - **Combine spec + quality review for mechanical tasks.** Skip the separate reviewer for purely mechanical changes (renames, stub additions, format-only renderers); keep them separate for tasks touching multiple files or making real design decisions.
-
-## Spec self-review is load-bearing
-
-After writing any design spec, run the brainstorming-skill's self-review pass (placeholder / consistency / scope / ambiguity sweep) **before** human review. The pass routinely catches defects that would otherwise ship into the plan and implementation — representative catches:
-
-- Cache v2 spec: per-row sub-query trap (the headline perf bug); JSON-path injection-vector over-restriction; globset-vs-pattern_matches_path mismatch; repair-plan two-phase shape implicit; exit-code primitive gap.
-- Find spec: `--col` paths-format ignored-warning missing; `--text ""` semantics ambiguous; truncation footer suppression unspecified.
-
-## Design constraints
-
-Durable preferences across sessions. Honor them when they apply:
-
-- **The `docs` namespace is dead.** Its naming is unintuitive. Any new command must use a job-shaped name (`find`, `links`, `validate`), not a noun-shaped one (`docs`, `files` is borderline). When `norn docs summary` and `norn docs inspect` get their redesign turn, they need new names.
-- **Records output, not tables.** Terminal rendering of query results is per-doc key-value blocks with terminal-width-aware value wrapping. The reference is pgcli / mycli vertical mode, not a spreadsheet grid. Don't reach for column-style tables for multi-field output.
-- **Default to dump-everything; let users narrow.** Dump everything by default — the user or agent may not know what to ask for until they see it, then filter down. `--col` and similar narrowing flags are subtractive; the default shows everything.
-- **`warn`, don't `block`.** For non-destructive operator decisions, norn warns and proceeds; blockers reserved for cases where the action can't proceed cleanly.
 
 ## Three-layer durability for shipping
 
@@ -95,9 +83,3 @@ When shipping any non-trivial work:
 3. **External design archive** — design spec, implementation plan, dev log. The archive location is in `CLAUDE.local.md`.
 
 Each layer answers a different question (what shipped / what's the code history / why was it built this way). Don't duplicate effort across them.
-
-## Worktree workflow
-
-Use isolated worktrees for substantial multi-commit work. Create them with the native `EnterWorktree` tool — not `git worktree add` directly. The harness needs to see the worktree state; `git worktree add` creates phantom state it can't see or manage.
-
-`EnterWorktree` branches from `origin/main`. Always check that local main is in sync with origin before creating a worktree, and rebase if local is ahead.
