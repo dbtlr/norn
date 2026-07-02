@@ -770,6 +770,47 @@ fn validate_reports_required_frontmatter_from_config() {
 }
 
 #[test]
+fn validate_list_selector_rule_fires_on_each_listed_type() {
+    let root = temp_cache_dir();
+    fs::create_dir_all(root.join(".norn")).expect("config dir should be created");
+    fs::write(
+        root.join(".norn/config.yaml"),
+        concat!(
+            "validate:\n",
+            "  rules:\n",
+            "    - name: base-node\n",
+            "      match:\n",
+            "        frontmatter:\n",
+            "          type: [task, phase]\n",
+            "      required_frontmatter:\n",
+            "        - parent\n",
+        ),
+    )
+    .expect("config should write");
+    fs::write(root.join("a-task.md"), "---\ntype: task\n---\n# A\n").expect("note should write");
+    fs::write(root.join("a-phase.md"), "---\ntype: phase\n---\n# B\n").expect("note should write");
+    fs::write(root.join("a-note.md"), "---\ntype: note\n---\n# C\n").expect("note should write");
+
+    let output = vault(&["-C", root.to_str().unwrap(), "validate", "--format", "json"]);
+
+    let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
+    let findings = parsed["findings"].as_array().unwrap();
+    let paths: Vec<&str> = findings
+        .iter()
+        .filter(|f| f["code"] == "frontmatter-required-field-missing" && f["field"] == "parent")
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"a-task.md"), "findings: {findings:?}");
+    assert!(paths.contains(&"a-phase.md"), "findings: {findings:?}");
+    assert!(
+        !paths.contains(&"a-note.md"),
+        "note type is outside the any-of set: {findings:?}"
+    );
+
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn validate_discovers_default_config_from_cwd() {
     let root = temp_cache_dir();
     fs::create_dir_all(root.join(".norn")).expect("config dir should be created");
@@ -1418,11 +1459,12 @@ fn validate_rejects_unknown_match_keys() {
 
 #[test]
 fn validate_rejects_non_scalar_frontmatter_predicates() {
+    // Lists are valid any-of selectors since NRN-71; objects remain invalid.
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: list\n      match:\n        frontmatter:\n          type:\n            - note\n      required_frontmatter:\n        - kind\n",
+        "validate:\n  rules:\n    - name: list\n      match:\n        frontmatter:\n          type:\n            nested: note\n      required_frontmatter:\n        - kind\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -1438,7 +1480,9 @@ fn validate_rejects_non_scalar_frontmatter_predicates() {
 
     assert!(error.contains("invalid config"));
     assert!(error.contains("rule list"));
-    assert!(error.contains("match.frontmatter.type must be a string, boolean, or number"));
+    assert!(error.contains(
+        "match.frontmatter.type must be a string, boolean, or number, or a list of those (any-of)"
+    ));
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();

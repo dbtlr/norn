@@ -16,8 +16,11 @@ present matches. Absent selectors are not constraints — they impose nothing.
 - `match.path` — if present, the document path must match this glob
 - `match.path_not` — if present, the document path must not match this glob
 - `match.frontmatter` — if present and non-empty, every listed field must
-  equal its declared value (exact, type-sensitive; missing fields do not
-  match)
+  match its declared value. A scalar value means exact equality (type-
+  sensitive; missing fields do not match). A list value means **any-of**:
+  the field must equal one of the listed scalars — `type: [task, phase]`
+  fires on either type. The list enumerates candidate values; it is not
+  containment over an array-valued field.
 - `exclude.path` — if present, the document path must not match this glob.
   Equivalent to `match.path_not`, but named for clarity when carving out
   from a broader `match.path`.
@@ -58,6 +61,23 @@ A rule can declare any combination of constraints. For example:
 This rule fires on any document with `type: agent-artifact` and emits up to
 three independent findings: one for missing `artifact_kind`, one for present
 `kind`, one for misrouted location.
+
+An any-of selector lets one **base rule** carry constraints shared across
+several types, with per-type rules refining on top — no duplicated
+constraints and no synthetic discriminator field:
+
+```yaml
+- name: node-base
+  match:
+    frontmatter:
+      type: [task, phase, initiative]
+  required_frontmatter: [id, title, parent]
+- name: task
+  match:
+    frontmatter:
+      type: task
+  required_frontmatter: [lifecycle]
+```
 
 ## Creation defaults
 

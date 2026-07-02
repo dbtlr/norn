@@ -53,7 +53,12 @@ pub fn rule_scope_query(rule: &ValidateRule) -> DocumentQuery {
         query.path_globs.push(pattern.clone());
     }
     for (field, expected) in &rule.r#match.frontmatter {
-        query.frontmatter_eq.push((field.clone(), expected.clone()));
+        match expected {
+            serde_json::Value::Array(options) => {
+                query.frontmatter_in.push((field.clone(), options.clone()))
+            }
+            scalar => query.frontmatter_eq.push((field.clone(), scalar.clone())),
+        }
     }
     query
 }
@@ -95,6 +100,39 @@ mod tests {
         };
         let q = document_query_from_options(&opts).unwrap();
         assert_eq!(q.frontmatter_eq.len(), 2);
+    }
+
+    #[test]
+    fn rule_scope_list_predicate_maps_to_frontmatter_in() {
+        use crate::standards::{RuleExclude, RuleSelector, ValidateRule};
+        use std::collections::HashMap;
+
+        let mut fm = HashMap::new();
+        fm.insert("type".to_string(), json!(["task", "phase"]));
+        let rule = ValidateRule {
+            name: None,
+            r#match: RuleSelector {
+                path: None,
+                path_not: None,
+                frontmatter: fm,
+            },
+            exclude: RuleExclude { path: None },
+            required_frontmatter: vec![],
+            forbidden_frontmatter: vec![],
+            field_types: HashMap::new(),
+            allowed_values: HashMap::new(),
+            allowed_paths: vec![],
+            frontmatter_defaults: HashMap::new(),
+            ..Default::default()
+        };
+
+        let q = rule_scope_query(&rule);
+
+        assert!(q.frontmatter_eq.is_empty());
+        assert_eq!(
+            q.frontmatter_in,
+            vec![("type".to_string(), vec![json!("task"), json!("phase")])]
+        );
     }
 
     #[test]

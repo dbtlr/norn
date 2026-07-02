@@ -550,15 +550,37 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             }
         }
 
-        // Frontmatter predicate values must be scalar (string/bool/number/null).
+        // Frontmatter predicate values: a scalar (exact match) or a non-empty
+        // list of scalars (any-of).
         for (field, value) in &rule.r#match.frontmatter {
-            if !is_scalar_json_value(value) {
-                return Err(ConfigError::Invalid {
-                    source_path: source_path.to_owned(),
-                    message: format!(
-                        "rule {rule_label}: match.frontmatter.{field} must be a string, boolean, or number"
-                    ),
-                });
+            match value {
+                serde_json::Value::Array(options) => {
+                    if options.is_empty() {
+                        return Err(ConfigError::Invalid {
+                            source_path: source_path.to_owned(),
+                            message: format!(
+                                "rule {rule_label}: match.frontmatter.{field} is an empty list; an any-of selector needs at least one value"
+                            ),
+                        });
+                    }
+                    if !options.iter().all(is_scalar_json_value) {
+                        return Err(ConfigError::Invalid {
+                            source_path: source_path.to_owned(),
+                            message: format!(
+                                "rule {rule_label}: match.frontmatter.{field} list elements must be strings, booleans, or numbers"
+                            ),
+                        });
+                    }
+                }
+                value if !is_scalar_json_value(value) => {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: match.frontmatter.{field} must be a string, boolean, or number, or a list of those (any-of)"
+                        ),
+                    });
+                }
+                _ => {}
             }
         }
 
@@ -679,10 +701,20 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         // (the shared helper in path_match). Using it here keeps the notes-scoped
         // target rule correctly disjoint from a tasks-scoped match.path rule,
         // instead of treating it as path-unconstrained.
+        // A predicate value viewed as its set of accepted scalars: an any-of
+        // list is its elements; a scalar is a one-element set.
+        fn predicate_options(value: &serde_json::Value) -> &[serde_json::Value] {
+            match value {
+                serde_json::Value::Array(options) => options,
+                scalar => std::slice::from_ref(scalar),
+            }
+        }
+
         fn rules_can_coapply(a: &ValidateRule, b: &ValidateRule) -> bool {
             for (k, va) in &a.r#match.frontmatter {
                 if let Some(vb) = b.r#match.frontmatter.get(k) {
-                    if va != vb {
+                    let (oa, ob) = (predicate_options(va), predicate_options(vb));
+                    if !oa.iter().any(|x| ob.contains(x)) {
                         return false;
                     }
                 }
@@ -1302,6 +1334,99 @@ validate:
         status: open
 "#;
         parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
+    }
+
+    #[test]
+    fn list_valued_match_frontmatter_parses() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: base-node
+      match:
+        frontmatter:
+          type: [task, phase, initiative]
+      required_frontmatter:
+        - title
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
+        assert_eq!(
+            cfg.validate.rules[0].r#match.frontmatter["type"],
+            serde_json::json!(["task", "phase", "initiative"])
+        );
+    }
+
+    #[test]
+    fn empty_list_match_frontmatter_is_rejected() {
+        let err = parse(
+            "validate:\n  rules:\n    - name: r\n      match:\n        frontmatter:\n          type: []\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("match.frontmatter.type") && msg.contains("empty"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn list_match_frontmatter_with_non_scalar_element_is_rejected() {
+        let err = parse(
+            "validate:\n  rules:\n    - name: r\n      match:\n        frontmatter:\n          type:\n            - [a, b]\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("match.frontmatter.type"), "got: {msg}");
+    }
+
+    #[test]
+    fn config_load_accepts_differing_defaults_when_list_predicates_disjoint() {
+        // The any-of sets {note, log} and {task} share no value, so the rules
+        // can never co-apply — differing defaults are legal.
+        let yaml = r#"
+validate:
+  rules:
+    - name: note-like
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: [note, log]
+      frontmatter_defaults:
+        status: evergreen
+    - name: task-like
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: [task]
+      frontmatter_defaults:
+        status: open
+"#;
+        parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
+    }
+
+    #[test]
+    fn config_load_rejects_conflicting_defaults_when_list_predicates_intersect() {
+        // {note, task} intersects {task} — both rules can fire on a task
+        // document, so their differing defaults conflict.
+        let yaml = r#"
+validate:
+  rules:
+    - name: broad
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: [note, task]
+      frontmatter_defaults:
+        status: evergreen
+    - name: narrow
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: task
+      frontmatter_defaults:
+        status: open
+"#;
+        let err = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap_err();
+        assert!(err.to_string().contains("conflict"), "msg was {err}");
     }
 
     #[test]

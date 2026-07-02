@@ -12,6 +12,19 @@ pub(crate) fn frontmatter_value_matches(actual: &Value, expected: &Value) -> boo
     }
 }
 
+/// Selector semantics for `match.frontmatter` predicates: a scalar expected
+/// value is exact equality; a list is any-of over its scalar elements. The
+/// list enumerates candidate values — it is not containment over an
+/// array-valued document field.
+pub(crate) fn frontmatter_predicate_matches(actual: &Value, expected: &Value) -> bool {
+    match expected {
+        Value::Array(options) => options
+            .iter()
+            .any(|option| frontmatter_value_matches(actual, option)),
+        _ => frontmatter_value_matches(actual, expected),
+    }
+}
+
 pub fn frontmatter_type_matches(value: &Value, expected_type: &str) -> bool {
     match expected_type {
         "datetime" => value.as_str().is_some_and(is_datetime_string),
@@ -202,7 +215,7 @@ pub(crate) fn frontmatter_predicates_match(
     predicates.iter().all(|(field, expected)| {
         frontmatter
             .get(field)
-            .is_some_and(|actual| frontmatter_value_matches(actual, expected))
+            .is_some_and(|actual| frontmatter_predicate_matches(actual, expected))
     })
 }
 
