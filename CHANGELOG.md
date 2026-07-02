@@ -12,7 +12,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 ### Changed
 
-- **Number/boolean `--eq`/`--not-eq`/`--in`/`--not-in` on indexed fields now answer from the `document_fields` index.** With the array-aware semantics below unifying the scan path, typed values became provably index-servable (the index already stores one typed row per array element); previously any non-string value forced the whole query back to the scan path. Query-plan only — results, output, and exit codes are unchanged relative to the fixed semantics. Date operators (`--before`/`--after`/`--on`) still always scan.
+- **Number/boolean `--eq`/`--not-eq`/`--in`/`--not-in` on indexed fields now answer from the `document_fields` index.** With the array-aware semantics below unifying the scan path, typed values became provably index-servable (the index already stores one typed row per array element); previously any non-string value forced the whole query back to the scan path. Query-plan only — results, output, and exit codes are unchanged relative to the fixed semantics. Membership lists mixing string and number/bool values, and date operators (`--before`/`--after`/`--on`), still always scan.
 
 ### Fixed
 
