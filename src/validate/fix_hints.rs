@@ -40,6 +40,9 @@ pub fn fix_hint_for(code: &str) -> Option<&'static str> {
         "link-ambiguous" => Some(
             "qualify the link target with a directory prefix to pick one of the candidates",
         ),
+        "frontmatter-reference-type" => Some(
+            "repoint the field at a document of an allowed type, or change the target's type",
+        ),
         "frontmatter-parse-failed" => Some(
             "fix the YAML syntax in the document's frontmatter, then re-run validate",
         ),

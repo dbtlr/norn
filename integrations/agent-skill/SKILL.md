@@ -197,7 +197,7 @@ norn -C /path/to/vault validate --severity error --path 'notes/**' --format json
 
 `--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (pipe default — a finding has no path), `json` (`{ total, findings[] }`), `paths` (unique source paths). Exit code is `1` when any finding is an error, else `0` — gate pipelines on it.
 
-Stable finding codes: `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-disallowed-value`, `frontmatter-invalid-type`, `frontmatter-forbidden-field`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`, `frontmatter-alias-malformed`, `document-misrouted`. Renames are CHANGELOG breaking changes.
+Stable finding codes: `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-disallowed-value`, `frontmatter-invalid-type`, `frontmatter-forbidden-field`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`, `frontmatter-alias-malformed`, `frontmatter-reference-type`, `document-misrouted`. Renames are CHANGELOG breaking changes.
 
 ### The plan/apply loop
 

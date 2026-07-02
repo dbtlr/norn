@@ -35,20 +35,29 @@ pub fn validate_with_compiled(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // Target-type lookup for `field_references` checks: every document's
-    // `type` frontmatter, keyed by path. Built once per run.
-    let type_by_path: std::collections::BTreeMap<&camino::Utf8Path, Option<&str>> = index
-        .documents
+    // Target-type lookup for `field_references` checks: each validated
+    // document's `type` frontmatter, keyed by path. Built once per run, and
+    // only when some rule declares the constraint. Ignored documents are
+    // deliberately absent — their frontmatter is outside the validation
+    // contract, so references to them are never judged.
+    let needs_reference_types = config
+        .rules
         .iter()
-        .map(|doc| {
-            let ty = doc
-                .frontmatter
-                .as_ref()
-                .and_then(|fm| fm.get("type"))
-                .and_then(|value| value.as_str());
-            (doc.path.as_path(), ty)
-        })
-        .collect();
+        .any(|rule| !rule.field_references.is_empty());
+    let type_by_path: std::collections::BTreeMap<&camino::Utf8Path, Option<&serde_json::Value>> =
+        if needs_reference_types {
+            index
+                .documents
+                .iter()
+                .filter(|doc| !document_ignored_compiled(doc, compiled, &config.ignore))
+                .map(|doc| {
+                    let ty = doc.frontmatter.as_ref().and_then(|fm| fm.get("type"));
+                    (doc.path.as_path(), ty)
+                })
+                .collect()
+        } else {
+            std::collections::BTreeMap::new()
+        };
 
     for document in &index.documents {
         if document_ignored_compiled(document, compiled, &config.ignore) {

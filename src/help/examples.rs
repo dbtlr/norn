@@ -298,7 +298,7 @@ pub fn conceptual_sections_for(cmd_path: &str) -> Vec<(String, String)> {
             ),
             (
                 "Finding codes",
-                "Codes identify validation findings. Filter with --code <code>. Glob patterns supported (--code 'link-*').\n\nlink-target-missing         A wikilink target doesn't exist in the vault.\nlink-anchor-missing         The target exists but the #anchor isn't present.\nlink-block-missing          The target exists but the ^block-ref isn't present.\nlink-ambiguous              A wikilink resolves to multiple candidates.\nfrontmatter-required-field-missing\n                            A required frontmatter field is absent.\nfrontmatter-disallowed-value\n                            A field's value is not in the configured set.\nfrontmatter-invalid-type    A field's value doesn't match its declared type.\nfrontmatter-forbidden-field A field that the rule forbids is present.\nfrontmatter-alias-shadowed-by-stem\n                            An alias matches another doc's stem; the alias is dead because stem resolution wins.\nfrontmatter-alias-duplicate-across-docs\n                            Two or more docs claim the same alias; wikilinks resolving via that alias will be ambiguous.\nfrontmatter-alias-malformed The alias field contains a non-scalar value.\ndocument-misrouted          A doc is in a directory the rule's path selector excludes.",
+                "Codes identify validation findings. Filter with --code <code>. Glob patterns supported (--code 'link-*').\n\nlink-target-missing         A wikilink target doesn't exist in the vault.\nlink-anchor-missing         The target exists but the #anchor isn't present.\nlink-block-missing          The target exists but the ^block-ref isn't present.\nlink-ambiguous              A wikilink resolves to multiple candidates.\nfrontmatter-required-field-missing\n                            A required frontmatter field is absent.\nfrontmatter-disallowed-value\n                            A field's value is not in the configured set.\nfrontmatter-invalid-type    A field's value doesn't match its declared type.\nfrontmatter-forbidden-field A field that the rule forbids is present.\nfrontmatter-alias-shadowed-by-stem\n                            An alias matches another doc's stem; the alias is dead because stem resolution wins.\nfrontmatter-alias-duplicate-across-docs\n                            Two or more docs claim the same alias; wikilinks resolving via that alias will be ambiguous.\nfrontmatter-alias-malformed The alias field contains a non-scalar value.\ndocument-misrouted          A doc is in a directory the rule's path selector excludes.\nfrontmatter-reference-type  A field's wikilink resolves to a document whose type is outside the allowed set.",
             ),
         ],
         "norn repair" => &[(
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_finding_codes_section_lists_all_ten_codes() {
+    fn validate_finding_codes_section_lists_all_stable_codes() {
         let sections = conceptual_sections_for("norn validate");
         let body = sections
             .iter()
@@ -430,6 +430,7 @@ mod tests {
             "frontmatter-alias-shadowed-by-stem",
             "frontmatter-alias-duplicate-across-docs",
             "frontmatter-alias-malformed",
+            "frontmatter-reference-type",
             "document-misrouted",
         ] {
             assert!(
