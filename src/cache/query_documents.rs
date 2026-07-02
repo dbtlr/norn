@@ -163,6 +163,12 @@ pub(crate) fn build_documents_matching_sql_parts(
     cache: &Cache,
     query: &DocumentQuery,
 ) -> (String, Vec<SqlValue>) {
+    // A non-authoritative open never warns here even on a large vault with an
+    // unindexed field — it has no `index_set` to compare against (the
+    // `Cache::open` default is an unconfigured empty set, not "nothing is
+    // indexed"), so there is no index concept to advise the caller toward.
+    // Accepted as designed, not a gap: advice would be noise with nothing
+    // behind it.
     if cache.index_authoritative {
         if let Some(fields) = eav_eligible_fields(query) {
             if !fields.is_empty() {
@@ -219,6 +225,17 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 /// - `--in`/`--not-in` where every value is a STRING: same array-aware form
 ///   (the scan path itself branches on this).
 /// - `--has`/`--missing`: pure presence, driven by the absent-sentinel row.
+/// - `--starts-with`/`--ends-with`/`--contains`: compiled as a two-branch
+///   union (`push_string_operator_eav`) rather than a single index lookup —
+///   text-typed `document_fields` rows are tested directly (a RANGE scan for
+///   `--starts-with`), and any row holding a non-text value for the field
+///   (the shapes that render differently between the index and
+///   `frontmatter_json` — see `string_op_renders_bool_as_source_text_not_integer`)
+///   falls through to the EXACT scan-path expression evaluated against the
+///   joined document. That second branch is what makes this provable: it
+///   reproduces the scan path byte-for-byte for every value shape by
+///   construction, not by argument, so string ops no longer need to force a
+///   whole-query fallback.
 ///
 /// NOT EAV-provable in this task (always falls back, per predicate class):
 /// - `--eq`/`--not-eq`/`--in`/`--not-in` with any NON-STRING value: the scan
@@ -227,11 +244,6 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 ///   element regardless of type — an EAV compilation would (wrongly) match
 ///   inside arrays where the scan path never does. See
 ///   `eq_integer_is_not_array_aware` / `in_non_string_values_is_not_array_aware`.
-/// - `--starts-with`/`--ends-with`/`--contains`: the scan path renders
-///   booleans as literal `true`/`false` text for these operators
-///   specifically, diverging from `canonicalize_scalar`'s INTEGER 0/1
-///   (needed for `--eq` parity). One canonical stored value can't serve
-///   both representations. See `string_op_renders_bool_as_source_text_not_integer`.
 /// - `--before`/`--after`/`--on`: the scan path is scalar-only (no
 ///   array-awareness at all) and compares the WHOLE field's JSON text; for
 ///   an array-valued field that's the array's JSON-encoded text, not its
@@ -239,17 +251,15 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 ///   text from its per-element rows. See
 ///   `date_before_on_array_field_compares_json_array_text_not_elements`.
 fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
-    if !query.frontmatter_starts_with.is_empty()
-        || !query.frontmatter_ends_with.is_empty()
-        || !query.frontmatter_contains.is_empty()
-        || !query.date_before.is_empty()
-        || !query.date_after.is_empty()
-        || !query.date_on.is_empty()
-    {
+    if !query.date_before.is_empty() || !query.date_after.is_empty() || !query.date_on.is_empty() {
         return None;
     }
 
     let mut fields: BTreeSet<String> = BTreeSet::new();
+
+    fields.extend(query.frontmatter_starts_with.iter().map(|(f, _)| f.clone()));
+    fields.extend(query.frontmatter_ends_with.iter().map(|(f, _)| f.clone()));
+    fields.extend(query.frontmatter_contains.iter().map(|(f, _)| f.clone()));
 
     for (field, value) in &query.frontmatter_eq {
         if !matches!(value, serde_json::Value::String(_)) {
@@ -300,8 +310,7 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
 /// EAV compilation of the provable predicate classes (see
 /// `eav_eligible_fields`). Only called once the router has confirmed every
 /// predicate present qualifies, so the non-string `.as_str()` unwraps below
-/// are guaranteed to succeed. Non-field predicates
-/// (starts-with/ends-with/contains/date ops) are guaranteed empty by the
+/// are guaranteed to succeed. Date-op vectors are guaranteed empty by the
 /// same gate; `push_shared_tail_clauses` still runs unconditionally so the
 /// two builders can never drift on the ones that DO always overlap
 /// (body_text/links_to/unresolved-links).
@@ -394,6 +403,38 @@ fn build_documents_matching_sql_parts_eav(query: &DocumentQuery) -> (String, Vec
                 .expect("eav-eligible --not-in must be all strings");
             binds.push(SqlValue::Text(strip_wikilink_brackets(raw)));
         }
+    }
+
+    // Anchored string operators: two-branch union per predicate (see
+    // `push_string_operator_eav`). Provable per `eav_eligible_fields`'s doc
+    // comment — the non-text branch re-evaluates the exact scan expression,
+    // so this can never drift from `push_string_operator`'s scan form.
+    for (field, needle) in &query.frontmatter_starts_with {
+        push_string_operator_eav(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::StartsWith,
+        );
+    }
+    for (field, needle) in &query.frontmatter_ends_with {
+        push_string_operator_eav(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::EndsWith,
+        );
+    }
+    for (field, needle) in &query.frontmatter_contains {
+        push_string_operator_eav(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::Contains,
+        );
     }
 
     push_shared_tail_clauses(&mut where_clauses, &mut binds, query);
@@ -509,6 +550,35 @@ pub(crate) fn build_documents_matching_sql_parts_scan(
         }
     }
 
+    // --starts-with / --ends-with / --contains field:VALUE
+    for (field, needle) in &query.frontmatter_starts_with {
+        push_string_operator(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::StartsWith,
+        );
+    }
+    for (field, needle) in &query.frontmatter_ends_with {
+        push_string_operator(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::EndsWith,
+        );
+    }
+    for (field, needle) in &query.frontmatter_contains {
+        push_string_operator(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::Contains,
+        );
+    }
+
     push_shared_tail_clauses(&mut where_clauses, &mut binds, query);
 
     let where_sql = if where_clauses.is_empty() {
@@ -520,50 +590,24 @@ pub(crate) fn build_documents_matching_sql_parts_scan(
     (where_sql, binds)
 }
 
-/// Predicate classes never gated by EAV eligibility: they either never
-/// touch `document_fields` at all (body-text, links-to, unresolved-links),
-/// or this task's router always routes them to the scan path
-/// (starts-with/ends-with/contains, date ops — see `eav_eligible_fields`'s
-/// doc comment for why). Shared verbatim between
-/// `build_documents_matching_sql_parts_scan` and
+/// Predicate classes never gated by EAV eligibility: they either never touch
+/// `document_fields` at all (body-text, links-to, unresolved-links), or this
+/// router always falls the whole query back to scan when they're present
+/// (date ops — see `eav_eligible_fields`'s doc comment for why). Shared
+/// verbatim between `build_documents_matching_sql_parts_scan` and
 /// `build_documents_matching_sql_parts_eav` so the two builders can't drift
-/// on the pieces they both need unchanged; for the EAV builder these
-/// starts-with/ends-with/contains/date vectors are guaranteed empty by the
-/// eligibility gate, so this is a no-op there beyond body-text/links.
+/// on the pieces they both need unchanged; for the EAV builder the date
+/// vectors are guaranteed empty by the eligibility gate, so this is a no-op
+/// there beyond body-text/links. Anchored string operators
+/// (starts-with/ends-with/contains) are NOT here — they're EAV-eligible now,
+/// so each builder compiles them its own way: the scan builder via
+/// `push_string_operator` (see `push_string_operators_scan_form`), the EAV
+/// builder via `push_string_operator_eav`.
 fn push_shared_tail_clauses(
     where_clauses: &mut Vec<String>,
     binds: &mut Vec<SqlValue>,
     query: &DocumentQuery,
 ) {
-    // --starts-with / --ends-with / --contains field:VALUE
-    for (field, needle) in &query.frontmatter_starts_with {
-        push_string_operator(
-            where_clauses,
-            binds,
-            field,
-            needle,
-            StringOperator::StartsWith,
-        );
-    }
-    for (field, needle) in &query.frontmatter_ends_with {
-        push_string_operator(
-            where_clauses,
-            binds,
-            field,
-            needle,
-            StringOperator::EndsWith,
-        );
-    }
-    for (field, needle) in &query.frontmatter_contains {
-        push_string_operator(
-            where_clauses,
-            binds,
-            field,
-            needle,
-            StringOperator::Contains,
-        );
-    }
-
     // --before field:DATE
     for (field, date) in &query.date_before {
         where_clauses.push("json_extract(frontmatter_json, ?) < ?".to_string());
@@ -758,6 +802,153 @@ fn push_string_operator(
     );
 }
 
+/// EAV compilation of one anchored string operator: a two-branch UNION
+/// inside a single driving subquery, so a string-op predicate can join the
+/// index route instead of forcing the whole query to scan.
+///
+/// - Branch 1 reads `document_fields` rows already typed `TEXT` for this
+///   key directly — those values are exactly what `push_string_operator`'s
+///   array/scalar text tests would see for a string-shaped element or
+///   scalar (the writer bracket-strips on the way in), so the SAME
+///   `StringOperator::test`/`needle_binds` expression applies straight to
+///   `value` with no CASE/json_each wrapping needed. `--starts-with`
+///   compiles this branch as an index RANGE (`value >= prefix AND value <
+///   upper`) rather than a `substr` predicate, so it can use
+///   `idx_document_fields_kv`'s `(key, value, path)` ordering as a genuine
+///   range scan — see `prefix_upper_bound`.
+/// - Branch 2 catches every doc holding a NON-text row for this key —
+///   bools/numbers, the shapes `push_string_operator`'s CASE rendering
+///   diverges from `canonicalize_scalar`'s stored representation (see
+///   `string_op_renders_bool_as_source_text_not_integer`) — and re-evaluates
+///   `push_string_operator`'s EXACT fragment against the joined document's
+///   `frontmatter_json`. Reusing that fragment verbatim (rather than
+///   reimplementing it) is what makes this provably byte-identical: any
+///   future change to the scan-side rendering automatically propagates here
+///   with no separate EAV-side fix.
+///
+/// The two branches can overlap (e.g. a mixed-type array with both a
+/// matching text element and a boolean element) — harmless, `UNION` dedups.
+fn push_string_operator_eav(
+    where_clauses: &mut Vec<String>,
+    binds: &mut Vec<SqlValue>,
+    field: &str,
+    needle: &str,
+    op: StringOperator,
+) {
+    let stripped = strip_wikilink_brackets(needle);
+    if stripped.is_empty() {
+        // Matches `push_string_operator`'s empty-needle behavior exactly.
+        where_clauses.push("0".to_string());
+        return;
+    }
+
+    let (branch1_sql, branch1_binds): (String, Vec<SqlValue>) = match op {
+        StringOperator::StartsWith => match prefix_upper_bound(&stripped) {
+            Some(upper) => (
+                "SELECT path FROM document_fields \
+                 WHERE key = ? AND typeof(value) = 'text' AND value >= ? AND value < ?"
+                    .to_string(),
+                vec![
+                    SqlValue::Text(field.to_string()),
+                    SqlValue::Text(stripped.clone()),
+                    SqlValue::Text(upper),
+                ],
+            ),
+            None => (
+                // No TEXT value can ever sort above `stripped` (see
+                // `prefix_upper_bound`) — the BLOB sentinel region is the
+                // exclusive upper bound of TEXT storage-class space, so this
+                // is equivalent to an unbounded-above range within TEXT.
+                "SELECT path FROM document_fields \
+                 WHERE key = ? AND typeof(value) = 'text' AND value >= ? AND value < x'00'"
+                    .to_string(),
+                vec![
+                    SqlValue::Text(field.to_string()),
+                    SqlValue::Text(stripped.clone()),
+                ],
+            ),
+        },
+        StringOperator::EndsWith | StringOperator::Contains => {
+            let mut b = vec![SqlValue::Text(field.to_string())];
+            b.extend(std::iter::repeat_n(
+                SqlValue::Text(stripped.clone()),
+                op.needle_binds(),
+            ));
+            (
+                format!(
+                    "SELECT path FROM document_fields \
+                     WHERE key = ? AND typeof(value) = 'text' AND {}",
+                    op.test("value")
+                ),
+                b,
+            )
+        }
+    };
+
+    // Branch 2: reuse `push_string_operator`'s clause verbatim — it always
+    // pushes exactly one clause for a non-empty needle (checked above).
+    let mut scan_clauses: Vec<String> = Vec::new();
+    let mut scan_binds: Vec<SqlValue> = Vec::new();
+    push_string_operator(&mut scan_clauses, &mut scan_binds, field, needle, op);
+    let scan_fragment = scan_clauses
+        .pop()
+        .expect("push_string_operator pushes exactly one clause for a non-empty needle");
+
+    where_clauses.push(format!(
+        "path IN ( \
+            {branch1_sql} \
+            UNION \
+            SELECT f.path FROM document_fields f JOIN documents dd ON dd.path = f.path \
+             WHERE f.key = ? AND typeof(f.value) NOT IN ('text', 'blob', 'null') AND ({scan_fragment}) \
+         )"
+    ));
+    binds.extend(branch1_binds);
+    binds.push(SqlValue::Text(field.to_string()));
+    binds.extend(scan_binds);
+}
+
+/// Exclusive upper bound, in BINARY-collation TEXT order, for every string
+/// that has `prefix` as a byte prefix — i.e. the smallest string that is
+/// provably NOT prefixed by `prefix`. Bumps the trailing Unicode scalar
+/// value rather than the trailing byte: UTF-8 byte order matches codepoint
+/// order, so bumping the last *character* gives the identical range a raw
+/// byte-increment would, without ever producing an invalid UTF-8 string
+/// along the way (a plain byte-increment can split a multi-byte character —
+/// e.g. incrementing the trailing continuation byte of `"café"` can land
+/// outside the continuation-byte range, or crossing the 0x7F/0x80 ASCII
+/// boundary, or 0xBF/0xC0 continuation-byte boundary, all invalid UTF-8).
+///
+/// Carries into the preceding character when the trailing one is already
+/// `char::MAX` (`U+10FFFF`) or would land in the surrogate range (which has
+/// no UTF-8 encoding), skipping straight to `U+E000`. Returns `None` when no
+/// upper bound exists in TEXT space at all (every character in `prefix` is
+/// already at its maximum) — the caller falls back to the BLOB sentinel
+/// region, since every BLOB sorts after every TEXT value regardless of
+/// content.
+fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        if let Some(bumped) = bump_char(last) {
+            chars.push(bumped);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
+/// The next Unicode scalar value after `c`, skipping the unencodable
+/// surrogate range, or `None` if `c` is already the maximum representable
+/// scalar value.
+fn bump_char(c: char) -> Option<char> {
+    let next = (c as u32).checked_add(1)?;
+    let next = if (0xD800..=0xDFFF).contains(&next) {
+        0xE000
+    } else {
+        next
+    };
+    char::from_u32(next)
+}
+
 /// Bracket-stripped text of a `json_each` array element.
 const STRIPPED_ARRAY_ELEMENT: &str = "replace(replace(value, '[[', ''), ']]', '')";
 
@@ -938,6 +1129,102 @@ mod router_tests {
         }
     }
 
+    // ── object/nested-array canonicalization parity (Fix 1) ──────────────
+    //
+    // A CLI `--eq field:{"name":"Alice"}` token coerces to a plain
+    // `Value::String` (see `filter_args::coerce_value` — it never parses
+    // JSON syntax out of a raw arg), so this compares that literal string
+    // against the field's whole JSON-serialized text — a comparison that IS
+    // string-eligible on both sides of the router. Before the canonical.rs
+    // fix, `canonicalize_scalar` only bracket-stripped the bare-String
+    // variant, so a `document_fields` row for an object/array value kept
+    // its embedded `[[brackets]]` while the scan path (which strips the
+    // whole extracted JSON text unconditionally) did not — the two routes
+    // disagreed on exactly this shape.
+
+    fn object_bracket_vault() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("bracketed.md").as_std_path(),
+            "---\ncustom:\n  name: \"[[Alice]]\"\nnested:\n  - \"[[Alice]]\"\n  - Bob\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("unbracketed.md").as_std_path(),
+            "---\ncustom:\n  name: Alice\nnested:\n  - Alice\n  - Bob\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("other.md").as_std_path(),
+            "---\ncustom:\n  name: Someone Else\nnested:\n  - Someone\n  - Else\n---\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn eav_and_scan_agree_on_object_with_embedded_wikilink_eq() {
+        let (_tmp, root) = object_bracket_vault();
+        let indexed = open_authoritative(&root, &["custom", "nested"]);
+        let scanned = Cache::open(&root).unwrap();
+
+        let cases: Vec<DocumentQuery> = vec![
+            DocumentQuery {
+                frontmatter_eq: vec![(
+                    "custom".to_string(),
+                    serde_json::json!(r#"{"name":"Alice"}"#),
+                )],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_not_eq: vec![(
+                    "custom".to_string(),
+                    serde_json::json!(r#"{"name":"Alice"}"#),
+                )],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_in: vec![(
+                    "custom".to_string(),
+                    vec![serde_json::json!(r#"{"name":"Alice"}"#)],
+                )],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![(
+                    "nested".to_string(),
+                    serde_json::json!(r#"["Alice","Bob"]"#),
+                )],
+                ..Default::default()
+            },
+        ];
+
+        for query in cases {
+            let routed = paths(&indexed.documents_matching(&query).unwrap());
+            let scan = paths(&scanned.documents_matching(&query).unwrap());
+            assert_eq!(routed, scan, "EAV and scan routes diverged for {query:?}");
+        }
+
+        // Pin the actual match, not just agreement: both `bracketed.md`
+        // (via canonicalization stripping the stored brackets) and
+        // `unbracketed.md` must match `--eq custom:{"name":"Alice"}`.
+        let eq_alice = DocumentQuery {
+            frontmatter_eq: vec![(
+                "custom".to_string(),
+                serde_json::json!(r#"{"name":"Alice"}"#),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            paths(&indexed.documents_matching(&eq_alice).unwrap()),
+            vec!["bracketed.md", "unbracketed.md"]
+        );
+    }
+
     fn explain_plan(cache: &Cache, sql: &str, binds: &[rusqlite::types::Value]) -> Vec<String> {
         let full_sql = format!("EXPLAIN QUERY PLAN {sql}");
         let mut stmt = cache.conn().prepare(&full_sql).unwrap();
@@ -1006,6 +1293,10 @@ mod router_tests {
             !rows.iter().any(|r| r.contains("SCAN document_fields")),
             "must not SCAN document_fields: {rows:?}"
         );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN documents")),
+            "must not SCAN documents: {rows:?}"
+        );
     }
 
     #[test]
@@ -1029,6 +1320,10 @@ mod router_tests {
         assert!(
             !rows.iter().any(|r| r.contains("SCAN document_fields")),
             "must not SCAN document_fields: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN documents")),
+            "must not SCAN documents: {rows:?}"
         );
     }
 
@@ -1064,6 +1359,283 @@ mod router_tests {
         assert!(
             where_sql.contains("json_extract"),
             "non-authoritative open must never route: {where_sql}"
+        );
+    }
+
+    // ── hybrid string-operator routing (NRN-79 extension) ────────────────
+    //
+    // `--starts-with`/`--ends-with`/`--contains` now join the EAV-eligible
+    // set via `push_string_operator_eav`'s two-branch union. These tests
+    // prove routed vs. scan parity across every value shape the union's two
+    // branches need to agree on, plus EXPLAIN guards proving the union
+    // actually drives off `idx_document_fields_kv` rather than scanning.
+
+    /// One vault exercising every value shape `push_string_operator_eav`'s
+    /// two branches need to agree on: plain/wikilink strings, a namespaced
+    /// tags array, boolean scalar AND array element, integer, float, an
+    /// object with an embedded wikilink, an empty array, a missing field,
+    /// literal `%`/`_` (SQL LIKE metacharacters, must never be treated as
+    /// wildcards), and a family of multi-byte-prefix shapes for the
+    /// `prefix_upper_bound` range-bound boundary.
+    fn string_op_vault() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("alpha.md").as_std_path(),
+            "---\n\
+             title: \"Alpha Report\"\n\
+             alias: \"[[Alice]]\"\n\
+             tags: [\"release:v0.1\", \"type:note\"]\n\
+             archived: true\n\
+             flags: [true, false]\n\
+             count: 42\n\
+             score: 2.5\n\
+             custom:\n  name: \"[[Alice]]\"\n\
+             empty_tags: []\n\
+             pct: \"50% off\"\n\
+             underscore: \"a_b_c\"\n\
+             unicode: \"café\"\n\
+             ---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("beta.md").as_std_path(),
+            "---\n\
+             title: \"Beta Report\"\n\
+             alias: \"[[Bob]]\"\n\
+             tags: [\"release:v0.2\"]\n\
+             archived: false\n\
+             flags: [false]\n\
+             count: 7\n\
+             score: 3.14\n\
+             custom:\n  name: \"Bob\"\n\
+             empty_tags: []\n\
+             pct: \"no percent here\"\n\
+             underscore: \"xyz\"\n\
+             unicode: \"cafe\"\n\
+             ---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("gamma.md").as_std_path(),
+            "---\ntitle: \"Gamma Notes\"\ntags: [\"type:note\"]\ncount: 100\nunicode: \"cafz\"\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("delta.md").as_std_path(),
+            "---\ntitle: \"Delta\"\nunicode: \"café2\"\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("epsilon.md").as_std_path(),
+            "---\ntitle: \"Epsilon\"\nunicode: \"cafê\"\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("missing.md").as_std_path(),
+            "---\nother: x\n---\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    fn string_op_index_fields() -> Vec<&'static str> {
+        vec![
+            "title",
+            "alias",
+            "tags",
+            "archived",
+            "flags",
+            "count",
+            "score",
+            "custom",
+            "empty_tags",
+            "pct",
+            "underscore",
+            "unicode",
+            "missing_entirely",
+        ]
+    }
+
+    fn starts_with(field: &str, needle: &str) -> DocumentQuery {
+        DocumentQuery {
+            frontmatter_starts_with: vec![(field.to_string(), needle.to_string())],
+            ..Default::default()
+        }
+    }
+
+    fn ends_with(field: &str, needle: &str) -> DocumentQuery {
+        DocumentQuery {
+            frontmatter_ends_with: vec![(field.to_string(), needle.to_string())],
+            ..Default::default()
+        }
+    }
+
+    fn contains(field: &str, needle: &str) -> DocumentQuery {
+        DocumentQuery {
+            frontmatter_contains: vec![(field.to_string(), needle.to_string())],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn string_op_eav_and_scan_agree_across_value_shapes() {
+        let (_tmp, root) = string_op_vault();
+        let fields = string_op_index_fields();
+        let indexed = open_authoritative(&root, &fields);
+        let scanned = Cache::open(&root).unwrap();
+
+        let cases: Vec<DocumentQuery> = vec![
+            // Plain string scalar.
+            starts_with("title", "Alpha"),
+            ends_with("title", "Report"),
+            contains("title", "ph"),
+            // Wikilink-bracketed string scalar — both sides bracket-collapse.
+            starts_with("alias", "Alic"),
+            contains("alias", "ob"),
+            // Namespaced tags array (`release:v0.1` style) — array-aware.
+            starts_with("tags", "release:"),
+            contains("tags", "note"),
+            // Boolean scalar: the exact divergence that used to force a
+            // whole-query fallback (scan renders 'true'/'false' text, the
+            // index stores INTEGER 0/1 — branch 2 must reconcile this).
+            contains("archived", "true"),
+            contains("archived", "1"),
+            starts_with("archived", "tru"),
+            // Boolean array element, same divergence, array-aware.
+            starts_with("flags", "fal"),
+            contains("flags", "true"),
+            // Integer / float scalars — non-text `document_fields` rows.
+            contains("count", "4"),
+            starts_with("count", "42"),
+            starts_with("count", "7"),
+            contains("score", "2.5"),
+            starts_with("score", "3."),
+            // Object with an embedded wikilink (Fix 1 territory) — whole
+            // JSON text is bracket-stripped and tested as one TEXT value.
+            contains("custom", "Alice"),
+            contains("custom", "[["),
+            // Empty array: no scalar to test, must never match.
+            contains("empty_tags", "x"),
+            // No document has this field at all — never matches, and (since
+            // it's declared/indexed) actually exercises the EAV route: every
+            // doc gets only the absent-sentinel row, excluded by branch 2's
+            // `typeof NOT IN ('text','blob','null')` filter.
+            starts_with("missing_entirely", "x"),
+            ends_with("missing_entirely", "x"),
+            contains("missing_entirely", "x"),
+            // SQL LIKE metacharacters treated literally, not as wildcards.
+            contains("pct", "%"),
+            starts_with("pct", "50%"),
+            contains("underscore", "_"),
+            contains("underscore", "a_b"),
+            // Empty-string needle: no meaningful anchored match, ever.
+            starts_with("title", ""),
+            ends_with("title", ""),
+            contains("title", ""),
+        ];
+
+        for query in cases {
+            assert_eq!(
+                paths(&indexed.documents_matching(&query).unwrap()),
+                paths(&scanned.documents_matching(&query).unwrap()),
+                "EAV and scan routes diverged for {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn string_op_eav_and_scan_agree_on_unicode_multibyte_prefix() {
+        // `prefix_upper_bound` bumps the trailing Unicode scalar value, not
+        // the trailing byte, so it never splits `é` (U+00E9, a 2-byte UTF-8
+        // character). Exercise every boundary: exact match, an extension of
+        // the prefix, values that sort just below it, and the bumped
+        // boundary value itself (which must NOT match).
+        let (_tmp, root) = string_op_vault();
+        let fields = string_op_index_fields();
+        let indexed = open_authoritative(&root, &fields);
+        let scanned = Cache::open(&root).unwrap();
+
+        let query = starts_with("unicode", "café");
+        assert_eq!(
+            paths(&indexed.documents_matching(&query).unwrap()),
+            paths(&scanned.documents_matching(&query).unwrap()),
+            "EAV and scan routes diverged for a multi-byte prefix: {query:?}"
+        );
+        // Pin the actual matched set too, not just that both sides agree —
+        // a bug that made both sides wrong the same way would still pass a
+        // bare equality check.
+        assert_eq!(
+            paths(&scanned.documents_matching(&query).unwrap()),
+            vec!["alpha.md", "delta.md"],
+            "expected exactly the docs whose unicode field starts with café"
+        );
+    }
+
+    #[test]
+    fn starts_with_only_query_drives_via_index_range_no_scan() {
+        let (_tmp, root) = string_op_vault();
+        let fields = string_op_index_fields();
+        let cache = open_authoritative(&root, &fields);
+
+        let query = starts_with("title", "Alpha");
+        let (where_sql, binds) = build_documents_matching_sql_parts(&cache, &query);
+        // The scan builder never mentions `document_fields` at all (its
+        // string-op clause is pure `json_extract`/`json_each` over
+        // `frontmatter_json`) — presence of the table name is the routed-vs-
+        // scan signal; the EAV form's branch 2 legitimately still contains
+        // `json_extract` as part of its non-text fallback.
+        assert!(
+            where_sql.contains("document_fields"),
+            "a starts-with-only query on an indexed field must route: {where_sql}"
+        );
+        let sql = format!("SELECT path FROM documents{where_sql}");
+        let rows = explain_plan(&cache, &sql, &binds);
+
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("SEARCH") && r.contains("idx_document_fields_kv")),
+            "expected a driving SEARCH range on idx_document_fields_kv: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN documents")),
+            "must not SCAN documents: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN document_fields")),
+            "must not SCAN document_fields: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn combined_eq_and_starts_with_query_stays_all_search() {
+        let (_tmp, root) = string_op_vault();
+        let fields = string_op_index_fields();
+        let cache = open_authoritative(&root, &fields);
+
+        let query = DocumentQuery {
+            frontmatter_eq: vec![("title".to_string(), serde_json::json!("Alpha Report"))],
+            frontmatter_starts_with: vec![("tags".to_string(), "release:".to_string())],
+            ..Default::default()
+        };
+        let (where_sql, binds) = build_documents_matching_sql_parts(&cache, &query);
+        assert!(
+            where_sql.contains("document_fields"),
+            "combined --eq + --starts-with on indexed fields must route: {where_sql}"
+        );
+        let sql = format!("SELECT path FROM documents{where_sql}");
+        let rows = explain_plan(&cache, &sql, &binds);
+
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN documents")),
+            "must not SCAN documents: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN document_fields")),
+            "must not SCAN document_fields: {rows:?}"
         );
     }
 }

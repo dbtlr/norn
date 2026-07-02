@@ -44,7 +44,7 @@ pub(crate) use identity::{
 pub(crate) use lock::acquire_flock;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 /// Handle to an opened cache. Holds a rusqlite Connection plus the resolved
 /// vault root and cache directory path. `alias_field` is the value passed

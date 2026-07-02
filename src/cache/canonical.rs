@@ -24,10 +24,24 @@ pub(crate) fn strip_wikilink_brackets(s: &str) -> String {
 /// collapsed; every other JSON scalar goes through `json_value_to_sql`
 /// (INTEGER for integers, REAL for floats, TEXT for JSON-encoded
 /// objects/arrays, etc — see that function's docs for the exact mapping).
+///
+/// The scan path's `json_extract`/`json_each.value` reads render an
+/// object/array value as its whole JSON-serialized text, and the scan path's
+/// `replace(replace(x, '[[', ''), ']]', '')` bracket-strip runs
+/// unconditionally over that text regardless of what's inside it — so a
+/// `{"name": "[[Alice]]"}` object matches `--eq field:{"name":"Alice"}` via
+/// scan. `json_value_to_sql` on its own only produces JSON text for
+/// Object/Array inputs (Integer/Real/Bool/Null outputs can never contain a
+/// bracket), so that TEXT result gets the exact same strip applied here —
+/// one shared `strip_wikilink_brackets` implementation on both the String
+/// and the Object/Array paths keeps this byte-identical with the scan side.
 pub(crate) fn canonicalize_scalar(v: &serde_json::Value) -> SqlValue {
     match v {
         serde_json::Value::String(s) => SqlValue::Text(strip_wikilink_brackets(s)),
-        other => json_value_to_sql(other),
+        other => match json_value_to_sql(other) {
+            SqlValue::Text(s) => SqlValue::Text(strip_wikilink_brackets(&s)),
+            not_text => not_text,
+        },
     }
 }
 
@@ -118,5 +132,49 @@ mod tests {
             SqlValue::Text(s) => assert_eq!(s, r#"{"a":1}"#),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    // ── object/nested-array bracket parity (NRN-79 review fix) ──────────
+    //
+    // The scan path's `json_extract`/`json_each.value` reads render an
+    // object/array value as its whole JSON-serialized text, and its
+    // bracket-strip runs over that whole text unconditionally — including
+    // brackets embedded inside a nested string field. `canonicalize_scalar`
+    // must reproduce that exactly, not just for the bare-String variant.
+
+    #[test]
+    fn canonicalize_scalar_object_with_embedded_wikilink_strips_brackets() {
+        // The reviewer's exact repro: `custom: { name: "[[Alice]]" }`.
+        match canonicalize_scalar(&serde_json::json!({"name": "[[Alice]]"})) {
+            SqlValue::Text(s) => assert_eq!(s, r#"{"name":"Alice"}"#),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonicalize_scalar_nested_array_with_embedded_wikilink_strips_brackets() {
+        match canonicalize_scalar(&serde_json::json!({"names": ["[[Alice]]", "Bob"]})) {
+            SqlValue::Text(s) => assert_eq!(s, r#"{"names":["Alice","Bob"]}"#),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonicalize_scalar_integer_real_bool_null_never_touched_by_strip() {
+        // Sanity check that the shared strip only ever engages on the TEXT
+        // branch of `json_value_to_sql` — no bracket-strip work happens (or
+        // could ever matter) for the other SQLite storage classes.
+        assert!(matches!(
+            canonicalize_scalar(&serde_json::json!(5)),
+            SqlValue::Integer(5)
+        ));
+        assert!(matches!(
+            canonicalize_scalar(&serde_json::json!(5.5)),
+            SqlValue::Real(f) if f == 5.5
+        ));
+        assert!(matches!(
+            canonicalize_scalar(&serde_json::json!(true)),
+            SqlValue::Integer(1)
+        ));
     }
 }
