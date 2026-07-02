@@ -38,6 +38,13 @@ pub enum FindingBody {
         actual_value: Value,
         expected_type: String,
     },
+    ExceedsMaxLength {
+        rule: Option<String>,
+        field: String,
+        actual_value: Value,
+        max_length: u32,
+        actual_length: usize,
+    },
     ForbiddenField {
         rule: Option<String>,
         field: String,
@@ -215,6 +222,34 @@ impl Finding {
                 field,
                 actual_value,
                 expected_type,
+            },
+        }
+    }
+
+    /// A `string`/`list_of_strings` value matches its declared type's shape but
+    /// exceeds the effective `max_length` bound (declared, or the type default).
+    pub fn frontmatter_exceeds_max_length(
+        path: Utf8PathBuf,
+        rule: Option<String>,
+        field: String,
+        actual_value: Value,
+        max_length: u32,
+        actual_length: usize,
+    ) -> Self {
+        let message = format!(
+            "frontmatter field exceeds max length: {field} ({actual_length} > {max_length})"
+        );
+        Self {
+            code: "frontmatter-exceeds-max-length".to_string(),
+            severity: Severity::Warning,
+            path,
+            message,
+            body: FindingBody::ExceedsMaxLength {
+                rule,
+                field,
+                actual_value,
+                max_length,
+                actual_length,
             },
         }
     }

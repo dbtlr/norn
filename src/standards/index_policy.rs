@@ -57,7 +57,7 @@ pub(crate) fn resolved_index_set(cfg: &VaultConfig) -> (BTreeSet<String>, String
                 Some(false) => vote.explicit_false = true,
                 None => {}
             }
-            if is_auto_qualifying_type(spec.type_name()) {
+            if spec.type_name().is_some_and(is_auto_qualifying_type) {
                 vote.auto_qualifies = true;
             }
         }
@@ -301,6 +301,33 @@ validate:
         let (set_b, hash_b) = resolved_index_set(&cfg_b);
         assert_eq!(set_a, set_b);
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn allowed_values_field_with_typeless_indexed_false_is_excluded() {
+        let cfg = parse(
+            r#"
+validate:
+  rules:
+    - name: r
+      allowed_values:
+        status:
+          - a
+      field_types:
+        status: { indexed: false }
+"#,
+        );
+        let (set, _) = resolved_index_set(&cfg);
+        assert!(!set.contains("status"));
+    }
+
+    #[test]
+    fn plain_untyped_field_with_typeless_indexed_true_is_included() {
+        let cfg = parse(
+            "validate:\n  rules:\n    - name: r\n      field_types:\n        notes: { indexed: true }\n",
+        );
+        let (set, _) = resolved_index_set(&cfg);
+        assert!(set.contains("notes"));
     }
 
     #[test]

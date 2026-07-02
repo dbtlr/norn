@@ -69,7 +69,8 @@ pub fn summarize(findings: &[Finding]) -> Summary {
                 increment(type_counts, expected_type);
             }
             FindingBody::ForbiddenField { rule, field, .. }
-            | FindingBody::ReferenceType { rule, field, .. } => {
+            | FindingBody::ReferenceType { rule, field, .. }
+            | FindingBody::ExceedsMaxLength { rule, field, .. } => {
                 if let Some(rule) = rule {
                     increment(&mut summary.rules, rule);
                 }

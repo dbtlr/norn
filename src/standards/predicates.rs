@@ -67,6 +67,35 @@ fn within_max_length(value: &str, max_length: Option<u32>) -> bool {
     }
 }
 
+/// Does `value` have the right shape for `expected_type` (`string` or
+/// `list_of_strings`) but violate `max_length`? Returns the offending length
+/// (the value's length for `string`, the longest element's length for
+/// `list_of_strings`) when so; `None` when the value doesn't match the type's
+/// base shape at all (a real type mismatch takes priority) or satisfies the
+/// bound.
+pub fn frontmatter_exceeds_max_length(
+    value: &Value,
+    expected_type: &str,
+    max_length: Option<u32>,
+) -> Option<usize> {
+    let bound = max_length? as usize;
+    match expected_type {
+        "string" => {
+            let len = value.as_str()?.chars().count();
+            (len > bound).then_some(len)
+        }
+        "list_of_strings" => {
+            let values = value.as_array()?;
+            let mut max_len = 0;
+            for v in values {
+                max_len = max_len.max(v.as_str()?.chars().count());
+            }
+            (max_len > bound).then_some(max_len)
+        }
+        _ => None,
+    }
+}
+
 pub fn is_datetime_string(value: &str) -> bool {
     let Some((date, time)) = value.split_once('T').or_else(|| value.split_once(' ')) else {
         return false;
@@ -243,7 +272,10 @@ pub(crate) fn frontmatter_predicates_match(
 
 #[cfg(test)]
 mod tests {
-    use super::{frontmatter_type_matches, is_date_string, is_datetime_string};
+    use super::{
+        frontmatter_exceeds_max_length, frontmatter_type_matches, is_date_string,
+        is_datetime_string,
+    };
     use serde_json::json;
 
     #[test]
@@ -306,6 +338,57 @@ mod tests {
     #[test]
     fn unknown_type_rejects() {
         assert!(!frontmatter_type_matches(&json!("x"), "bogus", None));
+    }
+
+    #[test]
+    fn exceeds_max_length_returns_length_for_over_bound_string() {
+        assert_eq!(
+            frontmatter_exceeds_max_length(&json!("abcd"), "string", Some(3)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn exceeds_max_length_none_for_within_bound_string() {
+        assert_eq!(
+            frontmatter_exceeds_max_length(&json!("abc"), "string", Some(3)),
+            None
+        );
+    }
+
+    #[test]
+    fn exceeds_max_length_none_for_wrong_type() {
+        // A real type mismatch is not a length violation.
+        assert_eq!(
+            frontmatter_exceeds_max_length(&json!(3), "string", Some(3)),
+            None
+        );
+    }
+
+    #[test]
+    fn exceeds_max_length_none_when_no_bound() {
+        let long = "x".repeat(1000);
+        assert_eq!(
+            frontmatter_exceeds_max_length(&json!(long), "string", None),
+            None
+        );
+    }
+
+    #[test]
+    fn exceeds_max_length_returns_longest_offending_list_element() {
+        assert_eq!(
+            frontmatter_exceeds_max_length(&json!(["ab", "abcd"]), "list_of_strings", Some(2)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn exceeds_max_length_none_for_list_with_non_string_element() {
+        // A non-string element is a base type mismatch, not a length violation.
+        assert_eq!(
+            frontmatter_exceeds_max_length(&json!(["ab", 3]), "list_of_strings", Some(1)),
+            None
+        );
     }
 
     #[test]

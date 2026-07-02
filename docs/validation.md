@@ -32,6 +32,7 @@ norn validate --rule typed-note --path "notes/**/*.md" --format jsonl
 | `frontmatter-required-field-missing` | warning | `required_frontmatter` field is absent or null. Carries `field`, `rule`. |
 | `frontmatter-forbidden-field` | warning | `forbidden_frontmatter` field is present. Carries `field`, `rule`. |
 | `frontmatter-invalid-type` | warning | Present field doesn't match declared `field_types` shape. Carries `field`, `expected_type`, `rule`. |
+| `frontmatter-exceeds-max-length` | warning | Present `string`/`list_of_strings` field matches its type's shape but exceeds the effective `max_length` bound. Carries `field`, `max_length`, `actual_length`, `rule`. |
 | `frontmatter-disallowed-value` | warning | Present scalar field value isn't in `allowed_values`. Carries `field`, `actual_value`, `allowed_values`, `rule`. |
 | `document-misrouted` | warning | Document path matches no `allowed_paths` glob. Carries `allowed_paths`, `rule`. |
 | `frontmatter-reference-type` | warning | A frontmatter wikilink resolves to a document whose `type` is outside the field's `field_references.target_type` set. Carries `field`, `reference`, `target`, `actual_type`, `allowed_types`, `rule`. |
