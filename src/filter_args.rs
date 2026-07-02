@@ -33,6 +33,18 @@ pub fn build_document_query(args: &FilterArgs) -> Result<DocumentQuery> {
     for spec in &args.not_in {
         frontmatter_not_in.push(parse_field_value_list(spec, "--not-in")?);
     }
+    let mut frontmatter_starts_with = Vec::new();
+    for spec in &args.starts_with {
+        frontmatter_starts_with.push(parse_field_text(spec, "--starts-with")?);
+    }
+    let mut frontmatter_ends_with = Vec::new();
+    for spec in &args.ends_with {
+        frontmatter_ends_with.push(parse_field_text(spec, "--ends-with")?);
+    }
+    let mut frontmatter_contains = Vec::new();
+    for spec in &args.contains {
+        frontmatter_contains.push(parse_field_text(spec, "--contains")?);
+    }
     let mut date_before = Vec::new();
     for spec in &args.before {
         date_before.push(parse_field_date(spec, "--before")?);
@@ -54,6 +66,9 @@ pub fn build_document_query(args: &FilterArgs) -> Result<DocumentQuery> {
         frontmatter_not_in,
         frontmatter_has: args.has.clone(),
         frontmatter_missing: args.missing.clone(),
+        frontmatter_starts_with,
+        frontmatter_ends_with,
+        frontmatter_contains,
         date_before,
         date_after,
         date_on,
@@ -140,6 +155,25 @@ fn parse_field_value_list(spec: &str, flag: &str) -> Result<(String, Vec<Value>)
         ));
     }
     Ok((field, values))
+}
+
+/// Parse a `field:VALUE` token for the anchored string operators. The value
+/// stays a literal string — no bool/number coercion (a `--contains prio:1`
+/// needle is the text "1").
+fn parse_field_text(spec: &str, flag: &str) -> Result<(String, String)> {
+    let (field, raw) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid {} value, expected field:value: {}", flag, spec))?;
+    let field = field.trim().to_string();
+    let raw = raw.trim();
+    if field.is_empty() || raw.is_empty() {
+        return Err(anyhow!(
+            "invalid {} value, expected non-empty field and value: {}",
+            flag,
+            spec
+        ));
+    }
+    Ok((field, raw.to_string()))
 }
 
 fn parse_field_date(spec: &str, flag: &str) -> Result<(String, String)> {
@@ -318,6 +352,40 @@ mod tests {
                 vec![json!("backlog"), json!("active")]
             )]
         );
+    }
+
+    #[test]
+    fn string_operator_values_stay_literal_text() {
+        let mut a = empty();
+        a.starts_with = vec!["tags:release:".into()];
+        a.ends_with = vec!["status:_progress".into()];
+        a.contains = vec!["priority:1".into()];
+        let q = build_document_query(&a).unwrap();
+        assert_eq!(
+            q.frontmatter_starts_with,
+            vec![("tags".to_string(), "release:".to_string())]
+        );
+        assert_eq!(
+            q.frontmatter_ends_with,
+            vec![("status".to_string(), "_progress".to_string())]
+        );
+        // No numeric coercion — the needle is the literal text "1".
+        assert_eq!(
+            q.frontmatter_contains,
+            vec![("priority".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn string_operator_empty_value_errors() {
+        for spec in ["tags:", "tags:  ", ":release", "nocolon"] {
+            let mut a = empty();
+            a.starts_with = vec![spec.into()];
+            assert!(
+                build_document_query(&a).is_err(),
+                "spec {spec:?} should be rejected"
+            );
+        }
     }
 
     #[test]

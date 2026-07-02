@@ -513,6 +513,30 @@ pub struct FilterArgs {
     )]
     pub not_in: Vec<String>,
 
+    /// Frontmatter `field` (or any array element) starts with `VALUE`. Case-sensitive.
+    #[arg(
+        long = "starts-with",
+        value_name = "FIELD:VALUE",
+        help_heading = "Filter options"
+    )]
+    pub starts_with: Vec<String>,
+
+    /// Frontmatter `field` (or any array element) ends with `VALUE`. Case-sensitive.
+    #[arg(
+        long = "ends-with",
+        value_name = "FIELD:VALUE",
+        help_heading = "Filter options"
+    )]
+    pub ends_with: Vec<String>,
+
+    /// Frontmatter `field` (or any array element) contains `VALUE`. Case-sensitive.
+    #[arg(
+        long = "contains",
+        value_name = "FIELD:VALUE",
+        help_heading = "Filter options"
+    )]
+    pub contains: Vec<String>,
+
     /// Frontmatter `field` is present (non-null).
     #[arg(long = "has", value_name = "FIELD", help_heading = "Filter options")]
     pub has: Vec<String>,

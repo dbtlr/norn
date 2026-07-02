@@ -229,6 +229,35 @@ pub(crate) fn build_documents_matching_sql_parts(query: &DocumentQuery) -> (Stri
         }
     }
 
+    // --starts-with / --ends-with / --contains field:VALUE
+    for (field, needle) in &query.frontmatter_starts_with {
+        push_string_operator(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::StartsWith,
+        );
+    }
+    for (field, needle) in &query.frontmatter_ends_with {
+        push_string_operator(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::EndsWith,
+        );
+    }
+    for (field, needle) in &query.frontmatter_contains {
+        push_string_operator(
+            &mut where_clauses,
+            &mut binds,
+            field,
+            needle,
+            StringOperator::Contains,
+        );
+    }
+
     // --before field:DATE
     for (field, date) in &query.date_before {
         where_clauses.push("json_extract(frontmatter_json, ?) < ?".to_string());
@@ -362,6 +391,82 @@ fn push_string_membership(
     binds.push(SqlValue::Text(path));
     for v in &stripped {
         binds.push(SqlValue::Text(v.clone()));
+    }
+}
+
+/// Anchored string operators for `--starts-with` / `--ends-with` / `--contains`.
+#[derive(Clone, Copy)]
+enum StringOperator {
+    StartsWith,
+    EndsWith,
+    Contains,
+}
+
+impl StringOperator {
+    /// SQL predicate over the text expression `val`; every `?` binds the
+    /// needle. `instr`/`substr` are used instead of `LIKE` deliberately:
+    /// they are case-sensitive under BINARY collation and treat `%`/`_`
+    /// literally, so no wildcard escaping is needed.
+    fn test(self, val: &str) -> String {
+        match self {
+            StringOperator::StartsWith => format!("substr({val}, 1, length(?)) = ?"),
+            StringOperator::EndsWith => format!("substr({val}, -length(?)) = ?"),
+            StringOperator::Contains => format!("instr({val}, ?) > 0"),
+        }
+    }
+
+    fn needle_binds(self) -> usize {
+        match self {
+            StringOperator::Contains => 1,
+            _ => 2,
+        }
+    }
+}
+
+/// Build the WHERE clause for one anchored string operator. Mirrors the
+/// array-aware + bracket-stripped compound shape of the string `--eq` branch
+/// (`push_equality`): any array element may satisfy the operator; scalar
+/// fields are tested directly. Both the stored value and the needle are
+/// wikilink-bracket-collapsed. Non-string stored scalars coerce to SQLite's
+/// text rendering (e.g. `123` matches a `"2"` substring needle).
+fn push_string_operator(
+    where_clauses: &mut Vec<String>,
+    binds: &mut Vec<SqlValue>,
+    field: &str,
+    needle: &str,
+    op: StringOperator,
+) {
+    let stripped = strip_wikilink_brackets(needle);
+    if stripped.is_empty() {
+        // An empty needle has no meaningful anchored-match semantics (only
+        // reachable via a bracket-only value like `[[]]` — the flag parser
+        // already rejects empty values). Match nothing, deterministically.
+        where_clauses.push("0".to_string());
+        return;
+    }
+    let path = json_path_for(field);
+    let array_test = op.test("replace(replace(value, '[[', ''), ']]', '')");
+    let scalar_test = op.test(
+        "replace(replace(CAST(json_extract(frontmatter_json, ?) AS TEXT), '[[', ''), ']]', '')",
+    );
+    where_clauses.push(format!(
+        "((json_type(frontmatter_json, ?) = 'array' \
+          AND EXISTS (SELECT 1 FROM json_each(frontmatter_json, ?) \
+                            WHERE {array_test})) \
+          OR \
+          ((json_type(frontmatter_json, ?) IS NULL OR json_type(frontmatter_json, ?) != 'array') \
+           AND {scalar_test}))"
+    ));
+    binds.push(SqlValue::Text(path.clone()));
+    binds.push(SqlValue::Text(path.clone()));
+    for _ in 0..op.needle_binds() {
+        binds.push(SqlValue::Text(stripped.clone()));
+    }
+    binds.push(SqlValue::Text(path.clone()));
+    binds.push(SqlValue::Text(path.clone()));
+    binds.push(SqlValue::Text(path));
+    for _ in 0..op.needle_binds() {
+        binds.push(SqlValue::Text(stripped.clone()));
     }
 }
 
