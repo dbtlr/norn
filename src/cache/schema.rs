@@ -80,6 +80,20 @@ CREATE TABLE IF NOT EXISTS diagnostics (
     detail   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_diagnostics_doc ON diagnostics(doc_path);
+
+-- Derived Wave-2 frontmatter index (EAV). One row per (doc, declared field)
+-- pair for every field in the resolved index set — see
+-- `crate::standards::index_policy::resolved_index_set` and
+-- `crate::cache::document_fields`. `value` deliberately has no type
+-- affinity: it stores typed scalars (INTEGER/REAL/TEXT), SQL NULL (an
+-- empty-array field), or the `x'00'` BLOB sentinel (field absent/null).
+CREATE TABLE IF NOT EXISTS document_fields (
+    path TEXT NOT NULL,
+    key  TEXT NOT NULL,
+    value
+);
+CREATE INDEX IF NOT EXISTS idx_document_fields_kv ON document_fields(key, value, path);
+CREATE INDEX IF NOT EXISTS idx_document_fields_pk ON document_fields(path, key, value);
 "#;
 
 pub fn apply_schema(conn: &Connection) -> Result<(), CacheError> {

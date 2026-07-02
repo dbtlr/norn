@@ -60,11 +60,7 @@ impl VaultContext {
     /// Callers should open a cache at the start of each tool call and drop it
     /// when done — do not cache the returned `Cache` handle across calls.
     pub(crate) fn query_cache(&self) -> Result<Cache> {
-        open_for_query(
-            &self.vault_root,
-            self.config.index_options.alias_field.as_deref(),
-            false,
-        )
+        open_for_query(&self.vault_root, &self.config.index_options, false)
     }
 }
 

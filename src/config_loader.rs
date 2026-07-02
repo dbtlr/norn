@@ -104,11 +104,16 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
     let (config, compiled) =
         parse_config_compiled(&config_text, &config_path).map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let (resolved_index_set, resolved_index_set_hash) =
+        crate::standards::resolved_index_set(&config);
+
     Ok(LoadedConfig {
         index_options: IndexOptions {
             ignore: config.files.ignore.clone(),
             alias_field: config.links.alias_field.clone(),
             auto: config.index.auto,
+            resolved_index_set,
+            resolved_index_set_hash,
         },
         validate: config.validate.clone(),
         repair: config.repair.clone(),

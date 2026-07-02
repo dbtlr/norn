@@ -57,7 +57,7 @@ impl crate::cache::Cache {
         clear_all_rows(&tx)?;
         let mut report = IndexReport::default();
         for doc in &index.documents {
-            insert_document(&tx, vault_root, doc, &mut report)?;
+            insert_document(&tx, vault_root, doc, &mut report, &self.index_set)?;
         }
         for file in &index.files {
             insert_file(&tx, vault_root, file)?;
@@ -65,7 +65,16 @@ impl crate::cache::Cache {
         }
         update_meta_rebuild_ts(&tx)?;
         update_meta_alias_field(&tx, self.alias_field.as_deref())?;
+        update_meta_index_set_hash(&tx, &self.index_set_hash)?;
         tx.commit()?;
+        // Refresh query-planner statistics for `document_fields` after a full
+        // rewrite; deliberately not run on the per-doc incremental path
+        // below, where the row-count delta is too small to matter. Scoped to
+        // this one table (rather than a schema-wide `ANALYZE`) so it doesn't
+        // perturb existing planner decisions for `links`/`documents` on
+        // small test fixtures — see the EXPLAIN-guard tests in query.rs /
+        // query_show.rs.
+        self.conn.execute("ANALYZE document_fields", [])?;
 
         report.duration_ms = start.elapsed().as_millis();
         Ok(report)
@@ -125,7 +134,7 @@ impl crate::cache::Cache {
                 FileChange::Added(path) | FileChange::Modified(path) => {
                     crate::cache::invalidation::drop_document(&tx, path)?;
                     if let Some(doc) = fresh_docs.get(path) {
-                        insert_document(&tx, vault_root, doc, &mut report)?;
+                        insert_document(&tx, vault_root, doc, &mut report, &self.index_set)?;
                     }
                     // Re-resolve incoming links that *might* now match this
                     // new path/stem.
@@ -200,6 +209,7 @@ fn rerun_link_resolution(
 
 fn clear_all_rows(tx: &rusqlite::Transaction) -> Result<(), CacheError> {
     tx.execute("DELETE FROM documents", [])?;
+    tx.execute("DELETE FROM document_fields", [])?;
     tx.execute("DELETE FROM files", [])?;
     tx.execute("DELETE FROM links", [])?;
     tx.execute("DELETE FROM headings", [])?;
@@ -213,6 +223,7 @@ fn insert_document(
     vault_root: &Utf8Path,
     doc: &Document,
     report: &mut IndexReport,
+    index_set: &std::collections::BTreeSet<String>,
 ) -> Result<(), CacheError> {
     let frontmatter_json = doc
         .frontmatter
@@ -237,6 +248,13 @@ fn insert_document(
         ],
     )?;
     report.doc_count += 1;
+
+    crate::cache::document_fields::insert_rows(
+        tx,
+        doc.path.as_str(),
+        doc.frontmatter.as_ref(),
+        index_set,
+    )?;
 
     for heading in &doc.headings {
         let (line, column, byte_offset): (Option<i64>, Option<i64>, Option<i64>) =
@@ -444,6 +462,17 @@ fn update_meta_alias_field(
     tx.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('links_alias_field', ?)",
         params![alias_field.unwrap_or("")],
+    )?;
+    Ok(())
+}
+
+/// Stamp the `index_set_hash` meta row so a later `Cache::open_with_index`
+/// call can tell whether `document_fields` already matches the resolved
+/// Wave-2 index set, or needs a re-shred.
+fn update_meta_index_set_hash(tx: &rusqlite::Transaction, hash: &str) -> Result<(), CacheError> {
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('index_set_hash', ?)",
+        params![hash],
     )?;
     Ok(())
 }

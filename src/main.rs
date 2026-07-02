@@ -167,15 +167,16 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::Cache(cache_command) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let alias_field = loaded_config.index_options.alias_field.as_deref();
             match &cache_command.command {
                 CacheSubcommand::Index(args) => {
-                    crate::cache_cmd::run_index(&cwd, alias_field, args)?
+                    crate::cache_cmd::run_index(&cwd, &loaded_config.index_options, args)?
                 }
-                CacheSubcommand::Rebuild => crate::cache_cmd::run_rebuild(&cwd, alias_field)?,
+                CacheSubcommand::Rebuild => {
+                    crate::cache_cmd::run_rebuild(&cwd, &loaded_config.index_options)?
+                }
                 CacheSubcommand::Clear => crate::cache_cmd::run_clear(&cwd)?,
                 CacheSubcommand::Status(args) => {
-                    crate::cache_cmd::run_status(&cwd, alias_field, args)?
+                    crate::cache_cmd::run_status(&cwd, &loaded_config.index_options, args)?
                 }
                 CacheSubcommand::Prune(args) => crate::cache_cmd::run_prune(
                     &cwd,
@@ -243,7 +244,7 @@ fn run(cli: Cli) -> Result<i32> {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             let cache = crate::cache_cmd::open_for_query(
                 &cwd,
-                loaded_config.index_options.alias_field.as_deref(),
+                &loaded_config.index_options,
                 no_cache_refresh,
             )?;
             let report = show::run(&cache, &args)?;
@@ -329,7 +330,7 @@ fn run(cli: Cli) -> Result<i32> {
             find::run(
                 args,
                 &cwd,
-                loaded_config.index_options.alias_field.as_deref(),
+                &loaded_config.index_options,
                 no_cache_refresh,
                 color,
             )
@@ -338,7 +339,7 @@ fn run(cli: Cli) -> Result<i32> {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             let cache = crate::cache_cmd::open_for_query(
                 &cwd,
-                loaded_config.index_options.alias_field.as_deref(),
+                &loaded_config.index_options,
                 no_cache_refresh,
             )?;
             let out = count::run(&cache, &args)?;
@@ -778,7 +779,7 @@ fn run(cli: Cli) -> Result<i32> {
             // Open a Cache for resolve_target (needs document query, not just index).
             let cache = crate::cache_cmd::open_for_query(
                 &cwd,
-                loaded_config.index_options.alias_field.as_deref(),
+                &loaded_config.index_options,
                 no_cache_refresh,
             )?;
 
@@ -952,7 +953,7 @@ fn run(cli: Cli) -> Result<i32> {
             trim_diagnostics(&mut index, verbose);
             let cache = crate::cache_cmd::open_for_query(
                 &cwd,
-                loaded_config.index_options.alias_field.as_deref(),
+                &loaded_config.index_options,
                 no_cache_refresh,
             )?;
             let vault_cfg = loaded_config.vault_config;

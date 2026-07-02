@@ -264,7 +264,8 @@ mod tests {
     }
 
     fn open(root: &Utf8Path) -> Cache {
-        crate::cache_cmd::open_for_query(root, None, false).unwrap()
+        crate::cache_cmd::open_for_query(root, &crate::graph::IndexOptions::default(), false)
+            .unwrap()
     }
 
     #[test]

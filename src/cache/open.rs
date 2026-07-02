@@ -1,5 +1,7 @@
 //! Cache::open implementation + permissions enforcement + meta init.
 
+use std::collections::BTreeSet;
+
 use camino::Utf8Path;
 use rusqlite::Connection;
 
@@ -40,9 +42,39 @@ impl crate::cache::Cache {
     /// `links_alias_field` meta row (including the disabled/empty case), the
     /// cache is silently rebuilt so resolved links stay consistent with
     /// current config.
+    ///
+    /// Thin wrapper around [`Cache::open_with_index`] that passes the
+    /// resolved index set for an unconfigured (default) vault — i.e. the
+    /// empty set. Call sites with a `LoadedConfig` in scope should use
+    /// `open_with_index` directly so the `document_fields` EAV table stays
+    /// consistent with the operator's current validate-rule / index.auto
+    /// configuration.
     pub fn open_with_config(
         vault_root: &Utf8Path,
         alias_field: Option<&str>,
+    ) -> Result<Self, CacheError> {
+        let (index_set, index_set_hash) =
+            crate::standards::resolved_index_set(&crate::standards::VaultConfig::default());
+        Self::open_with_index(vault_root, alias_field, &index_set, &index_set_hash)
+    }
+
+    /// Open the cache for a vault, additionally passing the resolved Wave-2
+    /// frontmatter-index field set (see
+    /// `crate::standards::index_policy::resolved_index_set`). Production call
+    /// sites with a `LoadedConfig` in scope should prefer this over
+    /// `open_with_config` so the `document_fields` derived table stays
+    /// consistent with the operator's current configuration.
+    ///
+    /// When an existing, otherwise-reusable cache's stored `index_set_hash`
+    /// meta row disagrees with `index_set_hash` (including "missing", for
+    /// caches that predate this column), `document_fields` is silently
+    /// re-shredded from the cached `frontmatter_json` column — no filesystem
+    /// re-parse, no user-facing output.
+    pub fn open_with_index(
+        vault_root: &Utf8Path,
+        alias_field: Option<&str>,
+        index_set: &BTreeSet<String>,
+        index_set_hash: &str,
     ) -> Result<Self, CacheError> {
         let (canonical, cache_dir) = cache_dir_for(vault_root)?;
 
@@ -56,14 +88,28 @@ impl crate::cache::Cache {
             let action = inspect_existing_cache(&db_path, &canonical, alias_field)?;
             match action {
                 InspectResult::Fresh => {
-                    return open_fresh(&cache_dir, &db_path, &canonical, alias_field);
+                    return open_fresh(
+                        &cache_dir,
+                        &db_path,
+                        &canonical,
+                        alias_field,
+                        index_set,
+                        index_set_hash,
+                    );
                 }
-                InspectResult::Reuse(conn) => {
+                InspectResult::Reuse(mut conn) => {
+                    crate::cache::document_fields::reshred_if_needed(
+                        &mut conn,
+                        index_set,
+                        index_set_hash,
+                    )?;
                     return Ok(crate::cache::Cache {
                         conn,
                         vault_root: canonical,
                         cache_dir,
                         alias_field: alias_field_owned,
+                        index_set: index_set.clone(),
+                        index_set_hash: index_set_hash.to_string(),
                     });
                 }
                 InspectResult::RebuildNeeded(reason) => {
@@ -225,6 +271,8 @@ fn open_fresh(
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
     alias_field: Option<&str>,
+    index_set: &BTreeSet<String>,
+    index_set_hash: &str,
 ) -> Result<crate::cache::Cache, CacheError> {
     let conn = Connection::open(db_path.as_std_path())?;
     conn.busy_timeout(CACHE_BUSY_TIMEOUT)?;
@@ -238,6 +286,8 @@ fn open_fresh(
         vault_root: canonical_root.to_owned(),
         cache_dir: cache_dir.to_owned(),
         alias_field: alias_field.map(|s| s.to_string()),
+        index_set: index_set.clone(),
+        index_set_hash: index_set_hash.to_string(),
     })
 }
 
@@ -336,6 +386,8 @@ fn init_meta(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
@@ -612,6 +664,106 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v, "");
+    }
+
+    #[test]
+    fn open_with_index_reshreds_document_fields_on_hash_mismatch() {
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cache-reshred-mismatch-")
+            .tempdir()
+            .unwrap();
+        let base = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        std::fs::write(vault_root.join("a.md"), "---\nstatus: active\n---\n# A\n").unwrap();
+
+        let set1: BTreeSet<String> = ["status".to_string()].into_iter().collect();
+        let mut cache =
+            crate::cache::Cache::open_with_index(&vault_root, None, &set1, "hash-1").unwrap();
+        cache.rebuild(&vault_root).unwrap();
+        drop(cache);
+
+        // Reopen with a different resolved index set / hash — should
+        // silently re-shred document_fields from cached frontmatter_json.
+        let set2: BTreeSet<String> = ["other".to_string()].into_iter().collect();
+        let cache2 =
+            crate::cache::Cache::open_with_index(&vault_root, None, &set2, "hash-2").unwrap();
+
+        let status_rows: i64 = cache2
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM document_fields WHERE key = 'status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status_rows, 0,
+            "old field should have no rows after re-shred"
+        );
+
+        let other_rows: i64 = cache2
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM document_fields WHERE key = 'other'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            other_rows, 1,
+            "newly-declared field should get a sentinel row after re-shred"
+        );
+
+        let stamped: String = cache2
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'index_set_hash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamped, "hash-2");
+    }
+
+    #[test]
+    fn open_with_index_skips_reshred_when_hash_matches() {
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cache-reshred-match-")
+            .tempdir()
+            .unwrap();
+        let base = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        std::fs::write(vault_root.join("a.md"), "---\nstatus: active\n---\n# A\n").unwrap();
+
+        let set: BTreeSet<String> = ["status".to_string()].into_iter().collect();
+        let mut cache =
+            crate::cache::Cache::open_with_index(&vault_root, None, &set, "hash-1").unwrap();
+        cache.rebuild(&vault_root).unwrap();
+
+        // Tamper a document_fields row directly; reopening with the SAME
+        // hash must not re-shred, so the tamper should persist.
+        cache
+            .conn
+            .execute(
+                "UPDATE document_fields SET value = 'tampered' WHERE path = 'a.md' AND key = 'status'",
+                [],
+            )
+            .unwrap();
+        drop(cache);
+
+        let cache2 =
+            crate::cache::Cache::open_with_index(&vault_root, None, &set, "hash-1").unwrap();
+        let value: String = cache2
+            .conn
+            .query_row(
+                "SELECT value FROM document_fields WHERE path = 'a.md' AND key = 'status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "tampered", "matching hash must skip re-shred");
     }
 
     #[test]

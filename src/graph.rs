@@ -23,14 +23,28 @@ pub(crate) struct IndexOptions {
     /// (later tasks) — not read anywhere in this task's scope.
     #[allow(dead_code)]
     pub auto: bool,
+    /// Resolved Wave-2 frontmatter-index field set — see
+    /// `crate::standards::index_policy::resolved_index_set`. Threaded to
+    /// `Cache::open_with_index` so the `document_fields` EAV writer indexes
+    /// exactly the fields the operator's config (validate rules + `auto`)
+    /// currently resolves to.
+    pub resolved_index_set: std::collections::BTreeSet<String>,
+    /// Stable hash of `resolved_index_set`, compared against the cache's
+    /// `index_set_hash` meta row on open to decide whether `document_fields`
+    /// needs a re-shred.
+    pub resolved_index_set_hash: String,
 }
 
 impl Default for IndexOptions {
     fn default() -> Self {
+        let (resolved_index_set, resolved_index_set_hash) =
+            crate::standards::resolved_index_set(&crate::standards::VaultConfig::default());
         Self {
             ignore: Vec::new(),
             alias_field: None,
             auto: true,
+            resolved_index_set,
+            resolved_index_set_hash,
         }
     }
 }
