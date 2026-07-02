@@ -30,6 +30,8 @@ mod query_documents;
 mod query_links;
 mod query_show;
 mod reader;
+#[cfg(test)]
+mod scan_semantics_probe;
 pub(crate) mod schema;
 mod status;
 mod writer;
