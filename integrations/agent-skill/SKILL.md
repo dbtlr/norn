@@ -252,7 +252,7 @@ Output is a **flattened norn-native projection**: hot fields `trace`, `status`, 
 
 ## User vault doctrine lives in .norn/config.yaml
 
-Don't hardcode a vault's rule names, field shapes, or status vocabularies into prompts — read them from `<vault-root>/.norn/config.yaml`. It declares `files.ignore`, `validate.ignore`, `validate.required_frontmatter`, `validate.rules`, and `repair.rules`. No config → defaults apply. Inspect it with `norn config show`.
+Don't hardcode a vault's rule names, field shapes, or status vocabularies into prompts — read them from `<vault-root>/.norn/config.yaml`. It declares `files.ignore`, `validate.ignore`, `validate.required_frontmatter`, `validate.rules`, and `repair.rules`. No config → defaults apply. Inspect it with `norn config show`. `field_types` entries with a bounded type (`string`, `date`, `datetime`, `wikilink`, `wikilink_or_list`, `list_of_strings`) or an explicit `indexed: true` get shredded into a derived index (`index.auto`, default on) that `find`/`count` route through automatically — no query-side flag needed, it's purely a config-time performance lever.
 
 ## Common pitfalls
 
