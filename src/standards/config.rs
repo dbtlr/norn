@@ -563,7 +563,12 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                             ),
                         });
                     }
-                    if !options.iter().all(is_scalar_json_value) {
+                    // Null is excluded: it can never match a document value, so
+                    // a null any-of option would be silently inert.
+                    if !options
+                        .iter()
+                        .all(|option| is_scalar_json_value(option) && !option.is_null())
+                    {
                         return Err(ConfigError::Invalid {
                             source_path: source_path.to_owned(),
                             message: format!(
@@ -713,8 +718,13 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         fn rules_can_coapply(a: &ValidateRule, b: &ValidateRule) -> bool {
             for (k, va) in &a.r#match.frontmatter {
                 if let Some(vb) = b.r#match.frontmatter.get(k) {
-                    let (oa, ob) = (predicate_options(va), predicate_options(vb));
-                    if !oa.iter().any(|x| ob.contains(x)) {
+                    // Overlap = some value accepted by `a` is also accepted by
+                    // `b`, judged by the engine's own predicate semantics so
+                    // the guard can never drift from what actually fires.
+                    let overlaps = predicate_options(va).iter().any(|option| {
+                        crate::standards::predicates::frontmatter_predicate_matches(option, vb)
+                    });
+                    if !overlaps {
                         return false;
                     }
                 }
@@ -1376,6 +1386,46 @@ validate:
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("match.frontmatter.type"), "got: {msg}");
+    }
+
+    #[test]
+    fn null_list_element_match_frontmatter_is_rejected() {
+        let err = parse(
+            "validate:\n  rules:\n    - name: r\n      match:\n        frontmatter:\n          status: [null, open]\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("match.frontmatter.status")
+                && msg.contains("strings, booleans, or numbers"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn config_load_accepts_differing_defaults_when_null_predicates_never_fire() {
+        // A scalar null predicate can never match a document (the engine's
+        // predicate semantics reject null), so two such rules can never
+        // co-apply — their differing defaults are not a conflict.
+        let yaml = r#"
+validate:
+  rules:
+    - name: a
+      match:
+        path: "**/*.md"
+        frontmatter:
+          flag: null
+      frontmatter_defaults:
+        status: x
+    - name: b
+      match:
+        path: "**/*.md"
+        frontmatter:
+          flag: null
+      frontmatter_defaults:
+        status: y
+"#;
+        parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
     }
 
     #[test]

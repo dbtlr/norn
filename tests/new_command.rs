@@ -92,6 +92,75 @@ validate:
 }
 
 #[test]
+fn process_level_list_selector_rule_gates_defaults() {
+    // An any-of selector (NRN-71) must gate frontmatter_defaults the same
+    // way it gates validation: `--field type=task` puts the doc inside the
+    // any-of set, so the rule's status default applies.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: node-base
+      match:
+        frontmatter:
+          type: [task, phase]
+      required_frontmatter: [status]
+      frontmatter_defaults:
+        status: backlog
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args([
+            "new",
+            "t1.md",
+            "--field",
+            "type=task",
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    let fc = envelope["frontmatter_created"].as_array().unwrap();
+    assert!(
+        fc.iter()
+            .any(|f| f["field"] == "status" && f["value"] == "backlog"),
+        "status default should apply via the any-of selector: {stdout}"
+    );
+
+    // Outside the any-of set: the default must NOT apply.
+    let output = norn_cmd(&vault)
+        .args([
+            "new",
+            "n1.md",
+            "--field",
+            "type=note",
+            "--dry-run",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    let fc = envelope["frontmatter_created"].as_array().unwrap();
+    assert!(
+        !fc.iter().any(|f| f["field"] == "status"),
+        "note is outside the any-of set; no status default expected: {stdout}"
+    );
+}
+
+#[test]
 fn process_level_apply_writes_file_with_yes() {
     let vault = build_vault("validate: {}\n");
 

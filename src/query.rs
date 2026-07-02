@@ -46,6 +46,12 @@ pub fn document_query_from_options(
 
 /// Convert a validate rule's `match` predicates into a DocumentQuery so
 /// the per-rule scope can be SQL-narrowed.
+///
+/// The narrowing is a *superset* filter, not the authoritative predicate:
+/// the SQL membership machinery (`push_string_membership`) also matches
+/// array-valued document fields and collapses wikilink brackets, both of
+/// which the engine's `frontmatter_predicate_matches` rejects. Any caller
+/// must re-check candidates with the engine predicate (`rule_matches`).
 #[allow(dead_code)]
 pub fn rule_scope_query(rule: &ValidateRule) -> DocumentQuery {
     let mut query = DocumentQuery::default();
