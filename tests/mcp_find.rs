@@ -217,3 +217,110 @@ fn lists_and_calls_vault_find() {
         );
     }
 }
+
+/// NRN-79: `vault.find` must return the identical result set whether the
+/// queried field is declared `indexed` (routes through the derived
+/// `document_fields` EAV table) or not (scan path) — MCP shares the same
+/// `Cache::documents_matching` builder as the CLI, so this is the MCP-level
+/// half of that non-negotiable (the CLI half lives in
+/// `tests/find_index_routing.rs`).
+#[test]
+fn vault_find_result_identical_when_queried_field_is_indexed() {
+    let vault = seeded_vault();
+    std::fs::create_dir_all(vault.path().join(".norn")).unwrap();
+    std::fs::write(
+        vault.path().join(".norn/config.yaml"),
+        "validate:\n  rules:\n    - name: r\n      field_types:\n        type: { type: string, indexed: true }\n",
+    )
+    .unwrap();
+
+    // Re-run cache rebuild so the freshly-declared index set is reflected
+    // (the seeded_vault() rebuild above ran before the config existed).
+    let rebuild = Command::new(norn_bin())
+        .arg("--cwd")
+        .arg(vault.path())
+        .arg("cache")
+        .arg("rebuild")
+        .env("XDG_CACHE_HOME", vault.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", vault.path().join(".xdg-state"))
+        .output()
+        .expect("failed to run norn cache rebuild");
+    assert!(rebuild.status.success());
+
+    let mut child = Command::new(norn_bin())
+        .arg("--cwd")
+        .arg(vault.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("XDG_CACHE_HOME", vault.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", vault.path().join(".xdg-state"))
+        .spawn()
+        .expect("failed to spawn norn mcp");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not captured");
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "norn-find-indexed-client", "version": "0.0.1" }
+                }
+            })))
+            .unwrap();
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.find",
+                    "arguments": { "eq": ["type:note"] }
+                }
+            })))
+            .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait on norn mcp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "norn mcp exited non-zero ({})\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+
+    let responses: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let find_resp = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .unwrap_or_else(|| panic!("no tools/call response\nstdout: {stdout}\nstderr: {stderr}"));
+    assert!(
+        find_resp.get("error").is_none(),
+        "vault.find call must not error, got: {find_resp}"
+    );
+
+    let mut paths: Vec<String> = find_resp["result"]["structuredContent"]["documents"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!("vault.find result must carry a documents array, got: {find_resp}")
+        })
+        .iter()
+        .map(|d| d["path"].as_str().unwrap().to_string())
+        .collect();
+    paths.sort();
+
+    // Same 2 notes as the unindexed round-trip above (note1.md, note2.md).
+    assert_eq!(paths, vec!["note1.md", "note2.md"]);
+}
