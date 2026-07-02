@@ -33,6 +33,14 @@ impl crate::cache::Cache {
     /// access to a loaded config should use this; production call sites with
     /// `LoadedConfig` in scope should use `open_with_config` so cached
     /// resolved-link state stays consistent with the operator's config.
+    ///
+    /// **Non-authoritative.** This opener has no real config knowledge — it
+    /// never knows whether the operator's declared index set is genuinely
+    /// empty or just unavailable here. It therefore never re-shreds
+    /// `document_fields` and never stamps the `index_set_hash` meta row;
+    /// an existing index is left exactly as-is for a later authoritative
+    /// open to reconcile. Every production path that can write documents
+    /// must open via `open_with_index`.
     pub fn open(vault_root: &Utf8Path) -> Result<Self, CacheError> {
         Self::open_with_config(vault_root, None)
     }
@@ -43,9 +51,10 @@ impl crate::cache::Cache {
     /// cache is silently rebuilt so resolved links stay consistent with
     /// current config.
     ///
-    /// Thin wrapper around [`Cache::open_with_index`] that passes the
-    /// resolved index set for an unconfigured (default) vault — i.e. the
-    /// empty set. Call sites with a `LoadedConfig` in scope should use
+    /// Resolves the same (empty) index set `open_with_index` would compute
+    /// for an unconfigured vault, but — unlike `open_with_index` — does NOT
+    /// treat it as authoritative. See the non-authoritative note on
+    /// [`Cache::open`]: call sites with a `LoadedConfig` in scope must use
     /// `open_with_index` directly so the `document_fields` EAV table stays
     /// consistent with the operator's current validate-rule / index.auto
     /// configuration.
@@ -55,7 +64,13 @@ impl crate::cache::Cache {
     ) -> Result<Self, CacheError> {
         let (index_set, index_set_hash) =
             crate::standards::resolved_index_set(&crate::standards::VaultConfig::default());
-        Self::open_with_index(vault_root, alias_field, &index_set, &index_set_hash)
+        open_impl(
+            vault_root,
+            alias_field,
+            &index_set,
+            &index_set_hash,
+            /* authoritative */ false,
+        )
     }
 
     /// Open the cache for a vault, additionally passing the resolved Wave-2
@@ -65,71 +80,96 @@ impl crate::cache::Cache {
     /// `open_with_config` so the `document_fields` derived table stays
     /// consistent with the operator's current configuration.
     ///
-    /// When an existing, otherwise-reusable cache's stored `index_set_hash`
-    /// meta row disagrees with `index_set_hash` (including "missing", for
-    /// caches that predate this column), `document_fields` is silently
-    /// re-shredded from the cached `frontmatter_json` column — no filesystem
-    /// re-parse, no user-facing output.
+    /// **Authoritative.** `index_set`/`index_set_hash` here are taken as
+    /// ground truth: when an existing, otherwise-reusable cache's stored
+    /// `index_set_hash` meta row disagrees (including "missing", for caches
+    /// that predate this column), `document_fields` is silently re-shredded
+    /// from the cached `frontmatter_json` column — no filesystem re-parse, no
+    /// user-facing output — and the meta row is stamped with the new hash.
     pub fn open_with_index(
         vault_root: &Utf8Path,
         alias_field: Option<&str>,
         index_set: &BTreeSet<String>,
         index_set_hash: &str,
     ) -> Result<Self, CacheError> {
-        let (canonical, cache_dir) = cache_dir_for(vault_root)?;
+        open_impl(
+            vault_root,
+            alias_field,
+            index_set,
+            index_set_hash,
+            /* authoritative */ true,
+        )
+    }
+}
 
-        // Ensure cache directory exists at 0700.
-        create_dir_secure(&cache_dir)?;
+/// Shared implementation behind `open`/`open_with_config` (non-authoritative)
+/// and `open_with_index` (authoritative). `authoritative` gates whether a
+/// reused cache is allowed to re-shred `document_fields` against
+/// `index_set`/`index_set_hash` — see the doc comments on the public
+/// constructors for the invariant this protects.
+fn open_impl(
+    vault_root: &Utf8Path,
+    alias_field: Option<&str>,
+    index_set: &BTreeSet<String>,
+    index_set_hash: &str,
+    authoritative: bool,
+) -> Result<crate::cache::Cache, CacheError> {
+    let (canonical, cache_dir) = cache_dir_for(vault_root)?;
 
-        let db_path = cache_dir.join("cache.db");
-        let alias_field_owned: Option<String> = alias_field.map(|s| s.to_string());
+    // Ensure cache directory exists at 0700.
+    create_dir_secure(&cache_dir)?;
 
-        loop {
-            let action = inspect_existing_cache(&db_path, &canonical, alias_field)?;
-            match action {
-                InspectResult::Fresh => {
-                    return open_fresh(
-                        &cache_dir,
-                        &db_path,
-                        &canonical,
-                        alias_field,
-                        index_set,
-                        index_set_hash,
-                    );
-                }
-                InspectResult::Reuse(mut conn) => {
+    let db_path = cache_dir.join("cache.db");
+    let alias_field_owned: Option<String> = alias_field.map(|s| s.to_string());
+
+    loop {
+        let action = inspect_existing_cache(&db_path, &canonical, alias_field)?;
+        match action {
+            InspectResult::Fresh => {
+                return open_fresh(
+                    &cache_dir,
+                    &db_path,
+                    &canonical,
+                    alias_field,
+                    index_set,
+                    index_set_hash,
+                    authoritative,
+                );
+            }
+            InspectResult::Reuse(mut conn) => {
+                if authoritative {
                     crate::cache::document_fields::reshred_if_needed(
                         &mut conn,
+                        &cache_dir,
                         index_set,
                         index_set_hash,
                     )?;
-                    return Ok(crate::cache::Cache {
-                        conn,
-                        vault_root: canonical,
-                        cache_dir,
-                        alias_field: alias_field_owned,
-                        index_set: index_set.clone(),
-                        index_set_hash: index_set_hash.to_string(),
-                    });
                 }
-                InspectResult::RebuildNeeded(reason) => {
-                    emit_rebuild_message(&reason);
-                    // Delete and loop back through; next pass takes the Fresh branch.
-                    if db_path.as_std_path().exists() {
-                        std::fs::remove_file(db_path.as_std_path()).map_err(|e| {
-                            CacheError::Io {
-                                path: db_path.clone(),
-                                source: e,
-                            }
-                        })?;
-                    }
-                    let wal = db_path.with_extension("db-wal");
-                    let shm = db_path.with_extension("db-shm");
-                    let _ = std::fs::remove_file(wal.as_std_path());
-                    let _ = std::fs::remove_file(shm.as_std_path());
-                }
-                InspectResult::HardError(err) => return Err(err),
+                return Ok(crate::cache::Cache {
+                    conn,
+                    vault_root: canonical,
+                    cache_dir,
+                    alias_field: alias_field_owned,
+                    index_set: index_set.clone(),
+                    index_set_hash: index_set_hash.to_string(),
+                    index_authoritative: authoritative,
+                });
             }
+            InspectResult::RebuildNeeded(reason) => {
+                emit_rebuild_message(&reason);
+                // Delete and loop back through; next pass takes the Fresh branch.
+                if db_path.as_std_path().exists() {
+                    std::fs::remove_file(db_path.as_std_path()).map_err(|e| CacheError::Io {
+                        path: db_path.clone(),
+                        source: e,
+                    })?;
+                }
+                let wal = db_path.with_extension("db-wal");
+                let shm = db_path.with_extension("db-shm");
+                let _ = std::fs::remove_file(wal.as_std_path());
+                let _ = std::fs::remove_file(shm.as_std_path());
+            }
+            InspectResult::HardError(err) => return Err(err),
         }
     }
 }
@@ -273,6 +313,7 @@ fn open_fresh(
     alias_field: Option<&str>,
     index_set: &BTreeSet<String>,
     index_set_hash: &str,
+    authoritative: bool,
 ) -> Result<crate::cache::Cache, CacheError> {
     let conn = Connection::open(db_path.as_std_path())?;
     conn.busy_timeout(CACHE_BUSY_TIMEOUT)?;
@@ -288,6 +329,7 @@ fn open_fresh(
         alias_field: alias_field.map(|s| s.to_string()),
         index_set: index_set.clone(),
         index_set_hash: index_set_hash.to_string(),
+        index_authoritative: authoritative,
     })
 }
 
@@ -764,6 +806,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(value, "tampered", "matching hash must skip re-shred");
+    }
+
+    #[test]
+    fn non_authoritative_open_never_reshreds_or_stamps_index_set_hash() {
+        // Regression for the live-reproduced CRITICAL bug: any opener
+        // without real config knowledge (`Cache::open` / `open_with_config`,
+        // e.g. `norn find --help`'s live-examples path) must NEVER treat its
+        // unconfigured-default empty index set as authoritative — doing so
+        // silently deleted every `document_fields` row and stamped the
+        // empty-set hash on a cache that was actually built against a real
+        // configured index set.
+        let dir = tempfile::Builder::new()
+            .prefix("vault-cache-nonauth-open-")
+            .tempdir()
+            .unwrap();
+        let base = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let vault_root = base.join("vault");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        std::fs::write(vault_root.join("a.md"), "---\nstatus: active\n---\n# A\n").unwrap();
+
+        // Authoritative build against a real configured index set.
+        let set: BTreeSet<String> = ["status".to_string()].into_iter().collect();
+        let mut cache =
+            crate::cache::Cache::open_with_index(&vault_root, None, &set, "real-config-hash")
+                .unwrap();
+        cache.rebuild(&vault_root).unwrap();
+        drop(cache);
+
+        let before_rows: i64 = {
+            let cache =
+                crate::cache::Cache::open_with_index(&vault_root, None, &set, "real-config-hash")
+                    .unwrap();
+            cache
+                .conn
+                .query_row("SELECT COUNT(*) FROM document_fields", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(
+            before_rows > 0,
+            "authoritative rebuild should have populated document_fields"
+        );
+
+        // A non-authoritative open (no config knowledge) must leave both the
+        // rows and the stamped hash completely untouched.
+        let non_auth = crate::cache::Cache::open(&vault_root).unwrap();
+        let after_rows: i64 = non_auth
+            .conn
+            .query_row("SELECT COUNT(*) FROM document_fields", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after_rows, before_rows,
+            "non-authoritative open must not delete/re-shred document_fields rows"
+        );
+        let stamped: String = non_auth
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'index_set_hash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamped, "real-config-hash",
+            "non-authoritative open must not stamp its own (unconfigured-default) hash"
+        );
     }
 
     #[test]

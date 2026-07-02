@@ -42,7 +42,7 @@ The cache is *disposable*. Any of the following triggers an automatic silent reb
 
 A cache with a *newer* schema version than the binary supports is the one case that hard-errors — interpreting unknown future fields would be unsafe. Upgrade `norn` to read it.
 
-The current `schema_version` is `2`. It is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
+The current `schema_version` is `3`. It is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
 
 ## Lifecycle
 
@@ -72,6 +72,12 @@ norn --no-cache-refresh validate --code 'link-*' --format jsonl
 Stored: document path, stem, content hash, frontmatter, body text, mtime, size; outgoing links with resolved targets (including the unresolved reason and candidate list for ambiguous links); headings; block IDs; non-Markdown file inventory.
 
 Not stored: validation findings — they depend on `.norn/config.yaml`, which can change between runs. Findings always recompute fresh against the in-memory graph loaded from the cache.
+
+### `document_fields` — the derived frontmatter index
+
+`document_fields` is a derived EAV (entity-attribute-value) table shredded from the declared, bounded frontmatter field set (the fields `field_types` bounds, plus any field explicitly marked `indexed`). Every document gets exactly one row per declared field: scalars are canonicalized the same way the query layer computes them; arrays expand to one row per element (an empty array, or an array whose elements are all null, gets a single row with a SQL `NULL` value, meaning "present, no scalar"); a field absent from frontmatter (or present but null, or whose frontmatter failed to parse) gets a reserved BLOB sentinel — every (document, declared field) pair always has at least one row. Fields outside the declared set get no rows.
+
+The table is rebuilt automatically: a full `norn cache rebuild` or incremental `norn cache index` keeps it current, and opening the cache with a resolved index set that no longer matches the stamped `index_set_hash` meta row triggers a silent in-place re-shred straight from the cached `frontmatter_json` column — no filesystem re-parse, no user-facing output. Like the rest of the cache, it's disposable and self-healing; nothing about it needs manual maintenance.
 
 ## Performance targets
 

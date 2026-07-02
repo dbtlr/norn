@@ -65,7 +65,14 @@ impl crate::cache::Cache {
         }
         update_meta_rebuild_ts(&tx)?;
         update_meta_alias_field(&tx, self.alias_field.as_deref())?;
-        update_meta_index_set_hash(&tx, &self.index_set_hash)?;
+        // Only an authoritative open (`Cache::open_with_index`) knows the
+        // operator's real declared index set — stamping the hash from a
+        // non-authoritative open's unconfigured-default empty set would
+        // make a later authoritative open think it's already reconciled.
+        // Leave whatever stamp already exists; that later open reconciles.
+        if self.index_authoritative {
+            update_meta_index_set_hash(&tx, &self.index_set_hash)?;
+        }
         tx.commit()?;
         // Refresh query-planner statistics for `document_fields` after a full
         // rewrite; deliberately not run on the per-doc incremental path
