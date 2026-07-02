@@ -77,6 +77,8 @@ Not stored: validation findings — they depend on `.norn/config.yaml`, which ca
 
 `document_fields` is a derived EAV (entity-attribute-value) table shredded from the declared, bounded frontmatter field set (the fields `field_types` bounds, plus any field explicitly marked `indexed`). Every document gets exactly one row per declared field: scalars are canonicalized the same way the query layer computes them; arrays expand to one row per element (an empty array, or an array whose elements are all null, gets a single row with a SQL `NULL` value, meaning "present, no scalar"); a field absent from frontmatter (or present but null, or whose frontmatter failed to parse) gets a reserved BLOB sentinel — every (document, declared field) pair always has at least one row. Fields outside the declared set get no rows.
 
+`find`/`count`'s query router reads this table directly for `--eq`/`--not-eq`/`--in`/`--not-in`/`--has`/`--missing`/`--starts-with`/`--ends-with`/`--contains` predicates on a declared-indexed field, instead of scanning `frontmatter_json` via `json_extract` — same results, but the query plan is an index seek rather than a per-document scan (see [`find`](commands/find.md#filters)).
+
 The table is rebuilt automatically: a full `norn cache rebuild` or incremental `norn cache index` keeps it current, and opening the cache with a resolved index set that no longer matches the stamped `index_set_hash` meta row triggers a silent in-place re-shred straight from the cached `frontmatter_json` column — no filesystem re-parse, no user-facing output. Like the rest of the cache, it's disposable and self-healing; nothing about it needs manual maintenance.
 
 ## Performance targets

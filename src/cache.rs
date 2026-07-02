@@ -19,6 +19,8 @@ pub(crate) use query::DocumentQuery;
 mod canonical;
 mod change_detection;
 mod document_fields;
+#[cfg(test)]
+mod eav_acceptance;
 mod find;
 mod identity;
 mod invalidation;

@@ -64,6 +64,8 @@ All filters are ANDed together. Within `--in` and `--not-in`, comma-separated va
 
 String-valued predicates (`--eq`, `--not-eq`, `--in`, `--not-in`, `--starts-with`, `--ends-with`, `--contains`) are array-aware — an array-valued field matches when any element matches — and collapse `[[wikilink]]` brackets on both sides, so `--starts-with depends_on:NRN-` matches a stored `"[[NRN-123]]"`. The three string operators compare literal text: no bool/number coercion of the value, no whitespace trimming (a quoted `'title:done '` keeps its trailing space), and no wildcards or regex. Non-string stored values compare by their JSON text rendering — booleans as `true`/`false`, numbers in canonical form (a stored `2.50` is the value `2.5`).
 
+These same predicates answer from the derived `document_fields` index (see [cache internals](../cache.md)) instead of scanning `frontmatter_json` when every field they touch is declared `indexed` (see [`config`](config.md)). Filtering on a field that isn't indexed still works — it just scans — and past 1,000 documents `find`/`count` warn once on stderr (`scanned N documents on unindexed field(s) 'x'; declare indexed: true (or a bounded type) to accelerate`) rather than silently staying slow.
+
 ## Selecting fields — `--col` and `--all-cols`
 
 By default `find` shows frontmatter only. `--col` narrows or extends that selection; the vocabulary is shared with `norn get`.
