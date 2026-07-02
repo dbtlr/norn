@@ -49,7 +49,11 @@ pub fn lookup_field_type(cfg: &VaultConfig, doc: &Document, field: &str) -> Opti
             continue;
         }
         if let Some(spec) = rule.field_types.get(field) {
-            return Some(spec.type_name().to_string());
+            // A type-less extended entry (`{ indexed: bool }`) declares no
+            // type — keep looking at subsequent matching rules.
+            if let Some(ty) = spec.type_name() {
+                return Some(ty.to_string());
+            }
         }
     }
     None
@@ -177,7 +181,13 @@ pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
         if !crate::standards::engine::rule_matches(doc, rule) {
             continue;
         }
-        if rule.field_types.contains_key(field)
+        // A type-less extended entry (`{ indexed: bool }`) contributes only to
+        // the index vote — it must not make the field "known" to the schema.
+        let has_typed_field_type = rule
+            .field_types
+            .get(field)
+            .is_some_and(|spec| spec.type_name().is_some());
+        if has_typed_field_type
             || rule.allowed_values.contains_key(field)
             || rule.required_frontmatter.iter().any(|f| f == field)
         {

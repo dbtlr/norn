@@ -168,11 +168,15 @@ pub fn build_plan(
                 .iter()
                 .find_map(|(rule, _)| rule.field_types.get(&key))
                 .cloned();
-            match field_type {
-                Some(spec) => crate::set::validate::coerce_value_for_type(
-                    spec.type_name(),
+            // A type-less extended entry (`{ indexed: bool }`) declares no
+            // type — treat it the same as an undeclared field.
+            match field_type.as_ref().and_then(|spec| spec.type_name()) {
+                Some(ty) => crate::set::validate::coerce_value_for_type(
+                    ty,
                     raw_str,
-                    spec.effective_max_length(),
+                    field_type
+                        .as_ref()
+                        .and_then(|spec| spec.effective_max_length()),
                 )
                 .map_err(|e| SynthError::Coercion {
                     field: key.clone(),

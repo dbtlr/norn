@@ -190,6 +190,7 @@ fn finding_field(finding: &Finding) -> Option<&str> {
         FindingBody::RequiredFrontmatterMissing { field, .. }
         | FindingBody::DisallowedValue { field, .. }
         | FindingBody::InvalidFieldType { field, .. }
+        | FindingBody::ExceedsMaxLength { field, .. }
         | FindingBody::ForbiddenField { field, .. }
         | FindingBody::AliasMalformed { field, .. }
         | FindingBody::ReferenceType { field, .. } => Some(field),
@@ -206,6 +207,7 @@ fn finding_rule(finding: &Finding) -> Option<&str> {
         FindingBody::RequiredFrontmatterMissing { rule, .. }
         | FindingBody::DisallowedValue { rule, .. }
         | FindingBody::InvalidFieldType { rule, .. }
+        | FindingBody::ExceedsMaxLength { rule, .. }
         | FindingBody::ForbiddenField { rule, .. }
         | FindingBody::DocumentMisrouted { rule, .. }
         | FindingBody::ReferenceType { rule, .. } => rule.as_deref(),

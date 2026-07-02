@@ -42,23 +42,41 @@ pub(crate) fn check_field_types(
     types
         .iter()
         .filter_map(|(field, spec)| {
+            // A type-less extended entry (`{ indexed: bool }`) contributes only
+            // to the index vote (see index_policy) — it declares no type here.
+            let expected_type = spec.type_name()?;
             let actual = crate::standards::predicates::document_frontmatter_field(document, field)?;
-            let expected_type = spec.type_name();
+            let max_length = spec.effective_max_length();
             if crate::standards::predicates::frontmatter_type_matches(
                 actual,
                 expected_type,
-                spec.effective_max_length(),
+                max_length,
             ) {
-                None
-            } else {
-                Some(Finding::frontmatter_invalid_type(
+                return None;
+            }
+            if let Some(actual_length) =
+                crate::standards::predicates::frontmatter_exceeds_max_length(
+                    actual,
+                    expected_type,
+                    max_length,
+                )
+            {
+                return Some(Finding::frontmatter_exceeds_max_length(
                     document.path.clone(),
                     rule.map(str::to_string),
                     field.clone(),
                     actual.clone(),
-                    expected_type.to_string(),
-                ))
+                    max_length.expect("a length violation implies an effective bound"),
+                    actual_length,
+                ));
             }
+            Some(Finding::frontmatter_invalid_type(
+                document.path.clone(),
+                rule.map(str::to_string),
+                field.clone(),
+                actual.clone(),
+                expected_type.to_string(),
+            ))
         })
         .collect()
 }
@@ -330,4 +348,96 @@ pub(crate) fn check_links(document: &Document) -> Vec<Finding> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::standards::config::FieldTypeSpec;
+    use crate::standards::findings::FindingBody;
+    use serde_json::json;
+
+    fn doc_with_frontmatter(fm: serde_json::Value) -> Document {
+        Document {
+            path: Utf8PathBuf::from("notes/foo.md"),
+            stem: "foo".to_string(),
+            hash: "h".into(),
+            frontmatter: Some(fm),
+            body_text: String::new(),
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
+        }
+    }
+
+    fn field_types(field_types_yaml: &str) -> HashMap<String, FieldTypeSpec> {
+        let yaml =
+            format!("validate:\n  rules:\n    - name: r\n      field_types:\n{field_types_yaml}");
+        let cfg = crate::standards::parse_config(&yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config should parse");
+        cfg.validate.rules[0].field_types.clone()
+    }
+
+    #[test]
+    fn over_length_string_reports_exceeds_max_length_not_invalid_type() {
+        let types = field_types("        project: { type: string, max_length: 5 }\n");
+        let doc = doc_with_frontmatter(json!({"project": "toolong"}));
+        let findings = check_field_types(&doc, &types, None);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "frontmatter-exceeds-max-length");
+        match &findings[0].body {
+            FindingBody::ExceedsMaxLength {
+                field,
+                max_length,
+                actual_length,
+                ..
+            } => {
+                assert_eq!(field, "project");
+                assert_eq!(*max_length, 5);
+                assert_eq!(*actual_length, 7);
+            }
+            other => panic!("expected ExceedsMaxLength, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrong_type_still_reports_invalid_type() {
+        let types = field_types("        project: { type: string, max_length: 5 }\n");
+        let doc = doc_with_frontmatter(json!({"project": 12345}));
+        let findings = check_field_types(&doc, &types, None);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "frontmatter-invalid-type");
+    }
+
+    #[test]
+    fn within_bound_string_produces_no_finding() {
+        let types = field_types("        project: { type: string, max_length: 5 }\n");
+        let doc = doc_with_frontmatter(json!({"project": "ok"}));
+        let findings = check_field_types(&doc, &types, None);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn over_length_list_of_strings_element_reports_exceeds_max_length() {
+        let types = field_types("        tags: { type: list_of_strings, max_length: 3 }\n");
+        let doc = doc_with_frontmatter(json!({"tags": ["ok", "toolong"]}));
+        let findings = check_field_types(&doc, &types, None);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "frontmatter-exceeds-max-length");
+        match &findings[0].body {
+            FindingBody::ExceedsMaxLength { actual_length, .. } => assert_eq!(*actual_length, 7),
+            other => panic!("expected ExceedsMaxLength, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn type_less_indexed_only_entry_contributes_no_type_finding() {
+        let types = field_types("        status: { indexed: false }\n");
+        let doc = doc_with_frontmatter(json!({"status": 12345}));
+        let findings = check_field_types(&doc, &types, None);
+        assert!(findings.is_empty());
+    }
 }

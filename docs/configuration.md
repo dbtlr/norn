@@ -32,11 +32,15 @@ validate:
       required_frontmatter: [...]
       forbidden_frontmatter: [...]
       field_types:
-        field: datetime | date | list_of_strings | wikilink | wikilink_or_list
+        field: datetime | date | list_of_strings | wikilink | wikilink_or_list | string | text
+        field2: { type: string, max_length: 32, indexed: true }   # extended form
+        field3: { indexed: true }   # type-less: index vote only, no type declared
       allowed_values:
         field: [value1, value2]
       allowed_paths:
         - "..."
+index:
+  auto: true        # auto-index bounded-type fields (default true)
 repair:
   rules:            # deterministic repair rules; see validation.md
     - name: rule-name
@@ -118,13 +122,14 @@ Constraints (independent and additive):
 | `required_frontmatter` | `frontmatter-required-field-missing` | Listed field is absent or null. |
 | `forbidden_frontmatter` | `frontmatter-forbidden-field` | Listed field is present and non-null. |
 | `field_types` | `frontmatter-invalid-type` | Present value doesn't match declared shape. |
+| `field_types` (`max_length`) | `frontmatter-exceeds-max-length` | Present `string`/`list_of_strings` value matches its declared type but exceeds the effective `max_length` bound. |
 | `allowed_values` | `frontmatter-disallowed-value` | Present value isn't one of the declared values. |
 | `allowed_paths` | `document-misrouted` | Document path matches no declared glob. |
 | `field_references` | `frontmatter-reference-type` | A field's wikilink resolves to a document whose `type` is outside the declared `target_type` set. |
 
 `field_references` declares typed references per field: `field_references: { parent: { target_type: [phase, initiative] } }` (scalar or any-of list, like `match.frontmatter`). Only resolved frontmatter wikilinks are judged — broken references stay `link-*` findings; a resolved target without `type` reports as `(missing)`. Validate-time only.
 
-Supported `field_types`: `datetime`, `date`, `list_of_strings`, `wikilink`, `wikilink_or_list`. Field-type checks only run when the field is present — combine with `required_frontmatter` when presence is also required.
+Supported `field_types`: `datetime`, `date`, `list_of_strings`, `wikilink`, `wikilink_or_list`, `string`, `text`. Field-type checks only run when the field is present — combine with `required_frontmatter` when presence is also required.
 
 - `frontmatter_defaults`: map of field → default value. Used by `norn new` to
   fill required fields when creating a new document. Values may use the
@@ -134,6 +139,25 @@ Supported `field_types`: `datetime`, `date`, `list_of_strings`, `wikilink`, `wik
   `slugify`). See `CHANGELOG.md` for details.
 
 `datetime` accepts ISO/YAML forms with optional seconds, fractional seconds, `Z`, numeric timezone offsets, or a space separator. `date` accepts plain `YYYY-MM-DD` values and YAML-normalized midnight datetime strings.
+
+`string` is a bounded scalar: at most `max_length` characters, default 64, raisable to a 256-char ceiling. `text` is its unbounded counterpart — any length, no `max_length` allowed. `list_of_strings` elements are bounded the same way as `string` (default 64, same 256 ceiling), each element checked independently. An over-length `string`/`list_of_strings` value reports `frontmatter-exceeds-max-length` rather than `frontmatter-invalid-type`.
+
+### Extended `field_types` form
+
+Alongside the bare `field: type_name` shorthand, a field can declare the extended object form:
+
+```yaml
+field_types:
+  project: { type: string, max_length: 32, indexed: true }
+  notes: { type: text }
+  status: { indexed: false }   # type-less: index vote only
+```
+
+- `type` — the field's type, same vocabulary as the bare form.
+- `max_length` — only valid on `string`/`list_of_strings`; must be between 1 and 256; defaults to 64 when the type is bounded and `max_length` is omitted.
+- `indexed` — forces the field in (`true`) or out (`false`) of the derived frontmatter index, overriding auto-indexing (see `index.auto` below). Valid on any type.
+
+`type` may be omitted only when `indexed` is the entry's sole key (`{ indexed: true }` / `{ indexed: false }`) — a type-less entry votes on indexing only and declares no type: `validate`, `norn set`, and `norn new` all treat the field as undeclared for type-checking and coercion purposes. Any other type-less combination (e.g. `{ max_length: 32 }` alone, or `{ indexed: false, max_length: 5 }`) is a config load error, as is an unknown key or a `max_length` on a type that carries no length bound.
 
 ### Worked example
 
@@ -170,6 +194,17 @@ validate:
 ```
 
 Findings include `rule` context when a scoped rule produced them.
+
+## index
+
+Config for the derived frontmatter index (used to accelerate queries):
+
+```yaml
+index:
+  auto: true   # default true
+```
+
+`auto` (default `true`) controls automatic indexing: when true, every field with a bounded `field_types` type (`date`, `datetime`, `wikilink`, `wikilink_or_list`, `string`, `list_of_strings`) or an `allowed_values` constraint is indexed for query acceleration, unless an explicit `indexed: false` overrides it. `text` fields — the one unbounded scalar type — are never auto-indexed; give a `text` field `indexed: true` explicitly to include it anyway. Set `auto: false` to index only fields with an explicit `indexed: true`.
 
 ## repair.rules
 

@@ -13,6 +13,9 @@ pub fn fix_hint_for(code: &str) -> Option<&'static str> {
         "frontmatter-invalid-type" => Some(
             "coerce the value to the expected type, or relax the rule's field-type constraint",
         ),
+        "frontmatter-exceeds-max-length" => Some(
+            "shorten the value to fit the bound, or raise the rule's max_length",
+        ),
         "frontmatter-forbidden-field" => Some(
             "remove the field from the document, or relax the rule's forbidden-fields list",
         ),

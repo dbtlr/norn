@@ -272,6 +272,11 @@ pub const STRING_MAX_LENGTH_CEILING: u32 = 256;
 /// A `field_types` declaration: either the bare type-name string (`created:
 /// datetime`) or the extended object form (`project: { type: string,
 /// max_length: 32 }`). Both are accepted anywhere a field type is declared.
+///
+/// `type` is optional in the extended form only for the type-less
+/// indexed-only shape (`{ indexed: true }`) — see `post_validate`, which
+/// enforces that an extended entry either declares `type` or declares
+/// `indexed` and nothing else.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum FieldTypeSpec {
@@ -282,19 +287,23 @@ pub enum FieldTypeSpec {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldTypeDecl {
-    #[serde(rename = "type")]
-    pub type_name: String,
-    #[serde(default)]
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed: Option<bool>,
 }
 
 impl FieldTypeSpec {
-    pub fn type_name(&self) -> &str {
+    /// The declared type name, if any. `None` only for the type-less
+    /// indexed-only extended form (`{ indexed: bool }`); such an entry
+    /// contributes no type — validate/checks and set-coercion treat the
+    /// field as undeclared for every purpose but the index vote.
+    pub fn type_name(&self) -> Option<&str> {
         match self {
-            FieldTypeSpec::Bare(name) => name,
-            FieldTypeSpec::Extended(decl) => &decl.type_name,
+            FieldTypeSpec::Bare(name) => Some(name),
+            FieldTypeSpec::Extended(decl) => decl.type_name.as_deref(),
         }
     }
 
@@ -320,7 +329,7 @@ impl FieldTypeSpec {
     /// types that carry no length bound (`text`, `datetime`, ...).
     pub fn effective_max_length(&self) -> Option<u32> {
         match self.type_name() {
-            "string" | "list_of_strings" => {
+            Some("string") | Some("list_of_strings") => {
                 Some(self.max_length().unwrap_or(DEFAULT_STRING_MAX_LENGTH))
             }
             _ => None,
@@ -636,7 +645,19 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             .unwrap_or_else(|| "unnamed validate rule".into());
 
         for (field, spec) in &rule.field_types {
-            let ty = spec.type_name();
+            let Some(ty) = spec.type_name() else {
+                // Extended form without `type` is valid only as the type-less
+                // indexed-only shape (`{ indexed: bool }`, no other keys).
+                if spec.max_length().is_some() || spec.indexed().is_none() {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: field_types.{field} must declare `type`, or be a type-less indexed-only entry (`{{ indexed: true|false }}`)"
+                        ),
+                    });
+                }
+                continue;
+            };
             if !is_known_field_type(ty) {
                 return Err(ConfigError::Invalid {
                     source_path: source_path.to_owned(),
@@ -1058,9 +1079,9 @@ mod tests {
         let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: string\n        notes: text\n";
         let cfg = parse(yaml).unwrap();
         let rule = &cfg.validate.rules[0];
-        assert_eq!(rule.field_types["project"].type_name(), "string");
+        assert_eq!(rule.field_types["project"].type_name(), Some("string"));
         assert_eq!(rule.field_types["project"].effective_max_length(), Some(64));
-        assert_eq!(rule.field_types["notes"].type_name(), "text");
+        assert_eq!(rule.field_types["notes"].type_name(), Some("text"));
         assert_eq!(rule.field_types["notes"].effective_max_length(), None);
     }
 
@@ -1077,10 +1098,10 @@ validate:
 "#;
         let cfg = parse(yaml).unwrap();
         let rule = &cfg.validate.rules[0];
-        assert_eq!(rule.field_types["project"].type_name(), "string");
+        assert_eq!(rule.field_types["project"].type_name(), Some("string"));
         assert_eq!(rule.field_types["project"].max_length(), Some(32));
         assert_eq!(rule.field_types["project"].effective_max_length(), Some(32));
-        assert_eq!(rule.field_types["notes"].type_name(), "text");
+        assert_eq!(rule.field_types["notes"].type_name(), Some("text"));
         assert_eq!(rule.field_types["notes"].max_length(), None);
         assert_eq!(rule.field_types["status"].indexed(), Some(false));
     }
@@ -1147,6 +1168,50 @@ validate:
     #[test]
     fn field_type_extended_form_requires_type_key() {
         let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: { max_length: 32 }\n";
+        assert!(parse(yaml).is_err());
+    }
+
+    // ── Fix 2: FieldTypeDecl omits absent Option fields when serialized ──────
+
+    #[test]
+    fn field_type_spec_bare_form_serializes_as_plain_string() {
+        let spec = FieldTypeSpec::Bare("string".to_string());
+        let value = serde_json::to_value(&spec).unwrap();
+        assert_eq!(value, serde_json::json!("string"));
+    }
+
+    #[test]
+    fn field_type_spec_extended_form_omits_absent_indexed_key() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: { type: string, max_length: 32 }\n";
+        let cfg = parse(yaml).unwrap();
+        let value = serde_json::to_value(&cfg.validate.rules[0].field_types["project"]).unwrap();
+        let obj = value
+            .as_object()
+            .expect("extended form serializes as an object");
+        assert!(
+            !obj.contains_key("indexed"),
+            "indexed should be omitted when absent; got: {value}"
+        );
+        assert_eq!(obj["type"], "string");
+        assert_eq!(obj["max_length"], 32);
+    }
+
+    // ── Fix 3: type-less indexed-only extended form ──────────────────────────
+
+    #[test]
+    fn field_type_extended_form_indexed_only_parses_without_type() {
+        let yaml =
+            "validate:\n  rules:\n    - name: r\n      field_types:\n        notes: { indexed: true }\n";
+        let cfg = parse(yaml).unwrap();
+        let spec = &cfg.validate.rules[0].field_types["notes"];
+        assert_eq!(spec.type_name(), None);
+        assert_eq!(spec.indexed(), Some(true));
+        assert_eq!(spec.effective_max_length(), None);
+    }
+
+    #[test]
+    fn field_type_extended_form_indexed_and_max_length_without_type_is_rejected() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: { indexed: false, max_length: 5 }\n";
         assert!(parse(yaml).is_err());
     }
 

@@ -646,6 +646,7 @@ fn skip_reason_for_body(body: &FindingBody) -> SkipReason {
         FindingBody::RequiredFrontmatterMissing { .. } => SkipReason::MissingDefault,
         FindingBody::DisallowedValue { .. }
         | FindingBody::InvalidFieldType { .. }
+        | FindingBody::ExceedsMaxLength { .. }
         | FindingBody::ForbiddenField { .. }
         | FindingBody::DocumentMisrouted { .. }
         | FindingBody::ReferenceType { .. }
@@ -687,6 +688,7 @@ fn skipped_finding(
         ),
         FindingBody::DisallowedValue { field, .. }
         | FindingBody::InvalidFieldType { field, .. }
+        | FindingBody::ExceedsMaxLength { field, .. }
         | FindingBody::ForbiddenField { field, .. } => (
             "no configured deterministic repair rule matched".to_string(),
             vec![
@@ -788,6 +790,7 @@ fn finding_rule(finding: &Finding) -> Option<String> {
         FindingBody::RequiredFrontmatterMissing { rule, .. }
         | FindingBody::DisallowedValue { rule, .. }
         | FindingBody::InvalidFieldType { rule, .. }
+        | FindingBody::ExceedsMaxLength { rule, .. }
         | FindingBody::ForbiddenField { rule, .. }
         | FindingBody::DocumentMisrouted { rule, .. }
         | FindingBody::ReferenceType { rule, .. } => rule.clone(),
@@ -804,6 +807,7 @@ fn finding_field(finding: &Finding) -> Option<String> {
         FindingBody::RequiredFrontmatterMissing { field, .. }
         | FindingBody::DisallowedValue { field, .. }
         | FindingBody::InvalidFieldType { field, .. }
+        | FindingBody::ExceedsMaxLength { field, .. }
         | FindingBody::ForbiddenField { field, .. }
         | FindingBody::AliasMalformed { field, .. }
         | FindingBody::ReferenceType { field, .. } => Some(field.clone()),
@@ -819,6 +823,7 @@ fn finding_actual_value(finding: &Finding) -> Option<&Value> {
     match &finding.body {
         FindingBody::DisallowedValue { actual_value, .. }
         | FindingBody::InvalidFieldType { actual_value, .. }
+        | FindingBody::ExceedsMaxLength { actual_value, .. }
         | FindingBody::ForbiddenField { actual_value, .. } => Some(actual_value),
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
