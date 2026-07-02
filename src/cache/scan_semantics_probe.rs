@@ -185,10 +185,7 @@ mod tests {
             frontmatter_not_eq: vec![("n".to_string(), serde_json::json!(5))],
             ..Default::default()
         };
-        assert_eq!(
-            matched(&cache, not_eq),
-            vec!["clean.md", "scalar_other.md"]
-        );
+        assert_eq!(matched(&cache, not_eq), vec!["clean.md", "scalar_other.md"]);
     }
 
     #[test]

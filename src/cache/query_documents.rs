@@ -18,7 +18,7 @@ use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::OptionalExtension;
 
-use crate::cache::canonical::strip_wikilink_brackets;
+use crate::cache::canonical::{canonicalize_scalar, strip_wikilink_brackets};
 use crate::cache::error::CacheError;
 use crate::cache::query::{json_path_for, DocumentQuery};
 use crate::cache::Cache;
@@ -222,8 +222,17 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 /// - `--eq`/`--not-eq` with a STRING value: the scan path's string branch is
 ///   already array-aware and bracket-stripped, exactly matching the
 ///   `document_fields` row-per-element writer.
-/// - `--in`/`--not-in` where every value is a STRING: same array-aware form
-///   (the scan path itself branches on this).
+/// - `--eq`/`--not-eq` with a NUMBER/BOOL value (NRN-81): the scan path's
+///   typed branch is array-aware with SQLite's typed comparison, and
+///   `canonicalize_scalar` stores exactly the `json_value_to_sql` value the
+///   scan side binds — INTEGER/REAL rows compare numerically in both paths,
+///   and a typed bind can never compare true against ANY text, so the
+///   writer's bracket-strip on text rows is unobservable to it.
+/// - `--in`/`--not-in` where every value is a STRING, NUMBER, or BOOL: same
+///   array-aware forms, generalized to N values (`push_scalar_membership`);
+///   the EAV `value IN (...)` list carries each value canonicalized by its
+///   own rule, which partitions exactly like the scan path's two buckets
+///   (text binds only ever match text rows, typed binds only typed rows).
 /// - `--has`/`--missing`: pure presence, driven by the absent-sentinel row.
 /// - `--starts-with`/`--ends-with`/`--contains`: compiled as a two-branch
 ///   union (`push_string_operator_eav`) rather than a single index lookup —
@@ -238,22 +247,33 @@ fn warn_cold_scan(cache: &Cache, unindexed_fields: &BTreeSet<String>) {
 ///   whole-query fallback.
 ///
 /// NOT EAV-provable in this task (always falls back, per predicate class):
-/// - `--eq`/`--not-eq`/`--in`/`--not-in` with any NON-STRING value: the scan
-///   path's non-string branch is a bare scalar `json_extract(...) = ?` with
-///   NO array-awareness, but `document_fields` stores one row per array
-///   element regardless of type — an EAV compilation would (wrongly) match
-///   inside arrays where the scan path never does. See
-///   `eq_integer_is_not_array_aware` / `in_non_string_values_is_not_array_aware`.
-/// - `--before`/`--after`/`--on`: the scan path is scalar-only (no
-///   array-awareness at all) and compares the WHOLE field's JSON text; for
-///   an array-valued field that's the array's JSON-encoded text, not its
-///   elements' dates. `document_fields` can't reconstruct that whole-value
-///   text from its per-element rows. See
-///   `date_before_on_array_field_compares_json_array_text_not_elements`.
+/// - `--eq`/`--not-eq`/`--in`/`--not-in` with a NULL/OBJECT/ARRAY value:
+///   the scan path keeps the legacy bare scalar form for these (see
+///   `push_equality` / `all_scalar_values` — unreachable from the CLI/MCP
+///   parsers), which is not array-aware, while `document_fields` stores one
+///   row per array element — an EAV compilation would (wrongly) match
+///   inside arrays where the scan path never does. Objects/arrays
+///   additionally diverge on the writer's bracket-strip of their JSON text.
+/// - `--before`/`--after`/`--on`: per-element semantics (NRN-82) are now
+///   EAV-shaped in principle, but the scan side compares the
+///   bracket-STRIPPED text of every element regardless of type, while
+///   `document_fields` rows keep typed INTEGER/REAL values whose text
+///   renderings the index can't range-compare without a per-row cast — a
+///   provable-parity compile needs the two-branch union treatment string
+///   operators got (`push_string_operator_eav`). Deferred; see NRN-84.
 fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
     if !query.date_before.is_empty() || !query.date_after.is_empty() || !query.date_on.is_empty() {
         return None;
     }
+
+    let eav_scalar = |v: &serde_json::Value| {
+        matches!(
+            v,
+            serde_json::Value::String(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::Bool(_)
+        )
+    };
 
     let mut fields: BTreeSet<String> = BTreeSet::new();
 
@@ -262,13 +282,13 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
     fields.extend(query.frontmatter_contains.iter().map(|(f, _)| f.clone()));
 
     for (field, value) in &query.frontmatter_eq {
-        if !matches!(value, serde_json::Value::String(_)) {
+        if !eav_scalar(value) {
             return None;
         }
         fields.insert(field.clone());
     }
     for (field, value) in &query.frontmatter_not_eq {
-        if !matches!(value, serde_json::Value::String(_)) {
+        if !eav_scalar(value) {
             return None;
         }
         fields.insert(field.clone());
@@ -282,10 +302,7 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
             // no index-membership requirement.
             continue;
         }
-        if !values
-            .iter()
-            .all(|v| matches!(v, serde_json::Value::String(_)))
-        {
+        if !values.iter().all(&eav_scalar) {
             return None;
         }
         fields.insert(field.clone());
@@ -295,10 +312,7 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
             // `--not-in field:` with no values is a no-op in both builders.
             continue;
         }
-        if !values
-            .iter()
-            .all(|v| matches!(v, serde_json::Value::String(_)))
-        {
+        if !values.iter().all(&eav_scalar) {
             return None;
         }
         fields.insert(field.clone());
@@ -309,39 +323,38 @@ fn eav_eligible_fields(query: &DocumentQuery) -> Option<BTreeSet<String>> {
 
 /// EAV compilation of the provable predicate classes (see
 /// `eav_eligible_fields`). Only called once the router has confirmed every
-/// predicate present qualifies, so the non-string `.as_str()` unwraps below
-/// are guaranteed to succeed. Date-op vectors are guaranteed empty by the
-/// same gate; `push_shared_tail_clauses` still runs unconditionally so the
-/// two builders can never drift on the ones that DO always overlap
+/// predicate present qualifies (scalar-typed values only). Date-op vectors
+/// are guaranteed empty by the same gate; `push_shared_tail_clauses` still
+/// runs unconditionally so the two builders can never drift on the ones that DO always overlap
 /// (body_text/links_to/unresolved-links).
 fn build_documents_matching_sql_parts_eav(query: &DocumentQuery) -> (String, Vec<SqlValue>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut binds: Vec<SqlValue> = Vec::new();
 
     // Positive equality: driving IN-list against the (key, value) index.
+    // `canonicalize_scalar` is the document_fields writer's own value
+    // canonicalizer — binding through it is what keeps query-side values
+    // byte-identical to stored rows for every eligible type (strings
+    // bracket-stripped TEXT, numbers INTEGER/REAL, bools INTEGER).
     for (field, value) in &query.frontmatter_eq {
-        let raw = value.as_str().expect("eav-eligible --eq must be a string");
         where_clauses.push(
             "path IN (SELECT path FROM document_fields WHERE key = ? AND value = ?)".to_string(),
         );
         binds.push(SqlValue::Text(field.clone()));
-        binds.push(SqlValue::Text(strip_wikilink_brackets(raw)));
+        binds.push(canonicalize_scalar(value));
     }
 
     // Negation: correlated probe against the (path, key) index. The
     // sentinel OR-term reproduces the scan path's "missing excludes from
     // --not-eq" behavior (see `not_eq_excludes_missing_field_by_default`).
     for (field, value) in &query.frontmatter_not_eq {
-        let raw = value
-            .as_str()
-            .expect("eav-eligible --not-eq must be a string");
         where_clauses.push(
             "NOT EXISTS (SELECT 1 FROM document_fields f WHERE f.path = documents.path \
              AND f.key = ? AND (f.value = ? OR f.value = x'00'))"
                 .to_string(),
         );
         binds.push(SqlValue::Text(field.clone()));
-        binds.push(SqlValue::Text(strip_wikilink_brackets(raw)));
+        binds.push(canonicalize_scalar(value));
     }
 
     // Presence: any non-sentinel row for (path, key).
@@ -378,8 +391,7 @@ fn build_documents_matching_sql_parts_eav(query: &DocumentQuery) -> (String, Vec
         ));
         binds.push(SqlValue::Text(field.clone()));
         for v in values {
-            let raw = v.as_str().expect("eav-eligible --in must be all strings");
-            binds.push(SqlValue::Text(strip_wikilink_brackets(raw)));
+            binds.push(canonicalize_scalar(v));
         }
     }
 
@@ -398,10 +410,7 @@ fn build_documents_matching_sql_parts_eav(query: &DocumentQuery) -> (String, Vec
         ));
         binds.push(SqlValue::Text(field.clone()));
         for v in values {
-            let raw = v
-                .as_str()
-                .expect("eav-eligible --not-in must be all strings");
-            binds.push(SqlValue::Text(strip_wikilink_brackets(raw)));
+            binds.push(canonicalize_scalar(v));
         }
     }
 
@@ -1430,6 +1439,219 @@ mod router_tests {
         assert!(
             !rows.iter().any(|r| r.contains("SCAN documents")),
             "must not SCAN documents: {rows:?}"
+        );
+    }
+
+    // ── typed-value routing (NRN-81) ─────────────────────────────────────
+    //
+    // Number/bool --eq/--not-eq/--in/--not-in are EAV-eligible now that the
+    // scan path is array-aware for them: `canonicalize_scalar` binds the
+    // exact typed value the writer stored per element. These tests prove
+    // routed vs. scan parity across the value shapes the typed comparison
+    // must respect (numeric INTEGER/REAL affinity, TEXT-vs-numeric type
+    // strictness, bool-as-INTEGER, sentinel exclusion), plus an EXPLAIN
+    // guard proving a typed --eq actually drives the (key, value) index.
+
+    fn typed_vault() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("int_scalar.md").as_std_path(),
+            "---\nn: 5\nb: true\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("int_array.md").as_std_path(),
+            "---\nn: [5, 6]\nb: [false]\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("float_array.md").as_std_path(),
+            "---\nn: [5.0]\nscore: 2.5\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("text_five.md").as_std_path(),
+            "---\nn: [\"5\"]\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("mixed_array.md").as_std_path(),
+            "---\nn: [seven, 8]\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("empty_array.md").as_std_path(),
+            "---\nn: []\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("missing.md").as_std_path(),
+            "---\nother: x\n---\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn eav_and_scan_agree_on_typed_eq_in_across_value_shapes() {
+        let (_tmp, root) = typed_vault();
+        let fields = vec!["n", "b", "score"];
+        let indexed = open_authoritative(&root, &fields);
+        let scanned = Cache::open(&root).unwrap();
+
+        let cases: Vec<DocumentQuery> = vec![
+            DocumentQuery {
+                frontmatter_eq: vec![("n".to_string(), serde_json::json!(5))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![("n".to_string(), serde_json::json!(5.0))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![("score".to_string(), serde_json::json!(2.5))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![("b".to_string(), serde_json::json!(true))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![("b".to_string(), serde_json::json!(false))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_not_eq: vec![("n".to_string(), serde_json::json!(5))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_in: vec![("n".to_string(), vec![serde_json::json!(5)])],
+                ..Default::default()
+            },
+            // Mixed string+typed list: each value by its own rules.
+            DocumentQuery {
+                frontmatter_in: vec![(
+                    "n".to_string(),
+                    vec![serde_json::json!("seven"), serde_json::json!(5)],
+                )],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_not_in: vec![(
+                    "n".to_string(),
+                    vec![serde_json::json!("seven"), serde_json::json!(5)],
+                )],
+                ..Default::default()
+            },
+            // Typed --eq combined with a string predicate on another field.
+            DocumentQuery {
+                frontmatter_eq: vec![("n".to_string(), serde_json::json!(5))],
+                frontmatter_not_eq: vec![("b".to_string(), serde_json::json!(true))],
+                ..Default::default()
+            },
+        ];
+
+        for query in cases {
+            assert_eq!(
+                paths(&indexed.documents_matching(&query).unwrap()),
+                paths(&scanned.documents_matching(&query).unwrap()),
+                "EAV and scan routes diverged for {query:?}"
+            );
+        }
+
+        // Pin the actual matched sets for the headline NRN-81 shapes, not
+        // just route agreement.
+        let eq_five = DocumentQuery {
+            frontmatter_eq: vec![("n".to_string(), serde_json::json!(5))],
+            ..Default::default()
+        };
+        assert_eq!(
+            paths(&indexed.documents_matching(&eq_five).unwrap()),
+            vec!["float_array.md", "int_array.md", "int_scalar.md"],
+            "typed --eq matches scalar and array elements numerically; a \
+             TEXT element \"5\" never equals a numeric bind"
+        );
+    }
+
+    #[test]
+    fn typed_eq_query_routes_and_drives_kv_index() {
+        let (_tmp, root) = typed_vault();
+        let cache = open_authoritative(&root, &["n"]);
+
+        let query = DocumentQuery {
+            frontmatter_eq: vec![("n".to_string(), serde_json::json!(5))],
+            ..Default::default()
+        };
+        let (where_sql, binds) = build_documents_matching_sql_parts(&cache, &query);
+        assert!(
+            where_sql.contains("document_fields"),
+            "typed --eq on an indexed field must route: {where_sql}"
+        );
+        let sql = format!("SELECT path FROM documents{where_sql}");
+        let rows = explain_plan(&cache, &sql, &binds);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("SEARCH") && r.contains("idx_document_fields_kv")),
+            "expected a driving SEARCH on idx_document_fields_kv: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN documents")),
+            "must not SCAN documents: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN document_fields")),
+            "must not SCAN document_fields: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn null_object_values_still_fall_back_to_scan() {
+        let (_tmp, root) = typed_vault();
+        let cache = open_authoritative(&root, &["n"]);
+
+        for value in [serde_json::json!(null), serde_json::json!({"a": 1})] {
+            let query = DocumentQuery {
+                frontmatter_eq: vec![("n".to_string(), value)],
+                ..Default::default()
+            };
+            let (where_sql, _binds) = build_documents_matching_sql_parts(&cache, &query);
+            assert!(
+                !where_sql.contains("document_fields"),
+                "null/object --eq values must fall back to scan: {where_sql}"
+            );
+        }
+        // A list containing a null keeps the legacy scan form too.
+        let query = DocumentQuery {
+            frontmatter_in: vec![(
+                "n".to_string(),
+                vec![serde_json::json!(5), serde_json::json!(null)],
+            )],
+            ..Default::default()
+        };
+        let (where_sql, _binds) = build_documents_matching_sql_parts(&cache, &query);
+        assert!(
+            !where_sql.contains("document_fields"),
+            "--in lists carrying null must fall back to scan: {where_sql}"
+        );
+    }
+
+    #[test]
+    fn date_ops_still_fall_back_to_scan() {
+        let (_tmp, root) = typed_vault();
+        let cache = open_authoritative(&root, &["n"]);
+        let query = DocumentQuery {
+            frontmatter_eq: vec![("n".to_string(), serde_json::json!(5))],
+            date_before: vec![("n".to_string(), "2026-01-01".to_string())],
+            ..Default::default()
+        };
+        let (where_sql, _binds) = build_documents_matching_sql_parts(&cache, &query);
+        assert!(
+            !where_sql.contains("document_fields"),
+            "any date op must force the whole query to the scan path: {where_sql}"
         );
     }
 
