@@ -78,7 +78,7 @@ impl crate::cache::Cache {
         use rusqlite::params_from_iter;
         use rusqlite::types::Value as SqlValue;
 
-        let (where_sql, where_binds) = build_documents_matching_sql_parts(&query.predicates);
+        let (where_sql, where_binds) = build_documents_matching_sql_parts(self, &query.predicates);
 
         let (order_by_sql, order_by_binds) = sort_clause_sql(query.sort.as_ref());
 
