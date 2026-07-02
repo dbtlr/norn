@@ -245,6 +245,61 @@ pub(crate) fn check_alias_duplicate_across_docs(
     findings
 }
 
+/// Typed-reference constraint (`field_references`): each frontmatter
+/// wikilink in a constrained field must resolve to a document whose `type`
+/// is in the allowed set. Only **resolved** links are judged — unresolved
+/// and ambiguous references are link validation's findings (`link-*`), not
+/// a reference-type violation. A resolved target without a `type` field is
+/// outside every set and reports as `(missing)`.
+pub(crate) fn check_field_references(
+    document: &Document,
+    field_references: &HashMap<String, crate::standards::config::FieldReferenceConstraint>,
+    type_by_path: &std::collections::BTreeMap<&camino::Utf8Path, Option<&str>>,
+    rule: Option<&str>,
+) -> Vec<Finding> {
+    if field_references.is_empty() {
+        return Vec::new();
+    }
+    // Deterministic finding order regardless of HashMap iteration.
+    let mut fields: Vec<(&String, &crate::standards::config::FieldReferenceConstraint)> =
+        field_references.iter().collect();
+    fields.sort_by_key(|(field, _)| field.as_str());
+
+    let mut findings = Vec::new();
+    for (field, constraint) in fields {
+        let allowed = constraint.allowed_types();
+        for link in &document.links {
+            let in_field = link.source_context.as_ref().is_some_and(|ctx| {
+                matches!(ctx.area, crate::core::LinkSourceArea::Frontmatter)
+                    && ctx.property.as_deref() == Some(field.as_str())
+            });
+            if !in_field || link.status != LinkStatus::Resolved {
+                continue;
+            }
+            let Some(target) = link.resolved_path.as_ref() else {
+                continue;
+            };
+            let actual = type_by_path
+                .get(target.as_path())
+                .copied()
+                .flatten()
+                .unwrap_or("(missing)");
+            if !allowed.iter().any(|ty| ty == actual) {
+                findings.push(Finding::frontmatter_reference_type(
+                    document.path.clone(),
+                    rule.map(str::to_string),
+                    field.clone(),
+                    link.raw.clone(),
+                    target.clone(),
+                    actual.to_string(),
+                    allowed.clone(),
+                ));
+            }
+        }
+    }
+    findings
+}
+
 pub(crate) fn check_links(document: &Document) -> Vec<Finding> {
     document
         .links

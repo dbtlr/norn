@@ -639,6 +639,7 @@ fn skip_reason_for_body(body: &FindingBody) -> SkipReason {
         | FindingBody::InvalidFieldType { .. }
         | FindingBody::ForbiddenField { .. }
         | FindingBody::DocumentMisrouted { .. }
+        | FindingBody::ReferenceType { .. }
         | FindingBody::AliasMalformed { .. }
         | FindingBody::AliasDuplicateAcrossDocs { .. } => SkipReason::NoRuleMatched,
         FindingBody::AliasShadowedByStem { .. } => SkipReason::AliasShadowed,
@@ -682,6 +683,21 @@ fn skipped_finding(
             vec![
                 format!("add a repair rule for field {field}"),
                 "rerun repair plan after updating config".to_string(),
+            ],
+        ),
+        FindingBody::ReferenceType {
+            field,
+            allowed_types,
+            ..
+        } => (
+            "typed-reference violation cannot be repaired deterministically".to_string(),
+            vec![
+                format!(
+                    "repoint '{field}' at a document whose type is one of: {}",
+                    allowed_types.join(", ")
+                ),
+                "or change the target document's type if the reference is right".to_string(),
+                "rerun validate after fixing the reference".to_string(),
             ],
         ),
         FindingBody::DocumentMisrouted { .. } => (
@@ -764,7 +780,8 @@ fn finding_rule(finding: &Finding) -> Option<String> {
         | FindingBody::DisallowedValue { rule, .. }
         | FindingBody::InvalidFieldType { rule, .. }
         | FindingBody::ForbiddenField { rule, .. }
-        | FindingBody::DocumentMisrouted { rule, .. } => rule.clone(),
+        | FindingBody::DocumentMisrouted { rule, .. }
+        | FindingBody::ReferenceType { rule, .. } => rule.clone(),
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
         | FindingBody::AliasMalformed { .. }
@@ -779,7 +796,8 @@ fn finding_field(finding: &Finding) -> Option<String> {
         | FindingBody::DisallowedValue { field, .. }
         | FindingBody::InvalidFieldType { field, .. }
         | FindingBody::ForbiddenField { field, .. }
-        | FindingBody::AliasMalformed { field, .. } => Some(field.clone()),
+        | FindingBody::AliasMalformed { field, .. }
+        | FindingBody::ReferenceType { field, .. } => Some(field.clone()),
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
         | FindingBody::DocumentMisrouted { .. }
@@ -797,6 +815,7 @@ fn finding_actual_value(finding: &Finding) -> Option<&Value> {
         | FindingBody::LinkIssue { .. }
         | FindingBody::RequiredFrontmatterMissing { .. }
         | FindingBody::DocumentMisrouted { .. }
+        | FindingBody::ReferenceType { .. }
         | FindingBody::AliasMalformed { .. }
         | FindingBody::AliasShadowedByStem { .. }
         | FindingBody::AliasDuplicateAcrossDocs { .. } => None,

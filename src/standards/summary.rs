@@ -68,7 +68,8 @@ pub fn summarize(findings: &[Finding]) -> Summary {
                 let type_counts = summary.invalid_types.entry(field.clone()).or_default();
                 increment(type_counts, expected_type);
             }
-            FindingBody::ForbiddenField { rule, field, .. } => {
+            FindingBody::ForbiddenField { rule, field, .. }
+            | FindingBody::ReferenceType { rule, field, .. } => {
                 if let Some(rule) = rule {
                     increment(&mut summary.rules, rule);
                 }

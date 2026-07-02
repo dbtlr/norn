@@ -191,7 +191,8 @@ fn finding_field(finding: &Finding) -> Option<&str> {
         | FindingBody::DisallowedValue { field, .. }
         | FindingBody::InvalidFieldType { field, .. }
         | FindingBody::ForbiddenField { field, .. }
-        | FindingBody::AliasMalformed { field, .. } => Some(field),
+        | FindingBody::AliasMalformed { field, .. }
+        | FindingBody::ReferenceType { field, .. } => Some(field),
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
         | FindingBody::DocumentMisrouted { .. }
@@ -206,7 +207,8 @@ fn finding_rule(finding: &Finding) -> Option<&str> {
         | FindingBody::DisallowedValue { rule, .. }
         | FindingBody::InvalidFieldType { rule, .. }
         | FindingBody::ForbiddenField { rule, .. }
-        | FindingBody::DocumentMisrouted { rule, .. } => rule.as_deref(),
+        | FindingBody::DocumentMisrouted { rule, .. }
+        | FindingBody::ReferenceType { rule, .. } => rule.as_deref(),
         FindingBody::GraphDiagnostic { .. }
         | FindingBody::LinkIssue { .. }
         | FindingBody::AliasMalformed { .. }

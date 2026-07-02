@@ -207,9 +207,35 @@ pub struct ValidateRule {
     #[serde(default)]
     pub frontmatter_defaults: HashMap<String, serde_json::Value>,
     #[serde(default)]
+    pub field_references: HashMap<String, FieldReferenceConstraint>,
+    #[serde(default)]
     pub target: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
+}
+
+/// Typed-reference constraint for one frontmatter field: the field's
+/// wikilink target(s) must resolve to documents whose `type` is in the
+/// allowed set. `target_type` accepts a scalar string or a non-empty list
+/// (any-of), mirroring `match.frontmatter` selector values.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldReferenceConstraint {
+    pub target_type: serde_json::Value,
+}
+
+impl FieldReferenceConstraint {
+    /// The allowed target types as a flat list, however they were authored.
+    pub fn allowed_types(&self) -> Vec<String> {
+        match &self.target_type {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect(),
+            serde_json::Value::String(value) => vec![value.clone()],
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -586,6 +612,29 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                     });
                 }
                 _ => {}
+            }
+        }
+
+        // field_references: target_type must be a non-empty string or a
+        // non-empty list of non-empty strings.
+        for (field, constraint) in &rule.field_references {
+            let valid = match &constraint.target_type {
+                serde_json::Value::String(value) => !value.is_empty(),
+                serde_json::Value::Array(values) => {
+                    !values.is_empty()
+                        && values
+                            .iter()
+                            .all(|value| value.as_str().is_some_and(|s| !s.is_empty()))
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(ConfigError::Invalid {
+                    source_path: source_path.to_owned(),
+                    message: format!(
+                        "rule {rule_label}: field_references.{field}.target_type must be a type name or a non-empty list of type names"
+                    ),
+                });
             }
         }
 
@@ -1400,6 +1449,75 @@ validate:
                 && msg.contains("strings, booleans, or numbers"),
             "got: {msg}"
         );
+    }
+
+    #[test]
+    fn field_references_parses_scalar_and_list() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: task-refs
+      match:
+        frontmatter:
+          type: task
+      field_references:
+        parent:
+          target_type: [phase, initiative]
+        depends_on:
+          target_type: task
+"#;
+        let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
+        let rule = &cfg.validate.rules[0];
+        assert_eq!(
+            rule.field_references["parent"].allowed_types(),
+            vec!["phase".to_string(), "initiative".to_string()]
+        );
+        assert_eq!(
+            rule.field_references["depends_on"].allowed_types(),
+            vec!["task".to_string()]
+        );
+    }
+
+    #[test]
+    fn field_references_empty_target_type_list_is_rejected() {
+        let err = parse(
+            "validate:\n  rules:\n    - name: r\n      field_references:\n        parent:\n          target_type: []\n",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("field_references.parent.target_type"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn field_references_non_string_target_type_is_rejected() {
+        for bad in [
+            "target_type: 3",
+            "target_type: [task, 3]",
+            "target_type: {}",
+        ] {
+            let yaml = format!(
+                "validate:\n  rules:\n    - name: r\n      field_references:\n        parent:\n          {bad}\n"
+            );
+            let err = parse(&yaml).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("field_references.parent.target_type")
+                    || err.to_string().contains("invalid type"),
+                "{bad} should be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_references_unknown_key_is_rejected() {
+        let err = parse(
+            "validate:\n  rules:\n    - name: r\n      field_references:\n        parent:\n          target_kind: [phase]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
     }
 
     #[test]

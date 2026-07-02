@@ -35,6 +35,21 @@ pub fn validate_with_compiled(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
+    // Target-type lookup for `field_references` checks: every document's
+    // `type` frontmatter, keyed by path. Built once per run.
+    let type_by_path: std::collections::BTreeMap<&camino::Utf8Path, Option<&str>> = index
+        .documents
+        .iter()
+        .map(|doc| {
+            let ty = doc
+                .frontmatter
+                .as_ref()
+                .and_then(|fm| fm.get("type"))
+                .and_then(|value| value.as_str());
+            (doc.path.as_path(), ty)
+        })
+        .collect();
+
     for document in &index.documents {
         if document_ignored_compiled(document, compiled, &config.ignore) {
             continue;
@@ -79,6 +94,13 @@ pub fn validate_with_compiled(
             findings.extend(crate::standards::checks::check_allowed_values(
                 document,
                 &rule.allowed_values,
+                rule.name.as_deref(),
+            ));
+
+            findings.extend(crate::standards::checks::check_field_references(
+                document,
+                &rule.field_references,
+                &type_by_path,
                 rule.name.as_deref(),
             ));
         }
