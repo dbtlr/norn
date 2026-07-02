@@ -5,6 +5,7 @@
 //! and [`resolve_to_fixpoint`] for the iterative resolver used by `norn new`.
 
 use crate::standards::config::{CompiledConfig, CompiledRule, ValidateRule, VaultConfig};
+use crate::standards::predicates::frontmatter_predicate_matches;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Iterate `{{…}}` substitution groups in a template, yielding the inner
@@ -109,7 +110,8 @@ pub fn path_variables(rule: &CompiledRule, path: &str) -> BTreeMap<String, Strin
 /// A rule matches when:
 /// - Its `match.path` is `None`, OR the path matches its compiled `PathPattern`.
 /// - Its `match.frontmatter` is empty, OR `frontmatter` is `Some(fm)` and every
-///   `(key, value)` predicate is present in `fm`.
+///   predicate accepts its field value (scalar = exact equality, list = any-of
+///   — the same selector semantics the validate engine applies).
 pub fn applicable_rules<'a>(
     cfg: &'a VaultConfig,
     compiled: &'a CompiledConfig,
@@ -130,11 +132,11 @@ pub fn applicable_rules<'a>(
             let Some(fm_obj) = fm.as_object() else {
                 continue;
             };
-            let all_match = rule
-                .r#match
-                .frontmatter
-                .iter()
-                .all(|(k, v)| fm_obj.get(k) == Some(v));
+            let all_match = rule.r#match.frontmatter.iter().all(|(k, v)| {
+                fm_obj
+                    .get(k)
+                    .is_some_and(|actual| frontmatter_predicate_matches(actual, v))
+            });
             if !all_match {
                 continue;
             }
@@ -312,6 +314,41 @@ validate:
         let fm = serde_json::json!({"type": "task"});
         let rules = applicable_rules(&cfg, &compiled, "anything.md", Some(&fm));
         assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn applicable_rules_list_selector_matches_any_listed_value() {
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: node-base
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: [task, phase]
+      frontmatter_defaults:
+        status: backlog
+"#,
+        );
+        for ty in ["task", "phase"] {
+            let fm = serde_json::json!({ "type": ty });
+            let rules = applicable_rules(&cfg, &compiled, "anything.md", Some(&fm));
+            assert_eq!(rules.len(), 1, "type={ty} should match the any-of selector");
+        }
+
+        let fm = serde_json::json!({"type": "note"});
+        let rules = applicable_rules(&cfg, &compiled, "anything.md", Some(&fm));
+        assert!(
+            rules.is_empty(),
+            "type outside the any-of set must not match"
+        );
+
+        // The list enumerates candidate scalars — a literal array value is not
+        // a match, mirroring the engine predicate.
+        let fm = serde_json::json!({"type": ["task", "phase"]});
+        let rules = applicable_rules(&cfg, &compiled, "anything.md", Some(&fm));
+        assert!(rules.is_empty(), "array-valued field must not match");
     }
 
     #[test]
