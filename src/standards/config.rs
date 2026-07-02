@@ -42,6 +42,9 @@ pub struct VaultConfig {
     /// Inbox settings for document creation routing.
     #[serde(default)]
     pub inbox: InboxConfig,
+    /// Derived frontmatter index settings (the auto-index toggle).
+    #[serde(default)]
+    pub index: IndexConfig,
     // Capture the deprecated v0.16 key so post_validate can emit a clear error.
     #[serde(default, rename = "graph")]
     _deprecated_graph: Option<serde_yaml::Value>,
@@ -65,6 +68,7 @@ impl Default for VaultConfig {
             telemetry: None,
             cache: None,
             inbox: InboxConfig::default(),
+            index: IndexConfig::default(),
             _deprecated_graph: None,
         }
     }
@@ -175,6 +179,26 @@ pub struct InboxConfig {
     pub path: Option<String>,
 }
 
+/// Derived frontmatter index settings, consumed by the cache writer and
+/// query router (Wave 2). `auto` gates automatic indexing of bounded-type
+/// fields; see `resolved_index_set`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexConfig {
+    #[serde(default = "default_index_auto")]
+    pub auto: bool,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self { auto: true }
+    }
+}
+
+fn default_index_auto() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateConfig {
@@ -199,7 +223,7 @@ pub struct ValidateRule {
     #[serde(default)]
     pub forbidden_frontmatter: Vec<String>,
     #[serde(default)]
-    pub field_types: HashMap<String, String>,
+    pub field_types: HashMap<String, FieldTypeSpec>,
     #[serde(default)]
     pub allowed_values: HashMap<String, Vec<serde_json::Value>>,
     #[serde(default)]
@@ -234,6 +258,72 @@ impl FieldReferenceConstraint {
                 .collect(),
             serde_json::Value::String(value) => vec![value.clone()],
             _ => Vec::new(),
+        }
+    }
+}
+
+/// Default bound applied to a `string` field, or to each element of a
+/// `list_of_strings` field, when the rule doesn't declare `max_length`.
+pub const DEFAULT_STRING_MAX_LENGTH: u32 = 64;
+
+/// The hard ceiling a declared `max_length` may not exceed.
+pub const STRING_MAX_LENGTH_CEILING: u32 = 256;
+
+/// A `field_types` declaration: either the bare type-name string (`created:
+/// datetime`) or the extended object form (`project: { type: string,
+/// max_length: 32 }`). Both are accepted anywhere a field type is declared.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FieldTypeSpec {
+    Bare(String),
+    Extended(FieldTypeDecl),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldTypeDecl {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    #[serde(default)]
+    pub max_length: Option<u32>,
+    #[serde(default)]
+    pub indexed: Option<bool>,
+}
+
+impl FieldTypeSpec {
+    pub fn type_name(&self) -> &str {
+        match self {
+            FieldTypeSpec::Bare(name) => name,
+            FieldTypeSpec::Extended(decl) => &decl.type_name,
+        }
+    }
+
+    /// The declared `max_length`, if any. `None` for the bare form and for
+    /// the extended form when the key is absent.
+    pub fn max_length(&self) -> Option<u32> {
+        match self {
+            FieldTypeSpec::Bare(_) => None,
+            FieldTypeSpec::Extended(decl) => decl.max_length,
+        }
+    }
+
+    /// The declared `indexed` override, if any.
+    pub fn indexed(&self) -> Option<bool> {
+        match self {
+            FieldTypeSpec::Bare(_) => None,
+            FieldTypeSpec::Extended(decl) => decl.indexed,
+        }
+    }
+
+    /// The bound actually enforced for a bounded scalar type: the declared
+    /// `max_length` if present, else `DEFAULT_STRING_MAX_LENGTH`. `None` for
+    /// types that carry no length bound (`text`, `datetime`, ...).
+    pub fn effective_max_length(&self) -> Option<u32> {
+        match self.type_name() {
+            "string" | "list_of_strings" => {
+                Some(self.max_length().unwrap_or(DEFAULT_STRING_MAX_LENGTH))
+            }
+            _ => None,
         }
     }
 }
@@ -545,14 +635,34 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             .clone()
             .unwrap_or_else(|| "unnamed validate rule".into());
 
-        for (field, ty) in &rule.field_types {
+        for (field, spec) in &rule.field_types {
+            let ty = spec.type_name();
             if !is_known_field_type(ty) {
                 return Err(ConfigError::Invalid {
                     source_path: source_path.to_owned(),
                     message: format!(
-                        "rule {rule_label}: unknown field_type '{ty}' for field '{field}'; expected one of: datetime, date, list_of_strings, wikilink, wikilink_or_list"
+                        "rule {rule_label}: unknown field_type '{ty}' for field '{field}'; expected one of: datetime, date, list_of_strings, wikilink, wikilink_or_list, string, text"
                     ),
                 });
+            }
+
+            if let Some(max_length) = spec.max_length() {
+                if !matches!(ty, "string" | "list_of_strings") {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: field_types.{field}.max_length is only valid for 'string' or 'list_of_strings' (field '{field}' is '{ty}')"
+                        ),
+                    });
+                }
+                if !(1..=STRING_MAX_LENGTH_CEILING).contains(&max_length) {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: field_types.{field}.max_length must be between 1 and {STRING_MAX_LENGTH_CEILING} (got {max_length})"
+                        ),
+                    });
+                }
             }
         }
 
@@ -878,7 +988,13 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
 fn is_known_field_type(ty: &str) -> bool {
     matches!(
         ty,
-        "datetime" | "date" | "list_of_strings" | "wikilink" | "wikilink_or_list"
+        "datetime"
+            | "date"
+            | "list_of_strings"
+            | "wikilink"
+            | "wikilink_or_list"
+            | "string"
+            | "text"
     )
 }
 
@@ -933,6 +1049,125 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("unknown field_type 'bogus'"), "got: {msg}");
         assert!(msg.contains("datetime"), "got: {msg}");
+    }
+
+    // ── NRN-77: string/text field types, max_length, indexed ─────────────────
+
+    #[test]
+    fn bare_string_and_text_field_types_parse() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: string\n        notes: text\n";
+        let cfg = parse(yaml).unwrap();
+        let rule = &cfg.validate.rules[0];
+        assert_eq!(rule.field_types["project"].type_name(), "string");
+        assert_eq!(rule.field_types["project"].effective_max_length(), Some(64));
+        assert_eq!(rule.field_types["notes"].type_name(), "text");
+        assert_eq!(rule.field_types["notes"].effective_max_length(), None);
+    }
+
+    #[test]
+    fn extended_field_type_form_parses_max_length_and_indexed() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: r
+      field_types:
+        project: { type: string, max_length: 32 }
+        notes: { type: text }
+        status: { type: string, indexed: false }
+"#;
+        let cfg = parse(yaml).unwrap();
+        let rule = &cfg.validate.rules[0];
+        assert_eq!(rule.field_types["project"].type_name(), "string");
+        assert_eq!(rule.field_types["project"].max_length(), Some(32));
+        assert_eq!(rule.field_types["project"].effective_max_length(), Some(32));
+        assert_eq!(rule.field_types["notes"].type_name(), "text");
+        assert_eq!(rule.field_types["notes"].max_length(), None);
+        assert_eq!(rule.field_types["status"].indexed(), Some(false));
+    }
+
+    #[test]
+    fn max_length_above_ceiling_is_rejected() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: { type: string, max_length: 257 }\n";
+        let err = parse(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("max_length"), "got: {msg}");
+        assert!(msg.contains("between 1 and 256"), "got: {msg}");
+    }
+
+    #[test]
+    fn max_length_zero_is_rejected() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: { type: string, max_length: 0 }\n";
+        let err = parse(yaml).unwrap_err();
+        assert!(err.to_string().contains("max_length"), "got: {err}");
+    }
+
+    #[test]
+    fn max_length_on_text_is_rejected() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        notes: { type: text, max_length: 32 }\n";
+        let err = parse(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("max_length"), "got: {msg}");
+        assert!(
+            msg.contains("string") || msg.contains("list_of_strings"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn max_length_on_datetime_is_rejected() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        created: { type: datetime, max_length: 32 }\n";
+        let err = parse(yaml).unwrap_err();
+        assert!(err.to_string().contains("max_length"), "got: {err}");
+    }
+
+    #[test]
+    fn max_length_on_list_of_strings_is_accepted() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        tags: { type: list_of_strings, max_length: 32 }\n";
+        let cfg = parse(yaml).unwrap();
+        assert_eq!(
+            cfg.validate.rules[0].field_types["tags"].effective_max_length(),
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn field_type_extended_form_rejects_unknown_key() {
+        // `FieldTypeSpec` is an untagged enum (bare string | extended object);
+        // serde discards the nested deny_unknown_fields message in favor of a
+        // generic "no variant matched" error, but it's still a config load
+        // error, which is what this test guards.
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: { type: string, bogus_key: 1 }\n";
+        let err = parse(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("did not match any variant"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn field_type_extended_form_requires_type_key() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        project: { max_length: 32 }\n";
+        assert!(parse(yaml).is_err());
+    }
+
+    // ── index.auto ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn index_auto_defaults_true_when_absent() {
+        let cfg = parse("").unwrap();
+        assert!(cfg.index.auto);
+    }
+
+    #[test]
+    fn index_auto_can_be_set_false() {
+        let cfg = parse("index:\n  auto: false\n").unwrap();
+        assert!(!cfg.index.auto);
+    }
+
+    #[test]
+    fn index_unknown_field_is_rejected() {
+        let err = parse("index:\n  notakey: x\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
     }
 
     #[test]

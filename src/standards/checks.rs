@@ -36,14 +36,19 @@ pub(crate) fn check_required_frontmatter(
 
 pub(crate) fn check_field_types(
     document: &Document,
-    types: &HashMap<String, String>,
+    types: &HashMap<String, crate::standards::config::FieldTypeSpec>,
     rule: Option<&str>,
 ) -> Vec<Finding> {
     types
         .iter()
-        .filter_map(|(field, expected_type)| {
+        .filter_map(|(field, spec)| {
             let actual = crate::standards::predicates::document_frontmatter_field(document, field)?;
-            if crate::standards::predicates::frontmatter_type_matches(actual, expected_type) {
+            let expected_type = spec.type_name();
+            if crate::standards::predicates::frontmatter_type_matches(
+                actual,
+                expected_type,
+                spec.effective_max_length(),
+            ) {
                 None
             } else {
                 Some(Finding::frontmatter_invalid_type(
@@ -51,7 +56,7 @@ pub(crate) fn check_field_types(
                     rule.map(str::to_string),
                     field.clone(),
                     actual.clone(),
-                    expected_type.clone(),
+                    expected_type.to_string(),
                 ))
             }
         })

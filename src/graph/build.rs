@@ -247,6 +247,7 @@ mod tests {
         let options = IndexOptions {
             ignore: vec![],
             alias_field: Some("aliases".into()),
+            ..Default::default()
         };
         let index =
             build_index_with_options(Utf8Path::new("fixtures/alias-basic"), &options).unwrap();

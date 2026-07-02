@@ -48,8 +48,24 @@ pub fn lookup_field_type(cfg: &VaultConfig, doc: &Document, field: &str) -> Opti
         if !crate::standards::engine::rule_matches(doc, rule) {
             continue;
         }
-        if let Some(ty) = rule.field_types.get(field) {
-            return Some(ty.clone());
+        if let Some(spec) = rule.field_types.get(field) {
+            return Some(spec.type_name().to_string());
+        }
+    }
+    None
+}
+
+/// The effective `max_length` bound for `field`'s declared schema type on
+/// this document — `Some(n)` for `string`/`list_of_strings` (the declared
+/// value, or the default of 64 when unset), `None` for every other type or
+/// when no matching rule declares the field.
+pub fn lookup_field_max_length(cfg: &VaultConfig, doc: &Document, field: &str) -> Option<u32> {
+    for rule in &cfg.validate.rules {
+        if !crate::standards::engine::rule_matches(doc, rule) {
+            continue;
+        }
+        if let Some(spec) = rule.field_types.get(field) {
+            return spec.effective_max_length();
         }
     }
     None
@@ -61,7 +77,13 @@ pub fn lookup_field_type(cfg: &VaultConfig, doc: &Document, field: &str) -> Opti
 /// Wikilink-typed values are auto-wrapped: `norn` becomes `[[norn]]`.
 /// Already-bracketed input passes through. Empty-stem wikilinks (`[[]]`) are
 /// refused as shape-invalid.
-pub fn coerce_value_for_type(field_type: &str, raw: &str) -> Result<Value> {
+/// `max_length` bounds `string` (the whole value) and each `list_of_strings`
+/// element; it is ignored for every other type.
+pub fn coerce_value_for_type(
+    field_type: &str,
+    raw: &str,
+    max_length: Option<u32>,
+) -> Result<Value> {
     match field_type {
         "datetime" => {
             if crate::standards::predicates::is_datetime_string(raw) {
@@ -97,9 +119,26 @@ pub fn coerce_value_for_type(field_type: &str, raw: &str) -> Result<Value> {
             }
             Ok(Value::String(wrapped))
         }
-        "list_of_strings" => Ok(Value::Array(vec![Value::String(raw.to_string())])),
+        "list_of_strings" => {
+            check_max_length(raw, max_length, "list_of_strings")?;
+            Ok(Value::Array(vec![Value::String(raw.to_string())]))
+        }
+        "string" => {
+            check_max_length(raw, max_length, "string")?;
+            Ok(Value::String(raw.to_string()))
+        }
+        "text" => Ok(Value::String(raw.to_string())),
         unknown => anyhow::bail!("unknown field_type: {unknown}"),
     }
+}
+
+fn check_max_length(raw: &str, max_length: Option<u32>, field_type: &str) -> Result<()> {
+    if let Some(bound) = max_length {
+        if raw.chars().count() > bound as usize {
+            anyhow::bail!("value '{raw}' exceeds max_length {bound} for field type '{field_type}'");
+        }
+    }
+    Ok(())
 }
 
 fn wrap_wikilink(raw: &str) -> String {
@@ -212,7 +251,10 @@ fn coerce_kv_slice(
     for kv in raw_kvs {
         let (key, raw) = crate::set::synth::parse_kv(kv)?;
         let coerced = match lookup_field_type(cfg, doc, &key) {
-            Some(ty) if !force => coerce_value_for_type(&ty, &raw)?,
+            Some(ty) if !force => {
+                let max_length = lookup_field_max_length(cfg, doc, &key);
+                coerce_value_for_type(&ty, &raw, max_length)?
+            }
             Some(_) => {
                 w.push(SetWarning::ForceBypass {
                     field: key.clone(),
@@ -297,7 +339,9 @@ pub fn synth_with_schema(
         let parsed: Value = serde_json::from_str(&raw_json)
             .map_err(|e| anyhow::anyhow!("--field-json value is not valid JSON ({key}): {e}"))?;
         if let Some(ty) = lookup_field_type(cfg, doc, &key) {
-            let valid = crate::standards::predicates::frontmatter_type_matches(&parsed, &ty);
+            let max_length = lookup_field_max_length(cfg, doc, &key);
+            let valid =
+                crate::standards::predicates::frontmatter_type_matches(&parsed, &ty, max_length);
             if !valid {
                 if !force {
                     anyhow::bail!(
@@ -450,6 +494,51 @@ validate:
             .expect("config should parse")
     }
 
+    fn fixture_config_with_bounded_string_fields() -> VaultConfig {
+        let yaml = r#"
+validate:
+  rules:
+    - name: note-fields
+      match:
+        frontmatter:
+          kind: note
+      field_types:
+        project: { type: string, max_length: 8 }
+        summary: string
+        notes: text
+"#;
+        crate::standards::parse_config(yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config should parse")
+    }
+
+    #[test]
+    fn lookup_field_max_length_returns_declared_override() {
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_with_bounded_string_fields();
+        assert_eq!(lookup_field_max_length(&cfg, &doc, "project"), Some(8));
+    }
+
+    #[test]
+    fn lookup_field_max_length_returns_default_when_unset() {
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_with_bounded_string_fields();
+        assert_eq!(lookup_field_max_length(&cfg, &doc, "summary"), Some(64));
+    }
+
+    #[test]
+    fn lookup_field_max_length_none_for_text() {
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_with_bounded_string_fields();
+        assert_eq!(lookup_field_max_length(&cfg, &doc, "notes"), None);
+    }
+
+    #[test]
+    fn lookup_field_max_length_none_for_undeclared_field() {
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_with_bounded_string_fields();
+        assert_eq!(lookup_field_max_length(&cfg, &doc, "madeup"), None);
+    }
+
     // ── Task 4.1: lookup_field_type ──────────────────────────────────────────
 
     #[test]
@@ -502,42 +591,72 @@ validate:
     #[test]
     fn coerce_value_passes_through_string_when_type_matches_string_shape() {
         let raw = "2026-05-25T12:00:00";
-        let out = coerce_value_for_type("datetime", raw).expect("should accept");
+        let out = coerce_value_for_type("datetime", raw, None).expect("should accept");
         assert_eq!(out, json!("2026-05-25T12:00:00"));
     }
 
     #[test]
     fn coerce_value_refuses_invalid_datetime() {
-        assert!(coerce_value_for_type("datetime", "not a date").is_err());
+        assert!(coerce_value_for_type("datetime", "not a date", None).is_err());
     }
 
     #[test]
     fn coerce_value_wraps_bare_stem_in_wikilink_brackets() {
-        let out = coerce_value_for_type("wikilink", "norn").expect("should wrap");
+        let out = coerce_value_for_type("wikilink", "norn", None).expect("should wrap");
         assert_eq!(out, json!("[[norn]]"));
     }
 
     #[test]
     fn coerce_value_passes_through_already_bracketed_wikilink() {
-        let out = coerce_value_for_type("wikilink", "[[norn]]").expect("should accept");
+        let out = coerce_value_for_type("wikilink", "[[norn]]", None).expect("should accept");
         assert_eq!(out, json!("[[norn]]"));
     }
 
     #[test]
     fn coerce_value_refuses_empty_wikilink_brackets() {
         // wrapping "" yields "[[]]" which is shape-invalid per is_wikilink_string.
-        assert!(coerce_value_for_type("wikilink", "").is_err());
+        assert!(coerce_value_for_type("wikilink", "", None).is_err());
     }
 
     #[test]
     fn coerce_value_for_list_of_strings_wraps_single_string() {
-        let out = coerce_value_for_type("list_of_strings", "single").expect("should wrap");
+        let out = coerce_value_for_type("list_of_strings", "single", None).expect("should wrap");
         assert_eq!(out, json!(["single"]));
     }
 
     #[test]
     fn coerce_value_refuses_unknown_field_type() {
-        assert!(coerce_value_for_type("some_unknown", "x").is_err());
+        assert!(coerce_value_for_type("some_unknown", "x", None).is_err());
+    }
+
+    #[test]
+    fn coerce_value_string_within_bound_accepted() {
+        let out = coerce_value_for_type("string", "abc", Some(3)).expect("should accept");
+        assert_eq!(out, json!("abc"));
+    }
+
+    #[test]
+    fn coerce_value_string_over_bound_refused() {
+        assert!(coerce_value_for_type("string", "abcd", Some(3)).is_err());
+    }
+
+    #[test]
+    fn coerce_value_string_with_no_bound_accepts_any_length() {
+        let long = "x".repeat(1000);
+        let out = coerce_value_for_type("string", &long, None).expect("should accept");
+        assert_eq!(out, json!(long));
+    }
+
+    #[test]
+    fn coerce_value_text_ignores_bound() {
+        let long = "x".repeat(1000);
+        let out = coerce_value_for_type("text", &long, Some(64)).expect("text is unbounded");
+        assert_eq!(out, json!(long));
+    }
+
+    #[test]
+    fn coerce_value_list_of_strings_over_bound_refused() {
+        assert!(coerce_value_for_type("list_of_strings", "abcd", Some(3)).is_err());
     }
 
     // ── Task 4.3: synth_with_schema ──────────────────────────────────────────
@@ -583,6 +702,45 @@ validate:
             false,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn synth_with_schema_refuses_string_over_max_length() {
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_with_bounded_string_fields();
+        let fm = current_fm(&doc);
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &fm,
+            &["project=this-is-way-too-long".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn synth_with_schema_accepts_string_within_max_length() {
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_with_bounded_string_fields();
+        let fm = current_fm(&doc);
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &fm,
+            &["project=short".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.changes[0].new_value, Some(json!("short")));
     }
 
     #[test]
