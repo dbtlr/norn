@@ -6,3 +6,6 @@ CLAUDE.local.md
 .atlas.toml
 .claude/settings.local.json
 .claude/worktrees/
+.claude/saga-claude-hook.sh
+.mcp.json
+.saga.local.json
