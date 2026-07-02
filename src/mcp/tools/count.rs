@@ -14,7 +14,6 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use crate::cli::{CountArgs, CountFormat};
 use crate::count::CountOutput;
@@ -30,8 +29,11 @@ use crate::mcp::context::VaultContext;
 /// structured envelope.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct CountParams {
-    /// Frontmatter field to group counts by. Without `by`, only the total is
-    /// returned. With `by`, both total and per-value group counts are returned.
+    /// Frontmatter field(s) to group counts by — comma-separated, exactly the
+    /// CLI's `--by` token (e.g. `"project,lifecycle"`). Without `by`, only
+    /// the total is returned. One field returns a string `by` and a flat
+    /// value→count `groups` map; several fields return an array `by` and
+    /// nested `groups` (one map level per field, counts at the leaves).
     #[serde(default)]
     pub by: Option<String>,
 
@@ -107,20 +109,24 @@ pub struct CountParams {
 
 /// Flat output envelope for `vault.count`.
 ///
-/// Covers both the `Total` and `Grouped` variants of [`CountOutput`] in a single
-/// `type: object` root so rmcp's schema validation passes at server startup:
+/// Covers every variant of [`CountOutput`] in a single `type: object` root so
+/// rmcp's schema validation passes at server startup, mirroring the CLI's
+/// `--format json` payloads exactly:
 /// - `total` — always present; the number of matching documents.
-/// - `by` — the grouping field name; present only when a `by` param was supplied.
-/// - `groups` — per-value counts; present only when a `by` param was supplied.
+/// - `by` — absent without grouping; the field name (string) for one key;
+///   the key list (array) for several.
+/// - `groups` — absent without grouping; a flat value→count map for one key;
+///   nested maps (one level per key, counts at the leaves) for several.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CountEnvelope {
     /// Total number of matching documents.
     pub total: usize,
-    /// Grouping field name (set when `by` was requested).
-    pub by: Option<String>,
-    /// Per-value document counts, sorted by field value (set when `by` was
-    /// requested).
-    pub groups: Option<BTreeMap<String, usize>>,
+    /// Grouping key(s): a string for single-key grouping, an array of
+    /// strings for multi-key (set when `by` was requested).
+    pub by: Option<serde_json::Value>,
+    /// Per-value document counts, sorted by field value: flat for one key,
+    /// nested for several (set when `by` was requested).
+    pub groups: Option<serde_json::Value>,
 }
 
 impl CountEnvelope {
@@ -133,8 +139,13 @@ impl CountEnvelope {
             },
             CountOutput::Grouped { by, total, groups } => Self {
                 total,
-                by: Some(by),
-                groups: Some(groups),
+                by: Some(serde_json::Value::String(by)),
+                groups: Some(serde_json::to_value(groups).expect("count groups serialize")),
+            },
+            CountOutput::GroupedMulti { by, total, groups } => Self {
+                total,
+                by: Some(serde_json::to_value(by).expect("count by serialize")),
+                groups: Some(serde_json::to_value(groups).expect("count groups serialize")),
             },
         }
     }
@@ -146,7 +157,13 @@ pub fn handle(ctx: &VaultContext, p: CountParams) -> Result<CountEnvelope> {
     let cache = ctx.query_cache()?;
 
     let args = CountArgs {
-        by: p.by,
+        // Same comma token as the CLI flag; empty segments are rejected by
+        // `count::run`'s empty-field guard, matching CLI behavior.
+        by: p
+            .by
+            .as_deref()
+            .map(|token| token.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
         filters: FilterArgs {
             text: p.text,
             eq: p.eq,
@@ -249,9 +266,9 @@ mod tests {
             envelope.total
         );
         assert_eq!(
-            envelope.by.as_deref(),
-            Some("type"),
-            "by field should reflect the grouping key"
+            envelope.by,
+            Some(serde_json::json!("type")),
+            "single-key `by` must stay a plain string"
         );
 
         let groups = envelope
@@ -259,20 +276,63 @@ mod tests {
             .as_ref()
             .expect("groups must be present in grouped mode");
         assert_eq!(
-            groups.get("note").copied(),
+            groups["note"].as_u64(),
             Some(2),
             "note group should have count 2, got {groups:?}"
         );
         assert_eq!(
-            groups.get("task").copied(),
+            groups["task"].as_u64(),
             Some(1),
             "task group should have count 1, got {groups:?}"
         );
         assert_eq!(
-            groups.len(),
+            groups.as_object().unwrap().len(),
             2,
             "expected exactly 2 groups (note, task), got {groups:?}"
         );
+    }
+
+    /// Multi-key `by` (comma token) nests groups and returns an array `by`.
+    #[test]
+    fn handle_multi_key_by_nests_groups() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let envelope = handle(
+            &ctx,
+            CountParams {
+                by: Some("type,title".into()),
+                ..CountParams::default()
+            },
+        )
+        .expect("handle should succeed");
+
+        assert_eq!(
+            envelope.by,
+            Some(serde_json::json!(["type", "title"])),
+            "multi-key `by` must be the key array"
+        );
+        let groups = envelope.groups.as_ref().expect("groups present");
+        assert_eq!(groups["note"]["Note One"].as_u64(), Some(1), "{groups:?}");
+        assert_eq!(groups["note"]["Note Two"].as_u64(), Some(1), "{groups:?}");
+        assert_eq!(groups["task"]["Task One"].as_u64(), Some(1), "{groups:?}");
+    }
+
+    /// An empty segment in the comma token is rejected, matching the CLI.
+    #[test]
+    fn handle_empty_by_segment_errors() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let err = handle(
+            &ctx,
+            CountParams {
+                by: Some("type,".into()),
+                ..CountParams::default()
+            },
+        )
+        .expect_err("empty --by segment should error");
+        assert!(err.to_string().contains("empty field name"), "{err}");
     }
 
     /// Filter with `eq` reduces the counted set.
