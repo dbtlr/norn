@@ -42,7 +42,7 @@ The cache is *disposable*. Any of the following triggers an automatic silent reb
 
 A cache with a *newer* schema version than the binary supports is the one case that hard-errors — interpreting unknown future fields would be unsafe. Upgrade `norn` to read it.
 
-The current `schema_version` is `3`. It is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
+The current `schema_version` is `4`. It is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
 
 ## Lifecycle
 
