@@ -272,6 +272,103 @@ mod tests {
         );
     }
 
+    // ── string values are text-strict (NRN-85) ──────────────────────────
+    //
+    // A string query value only ever matches TEXT-typed storage. Pre-NRN-85
+    // the scan path's bracket-strip (SQLite `replace()`) cast numeric/bool
+    // stored values to text as a side effect, so `--eq n:[[5]]` (the string
+    // "5" after stripping — a bare 5 coerces to a number in filter_args)
+    // accidentally matched a stored number 5 — while the EAV route never
+    // did. Typed strictness is the decided canonical rule: values compare
+    // within their type; strings additionally collapse wikilink brackets.
+    // The anchored string operators are NOT covered by this rule — they are
+    // textual by nature and keep their documented text-rendering contract
+    // (see `string_op_renders_bool_as_source_text_not_integer`), as do the
+    // date ops (see the NRN-82 section below).
+
+    #[test]
+    fn eq_string_never_matches_numeric_or_bool_storage() {
+        let (_tmp, root) = vault_with(&[
+            ("num_scalar.md", "---\nf: 5\n---\n"),
+            ("num_array.md", "---\nf: [5]\n---\n"),
+            ("text_scalar.md", "---\nf: \"5\"\n---\n"),
+            ("text_array.md", "---\nf: [\"5\"]\n---\n"),
+            ("bool.md", "---\nf: true\n---\n"),
+        ]);
+        let cache = open(&root);
+        assert_eq!(
+            matched(&cache, eq("f", serde_json::json!("5"))),
+            vec!["text_array.md", "text_scalar.md"],
+            "string \"5\" matches only TEXT-typed storage, never number 5"
+        );
+        assert!(
+            matched(&cache, eq("f", serde_json::json!("true"))).is_empty(),
+            "string \"true\" never matches a stored boolean"
+        );
+        assert!(
+            matched(&cache, eq("f", serde_json::json!("1"))).is_empty(),
+            "string \"1\" never matches a stored boolean's INTEGER rendering"
+        );
+    }
+
+    #[test]
+    fn not_eq_string_counts_non_text_values_as_unequal() {
+        // A numeric value IS unequal to any string, so it matches --not-eq;
+        // missing and null-valued fields stay excluded (no value at all).
+        let (_tmp, root) = vault_with(&[
+            ("equal.md", "---\nf: \"5\"\n---\n"),
+            ("num.md", "---\nf: 5\n---\n"),
+            ("num_array.md", "---\nf: [5]\n---\n"),
+            ("other_text.md", "---\nf: x\n---\n"),
+            ("null_field.md", "---\nf: null\n---\n"),
+            ("missing.md", "---\nother: x\n---\n"),
+        ]);
+        let cache = open(&root);
+        let not_eq = DocumentQuery {
+            frontmatter_not_eq: vec![("f".to_string(), serde_json::json!("5"))],
+            ..Default::default()
+        };
+        assert_eq!(
+            matched(&cache, not_eq),
+            vec!["num.md", "num_array.md", "other_text.md"]
+        );
+    }
+
+    #[test]
+    fn in_string_values_are_text_strict_too() {
+        let (_tmp, root) = vault_with(&[
+            ("num.md", "---\nf: 5\n---\n"),
+            ("text.md", "---\nf: \"5\"\n---\n"),
+            ("arr.md", "---\nf: [5, \"6\"]\n---\n"),
+        ]);
+        let cache = open(&root);
+        assert_eq!(
+            matched(
+                &cache,
+                in_("f", vec![serde_json::json!("5"), serde_json::json!("6")])
+            ),
+            vec!["arr.md", "text.md"],
+            "string membership matches text elements only (arr.md via \"6\")"
+        );
+        // The typed side of a mixed list still matches the number.
+        assert_eq!(
+            matched(
+                &cache,
+                in_("f", vec![serde_json::json!("6"), serde_json::json!(5)])
+            ),
+            vec!["arr.md", "num.md"]
+        );
+        // --not-in: the number 5 is not any of the listed strings.
+        let not_in = DocumentQuery {
+            frontmatter_not_in: vec![(
+                "f".to_string(),
+                vec![serde_json::json!("5"), serde_json::json!("6")],
+            )],
+            ..Default::default()
+        };
+        assert_eq!(matched(&cache, not_in), vec!["num.md"]);
+    }
+
     // ── integer/float equality ───────────────────────────────────────────
 
     #[test]
