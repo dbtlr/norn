@@ -1990,11 +1990,12 @@ mod router_tests {
 
     #[test]
     fn date_query_routes_and_drives_kv_index() {
-        // The writer ANALYZEs document_fields after every shred, so on a
-        // dozen-row vault the planner legitimately prefers a scan over the
-        // kv range — the SEARCH-at-scale property this guard exists for
-        // only shows once the stats say the range is selective. Generate
-        // enough docs for the stats to flip.
+        // The writer ANALYZEs document_fields after every shred, and with
+        // small-table stats the planner may legitimately prefer a scan
+        // over the kv range (observed on the dozen-row dates_vault; the
+        // exact tipping point is stats-dependent). The property this guard
+        // exists for is SEARCH at scale — generate enough docs that the
+        // stats favor the range unambiguously.
         let tmp = TempDir::new().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
             .unwrap()
