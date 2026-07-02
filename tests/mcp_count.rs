@@ -153,6 +153,19 @@ fn lists_and_calls_vault_count() {
                 }
             })))
             .unwrap();
+
+        // 5. vault.count — multi-key grouping (CLI-isomorphic comma token)
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.count",
+                    "arguments": { "by": "type,title" }
+                }
+            })))
+            .unwrap();
     }
     drop(child.stdin.take());
 
@@ -276,5 +289,30 @@ fn lists_and_calls_vault_count() {
         groups.len(),
         2,
         "expected exactly 2 groups (note, task), got: {groups:?}"
+    );
+
+    // ── tools/call (id=5): multi-key grouping nests ───────────────────────
+    let multi_resp = responses.iter().find(|r| r["id"] == 5).unwrap_or_else(|| {
+        panic!("no tools/call (id=5) response\nstdout: {stdout}\nstderr: {stderr}")
+    });
+    assert!(
+        multi_resp.get("error").is_none(),
+        "vault.count (multi-key) call must not error, got: {multi_resp}"
+    );
+    let structured = &multi_resp["result"]["structuredContent"];
+    assert_eq!(
+        structured["by"],
+        serde_json::json!(["type", "title"]),
+        "multi-key `by` should mirror the CLI JSON (array), got: {structured}"
+    );
+    assert_eq!(
+        structured["groups"]["note"]["Note One"].as_u64(),
+        Some(1),
+        "nested multi-key groups expected, got: {structured}"
+    );
+    assert_eq!(
+        structured["groups"]["task"]["Task One"].as_u64(),
+        Some(1),
+        "nested multi-key groups expected, got: {structured}"
     );
 }

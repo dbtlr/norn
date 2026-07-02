@@ -89,6 +89,107 @@ fn count_by_field_groups() {
 }
 
 #[test]
+fn count_by_single_key_shape_is_unchanged() {
+    // Load-bearing for external consumers (Mimir): with ONE key, `by` stays
+    // a plain string and `groups` a flat value→count map — not the nested
+    // multi-key shape.
+    let tmp = synth_vault();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["count", "--by", "status", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(v["by"].is_string(), "single-key `by` must be a string: {v}");
+    let groups = v["groups"].as_object().unwrap();
+    assert!(
+        groups.values().all(serde_json::Value::is_u64),
+        "single-key groups must be flat value→count: {v}"
+    );
+}
+
+#[test]
+fn count_by_multi_key_nests_groups() {
+    let tmp = synth_vault();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["count", "--by", "type,status", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["by"], serde_json::json!(["type", "status"]));
+    assert_eq!(v["total"], 3);
+    assert_eq!(v["groups"]["note"]["active"], 1);
+    assert_eq!(v["groups"]["note"]["backlog"], 1);
+    assert_eq!(v["groups"]["log"]["backlog"], 1);
+}
+
+#[test]
+fn count_by_multi_key_text_render_nests() {
+    let tmp = synth_vault();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["count", "--by", "type,status"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(stdout.contains("total"), "{stdout}");
+    // Branch keys appear as their own lines; leaves indented beneath them.
+    assert!(stdout.contains("note"), "{stdout}");
+    assert!(stdout.contains("  active"), "{stdout}");
+    assert!(stdout.contains("  backlog"), "{stdout}");
+}
+
+#[test]
+fn count_by_missing_field_nests_missing_marker() {
+    let tmp = synth_vault();
+    // c.md has no `owner`; grouping type,owner buckets it under (missing).
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["count", "--by", "type,owner", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["groups"]["log"]["(missing)"], 1);
+    assert_eq!(v["groups"]["note"]["(missing)"], 2);
+}
+
+#[test]
+fn count_by_empty_key_errors() {
+    let tmp = synth_vault();
+    for by in ["type,", ",type", "type,,status", ""] {
+        let out = norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(tmp.path().join("vault"))
+            .args(["count", "--by", by, "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "--by {by:?} should be rejected, stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+#[test]
 fn count_filter_then_by_narrows() {
     let tmp = synth_vault();
     let out = norn_cmd(&tmp)

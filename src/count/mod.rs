@@ -19,25 +19,52 @@ pub enum CountOutput {
     Total {
         total: usize,
     },
+    /// Single-key grouping. `by` stays a plain string and `groups` a flat
+    /// value→count map — this exact JSON shape is load-bearing for external
+    /// consumers; multi-key grouping is the separate `GroupedMulti` shape.
     Grouped {
         by: String,
         total: usize,
         groups: BTreeMap<String, usize>,
     },
+    /// Multi-key grouping: `by` is the key list and `groups` nests one map
+    /// level per key, counts at the leaves.
+    GroupedMulti {
+        by: Vec<String>,
+        total: usize,
+        groups: BTreeMap<String, GroupNode>,
+    },
+}
+
+/// One level of a nested grouping tree: a leaf count, or a branch keyed by
+/// the next `--by` field's rendered values.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum GroupNode {
+    Leaf(usize),
+    Branch(BTreeMap<String, GroupNode>),
 }
 
 pub fn run(cache: &Cache, args: &CountArgs) -> Result<CountOutput> {
+    if args.by.iter().any(|field| field.trim().is_empty()) {
+        anyhow::bail!("invalid --by value: empty field name");
+    }
     let mut query = build_document_query(&args.filters)?;
     query.links_to = crate::filter_args::resolve_links_to(cache, &args.filters.links_to)?;
     let docs = cache.documents_matching(&query)?;
     let total = docs.len();
 
-    match &args.by {
-        None => Ok(CountOutput::Total { total }),
-        Some(field) => Ok(CountOutput::Grouped {
+    match args.by.as_slice() {
+        [] => Ok(CountOutput::Total { total }),
+        [field] => Ok(CountOutput::Grouped {
             by: field.clone(),
             total,
             groups: group_by(&docs, field),
+        }),
+        fields => Ok(CountOutput::GroupedMulti {
+            by: fields.to_vec(),
+            total,
+            groups: group_by_multi(&docs, fields),
         }),
     }
 }
@@ -45,15 +72,46 @@ pub fn run(cache: &Cache, args: &CountArgs) -> Result<CountOutput> {
 fn group_by(docs: &[DocumentSummary], field: &str) -> BTreeMap<String, usize> {
     let mut groups: BTreeMap<String, usize> = BTreeMap::new();
     for doc in docs {
-        let key = doc
-            .frontmatter
-            .as_ref()
-            .and_then(|fm| fm.get(field))
-            .map(render_key)
-            .unwrap_or_else(|| "(missing)".to_string());
-        *groups.entry(key).or_insert(0) += 1;
+        *groups.entry(doc_key(doc, field)).or_insert(0) += 1;
     }
     groups
+}
+
+/// Nest documents one map level per field, counting at the leaves. Documents
+/// missing a field bucket under `(missing)` at that level, mirroring the
+/// single-key behavior.
+fn group_by_multi(docs: &[DocumentSummary], fields: &[String]) -> BTreeMap<String, GroupNode> {
+    let refs: Vec<&DocumentSummary> = docs.iter().collect();
+    group_refs(&refs, fields)
+}
+
+fn group_refs(docs: &[&DocumentSummary], fields: &[String]) -> BTreeMap<String, GroupNode> {
+    let (first, rest) = fields
+        .split_first()
+        .expect("group_refs requires at least one field");
+    let mut buckets: BTreeMap<String, Vec<&DocumentSummary>> = BTreeMap::new();
+    for doc in docs {
+        buckets.entry(doc_key(doc, first)).or_default().push(doc);
+    }
+    buckets
+        .into_iter()
+        .map(|(key, bucket)| {
+            let node = if rest.is_empty() {
+                GroupNode::Leaf(bucket.len())
+            } else {
+                GroupNode::Branch(group_refs(&bucket, rest))
+            };
+            (key, node)
+        })
+        .collect()
+}
+
+fn doc_key(doc: &DocumentSummary, field: &str) -> String {
+    doc.frontmatter
+        .as_ref()
+        .and_then(|fm| fm.get(field))
+        .map(render_key)
+        .unwrap_or_else(|| "(missing)".to_string())
 }
 
 fn render_key(value: &serde_json::Value) -> String {
@@ -99,7 +157,7 @@ mod tests {
         cache.rebuild(&root).unwrap();
 
         let args = crate::cli::CountArgs {
-            by: None,
+            by: vec![],
             filters: crate::filter_args::FilterArgs::default(),
             format: crate::cli::CountFormat::Text,
         };
@@ -117,7 +175,7 @@ mod tests {
         cache.rebuild(&root).unwrap();
 
         let args = crate::cli::CountArgs {
-            by: Some("status".to_string()),
+            by: vec!["status".to_string()],
             filters: crate::filter_args::FilterArgs::default(),
             format: crate::cli::CountFormat::Text,
         };
@@ -145,7 +203,7 @@ mod tests {
         cache.rebuild(&root).unwrap();
 
         let args = crate::cli::CountArgs {
-            by: Some("status".to_string()),
+            by: vec!["status".to_string()],
             filters: crate::filter_args::FilterArgs::default(),
             format: crate::cli::CountFormat::Text,
         };

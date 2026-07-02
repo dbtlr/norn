@@ -78,10 +78,11 @@ Shared by `find` and `get`:
 ```bash
 norn count                                    # total
 norn count --eq type:note --by status         # grouped; same filters as find
+norn count --by project,lifecycle             # multi-key: nested distribution per project
 norn count --path 'notes/**/*.md' --by type
 ```
 
-`count` shares the full `find` filter surface. Formats: `text` (default) and `json` only.
+`count` shares the full `find` filter surface. `--by` takes one or more comma-separated fields: one field → flat value→count `groups` with a string `by`; several → nested groups (one map level per field, counts at the leaves) with an array `by`. Formats: `text` (default) and `json` only.
 
 ### Output formats
 

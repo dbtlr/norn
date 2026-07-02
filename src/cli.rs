@@ -703,10 +703,16 @@ pub enum ValidateFormat {
 
 #[derive(Args, Debug)]
 pub struct CountArgs {
-    /// Frontmatter field to group document counts by. Without --by,
-    /// emits only the total.
-    #[arg(long = "by", value_name = "FIELD", help_heading = "Count options")]
-    pub by: Option<String>,
+    /// Frontmatter field(s) to group document counts by, comma-separated.
+    /// One field emits a flat distribution; several nest in order
+    /// (e.g. --by project,lifecycle). Without --by, emits only the total.
+    #[arg(
+        long = "by",
+        value_name = "FIELD1,FIELD2,...",
+        value_delimiter = ',',
+        help_heading = "Count options"
+    )]
+    pub by: Vec<String>,
 
     #[command(flatten)]
     pub filters: FilterArgs,
@@ -1347,7 +1353,7 @@ mod count_cli_tests {
         let cli = Cli::try_parse_from(["norn", "count", "--by", "status"]).unwrap();
         match cli.command {
             Command::Count(args) => {
-                assert_eq!(args.by.as_deref(), Some("status"));
+                assert_eq!(args.by, vec!["status".to_string()]);
             }
             _ => panic!("expected Count variant"),
         }
@@ -1366,7 +1372,7 @@ mod count_cli_tests {
         match cli.command {
             Command::Count(args) => {
                 assert_eq!(args.filters.eq, vec!["type:note".to_string()]);
-                assert_eq!(args.by.as_deref(), Some("status"));
+                assert_eq!(args.by, vec!["status".to_string()]);
             }
             _ => panic!("expected Count variant"),
         }

@@ -19,13 +19,18 @@ norn count --eq type:note --by status
 norn count --path 'notes/**/*.md' --by type
 # documents under notes/, grouped by type
 
+norn count --by project,lifecycle --format json
+# every project's lifecycle distribution in one call
+
 norn count --eq type:task --format json
 # machine-readable total
 ```
 
 ## Grouping
 
-`--by <FIELD>` groups the count by a frontmatter field, emitting one tally per distinct value. Without `--by`, `count` emits only the total.
+`--by <FIELD1,FIELD2,...>` groups the count by one or more frontmatter fields. One field emits a flat tally per distinct value. Several fields nest in order --- `--by project,lifecycle` yields one block per project, each holding that project's lifecycle distribution, with counts at the leaves. Documents missing a field bucket under `(missing)` at that level. Without `--by`, `count` emits only the total.
+
+JSON shape: with one field, `by` is the field name (a string) and `groups` a flat value-to-count map --- this exact shape is stable for existing consumers. With several fields, `by` is the key list (an array) and `groups` nests one map level per key.
 
 ## Filters
 
