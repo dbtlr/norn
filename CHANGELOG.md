@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.41.0 - 2026-07-02
+
+The frontmatter-index release (Wave 2 of the relational-engine enablement arc). Frontmatter-field queries stop degrading with vault size: declared fields shred into a derived cache index that `find`/`count` route through with byte-identical results, staying flat from 1k to 50k documents. The schema vocabulary gains bounded `string` and unbounded `text` types, and indexing is automatic for every bounded-typed field. The cache schema moves to v4: this binary rebuilds any older cache silently on first use, while a v0.40.0-or-older binary that encounters a v4 cache refuses cleanly with an "upgrade norn" message — upgrading is the fix; there is nothing to clear or repair by hand.
+
 ### Breaking changes
 
 - **`list_of_strings` elements are now bounded (default 64 chars, same as `string`).** Previously a `list_of_strings` field accepted elements of any length; each element is now checked against the field's `max_length` (declared or the 64-char default). An over-length element reports a dedicated `frontmatter-exceeds-max-length` finding (carrying the field, the effective bound, and the actual length) rather than the generic `frontmatter-invalid-type`. Raise the bound per field with the extended `field_types` form (`tags: { type: list_of_strings, max_length: 200 }`, up to the 256-char ceiling) if a vault's existing values need more room.
