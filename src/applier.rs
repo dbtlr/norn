@@ -288,6 +288,15 @@ fn needs_hash_check(operation: &str) -> bool {
             | "set_frontmatter"
             | "add_frontmatter"
             | "remove_frontmatter"
+            // Section/body edit ops (NRN-98) are hash-checked in Pass 1d2, so an
+            // omitted document_hash must be hydrated from the index just like
+            // replace_body — otherwise a plan without a hash aborts spuriously.
+            | "str_replace"
+            | "replace_section"
+            | "append_to_section"
+            | "delete_section"
+            | "insert_before_heading"
+            | "insert_after_heading"
     )
 }
 
