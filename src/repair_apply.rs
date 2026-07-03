@@ -382,6 +382,81 @@ pub fn apply_repair_plan_with_context(
         report.replaced_bodies.push(change.path.clone());
     }
 
+    // Pass 1d2: section/body edit ops (NRN-98 / H1) — append_to_section,
+    // replace_section, delete_section, insert_before/after_heading, str_replace.
+    // Unlike replace_body (a pre-materialized whole body), these resolve at apply
+    // time: read the current body under whole-doc CAS and run the shared
+    // `edit::transform` engine. Grouped by path so multiple edits to one document
+    // apply in plan order against the evolving body, with a single hash-check
+    // against plan-time state (matching `norn edit`'s atomic `edits` array).
+    {
+        const EDIT_KINDS: &[&str] = &[
+            "str_replace",
+            "replace_section",
+            "append_to_section",
+            "delete_section",
+            "insert_before_heading",
+            "insert_after_heading",
+        ];
+        let mut order: Vec<Utf8PathBuf> = Vec::new();
+        let mut by_path: std::collections::BTreeMap<Utf8PathBuf, Vec<&PlannedChange>> =
+            std::collections::BTreeMap::new();
+        for change in plan
+            .changes
+            .iter()
+            .filter(|c| EDIT_KINDS.contains(&c.operation.as_str()))
+        {
+            if !by_path.contains_key(&change.path) {
+                order.push(change.path.clone());
+            }
+            by_path.entry(change.path.clone()).or_default().push(change);
+        }
+
+        // Pre-check every edit path's hash BEFORE writing any of them, so a
+        // drifted target aborts the whole edit batch before the first edit lands
+        // (whole-doc CAS, per the H1 design). Same-path edits share one hash.
+        for path in &order {
+            check_hash(&current_hashes, by_path[path][0])?;
+        }
+
+        for path in &order {
+            let changes = &by_path[path];
+
+            if dry_run {
+                if !report.changed_files.contains(path) {
+                    report.changed_files.push(path.clone());
+                }
+                continue;
+            }
+
+            let absolute_path = cwd.join(path);
+            let content = fs::read_to_string(&absolute_path)
+                .with_context(|| format!("read {absolute_path}"))?;
+            let ops: Vec<crate::edit::ops::EditOp> = changes
+                .iter()
+                .map(|c| {
+                    let payload = c
+                        .new_value
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("edit op missing payload for {}", c.path))?;
+                    serde_json::from_value::<crate::edit::ops::EditOp>(payload.clone())
+                        .map_err(|e| anyhow::anyhow!("edit op decode for {}: {e}", c.path))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let updated = crate::standards::apply::apply_edit_ops(&content, &ops, path)?;
+            if updated != content {
+                fs::write(&absolute_path, &updated)
+                    .with_context(|| format!("write {absolute_path}"))?;
+                if !report.changed_files.contains(path) {
+                    report.changed_files.push(path.clone());
+                }
+            }
+            for change in changes {
+                emit_op_action(sink, spans, change, Severity::Info, Vec::new());
+            }
+        }
+    }
+
     // Pass 1e: create_document operations. Sequenced after all mutation passes
     // (set/remove frontmatter, rewrite_link, delete, replace_body) and before
     // move_document, so we never move a document that was just created and then
