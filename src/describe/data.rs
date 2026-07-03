@@ -204,10 +204,12 @@ pub fn date_fields(config: &LoadedConfig) -> BTreeSet<String> {
     out
 }
 
-/// Min/max per date field. Values are normalized via the same date/datetime
-/// coercion `set` uses, so ISO lexical order == chronological order. Values
-/// that fail to coerce fall back to the raw string (still ISO-comparable for
-/// well-formed inputs); a field with no present values contributes no bounds.
+/// Min/max per date field, lexical over validated ISO values (== chronological
+/// for ISO-8601). Only values that validate as an ISO `date` or `datetime` are
+/// included; malformed values are schema violations (surfaced separately by
+/// `validate`) and are excluded rather than coerced or compared lexically as
+/// raw strings — `describe` reports the vault, it does not re-validate it. A
+/// field with no valid present values contributes no bounds.
 pub fn date_bounds(docs: &[DocumentSummary], fields: &BTreeSet<String>) -> Vec<DateBounds> {
     let mut out = Vec::new();
     for field in fields {
@@ -222,16 +224,20 @@ pub fn date_bounds(docs: &[DocumentSummary], fields: &BTreeSet<String>) -> Vec<D
             else {
                 continue;
             };
-            // Normalize to ISO; skip unparseable. `datetime` accepts both.
-            let normalized = crate::set::validate::coerce_value_for_type("datetime", raw, None)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_else(|| raw.to_string());
-            if min.as_ref().is_none_or(|m| &normalized < m) {
-                min = Some(normalized.clone());
+            // Include only well-formed ISO date/datetime values. Malformed
+            // values are schema violations (surfaced by `validate`); excluding
+            // them keeps bounds chronological, since ISO-8601 lexical order
+            // == chronological order.
+            let valid = crate::set::validate::coerce_value_for_type("date", raw, None).is_ok()
+                || crate::set::validate::coerce_value_for_type("datetime", raw, None).is_ok();
+            if !valid {
+                continue;
             }
-            if max.as_ref().is_none_or(|m| &normalized > m) {
-                max = Some(normalized);
+            if min.as_ref().is_none_or(|m| raw < m.as_str()) {
+                min = Some(raw.to_string());
+            }
+            if max.as_ref().is_none_or(|m| raw > m.as_str()) {
+                max = Some(raw.to_string());
             }
         }
         if let (Some(min), Some(max)) = (min, max) {
@@ -480,8 +486,6 @@ mod tests {
         assert_eq!(fields, vec!["status".to_string(), "type".to_string()]);
     }
 
-    use crate::config_loader::LoadedConfig;
-
     /// A `LoadedConfig` whose `validate` has one rule typing `field` as `ty`,
     /// exercised through the real loader (a temp `.norn/config.yaml` parsed
     /// by `load_config`) rather than a hand-built struct — the date-field
@@ -526,23 +530,46 @@ mod tests {
     }
 
     #[test]
+    fn date_bounds_excludes_malformed_values() {
+        // "not-a-date" validates as neither `date` nor `datetime` and must be
+        // excluded rather than compared lexically as a raw string — sorting
+        // it in would corrupt chronological ordering.
+        let docs = vec![
+            doc(serde_json::json!({"created": "2026-05-10"})),
+            doc(serde_json::json!({"created": "not-a-date"})),
+            doc(serde_json::json!({"created": "2026-07-03"})),
+        ];
+        let mut df = std::collections::BTreeSet::new();
+        df.insert("created".to_string());
+        let bounds = date_bounds(&docs, &df);
+        assert_eq!(bounds.len(), 1);
+        assert_eq!(bounds[0].field, "created");
+        assert_eq!(bounds[0].min, "2026-05-10");
+        assert_eq!(bounds[0].max, "2026-07-03");
+    }
+
+    #[test]
     fn summarize_excludes_date_fields_from_distributions() {
-        // Both docs share `type: note` (rather than the brief's distinct
-        // note/task pair) so the non-date field's identity-ratio
-        // (distinct/occurrences) stays below the default 0.9 skip threshold.
-        // With 2 docs and 2 *distinct* type values the ratio would hit 1.0
-        // and `type` would land in `skipped` via the Task-2 identity-skip —
-        // a real interaction with that already-shipped heuristic, not a
-        // Task-3 bug — so the fixture is widened here rather than weakening
-        // the assertions below (`total`, `dates`, and the fields-membership
-        // checks are unchanged from the brief).
+        // Both `type` and `created` need a ratio that survives identity-skip
+        // (distinct/occurrences < 0.9) so this test genuinely depends on the
+        // Task-3 date-exclusion wiring rather than passing by coincidence via
+        // the Task-2 identity-skip heuristic:
+        // - `type`: "note" repeats (2 of 3 docs) so its ratio (2/3 ≈ 0.67)
+        //   stays below threshold and it lands in `fields` regardless of
+        //   dates.
+        // - `created`: "2026-05-10" repeats (2 of 3 docs) so its ratio
+        //   (2/3 ≈ 0.67) also stays below threshold — specifically to defeat
+        //   identity-skip — so if `summarize`'s date-field exclusion were
+        //   deleted, `created` would survive identity-skip and appear in
+        //   `summary.fields`, which is exactly what this test must catch.
         let docs = vec![
             doc(serde_json::json!({"type": "note", "created": "2026-05-10"})),
-            doc(serde_json::json!({"type": "note", "created": "2026-07-03"})),
+            doc(serde_json::json!({"type": "note", "created": "2026-05-10"})),
+            doc(serde_json::json!({"type": "task", "created": "2026-07-03"})),
         ];
         let cfg = config_with_date_field("created", "datetime");
         let summary = summarize(&docs, &cfg, &DataOptions::default());
-        assert_eq!(summary.total, 2);
+        assert_eq!(summary.total, 3);
         assert!(summary.dates.iter().any(|d| d.field == "created"));
         assert!(
             !summary.fields.iter().any(|f| f.field == "created"),
