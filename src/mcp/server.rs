@@ -27,11 +27,11 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use super::context::VaultContext;
 use super::to_mcp_error;
+use crate::describe::DescribeOutput;
 use crate::mcp::tools::apply_plan::ApplyPlanOutput;
 use crate::mcp::tools::audit::AuditOutput;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::delete::DeleteOutput;
-use crate::mcp::tools::describe::DescribeOutput;
 use crate::mcp::tools::edit::EditOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;

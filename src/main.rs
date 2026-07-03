@@ -10,6 +10,7 @@ mod config_loader;
 mod core;
 mod count;
 pub mod delete_doc;
+mod describe;
 mod edit;
 mod filter;
 mod filter_args;
