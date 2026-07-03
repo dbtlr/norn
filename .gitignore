@@ -9,3 +9,4 @@ CLAUDE.local.md
 .claude/saga-claude-hook.sh
 .mcp.json
 .saga.local.json
+.codex/
