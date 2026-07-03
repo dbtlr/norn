@@ -352,6 +352,71 @@ mod tests {
         );
     }
 
+    /// NRN-100 (H2): a `create_document` + `replace_body` composed into ONE plan
+    /// applies as a single batch via `vault.apply_plan` — the MCP counterpart of
+    /// the `migrate` CLI composition test. Confirms the composed write path is
+    /// reachable off-filesystem (MCP-only client parity).
+    #[test]
+    fn composed_create_and_replace_body_applies_via_apply_plan() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-compose-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        let existing = root.join("a.md");
+        std::fs::write(&existing, "---\ntype: note\n---\n# A\n").unwrap();
+        let a_hash = blake3::hash(&std::fs::read(&existing).unwrap())
+            .to_hex()
+            .to_string();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [
+                {
+                    "kind": "create_document",
+                    "fields": {
+                        "path": "c.md",
+                        "new_value": { "frontmatter": {"type": "note"}, "body": "# C\n" }
+                    }
+                },
+                {
+                    "kind": "replace_body",
+                    "fields": {
+                        "path": "a.md",
+                        "document_hash": a_hash,
+                        "new_value": "# A (rewritten)\n"
+                    }
+                }
+            ]
+        });
+
+        let report = handle(
+            &ctx,
+            ApplyPlanParams {
+                plan,
+                confirm: true,
+            },
+        )
+        .expect("apply_plan (confirm) should succeed");
+        assert!(!report.dry_run);
+        assert!(report.applied >= 2, "expected >= 2 applied: {report:?}");
+
+        let c = std::fs::read_to_string(root.join("c.md")).unwrap();
+        assert!(
+            c.contains("type: note") && c.contains("# C"),
+            "create landed via MCP; got:\n{c}"
+        );
+        let a = std::fs::read_to_string(&existing).unwrap();
+        assert!(
+            a.contains("type: note") && a.contains("# A (rewritten)"),
+            "replace_body landed via MCP with frontmatter preserved; got:\n{a}"
+        );
+    }
+
     /// A malformed plan (garbage JSON) must return Err, applying nothing.
     #[test]
     fn malformed_plan_is_rejected() {
