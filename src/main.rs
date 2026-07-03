@@ -362,9 +362,14 @@ fn run(cli: Cli) -> Result<i32> {
                 &loaded_config.index_options,
                 no_cache_refresh,
             )?;
-            let want_data = args.data || args.stats || !args.by.is_empty();
+            // Normalize `--by` ONCE up front so the want_data gate and the
+            // DataOptions.by mode-selection agree (shared with MCP via
+            // `normalize_by`) — a blank/whitespace-only `--by` must not gate
+            // data on differently from MCP.
+            let by = crate::describe::data::normalize_by(&args.by);
+            let want_data = args.data || args.stats || !by.is_empty();
             let data = want_data.then(|| crate::describe::data::DataOptions {
-                by: args.by.clone(),
+                by,
                 limit: args.limit.unwrap_or(20),
                 ..Default::default()
             });

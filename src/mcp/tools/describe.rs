@@ -185,20 +185,17 @@ pub fn handle(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOut
 pub fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
     let cache = ctx.query_cache()?;
 
-    // Trim + drop-empty here is now redundant with `describe::data::summarize`'s
-    // own normalization (the shared seam that fixes CLI↔MCP `--by` parity —
-    // see NRN-103 adversarial-review F1) but harmless; left in place since
-    // this handler also uses `by` to compute `want_data` below.
-    let by: Vec<String> = params
+    // Normalize `by` via the SHARED `normalize_by` helper — the same helper
+    // the CLI arm uses — so the `want_data` gate below and the mode-selection
+    // inside `summarize` agree across surfaces on a blank/whitespace-only
+    // `--by` (NRN-103 F1 divergence: comma-split of `,` yields `["",""]`,
+    // which must gate identically to the CLI's raw clap Vec).
+    let split: Vec<String> = params
         .by
         .as_deref()
-        .map(|s| {
-            s.split(',')
-                .map(|f| f.trim().to_string())
-                .filter(|f| !f.is_empty())
-                .collect()
-        })
+        .map(|s| s.split(',').map(str::to_string).collect())
         .unwrap_or_default();
+    let by = crate::describe::data::normalize_by(&split);
     let want_data = params.data || !by.is_empty();
     let data = want_data.then(|| crate::describe::data::DataOptions {
         by,

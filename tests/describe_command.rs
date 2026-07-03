@@ -170,6 +170,35 @@ fn describe_by_with_space_after_comma_includes_both_fields() {
 }
 
 #[test]
+fn describe_comma_only_by_does_not_gate_data_on() {
+    // New-F1: clap's `value_delimiter=','` splits a lone `,` into ["", ""] — a
+    // NON-empty raw Vec. Pre-fix the CLI gated `want_data` on the raw Vec
+    // (`!args.by.is_empty()` → true → emits a data section) while MCP trimmed
+    // to empty (want_data=false → no data). Both surfaces now normalize `--by`
+    // via the shared `normalize_by` before gating, so a comma-only `--by`
+    // (with no `--data`) collapses to empty and emits NO data section —
+    // matching MCP.
+    let tmp = synth_vault();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["describe", "--by", ",", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(
+        v.get("data").is_none(),
+        "comma-only --by must not gate a data section on: {v}"
+    );
+}
+
+#[test]
 fn describe_filter_then_data_narrows_totals() {
     let tmp = synth_vault();
     let out = norn_cmd(&tmp)

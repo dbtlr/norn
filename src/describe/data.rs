@@ -79,6 +79,15 @@ pub struct SkippedField {
     pub total: usize,
 }
 
+/// Trim each `--by` entry and drop empties. Shared by CLI + MCP so the
+/// want_data gate and mode-selection agree across surfaces.
+pub fn normalize_by(by: &[String]) -> Vec<String> {
+    by.iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
 /// Sorted union of frontmatter keys present across `docs`, minus `exclude`.
 pub fn auto_fields(docs: &[DocumentSummary], exclude: &BTreeSet<String>) -> Vec<String> {
     let mut keys: BTreeSet<String> = BTreeSet::new();
@@ -94,18 +103,25 @@ pub fn auto_fields(docs: &[DocumentSummary], exclude: &BTreeSet<String>) -> Vec<
     keys.into_iter().collect()
 }
 
-/// The present rendered values for `field` on `doc`: `None` when absent,
-/// explicit `null`, or an empty array (no value, like an absent field), else
-/// ≥1 element (arrays flattened per-element). Treating `null` as missing
-/// matches the `has`/`missing` query-filter convention (null is absent),
-/// even though `count::render_key` — used for `--by` grouping — renders null
-/// as a `"(null)"` bucket on purpose; the two surfaces are allowed to diverge
-/// here.
+/// The present rendered values for `field` on `doc`: `None` only when the key
+/// is truly ABSENT; otherwise `Some(≥1 bucket)`. This is the "nothing present
+/// ever vanishes" model for an inventory tool — a field carried by any doc must
+/// always appear, so `null` and `[]` become honest VALUE BUCKETS rather than
+/// "missing":
+///
+/// - key absent → `None` (the only genuine missing).
+/// - key present as `null` (`serde_json::Value::Null`) → falls through to
+///   `other` → `render_key(Null)` = `"(null)"`, matching `count`'s null
+///   handling and preventing a present-but-null field from vanishing or
+///   distorting the identity ratio.
+/// - key present as `[]` → a single `"(empty)"` bucket (present, counted,
+///   visible) — NOT missing.
+/// - key present as a non-empty array → one bucket per element (flattened).
+/// - any other scalar → one bucket via `render_key`.
 fn present_values(doc: &DocumentSummary, field: &str) -> Option<Vec<String>> {
     let v = doc.frontmatter.as_ref()?.get(field)?;
     match v {
-        serde_json::Value::Null => None,
-        serde_json::Value::Array(items) if items.is_empty() => None,
+        serde_json::Value::Array(items) if items.is_empty() => Some(vec!["(empty)".to_string()]),
         serde_json::Value::Array(items) => {
             Some(items.iter().map(crate::count::render_key).collect())
         }
@@ -274,16 +290,11 @@ pub fn summarize(
     config: &LoadedConfig,
     opts: &DataOptions,
 ) -> DataSummary {
-    // F1: normalize `by` (trim + drop-empty) at this shared seam so the CLI
-    // (`--by` via clap's `value_delimiter=','`, which does not trim) and the
-    // MCP path (which already trims) cannot diverge — matches `count`'s own
-    // `by` normalization in `src/count/mod.rs`.
-    let by: Vec<String> = opts
-        .by
-        .iter()
-        .map(|f| f.trim().to_string())
-        .filter(|f| !f.is_empty())
-        .collect();
+    // F1: normalize `by` (trim + drop-empty) via the shared `normalize_by`
+    // helper — the SAME helper the CLI + MCP callers use to compute their
+    // `want_data` gate, so the gate and mode-selection cannot diverge on a
+    // blank/whitespace `--by`. Idempotent here: callers already normalized.
+    let by = normalize_by(&opts.by);
 
     let dfields = date_fields(config);
     // F4: only compute auto date-bounds in auto mode; `--by` mode is an
@@ -425,9 +436,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_array_counts_as_missing() {
-        // A doc carrying `field: []` has no value — treat it as missing, not
-        // as a distinct value and not as an uncounted occurrence. Two docs
+    fn empty_array_is_empty_bucket() {
+        // "Nothing present ever vanishes": a doc carrying `tags: []` is PRESENT
+        // with the field, so it contributes an honest `"(empty)"` value bucket
+        // — NOT a `(missing)` bucket, and not an uncounted occurrence. Two docs
         // share the "rust" tag so the identity-ratio (distinct/occurrences)
         // stays below the default 0.9 skip threshold and the field survives
         // into a distribution, letting us inspect its buckets.
@@ -446,8 +458,15 @@ mod tests {
             .map(|v| (v.value.as_str(), v.count))
             .collect();
         assert!(vals.contains(&("rust", 2)));
-        assert!(vals.contains(&(MISSING, 1)));
-        assert_eq!(dists[0].values.len(), 2, "no distinct bucket for []");
+        assert!(
+            vals.contains(&("(empty)", 1)),
+            "`[]` must be an \"(empty)\" value bucket, got: {vals:?}"
+        );
+        assert!(
+            !vals.iter().any(|(v, _)| *v == MISSING),
+            "`[]` is present, not missing — no (missing) bucket, got: {vals:?}"
+        );
+        assert_eq!(dists[0].values.len(), 2, "rust + (empty), no (missing)");
     }
 
     #[test]
@@ -681,12 +700,12 @@ mod tests {
     }
 
     #[test]
-    fn null_value_counts_as_missing_not_as_null_bucket() {
-        // F5: explicit `null` must be treated as MISSING, consistent with
-        // `has`/`missing` query filters (which treat null as absent) and with
-        // the existing empty-array-as-missing handling. Two docs share
-        // "rust" so the field survives identity-skip and we can inspect
-        // buckets directly.
+    fn null_value_is_null_bucket_not_missing() {
+        // F5a: a key present as explicit `null` is PRESENT, so it becomes a
+        // `"(null)"` value bucket — matching `count::render_key`'s null
+        // handling — NOT a `(missing)` bucket. "Nothing present ever vanishes."
+        // Two docs share "rust" so the field survives identity-skip and we can
+        // inspect buckets directly.
         let docs = vec![
             doc(serde_json::json!({"field": serde_json::Value::Null})),
             doc(serde_json::json!({"field": "rust"})),
@@ -702,19 +721,95 @@ mod tests {
             .map(|v| (v.value.as_str(), v.count))
             .collect();
         assert!(
-            !vals.iter().any(|(v, _)| *v == "(null)"),
-            "null must not appear as a \"(null)\" value bucket, got: {vals:?}"
+            vals.contains(&("(null)", 1)),
+            "null must appear as a \"(null)\" value bucket, got: {vals:?}"
         );
         assert!(
-            vals.contains(&(MISSING, 1)),
-            "null must be counted in the (missing) bucket, got: {vals:?}"
+            !vals.iter().any(|(v, _)| *v == MISSING),
+            "present null is not missing — no (missing) bucket, got: {vals:?}"
         );
         assert!(vals.contains(&("rust", 2)));
         assert_eq!(
             dists[0].values.len(),
             2,
-            "only `rust` and `(missing)` buckets, no distinct null bucket, got: {vals:?}"
+            "only `rust` and `(null)` buckets, got: {vals:?}"
         );
+    }
+
+    #[test]
+    fn null_everywhere_field_stays_visible() {
+        // F5a regression: a field that is `null` on ALL docs carrying it must
+        // NOT vanish. Under the prior "null == missing" model, `occurrences`
+        // was 0 and the field was dropped entirely. Now each present-null doc
+        // contributes a `"(null)"` bucket, so the field appears with a
+        // `"(null)"` bucket counting every carrier.
+        let docs = vec![
+            doc(serde_json::json!({"field": serde_json::Value::Null})),
+            doc(serde_json::json!({"field": serde_json::Value::Null})),
+            doc(serde_json::json!({"field": serde_json::Value::Null})),
+        ];
+        let opts = DataOptions::default();
+        let (dists, skipped) = field_distributions(&docs, &["field".to_string()], false, &opts);
+        assert!(skipped.is_empty(), "all-null field must not be skipped");
+        assert_eq!(dists.len(), 1, "all-null field must stay visible");
+        assert_eq!(dists[0].field, "field");
+        assert_eq!(
+            dists[0].values,
+            vec![ValueCount {
+                value: "(null)".into(),
+                count: 3
+            }],
+            "a single (null) bucket counting all 3 carriers"
+        );
+    }
+
+    #[test]
+    fn nulls_do_not_distort_identity_ratio() {
+        // F5b regression: a field carried by N docs where most are `null` and a
+        // couple hold unique real values must be SHOWN, not identity-skipped —
+        // the present-null docs pad `occurrences` so the distinct/occurrences
+        // ratio stays below threshold. 5 docs: null×3, "a", "b" → distinct 3
+        // ("(null)","a","b"), occurrences 5, ratio 0.6 < 0.9 → shown in fields.
+        // Under the buggy "null == missing" model occurrences was 2 and distinct
+        // 2 → ratio 1.0 → wrongly skipped.
+        let docs = vec![
+            doc(serde_json::json!({"k": serde_json::Value::Null})),
+            doc(serde_json::json!({"k": serde_json::Value::Null})),
+            doc(serde_json::json!({"k": serde_json::Value::Null})),
+            doc(serde_json::json!({"k": "a"})),
+            doc(serde_json::json!({"k": "b"})),
+        ];
+        let opts = DataOptions::default();
+        let (dists, skipped) = field_distributions(&docs, &["k".to_string()], false, &opts);
+        assert!(
+            skipped.is_empty(),
+            "nulls pad occurrences → ratio 0.6 < 0.9 → not skipped, got skipped: {skipped:?}"
+        );
+        assert_eq!(dists.len(), 1, "field `k` must be shown, not skipped");
+        assert_eq!(dists[0].field, "k");
+        let vals: Vec<_> = dists[0]
+            .values
+            .iter()
+            .map(|v| (v.value.as_str(), v.count))
+            .collect();
+        assert!(vals.contains(&("(null)", 3)), "got: {vals:?}");
+        assert!(vals.contains(&("a", 1)), "got: {vals:?}");
+        assert!(vals.contains(&("b", 1)), "got: {vals:?}");
+    }
+
+    #[test]
+    fn normalize_by_trims_and_drops_empties() {
+        // F1: the canonical `--by` normalization. A comma-only or
+        // whitespace-only `--by` (e.g. clap `,` → `["",""]`, or MCP
+        // `split(',')` of `,`) must collapse to empty, and real entries must be
+        // trimmed. This is the SAME helper both the CLI want_data gate and the
+        // MCP want_data gate call, so they cannot diverge.
+        assert_eq!(
+            normalize_by(&["".into(), " ".into(), " x ".into()]),
+            vec!["x".to_string()]
+        );
+        assert!(normalize_by(&["".into(), "  ".into()]).is_empty());
+        assert!(normalize_by(&[]).is_empty());
     }
 
     #[test]
