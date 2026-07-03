@@ -35,24 +35,175 @@
 //! so the struct derives `schemars::JsonSchema` directly. The root is an object,
 //! satisfying rmcp 1.7.0's `outputSchema` constraint.
 //!
-//! **Core delegation.** All assembly logic lives in [`crate::describe::structure`],
-//! shared with the (future) CLI `norn describe` command so the two surfaces
-//! cannot drift. This module is now a thin adapter: build a `Cache` + read
-//! `ctx.config`, delegate, return.
+//! **Core delegation.** All assembly logic lives in [`crate::describe::structure`]
+//! and [`crate::describe::describe`], shared with the CLI `norn describe`
+//! command so the two surfaces cannot drift. This module is now a thin
+//! adapter: build a `Cache` + read `ctx.config`, delegate, return.
+//!
+//! **`data` + filter parity.** [`DescribeParams`] mirrors `CountParams`'s
+//! filter-predicate surface (`eq`, `not_eq`, `in`, ... `unresolved_links`) plus
+//! `data` / `by` / `limit`, exactly the CLI's `--data`/`--by`/`--limit` plus
+//! the find-filter flags. `handle_with` builds a [`crate::filter_args::FilterArgs`]
+//! from the params (mirroring `count.rs`'s `CountParams` → `FilterArgs`
+//! conversion) and a `DataOptions` (mirroring `main.rs`'s CLI wiring: `by`
+//! split on comma+trim, `want_data = data || !by.is_empty()`, `limit` default
+//! 20), then calls the shared `crate::describe::describe` — the same call the
+//! CLI makes — so the MCP `data` section is byte-for-byte what the CLI would
+//! produce for the same filters.
 
 use anyhow::Result;
 
 use crate::describe::DescribeOutput;
+use crate::filter_args::FilterArgs;
 use crate::mcp::context::VaultContext;
 
-/// Parameters for `vault.describe`. Empty — describe takes no args in v1.
+/// Parameters for `vault.describe`.
+///
+/// `data` (+ `by` / `limit`) opt into the contents-summary; the remaining
+/// fields mirror `CountParams`'s filter-predicate surface verbatim (text, eq,
+/// not_eq, in, not_in, starts_with, ends_with, contains, has, missing, before,
+/// after, on, path, links_to, unresolved_links) so the MCP tool and `norn
+/// describe --data` stay isomorphic on the filter surface.
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-pub struct DescribeParams {}
+pub struct DescribeParams {
+    /// Include the vault contents-summary (totals, field distributions, date bounds).
+    #[serde(default)]
+    pub data: bool,
 
-/// Pure handler for `vault.describe`. Delegates to the shared core.
-pub fn handle(ctx: &VaultContext) -> Result<DescribeOutput> {
+    /// Explicit fields to distribute (comma-separated); bypasses identity-skip. Implies data.
+    #[serde(default)]
+    pub by: Option<String>,
+
+    /// Max value-buckets per field (default 20; 0 = no cap).
+    #[serde(default)]
+    pub limit: Option<usize>,
+
+    // ── Filter predicates (mirrors CountParams / FilterArgs) ────────────────
+    /// Full-text body substring. Case-insensitive.
+    #[serde(default)]
+    pub text: Option<String>,
+
+    /// Frontmatter equality predicates `field:value`. Repeatable; all must match.
+    #[serde(default)]
+    pub eq: Vec<String>,
+
+    /// Frontmatter inequality predicates `field:value`. Repeatable.
+    #[serde(default)]
+    pub not_eq: Vec<String>,
+
+    /// Frontmatter ANY-of predicates `field:V1,V2,...`. Repeatable.
+    #[serde(default)]
+    #[serde(rename = "in")]
+    pub r#in: Vec<String>,
+
+    /// Frontmatter NOT-in predicates `field:V1,V2,...`. Repeatable.
+    #[serde(default)]
+    pub not_in: Vec<String>,
+
+    /// Frontmatter prefix predicates `field:VALUE` — the field (or any array
+    /// element) starts with VALUE. Case-sensitive. Repeatable; all must match.
+    #[serde(default)]
+    pub starts_with: Vec<String>,
+
+    /// Frontmatter suffix predicates `field:VALUE` — the field (or any array
+    /// element) ends with VALUE. Case-sensitive. Repeatable.
+    #[serde(default)]
+    pub ends_with: Vec<String>,
+
+    /// Frontmatter substring predicates `field:VALUE` — the field (or any
+    /// array element) contains VALUE. Case-sensitive. Repeatable.
+    #[serde(default)]
+    pub contains: Vec<String>,
+
+    /// Frontmatter fields that must be present (non-null). Repeatable.
+    #[serde(default)]
+    pub has: Vec<String>,
+
+    /// Frontmatter fields that must be absent or null. Repeatable.
+    #[serde(default)]
+    pub missing: Vec<String>,
+
+    /// Date-before predicates `field:DATE`. ISO 8601. Repeatable.
+    #[serde(default)]
+    pub before: Vec<String>,
+
+    /// Date-after predicates `field:DATE`. ISO 8601. Repeatable.
+    #[serde(default)]
+    pub after: Vec<String>,
+
+    /// Date-on predicates `field:DATE`. Accepts `today`. Repeatable.
+    #[serde(default)]
+    pub on: Vec<String>,
+
+    /// Path glob patterns. Repeatable.
+    #[serde(default)]
+    pub path: Vec<String>,
+
+    /// Documents whose outgoing links resolve to TARGET. Repeatable; AND'd.
+    #[serde(default)]
+    pub links_to: Vec<String>,
+
+    /// Include only documents with at least one unresolved link.
+    #[serde(default)]
+    pub unresolved_links: bool,
+}
+
+/// Project a [`DescribeParams`]'s filter predicates into a [`FilterArgs`].
+/// Mirrors `count.rs`'s `CountParams` → `FilterArgs` construction field for
+/// field, so the two tools cannot drift on filter semantics.
+fn params_to_filter_args(params: &DescribeParams) -> FilterArgs {
+    FilterArgs {
+        text: params.text.clone(),
+        eq: params.eq.clone(),
+        not_eq: params.not_eq.clone(),
+        r#in: params.r#in.clone(),
+        not_in: params.not_in.clone(),
+        starts_with: params.starts_with.clone(),
+        ends_with: params.ends_with.clone(),
+        contains: params.contains.clone(),
+        has: params.has.clone(),
+        missing: params.missing.clone(),
+        before: params.before.clone(),
+        after: params.after.clone(),
+        on: params.on.clone(),
+        path: params.path.clone(),
+        links_to: params.links_to.clone(),
+        unresolved_links: params.unresolved_links,
+    }
+}
+
+/// Pure handler for `vault.describe`. Delegates to `handle_with`; kept as a
+/// distinct entry point so the server registration and the tests both read
+/// as calling "the" handler.
+pub fn handle(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
+    handle_with(ctx, params)
+}
+
+/// Builds a `DataOptions` + `FilterArgs` from `params` and calls the shared
+/// [`crate::describe::describe`] core — the same call the CLI makes for
+/// `norn describe --data`, so the MCP `data` section cannot drift from it.
+pub fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
     let cache = ctx.query_cache()?;
-    crate::describe::structure(&cache, &ctx.config)
+
+    let by: Vec<String> = params
+        .by
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let want_data = params.data || !by.is_empty();
+    let data = want_data.then(|| crate::describe::data::DataOptions {
+        by,
+        limit: params.limit.unwrap_or(20),
+        ..Default::default()
+    });
+
+    let filters = params_to_filter_args(params);
+    crate::describe::describe(&cache, &ctx.config, &filters, data)
 }
 
 #[cfg(test)]
@@ -125,7 +276,7 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let out = handle(&ctx).expect("handle should succeed");
+        let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
         // ── folders: the directory holding the notes doc is present ──────────
         assert!(
@@ -191,7 +342,7 @@ mod tests {
         std::fs::write(root.join("top.md"), "---\ntype: note\n---\nbody\n").unwrap();
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
-        let out = handle(&ctx).expect("handle should succeed");
+        let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
         // No config → no path rules. The top-level doc folds to "".
         assert!(
@@ -258,7 +409,7 @@ mod tests {
         let (_tmp, root) = vault_with_creatable_rule();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let out = handle(&ctx).expect("handle should succeed");
+        let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
         // ── creatable_rules: the "task" rule with target is present ──────────
         assert_eq!(
@@ -324,5 +475,47 @@ mod tests {
                 .any(|r| r.name.as_deref() == Some("task")),
             "task (creatable) rule must NOT appear in path_rules"
         );
+    }
+
+    #[test]
+    fn describe_data_matches_cli_summarize() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        // MCP path with data: true
+        let params = DescribeParams {
+            data: true,
+            ..Default::default()
+        };
+        let out = handle_with(&ctx, &params).expect("handle_with");
+        let data = out.data.expect("data present");
+
+        // Direct core path
+        let cache = ctx.query_cache().unwrap();
+        let docs = cache
+            .documents_matching(
+                &crate::filter_args::build_document_query(
+                    &crate::filter_args::FilterArgs::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let expected = crate::describe::data::summarize(
+            &docs,
+            &ctx.config,
+            &crate::describe::data::DataOptions::default(),
+        );
+
+        assert_eq!(data.total, expected.total);
+        assert_eq!(data.fields, expected.fields);
+        assert_eq!(data.skipped, expected.skipped);
+    }
+
+    #[test]
+    fn describe_without_data_flag_omits_summary() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let out = handle_with(&ctx, &DescribeParams::default()).expect("handle");
+        assert!(out.data.is_none(), "no data flag ⇒ no summary section");
     }
 }
