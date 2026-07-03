@@ -50,6 +50,11 @@ pub enum GroupNode {
 /// `by` value abort the process (stack overflow) instead of erroring.
 const MAX_BY_FIELDS: usize = 16;
 
+/// The sentinel bucket/group key for a document that lacks the field.
+/// Shared with `describe::data` so the two surfaces cannot drift on the
+/// literal.
+pub(crate) const MISSING: &str = "(missing)";
+
 pub fn run(cache: &Cache, args: &CountArgs) -> Result<CountOutput> {
     // Normalize once for both surfaces (CLI flag and MCP `by` token):
     // segments are trimmed so `--by "project, lifecycle"` groups on the
@@ -135,10 +140,10 @@ fn doc_key(doc: &DocumentSummary, field: &str) -> String {
         .as_ref()
         .and_then(|fm| fm.get(field))
         .map(render_key)
-        .unwrap_or_else(|| "(missing)".to_string())
+        .unwrap_or_else(|| MISSING.to_string())
 }
 
-fn render_key(value: &serde_json::Value) -> String {
+pub(crate) fn render_key(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "(null)".to_string(),
         serde_json::Value::String(s) => s.clone(),

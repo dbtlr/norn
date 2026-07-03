@@ -10,6 +10,7 @@ mod config_loader;
 mod core;
 mod count;
 pub mod delete_doc;
+mod describe;
 mod edit;
 mod filter;
 mod filter_args;
@@ -347,6 +348,36 @@ fn run(cli: Cli) -> Result<i32> {
             let text = match args.format {
                 cli::CountFormat::Json => count::render::render_json(&out),
                 cli::CountFormat::Text => count::render::render_text(&out),
+            };
+            print!("{}", text);
+            if !text.ends_with('\n') {
+                println!();
+            }
+            Ok(0)
+        }
+        Command::Describe(args) => {
+            let loaded_config = load_config(&cwd, config_path.as_ref())?;
+            let cache = crate::cache_cmd::open_for_query(
+                &cwd,
+                &loaded_config.index_options,
+                no_cache_refresh,
+            )?;
+            // Normalize `--by` ONCE up front so the want_data gate and the
+            // DataOptions.by mode-selection agree (shared with MCP via
+            // `normalize_by`) — a blank/whitespace-only `--by` must not gate
+            // data on differently from MCP.
+            let by = crate::describe::data::normalize_by(&args.by);
+            let want_data = args.data || args.stats || !by.is_empty();
+            let data = want_data.then(|| crate::describe::data::DataOptions {
+                by,
+                limit: args.limit.unwrap_or(20),
+                ..Default::default()
+            });
+            let out = crate::describe::describe(&cache, &loaded_config, &args.filters, data)?;
+            let format = args.format.unwrap_or(crate::cli::DescribeFormat::Text);
+            let text = match format {
+                crate::cli::DescribeFormat::Json => crate::describe::render::render_json(&out),
+                crate::cli::DescribeFormat::Text => crate::describe::render::render_text(&out),
             };
             print!("{}", text);
             if !text.ends_with('\n') {

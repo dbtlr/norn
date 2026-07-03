@@ -34,190 +34,177 @@
 //! are `Vec<String>` + structs whose members are `String` / `serde_json::Value`,
 //! so the struct derives `schemars::JsonSchema` directly. The root is an object,
 //! satisfying rmcp 1.7.0's `outputSchema` constraint.
+//!
+//! **Core delegation.** All assembly logic lives in [`crate::describe::structure`]
+//! and [`crate::describe::describe`], shared with the CLI `norn describe`
+//! command so the two surfaces cannot drift. This module is now a thin
+//! adapter: build a `Cache` + read `ctx.config`, delegate, return.
+//!
+//! **`data` + filter parity.** [`DescribeParams`] mirrors `CountParams`'s
+//! filter-predicate surface (`eq`, `not_eq`, `in`, ... `unresolved_links`) plus
+//! `data` / `by` / `limit`, exactly the CLI's `--data`/`--by`/`--limit` plus
+//! the find-filter flags. `handle_with` builds a [`crate::filter_args::FilterArgs`]
+//! from the params (mirroring `count.rs`'s `CountParams` → `FilterArgs`
+//! conversion) and a `DataOptions` (mirroring `main.rs`'s CLI wiring: `by`
+//! split on comma+trim, `want_data = data || !by.is_empty()`, `limit` default
+//! 20), then calls the shared `crate::describe::describe` — the same call the
+//! CLI makes — so the MCP `data` section is byte-for-byte what the CLI would
+//! produce for the same filters.
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
-use crate::cli::{FindArgs, SortPaginateArgs};
+use crate::describe::DescribeOutput;
 use crate::filter_args::FilterArgs;
 use crate::mcp::context::VaultContext;
 
-/// Parameters for `vault.describe`. Empty — describe takes no args in v1.
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub struct DescribeParams {}
-
-/// A single declared path rule: which glob gets which frontmatter defaults.
+/// Parameters for `vault.describe`.
 ///
-/// Surfaced from a `ValidateRule` that declares a `match.path`. The
-/// `frontmatter_defaults` map is the rule's `frontmatter_defaults` verbatim
-/// (e.g. `{"type": "note"}`) — the values `norn new` scaffolds onto a doc
-/// created at a path matching `glob`. An agent reads `glob` to learn where a
-/// kind of doc lives, and `frontmatter_defaults` to learn what it inherits.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct PathRule {
-    /// The rule's `match.path` glob (e.g. `Workspaces/{{workspace}}/notes/*.md`).
-    pub glob: String,
-    /// Optional rule name, if the config declared one.
-    pub name: Option<String>,
-    /// The frontmatter defaults a doc at a matching path inherits, as declared.
-    /// Empty object when the rule sets no defaults (it is still a placement
-    /// signal — the glob tells the agent where that kind of doc lives).
-    pub frontmatter_defaults: serde_json::Value,
+/// `data` (+ `by` / `limit`) opt into the contents-summary; the remaining
+/// fields mirror `CountParams`'s filter-predicate surface verbatim (text, eq,
+/// not_eq, in, not_in, starts_with, ends_with, contains, has, missing, before,
+/// after, on, path, links_to, unresolved_links) so the MCP tool and `norn
+/// describe --data` stay isomorphic on the filter surface.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct DescribeParams {
+    /// Include the vault contents-summary (totals, field distributions, date bounds).
+    #[serde(default)]
+    pub data: bool,
+
+    /// Explicit fields to distribute (comma-separated); bypasses identity-skip. Implies data.
+    #[serde(default)]
+    pub by: Option<String>,
+
+    /// Max value-buckets per field (default 20; 0 = no cap).
+    #[serde(default)]
+    pub limit: Option<usize>,
+
+    // ── Filter predicates (mirrors CountParams / FilterArgs) ────────────────
+    /// Full-text body substring. Case-insensitive.
+    #[serde(default)]
+    pub text: Option<String>,
+
+    /// Frontmatter equality predicates `field:value`. Repeatable; all must match.
+    #[serde(default)]
+    pub eq: Vec<String>,
+
+    /// Frontmatter inequality predicates `field:value`. Repeatable.
+    #[serde(default)]
+    pub not_eq: Vec<String>,
+
+    /// Frontmatter ANY-of predicates `field:V1,V2,...`. Repeatable.
+    #[serde(default)]
+    #[serde(rename = "in")]
+    pub r#in: Vec<String>,
+
+    /// Frontmatter NOT-in predicates `field:V1,V2,...`. Repeatable.
+    #[serde(default)]
+    pub not_in: Vec<String>,
+
+    /// Frontmatter prefix predicates `field:VALUE` — the field (or any array
+    /// element) starts with VALUE. Case-sensitive. Repeatable; all must match.
+    #[serde(default)]
+    pub starts_with: Vec<String>,
+
+    /// Frontmatter suffix predicates `field:VALUE` — the field (or any array
+    /// element) ends with VALUE. Case-sensitive. Repeatable.
+    #[serde(default)]
+    pub ends_with: Vec<String>,
+
+    /// Frontmatter substring predicates `field:VALUE` — the field (or any
+    /// array element) contains VALUE. Case-sensitive. Repeatable.
+    #[serde(default)]
+    pub contains: Vec<String>,
+
+    /// Frontmatter fields that must be present (non-null). Repeatable.
+    #[serde(default)]
+    pub has: Vec<String>,
+
+    /// Frontmatter fields that must be absent or null. Repeatable.
+    #[serde(default)]
+    pub missing: Vec<String>,
+
+    /// Date-before predicates `field:DATE`. ISO 8601. Repeatable.
+    #[serde(default)]
+    pub before: Vec<String>,
+
+    /// Date-after predicates `field:DATE`. ISO 8601. Repeatable.
+    #[serde(default)]
+    pub after: Vec<String>,
+
+    /// Date-on predicates `field:DATE`. Accepts `today`. Repeatable.
+    #[serde(default)]
+    pub on: Vec<String>,
+
+    /// Path glob patterns. Repeatable.
+    #[serde(default)]
+    pub path: Vec<String>,
+
+    /// Documents whose outgoing links resolve to TARGET. Repeatable; AND'd.
+    #[serde(default)]
+    pub links_to: Vec<String>,
+
+    /// Include only documents with at least one unresolved link.
+    #[serde(default)]
+    pub unresolved_links: bool,
 }
 
-/// A rule that can be used to create a new document via `vault.new { rule: "..." }`.
-///
-/// Only rules that declare BOTH a `name` AND a `target` template are creatable.
-/// An agent can call `vault.new { rule: name, title: "...", vars: {...} }` to
-/// create a document at the path derived from `target`, without knowing the
-/// concrete path in advance.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct CreatableRule {
-    /// The rule's declared name — pass this as `vault.new { rule: name }`.
-    pub name: String,
-    /// The path template (e.g. `Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md`).
-    /// Shows the agent what the concrete path will look like once rendered.
-    pub target: String,
-    /// Variable names (from `{{var.X}}` / `{{path.X}}` tokens) the template requires.
-    /// The agent must supply these via `vault.new { vars: { "workspace": "..." } }`.
-    pub required_vars: Vec<String>,
-    /// The frontmatter defaults a doc created with this rule inherits.
-    pub frontmatter_defaults: serde_json::Value,
-    /// Optional body scaffold template for the new document's body.
-    /// Rendered with the same substitution context used for path generation.
-    pub body: Option<String>,
+/// Project a [`DescribeParams`]'s filter predicates into a [`FilterArgs`].
+/// Mirrors `count.rs`'s `CountParams` → `FilterArgs` construction field for
+/// field, so the two tools cannot drift on filter semantics.
+fn params_to_filter_args(params: &DescribeParams) -> FilterArgs {
+    FilterArgs {
+        text: params.text.clone(),
+        eq: params.eq.clone(),
+        not_eq: params.not_eq.clone(),
+        r#in: params.r#in.clone(),
+        not_in: params.not_in.clone(),
+        starts_with: params.starts_with.clone(),
+        ends_with: params.ends_with.clone(),
+        contains: params.contains.clone(),
+        has: params.has.clone(),
+        missing: params.missing.clone(),
+        before: params.before.clone(),
+        after: params.after.clone(),
+        on: params.on.clone(),
+        path: params.path.clone(),
+        links_to: params.links_to.clone(),
+        unresolved_links: params.unresolved_links,
+    }
 }
 
-/// Structured output for `vault.describe`. Root is `type: object`.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct DescribeOutput {
-    /// Distinct vault-relative directories that currently hold documents,
-    /// sorted. The vault root is represented as `""` (docs at top level). This
-    /// is the folder tree the agent uses to see where each kind of doc lives.
-    pub folders: Vec<String>,
-    /// Declared path rules: for each config rule with a `match.path`, the glob
-    /// plus the frontmatter defaults a doc at a matching path inherits.
-    pub path_rules: Vec<PathRule>,
-    /// Rules that can be used with `vault.new { rule: "name" }` to create a
-    /// document at a derived path. Each entry carries the rule name, its target
-    /// template, the required variable names, frontmatter defaults, and optional
-    /// body scaffold. Separate from `path_rules` so the existing contract is
-    /// undisturbed — an agent that already parses `path_rules` keeps working.
-    pub creatable_rules: Vec<CreatableRule>,
-    /// Configured inbox path (from `inbox.path` in the vault config), if any.
-    /// When present, `vault.new { title: "..." }` (no path, no rule) routes the
-    /// new document to `<inbox>/<title|slugify>.md`.
-    pub inbox: Option<String>,
-    /// The full configured frontmatter schema/standards — the `validate` config
-    /// serialized verbatim (required/forbidden fields, field types, allowed
-    /// values, per-rule selectors). `serde_json::Value` so no standard is lost.
-    pub schema: serde_json::Value,
+/// Pure handler for `vault.describe`. Delegates to `handle_with`; kept as a
+/// distinct entry point so the server registration and the tests both read
+/// as calling "the" handler.
+pub fn handle(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
+    handle_with(ctx, params)
 }
 
-/// Pure handler for `vault.describe`.
-///
-/// Assembles the three forward facts:
-/// - `folders` from an unbounded paths query folded to distinct parent dirs.
-///   Reuses the shared `find::query` seam (default `{path, frontmatter}`
-///   projection) with `no_limit` so the full document set is folded — matching
-///   the find/get/count behavior of including `files.ignore`-d docs (Task 6).
-/// - `path_rules` + `schema` from the warm `ctx.config.validate` config.
-pub fn handle(ctx: &VaultContext) -> Result<DescribeOutput> {
-    let folders = collect_folders(ctx)?;
-
-    let path_rules = ctx
-        .config
-        .validate
-        .rules
-        .iter()
-        .filter_map(|rule| {
-            rule.r#match.path.as_ref().map(|glob| PathRule {
-                glob: glob.clone(),
-                name: rule.name.clone(),
-                frontmatter_defaults: serde_json::to_value(&rule.frontmatter_defaults)
-                    .unwrap_or(serde_json::Value::Null),
-            })
-        })
-        .collect();
-
-    // Creatable rules: rules that have BOTH a `name` AND a `target` template.
-    // These are the rules an agent can pass to `vault.new { rule: "..." }`.
-    // We use a separate `creatable_rules` field rather than extending `PathRule`
-    // to keep the existing `path_rules` contract undisturbed — agents that already
-    // parse `path_rules` continue to work unchanged.
-    let creatable_rules = ctx
-        .config
-        .validate
-        .rules
-        .iter()
-        .filter_map(|rule| {
-            // A rule is creatable iff it has both `name` and `target`.
-            let name = rule.name.as_ref()?;
-            let target = rule.target.as_ref()?;
-            let required_vars = crate::new::generate::referenced_vars(target);
-            Some(CreatableRule {
-                name: name.clone(),
-                target: target.clone(),
-                required_vars,
-                frontmatter_defaults: serde_json::to_value(&rule.frontmatter_defaults)
-                    .unwrap_or(serde_json::Value::Null),
-                body: rule.body.clone(),
-            })
-        })
-        .collect();
-
-    let inbox = ctx.config.vault_config.inbox.path.clone();
-
-    let schema = serde_json::to_value(&ctx.config.validate)?;
-
-    Ok(DescribeOutput {
-        folders,
-        path_rules,
-        creatable_rules,
-        inbox,
-        schema,
-    })
-}
-
-/// Query every document's path (no limit) and fold to the sorted, deduped set of
-/// distinct parent directories. Vault-root docs contribute `""`.
-fn collect_folders(ctx: &VaultContext) -> Result<Vec<String>> {
+/// Builds a `DataOptions` + `FilterArgs` from `params` and calls the shared
+/// [`crate::describe::describe`] core — the same call the CLI makes for
+/// `norn describe --data`, so the MCP `data` section cannot drift from it.
+pub fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
     let cache = ctx.query_cache()?;
 
-    // Empty filter, no limit → every document. Default `{path, frontmatter}`
-    // projection gives us each doc's vault-relative `path`.
-    let args = FindArgs {
-        filters: FilterArgs::default(),
-        all: true,
-        paging: SortPaginateArgs {
-            sort: None,
-            desc: false,
-            limit: None,
-            no_limit: true,
-            starts_at: 1,
-        },
-        format: None,
-        all_cols: false,
-        col: Vec::new(),
-        no_pager: false,
-    };
+    // Normalize `by` via the SHARED `normalize_by` helper — the same helper
+    // the CLI arm uses — so the `want_data` gate below and the mode-selection
+    // inside `summarize` agree across surfaces on a blank/whitespace-only
+    // `--by` (NRN-103 F1 divergence: comma-split of `,` yields `["",""]`,
+    // which must gate identically to the CLI's raw clap Vec).
+    let split: Vec<String> = params
+        .by
+        .as_deref()
+        .map(|s| s.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
+    let by = crate::describe::data::normalize_by(&split);
+    let want_data = params.data || !by.is_empty();
+    let data = want_data.then(|| crate::describe::data::DataOptions {
+        by,
+        limit: params.limit.unwrap_or(20),
+        ..Default::default()
+    });
 
-    let documents = crate::find::query::query(&cache, &args, None)?;
-
-    let mut folders: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for doc in &documents {
-        let Some(path) = doc.get("path").and_then(|p| p.as_str()) else {
-            continue;
-        };
-        // Parent directory of the vault-relative path. Top-level docs → "".
-        let parent = match path.rfind('/') {
-            Some(idx) => &path[..idx],
-            None => "",
-        };
-        folders.insert(parent.to_string());
-    }
-
-    Ok(folders.into_iter().collect())
+    let filters = params_to_filter_args(params);
+    crate::describe::describe(&cache, &ctx.config, &filters, data)
 }
 
 #[cfg(test)]
@@ -290,7 +277,7 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let out = handle(&ctx).expect("handle should succeed");
+        let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
         // ── folders: the directory holding the notes doc is present ──────────
         assert!(
@@ -356,7 +343,7 @@ mod tests {
         std::fs::write(root.join("top.md"), "---\ntype: note\n---\nbody\n").unwrap();
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
-        let out = handle(&ctx).expect("handle should succeed");
+        let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
         // No config → no path rules. The top-level doc folds to "".
         assert!(
@@ -423,7 +410,7 @@ mod tests {
         let (_tmp, root) = vault_with_creatable_rule();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let out = handle(&ctx).expect("handle should succeed");
+        let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
         // ── creatable_rules: the "task" rule with target is present ──────────
         assert_eq!(
@@ -489,5 +476,90 @@ mod tests {
                 .any(|r| r.name.as_deref() == Some("task")),
             "task (creatable) rule must NOT appear in path_rules"
         );
+    }
+
+    #[test]
+    fn describe_data_matches_cli_summarize() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        // MCP path with data: true
+        let params = DescribeParams {
+            data: true,
+            ..Default::default()
+        };
+        let out = handle_with(&ctx, &params).expect("handle_with");
+        let data = out.data.expect("data present");
+
+        // Direct core path
+        let cache = ctx.query_cache().unwrap();
+        let docs = cache
+            .documents_matching(
+                &crate::filter_args::build_document_query(
+                    &crate::filter_args::FilterArgs::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let expected = crate::describe::data::summarize(
+            &docs,
+            &ctx.config,
+            &crate::describe::data::DataOptions::default(),
+        );
+
+        assert_eq!(data.total, expected.total);
+        assert_eq!(data.fields, expected.fields);
+        assert_eq!(data.skipped, expected.skipped);
+        assert_eq!(data.dates, expected.dates);
+    }
+
+    /// A non-default filter (`eq type:note`) passed through `handle_with` must
+    /// scope the summary identically to a direct `summarize` call over
+    /// `documents_matching` with the SAME filter — exercising the 16-field
+    /// `params_to_filter_args` mapping end to end (mirrors `count.rs`'s
+    /// `handle_eq_filter_narrows_count`).
+    #[test]
+    fn describe_data_respects_filter() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let params = DescribeParams {
+            data: true,
+            eq: vec!["type:note".into()],
+            ..Default::default()
+        };
+        let out = handle_with(&ctx, &params).expect("handle_with");
+        let data = out.data.expect("data present");
+
+        // Direct core path with the SAME eq filter.
+        let cache = ctx.query_cache().unwrap();
+        let filters = crate::filter_args::FilterArgs {
+            eq: vec!["type:note".into()],
+            ..Default::default()
+        };
+        let docs = cache
+            .documents_matching(&crate::filter_args::build_document_query(&filters).unwrap())
+            .unwrap();
+        let expected = crate::describe::data::summarize(
+            &docs,
+            &ctx.config,
+            &crate::describe::data::DataOptions::default(),
+        );
+
+        assert_eq!(
+            data.total, 1,
+            "seeded_vault has exactly one type:note doc, got total={}",
+            data.total
+        );
+        assert_eq!(data.total, expected.total);
+        assert_eq!(data.fields, expected.fields);
+    }
+
+    #[test]
+    fn describe_without_data_flag_omits_summary() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let out = handle_with(&ctx, &DescribeParams::default()).expect("handle");
+        assert!(out.data.is_none(), "no data flag ⇒ no summary section");
     }
 }

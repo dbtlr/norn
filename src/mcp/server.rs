@@ -27,11 +27,11 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use super::context::VaultContext;
 use super::to_mcp_error;
+use crate::describe::DescribeOutput;
 use crate::mcp::tools::apply_plan::ApplyPlanOutput;
 use crate::mcp::tools::audit::AuditOutput;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::delete::DeleteOutput;
-use crate::mcp::tools::describe::DescribeOutput;
 use crate::mcp::tools::edit::EditOutput;
 use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
@@ -276,19 +276,22 @@ impl McpServer {
     /// Thin wrapper: deserialize params, call the pure handler, map the result.
     /// All logic lives in `tools::describe`, which assembles the folder tree
     /// (from a paths query), the declared path rules, and the frontmatter schema
-    /// from `ctx.config`. The returned [`DescribeOutput`] derives `JsonSchema`
-    /// directly (its fields are `Vec<String>` + structs of `String`/`Value`), so
-    /// no Value-only envelope is needed; the root is still `type: object`.
-    /// Read-only: it never opens the vault for mutation.
+    /// from `ctx.config`, plus (when `data: true` or `by` is set) a contents-summary
+    /// via `crate::describe::describe` over the find-filter surface. The returned
+    /// [`DescribeOutput`] derives `JsonSchema` directly (its fields are
+    /// `Vec<String>` + structs of `String`/`Value`), so no Value-only envelope is
+    /// needed; the root is still `type: object`. Read-only: it never opens the
+    /// vault for mutation.
     #[tool(
         name = "vault.describe",
-        description = "Describe this vault for an off-filesystem client: the folder tree, the declared path rules (which glob gets which frontmatter defaults — i.e. where each kind of doc lives), and the frontmatter schema (field types, allowed values, required fields). Use it to construct the correct path for a new document, then call vault.new."
+        description = "Describe this vault for an off-filesystem client: the folder tree, the declared path rules (which glob gets which frontmatter defaults — i.e. where each kind of doc lives), the frontmatter schema (field types, allowed values, required fields), and — with data: true (or by set) — a contents-summary (totals, field distributions, date bounds) filtered by the same predicates as vault.find/vault.count. Use it to construct the correct path for a new document, then call vault.new."
     )]
     async fn describe(
         &self,
-        Parameters(_p): Parameters<crate::mcp::tools::describe::DescribeParams>,
+        Parameters(p): Parameters<crate::mcp::tools::describe::DescribeParams>,
     ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
-        self.run_tool(crate::mcp::tools::describe::handle).await
+        self.run_tool(|ctx| crate::mcp::tools::describe::handle(ctx, &p))
+            .await
     }
 }
 
