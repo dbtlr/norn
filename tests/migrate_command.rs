@@ -470,3 +470,205 @@ operations:
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["dry_run"], true);
 }
+
+// ---------------------------------------------------------------------------
+// NRN-100 (H2) — a `create_document` and a `replace_body` op compose into ONE
+// MigrationPlan and apply as a single batch. Both op kinds route through the
+// same pass-through arm of `expand()` (src/planner/intent/mod.rs), so the
+// applier treats them as ordinary planned changes; the guarantee under test is
+// that a create of a NEW doc and a CAS-checked body replacement of an EXISTING
+// doc land together from one plan.
+// ---------------------------------------------------------------------------
+
+/// blake3 hex digest of a file's bytes — matches vault-graph's hash function so
+/// a `replace_body` op can carry a valid `document_hash` (CAS precondition).
+fn blake3_of_file(path: &std::path::Path) -> String {
+    blake3::hash(&std::fs::read(path).unwrap())
+        .to_hex()
+        .to_string()
+}
+
+#[test]
+fn migrate_composes_create_document_and_replace_body() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    // a.md exists ("---\ntype: note\n---\n# A\n"); c.md does not yet.
+    let a_path = vault.join("a.md");
+    let a_hash = blake3_of_file(&a_path);
+
+    let plan = serde_json::json!({
+        "schema_version": 1,
+        "vault_root": vault.to_str().unwrap(),
+        "operations": [
+            {
+                "kind": "create_document",
+                "fields": {
+                    "path": "c.md",
+                    "new_value": { "frontmatter": {"type": "note"}, "body": "# C\n" }
+                }
+            },
+            {
+                "kind": "replace_body",
+                "fields": {
+                    "path": "a.md",
+                    "document_hash": a_hash,
+                    "new_value": "# A (rewritten)\n"
+                }
+            }
+        ]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, plan.to_string()).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["migrate"])
+        .arg(&plan_path)
+        .args(["--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The new doc was created with the given frontmatter + body.
+    let c = std::fs::read_to_string(vault.join("c.md")).unwrap();
+    assert!(c.contains("type: note"), "c.md frontmatter; got:\n{c}");
+    assert!(c.contains("# C"), "c.md body; got:\n{c}");
+    // The existing doc's body was replaced while its frontmatter was preserved.
+    let a = std::fs::read_to_string(&a_path).unwrap();
+    assert!(
+        a.contains("type: note"),
+        "a.md frontmatter preserved; got:\n{a}"
+    );
+    assert!(
+        a.contains("# A (rewritten)") && !a.contains("# A\n"),
+        "a.md body replaced; got:\n{a}"
+    );
+}
+
+#[test]
+fn migrate_composed_create_and_replace_body_dry_run_does_not_mutate() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let a_path = vault.join("a.md");
+    let a_before = std::fs::read_to_string(&a_path).unwrap();
+    let a_hash = blake3_of_file(&a_path);
+
+    let plan = serde_json::json!({
+        "schema_version": 1,
+        "vault_root": vault.to_str().unwrap(),
+        "operations": [
+            {
+                "kind": "create_document",
+                "fields": {
+                    "path": "c.md",
+                    "new_value": { "frontmatter": {"type": "note"}, "body": "# C\n" }
+                }
+            },
+            {
+                "kind": "replace_body",
+                "fields": {
+                    "path": "a.md",
+                    "document_hash": a_hash,
+                    "new_value": "# A (rewritten)\n"
+                }
+            }
+        ]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, plan.to_string()).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["migrate"])
+        .arg(&plan_path)
+        .args(["--dry-run", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["dry_run"], true);
+    let kinds: Vec<&str> = report["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["kind"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        kinds.contains(&"create_document") && kinds.contains(&"replace_body"),
+        "both ops present in the report; got {kinds:?}"
+    );
+    assert!(!vault.join("c.md").exists(), "dry-run must not create c.md");
+    assert_eq!(
+        std::fs::read_to_string(&a_path).unwrap(),
+        a_before,
+        "dry-run must not mutate a.md"
+    );
+}
+
+/// The CAS precondition still guards a `replace_body` even when it rides in a
+/// plan alongside a `create_document`: a stale hash aborts the whole apply and
+/// the sibling create must NOT have landed (compute-all-validate-then-write).
+#[test]
+fn migrate_composed_stale_replace_body_hash_aborts_and_create_does_not_land() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+
+    let plan = serde_json::json!({
+        "schema_version": 1,
+        "vault_root": vault.to_str().unwrap(),
+        "operations": [
+            {
+                "kind": "create_document",
+                "fields": {
+                    "path": "c.md",
+                    "new_value": { "frontmatter": {"type": "note"}, "body": "# C\n" }
+                }
+            },
+            {
+                "kind": "replace_body",
+                "fields": {
+                    "path": "a.md",
+                    "document_hash": "definitely-wrong-hash",
+                    "new_value": "# A (rewritten)\n"
+                }
+            }
+        ]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, plan.to_string()).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["migrate"])
+        .arg(&plan_path)
+        .args(["--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "stale hash must abort the apply; stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // Pin the failure CAUSE to the CAS check, not an unrelated error — otherwise
+    // this test could pass for the wrong reason (e.g. a schema/parse refusal).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("stale") || stderr.contains("hash"),
+        "expected a stale-hash error on stderr, got: {stderr}"
+    );
+    assert!(
+        !vault.join("c.md").exists(),
+        "sibling create must not land when the composed plan aborts on a stale hash"
+    );
+}
