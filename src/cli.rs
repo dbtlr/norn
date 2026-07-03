@@ -79,6 +79,10 @@ pub enum Command {
     )]
     Count(CountArgs),
     #[command(
+        about = "Describe the vault: structure (placement) and, with --data, a contents-summary"
+    )]
+    Describe(DescribeArgs),
+    #[command(
         disable_help_flag = true,
         about = "Get one or more documents — frontmatter, headings, outgoing/incoming/unresolved links",
         long_about = "Get one or more documents in detail.\n\nEach target may be a vault-relative path, a unique case-insensitive document stem, or a wikilink-shaped string (with or without brackets, with or without anchor / block-ref / pipe-alias suffix). Ambiguous targets emit one record per resolved candidate. --all-cols adds the full structured dump (incl. body); --col narrows the default field set. Supports --sort/--limit/--starts-at over the named targets."
@@ -726,6 +730,44 @@ pub struct CountArgs {
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CountFormat {
+    Text,
+    Json,
+}
+
+#[derive(Args, Debug)]
+pub struct DescribeArgs {
+    /// Include the vault contents-summary (totals, field distributions, date bounds).
+    #[arg(long, help_heading = "Describe options")]
+    pub data: bool,
+
+    /// Alias for --data.
+    #[arg(long, help_heading = "Describe options")]
+    pub stats: bool,
+
+    /// Explicit frontmatter field(s) to distribute, comma-separated. Bypasses
+    /// the automatic identity-skip. Implies --data.
+    #[arg(
+        long = "by",
+        value_name = "FIELD1,FIELD2,...",
+        value_delimiter = ',',
+        help_heading = "Describe options"
+    )]
+    pub by: Vec<String>,
+
+    /// Max value-buckets shown per field (default 20; 0 = no cap).
+    #[arg(long, value_name = "N", help_heading = "Describe options")]
+    pub limit: Option<usize>,
+
+    #[command(flatten)]
+    pub filters: FilterArgs,
+
+    /// Output format. Default text.
+    #[arg(long, value_enum, help_heading = "Output")]
+    pub format: Option<DescribeFormat>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescribeFormat {
     Text,
     Json,
 }

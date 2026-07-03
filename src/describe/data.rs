@@ -1,10 +1,6 @@
 //! Vault contents-summary (`describe --data`): field distributions,
 //! identity-skip, and (Task 3) date bounds. Pure over `DocumentSummary`.
 
-// These items are pub for Task 3 wiring into `describe::mod` / the CLI; the
-// binary doesn't call them yet.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;

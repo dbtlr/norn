@@ -3,6 +3,7 @@
 //! `vault.describe` MCP tool so the two cannot drift.
 
 pub mod data;
+pub mod render;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -10,7 +11,8 @@ use serde::Serialize;
 use crate::cache::Cache;
 use crate::cli::{FindArgs, SortPaginateArgs};
 use crate::config_loader::LoadedConfig;
-use crate::filter_args::FilterArgs;
+use crate::describe::data::{summarize, DataOptions};
+use crate::filter_args::{build_document_query, FilterArgs};
 
 /// A single declared path rule: which glob gets which frontmatter defaults.
 ///
@@ -130,6 +132,24 @@ pub fn structure(cache: &Cache, config: &LoadedConfig) -> Result<DescribeOutput>
         schema,
         data: None,
     })
+}
+
+/// Full describe: structure, plus a contents-summary when `data` is `Some`.
+/// The summary honors the find-filter surface in `filters`.
+pub fn describe(
+    cache: &Cache,
+    config: &LoadedConfig,
+    filters: &FilterArgs,
+    data: Option<DataOptions>,
+) -> Result<DescribeOutput> {
+    let mut out = structure(cache, config)?;
+    if let Some(opts) = data {
+        let mut query = build_document_query(filters)?;
+        query.links_to = crate::filter_args::resolve_links_to(cache, &filters.links_to)?;
+        let docs = cache.documents_matching(&query)?;
+        out.data = Some(summarize(&docs, config, &opts));
+    }
+    Ok(out)
 }
 
 fn collect_folders(cache: &Cache) -> Result<Vec<String>> {
