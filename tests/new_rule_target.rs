@@ -229,6 +229,41 @@ validate:
     );
 }
 
+#[test]
+fn new_seq_in_directory_component_refuses() {
+    // `{{seq}}` in a directory component (not the file name) is unresolvable and
+    // must fail loudly rather than create a literal `{{seq}}` directory.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/{{seq}}/note.md"
+      frontmatter_defaults:
+        type: task
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args(["new", "--as", "task", "--yes", "-p", "--format", "json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected exit 2, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("file name"),
+        "expected a file-name-only error, got: {stderr}"
+    );
+    // Nothing written.
+    assert!(!vault.path().join("tasks").join("{{seq}}").exists());
+}
+
 // ── Scenario 2: No path, no --as → inbox fallback ─────────────────────────────
 
 #[test]
