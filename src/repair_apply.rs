@@ -10,7 +10,7 @@ use crate::standards::apply::{
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 /// Context passed to `apply_repair_plan` for flags that only affect specific
 /// orchestrator passes (currently, `create_document` Pass 1e).
@@ -57,6 +57,19 @@ fn check_hash(
         }));
     }
     Ok(())
+}
+
+/// File names (not full paths) of the entries directly in `dir`. Empty when the
+/// directory is missing or unreadable — a create into a not-yet-existing folder
+/// then correctly starts its `{{seq}}` sequence at 1.
+fn read_dir_file_names(dir: &Utf8Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir.as_std_path()) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect()
 }
 
 fn count_planned_links(change: &PlannedChange) -> usize {
@@ -394,9 +407,22 @@ pub fn apply_repair_plan_with_context(
         // create_document has no document_hash precondition (the file doesn't
         // exist yet). Skip the hash-check used by other passes.
 
+        // NRN-101: resolve an incremental `{{seq}}` token to the next id via
+        // filesystem max+1. This runs under the mutation lock the caller holds
+        // around apply, so two concurrent creates serialize — the second observes
+        // the first's file and gets a distinct sequential id. No new lock is
+        // introduced: the NRN-87 warm daemon will own this same boundary and can
+        // swap the impl behind it untouched.
+        let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
+            let dir = cwd.join(change.path.parent().unwrap_or_else(|| Utf8Path::new("")));
+            crate::seq_alloc::resolve_seq(&change.path, &read_dir_file_names(&dir))
+        } else {
+            change.path.clone()
+        };
+
         let nv = change.new_value.as_ref().ok_or_else(|| {
             anyhow::anyhow!(ApplyError::MissingNewValue {
-                path: change.path.clone(),
+                path: resolved_path.clone(),
             })
         })?;
         let fm_obj = nv
@@ -407,13 +433,13 @@ pub fn apply_repair_plan_with_context(
             })?;
         let body = nv.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
-        let full = cwd.join(&change.path);
+        let full = cwd.join(&resolved_path);
 
         // Pre-flight (defense in depth — preflight/synth should have caught these).
         if full.as_std_path().exists() && !change.force {
             return Err(anyhow::anyhow!(
                 "create_document: destination already exists (use --force to overwrite): {}",
-                change.path
+                resolved_path
             ));
         }
         if let Some(parent) = full.parent() {
@@ -421,13 +447,13 @@ pub fn apply_repair_plan_with_context(
                 if ctx.parents {
                     if !dry_run {
                         fs::create_dir_all(parent.as_std_path()).with_context(|| {
-                            format!("create_document: create parent dirs for {}", change.path)
+                            format!("create_document: create parent dirs for {}", resolved_path)
                         })?;
                     }
                 } else {
                     return Err(anyhow::anyhow!(
                         "create_document: parent directory does not exist (use -p / --parents to auto-create): {}",
-                        change.path
+                        resolved_path
                     ));
                 }
             }
@@ -435,10 +461,10 @@ pub fn apply_repair_plan_with_context(
 
         if dry_run {
             report.created_documents.push(CreateDocumentResult {
-                path: change.path.clone(),
+                path: resolved_path.clone(),
             });
-            if !report.changed_files.contains(&change.path) {
-                report.changed_files.push(change.path.clone());
+            if !report.changed_files.contains(&resolved_path) {
+                report.changed_files.push(resolved_path.clone());
             }
             continue;
         }
@@ -465,10 +491,10 @@ pub fn apply_repair_plan_with_context(
         })?;
 
         report.created_documents.push(CreateDocumentResult {
-            path: change.path.clone(),
+            path: resolved_path.clone(),
         });
-        if !report.changed_files.contains(&change.path) {
-            report.changed_files.push(change.path.clone());
+        if !report.changed_files.contains(&resolved_path) {
+            report.changed_files.push(resolved_path.clone());
         }
         emit_op_action(sink, spans, change, Severity::Info, Vec::new());
     }

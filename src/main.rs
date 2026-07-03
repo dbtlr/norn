@@ -34,6 +34,7 @@ mod repair;
 mod repair_apply;
 mod rewrite_wikilink_cmd;
 mod self_update;
+mod seq_alloc;
 mod set;
 mod show;
 mod standards;
