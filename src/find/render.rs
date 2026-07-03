@@ -109,8 +109,9 @@ pub(crate) fn doc_to_json(
     // `.document_hash` is identity/metadata-class: opt-in only (never in the
     // default or `--all-cols` dump), so existing output stays byte-identical.
     // The full-content blake3 the CAS surfaces use — how a caller reads the hash
-    // to feed `edit --expected-hash`.
-    if allow.contains("document_hash") {
+    // to feed `edit --expected-hash`. Omit for an unreadable/unindexed file
+    // (empty hash) rather than hand out "" as a bogus CAS token.
+    if allow.contains("document_hash") && !doc.hash.is_empty() {
         map.insert(
             "document_hash".into(),
             serde_json::Value::String(doc.hash.clone()),
@@ -346,8 +347,9 @@ fn build_record_pairs(
     // `.document_hash` is identity/metadata-class: opt-in only (never in the
     // default or `--all-cols` dump), so existing output stays byte-identical.
     // The value is the full-content blake3 the CAS surfaces use — this is how a
-    // caller reads the hash to feed `edit --expected-hash`.
-    if facet_set.contains("document_hash") {
+    // caller reads the hash to feed `edit --expected-hash`. Omit for an
+    // unreadable/unindexed file (empty hash) rather than emit a bogus "".
+    if facet_set.contains("document_hash") && !doc.hash.is_empty() {
         pairs.push(("document_hash".into(), doc.hash.clone()));
     }
 

@@ -92,7 +92,12 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
             records.push(ShowRecord {
                 path: deep.path,
                 stem: deep.stem,
-                document_hash: wants_document_hash.then(|| deep.hash.clone()),
+                // Omit when the hash is empty — an unreadable/unindexed file
+                // carries `hash: ""` (graph::build), and handing a caller "" as
+                // a CAS token would be misleading. Absent facet, like `.raw`
+                // omits when the file is unreadable.
+                document_hash: (wants_document_hash && !deep.hash.is_empty())
+                    .then(|| deep.hash.clone()),
                 frontmatter: deep.frontmatter,
                 headings: deep.headings,
                 outgoing_links: deep.outgoing_links,

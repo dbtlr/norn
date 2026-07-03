@@ -77,7 +77,7 @@ norn edit notes/project.md \
 # refuses (exit 2, no write) if the document drifted from $hash since you read it
 ```
 
-`HASH` is the blake3 hex of the document's **full** content (frontmatter + body) — the same `document_hash` value plan ops carry. Read it with `get --col .document_hash` (or `find --col .document_hash` for many docs); an MCP client reads it the same way via `vault.get`. The check runs in preflight, before the transform, so a stale hash refuses even under `--dry-run` rather than previewing a phantom edit. Omit the flag and `edit` behaves exactly as before. The MCP `vault.edit` tool takes the same precondition as an `expected_hash` argument.
+`HASH` is the blake3 hex of the document's **full** content (frontmatter + body) — the same `document_hash` value plan ops carry. Read it with `get --col .document_hash` (or `find --col .document_hash` for many docs); an MCP client reads it the same way via `vault.get`. Read it on the **default** path (not `--no-cache-refresh`): `.document_hash` is served from the cache, which the pre-query refresh reconciles with disk — under `--no-cache-refresh` the reported hash can lag on-disk content, and `edit` then recomputes the fresh hash and refuses with a spurious drift error. The check runs in preflight, before the transform, so a stale hash refuses even under `--dry-run` rather than previewing a phantom edit. Omit the flag and `edit` behaves exactly as before. The MCP `vault.edit` tool takes the same precondition as an `expected_hash` argument.
 
 Exit codes: `0` success or dry-run, `1` operator-cancelled, `2` pre-flight refusal (malformed/empty array, string not found or ambiguous, heading not found or ambiguous, or `--expected-hash` drift).
 

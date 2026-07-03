@@ -666,7 +666,8 @@ pub struct FindArgs {
     /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
     /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
     /// `.incoming_links`, `.body`, `.raw`, `.document_hash` (the content hash
-    /// `edit --expected-hash` wants). Default (no --col): frontmatter
+    /// `edit --expected-hash` wants; opt-in only, like `.raw` — never in
+    /// `--all-cols`). Default (no --col): frontmatter
     /// only. Ignored with a warning on paths format.
     #[arg(
         long,
@@ -756,7 +757,8 @@ pub struct GetArgs {
     /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
     /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
     /// `.incoming_links`, `.body`, `.raw`, `.document_hash` (the content hash
-    /// `edit --expected-hash` wants). Without --col, frontmatter +
+    /// `edit --expected-hash` wants; opt-in only, like `.raw` — never in
+    /// `--all-cols`). Without --col, frontmatter +
     /// headings + links are emitted (body only with --all-cols or `--col .body`).
     #[arg(
         long,
