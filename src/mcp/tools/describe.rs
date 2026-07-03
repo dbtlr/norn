@@ -185,6 +185,10 @@ pub fn handle(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOut
 pub fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
     let cache = ctx.query_cache()?;
 
+    // Trim + drop-empty here is now redundant with `describe::data::summarize`'s
+    // own normalization (the shared seam that fixes CLI↔MCP `--by` parity —
+    // see NRN-103 adversarial-review F1) but harmless; left in place since
+    // this handler also uses `by` to compute `want_data` below.
     let by: Vec<String> = params
         .by
         .as_deref()

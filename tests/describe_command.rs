@@ -131,6 +131,45 @@ fn describe_by_implies_data_and_bypasses_identity_skip() {
 }
 
 #[test]
+fn describe_by_with_space_after_comma_includes_both_fields() {
+    // F1: clap's `value_delimiter=','` splits "type, status" into
+    // ["type", " status"] without trimming. `summarize` must normalize (trim
+    // + drop-empty) so the space-prefixed segment is honored, matching the
+    // MCP path's own trim — pre-fix, " status" matched no field and was
+    // silently dropped, leaving only `type` in the output.
+    let tmp = synth_vault();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args([
+            "describe",
+            "--data",
+            "--by",
+            "type, status",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let fields = v["data"]["fields"].as_array().unwrap();
+    assert!(
+        fields.iter().any(|f| f["field"] == "type"),
+        "expected `type` distribution: {v}"
+    );
+    assert!(
+        fields.iter().any(|f| f["field"] == "status"),
+        "expected `status` distribution (trimmed from \" status\"): {v}"
+    );
+}
+
+#[test]
 fn describe_filter_then_data_narrows_totals() {
     let tmp = synth_vault();
     let out = norn_cmd(&tmp)

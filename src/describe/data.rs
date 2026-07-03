@@ -28,8 +28,9 @@ pub struct DataSummary {
 
 /// The bucket key for a document that lacks the field. Excluded from the
 /// distinct-value count and the identity-ratio denominator, but shown as a
-/// bucket when the field survives.
-pub const MISSING: &str = "(missing)";
+/// bucket when the field survives. Shared with `count::doc_key` so the two
+/// surfaces cannot drift on the literal.
+pub(crate) use crate::count::MISSING;
 
 #[derive(Debug, Clone)]
 pub struct DataOptions {
@@ -93,12 +94,17 @@ pub fn auto_fields(docs: &[DocumentSummary], exclude: &BTreeSet<String>) -> Vec<
     keys.into_iter().collect()
 }
 
-/// The present rendered values for `field` on `doc`: `None` when absent or
-/// an empty array (no value, like an absent field), else ≥1 element (arrays
-/// flattened per-element).
+/// The present rendered values for `field` on `doc`: `None` when absent,
+/// explicit `null`, or an empty array (no value, like an absent field), else
+/// ≥1 element (arrays flattened per-element). Treating `null` as missing
+/// matches the `has`/`missing` query-filter convention (null is absent),
+/// even though `count::render_key` — used for `--by` grouping — renders null
+/// as a `"(null)"` bucket on purpose; the two surfaces are allowed to diverge
+/// here.
 fn present_values(doc: &DocumentSummary, field: &str) -> Option<Vec<String>> {
     let v = doc.frontmatter.as_ref()?.get(field)?;
     match v {
+        serde_json::Value::Null => None,
         serde_json::Value::Array(items) if items.is_empty() => None,
         serde_json::Value::Array(items) => {
             Some(items.iter().map(crate::count::render_key).collect())
@@ -200,12 +206,21 @@ pub fn date_fields(config: &LoadedConfig) -> BTreeSet<String> {
     out
 }
 
-/// Min/max per date field, lexical over validated ISO values (== chronological
-/// for ISO-8601). Only values that validate as an ISO `date` or `datetime` are
-/// included; malformed values are schema violations (surfaced separately by
-/// `validate`) and are excluded rather than coerced or compared lexically as
-/// raw strings — `describe` reports the vault, it does not re-validate it. A
-/// field with no valid present values contributes no bounds.
+/// Min/max per date field, computed by lexical (string) comparison over
+/// validated ISO values. This matches norn's substrate-wide date comparison:
+/// `--before`/`--after`/`--on` also compare dates lexically via SQL string
+/// `<`/`>` (`src/cache/query_documents.rs`), so `date_bounds` staying lexical
+/// keeps `describe` consistent with the rest of norn rather than introducing
+/// a second, chronological notion of date order. For uniform-offset or UTC
+/// ISO-8601 values, lexical order equals chronological order; values with
+/// mixed UTC offsets can sort out of true chronological order under lexical
+/// comparison — this is a known, norn-wide limitation (not specific to
+/// `describe`), tracked as NRN-110. Only values that validate as an ISO
+/// `date` or `datetime` are included; malformed values are schema violations
+/// (surfaced separately by `validate`) and are excluded rather than coerced
+/// or compared lexically as raw strings — `describe` reports the vault, it
+/// does not re-validate it. A field with no valid present values contributes
+/// no bounds.
 pub fn date_bounds(docs: &[DocumentSummary], fields: &BTreeSet<String>) -> Vec<DateBounds> {
     let mut out = Vec::new();
     for field in fields {
@@ -222,8 +237,8 @@ pub fn date_bounds(docs: &[DocumentSummary], fields: &BTreeSet<String>) -> Vec<D
             };
             // Include only well-formed ISO date/datetime values. Malformed
             // values are schema violations (surfaced by `validate`); excluding
-            // them keeps bounds chronological, since ISO-8601 lexical order
-            // == chronological order.
+            // them keeps bounds meaningful — comparison below is lexical, per
+            // the function doc comment.
             let valid = crate::set::validate::coerce_value_for_type("date", raw, None).is_ok()
                 || crate::set::validate::coerce_value_for_type("datetime", raw, None).is_ok();
             if !valid {
@@ -247,22 +262,49 @@ pub fn date_bounds(docs: &[DocumentSummary], fields: &BTreeSet<String>) -> Vec<D
     out
 }
 
-/// Assemble the full contents-summary. Auto mode excludes date fields from
-/// distributions (they get bounds instead); `--by` mode summarizes exactly
-/// the named fields and bypasses identity-skip.
+/// Assemble the full contents-summary. Auto mode excludes date fields that
+/// actually produced bounds from distributions (they get bounds instead; a
+/// declared date field whose values are all non-ISO has no bounds and so
+/// stays visible as a distribution rather than vanishing); `--by` mode
+/// summarizes exactly the named fields, bypasses identity-skip, and — since
+/// the user explicitly asked for these distributions — skips auto
+/// date-bounds entirely so a named date field isn't double-rendered.
 pub fn summarize(
     docs: &[DocumentSummary],
     config: &LoadedConfig,
     opts: &DataOptions,
 ) -> DataSummary {
+    // F1: normalize `by` (trim + drop-empty) at this shared seam so the CLI
+    // (`--by` via clap's `value_delimiter=','`, which does not trim) and the
+    // MCP path (which already trims) cannot diverge — matches `count`'s own
+    // `by` normalization in `src/count/mod.rs`.
+    let by: Vec<String> = opts
+        .by
+        .iter()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+
     let dfields = date_fields(config);
-    let (fields, skipped) = if opts.by.is_empty() {
-        let auto = auto_fields(docs, &dfields);
+    // F4: only compute auto date-bounds in auto mode; `--by` mode is an
+    // explicit request for field distributions, not bounds.
+    let dates = if by.is_empty() {
+        date_bounds(docs, &dfields)
+    } else {
+        Vec::new()
+    };
+    // F3: exclude from auto distributions only the date fields that actually
+    // produced bounds (valid ISO values present), not every declared date
+    // field — a mistyped date field (all non-ISO values) has no bounds and
+    // must still surface as a distribution.
+    let bounded: BTreeSet<String> = dates.iter().map(|d| d.field.clone()).collect();
+
+    let (fields, skipped) = if by.is_empty() {
+        let auto = auto_fields(docs, &bounded);
         field_distributions(docs, &auto, false, opts)
     } else {
-        field_distributions(docs, &opts.by, true, opts)
+        field_distributions(docs, &by, true, opts)
     };
-    let dates = date_bounds(docs, &dfields);
     DataSummary {
         total: docs.len(),
         fields,
@@ -542,6 +584,137 @@ mod tests {
         assert_eq!(bounds[0].field, "created");
         assert_eq!(bounds[0].min, "2026-05-10");
         assert_eq!(bounds[0].max, "2026-07-03");
+    }
+
+    #[test]
+    fn summarize_normalizes_by_trimming_and_dropping_empties() {
+        // F1: CLI's clap `value_delimiter=','` does not trim segments, so
+        // `--by "type, status"` arrives as `["type", " status"]`. `summarize`
+        // must normalize (trim + drop-empty) before selecting fields, so the
+        // space-prefixed " status" is honored as `status`, not silently
+        // dropped (which is what happened pre-fix: only `type` appeared).
+        let docs = vec![
+            doc(serde_json::json!({"type": "note", "status": "active"})),
+            doc(serde_json::json!({"type": "task", "status": "backlog"})),
+        ];
+        let opts = DataOptions {
+            by: vec!["type".to_string(), " status".to_string()],
+            ..DataOptions::default()
+        };
+        let cfg = config_with_date_field("created", "datetime");
+        let summary = summarize(&docs, &cfg, &opts);
+        assert!(
+            summary.fields.iter().any(|f| f.field == "type"),
+            "expected `type` distribution, got: {:?}",
+            summary.fields.iter().map(|f| &f.field).collect::<Vec<_>>()
+        );
+        assert!(
+            summary.fields.iter().any(|f| f.field == "status"),
+            "expected `status` distribution (trimmed from \" status\"), got: {:?}",
+            summary.fields.iter().map(|f| &f.field).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn summarize_mistyped_date_field_stays_visible_as_distribution() {
+        // F3: `due` is declared `date` but every value is free text ("someday",
+        // "TBD") — none validate as ISO, so `date_bounds` produces no bounds
+        // for it. Excluding ALL declared date fields from auto distributions
+        // (the pre-fix behavior) then makes `due` vanish from both `dates`
+        // and `fields`. The fix excludes only fields that actually produced
+        // bounds, so a mistyped date field falls through to a normal
+        // distribution instead of disappearing.
+        let docs = vec![
+            doc(serde_json::json!({"due": "someday"})),
+            doc(serde_json::json!({"due": "someday"})),
+            doc(serde_json::json!({"due": "TBD"})),
+        ];
+        let cfg = config_with_date_field("due", "date");
+        let summary = summarize(&docs, &cfg, &DataOptions::default());
+        assert!(
+            summary.dates.is_empty(),
+            "no valid ISO values ⇒ no bounds, got: {:?}",
+            summary.dates
+        );
+        assert!(
+            summary.fields.iter().any(|f| f.field == "due"),
+            "mistyped date field must still appear as a distribution, got: {:?}",
+            summary.fields.iter().map(|f| &f.field).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn summarize_by_mode_omits_auto_date_bounds() {
+        // F4: in `--by` mode the user explicitly asked for a distribution of
+        // the named field. Pre-fix, `date_bounds` ran unconditionally, so a
+        // `--by created` on a `datetime` field rendered BOTH a distribution
+        // (from the `--by` branch, which doesn't exclude date fields) AND a
+        // `dates` entry — double-rendering. Fix: no auto date-bounds when
+        // `by` is non-empty.
+        let docs = vec![
+            doc(serde_json::json!({"created": "2026-05-10"})),
+            doc(serde_json::json!({"created": "2026-05-10"})),
+            doc(serde_json::json!({"created": "2026-07-03"})),
+        ];
+        let cfg = config_with_date_field("created", "datetime");
+        let opts = DataOptions {
+            by: vec!["created".to_string()],
+            ..DataOptions::default()
+        };
+        let summary = summarize(&docs, &cfg, &opts);
+        assert!(
+            summary.dates.is_empty(),
+            "--by mode must not also emit auto date-bounds, got: {:?}",
+            summary.dates
+        );
+        let matches: Vec<_> = summary
+            .fields
+            .iter()
+            .filter(|f| f.field == "created")
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "`created` must appear exactly once (as a distribution), got: {:?}",
+            summary.fields.iter().map(|f| &f.field).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn null_value_counts_as_missing_not_as_null_bucket() {
+        // F5: explicit `null` must be treated as MISSING, consistent with
+        // `has`/`missing` query filters (which treat null as absent) and with
+        // the existing empty-array-as-missing handling. Two docs share
+        // "rust" so the field survives identity-skip and we can inspect
+        // buckets directly.
+        let docs = vec![
+            doc(serde_json::json!({"field": serde_json::Value::Null})),
+            doc(serde_json::json!({"field": "rust"})),
+            doc(serde_json::json!({"field": "rust"})),
+        ];
+        let opts = DataOptions::default();
+        let (dists, skipped) = field_distributions(&docs, &["field".to_string()], false, &opts);
+        assert!(skipped.is_empty());
+        assert_eq!(dists.len(), 1);
+        let vals: Vec<_> = dists[0]
+            .values
+            .iter()
+            .map(|v| (v.value.as_str(), v.count))
+            .collect();
+        assert!(
+            !vals.iter().any(|(v, _)| *v == "(null)"),
+            "null must not appear as a \"(null)\" value bucket, got: {vals:?}"
+        );
+        assert!(
+            vals.contains(&(MISSING, 1)),
+            "null must be counted in the (missing) bucket, got: {vals:?}"
+        );
+        assert!(vals.contains(&("rust", 2)));
+        assert_eq!(
+            dists[0].values.len(),
+            2,
+            "only `rust` and `(missing)` buckets, no distinct null bucket, got: {vals:?}"
+        );
     }
 
     #[test]
