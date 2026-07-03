@@ -185,6 +185,50 @@ validate:
     assert_eq!(env2["path"], serde_json::json!("tasks/MMR-2.md"));
 }
 
+#[test]
+fn new_seq_rule_dry_run_predicts_without_allocating() {
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/task-{{seq}}.md"
+      frontmatter_defaults:
+        type: task
+"#,
+    );
+    // Seed an existing id so the prediction is a non-trivial max+1.
+    fs::create_dir_all(vault.path().join("tasks")).unwrap();
+    fs::write(
+        vault.path().join("tasks/task-1.md"),
+        "---\ntype: task\n---\n",
+    )
+    .unwrap();
+
+    let output = norn_cmd(&vault)
+        .args(["new", "--as", "task", "--dry-run", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let env: serde_json::Value = serde_json::from_slice(&output.stdout).expect("envelope json");
+    // `path` stays the honest unresolved target; the prediction is a separate,
+    // explicitly non-binding field.
+    assert_eq!(env["path"], serde_json::json!("tasks/task-{{seq}}.md"));
+    assert_eq!(env["predicted_path"], serde_json::json!("tasks/task-2.md"));
+    assert_eq!(env["applied"], serde_json::json!(false));
+
+    // Dry-run must allocate nothing.
+    assert!(
+        !vault.path().join("tasks/task-2.md").exists(),
+        "dry-run must not create task-2.md"
+    );
+}
+
 // ── Scenario 2: No path, no --as → inbox fallback ─────────────────────────────
 
 #[test]

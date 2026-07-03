@@ -10,7 +10,7 @@ use crate::standards::apply::{
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 
 /// Context passed to `apply_repair_plan` for flags that only affect specific
 /// orchestrator passes (currently, `create_document` Pass 1e).
@@ -57,19 +57,6 @@ fn check_hash(
         }));
     }
     Ok(())
-}
-
-/// File names (not full paths) of the entries directly in `dir`. Empty when the
-/// directory is missing or unreadable — a create into a not-yet-existing folder
-/// then correctly starts its `{{seq}}` sequence at 1.
-fn read_dir_file_names(dir: &Utf8Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir.as_std_path()) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
 }
 
 fn count_planned_links(change: &PlannedChange) -> usize {
@@ -414,8 +401,7 @@ pub fn apply_repair_plan_with_context(
         // introduced: the NRN-87 warm daemon will own this same boundary and can
         // swap the impl behind it untouched.
         let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
-            let dir = cwd.join(change.path.parent().unwrap_or_else(|| Utf8Path::new("")));
-            crate::seq_alloc::resolve_seq(&change.path, &read_dir_file_names(&dir))
+            crate::seq_alloc::predict(cwd, &change.path)
         } else {
             change.path.clone()
         };
@@ -496,7 +482,13 @@ pub fn apply_repair_plan_with_context(
         if !report.changed_files.contains(&resolved_path) {
             report.changed_files.push(resolved_path.clone());
         }
-        emit_op_action(sink, spans, change, Severity::Info, Vec::new());
+        // Audit the action against the resolved path, not the `{{seq}}` template
+        // (NRN-101). Same change_id, so it still hangs off the op_planned span.
+        let resolved_change = PlannedChange {
+            path: resolved_path.clone(),
+            ..change.clone()
+        };
+        emit_op_action(sink, spans, &resolved_change, Severity::Info, Vec::new());
     }
 
     // Collect move_document changes for passes 2 and 3.

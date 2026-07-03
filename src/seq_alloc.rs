@@ -17,6 +17,28 @@ pub fn has_seq(path: &Utf8Path) -> bool {
     path.as_str().contains(SEQ_TOKEN)
 }
 
+/// File names (not full paths) of the entries directly in `dir`. Empty when the
+/// directory is missing or unreadable — a create into a not-yet-existing folder
+/// then correctly starts its `{{seq}}` sequence at 1.
+pub fn dir_file_names(dir: &Utf8Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir.as_std_path()) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect()
+}
+
+/// Resolve a `{{seq}}` `template` (vault-relative) against the live filesystem
+/// rooted at `cwd`. Reads the template's parent directory and applies
+/// [`resolve_seq`]. Used both at apply time (under the lock, authoritative) and
+/// for dry-run prediction (non-binding — a concurrent create could take the id).
+pub fn predict(cwd: &Utf8Path, template: &Utf8Path) -> Utf8PathBuf {
+    let dir = cwd.join(template.parent().unwrap_or_else(|| Utf8Path::new("")));
+    resolve_seq(template, &dir_file_names(&dir))
+}
+
 /// Resolve `{{seq}}` in `template`'s file name to the next id, given the file
 /// names present in the template's parent directory (`siblings`).
 ///

@@ -269,8 +269,22 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
 
     // ── DRY-RUN (default): no lock, no apply, no write ─────────────────────────
     if !p.confirm {
-        return crate::new::report::render_json(&plan, &doc_path_str, false, body_bytes, "")
-            .map_err(|e| anyhow::anyhow!("render_json: {e}"));
+        // NRN-101: non-binding predicted id for an unresolved `{{seq}}` target,
+        // mirroring the CLI dry-run preview.
+        let predicted: Option<String> = if crate::seq_alloc::has_seq(&doc_path) {
+            Some(crate::seq_alloc::predict(&cwd, &doc_path).to_string())
+        } else {
+            None
+        };
+        return crate::new::report::render_json(
+            &plan,
+            &doc_path_str,
+            false,
+            body_bytes,
+            "",
+            predicted.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("render_json: {e}"));
     }
 
     // ── CONFIRM: acquire mutation lock, open sink, apply ───────────────────────
@@ -329,13 +343,23 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     let trace_id = sink.trace_id().to_string();
     let exit_code = if apply_outcome.is_ok() { 0 } else { 2 };
     crate::emit_single_op_finished(&mut sink, "new", exit_code, apply_outcome.is_ok());
-    apply_outcome?;
+    let apply_report = apply_outcome?;
+
+    // NRN-101: an incremental `{{seq}}` target is resolved at apply time inside
+    // the applier (under the lock). Render + post-create validate against the
+    // path actually written, not the unresolved `{{seq}}` template — the CLI
+    // path does the same in `apply_and_render`.
+    let effective_path = apply_report
+        .created_documents
+        .first()
+        .map(|c| c.path.clone())
+        .unwrap_or_else(|| doc_path.clone());
 
     // Post-create validate: surface any missing-required-field findings as
     // warnings in the output envelope — mirrors `apply_and_render`'s
     // `post_create_validate` call.
     let post_warnings =
-        crate::new::post_create_validate(&cwd, doc_path.as_str(), &plan.warnings, body_bytes)
+        crate::new::post_create_validate(&cwd, effective_path.as_str(), &plan.warnings, body_bytes)
             .unwrap_or_default();
     let mut augmented = crate::new::synth::CreateDocumentPlan {
         change: plan.change.clone(),
@@ -344,8 +368,15 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     };
     augmented.warnings.extend(post_warnings);
 
-    crate::new::report::render_json(&augmented, &doc_path_str, true, body_bytes, &trace_id)
-        .map_err(|e| anyhow::anyhow!("render_json: {e}"))
+    crate::new::report::render_json(
+        &augmented,
+        effective_path.as_str(),
+        true,
+        body_bytes,
+        &trace_id,
+        None,
+    )
+    .map_err(|e| anyhow::anyhow!("render_json: {e}"))
 }
 
 #[cfg(test)]
@@ -375,6 +406,56 @@ validate:
         std::fs::create_dir_all(&norn_dir).unwrap();
         std::fs::write(norn_dir.join("config.yaml"), CONFIG_WITH_SCHEMA).unwrap();
         (tmp, root)
+    }
+
+    const CONFIG_WITH_SEQ_RULE: &str = r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/MMR-{{seq}}.md"
+      frontmatter_defaults:
+        type: task
+"#;
+
+    /// NRN-101 MCP parity: `vault.new` with a `{{seq}}` rule resolves the id at
+    /// apply (confirm) and predicts non-bindingly on dry-run — mirroring the CLI.
+    #[test]
+    fn seq_rule_resolves_on_confirm_and_predicts_on_dry_run() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-new-seq-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let norn_dir = root.join(".norn");
+        std::fs::create_dir_all(&norn_dir).unwrap();
+        std::fs::write(norn_dir.join("config.yaml"), CONFIG_WITH_SEQ_RULE).unwrap();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let call = |confirm: bool| {
+            handle(
+                &ctx,
+                NewParams {
+                    rule: Some("task".to_string()),
+                    parents: true,
+                    confirm,
+                    ..Default::default()
+                },
+            )
+            .expect("handle should succeed")
+        };
+
+        // Confirm → allocates MMR-1 and writes it.
+        let v1: serde_json::Value = serde_json::from_str(&call(true)).unwrap();
+        assert_eq!(v1["applied"], serde_json::json!(true));
+        assert_eq!(v1["path"], serde_json::json!("tasks/MMR-1.md"));
+        assert!(root.join("tasks/MMR-1.md").exists());
+
+        // Dry-run → predicts MMR-2 (non-binding), writes nothing.
+        let v2: serde_json::Value = serde_json::from_str(&call(false)).unwrap();
+        assert_eq!(v2["applied"], serde_json::json!(false));
+        assert_eq!(v2["path"], serde_json::json!("tasks/MMR-{{seq}}.md"));
+        assert_eq!(v2["predicted_path"], serde_json::json!("tasks/MMR-2.md"));
+        assert!(!root.join("tasks/MMR-2.md").exists());
     }
 
     /// Core mutation-safety contract: dry-run (default `confirm: false`) returns

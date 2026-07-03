@@ -75,7 +75,13 @@ validate:
         status: backlog
 ```
 
-Template placeholders: `{{title}}`, `{{title|slugify}}`, `{{date}}`, `{{now}}`, `{{var.KEY}}` (filled by `--var KEY=VALUE`), and any transform the substitution engine supports (`|slugify`, `|lower`, etc.).
+Template placeholders: `{{title}}`, `{{title|slugify}}`, `{{date}}`, `{{now}}`, `{{var.KEY}}` (filled by `--var KEY=VALUE`), `{{seq}}` (auto-incrementing id, see below), and any transform the substitution engine supports (`|slugify`, `|lower`, etc.).
+
+#### `{{seq}}` — auto-incrementing ids
+
+A `target` may include a `{{seq}}` token to allocate the next integer id at creation time, e.g. `target: "tasks/MMR-{{seq}}.md"`. The id is `max + 1` over the existing files sharing the resolved prefix, so it is **scoped per prefix** — `MMR-{{seq}}` counts only `MMR-*` files (independent of `NRN-*`), and the first id is `1`. Allocation happens at apply time under the per-vault mutation lock, so two concurrent creations get distinct, sequential ids with no collision.
+
+On `--dry-run`, the reported `path` keeps the unresolved `{{seq}}` template and a separate `predicted_path` field shows the id that *would* be allocated — non-binding, since a concurrent creation could take it first. Ids are derived from the files on disk, not a stored counter: deleting the highest-numbered file frees its id for reuse on the next creation, while deleting a lower one leaves the next id unchanged.
 
 ### `validate.rules[].body` (body scaffold)
 
