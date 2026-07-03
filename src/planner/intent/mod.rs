@@ -197,6 +197,51 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             Ok(vec![change])
         }
 
+        "str_replace"
+        | "replace_section"
+        | "append_to_section"
+        | "delete_section"
+        | "insert_before_heading"
+        | "insert_after_heading" => {
+            // Section/body edit ops (NRN-98 / H1). The op fields ARE the
+            // `EditOp` (internally tagged on `op`); carry that payload in
+            // `new_value` so the applier can deserialize and apply it against
+            // the current body at apply time, under whole-doc CAS. Extra keys
+            // (`path`/`document_hash`) are ignored by `EditOp`'s deserializer.
+            let path = op.fields["path"]
+                .as_str()
+                .ok_or_else(|| anyhow!("{} missing path", op.kind))?;
+            let document_hash = op.fields["document_hash"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let mut edit_json = op
+                .fields
+                .as_object()
+                .cloned()
+                .ok_or_else(|| anyhow!("op.fields for {} must be an object", op.kind))?;
+            edit_json.insert("op".into(), serde_json::Value::String(op.kind.clone()));
+
+            let change = PlannedChange {
+                change_id: format!("{}-{}", op.kind, path),
+                path: path.into(),
+                document_hash,
+                finding_code: "operator-request".into(),
+                finding_rule: None,
+                repair_rule: "operator-request".into(),
+                operation: op.kind.clone(),
+                field: None,
+                expected_old_value: None,
+                new_value: Some(serde_json::Value::Object(edit_json)),
+                destination: None,
+                link_risk: None,
+                warnings: Vec::new(),
+                force: false,
+                parents: false,
+            };
+            Ok(vec![change])
+        }
+
         other => Err(anyhow!("unknown operation kind: {}", other)),
     }
 }

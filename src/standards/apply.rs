@@ -61,6 +61,11 @@ pub enum ApplyError {
     #[error("frontmatter parse failed for {path}: {message}")]
     FrontmatterParseFailed { path: Utf8PathBuf, message: String },
 
+    #[error("edit op failed for {path}: {message}")]
+    EditFailed {
+        path: camino::Utf8PathBuf,
+        message: String,
+    },
     #[error("set_frontmatter change missing new_value for {path}")]
     MissingNewValue { path: Utf8PathBuf },
 
@@ -269,7 +274,17 @@ pub fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &RepairPlan) -> Result<(
 fn is_orchestrator_pass_op(operation: &str) -> bool {
     matches!(
         operation,
-        "move_document" | "rewrite_link" | "delete_document" | "replace_body" | "create_document"
+        "move_document"
+            | "rewrite_link"
+            | "delete_document"
+            | "replace_body"
+            | "create_document"
+            | "str_replace"
+            | "replace_section"
+            | "append_to_section"
+            | "delete_section"
+            | "insert_before_heading"
+            | "insert_after_heading"
     )
 }
 
@@ -810,6 +825,33 @@ pub fn apply_replace_body(content: &str, change: &PlannedChange) -> Result<Strin
         }
         None => Ok(new_body.to_string()),
     }
+}
+
+/// Apply a sequence of section/body [`EditOp`](crate::edit::ops::EditOp)s to
+/// `content` at apply time, preserving frontmatter.
+///
+/// Mirrors [`apply_replace_body`]'s frontmatter-preserving splice, but computes
+/// the new body via the shared `edit::transform` engine — the same code path
+/// `norn edit` uses — so a plan-applied section edit and `norn edit` produce
+/// byte-identical results. Ops apply sequentially, each against the prior's
+/// output. The caller verifies the document hash before invoking (whole-doc CAS).
+pub fn apply_edit_ops(
+    content: &str,
+    ops: &[crate::edit::ops::EditOp],
+    path: &camino::Utf8Path,
+) -> Result<String, ApplyError> {
+    let mut diagnostics = Vec::new();
+    let (_, frontmatter_range, _, body_start) = extract_frontmatter(content, &mut diagnostics);
+    let body = &content[body_start..];
+    let transformed =
+        crate::edit::transform::apply_edits(body, ops).map_err(|e| ApplyError::EditFailed {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    Ok(match frontmatter_range {
+        Some(_) => format!("{}{}", &content[..body_start], transformed.new_body),
+        None => transformed.new_body,
+    })
 }
 
 ///
