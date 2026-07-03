@@ -927,6 +927,12 @@ pub struct EditArgs {
     #[arg(long = "edits-json", value_name = "JSON")]
     pub edits_json: Option<String>,
 
+    /// Refuse the edit unless the document's current content hash equals HASH
+    /// (blake3 hex of the full file, as `norn get` reports). Opt-in
+    /// compare-and-swap; absent = read-modify-write.
+    #[arg(long = "expected-hash", value_name = "HASH")]
+    pub expected_hash: Option<String>,
+
     /// Apply the edits without an interactive confirm prompt.
     #[arg(long)]
     pub yes: bool,

@@ -966,6 +966,7 @@ fn run(cli: Cli) -> Result<i32> {
                 &vault_cfg,
                 &args.target,
                 &ops,
+                args.expected_hash.as_deref(),
             ) {
                 Ok(p) => p,
                 Err(e) => {
