@@ -307,6 +307,51 @@ mod tests {
         );
     }
 
+    /// NRN-98 parity: an `append_to_section` edit op applies via `vault.apply_plan`
+    /// exactly as it does via `norn migrate` (same applier path).
+    #[test]
+    fn edit_op_applies_via_apply_plan() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-edit-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        let note = root.join("note.md");
+        std::fs::write(&note, "---\nt: 1\n---\n## Notes\nline one\n").unwrap();
+        let hash = blake3::hash(&std::fs::read(&note).unwrap())
+            .to_hex()
+            .to_string();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [{
+                "kind": "append_to_section",
+                "fields": { "path": "note.md", "document_hash": hash, "heading": "Notes", "content": "line two" }
+            }]
+        });
+
+        let report = handle(
+            &ctx,
+            ApplyPlanParams {
+                plan,
+                confirm: true,
+            },
+        )
+        .expect("apply_plan (confirm) should succeed");
+        assert!(!report.dry_run);
+        assert!(report.applied >= 1, "expected >= 1 applied: {report:?}");
+
+        let after = std::fs::read_to_string(&note).unwrap();
+        assert!(
+            after.contains("line one") && after.contains("line two"),
+            "edit must apply via MCP; got:\n{after}"
+        );
+    }
+
     /// A malformed plan (garbage JSON) must return Err, applying nothing.
     #[test]
     fn malformed_plan_is_rejected() {

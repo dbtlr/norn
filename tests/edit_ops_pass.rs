@@ -102,6 +102,32 @@ fn append_to_section_applies_at_apply_time() {
 }
 
 #[test]
+fn str_replace_applies_at_apply_time() {
+    // A content-anchored op (unique-match-or-refuse), distinct from the
+    // heading-anchored section ops.
+    let initial = "---\nt: 1\n---\nhello world\n";
+    let (tmp, note_path) = setup_vault(initial);
+    let hash = blake3_of_file(&note_path);
+    let plan = edit_plan(
+        tmp.path().to_str().unwrap(),
+        vec![serde_json::json!({
+            "kind": "str_replace",
+            "fields": { "path": "note.md", "document_hash": hash, "old": "world", "new": "norn" }
+        })],
+    );
+    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&note_path).unwrap(),
+        "---\nt: 1\n---\nhello norn\n"
+    );
+}
+
+#[test]
 fn edit_op_with_stale_hash_aborts_without_writing() {
     let initial = "---\ntitle: Foo\n---\n## Notes\nline one\n";
     let (tmp, note_path) = setup_vault(initial);
