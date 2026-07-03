@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Added
+
+- **Rule targets can carry a `{{seq}}` token for auto-incrementing document ids.** A creatable rule whose `target` includes `{{seq}}` — e.g. `target: "tasks/MMR-{{seq}}.md"` — allocates the next integer id at apply time, computed as filesystem max+1 over existing sibling files sharing the resolved prefix (per-prefix counters: `MMR-*` is independent of `NRN-*`, and the first id is `1`). Allocation runs under the per-vault mutation lock, so two concurrent `norn new` / `vault.new` creations get distinct sequential ids with no collision — the caller no longer needs its own `max+1`/retry. `--dry-run` (CLI and MCP) shows the honest unresolved target plus a non-binding `predicted_path` field; the real id is allocated at apply and can differ under concurrency. CLI `norn new --as <rule>` and MCP `vault.new` are at parity.
+
 ### Changed
 
 - **Date operators (`--before`/`--after`/`--on`) now answer from the `document_fields` index on indexed fields.** The last scan-only frontmatter predicate class joins the index route via the same two-branch compile the string operators use: text-typed index rows range-compare directly (a genuine index range on `--before`/`--after`), and any non-text value falls through to the exact scan-path expression, so routed and scanned results stay identical for every value shape. With this, every frontmatter predicate routes when its fields are indexed. Query-plan only — results, output, and exit codes are unchanged. One visible side effect: a date query on an *unindexed* field now gets the standard past-1,000-documents cold-scan warning, where previously date ops fell back silently as a router limitation.

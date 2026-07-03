@@ -223,14 +223,32 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     //   stdout is TTY       → interactive confirm
     //   non-TTY, no --yes   → implicit dry-run
 
+    // NRN-101: for an unresolved `{{seq}}` target, compute a non-binding
+    // predicted id (filesystem max+1 now) to show in the preview. Real
+    // allocation happens at apply under the lock and can differ.
+    let predicted_path: Option<String> = if crate::seq_alloc::has_seq(&doc_path) {
+        Some(crate::seq_alloc::predict(vault_root, &doc_path).to_string())
+    } else {
+        None
+    };
+
     let render_preview = |applied: bool| -> Result<String> {
         Ok(match args.format {
-            NewFormat::Records => {
-                crate::new::report::render_records(&plan, &doc_path_str, applied, body_bytes)
-            }
-            NewFormat::Json => {
-                crate::new::report::render_json(&plan, &doc_path_str, applied, body_bytes, "")?
-            }
+            NewFormat::Records => crate::new::report::render_records(
+                &plan,
+                &doc_path_str,
+                applied,
+                body_bytes,
+                predicted_path.as_deref(),
+            ),
+            NewFormat::Json => crate::new::report::render_json(
+                &plan,
+                &doc_path_str,
+                applied,
+                body_bytes,
+                "",
+                predicted_path.as_deref(),
+            )?,
         })
     };
 
@@ -432,6 +450,7 @@ fn apply_and_render(
             effective_path.as_str(),
             true,
             body_bytes,
+            None,
         ),
         crate::cli::NewFormat::Json => crate::new::report::render_json(
             &augmented,
@@ -439,6 +458,7 @@ fn apply_and_render(
             true,
             body_bytes,
             &trace_id,
+            None,
         )?,
     };
 

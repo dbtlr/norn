@@ -22,8 +22,9 @@ pub fn render_json(
     applied: bool,
     body_bytes: usize,
     trace_id: &str,
+    predicted_path: Option<&str>,
 ) -> Result<String, serde_json::Error> {
-    let envelope = json!({
+    let mut envelope = json!({
         "schema_version": 2,
         "operation": "new",
         "path": path,
@@ -42,6 +43,14 @@ pub fn render_json(
         "body_bytes": body_bytes,
         "warnings": plan.warnings.iter().map(warning_to_json).collect::<Vec<_>>(),
     });
+    // NRN-101: for an unresolved `{{seq}}` target, surface a non-binding
+    // predicted id alongside the honest unresolved `path`. The real id is
+    // allocated at apply under the lock and can differ (concurrent create).
+    if let Some(pred) = predicted_path {
+        if let Some(obj) = envelope.as_object_mut() {
+            obj.insert("predicted_path".into(), Value::String(pred.to_string()));
+        }
+    }
     serde_json::to_string_pretty(&envelope)
 }
 
@@ -107,6 +116,7 @@ pub fn render_records(
     path: &str,
     applied: bool,
     body_bytes: usize,
+    predicted_path: Option<&str>,
 ) -> String {
     let mut out = String::new();
 
@@ -120,6 +130,10 @@ pub fn render_records(
     }
 
     row!("path", path);
+    // NRN-101: non-binding predicted id for an unresolved `{{seq}}` target.
+    if let Some(pred) = predicted_path {
+        row!("predicted", format!("≈ {pred} (allocated at apply)"));
+    }
     row!("operation", "new");
     row!("applied", if applied { "true" } else { "false" });
 
@@ -259,7 +273,7 @@ mod render_json_tests {
             source: FieldSourceKind::SchemaDefault,
             rule: Some("task-rule".into()),
         }]);
-        let out = render_json(&plan, "Workspaces/foo/tasks/bar.md", true, 0, "").unwrap();
+        let out = render_json(&plan, "Workspaces/foo/tasks/bar.md", true, 0, "", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["schema_version"], serde_json::json!(2));
         assert_eq!(v["operation"], serde_json::json!("new"));
@@ -285,7 +299,7 @@ mod render_json_tests {
                 rule: None,
             },
         ]);
-        let out = render_json(&plan, "p.md", true, 0, "").unwrap();
+        let out = render_json(&plan, "p.md", true, 0, "", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let fc = v["frontmatter_created"].as_array().unwrap();
         assert_eq!(fc.len(), 2);
@@ -308,7 +322,7 @@ mod render_json_tests {
             source: FieldSourceKind::OperatorFlagJson,
             rule: None,
         }]);
-        let out = render_json(&plan, "p.md", true, 0, "").unwrap();
+        let out = render_json(&plan, "p.md", true, 0, "", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v["frontmatter_created"][0]["source"],
@@ -337,7 +351,7 @@ mod render_json_tests {
                 variable: "workspace".into(),
             },
         ];
-        let out = render_json(&plan, "p.md", true, 0, "").unwrap();
+        let out = render_json(&plan, "p.md", true, 0, "", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let warnings = v["warnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 4);
@@ -362,7 +376,7 @@ mod render_json_tests {
     #[test]
     fn dry_run_envelope_has_applied_false() {
         let plan = plan_with_fields(vec![]);
-        let out = render_json(&plan, "p.md", false, 0, "").unwrap();
+        let out = render_json(&plan, "p.md", false, 0, "", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["applied"], serde_json::json!(false));
     }
@@ -370,7 +384,7 @@ mod render_json_tests {
     #[test]
     fn body_bytes_threaded_through() {
         let plan = plan_with_fields(vec![]);
-        let out = render_json(&plan, "p.md", true, 1234, "").unwrap();
+        let out = render_json(&plan, "p.md", true, 1234, "", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["body_bytes"], serde_json::json!(1234));
     }
@@ -414,7 +428,7 @@ mod render_records_tests {
     #[test]
     fn renders_path_operation_applied_labels() {
         let p = plan(vec![], vec![]);
-        let out = render_records(&p, "Workspaces/foo/tasks/bar.md", true, 0);
+        let out = render_records(&p, "Workspaces/foo/tasks/bar.md", true, 0, None);
         let s = strip_ansi(&out);
         assert!(s.contains("path"));
         assert!(s.contains("Workspaces/foo/tasks/bar.md"));
@@ -441,7 +455,7 @@ mod render_records_tests {
             },
         ];
         let p = plan(fields, vec![]);
-        let out = render_records(&p, "p.md", true, 0);
+        let out = render_records(&p, "p.md", true, 0, None);
         let s = strip_ansi(&out);
         assert!(s.contains("type"));
         assert!(s.contains("task"));
@@ -455,7 +469,7 @@ mod render_records_tests {
     #[test]
     fn renders_body_bytes() {
         let p = plan(vec![], vec![]);
-        let out = render_records(&p, "p.md", true, 1234);
+        let out = render_records(&p, "p.md", true, 1234, None);
         let s = strip_ansi(&out);
         assert!(s.contains("body"));
         assert!(s.contains("1234"));
@@ -464,7 +478,7 @@ mod render_records_tests {
     #[test]
     fn renders_no_warnings_state() {
         let p = plan(vec![], vec![]);
-        let out = render_records(&p, "p.md", true, 0);
+        let out = render_records(&p, "p.md", true, 0, None);
         let s = strip_ansi(&out);
         assert!(s.contains("warnings"));
         assert!(s.contains("none") || s.contains("0"));
@@ -483,7 +497,7 @@ mod render_records_tests {
             },
         ];
         let p = plan(vec![], warnings);
-        let out = render_records(&p, "p.md", true, 0);
+        let out = render_records(&p, "p.md", true, 0, None);
         let s = strip_ansi(&out);
         assert!(s.contains("missing-required-field") || s.contains("status"));
         assert!(s.contains("unresolved-wikilink") || s.contains("missing-stem"));
@@ -492,7 +506,7 @@ mod render_records_tests {
     #[test]
     fn dry_run_emits_apply_hint() {
         let p = plan(vec![], vec![]);
-        let out = render_records(&p, "p.md", false, 0);
+        let out = render_records(&p, "p.md", false, 0, None);
         let s = strip_ansi(&out);
         assert!(s.contains("--yes"), "dry-run should suggest --yes");
     }
@@ -500,7 +514,7 @@ mod render_records_tests {
     #[test]
     fn applied_omits_apply_hint() {
         let p = plan(vec![], vec![]);
-        let out = render_records(&p, "p.md", true, 0);
+        let out = render_records(&p, "p.md", true, 0, None);
         let s = strip_ansi(&out);
         assert!(!s.contains("--yes"), "applied run should NOT suggest --yes");
     }
