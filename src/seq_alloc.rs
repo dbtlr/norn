@@ -17,26 +17,44 @@ pub fn has_seq(path: &Utf8Path) -> bool {
     path.as_str().contains(SEQ_TOKEN)
 }
 
-/// File names (not full paths) of the entries directly in `dir`. Empty when the
-/// directory is missing or unreadable — a create into a not-yet-existing folder
-/// then correctly starts its `{{seq}}` sequence at 1.
-pub fn dir_file_names(dir: &Utf8Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir.as_std_path()) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
+/// File names (not full paths) of the entries directly in `dir`.
+///
+/// A **missing** directory yields an empty list — a create into a not-yet-existing
+/// folder legitimately starts its `{{seq}}` sequence at 1. Any *other* read error
+/// (permissions, EMFILE, …) is propagated, never coerced to empty: coercing would
+/// silently reset the sequence to 1 and — under `--force` — overwrite the real
+/// highest-id file.
+pub fn dir_file_names(dir: &Utf8Path) -> std::io::Result<Vec<String>> {
+    match std::fs::read_dir(dir.as_std_path()) {
+        Ok(entries) => Ok(entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Resolve a `{{seq}}` `template` (vault-relative) against the live filesystem
 /// rooted at `cwd`. Reads the template's parent directory and applies
 /// [`resolve_seq`]. Used both at apply time (under the lock, authoritative) and
 /// for dry-run prediction (non-binding — a concurrent create could take the id).
-pub fn predict(cwd: &Utf8Path, template: &Utf8Path) -> Utf8PathBuf {
+pub fn predict(cwd: &Utf8Path, template: &Utf8Path) -> std::io::Result<Utf8PathBuf> {
     let dir = cwd.join(template.parent().unwrap_or_else(|| Utf8Path::new("")));
-    resolve_seq(template, &dir_file_names(&dir))
+    Ok(resolve_seq(template, &dir_file_names(&dir)?))
+}
+
+/// True when `path` carries a `{{seq}}` token that cannot be resolved: the token
+/// must appear **exactly once, in the file name**. A token in a directory
+/// component, or a second occurrence, is a rule misconfiguration. Lets callers
+/// fail fast at plan/generate time rather than deferring the refusal to apply.
+pub fn seq_misplaced(path: &Utf8Path) -> bool {
+    let total = path.as_str().matches(SEQ_TOKEN).count();
+    if total == 0 {
+        return false;
+    }
+    let in_name = path.file_name().map_or(0, |n| n.matches(SEQ_TOKEN).count());
+    total != 1 || in_name != 1
 }
 
 /// Resolve `{{seq}}` in `template`'s file name to the next id, given the file
@@ -129,6 +147,21 @@ mod tests {
     fn no_seq_token_returns_unchanged() {
         let out = resolve_seq(Utf8Path::new("tasks/fixed.md"), &["fixed.md".to_string()]);
         assert_eq!(out, Utf8PathBuf::from("tasks/fixed.md"));
+    }
+
+    #[test]
+    fn seq_misplaced_flags_only_bad_placements() {
+        assert!(!seq_misplaced(Utf8Path::new("tasks/MMR-{{seq}}.md"))); // one, in name → ok
+        assert!(!seq_misplaced(Utf8Path::new("tasks/fixed.md"))); // no token → ok
+        assert!(seq_misplaced(Utf8Path::new("tasks/{{seq}}/note.md"))); // dir component
+        assert!(seq_misplaced(Utf8Path::new("tasks/MMR-{{seq}}-{{seq}}.md"))); // twice
+        assert!(seq_misplaced(Utf8Path::new("{{seq}}/MMR-{{seq}}.md"))); // dir + name
+    }
+
+    #[test]
+    fn dir_file_names_missing_dir_is_empty_not_error() {
+        let out = dir_file_names(Utf8Path::new("/no/such/norn/dir/xyz")).unwrap();
+        assert!(out.is_empty());
     }
 
     #[test]

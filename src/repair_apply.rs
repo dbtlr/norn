@@ -10,7 +10,7 @@ use crate::standards::apply::{
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 /// Context passed to `apply_repair_plan` for flags that only affect specific
 /// orchestrator passes (currently, `create_document` Pass 1e).
@@ -386,6 +386,13 @@ pub fn apply_repair_plan_with_context(
     // (set/remove frontmatter, rewrite_link, delete, replace_body) and before
     // move_document, so we never move a document that was just created and then
     // immediately renamed.
+    //
+    // NRN-101: `{{seq}}` ids allocated earlier in THIS plan but not yet on disk
+    // (dry-run never writes; apply writes just-in-time) are tracked here so a
+    // later seq-create in the same plan doesn't re-predict an id already claimed
+    // by an earlier one. Without this, a dry-run of a multi-create plan reports
+    // duplicate ids while apply produces distinct ones.
+    let mut allocated_this_plan: Vec<Utf8PathBuf> = Vec::new();
     for change in plan
         .changes
         .iter()
@@ -401,16 +408,31 @@ pub fn apply_repair_plan_with_context(
         // introduced: the NRN-87 warm daemon will own this same boundary and can
         // swap the impl behind it untouched.
         let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
-            let resolved = crate::seq_alloc::predict(cwd, &change.path);
+            let dir = cwd.join(change.path.parent().unwrap_or_else(|| Utf8Path::new("")));
+            let mut siblings = crate::seq_alloc::dir_file_names(&dir)
+                .with_context(|| format!("create_document: scan {dir} for {{{{seq}}}}"))?;
+            // Fold in ids already claimed by earlier same-directory seq-creates
+            // in this plan (not necessarily on disk yet).
+            for prior in &allocated_this_plan {
+                if prior.parent() == change.path.parent() {
+                    if let Some(name) = prior.file_name() {
+                        siblings.push(name.to_string());
+                    }
+                }
+            }
+            let resolved = crate::seq_alloc::resolve_seq(&change.path, &siblings);
             // `{{seq}}` is only resolvable once, in the file name. If any token
             // survives (it appeared in a directory component, or more than once),
-            // refuse rather than write a path with a literal `{{seq}}` in it.
+            // refuse rather than write a path with a literal `{{seq}}` in it. The
+            // `new` path already refuses this at generate time; this backstops
+            // hand-authored migrate plans that bypass `generate_path`.
             if crate::seq_alloc::has_seq(&resolved) {
                 return Err(anyhow::anyhow!(
                     "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {}",
                     change.path
                 ));
             }
+            allocated_this_plan.push(resolved.clone());
             resolved
         } else {
             change.path.clone()

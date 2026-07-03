@@ -83,6 +83,8 @@ A `target` may include a `{{seq}}` token to allocate the next integer id at crea
 
 On `--dry-run`, the reported `path` keeps the unresolved `{{seq}}` template and a separate `predicted_path` field shows the id that *would* be allocated — non-binding, since a concurrent creation could take it first. Ids are derived from the files on disk, not a stored counter: deleting the highest-numbered file frees its id for reuse on the next creation, while deleting a lower one leaves the next id unchanged.
 
+Ids are plain, unpadded integers (`1`, `2`, … `10`). `{{seq}}` has no zero-padding directive, so don't point a `{{seq}}` rule at a directory that already uses zero-padded ids (`task-007.md`) — the next id would be `task-8.md`, breaking the lexical sort the padding existed to preserve. The token must appear exactly once, in the file name; a `{{seq}}` in a directory component (or twice) is refused at plan time.
+
 ### `validate.rules[].body` (body scaffold)
 
 An optional inline body template seeded into the new document. Rendered with the same substitution context used for the path (so `{{title}}` and `{{var.X}}` work). Overridden by `--body-from-stdin`.
