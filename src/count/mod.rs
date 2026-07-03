@@ -138,7 +138,7 @@ fn doc_key(doc: &DocumentSummary, field: &str) -> String {
         .unwrap_or_else(|| "(missing)".to_string())
 }
 
-fn render_key(value: &serde_json::Value) -> String {
+pub(crate) fn render_key(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "(null)".to_string(),
         serde_json::Value::String(s) => s.clone(),
