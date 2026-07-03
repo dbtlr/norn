@@ -130,4 +130,13 @@ mod tests {
         let out = resolve_seq(Utf8Path::new("tasks/fixed.md"), &["fixed.md".to_string()]);
         assert_eq!(out, Utf8PathBuf::from("tasks/fixed.md"));
     }
+
+    #[test]
+    fn seq_only_in_directory_component_is_left_unresolved() {
+        // `{{seq}}` outside the file name is not resolved here — the applier
+        // detects the surviving token and refuses rather than writing a literal.
+        let out = resolve_seq(Utf8Path::new("tasks/{{seq}}/note.md"), &[]);
+        assert_eq!(out, Utf8PathBuf::from("tasks/{{seq}}/note.md"));
+        assert!(has_seq(&out));
+    }
 }

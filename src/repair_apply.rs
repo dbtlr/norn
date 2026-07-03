@@ -401,7 +401,17 @@ pub fn apply_repair_plan_with_context(
         // introduced: the NRN-87 warm daemon will own this same boundary and can
         // swap the impl behind it untouched.
         let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
-            crate::seq_alloc::predict(cwd, &change.path)
+            let resolved = crate::seq_alloc::predict(cwd, &change.path);
+            // `{{seq}}` is only resolvable once, in the file name. If any token
+            // survives (it appeared in a directory component, or more than once),
+            // refuse rather than write a path with a literal `{{seq}}` in it.
+            if crate::seq_alloc::has_seq(&resolved) {
+                return Err(anyhow::anyhow!(
+                    "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {}",
+                    change.path
+                ));
+            }
+            resolved
         } else {
             change.path.clone()
         };
