@@ -78,6 +78,24 @@ fn edit_with_correct_expected_hash_applies() {
 }
 
 #[test]
+fn edit_with_uppercase_expected_hash_applies() {
+    // blake3 hex is emitted lowercase, but hex is case-insensitive — a correct
+    // hash copied in uppercase must be accepted, not read as drift.
+    let tmp = fixture();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\ntype: note\n---\nhello world\n").unwrap();
+    let hash = blake3_of_file(&doc).to_uppercase();
+
+    let out = run_edit(&tmp, "note.md", EDITS, &["--expected-hash", &hash, "--yes"]);
+    assert!(
+        out.status.success(),
+        "uppercase-but-correct expected-hash must apply; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fs::read_to_string(&doc).unwrap().contains("hello norn"));
+}
+
+#[test]
 fn edit_with_stale_expected_hash_refuses_and_does_not_write() {
     let tmp = fixture();
     let doc = tmp.path().join("note.md");

@@ -33,9 +33,9 @@ pub struct EditParams {
     pub edits: Vec<EditOp>,
 
     /// Optional compare-and-swap precondition: the document's expected current
-    /// content hash (blake3 hex of the full file, as `vault.get` reports). When
-    /// present, the edit is refused if the document has drifted from it; absent
-    /// = read-modify-write. Mirrors `norn edit --expected-hash`.
+    /// content hash (blake3 hex of the full file — the `document_hash` plan ops
+    /// carry). When present, the edit is refused if the document has drifted
+    /// from it; absent = read-modify-write. Mirrors `norn edit --expected-hash`.
     #[serde(default)]
     pub expected_hash: Option<String>,
 
@@ -90,13 +90,26 @@ pub fn handle_output(ctx: &VaultContext, p: EditParams) -> Result<EditOutput> {
 /// the file untouched.
 pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
     let cwd = ctx.vault_root.clone();
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config.index_options, false)?;
-    let cache = ctx.query_cache()?;
-    let vault_cfg = &ctx.config.vault_config;
 
     if p.edits.is_empty() {
         anyhow::bail!("edits array is empty");
     }
+
+    // CONFIRM acquires the per-vault mutation lock BEFORE the preflight read —
+    // matching `norn edit` (main.rs), which locks before `preflight_and_plan`.
+    // The lock must span the body read + transform + apply so a concurrent norn
+    // writer can't drift the file in the read→apply window and slip past both
+    // the `expected_hash` CAS and the applier's index-snapshot hash check. The
+    // DRY-RUN path is read-only and takes NO lock.
+    let _mutation_lock = if p.confirm {
+        Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    } else {
+        None
+    };
+
+    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config.index_options, false)?;
+    let cache = ctx.query_cache()?;
+    let vault_cfg = &ctx.config.vault_config;
 
     let pre = crate::edit::synth::preflight_and_plan(
         &cwd,
@@ -117,9 +130,6 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
             "",
         ));
     }
-
-    // CONFIRM: acquire the per-vault mutation lock, then apply.
-    let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
 
     // Open a REAL, file-backed event sink on the apply path — the same audit
     // trail `norn edit` writes. The sink also owns the trace id stamped into the
