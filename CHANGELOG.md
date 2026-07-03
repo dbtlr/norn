@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.42.0 - 2026-07-03
+
+Trusted mutation and vault inspection. `norn describe` becomes a first-class CLI command with a `--data` contents-summary; section/body edits compose into plans as apply-time actions; `norn edit` / `vault.edit` gain an optional expected-hash compare-and-swap and `.document_hash` becomes readable through `find`/`get`/`vault.get`; and rule targets can auto-allocate ids via `{{seq}}`. Query-plan work extends `document_fields` index routing to the date, numeric, and boolean predicate classes, with typed comparison semantics unified across the indexed and scan paths.
+
 ### Added
 
 - **`norn describe` is now a CLI command** (previously MCP-only). `--data`/`--stats` (CLI-only alias for `--data`) adds a vault contents-summary: total document count, per-field value distributions auto-selected by cardinality (identity-like fields such as `title`/`id` are skipped as non-informative), and min/max bounds for any schema-typed `date`/`datetime` field. `--by field1,field2` forces distribution on specific fields (bypassing the identity-skip), `--limit N` caps the values shown per field (0 = no cap, default 20), and the existing find-filter surface (`--eq`, `--in`, `--path`, …) scopes the summary to a subset of the vault. Distributions follow a "nothing present ever vanishes" model: a field carried by any document always appears, so a present-but-`null` value becomes a `(null)` bucket (matching `count`) and an empty array renders as `[]` (also matching `count`'s array stringification) — only a truly-absent key falls into `(missing)`; neither null nor `[]` can silently drop a field or skew its identity-skip ratio. Mirrored exactly in the `vault.describe { data: true }` MCP tool — the MCP form has no `stats` alias, only `data`. (NRN-103)
