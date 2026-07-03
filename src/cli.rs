@@ -665,7 +665,8 @@ pub struct FindArgs {
     /// fields (e.g. `status,title`), exactly like `norn get`. Structural
     /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
     /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
-    /// `.incoming_links`, `.body`, `.raw`. Default (no --col): frontmatter
+    /// `.incoming_links`, `.body`, `.raw`, `.document_hash` (the content hash
+    /// `edit --expected-hash` wants). Default (no --col): frontmatter
     /// only. Ignored with a warning on paths format.
     #[arg(
         long,
@@ -754,7 +755,8 @@ pub struct GetArgs {
     /// fields (e.g. `status,title`), exactly like `norn find`. Structural
     /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
     /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
-    /// `.incoming_links`, `.body`, `.raw`. Without --col, frontmatter +
+    /// `.incoming_links`, `.body`, `.raw`, `.document_hash` (the content hash
+    /// `edit --expected-hash` wants). Without --col, frontmatter +
     /// headings + links are emitted (body only with --all-cols or `--col .body`).
     #[arg(
         long,

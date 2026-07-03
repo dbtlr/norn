@@ -19,6 +19,14 @@ pub struct ShowRecord {
     /// stays byte-identical and stem surfaces only when `--col .stem` asks.
     #[serde(skip)]
     pub stem: String,
+    /// Full-content blake3 hash, for the opt-in `.document_hash` facet. Populated
+    /// (and serialized) ONLY when `.document_hash` is requested — the same
+    /// load-on-request + `skip_serializing_if` pattern as `.body`/`.raw`, so
+    /// `get --format json` (no `--col`) stays byte-identical AND an MCP
+    /// `vault.get` (which serializes the record directly) surfaces the hash when
+    /// asked. `#[serde(skip)]` would hide it from the MCP envelope entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_hash: Option<String>,
     pub frontmatter: Option<serde_json::Value>,
     pub headings: Vec<Heading>,
     pub outgoing_links: Vec<Link>,
@@ -50,6 +58,10 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     let (facets, _fields) = crate::output::projection::split_cols(&args.col);
     let wants_body = args.all_cols || facets.iter().any(|f| f == "body");
     let wants_raw = facets.iter().any(|f| f == "raw");
+    // `.document_hash` is identity/metadata-class: opt-in only (never in the
+    // default or `--all-cols` dump), like `.raw`. Populated only when requested
+    // so the default record stays byte-identical.
+    let wants_document_hash = facets.iter().any(|f| f == "document_hash");
 
     for raw in &args.targets {
         let resolved = target::resolve_target(cache, raw)?;
@@ -80,6 +92,7 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
             records.push(ShowRecord {
                 path: deep.path,
                 stem: deep.stem,
+                document_hash: wants_document_hash.then(|| deep.hash.clone()),
                 frontmatter: deep.frontmatter,
                 headings: deep.headings,
                 outgoing_links: deep.outgoing_links,
@@ -426,6 +439,7 @@ mod tests {
         ShowRecord {
             stem,
             path,
+            document_hash: None,
             frontmatter: Some(fm),
             headings: vec![],
             outgoing_links: vec![],

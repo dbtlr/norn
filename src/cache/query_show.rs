@@ -17,6 +17,8 @@ use crate::cache::error::CacheError;
 pub struct DocumentDeep {
     pub path: Utf8PathBuf,
     pub stem: String,
+    /// Full-content blake3 hash — carried for the opt-in `.document_hash` facet.
+    pub hash: String,
     pub frontmatter: Option<serde_json::Value>,
     pub headings: Vec<Heading>,
     pub outgoing_links: Vec<Link>,
@@ -50,20 +52,21 @@ impl crate::cache::Cache {
         with_body: bool,
     ) -> Result<Option<DocumentDeep>, CacheError> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, stem, frontmatter_json, body_text \
+            "SELECT path, stem, hash, frontmatter_json, body_text \
              FROM documents WHERE path = ?",
         )?;
         let row = stmt
             .query_row([path.as_str()], |row| {
                 let path: String = row.get(0)?;
                 let stem: String = row.get(1)?;
-                let frontmatter_json: Option<String> = row.get(2)?;
-                let body_text: String = row.get(3)?;
-                Ok((path, stem, frontmatter_json, body_text))
+                let hash: String = row.get(2)?;
+                let frontmatter_json: Option<String> = row.get(3)?;
+                let body_text: String = row.get(4)?;
+                Ok((path, stem, hash, frontmatter_json, body_text))
             })
             .optional()?;
 
-        let Some((path_str, stem, fm_json, body_text)) = row else {
+        let Some((path_str, stem, hash, fm_json, body_text)) = row else {
             return Ok(None);
         };
 
@@ -90,6 +93,7 @@ impl crate::cache::Cache {
         Ok(Some(DocumentDeep {
             path: path_buf,
             stem,
+            hash,
             frontmatter,
             headings,
             outgoing_links,

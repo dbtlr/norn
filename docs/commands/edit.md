@@ -69,13 +69,15 @@ Apply is atomic — the whole batch resolves to one filesystem write, audited to
 By default `edit` is read-modify-write: it reads the current body, applies the ops, and writes — the one-shot common case. When you read a document, decide on an edit, and want to be sure nothing changed underneath you in between, pass `--expected-hash <HASH>`:
 
 ```bash
+hash=$(norn get notes/project.md --col .document_hash --format json | jq -r '.[0].document_hash')
+# ...decide on an edit against what you just read...
 norn edit notes/project.md \
   --edits-json '[{"op":"str_replace","old":"draft","new":"final"}]' \
   --expected-hash "$hash" --yes
 # refuses (exit 2, no write) if the document drifted from $hash since you read it
 ```
 
-`HASH` is the blake3 hex of the document's **full** content (frontmatter + body) — the same `document_hash` value plan ops carry. The check runs in preflight, before the transform, so a stale hash refuses even under `--dry-run` rather than previewing a phantom edit. Omit the flag and `edit` behaves exactly as before. The MCP `vault.edit` tool takes the same precondition as an `expected_hash` argument.
+`HASH` is the blake3 hex of the document's **full** content (frontmatter + body) — the same `document_hash` value plan ops carry. Read it with `get --col .document_hash` (or `find --col .document_hash` for many docs); an MCP client reads it the same way via `vault.get`. The check runs in preflight, before the transform, so a stale hash refuses even under `--dry-run` rather than previewing a phantom edit. Omit the flag and `edit` behaves exactly as before. The MCP `vault.edit` tool takes the same precondition as an `expected_hash` argument.
 
 Exit codes: `0` success or dry-run, `1` operator-cancelled, `2` pre-flight refusal (malformed/empty array, string not found or ambiguous, heading not found or ambiguous, or `--expected-hash` drift).
 
