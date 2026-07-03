@@ -222,8 +222,18 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 .ok_or_else(|| anyhow!("op.fields for {} must be an object", op.kind))?;
             edit_json.insert("op".into(), serde_json::Value::String(op.kind.clone()));
 
+            // change_id must be unique per op: two edits of the same kind on the
+            // same document would otherwise collide and clobber each other's
+            // telemetry span. Prefer the plan-supplied `op.id`; else discriminate
+            // by a hash of the edit payload.
+            let change_id = op.id.clone().unwrap_or_else(|| {
+                let payload = serde_json::Value::Object(edit_json.clone()).to_string();
+                let digest = blake3::hash(payload.as_bytes()).to_hex();
+                format!("{}-{}-{}", op.kind, path, &digest[..8])
+            });
+
             let change = PlannedChange {
-                change_id: format!("{}-{}", op.kind, path),
+                change_id,
                 path: path.into(),
                 document_hash,
                 finding_code: "operator-request".into(),

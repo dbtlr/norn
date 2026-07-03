@@ -811,19 +811,22 @@ pub fn apply_replace_body(content: &str, change: &PlannedChange) -> Result<Strin
             path: change.path.clone(),
         })?;
 
+    let (prefix, _body) = split_frontmatter_body(content);
+    Ok(format!("{prefix}{new_body}"))
+}
+
+/// Split `content` into the `(prefix, body)` around the frontmatter block: the
+/// prefix is everything up to and including the closing `---\n` (empty when the
+/// document has no frontmatter), and `body` is the remainder. Reassemble a
+/// body-preserving edit as `format!("{prefix}{new_body}")`. The single source of
+/// truth for the frontmatter/body boundary, shared by [`apply_replace_body`] and
+/// [`apply_edit_ops`] so they can't diverge.
+fn split_frontmatter_body(content: &str) -> (&str, &str) {
     let mut diagnostics = Vec::new();
     let (_, frontmatter_range, _, body_start) = extract_frontmatter(content, &mut diagnostics);
-
     match frontmatter_range {
-        Some(_) => {
-            // Preserve everything up to (and including) the closing `---\n`,
-            // then replace the body.
-            let mut result = String::with_capacity(body_start + new_body.len());
-            result.push_str(&content[..body_start]);
-            result.push_str(new_body);
-            Ok(result)
-        }
-        None => Ok(new_body.to_string()),
+        Some(_) => (&content[..body_start], &content[body_start..]),
+        None => ("", content),
     }
 }
 
@@ -840,18 +843,13 @@ pub fn apply_edit_ops(
     ops: &[crate::edit::ops::EditOp],
     path: &camino::Utf8Path,
 ) -> Result<String, ApplyError> {
-    let mut diagnostics = Vec::new();
-    let (_, frontmatter_range, _, body_start) = extract_frontmatter(content, &mut diagnostics);
-    let body = &content[body_start..];
+    let (prefix, body) = split_frontmatter_body(content);
     let transformed =
         crate::edit::transform::apply_edits(body, ops).map_err(|e| ApplyError::EditFailed {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
-    Ok(match frontmatter_range {
-        Some(_) => format!("{}{}", &content[..body_start], transformed.new_body),
-        None => transformed.new_body,
-    })
+    Ok(format!("{prefix}{}", transformed.new_body))
 }
 
 ///

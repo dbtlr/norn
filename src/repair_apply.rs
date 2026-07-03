@@ -387,8 +387,9 @@ pub fn apply_repair_plan_with_context(
     // Unlike replace_body (a pre-materialized whole body), these resolve at apply
     // time: read the current body under whole-doc CAS and run the shared
     // `edit::transform` engine. Grouped by path so multiple edits to one document
-    // apply in plan order against the evolving body, with a single hash-check
-    // against plan-time state (matching `norn edit`'s atomic `edits` array).
+    // apply in plan order against the evolving body (matching `norn edit`'s
+    // atomic `edits` array). Every target is hash-checked and transformed before
+    // any edit is written, so the whole edit batch either applies or aborts.
     {
         const EDIT_KINDS: &[&str] = &[
             "str_replace",
@@ -412,23 +413,23 @@ pub fn apply_repair_plan_with_context(
             by_path.entry(change.path.clone()).or_default().push(change);
         }
 
-        // Pre-check every edit path's hash BEFORE writing any of them, so a
-        // drifted target aborts the whole edit batch before the first edit lands
-        // (whole-doc CAS, per the H1 design). Same-path edits share one hash.
-        for path in &order {
-            check_hash(&current_hashes, by_path[path][0])?;
-        }
-
+        // Compute-and-validate EVERY edit target before writing any of them:
+        // hash-check all of a path's changes (not just the first), then read +
+        // run the transform. A hash drift OR a failing edit anchor (missing
+        // heading, non-unique str_replace) aborts here, before the first write,
+        // so the edit batch never leaves the vault half-mutated. Running the real
+        // transform up front is also what makes dry-run honest — it reports the
+        // true change set (and fails the same way apply would), rather than
+        // assuming every op mutates.
+        //
+        // `resolved[i]` holds the new content for `order[i]`, or `None` when the
+        // edit is a no-op (result byte-identical to the current file).
+        let mut resolved: Vec<Option<String>> = Vec::with_capacity(order.len());
         for path in &order {
             let changes = &by_path[path];
-
-            if dry_run {
-                if !report.changed_files.contains(path) {
-                    report.changed_files.push(path.clone());
-                }
-                continue;
+            for change in changes {
+                check_hash(&current_hashes, change)?;
             }
-
             let absolute_path = cwd.join(path);
             let content = fs::read_to_string(&absolute_path)
                 .with_context(|| format!("read {absolute_path}"))?;
@@ -444,14 +445,23 @@ pub fn apply_repair_plan_with_context(
                 })
                 .collect::<Result<Vec<_>>>()?;
             let updated = crate::standards::apply::apply_edit_ops(&content, &ops, path)?;
-            if updated != content {
-                fs::write(&absolute_path, &updated)
-                    .with_context(|| format!("write {absolute_path}"))?;
-                if !report.changed_files.contains(path) {
-                    report.changed_files.push(path.clone());
-                }
+            resolved.push((updated != content).then_some(updated));
+        }
+
+        for (path, new_content) in order.iter().zip(resolved) {
+            let Some(new_content) = new_content else {
+                continue; // no-op edit: no write, no changed_files, no action event
+            };
+            if !report.changed_files.contains(path) {
+                report.changed_files.push(path.clone());
             }
-            for change in changes {
+            if dry_run {
+                continue;
+            }
+            let absolute_path = cwd.join(path);
+            fs::write(&absolute_path, &new_content)
+                .with_context(|| format!("write {absolute_path}"))?;
+            for change in &by_path[path] {
                 emit_op_action(sink, spans, change, Severity::Info, Vec::new());
             }
         }

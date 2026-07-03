@@ -128,6 +128,171 @@ fn str_replace_applies_at_apply_time() {
 }
 
 #[test]
+fn multi_doc_edit_batch_is_atomic_on_transform_failure() {
+    // Review F1: doc A has a valid edit, doc B a bad anchor. The whole batch
+    // must abort BEFORE writing A — no half-applied plan.
+    let (tmp, note_a) = setup_vault("---\nt: 1\n---\n## A\nalpha\n");
+    let note_b = tmp.path().join("b.md");
+    fs::write(&note_b, "---\nt: 2\n---\n## B\nbeta\n").unwrap();
+    let hash_a = blake3_of_file(&note_a);
+    let hash_b = blake3_of_file(&note_b);
+    let a_before = fs::read_to_string(&note_a).unwrap();
+    let plan = edit_plan(
+        tmp.path().to_str().unwrap(),
+        vec![
+            serde_json::json!({
+                "kind": "append_to_section",
+                "fields": { "path": "note.md", "document_hash": hash_a, "heading": "A", "content": "alpha2" }
+            }),
+            serde_json::json!({
+                "kind": "append_to_section",
+                "fields": { "path": "b.md", "document_hash": hash_b, "heading": "NoSuchHeading", "content": "x" }
+            }),
+        ],
+    );
+    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    assert!(
+        !output.status.success(),
+        "a failing anchor must abort the batch"
+    );
+    assert_eq!(
+        fs::read_to_string(&note_a).unwrap(),
+        a_before,
+        "doc A must NOT be written when doc B's transform fails"
+    );
+}
+
+#[test]
+fn dry_run_fails_when_transform_would_fail() {
+    // Review F2: dry-run runs the real transform, so a bad anchor fails the
+    // preview instead of falsely reporting a change.
+    let (tmp, note_path) = setup_vault("---\nt: 1\n---\nhello world\n");
+    let hash = blake3_of_file(&note_path);
+    let plan = edit_plan(
+        tmp.path().to_str().unwrap(),
+        vec![serde_json::json!({
+            "kind": "str_replace",
+            "fields": { "path": "note.md", "document_hash": hash, "old": "ABSENT", "new": "x" }
+        })],
+    );
+    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--dry-run"]);
+    assert!(
+        !output.status.success(),
+        "dry-run must fail when the edit anchor is absent, not preview a phantom change"
+    );
+}
+
+#[test]
+fn edit_op_without_hash_is_hydrated_and_applies() {
+    // Review F3: an omitted document_hash is hydrated from the index (like
+    // replace_body), not left "" to spuriously abort on an unmodified file.
+    let (tmp, note_path) = setup_vault("---\nt: 1\n---\n## Notes\nline one\n");
+    let plan = edit_plan(
+        tmp.path().to_str().unwrap(),
+        vec![serde_json::json!({
+            "kind": "append_to_section",
+            "fields": { "path": "note.md", "heading": "Notes", "content": "line two" }
+        })],
+    );
+    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    assert!(
+        output.status.success(),
+        "an omitted hash must hydrate and apply; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fs::read_to_string(&note_path).unwrap().contains("line two"));
+}
+
+#[test]
+fn same_path_divergent_hash_is_rejected() {
+    // Review F4: every same-path edit's hash is verified, not just the first.
+    let (tmp, note_path) = setup_vault("---\nt: 1\n---\n## A\nalpha\n");
+    let hash = blake3_of_file(&note_path);
+    let before = fs::read_to_string(&note_path).unwrap();
+    let plan = edit_plan(
+        tmp.path().to_str().unwrap(),
+        vec![
+            serde_json::json!({
+                "kind": "append_to_section",
+                "fields": { "path": "note.md", "document_hash": hash, "heading": "A", "content": "one" }
+            }),
+            serde_json::json!({
+                "kind": "append_to_section",
+                "fields": { "path": "note.md", "document_hash": "0000000000000000000000000000000000000000000000000000000000000000", "heading": "A", "content": "two" }
+            }),
+        ],
+    );
+    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    assert!(
+        !output.status.success(),
+        "a divergent same-path hash must abort"
+    );
+    assert_eq!(
+        fs::read_to_string(&note_path).unwrap(),
+        before,
+        "nothing written on abort"
+    );
+}
+
+#[test]
+fn no_op_edit_leaves_file_untouched() {
+    // Review F5: an edit whose result is byte-identical writes nothing.
+    let initial = "---\nt: 1\n---\nhello world\n";
+    let (tmp, note_path) = setup_vault(initial);
+    let hash = blake3_of_file(&note_path);
+    let plan = edit_plan(
+        tmp.path().to_str().unwrap(),
+        vec![serde_json::json!({
+            "kind": "str_replace",
+            "fields": { "path": "note.md", "document_hash": hash, "old": "world", "new": "world" }
+        })],
+    );
+    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&note_path).unwrap(),
+        initial,
+        "no-op must not rewrite the file"
+    );
+}
+
+#[test]
+fn two_same_kind_edits_on_one_doc_both_apply() {
+    // Review F6: two append_to_section on one doc get distinct change_ids and
+    // both land (no clobber).
+    let (tmp, note_path) = setup_vault("---\nt: 1\n---\n## Log\nstart\n");
+    let hash = blake3_of_file(&note_path);
+    let plan = edit_plan(
+        tmp.path().to_str().unwrap(),
+        vec![
+            serde_json::json!({
+                "kind": "append_to_section",
+                "fields": { "path": "note.md", "document_hash": hash, "heading": "Log", "content": "first" }
+            }),
+            serde_json::json!({
+                "kind": "append_to_section",
+                "fields": { "path": "note.md", "document_hash": hash, "heading": "Log", "content": "second" }
+            }),
+        ],
+    );
+    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out = fs::read_to_string(&note_path).unwrap();
+    assert!(
+        out.contains("first") && out.contains("second"),
+        "both appends must land; got:\n{out}"
+    );
+}
+
+#[test]
 fn edit_op_with_stale_hash_aborts_without_writing() {
     let initial = "---\ntitle: Foo\n---\n## Notes\nline one\n";
     let (tmp, note_path) = setup_vault(initial);
