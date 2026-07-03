@@ -106,8 +106,21 @@ pub fn generate_path(
         time_format: cfg.templates.time_format.clone(),
     };
 
-    substitution::render(target, &ctx).map_err(|e| GeneratePathError::Render(e.to_string()))
+    // `{{seq}}` is an incremental-path token (NRN-101): resolved at APPLY time via
+    // filesystem max+1 under the mutation lock, not here. Shield it from the
+    // substitution engine (which would reject the unknown `seq` variable) so it
+    // survives rendering as a literal `{{seq}}` in the emitted path template.
+    let protected = target.replace(SEQ_TOKEN, SEQ_SENTINEL);
+    let rendered = substitution::render(&protected, &ctx)
+        .map_err(|e| GeneratePathError::Render(e.to_string()))?;
+    Ok(rendered.replace(SEQ_SENTINEL, SEQ_TOKEN))
 }
+
+/// The incremental-path token, resolved to the next id at apply time.
+pub const SEQ_TOKEN: &str = "{{seq}}";
+/// Internal placeholder that survives the substitution engine untouched (NUL
+/// bytes never occur in a template or a real path).
+const SEQ_SENTINEL: &str = "\u{0}norn_seq\u{0}";
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

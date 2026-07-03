@@ -395,14 +395,28 @@ fn apply_and_render(
         Err(_) => 2,
     };
     crate::emit_single_op_finished(&mut sink, "new", exit_code, apply_outcome.is_ok());
-    apply_outcome?;
+    let apply_report = apply_outcome?;
+
+    // NRN-101: an incremental `{{seq}}` target is resolved to its concrete id at
+    // apply time inside the applier (under the mutation lock). The synth-time
+    // `doc_path` still carries the unresolved `{{seq}}`, so render + post-create
+    // validate against the path the applier actually wrote.
+    let effective_path = apply_report
+        .created_documents
+        .first()
+        .map(|c| c.path.clone())
+        .unwrap_or_else(|| doc_path.to_owned());
 
     // Task 8.3: post-create validate hook.
     // Re-validate the new doc to surface any findings as warnings in the envelope.
     // We reload the index to include the newly created file.
-    let post_warnings =
-        post_create_validate(vault_root, doc_path.as_str(), &plan.warnings, body_bytes)
-            .unwrap_or_default();
+    let post_warnings = post_create_validate(
+        vault_root,
+        effective_path.as_str(),
+        &plan.warnings,
+        body_bytes,
+    )
+    .unwrap_or_default();
 
     // If post-validate found additional warnings, merge them into the plan's warnings
     // for rendering. We render with a modified plan that includes post_warnings.
@@ -413,12 +427,15 @@ fn apply_and_render(
     };
     augmented.warnings.extend(post_warnings);
     let mut rendered = match args.format {
-        crate::cli::NewFormat::Records => {
-            crate::new::report::render_records(&augmented, doc_path.as_str(), true, body_bytes)
-        }
+        crate::cli::NewFormat::Records => crate::new::report::render_records(
+            &augmented,
+            effective_path.as_str(),
+            true,
+            body_bytes,
+        ),
         crate::cli::NewFormat::Json => crate::new::report::render_json(
             &augmented,
-            doc_path.as_str(),
+            effective_path.as_str(),
             true,
             body_bytes,
             &trace_id,

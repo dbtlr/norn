@@ -96,6 +96,95 @@ validate:
     );
 }
 
+// ── H3: incremental-path {{seq}} allocation (NRN-101) ─────────────────────────
+
+#[test]
+fn new_seq_rule_allocates_first_id_in_empty_vault() {
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/task-{{seq}}.md"
+      frontmatter_defaults:
+        type: task
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args(["new", "--as", "task", "--yes", "-p", "--format", "json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // First creation in an empty vault allocates seq = 1.
+    let expected = vault.path().join("tasks/task-1.md");
+    assert!(
+        expected.exists(),
+        "expected file at tasks/task-1.md; tasks dir: {:?}",
+        fs::read_dir(vault.path().join("tasks"))
+            .map(|d| d.map(|e| e.map(|e| e.path())).collect::<Vec<_>>())
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect(&stdout);
+    assert_eq!(envelope["path"], serde_json::json!("tasks/task-1.md"));
+}
+
+#[test]
+fn new_seq_rule_allocates_distinct_sequential_ids() {
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/MMR-{{seq}}.md"
+      frontmatter_defaults:
+        type: task
+"#,
+    );
+
+    let run = || {
+        norn_cmd(&vault)
+            .args(["new", "--as", "task", "--yes", "-p", "--format", "json"])
+            .output()
+            .unwrap()
+    };
+
+    // Two successive creates must land on distinct, incrementing ids — the
+    // second observes the first's file via filesystem max+1.
+    let first = run();
+    assert!(
+        first.status.success(),
+        "1st stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = run();
+    assert!(
+        second.status.success(),
+        "2nd stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    assert!(
+        vault.path().join("tasks/MMR-1.md").exists(),
+        "expected MMR-1.md"
+    );
+    assert!(
+        vault.path().join("tasks/MMR-2.md").exists(),
+        "expected MMR-2.md"
+    );
+
+    let env2: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("2nd envelope json");
+    assert_eq!(env2["path"], serde_json::json!("tasks/MMR-2.md"));
+}
+
 // ── Scenario 2: No path, no --as → inbox fallback ─────────────────────────────
 
 #[test]
