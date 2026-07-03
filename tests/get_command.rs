@@ -111,6 +111,41 @@ fn get_document_hash_facet_matches_find_and_content() {
     );
 }
 
+/// NRN-105 (review [0]): a file that failed UTF-8 read at index time carries an
+/// empty hash — `.document_hash` must OMIT the facet (like `.raw` on an
+/// unreadable file), never hand out `""` as a bogus CAS token.
+#[test]
+fn get_document_hash_facet_omitted_for_unreadable_file() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-badutf8-")
+        .tempdir()
+        .unwrap();
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir(&vault).unwrap();
+    // Invalid UTF-8 bytes → read_to_string fails → indexed with hash "".
+    std::fs::write(vault.join("bad.md"), [0xff, 0xfe, 0x00, 0x9c]).unwrap();
+
+    let g = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(&vault)
+            .args([
+                "get",
+                "bad.md",
+                "--col",
+                ".document_hash",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        g[0].get("document_hash").is_none(),
+        "empty hash must omit the facet, not emit \"\": {g}"
+    );
+}
+
 #[test]
 fn get_single_target_json() {
     let tmp = synth();

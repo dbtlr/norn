@@ -18,15 +18,17 @@ use crate::show::ShowReport;
 /// an optional column request. The heavier CLI knobs (`--all-cols`, paging, the
 /// byte-faithful `markdown` format) are intentionally omitted from v1 — the MCP
 /// client always gets the full structured record set (frontmatter, headings, all
-/// three link sets), and `col` only opts the heavy `.body`/`.raw` facets *in*.
+/// three link sets), and `col` only opts the on-request facets — `.body`, `.raw`,
+/// and `.document_hash` — *in*.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct GetParams {
     /// One or more document targets (stem or path), as `norn get` accepts.
     pub targets: Vec<String>,
     /// Optional column request, comma-separated, in `norn get --col` syntax (bare
     /// frontmatter fields like `status,title`; dot-prefixed facets like `.body`,
-    /// `.headings`). NOTE (v1): this only controls whether the heavy `.body`/`.raw`
-    /// facets are *included* — it does NOT narrow the payload. Every record always
+    /// `.headings`). NOTE (v1): this only controls whether the on-request facets
+    /// (`.body`, `.raw`, `.document_hash` — the full-content blake3 the CAS uses)
+    /// are *included* — it does NOT narrow the payload. Every record always
     /// ships its full structured shape (dump-everything default); bare-field /
     /// facet narrowing is not applied to the MCP envelope.
     #[serde(default)]
@@ -50,7 +52,8 @@ pub struct GetParams {
 pub struct GetOutput {
     /// One entry per resolved document, in resolution order. Each is the JSON
     /// form of a `norn get` record: `path`, `frontmatter`, `headings`, the three
-    /// link sets, and (when a `.body`/`.raw` col was requested) `body`/`raw`.
+    /// link sets, and (when the matching col was requested) `body` / `raw` /
+    /// `document_hash`.
     pub records: Vec<serde_json::Value>,
 }
 
