@@ -223,16 +223,16 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     //   stdout is TTY       → interactive confirm
     //   non-TTY, no --yes   → implicit dry-run
 
-    // NRN-101: for an unresolved `{{seq}}` target, compute a non-binding
-    // predicted id (filesystem max+1 now) to show in the preview. Real
-    // allocation happens at apply under the lock and can differ.
-    let predicted_path: Option<String> = if crate::seq_alloc::has_seq(&doc_path) {
-        Some(crate::seq_alloc::predict(vault_root, &doc_path).to_string())
-    } else {
-        None
-    };
-
     let render_preview = |applied: bool| -> Result<String> {
+        // NRN-101: for an unresolved `{{seq}}` target, compute a non-binding
+        // predicted id (filesystem max+1 now). Done lazily inside the preview so
+        // the `--yes` apply path — which re-scans authoritatively under the lock —
+        // pays no extra directory read.
+        let predicted_path: Option<String> = if crate::seq_alloc::has_seq(&doc_path) {
+            Some(crate::seq_alloc::predict(vault_root, &doc_path)?.to_string())
+        } else {
+            None
+        };
         Ok(match args.format {
             NewFormat::Records => crate::new::report::render_records(
                 &plan,

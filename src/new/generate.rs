@@ -15,6 +15,8 @@ pub enum GeneratePathError {
     MissingTitle,
     #[error("template error: {0}")]
     Render(String),
+    #[error("`{{{{seq}}}}` is only supported once, in the file name of a rule target")]
+    SeqPlacement,
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -113,7 +115,14 @@ pub fn generate_path(
     let protected = target.replace(SEQ_TOKEN, SEQ_SENTINEL);
     let rendered = substitution::render(&protected, &ctx)
         .map_err(|e| GeneratePathError::Render(e.to_string()))?;
-    Ok(rendered.replace(SEQ_SENTINEL, SEQ_TOKEN))
+    let out = rendered.replace(SEQ_SENTINEL, SEQ_TOKEN);
+    // Reject an unresolvable `{{seq}}` (in a directory component, or more than
+    // once) here at plan time so dry-run and apply agree — rather than letting a
+    // dry-run preview succeed and only refusing at apply (NRN-101).
+    if crate::seq_alloc::seq_misplaced(camino::Utf8Path::new(&out)) {
+        return Err(GeneratePathError::SeqPlacement);
+    }
+    Ok(out)
 }
 
 /// The incremental-path token, resolved to the next id at apply time.

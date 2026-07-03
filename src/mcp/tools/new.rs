@@ -272,7 +272,7 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         // NRN-101: non-binding predicted id for an unresolved `{{seq}}` target,
         // mirroring the CLI dry-run preview.
         let predicted: Option<String> = if crate::seq_alloc::has_seq(&doc_path) {
-            Some(crate::seq_alloc::predict(&cwd, &doc_path).to_string())
+            Some(crate::seq_alloc::predict(&cwd, &doc_path)?.to_string())
         } else {
             None
         };

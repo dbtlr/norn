@@ -292,7 +292,15 @@ fn needs_hash_check(operation: &str) -> bool {
 }
 
 /// Build a one-liner summary for an `ApplyReportOp`.
-fn build_summary(change: &PlannedChange, dry_run: bool) -> String {
+///
+/// `create_display` overrides the path shown for a `create_document` op — used
+/// to surface the apply-time-resolved `{{seq}}` id (NRN-101) instead of the
+/// unresolved template `change.path`.
+fn build_summary(
+    change: &PlannedChange,
+    dry_run: bool,
+    create_display: Option<&camino::Utf8Path>,
+) -> String {
     let prefix = if dry_run { "would " } else { "" };
     match change.operation.as_str() {
         "move_document" => {
@@ -304,7 +312,10 @@ fn build_summary(change: &PlannedChange, dry_run: bool) -> String {
             format!("{}move {} → {}", prefix, change.path, dst)
         }
         "delete_document" => format!("{}delete {}", prefix, change.path),
-        "create_document" => format!("{}create {}", prefix, change.path),
+        "create_document" => {
+            let path = create_display.unwrap_or(change.path.as_path());
+            format!("{prefix}create {path}")
+        }
         "replace_body" => format!("{}replace body of {}", prefix, change.path),
         "rewrite_link" => {
             let from = change
@@ -514,10 +525,15 @@ fn build_report_ops(
     span_ids: &[String],
     events: &[Event],
 ) -> Vec<ApplyReportOp> {
+    // NRN-101: create_document ops are recorded in `created_documents` in the
+    // same order they appear here, each carrying its apply-time-resolved
+    // `{{seq}}` path. Walk that list in lockstep so summaries show the real
+    // (or dry-run predicted) id, not the unresolved template.
+    let mut created_iter = apply_result.created_documents.iter();
     changes
         .iter()
         .enumerate()
-        .map(|(i, change)| {
+        .map(move |(i, change)| {
             let parent_idx = provenance[i];
             let parent_op = &plan_ops[parent_idx];
 
@@ -552,7 +568,12 @@ fn build_report_ops(
                 }
             };
 
-            let summary = build_summary(change, dry_run);
+            let create_display = if change.operation == "create_document" {
+                created_iter.next().map(|c| c.path.as_path())
+            } else {
+                None
+            };
+            let summary = build_summary(change, dry_run, create_display);
 
             let cascade = match change.operation.as_str() {
                 "move_document" | "delete_document" => Some(if dry_run {

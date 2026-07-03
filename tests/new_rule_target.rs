@@ -264,6 +264,34 @@ validate:
     assert!(!vault.path().join("tasks").join("{{seq}}").exists());
 }
 
+#[test]
+fn new_seq_in_directory_component_fails_fast_on_dry_run() {
+    // Review F5: a malformed `{{seq}}` target must be refused at plan time, so a
+    // dry-run does NOT report success (exit 0) and then blow up at apply.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: task
+      target: "tasks/{{seq}}/note.md"
+      frontmatter_defaults:
+        type: task
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args(["new", "--as", "task", "--dry-run", "--format", "json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "dry-run must fail fast on a malformed seq target, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ── Scenario 2: No path, no --as → inbox fallback ─────────────────────────────
 
 #[test]

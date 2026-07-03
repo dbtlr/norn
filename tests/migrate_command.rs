@@ -153,6 +153,65 @@ fn migrate_reads_plan_from_stdin() {
     );
 }
 
+/// NRN-101 (review F3): two `{{seq}}` creates in ONE plan must preview distinct
+/// ids on dry-run — earlier plan-local allocations are folded in, so the preview
+/// matches what apply would actually write (MMR-1, MMR-2), not a duplicated id.
+#[test]
+fn migrate_dry_run_multiple_seq_creates_predict_distinct_ids() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let mk = |p: &str| {
+        serde_json::json!({
+            "kind": "create_document",
+            "fields": {
+                "path": p,
+                "new_value": { "frontmatter": {"type": "task"}, "body": "# t\n" }
+            }
+        })
+    };
+    let plan = serde_json::json!({
+        "schema_version": 1,
+        "vault_root": vault.to_str().unwrap(),
+        "operations": [mk("tasks/MMR-{{seq}}.md"), mk("tasks/MMR-{{seq}}.md")]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, plan.to_string()).unwrap();
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["migrate"])
+        .arg(&plan_path)
+        .args(["--dry-run", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let summaries: Vec<String> = report["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["summary"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        summaries.iter().any(|s| s.contains("MMR-1.md")),
+        "expected a create of MMR-1.md; got {summaries:?}"
+    );
+    assert!(
+        summaries.iter().any(|s| s.contains("MMR-2.md")),
+        "expected the second create to predict MMR-2.md (not a duplicate MMR-1); got {summaries:?}"
+    );
+    assert!(
+        !vault.join("tasks/MMR-1.md").exists(),
+        "dry-run must not write"
+    );
+}
+
 /// Ported from the deleted `repair_apply_out_orthogonality` suite: `--out`
 /// writes the JSON ApplyReport to a file and keeps stdout silent.
 #[test]
