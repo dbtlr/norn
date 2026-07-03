@@ -9,14 +9,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use crate::config_loader::LoadedConfig;
 use crate::core::DocumentSummary;
 
-/// Placeholder root summary type; the full shape (incl. `dates`) lands in
-/// Task 3. Kept minimal here so `DescribeOutput { data: Option<DataSummary> }`
-/// (Task 1) keeps compiling.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+/// Chronological min/max for one date/datetime field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct DateBounds {
+    pub field: String,
+    pub min: String,
+    pub max: String,
+}
+
+/// The full vault contents-summary: field distributions, date bounds, and
+/// identity-skipped fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct DataSummary {
     pub total: usize,
+    pub fields: Vec<FieldDistribution>,
+    pub dates: Vec<DateBounds>,
+    pub skipped: Vec<SkippedField>,
 }
 
 /// The bucket key for a document that lacks the field. Excluded from the
@@ -86,11 +97,13 @@ pub fn auto_fields(docs: &[DocumentSummary], exclude: &BTreeSet<String>) -> Vec<
     keys.into_iter().collect()
 }
 
-/// The present rendered values for `field` on `doc`: `None` when absent,
-/// else ≥1 element (arrays flattened per-element).
+/// The present rendered values for `field` on `doc`: `None` when absent or
+/// an empty array (no value, like an absent field), else ≥1 element (arrays
+/// flattened per-element).
 fn present_values(doc: &DocumentSummary, field: &str) -> Option<Vec<String>> {
     let v = doc.frontmatter.as_ref()?.get(field)?;
     match v {
+        serde_json::Value::Array(items) if items.is_empty() => None,
         serde_json::Value::Array(items) => {
             Some(items.iter().map(crate::count::render_key).collect())
         }
@@ -176,6 +189,84 @@ pub fn field_distributions(
     }
 
     (dists, skipped)
+}
+
+/// Fields declared `date` or `datetime` in any rule's `field_types`.
+pub fn date_fields(config: &LoadedConfig) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for rule in &config.validate.rules {
+        for (field, spec) in &rule.field_types {
+            if matches!(spec.type_name(), Some("date") | Some("datetime")) {
+                out.insert(field.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Min/max per date field. Values are normalized via the same date/datetime
+/// coercion `set` uses, so ISO lexical order == chronological order. Values
+/// that fail to coerce fall back to the raw string (still ISO-comparable for
+/// well-formed inputs); a field with no present values contributes no bounds.
+pub fn date_bounds(docs: &[DocumentSummary], fields: &BTreeSet<String>) -> Vec<DateBounds> {
+    let mut out = Vec::new();
+    for field in fields {
+        let mut min: Option<String> = None;
+        let mut max: Option<String> = None;
+        for doc in docs {
+            let Some(raw) = doc
+                .frontmatter
+                .as_ref()
+                .and_then(|fm| fm.get(field))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            // Normalize to ISO; skip unparseable. `datetime` accepts both.
+            let normalized = crate::set::validate::coerce_value_for_type("datetime", raw, None)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| raw.to_string());
+            if min.as_ref().is_none_or(|m| &normalized < m) {
+                min = Some(normalized.clone());
+            }
+            if max.as_ref().is_none_or(|m| &normalized > m) {
+                max = Some(normalized);
+            }
+        }
+        if let (Some(min), Some(max)) = (min, max) {
+            out.push(DateBounds {
+                field: field.clone(),
+                min,
+                max,
+            });
+        }
+    }
+    out
+}
+
+/// Assemble the full contents-summary. Auto mode excludes date fields from
+/// distributions (they get bounds instead); `--by` mode summarizes exactly
+/// the named fields and bypasses identity-skip.
+pub fn summarize(
+    docs: &[DocumentSummary],
+    config: &LoadedConfig,
+    opts: &DataOptions,
+) -> DataSummary {
+    let dfields = date_fields(config);
+    let (fields, skipped) = if opts.by.is_empty() {
+        let auto = auto_fields(docs, &dfields);
+        field_distributions(docs, &auto, false, opts)
+    } else {
+        field_distributions(docs, &opts.by, true, opts)
+    };
+    let dates = date_bounds(docs, &dfields);
+    DataSummary {
+        total: docs.len(),
+        fields,
+        dates,
+        skipped,
+    }
 }
 
 #[cfg(test)]
@@ -286,7 +377,33 @@ mod tests {
         let opts = DataOptions::default();
         let (_dists, skipped) = field_distributions(&docs, &["slug".to_string()], false, &opts);
         assert_eq!(skipped.len(), 1);
-        assert_eq!(skipped[0].total, 2, "denominator = docs carrying the field");
+        assert_eq!(skipped[0].total, 2, "denominator = total value-occurrences");
+    }
+
+    #[test]
+    fn empty_array_counts_as_missing() {
+        // A doc carrying `field: []` has no value — treat it as missing, not
+        // as a distinct value and not as an uncounted occurrence. Two docs
+        // share the "rust" tag so the identity-ratio (distinct/occurrences)
+        // stays below the default 0.9 skip threshold and the field survives
+        // into a distribution, letting us inspect its buckets.
+        let docs = vec![
+            doc(serde_json::json!({"tags": []})),
+            doc(serde_json::json!({"tags": ["rust"]})),
+            doc(serde_json::json!({"tags": ["rust"]})),
+        ];
+        let opts = DataOptions::default();
+        let (dists, skipped) = field_distributions(&docs, &["tags".to_string()], false, &opts);
+        assert!(skipped.is_empty());
+        assert_eq!(dists.len(), 1);
+        let vals: Vec<_> = dists[0]
+            .values
+            .iter()
+            .map(|v| (v.value.as_str(), v.count))
+            .collect();
+        assert!(vals.contains(&("rust", 2)));
+        assert!(vals.contains(&(MISSING, 1)));
+        assert_eq!(dists[0].values.len(), 2, "no distinct bucket for []");
     }
 
     #[test]
@@ -361,5 +478,76 @@ mod tests {
         exclude.insert("created".to_string());
         let fields = auto_fields(&docs, &exclude);
         assert_eq!(fields, vec!["status".to_string(), "type".to_string()]);
+    }
+
+    use crate::config_loader::LoadedConfig;
+
+    /// A `LoadedConfig` whose `validate` has one rule typing `field` as `ty`,
+    /// exercised through the real loader (a temp `.norn/config.yaml` parsed
+    /// by `load_config`) rather than a hand-built struct — the date-field
+    /// detection must see genuine parsing, including `deny_unknown_fields`
+    /// and the `field_types` untagged-enum shape.
+    fn config_with_date_field(field: &str, ty: &str) -> LoadedConfig {
+        let dir = tempfile::Builder::new()
+            .prefix("norn-describe-data-config-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let config_dir = root.join(".norn");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let yaml = format!(
+            "validate:\n  rules:\n    - name: r\n      field_types:\n        {field}: {ty}\n"
+        );
+        std::fs::write(config_dir.join("config.yaml"), yaml).unwrap();
+        crate::config_loader::load_config(&root, None).expect("parse config")
+    }
+
+    #[test]
+    fn date_fields_reads_date_and_datetime_types() {
+        let cfg = config_with_date_field("created", "datetime");
+        let fields = date_fields(&cfg);
+        assert!(fields.contains("created"));
+    }
+
+    #[test]
+    fn date_bounds_computes_chronological_min_max() {
+        let docs = vec![
+            doc(serde_json::json!({"created": "2026-05-10"})),
+            doc(serde_json::json!({"created": "2026-07-03"})),
+            doc(serde_json::json!({"created": "2026-06-01"})),
+        ];
+        let mut df = std::collections::BTreeSet::new();
+        df.insert("created".to_string());
+        let bounds = date_bounds(&docs, &df);
+        assert_eq!(bounds.len(), 1);
+        assert_eq!(bounds[0].field, "created");
+        assert_eq!(bounds[0].min, "2026-05-10");
+        assert_eq!(bounds[0].max, "2026-07-03");
+    }
+
+    #[test]
+    fn summarize_excludes_date_fields_from_distributions() {
+        // Both docs share `type: note` (rather than the brief's distinct
+        // note/task pair) so the non-date field's identity-ratio
+        // (distinct/occurrences) stays below the default 0.9 skip threshold.
+        // With 2 docs and 2 *distinct* type values the ratio would hit 1.0
+        // and `type` would land in `skipped` via the Task-2 identity-skip —
+        // a real interaction with that already-shipped heuristic, not a
+        // Task-3 bug — so the fixture is widened here rather than weakening
+        // the assertions below (`total`, `dates`, and the fields-membership
+        // checks are unchanged from the brief).
+        let docs = vec![
+            doc(serde_json::json!({"type": "note", "created": "2026-05-10"})),
+            doc(serde_json::json!({"type": "note", "created": "2026-07-03"})),
+        ];
+        let cfg = config_with_date_field("created", "datetime");
+        let summary = summarize(&docs, &cfg, &DataOptions::default());
+        assert_eq!(summary.total, 2);
+        assert!(summary.dates.iter().any(|d| d.field == "created"));
+        assert!(
+            !summary.fields.iter().any(|f| f.field == "created"),
+            "date field must not appear as a distribution"
+        );
+        assert!(summary.fields.iter().any(|f| f.field == "type"));
     }
 }
