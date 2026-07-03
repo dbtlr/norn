@@ -27,6 +27,7 @@ pub const KNOWN_FACETS: &[&str] = &[
     "incoming_links",
     "body",
     "raw",
+    "document_hash",
 ];
 
 /// Read a document's source file verbatim from disk. `rel_path` is the

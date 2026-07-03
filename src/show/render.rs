@@ -74,6 +74,12 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
         if allow.contains("stem") {
             map.insert("stem".into(), Value::String(record.stem.clone()));
         }
+        // `.document_hash`: opt-in/identity-class. Populated only when requested
+        // (the full-content blake3 the CAS surfaces use) — how a caller reads the
+        // hash to feed `edit --expected-hash`.
+        if let Some(hash) = &record.document_hash {
+            map.insert("document_hash".into(), Value::String(hash.clone()));
+        }
         // `.frontmatter` emits the whole block; bare field names filter it to
         // just those keys (matching `norn find`'s frontmatter projection).
         if allow.contains("frontmatter") {
@@ -225,6 +231,15 @@ fn build_text_fields(
         fields.push(FieldOwned {
             label: "stem".into(),
             value: record.stem.clone(),
+        });
+    }
+
+    // `.document_hash` is identity/metadata-class: opt-in only, populated only
+    // when requested.
+    if let Some(hash) = &record.document_hash {
+        fields.push(FieldOwned {
+            label: "document_hash".into(),
+            value: hash.clone(),
         });
     }
 

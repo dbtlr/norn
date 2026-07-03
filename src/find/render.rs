@@ -106,6 +106,17 @@ pub(crate) fn doc_to_json(
         map.insert("stem".into(), serde_json::Value::String(doc.stem.clone()));
     }
 
+    // `.document_hash` is identity/metadata-class: opt-in only (never in the
+    // default or `--all-cols` dump), so existing output stays byte-identical.
+    // The full-content blake3 the CAS surfaces use — how a caller reads the hash
+    // to feed `edit --expected-hash`.
+    if allow.contains("document_hash") {
+        map.insert(
+            "document_hash".into(),
+            serde_json::Value::String(doc.hash.clone()),
+        );
+    }
+
     // `--all-cols`: whole frontmatter + every cache-served facet + body.
     // `.frontmatter` emits the whole block; bare field names filter it.
     if all_cols || allow.contains("frontmatter") {
@@ -330,6 +341,14 @@ fn build_record_pairs(
     // default or `--all-cols` dump. Emitted first, adjacent to the path header.
     if facet_set.contains("stem") {
         pairs.push(("stem".into(), doc.stem.clone()));
+    }
+
+    // `.document_hash` is identity/metadata-class: opt-in only (never in the
+    // default or `--all-cols` dump), so existing output stays byte-identical.
+    // The value is the full-content blake3 the CAS surfaces use — this is how a
+    // caller reads the hash to feed `edit --expected-hash`.
+    if facet_set.contains("document_hash") {
+        pairs.push(("document_hash".into(), doc.hash.clone()));
     }
 
     // `--all-cols`: per-field frontmatter rows (like the default), then every

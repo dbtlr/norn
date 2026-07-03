@@ -37,6 +37,80 @@ fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
     c
 }
 
+fn json_of(out: &std::process::Output) -> serde_json::Value {
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap()
+}
+
+/// NRN-105: `get --col .document_hash` emits the full-content blake3 hex, it
+/// equals what `find --col .document_hash` reports for the same doc (parity),
+/// and it is absent from the default dump (opt-in/identity-class).
+#[test]
+fn get_document_hash_facet_matches_find_and_content() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let expected = blake3::hash(&std::fs::read(vault.join("a.md")).unwrap())
+        .to_hex()
+        .to_string();
+
+    // get side
+    let g = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(&vault)
+            .args(["get", "a.md", "--col", ".document_hash", "--format", "json"])
+            .output()
+            .unwrap(),
+    );
+    let get_hash = g[0]["document_hash"].as_str().unwrap();
+    assert_eq!(get_hash, expected, "get emits full-content blake3: {g}");
+
+    // find side — same doc, same hash (parity across the shared facet).
+    let f = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(&vault)
+            .args([
+                "find",
+                "--eq",
+                "type:note",
+                "--col",
+                ".document_hash",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let find_hash = f["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["path"] == "a.md")
+        .unwrap()["document_hash"]
+        .as_str()
+        .unwrap();
+    assert_eq!(find_hash, get_hash, "find and get agree on the hash");
+
+    // default dump omits it (opt-in only) — output stays byte-identical.
+    let d = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(&vault)
+            .args(["get", "a.md", "--format", "json"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        d[0].get("document_hash").is_none(),
+        "default get omits document_hash: {d}"
+    );
+}
+
 #[test]
 fn get_single_target_json() {
     let tmp = synth();

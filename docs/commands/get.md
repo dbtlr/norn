@@ -44,11 +44,11 @@ An ambiguous target emits one record per resolved candidate. Multiple targets ar
 The `--col` vocabulary is identical to `norn find`:
 
 - **Bare names select frontmatter fields:** `--col status,title`.
-- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter`, `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.raw`.
+- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter`, `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.raw`, `.document_hash`.
 - **Default (no `--col`):** frontmatter, headings, and links. Body is included only with `--all-cols` or `--col .body`.
-- **`--all-cols`:** every frontmatter field plus every cache-served facet, including `.body`. Excludes `.raw` (the disk-read form is requested only by name). Mutually exclusive with `--col`.
+- **`--all-cols`:** every frontmatter field plus every cache-served facet, including `.body`. Excludes `.raw` and `.document_hash` (opt-in/identity-class, requested only by name). Mutually exclusive with `--col`.
 
-`.body` is the parsed body from the cache; `.raw` is the file's exact bytes from disk.
+`.body` is the parsed body from the cache; `.raw` is the file's exact bytes from disk. `.document_hash` is the blake3 hex of the full file content — the same value plan ops carry and `edit --expected-hash` / `vault.edit`'s `expected_hash` compare against, so `get --col .document_hash` is how you read a document's hash to guard a later edit.
 
 ## Sorting and paging
 

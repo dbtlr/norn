@@ -195,6 +195,51 @@ mod tests {
         );
     }
 
+    /// NRN-105: `vault.get` with `col: ".document_hash"` surfaces the
+    /// full-content blake3 in the serialized MCP envelope (the record is
+    /// serialized directly, no facet narrowing) — how an off-filesystem MCP
+    /// client reads the hash to feed `vault.edit`'s `expected_hash`. Absent
+    /// without the col, so the default envelope stays byte-identical.
+    #[test]
+    fn handle_document_hash_facet_surfaces_in_envelope() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let expected = blake3::hash(&std::fs::read(root.join("note.md")).unwrap())
+            .to_hex()
+            .to_string();
+
+        // Requested → present in the serialized record.
+        let report = handle(
+            &ctx,
+            GetParams {
+                targets: vec!["note".into()],
+                col: Some(".document_hash".into()),
+            },
+        )
+        .expect("handle should succeed");
+        let json = serde_json::to_value(&report.records[0]).unwrap();
+        assert_eq!(
+            json.get("document_hash").and_then(|v| v.as_str()),
+            Some(expected.as_str()),
+            "MCP envelope must carry document_hash when requested: {json}"
+        );
+
+        // Not requested → absent (default envelope unchanged).
+        let plain = handle(
+            &ctx,
+            GetParams {
+                targets: vec!["note".into()],
+                col: None,
+            },
+        )
+        .expect("handle should succeed");
+        let pjson = serde_json::to_value(&plain.records[0]).unwrap();
+        assert!(
+            pjson.get("document_hash").is_none(),
+            "default envelope must omit document_hash: {pjson}"
+        );
+    }
+
     #[test]
     fn handle_col_projection_parses_like_cli() {
         let (_tmp, root) = seeded_vault();

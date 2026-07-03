@@ -415,6 +415,70 @@ fn default_omits_facets_that_all_cols_adds() {
     assert!(a.get("body").is_none());
 }
 
+/// blake3 hex of a file's full bytes — the canonical `document_hash` convention
+/// (matches `set::synth` / the applier / `edit --expected-hash`).
+fn blake3_of_file(path: &std::path::Path) -> String {
+    blake3::hash(&std::fs::read(path).unwrap())
+        .to_hex()
+        .to_string()
+}
+
+/// NRN-105: `find --col .document_hash` emits the document's full-content blake3
+/// hex — the value `edit --expected-hash` wants, obtainable through norn.
+#[test]
+fn col_document_hash_facet_emits_content_hash() {
+    let tmp = synth_vault();
+    let v = json_out(
+        &tmp,
+        &[
+            "find",
+            "--eq",
+            "title:Alpha",
+            "--col",
+            ".document_hash",
+            "--format",
+            "json",
+        ],
+    );
+    let a = doc_a(&v);
+    let expected = blake3_of_file(&tmp.path().join("vault").join("a.md"));
+    assert_eq!(
+        a["document_hash"], expected,
+        "facet emits full-content blake3: {a}"
+    );
+    // Only the requested facet (+ identity) appears.
+    assert!(a.get("body").is_none(), "body not requested: {a}");
+    assert!(a.get("headings").is_none(), "headings not requested: {a}");
+}
+
+/// `.document_hash` is opt-in/identity-class: absent from the default dump AND
+/// from `--all-cols`, so existing output stays byte-identical.
+#[test]
+fn document_hash_facet_is_opt_in_only() {
+    let tmp = synth_vault();
+    let d = json_out(&tmp, &["find", "--eq", "title:Alpha", "--format", "json"]);
+    assert!(
+        doc_a(&d).get("document_hash").is_none(),
+        "default omits document_hash"
+    );
+    let a = json_out(
+        &tmp,
+        &[
+            "find",
+            "--eq",
+            "title:Alpha",
+            "--all-cols",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        doc_a(&a).get("document_hash").is_none(),
+        "--all-cols omits document_hash (opt-in only): {}",
+        doc_a(&a)
+    );
+}
+
 #[test]
 fn all_cols_conflicts_with_col() {
     let tmp = synth_vault();
