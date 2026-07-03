@@ -10,6 +10,11 @@ pub struct EditPreflight {
     pub descriptors: Vec<EditDescriptor>,
 }
 
+/// `expected_hash`, when `Some`, is an opt-in compare-and-swap precondition:
+/// the caller's belief about the document's current full-content blake3 hex
+/// (the same value `norn get` / the index expose). If it does not match the
+/// content read here, the edit is refused before the transform runs — nothing
+/// is planned or written. `None` = today's read-modify-write.
 pub fn preflight_and_plan(
     cwd: &camino::Utf8Path,
     cache: &crate::cache::Cache,
@@ -17,6 +22,7 @@ pub fn preflight_and_plan(
     cfg: &crate::standards::VaultConfig,
     target: &str,
     ops: &[EditOp],
+    expected_hash: Option<&str>,
 ) -> anyhow::Result<EditPreflight> {
     // Reuse set's preflight with zero frontmatter ops + no body to get a
     // resolved target and an empty RepairPlan. preflight does not read stdin
@@ -40,6 +46,20 @@ pub fn preflight_and_plan(
     let full_path = cwd.join(&outcome.target);
     let content = std::fs::read_to_string(full_path.as_std_path())
         .map_err(|e| anyhow::anyhow!("failed to read {full_path}: {e}"))?;
+
+    // Opt-in CAS: refuse before transforming if the document has drifted from
+    // the hash the caller expected. Compared against full-content blake3 hex —
+    // the canonical `document_hash` convention (`set::synth`, the applier).
+    if let Some(expected) = expected_hash {
+        let actual = blake3::hash(content.as_bytes()).to_hex().to_string();
+        if actual != expected {
+            anyhow::bail!(
+                "document {} has drifted: expected hash {expected}, found {actual}",
+                outcome.target
+            );
+        }
+    }
+
     let current_body = crate::set::synth::body_after_frontmatter(&content);
     let transform = apply_edits(&current_body, ops)?;
 

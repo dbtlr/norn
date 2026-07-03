@@ -32,6 +32,13 @@ pub struct EditParams {
     /// Ordered edit ops, applied all-or-nothing. Each op is tagged by `op`.
     pub edits: Vec<EditOp>,
 
+    /// Optional compare-and-swap precondition: the document's expected current
+    /// content hash (blake3 hex of the full file, as `vault.get` reports). When
+    /// present, the edit is refused if the document has drifted from it; absent
+    /// = read-modify-write. Mirrors `norn edit --expected-hash`.
+    #[serde(default)]
+    pub expected_hash: Option<String>,
+
     /// Apply the edits. **Defaults to false (dry-run): returns the plan with
     /// `applied = false` and writes nothing.** Pass true to acquire the vault
     /// mutation lock and write.
@@ -92,7 +99,13 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
     }
 
     let pre = crate::edit::synth::preflight_and_plan(
-        &cwd, &cache, &index, vault_cfg, &p.target, &p.edits,
+        &cwd,
+        &cache,
+        &index,
+        vault_cfg,
+        &p.target,
+        &p.edits,
+        p.expected_hash.as_deref(),
     )?;
 
     // DRY-RUN (default): no lock, no apply, no write.
