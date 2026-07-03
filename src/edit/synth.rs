@@ -49,13 +49,16 @@ pub fn preflight_and_plan(
 
     // Opt-in CAS: refuse before transforming if the document has drifted from
     // the hash the caller expected. Compared against full-content blake3 hex —
-    // the canonical `document_hash` convention (`set::synth`, the applier).
+    // the canonical `document_hash` convention (`set::synth`, the applier). The
+    // compare is case-insensitive and whitespace-trimmed: hex is case-agnostic,
+    // so a correct hash copied in uppercase must not read as drift.
     if let Some(expected) = expected_hash {
         let actual = blake3::hash(content.as_bytes()).to_hex().to_string();
-        if actual != expected {
+        if !actual.eq_ignore_ascii_case(expected.trim()) {
             anyhow::bail!(
-                "document {} has drifted: expected hash {expected}, found {actual}",
-                outcome.target
+                "document {} has drifted: expected hash {}, found {actual}",
+                outcome.target,
+                expected.trim()
             );
         }
     }
