@@ -114,14 +114,23 @@ pub fn auto_fields(docs: &[DocumentSummary], exclude: &BTreeSet<String>) -> Vec<
 ///   `other` → `render_key(Null)` = `"(null)"`, matching `count`'s null
 ///   handling and preventing a present-but-null field from vanishing or
 ///   distorting the identity ratio.
-/// - key present as `[]` → a single `"(empty)"` bucket (present, counted,
-///   visible) — NOT missing.
+/// - key present as `[]` → a single `"[]"` bucket (present, counted,
+///   visible) — NOT missing. `"[]"` is exactly `render_key`'s stringification
+///   of an empty array (`serde_json::Value::Array(vec![]).to_string()`), so
+///   this introduces no bucket label `count` doesn't already emit — a prior
+///   revision used a bespoke `"(empty)"` sentinel here, which could collide
+///   with a real frontmatter string value literally equal to `"(empty)"`.
+///   The residual sentinel-vs-literal collision risk for `"(missing)"` /
+///   `"(null)"` / `"[]"` is a pre-existing `norn`/`count` convention, not new
+///   to `describe`.
 /// - key present as a non-empty array → one bucket per element (flattened).
 /// - any other scalar → one bucket via `render_key`.
 fn present_values(doc: &DocumentSummary, field: &str) -> Option<Vec<String>> {
     let v = doc.frontmatter.as_ref()?.get(field)?;
     match v {
-        serde_json::Value::Array(items) if items.is_empty() => Some(vec!["(empty)".to_string()]),
+        serde_json::Value::Array(items) if items.is_empty() => {
+            Some(vec![crate::count::render_key(v)])
+        }
         serde_json::Value::Array(items) => {
             Some(items.iter().map(crate::count::render_key).collect())
         }
@@ -438,9 +447,11 @@ mod tests {
     #[test]
     fn empty_array_is_empty_bucket() {
         // "Nothing present ever vanishes": a doc carrying `tags: []` is PRESENT
-        // with the field, so it contributes an honest `"(empty)"` value bucket
-        // — NOT a `(missing)` bucket, and not an uncounted occurrence. Two docs
-        // share the "rust" tag so the identity-ratio (distinct/occurrences)
+        // with the field, so it contributes an honest `"[]"` value bucket —
+        // NOT a `(missing)` bucket, and not an uncounted occurrence. `"[]"` is
+        // exactly `count::render_key`'s stringification of an empty array, so
+        // this introduces no bucket label `count` doesn't already emit. Two
+        // docs share the "rust" tag so the identity-ratio (distinct/occurrences)
         // stays below the default 0.9 skip threshold and the field survives
         // into a distribution, letting us inspect its buckets.
         let docs = vec![
@@ -459,14 +470,14 @@ mod tests {
             .collect();
         assert!(vals.contains(&("rust", 2)));
         assert!(
-            vals.contains(&("(empty)", 1)),
-            "`[]` must be an \"(empty)\" value bucket, got: {vals:?}"
+            vals.contains(&("[]", 1)),
+            "`[]` must be a \"[]\" value bucket (count-consistent), got: {vals:?}"
         );
         assert!(
             !vals.iter().any(|(v, _)| *v == MISSING),
             "`[]` is present, not missing — no (missing) bucket, got: {vals:?}"
         );
-        assert_eq!(dists[0].values.len(), 2, "rust + (empty), no (missing)");
+        assert_eq!(dists[0].values.len(), 2, "rust + [], no (missing)");
     }
 
     #[test]
