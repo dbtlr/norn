@@ -416,6 +416,48 @@ validate:
         assert_eq!(matched_paths(&cache, &query).len(), 100);
     }
 
+    // ── describe --data: doc-set load plan (NRN-103) ─────────────────────
+    //
+    // `describe --data` (CLI `norn describe --data`/`--stats`, MCP
+    // `vault.describe { data: true }`) computes per-field value
+    // distributions and date bounds as an in-memory fold over
+    // `documents_matching`'s result set — see `summarize` in
+    // `src/describe/data.rs` and `describe()` in `src/describe/mod.rs`.
+    // There is no per-field SQL and no N+1 query per document or per
+    // field; the *only* SQL `describe --data` issues is the doc-set load
+    // itself, so the whole perf story rests on that one query's plan
+    // staying a single SCAN/SEARCH rather than degrading into a per-row
+    // subquery.
+    //
+    // The common case — `norn describe --data` with no filters — maps to
+    // `DocumentQuery::default()`. Unlike the predicate-routed tests above
+    // (which assert SEARCH via `idx_document_fields_kv`/`idx_document_fields_pk`
+    // and forbid `SCAN documents`), no predicate narrows this row set, so
+    // the correct — and only possible — plan is a single unindexed scan of
+    // `documents`. What this guard pins is that it stays *one* plan row
+    // (no join, no correlated subquery), not that it avoids a scan.
+    #[test]
+    fn describe_data_default_query_is_single_scan_no_per_row_subquery() {
+        let (_tmp, root) = mimir_vault();
+        let cache = open_mimir(&root);
+
+        let query = DocumentQuery::default();
+        let (_where_sql, rows) = plan_for(&cache, &query);
+        eprintln!("describe --data (no filters) doc-set load plan: {rows:?}");
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "the doc-set load should be a single plan row (no per-row subquery/join): {rows:?}"
+        );
+        assert!(
+            rows[0].contains("SCAN documents"),
+            "no predicate narrows the row set, so a full scan of `documents` is the correct \
+             (and only possible) plan — anything else would mean an unexpected join or subquery: {rows:?}"
+        );
+        assert_eq!(matched_paths(&cache, &query).len(), 6);
+    }
+
     // ── Timing curve: 1k / 10k / 50k, routed vs. scan ────────────────────
 
     fn timing_vault(root: &Utf8PathBuf, n: usize) {

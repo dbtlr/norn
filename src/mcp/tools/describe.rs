@@ -509,6 +509,49 @@ mod tests {
         assert_eq!(data.total, expected.total);
         assert_eq!(data.fields, expected.fields);
         assert_eq!(data.skipped, expected.skipped);
+        assert_eq!(data.dates, expected.dates);
+    }
+
+    /// A non-default filter (`eq type:note`) passed through `handle_with` must
+    /// scope the summary identically to a direct `summarize` call over
+    /// `documents_matching` with the SAME filter — exercising the 16-field
+    /// `params_to_filter_args` mapping end to end (mirrors `count.rs`'s
+    /// `handle_eq_filter_narrows_count`).
+    #[test]
+    fn describe_data_respects_filter() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let params = DescribeParams {
+            data: true,
+            eq: vec!["type:note".into()],
+            ..Default::default()
+        };
+        let out = handle_with(&ctx, &params).expect("handle_with");
+        let data = out.data.expect("data present");
+
+        // Direct core path with the SAME eq filter.
+        let cache = ctx.query_cache().unwrap();
+        let filters = crate::filter_args::FilterArgs {
+            eq: vec!["type:note".into()],
+            ..Default::default()
+        };
+        let docs = cache
+            .documents_matching(&crate::filter_args::build_document_query(&filters).unwrap())
+            .unwrap();
+        let expected = crate::describe::data::summarize(
+            &docs,
+            &ctx.config,
+            &crate::describe::data::DataOptions::default(),
+        );
+
+        assert_eq!(
+            data.total, 1,
+            "seeded_vault has exactly one type:note doc, got total={}",
+            data.total
+        );
+        assert_eq!(data.total, expected.total);
+        assert_eq!(data.fields, expected.fields);
     }
 
     #[test]

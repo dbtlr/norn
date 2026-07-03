@@ -136,6 +136,18 @@ pub fn structure(cache: &Cache, config: &LoadedConfig) -> Result<DescribeOutput>
 
 /// Full describe: structure, plus a contents-summary when `data` is `Some`.
 /// The summary honors the find-filter surface in `filters`.
+///
+/// Perf: the ONLY DB query `data` mode issues is the `documents_matching`
+/// doc-set load below — `summarize`'s per-field distributions and date
+/// bounds are an in-memory fold over that result set (no per-field SQL, no
+/// N+1). The doc-set load's plan is guarded to stay a single SCAN/SEARCH by
+/// `describe_data_default_query_is_single_scan_no_per_row_subquery` in
+/// `src/cache/eav_acceptance.rs` (no-filter case) plus the existing
+/// predicate-routed `EXPLAIN QUERY PLAN` guards in that file and
+/// `query_documents.rs`'s `router_tests` (filtered case, e.g. `--eq`/`--in`)
+/// — `describe` reuses the same `build_document_query`/`documents_matching`
+/// path `find`/`count` do, so it inherits their routing guarantees rather
+/// than needing describe-specific duplicates.
 pub fn describe(
     cache: &Cache,
     config: &LoadedConfig,
