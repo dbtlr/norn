@@ -118,7 +118,7 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
     let cwd = ctx.vault_root.clone();
 
     // Load the graph index honoring files.ignore, exactly like the CLI delete path.
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config.index_options, false)?;
+    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config().index_options, false)?;
 
     // Preflight: resolve the doc + enforce the backlinks policy. Refuse early
     // (the CLI exits 2): incoming-links-present without --rewrite-to /

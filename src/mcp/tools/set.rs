@@ -123,12 +123,13 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
     // Load the graph index honoring files.ignore, exactly like the CLI set path.
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config.index_options, false)?;
+    let config = ctx.config();
+    let index = crate::cache_cmd::load_graph_index(&cwd, &config.index_options, false)?;
 
     // Cache for target resolution (needs document query, not just the index).
     let cache = ctx.query_cache()?;
 
-    let vault_cfg = &ctx.config.vault_config;
+    let vault_cfg = &config.vault_config;
 
     // Build SetArgs inline. The MCP `set` map routes through --field-json so JSON
     // values (scalars, arrays, objects, null) are applied verbatim and

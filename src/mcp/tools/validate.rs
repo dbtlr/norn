@@ -98,15 +98,16 @@ pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
     // validate uses — so that `files.ignore` patterns are applied via
     // `apply_ignore_filter`. The old `ctx.query_cache()? + cache.load_graph_index()`
     // path hardcoded `ignored_files: Vec::new()` and silently skipped the filter.
-    let index = load_graph_index(&ctx.vault_root, &ctx.config.index_options, false)?;
+    let config = ctx.config();
+    let index = load_graph_index(&ctx.vault_root, &config.index_options, false)?;
 
     // Run validation using the warm server-lifetime config — same config path
     // as `norn validate` (load_config is called once at server start, held in ctx).
     let findings = validate_with_compiled(
         &index,
-        &ctx.config.validate,
-        &ctx.config.compiled,
-        ctx.config.index_options.alias_field.as_deref(),
+        &config.validate,
+        &config.compiled,
+        config.index_options.alias_field.as_deref(),
     );
 
     // Apply triage filters (code, severity, field, rule, path, target, reason).

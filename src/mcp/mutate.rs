@@ -64,7 +64,8 @@ pub(crate) fn open_mutation_event_sink(ctx: &VaultContext) -> EventSink {
     let clock = Clock::System;
     let start_ts = clock.now_rfc3339();
 
-    let telemetry = ctx.config.vault_config.telemetry.as_ref();
+    let config = ctx.config();
+    let telemetry = config.vault_config.telemetry.as_ref();
     let dir = telemetry
         .and_then(|t| t.location.clone())
         .map(camino::Utf8PathBuf::from)

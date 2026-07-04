@@ -107,9 +107,10 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
         None
     };
 
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config.index_options, false)?;
+    let config = ctx.config();
+    let index = crate::cache_cmd::load_graph_index(&cwd, &config.index_options, false)?;
     let cache = ctx.query_cache()?;
-    let vault_cfg = &ctx.config.vault_config;
+    let vault_cfg = &config.vault_config;
 
     let pre = crate::edit::synth::preflight_and_plan(
         &cwd,
