@@ -36,6 +36,7 @@ mod repair_apply;
 mod rewrite_wikilink_cmd;
 mod self_update;
 mod seq_alloc;
+mod service;
 mod set;
 mod show;
 mod standards;
@@ -84,6 +85,43 @@ pub fn cli_main() {
     }
 }
 
+/// Commands whose work a warm `norn-service` daemon could serve from its warm
+/// cache. Kept to reads (`find` / `get` / `count`) for phase 1 — they prove the
+/// routing spine without the write-serialization concerns of mutations.
+fn is_routable_read(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Find(_) | Command::Get(_) | Command::Count(_)
+    )
+}
+
+/// The CLI→service routing seam (NRN-92).
+///
+/// For a routable read command, probe for a live warm service for `cwd`.
+/// Returns `Some(result)` if the request was served by routing to the service,
+/// or `None` to fall through to the direct, integrity-verified dispatch.
+///
+/// NRN-94 will implement the `Route` arm: translate the CLI args to the MCP
+/// tool contract, delegate to the warm cache, and render the routed response.
+/// Until then this always returns `None` — a live service is a safe
+/// fall-through, because the direct dispatch re-establishes trust locally and
+/// so preserves the invariant unconditionally (ADR 0005).
+fn try_route_read(command: &Command, cwd: &camino::Utf8Path) -> Option<Result<i32>> {
+    if !is_routable_read(command) {
+        return None;
+    }
+    match service::probe(cwd, service::DEFAULT_HANDSHAKE_TIMEOUT) {
+        service::RouteDecision::Direct => None,
+        #[cfg(unix)]
+        service::RouteDecision::Route(_client) => {
+            // NRN-94: send the translated request on `_client` and return
+            // `Some(rendered)`. For now, drop the connection and fall through to
+            // the verified direct open below.
+            None
+        }
+    }
+}
+
 fn run(cli: Cli) -> Result<i32> {
     let Cli {
         cwd,
@@ -121,6 +159,15 @@ fn run(cli: Cli) -> Result<i32> {
         &command,
         Command::Cache(c) if matches!(c.command, CacheSubcommand::Prune(_))
     );
+
+    // NRN-92 routing seam: for a routable read command, decide whether a warm
+    // `norn-service` daemon is live for this vault and should serve the request
+    // from an already-verified cache. When it returns `Some`, the request was
+    // served by routing; otherwise we fall through to the direct, integrity-
+    // verified dispatch below (today's behavior). No daemon => only a `stat`.
+    if let Some(result) = try_route_read(&command, &cwd) {
+        return result;
+    }
 
     let outcome = match command {
         Command::Migrate(args) => {
