@@ -52,6 +52,13 @@ ureq = { version = "2.10", default-features = false, features = ["tls", "json"] 
 walkdir = "2.5"
 xz2 = "0.1"
 
+# Unix-only: the CLI→service routing seam bounds its control-socket connect
+# with a nonblocking connect + poll(2) (src/service.rs), which needs the raw
+# socket/fcntl/poll syscalls. libc is already in the tree transitively; this
+# makes it a direct dependency so the seam can call it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 camino = { version = "1.1", features = ["serde1"] }
 clap = { version = "4.5", features = ["derive"] }

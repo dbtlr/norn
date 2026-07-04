@@ -249,20 +249,24 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
         return RouteDecision::Direct;
     }
 
-    // A socket file is present. Connect — a stale/orphaned socket (daemon died
-    // without unlinking) refuses, and an over-length path (macOS `sun_path` is
-    // ~104 bytes) is rejected by the OS; both map to Direct.
+    // A socket file is present. The connect and the handshake share ONE
+    // wall-clock budget (`timeout`): compute the deadline once, spend part of
+    // it on the connect, and hand the handshake whatever remains — so a slow
+    // connect plus a slow handshake can never exceed `timeout` in total.
     //
-    // NOTE: `connect` itself has no timeout. A pathological wedged daemon whose
-    // accept backlog is full could block it. That path is unreachable until a
-    // daemon exists (NRN-93 binds the socket), so bounding the *connect* is
-    // deferred to NRN-93 alongside the daemon lifecycle it belongs with; the
-    // handshake read below is already deadline-bounded.
-    let Ok(stream) = connect_control(socket_path) else {
+    // The connect is bounded (nonblocking connect + `poll(2)` — see
+    // `connect_control`): a stale/orphaned socket (daemon died without
+    // unlinking) refuses, an over-length path (macOS `sun_path` is ~104 bytes)
+    // is rejected, and a wedged daemon whose accept backlog is full times out
+    // instead of blocking forever. All three map to Direct.
+    let deadline = std::time::Instant::now() + timeout;
+    let connect_budget = deadline.saturating_duration_since(std::time::Instant::now());
+    let Ok(stream) = connect_control(socket_path, connect_budget) else {
         return RouteDecision::Direct;
     };
 
-    let decision = match handshake(&stream, timeout) {
+    let handshake_budget = deadline.saturating_duration_since(std::time::Instant::now());
+    let decision = match handshake(&stream, handshake_budget) {
         Ok(()) => RouteDecision::Route(ServiceClient {
             socket_path: socket_path.to_owned(),
         }),
@@ -293,14 +297,184 @@ pub fn probe_socket(_socket_path: &Utf8Path, _timeout: std::time::Duration) -> R
     RouteDecision::Direct
 }
 
-/// Connect to the control socket. Blocking `std` connect: it returns an error
-/// for a refused (stale/orphaned) socket and for an over-length path (the OS
-/// rejects a `sun_path` beyond ~104 bytes rather than truncating), both of which
-/// the caller maps to Direct. It has no *connect* timeout — see the note at the
-/// call site; the handshake read that follows is deadline-bounded.
+/// Connect to the control socket within `timeout`, returning a
+/// blocking-mode [`UnixStream`] ready for the handshake.
+///
+/// `std`'s blocking connect has no timeout: a wedged daemon whose accept
+/// backlog is full blocks it indefinitely on Linux (macOS refuses a full
+/// backlog outright). Bounding that is NRN-92 review finding F2. The fix is a
+/// nonblocking connect fenced by `poll(2)`:
+///
+/// 1. `socket(AF_UNIX, SOCK_STREAM)`, wrapped in an [`OwnedFd`] immediately so
+///    every early-return path closes the fd — no leak on any error.
+/// 2. `FD_CLOEXEC` (macOS has no `SOCK_CLOEXEC` socket() flag, so it is set via
+///    `fcntl` unconditionally) and `O_NONBLOCK`, both via `fcntl`.
+/// 3. `connect`: immediate success, or `EINPROGRESS`/`EAGAIN` → `poll` for
+///    `POLLOUT` bounded by `timeout`. A poll timeout maps to
+///    [`std::io::ErrorKind::TimedOut`]; once poll fires, `SO_ERROR` is read as
+///    the authoritative async-connect result (non-zero → fail, covering
+///    `POLLERR`/`POLLHUP`).
+/// 4. Clear `O_NONBLOCK` — the handshake that follows relies on *blocking* I/O
+///    bounded by `SO_RCVTIMEO`/`SO_SNDTIMEO`, which nonblocking mode defeats.
+///
+/// An over-length path (past `sun_path`, ~104 bytes on macOS) is rejected up
+/// front rather than truncated (truncation would silently connect to the wrong
+/// socket); a refused/stale socket errors too. Both map to Direct at the call
+/// site.
+///
+/// Implemented on `libc`, not `socket2`: a prior `socket2` attempt caused
+/// nonblocking-state flakiness and macOS `setsockopt`-under-load `EINVAL`. And
+/// `poll`, not `select`, so there is no `FD_SETSIZE` (1024-fd) hazard.
 #[cfg(unix)]
-fn connect_control(socket_path: &Utf8Path) -> std::io::Result<std::os::unix::net::UnixStream> {
-    std::os::unix::net::UnixStream::connect(socket_path.as_std_path())
+fn connect_control(
+    socket_path: &Utf8Path,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::io::{Error, ErrorKind};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    // Build the target address, rejecting an over-length path before touching
+    // any fd. `sun_path` is a fixed C array; the path plus its trailing NUL
+    // must fit, so require `len < sun_path.len()` — the array starts zeroed, so
+    // leaving the final byte untouched supplies the NUL terminator.
+    let path_bytes = socket_path.as_str().as_bytes();
+    // SAFETY: `sockaddr_un` is plain-old-data; an all-zero value is a valid,
+    // fully-initialized instance.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path_bytes.len() >= addr.sun_path.len() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "control socket path exceeds the sun_path limit",
+        ));
+    }
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (dst, &src) in addr.sun_path.iter_mut().zip(path_bytes) {
+        *dst = src as libc::c_char;
+    }
+
+    // Create the socket and take ownership immediately: the `OwnedFd` closes the
+    // fd on every early return below, so no error path can leak it.
+    // SAFETY: `socket(2)` with valid constants; returns -1 on failure.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: `raw` is a fresh, valid, exclusively-owned fd from `socket(2)`.
+    let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+    let fd = owned.as_raw_fd();
+
+    // FD_CLOEXEC so the fd does not leak across an exec. macOS has no
+    // `SOCK_CLOEXEC` socket() flag, so set it here unconditionally.
+    // SAFETY: F_GETFD/F_SETFD on a valid fd; both return -1 on failure.
+    let fdflags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if fdflags < 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: F_SETFD on a valid fd.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, fdflags | libc::FD_CLOEXEC) } < 0 {
+        return Err(Error::last_os_error());
+    }
+
+    // O_NONBLOCK so `connect(2)` returns immediately (EINPROGRESS) instead of
+    // blocking on a full accept backlog. `orig_fl` is the pre-nonblocking flag
+    // set, restored (cleared) once the connect completes.
+    // SAFETY: F_GETFL on a valid fd.
+    let orig_fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if orig_fl < 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: F_SETFL on a valid fd.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, orig_fl | libc::O_NONBLOCK) } < 0 {
+        return Err(Error::last_os_error());
+    }
+
+    // Nonblocking connect.
+    // SAFETY: `connect(2)` with a correctly-initialized `sockaddr_un` and the
+    // full struct size as the address length (valid for a pathname socket that
+    // fits within `sun_path`, verified above).
+    let rc = unsafe {
+        libc::connect(
+            fd,
+            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = Error::last_os_error();
+        // Anything but "in progress" is a hard failure — e.g. ECONNREFUSED for
+        // a stale socket, or a full backlog on macOS. Surface it (→ Direct).
+        let os = err.raw_os_error();
+        if os != Some(libc::EINPROGRESS) && os != Some(libc::EAGAIN) {
+            return Err(err);
+        }
+        // Wait for the connect to settle, bounded by a wall-clock deadline so
+        // EINTR restarts cannot extend the budget past `timeout`.
+        let deadline = std::time::Instant::now() + timeout;
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "control-socket connect timed out",
+                ));
+            }
+            let ms = remaining.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+            // SAFETY: `poll(2)` over one initialized `pollfd`.
+            let pr = unsafe { libc::poll(&mut pfd, 1, ms) };
+            if pr < 0 {
+                let e = Error::last_os_error();
+                if e.raw_os_error() == Some(libc::EINTR) {
+                    continue; // interrupted; re-poll on the remaining budget
+                }
+                return Err(e);
+            }
+            if pr == 0 {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "control-socket connect timed out",
+                ));
+            }
+            break;
+        }
+        // poll fired (POLLOUT and/or POLLERR/POLLHUP). SO_ERROR is the
+        // authoritative async-connect result; non-zero means it failed.
+        let mut soerr: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `getsockopt` writes one `int` into `soerr`; `len` carries its
+        // size and is updated in place.
+        let gr = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut soerr as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if gr < 0 {
+            return Err(Error::last_os_error());
+        }
+        if soerr != 0 {
+            return Err(Error::from_raw_os_error(soerr));
+        }
+    }
+
+    // Restore blocking mode: the handshake relies on blocking reads/writes
+    // bounded by SO_RCVTIMEO/SO_SNDTIMEO, which O_NONBLOCK would defeat.
+    // SAFETY: F_SETFL on a valid fd, clearing exactly the O_NONBLOCK bit we set.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, orig_fl & !libc::O_NONBLOCK) } < 0 {
+        return Err(Error::last_os_error());
+    }
+
+    // Transfer ownership into the `UnixStream` (no dup, no leak): `owned` is
+    // moved, so the fd is now owned solely by the returned stream.
+    Ok(UnixStream::from(owned))
 }
 
 /// Exchange the control ping/pong on a connected stream within `timeout`.
@@ -625,7 +799,7 @@ mod tests {
             w.flush().unwrap();
         });
 
-        let stream = connect_control(&path).unwrap();
+        let stream = connect_control(&path, DEFAULT_HANDSHAKE_TIMEOUT).unwrap();
         let err = handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT).expect_err("expected VersionSkew");
         match err {
             HandshakeError::VersionSkew { server, client } => {
@@ -661,7 +835,7 @@ mod tests {
             w.flush().unwrap();
         });
 
-        let stream = connect_control(&path).unwrap();
+        let stream = connect_control(&path, DEFAULT_HANDSHAKE_TIMEOUT).unwrap();
         let err =
             handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT).expect_err("expected a handshake error");
         assert!(
@@ -816,8 +990,106 @@ mod tests {
         let long_name = "s".repeat(200);
         let path = Utf8PathBuf::from_path_buf(dir.path().join(long_name)).unwrap();
         assert!(
-            connect_control(&path).is_err(),
+            connect_control(&path, DEFAULT_HANDSHAKE_TIMEOUT).is_err(),
             "an over-length socket path must be rejected, not truncated"
         );
+    }
+
+    /// A wedged daemon whose accept backlog is full must not hang the probe:
+    /// the bounded connect gives up at its budget and the probe returns Direct.
+    ///
+    /// Setup: bind a listener by hand with the minimal backlog (`listen(fd, 1)`)
+    /// and NEVER accept, then saturate the backlog with idle client
+    /// connections. Platform behavior then diverges — on Linux a further
+    /// `connect(2)` *blocks* until a slot frees (the finding-F2 hang: a plain
+    /// blocking connect never returns), while macOS *refuses* a full backlog
+    /// outright. Either way the bounded connect resolves quickly to Direct
+    /// (Linux: `poll` times out at the 150ms budget; macOS: ECONNREFUSED).
+    ///
+    /// TEETH: this test bites on Linux — against the pre-fix blocking connect it
+    /// would hang far past the 2s bound. On macOS it passes trivially because
+    /// macOS never blocks on a full backlog (verified empirically), so there the
+    /// assertion only guards against a regression that reintroduces blocking.
+    #[test]
+    fn full_backlog_connect_times_out_to_direct() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+
+        // Build the sockaddr_un for `path` once; reused for bind and connects.
+        // SAFETY: `sockaddr_un` is POD; zeroed is a valid initialized value.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let pb = path.as_str().as_bytes();
+        assert!(
+            pb.len() < addr.sun_path.len(),
+            "test path must fit sun_path"
+        );
+        for (d, &s) in addr.sun_path.iter_mut().zip(pb) {
+            *d = s as libc::c_char;
+        }
+        let addr_len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+
+        // Bind + listen(1) by hand so the accept backlog is minimal and cheap
+        // to saturate. Hold the listener fd open (never accept) for the probe.
+        // SAFETY: socket/bind/listen with valid constants and a valid addr.
+        let listener = unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+            let owned = OwnedFd::from_raw_fd(fd);
+            let rc = libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                addr_len,
+            );
+            assert_eq!(rc, 0, "bind: {}", std::io::Error::last_os_error());
+            let rc = libc::listen(fd, 1);
+            assert_eq!(rc, 0, "listen: {}", std::io::Error::last_os_error());
+            owned
+        };
+
+        // Saturate the backlog with idle nonblocking clients; keep their fds
+        // open so the slots stay occupied. Nothing ever accepts them.
+        let mut fillers: Vec<OwnedFd> = Vec::new();
+        for _ in 0..64 {
+            // SAFETY: socket + nonblocking connect with the same valid addr;
+            // the fd is owned immediately so it is closed on drop.
+            unsafe {
+                let cfd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                if cfd < 0 {
+                    break;
+                }
+                let owned = OwnedFd::from_raw_fd(cfd);
+                let fl = libc::fcntl(cfd, libc::F_GETFL);
+                libc::fcntl(cfd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+                let _ = libc::connect(
+                    cfd,
+                    &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                    addr_len,
+                );
+                fillers.push(owned);
+            }
+        }
+
+        let start = std::time::Instant::now();
+        let decision = probe_socket(&path, std::time::Duration::from_millis(150));
+        assert!(
+            matches!(decision, RouteDecision::Direct),
+            "a full-backlog (wedged) service must fall back to Direct"
+        );
+        // 150ms budget vs a 2s bound: the pre-fix blocking connect hangs on
+        // Linux; the bounded connect gives up ~150ms. 2s separates them with
+        // ample room for load jitter.
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "probe must give up near the connect budget, not block (elapsed {:?})",
+            start.elapsed()
+        );
+
+        // Keep the sockets alive until here so the backlog stayed full during
+        // the probe; drop explicitly to make that lifetime intent clear.
+        drop(fillers);
+        drop(listener);
     }
 }

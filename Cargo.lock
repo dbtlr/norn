@@ -1074,6 +1074,7 @@ dependencies = [
  "filetime",
  "fs2",
  "globset",
+ "libc",
  "mockito",
  "pulldown-cmark",
  "regex",
