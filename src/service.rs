@@ -236,7 +236,7 @@ pub fn probe(timeout: std::time::Duration) -> RouteDecision {
 /// bytes; this cap turns a peer that streams bytes without a newline into a
 /// bounded `Err` (→ Direct) instead of an unbounded buffer growth.
 #[cfg(unix)]
-const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024;
 
 /// Probe a specific socket path. Split from [`probe`] so tests can point it at a
 /// stub listener on a temp path.

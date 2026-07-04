@@ -107,13 +107,30 @@ impl McpServer {
     /// macro additionally needs `T: JsonSchema` to emit each tool's
     /// `outputSchema`. Both bounds match what the existing methods already
     /// required, so the generic does not narrow any tool's contract.
+    ///
+    /// The lock is acquired FIRST (async), then the sync vault work runs on a
+    /// `spawn_blocking` thread rather than inline on the async worker. Under the
+    /// warm host daemon (`norn serve`) many connections share one runtime; a
+    /// long-running query executed inline would occupy a worker thread and could
+    /// starve the O(1) control-ping path (ADR 0005 requires pings answer
+    /// promptly regardless of query load). Running the SQLite work off the async
+    /// workers keeps them free for accepts, pings, and other vaults. The NRN-55
+    /// serialization guarantee is unchanged: `call_lock` is still held across the
+    /// whole blocking call, so per-vault work stays single-flight.
     async fn run_tool<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
     where
-        T: serde::Serialize + schemars::JsonSchema,
-        F: FnOnce(&VaultContext) -> anyhow::Result<T>,
+        T: serde::Serialize + schemars::JsonSchema + Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
     {
         let _guard = self.call_lock.lock().await;
-        f(&self.ctx).map(Json).map_err(to_mcp_error)
+        let ctx = Arc::clone(&self.ctx);
+        match tokio::task::spawn_blocking(move || f(&ctx)).await {
+            Ok(result) => result.map(Json).map_err(to_mcp_error),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("tool task failed: {join_err}"),
+                None,
+            )),
+        }
     }
 
     /// Run a *mutation* tool handler — like [`run_tool`](Self::run_tool), but
@@ -132,8 +149,8 @@ impl McpServer {
     /// client that calls a tool it was never advertised.
     async fn run_mutation<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
     where
-        T: serde::Serialize + schemars::JsonSchema,
-        F: FnOnce(&VaultContext) -> anyhow::Result<T>,
+        T: serde::Serialize + schemars::JsonSchema + Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
     {
         if self.read_only {
             return Err(rmcp::ErrorData::invalid_request(
@@ -142,7 +159,14 @@ impl McpServer {
             ));
         }
         let _guard = self.call_lock.lock().await;
-        f(&self.ctx).map(Json).map_err(to_mcp_error)
+        let ctx = Arc::clone(&self.ctx);
+        match tokio::task::spawn_blocking(move || f(&ctx)).await {
+            Ok(result) => result.map(Json).map_err(to_mcp_error),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("tool task failed: {join_err}"),
+                None,
+            )),
+        }
     }
 }
 
@@ -290,7 +314,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::describe::DescribeParams>,
     ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::describe::handle(ctx, &p))
+        self.run_tool(move |ctx| crate::mcp::tools::describe::handle(ctx, &p))
             .await
     }
 }

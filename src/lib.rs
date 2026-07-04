@@ -36,6 +36,7 @@ mod repair_apply;
 mod rewrite_wikilink_cmd;
 mod self_update;
 mod seq_alloc;
+mod serve;
 mod service;
 mod set;
 mod show;
@@ -149,6 +150,23 @@ fn run(cli: Cli) -> Result<i32> {
     // cache-opening match arms below.
     if let Command::Mcp(args) = &command {
         crate::mcp::run(args, &cwd, config_path.as_ref())?;
+        return Ok(0);
+    }
+
+    // The warm host daemon owns its own tokio runtime and opens vault contexts
+    // per-connection, so — like `mcp` — it is pre-handled here, before the
+    // cache-opening arms and the routing seam. It ignores `--cwd` for data
+    // (vaults arrive per connection) but refuses an explicit `--config`:
+    // warm contexts always load each vault's default config, so honoring a
+    // single CLI-level `--config` would be misleading. Exit 2 = bad invocation.
+    if let Command::Serve(_) = &command {
+        if config_path.is_some() {
+            eprintln!(
+                "norn serve: --config is not supported (each vault loads its own default .norn/config.yaml)"
+            );
+            return Ok(2);
+        }
+        crate::serve::run()?;
         return Ok(0);
     }
 
@@ -1209,6 +1227,9 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::Mcp(_) => {
             unreachable!("mcp is handled before the cache-opening dispatch")
+        }
+        Command::Serve(_) => {
+            unreachable!("serve is handled before the cache-opening dispatch")
         }
     };
     // Per-invocation throttled lazy GC: best-effort, never affects the
