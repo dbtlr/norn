@@ -4,7 +4,8 @@
 //!
 //! 1. Reconstruct the `GraphIndex` via `cache_cmd::load_graph_index`, applying
 //!    `files.ignore` patterns and an implicit incremental cache refresh.
-//! 2. Call `validate_with_compiled` with the warm server-lifetime config.
+//! 2. Call `validate_with_compiled` with the context's current config
+//!    (`ctx.config()`; hot-swapped in warm mode).
 //! 3. Filter findings via `filter_findings` (triage filters from params).
 //! 4. Serialize each `Finding` as `serde_json::Value` into the output envelope.
 //!
@@ -101,8 +102,8 @@ pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
     let config = ctx.config();
     let index = load_graph_index(&ctx.vault_root, &config.index_options, false)?;
 
-    // Run validation using the warm server-lifetime config — same config path
-    // as `norn validate` (load_config is called once at server start, held in ctx).
+    // Run validation using the context's current config (`ctx.config()`;
+    // hot-swapped in warm mode) — same config path as `norn validate`.
     let findings = validate_with_compiled(
         &index,
         &config.validate,

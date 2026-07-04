@@ -128,6 +128,12 @@ pub(crate) async fn handle_connection(
 /// Crucially, it consumes only up to and including the newline from the
 /// `BufReader`, leaving any pipelined bytes buffered for the subsequent MCP
 /// stream.
+///
+/// Each iteration only consumes/appends up to `cap - buf.len() + 1` bytes of
+/// whatever `fill_buf` makes available, so `buf` can overshoot `cap` by at
+/// most one byte before the cap trips — never by a full extra `fill_buf`
+/// chunk. Any unconsumed remainder stays buffered in `reader` for the next
+/// `fill_buf` call (or for the subsequent MCP stream), so no bytes are lost.
 async fn read_first_line_capped<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     cap: usize,
@@ -140,13 +146,18 @@ async fn read_first_line_capped<R: AsyncBufRead + Unpin>(
             // frame" — the caller drops the connection either way.
             return Ok(None);
         }
-        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
-            buf.extend_from_slice(&available[..pos]);
+        // Bound how much of `available` we look at / take this iteration —
+        // `buf.len() <= cap` is the loop invariant (checked below), so this
+        // budget is always >= 1.
+        let budget = cap - buf.len() + 1;
+        let window = &available[..available.len().min(budget)];
+        if let Some(pos) = window.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&window[..pos]);
             reader.consume(pos + 1);
             return Ok(Some(buf));
         }
-        let taken = available.len();
-        buf.extend_from_slice(available);
+        let taken = window.len();
+        buf.extend_from_slice(window);
         reader.consume(taken);
         if buf.len() > cap {
             return Err(std::io::Error::new(

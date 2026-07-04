@@ -22,8 +22,11 @@
 //!   checks integrity once, then self-heals per request — so warm queries skip
 //!   the repeated integrity check the one-shot CLI pays.
 
+#[cfg(unix)]
 pub(crate) mod conn;
+#[cfg(unix)]
 pub(crate) mod contexts;
+#[cfg(unix)]
 pub(crate) mod lifecycle;
 
 #[cfg(unix)]
@@ -54,13 +57,20 @@ pub fn run() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // Register the shutdown signal handlers BEFORE binding the listener:
+        // if registration fails, we bail out with no socket left bound for a
+        // future probe to mistake for a live daemon.
+        use tokio::signal::unix::{signal, SignalKind};
+        let sigint = signal(SignalKind::interrupt())?;
+        let sigterm = signal(SignalKind::terminate())?;
+
         let listener = lifecycle::bind_listener(&socket_path)?;
         eprintln!(
             "norn serve: listening at {socket_path} (v{}, pid {})",
             env!("CARGO_PKG_VERSION"),
             std::process::id()
         );
-        serve_loop(listener, &socket_path).await
+        serve_loop(listener, &socket_path, sigint, sigterm).await
     })
 }
 
@@ -73,17 +83,19 @@ pub fn run() -> anyhow::Result<()> {
 /// Accept connections until a shutdown signal, spawning a task per connection.
 /// On SIGINT/SIGTERM: stop accepting, unlink the socket, return (exit 0).
 /// In-flight connections may be dropped — the client falls back to Direct.
+///
+/// `sigint`/`sigterm` are registered by the caller (before the listener is
+/// bound — see [`run`]) so a signal-registration failure never leaves the
+/// socket bound with nothing watching it.
 #[cfg(unix)]
 async fn serve_loop(
     listener: tokio::net::UnixListener,
     socket_path: &Utf8Path,
+    mut sigint: tokio::signal::unix::Signal,
+    mut sigterm: tokio::signal::unix::Signal,
 ) -> anyhow::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
-
     let contexts = Arc::new(contexts::Contexts::new());
     let start = Instant::now();
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let mut sigterm = signal(SignalKind::terminate())?;
 
     loop {
         tokio::select! {
