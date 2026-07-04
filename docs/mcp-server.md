@@ -11,7 +11,7 @@ description: Run norn as a Model Context Protocol stdio server — the 14-tool c
 norn mcp --cwd /path/to/vault
 ```
 
-The server speaks JSON-RPC over stdin/stdout. It is **not** a daemon, a network service, or a file watcher: it is a child process the harness launches and keeps alive, one vault per instance, with no background activity between calls.
+The server speaks JSON-RPC over stdin/stdout. It is **not** a daemon, a network service, or a file watcher: it is a child process the harness launches and keeps alive, one vault per instance, with no background activity between calls. For a persistent, multi-vault alternative that stays warm across calls, see [`norn serve`](service.md).
 
 ## Scope (v1)
 
@@ -149,6 +149,7 @@ These are intentional v1 boundaries, tracked under the ongoing MCP initiative:
 
 ## See also
 
+- [Warm host daemon](service.md) — `norn serve`, the persistent multi-vault alternative to this stdio server.
 - [Agent workflows](agent-workflows.md) — the CLI-side agent contract and loop patterns the MCP tools mirror.
 - [Validation and repair](validation.md) — the `MigrationPlan` schema behind `vault.repair_plan` / `vault.apply_plan`.
 - [Configuration](configuration.md) — the `.norn/config.yaml` keys `vault.describe` projects.

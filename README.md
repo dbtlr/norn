@@ -139,6 +139,7 @@ One server instance serves one vault. See [docs/mcp-server.md](docs/mcp-server.m
 | Validate rule shape (selectors + constraints) | [docs/rule-shape.md](docs/rule-shape.md) |
 | Agent workflows | [docs/agent-workflows.md](docs/agent-workflows.md) |
 | MCP server | [docs/mcp-server.md](docs/mcp-server.md) |
+| Warm host daemon (`norn serve`) | [docs/service.md](docs/service.md) |
 | Development | [docs/development.md](docs/development.md) |
 | Releases and versioning | [docs/releases.md](docs/releases.md) |
 
