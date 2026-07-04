@@ -11,12 +11,9 @@ pub const BIN_NAME: &str = match option_env!("CARGO_BIN_NAME") {
     None => "norn",
 };
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bin_name_matches_cargo_bin_name() {
-        assert_eq!(BIN_NAME, "norn");
-    }
-}
+// No unit test here: in a library build `CARGO_BIN_NAME` is unset, so `BIN_NAME`
+// resolves to the hardcoded fallback and any `assert_eq!(BIN_NAME, "norn")`
+// would be a tautology. The guarantee that matters — the `norn` *binary*
+// reports "norn" as its program name — is verified against the real binary
+// (compiled with `CARGO_BIN_NAME` set) in `tests/cli_output.rs`
+// (`top_level_help_uses_norn_program_name`).
