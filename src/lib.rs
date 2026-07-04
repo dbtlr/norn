@@ -97,7 +97,7 @@ fn is_routable_read(command: &Command) -> bool {
 
 /// The CLI→service routing seam (NRN-92).
 ///
-/// For a routable read command, probe for a live warm service for `cwd`.
+/// For a routable read command, probe for a live warm host service.
 /// Returns `Some(result)` if the request was served by routing to the service,
 /// or `None` to fall through to the direct, integrity-verified dispatch.
 ///
@@ -106,11 +106,11 @@ fn is_routable_read(command: &Command) -> bool {
 /// Until then this always returns `None` — a live service is a safe
 /// fall-through, because the direct dispatch re-establishes trust locally and
 /// so preserves the invariant unconditionally (ADR 0005).
-fn try_route_read(command: &Command, cwd: &camino::Utf8Path) -> Option<Result<i32>> {
+fn try_route_read(command: &Command) -> Option<Result<i32>> {
     if !is_routable_read(command) {
         return None;
     }
-    match service::probe(cwd, service::DEFAULT_HANDSHAKE_TIMEOUT) {
+    match service::probe(service::DEFAULT_HANDSHAKE_TIMEOUT) {
         service::RouteDecision::Direct => None,
         #[cfg(unix)]
         service::RouteDecision::Route(_client) => {
@@ -165,7 +165,7 @@ fn run(cli: Cli) -> Result<i32> {
     // from an already-verified cache. When it returns `Some`, the request was
     // served by routing; otherwise we fall through to the direct, integrity-
     // verified dispatch below (today's behavior). No daemon => only a `stat`.
-    if let Some(result) = try_route_read(&command, &cwd) {
+    if let Some(result) = try_route_read(&command) {
         return result;
     }
 

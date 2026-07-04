@@ -1,9 +1,10 @@
-//! The CLI → service routing seam (NRN-92).
+//! The CLI → service routing seam (NRN-92, retargeted to a host daemon in
+//! NRN-93).
 //!
 //! On each invocation the CLI decides, for a routable read command, whether a
-//! warm [`norn-service`] daemon is live for this vault and can serve the request
-//! from an already-verified warm cache — or whether to run the operation
-//! **directly** with its own integrity-verified cache open (today's behavior).
+//! warm `norn-service` host daemon is live and can serve the request from an
+//! already-verified warm cache — or whether to run the operation **directly**
+//! with its own integrity-verified cache open (today's behavior).
 //!
 //! The decision is the trust hinge of the whole `norn-service` design
 //! (ADR 0005): trust is *inherited from a live authority or re-established
@@ -27,10 +28,29 @@
 //! **handshake must ride an O(1) control path** so a busy service still answers
 //! the ping immediately (the daemon side of that is NRN-93).
 //!
-//! ## Scope of this module (NRN-92)
+//! ## One host daemon, not one per vault (ADR 0005 amendment, 2026-07-04)
 //!
-//! This lands the *client half*: socket-path derivation, the probe, and the
-//! control-frame protocol. It returns a [`RouteDecision`]; the daemon that
+//! The original design (NRN-92) derived a per-vault socket path from the
+//! vault root's identity hash, so N open vaults meant N independent
+//! single-owner daemons with no central coordinator. That derived path
+//! measured ~101 bytes on a real vault under a typical `XDG_CACHE_HOME`,
+//! leaving almost no headroom under macOS's ~104-byte `sun_path` limit before
+//! silently overflowing into "socket unreachable, fall back to Direct" — and
+//! running N daemons multiplies the ops burden (N lifecycles, N crash
+//! surfaces, N places a stale process can linger) for no benefit the vault
+//! itself needs.
+//!
+//! The revised design is **one host daemon at a single well-known socket**:
+//! [`host_socket_path`] is `<XDG_CACHE_HOME>/norn/run/norn.sock`, fixed
+//! regardless of how many vaults are open. There is no per-vault derivation to
+//! overflow. The daemon names the vault for a connection itself, via a
+//! `hello` preamble frame the client sends after the control handshake (see
+//! below) — the socket path no longer encodes vault identity at all.
+//!
+//! ## Scope of this module (NRN-92 / NRN-93)
+//!
+//! This lands the *client half*: host-socket-path derivation, the probe, and
+//! the control-frame protocol. It returns a [`RouteDecision`]; the daemon that
 //! answers the handshake is NRN-93, and translating the CLI args to the MCP
 //! contract and rendering the routed response is NRN-94. Until NRN-94 fills the
 //! `Route` arm, callers treat a live service as a safe fall-through to Direct —
@@ -41,16 +61,11 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::cache::cache_dir_for;
-
 /// Control-frame protocol version. Bumped only on a breaking change to the
 /// handshake wire shape; the client refuses to route unless the daemon echoes
 /// the same version, so a version skew falls back to Direct rather than
 /// misinterpreting frames.
 pub const CONTROL_PROTOCOL: u32 = 1;
-
-/// Filename of the per-vault service socket, under the vault's cache dir.
-const SOCKET_FILENAME: &str = "service.sock";
 
 /// How long the probe waits for the handshake pong before giving up and
 /// falling back to Direct. Kept short: a live daemon answers the control ping
@@ -90,25 +105,45 @@ pub struct ServiceClient {
     pub socket_path: Utf8PathBuf,
 }
 
-/// Derive the per-vault service socket path: `<cache_dir>/service.sock`, where
-/// the cache dir is `<XDG_CACHE_HOME>/norn/<sha256-of-canonical-root>/`.
+/// The host daemon's run directory: `<XDG_CACHE_HOME>/norn/run`.
 ///
-/// Routing is by **derivation, not a registry**: both the client and the daemon
-/// compute this same path from the vault root's identity hash, so N vaults on a
-/// host get N independent single-owner daemons with no central coordinator.
-pub fn service_socket_path(vault_root: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
-    let (_canonical, cache_dir) = cache_dir_for(vault_root)?;
-    Ok(cache_dir.join(SOCKET_FILENAME))
+/// This is where the well-known control socket and its advisory lock live.
+/// The client only ever stats or connects under this directory — creating it
+/// is the daemon's job (it must exist before the daemon can bind the socket),
+/// so this function does not create anything on disk.
+pub fn run_dir() -> anyhow::Result<Utf8PathBuf> {
+    Ok(crate::cache::cache_tree_root()?.join("run"))
 }
 
-/// Probe for a live service for `vault_root` and decide how to run the request.
+/// The host daemon's well-known control socket: `<run_dir>/norn.sock`.
+///
+/// Fixed and singular — there is exactly one of these per host, independent
+/// of how many vaults are open. See the module docs' "one host daemon, not
+/// one per vault" section for why this replaced per-vault derivation.
+pub fn host_socket_path() -> anyhow::Result<Utf8PathBuf> {
+    Ok(run_dir()?.join("norn.sock"))
+}
+
+/// The host daemon's advisory lock file: `<run_dir>/norn.lock`, used to keep
+/// at most one daemon instance bound to [`host_socket_path`] at a time.
+///
+/// Unused by the client today — the daemon lifecycle that acquires this lock
+/// on startup is a later task (NRN-93's daemon binary). Kept `pub` and
+/// defined here now so the run-directory layout (socket + lock, one place)
+/// is settled by the same change that fixes the socket path.
+#[allow(dead_code)]
+pub fn host_lock_path() -> anyhow::Result<Utf8PathBuf> {
+    Ok(run_dir()?.join("norn.lock"))
+}
+
+/// Probe for a live host service and decide how to run the request.
 ///
 /// Never errors: any failure to derive the path, stat, connect, or handshake
 /// resolves to [`RouteDecision::Direct`] — the always-safe path. The daemon is
 /// a pure optimization, so its absence or malfunction must degrade to today's
 /// behavior, never surface as an error.
-pub fn probe(vault_root: &Utf8Path, timeout: std::time::Duration) -> RouteDecision {
-    let Ok(socket_path) = service_socket_path(vault_root) else {
+pub fn probe(timeout: std::time::Duration) -> RouteDecision {
+    let Ok(socket_path) = host_socket_path() else {
         return RouteDecision::Direct;
     };
     probe_socket(&socket_path, timeout)
@@ -268,25 +303,22 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
-    /// Derivation is deterministic and lands under the vault's cache dir.
-    /// The roots must exist because `vault_identity` canonicalizes them.
+    /// The host socket path is deterministic (same process env => same
+    /// answer every call) and lands at the well-known `norn/run/norn.sock`
+    /// suffix under the ambient cache tree.
+    ///
+    /// Deliberately does NOT `std::env::set_var` to force a specific
+    /// `XDG_CACHE_HOME`: that call is process-global and races other
+    /// in-binary tests reading the same env (see the `mcp::server` tests'
+    /// `cold_seeded_vault` for the same rule). Asserting the suffix under
+    /// whatever cache root the ambient environment resolves to is enough to
+    /// prove derivation is well-known and stable without racing anything.
     #[test]
-    fn socket_path_is_deterministic_and_under_cache_dir() {
-        let vault = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(vault.path()).unwrap();
-        let a = service_socket_path(root).expect("derive");
-        let b = service_socket_path(root).expect("derive again");
-        assert_eq!(a, b, "same vault => same socket path");
-        assert!(a.as_str().ends_with("/service.sock"), "path was {a}");
-        assert!(
-            a.as_str().contains("/norn/"),
-            "under the norn cache tree: {a}"
-        );
-
-        let other_vault = tempfile::tempdir().unwrap();
-        let other_root = Utf8Path::from_path(other_vault.path()).unwrap();
-        let other = service_socket_path(other_root).expect("derive other");
-        assert_ne!(a, other, "distinct vaults => distinct sockets");
+    fn host_socket_path_is_deterministic_and_well_known() {
+        let a = host_socket_path().expect("derive");
+        let b = host_socket_path().expect("derive again");
+        assert_eq!(a, b, "same process env => same host socket path");
+        assert!(a.as_str().ends_with("norn/run/norn.sock"), "path was {a}");
     }
 
     /// No socket file present => the fast Direct path.
