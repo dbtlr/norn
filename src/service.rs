@@ -67,6 +67,89 @@ use camino::{Utf8Path, Utf8PathBuf};
 /// misinterpreting frames.
 pub const CONTROL_PROTOCOL: u32 = 1;
 
+/// The control-frame wire protocol: newline-delimited JSON, one frame per
+/// line, tagged on `norn_control` so client and daemon can dispatch on the
+/// frame kind without guessing from shape.
+///
+/// A single internally-tagged enum is the wire contract for *both* halves —
+/// the client constructs [`ControlFrame::Ping`] and parses
+/// [`ControlFrame::Pong`] today; the daemon (a later task) constructs `Pong`
+/// and parses `Ping`/`Hello`, and answers a named-vault connection with
+/// `Ready` or `Error`. Defining every variant now, even the ones the client
+/// doesn't speak yet, pins the wire shape for both sides in one place instead
+/// of letting the daemon task invent its own ad hoc framing.
+///
+/// Wire shapes (exactly, one JSON object per line):
+/// - ping:  `{"norn_control":"ping","protocol":1}`
+/// - pong:  `{"norn_control":"pong","protocol":1,"version":"<semver>","pid":<u32>,"uptime_secs":<u64>}`
+/// - hello: `{"norn_control":"hello","protocol":1,"vault_root":"<canonical abs path>"}`
+/// - ready: `{"norn_control":"ready","protocol":1,"version":"<semver>"}`
+/// - error: `{"norn_control":"error","protocol":1,"message":"..."}`
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "norn_control", rename_all = "lowercase")]
+pub enum ControlFrame {
+    /// Client -> daemon: "are you alive, and do we speak the same protocol?"
+    Ping { protocol: u32 },
+    /// Daemon -> client: proof of life plus enough to decide whether to
+    /// route. `pid`/`uptime_secs` are informational (useful for `norn service
+    /// status`-style diagnostics later); the client today only reads
+    /// `version` to gate routing, so they parse as `Option` and a pong
+    /// missing them is still a valid, routable pong. `version` is NOT
+    /// optional: a pong missing it is a malformed frame (silent Direct), not
+    /// a version skew.
+    Pong {
+        protocol: u32,
+        version: String,
+        #[serde(default)]
+        pid: Option<u32>,
+        #[serde(default)]
+        uptime_secs: Option<u64>,
+    },
+    /// Client -> daemon, after the control handshake: names the vault this
+    /// connection is for. The daemon derives vault identity from this path
+    /// rather than from the socket path (there is only one socket now — see
+    /// the module docs). Unused by the client until NRN-94 opens the request
+    /// connection; defined now so the wire contract is settled for the
+    /// daemon task.
+    #[allow(dead_code)]
+    Hello { protocol: u32, vault_root: String },
+    /// Daemon -> client: the named vault's warm cache is ready to serve.
+    /// Unused until NRN-94.
+    #[allow(dead_code)]
+    Ready { protocol: u32, version: String },
+    /// Daemon -> client: the request (handshake or named-vault open) failed
+    /// on the daemon side. Unused until NRN-94.
+    #[allow(dead_code)]
+    Error { protocol: u32, message: String },
+}
+
+/// A handshake outcome that distinguishes version skew from every other
+/// failure mode.
+///
+/// Every handshake failure maps to [`RouteDecision::Direct`] — trust is never
+/// skipped just because routing didn't happen — but version skew is the one
+/// failure worth telling the operator about: it is actionable (the fix is
+/// `norn service restart`) and silent about it would leave the CLI quietly
+/// falling back to Direct forever after a client upgrade, with no signal that
+/// a stale daemon is the reason. Every other variant (`Other`) covers
+/// timeouts, I/O errors, protocol mismatches, and malformed frames, which
+/// stay silent because they are expected transient or environmental noise.
+#[cfg(unix)]
+#[derive(Debug)]
+enum HandshakeError {
+    /// The daemon answered with a well-formed pong at the right protocol
+    /// version, but its build version doesn't match this client's.
+    VersionSkew { server: String, client: String },
+    /// Anything else: timeout, I/O error, protocol mismatch, wrong frame
+    /// kind, or a pong missing `version`. The wrapped error is never read
+    /// today — callers only distinguish this variant from `VersionSkew`,
+    /// deliberately staying silent about the specifics — but it's kept
+    /// rather than discarded so future diagnostics (e.g. `-v` logging) have
+    /// it to hand without re-plumbing the type.
+    #[allow(dead_code)]
+    Other(anyhow::Error),
+}
+
 /// How long the probe waits for the handshake pong before giving up and
 /// falling back to Direct. Kept short: a live daemon answers the control ping
 /// off its accept loop essentially instantly, so a slow reply means "hung",
@@ -183,9 +266,20 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
         Ok(()) => RouteDecision::Route(ServiceClient {
             socket_path: socket_path.to_owned(),
         }),
-        // Hung (timeout), refused mid-handshake, version skew, or garbage — all
-        // fall back to a verified direct open. Trust is never skipped.
-        Err(_) => RouteDecision::Direct,
+        // Version skew is the one failure mode worth telling the operator
+        // about — it's actionable and otherwise invisible (the CLI would
+        // just quietly run Direct forever after a client upgrade). Exactly
+        // one line, then fall back like every other failure.
+        Err(HandshakeError::VersionSkew { server, client }) => {
+            eprintln!(
+                "norn: service is v{server}, client is v{client} — run 'norn service restart'"
+            );
+            RouteDecision::Direct
+        }
+        // Hung (timeout), refused mid-handshake, protocol mismatch, or
+        // garbage — all fall back to a verified direct open, silently. Trust
+        // is never skipped.
+        Err(HandshakeError::Other(_)) => RouteDecision::Direct,
     };
     // The control connection has served its purpose (proving liveness); drop it
     // explicitly. NRN-94 opens the request connection to the same socket.
@@ -211,9 +305,13 @@ fn connect_control(socket_path: &Utf8Path) -> std::io::Result<std::os::unix::net
 
 /// Exchange the control ping/pong on a connected stream within `timeout`.
 ///
-/// Writes a single newline-delimited JSON ping, then reads one line and
-/// requires a matching-version pong. Any I/O error, timeout, protocol-version
-/// mismatch, or unexpected frame is an `Err`, which the caller maps to Direct.
+/// Writes a single newline-delimited JSON [`ControlFrame::Ping`], then reads
+/// one line and requires a protocol-matching, exact-version-matching
+/// [`ControlFrame::Pong`]. Any I/O error, timeout, protocol mismatch, or
+/// unexpected/malformed frame is [`HandshakeError::Other`]; a well-formed,
+/// protocol-matching pong whose `version` differs from this build's is
+/// [`HandshakeError::VersionSkew`] — the one case the caller surfaces to the
+/// operator before falling back to Direct.
 ///
 /// The stream is used only to prove liveness and is dropped by the caller
 /// afterward, so the short handshake timeouts never leak onto a request channel.
@@ -221,7 +319,28 @@ fn connect_control(socket_path: &Utf8Path) -> std::io::Result<std::os::unix::net
 fn handshake(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
-) -> anyhow::Result<()> {
+) -> Result<(), HandshakeError> {
+    let version = handshake_pong_version(stream, timeout).map_err(HandshakeError::Other)?;
+    let client_version = env!("CARGO_PKG_VERSION");
+    if version != client_version {
+        return Err(HandshakeError::VersionSkew {
+            server: version,
+            client: client_version.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Write the ping, read the reply, and return the pong's `version` string —
+/// the piece [`handshake`] needs to decide routing vs. version skew. Every
+/// failure short of a well-formed, protocol-matching pong is a plain
+/// `anyhow::Error`; [`handshake`] is the only place that turns "the version
+/// differs" into the distinguished [`HandshakeError::VersionSkew`].
+#[cfg(unix)]
+fn handshake_pong_version(
+    stream: &std::os::unix::net::UnixStream,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
     use std::io::Write;
 
     let deadline = std::time::Instant::now() + timeout;
@@ -236,8 +355,11 @@ fn handshake(
     // `Read`/`Write`, so no `try_clone` is needed. (Cloning then dropping a
     // dup'd socket fd before touching `SO_RCVTIMEO` on the original trips EINVAL
     // on macOS; borrowing sidesteps that and avoids the fd churn.)
-    let ping = serde_json::json!({ "norn_control": "ping", "protocol": CONTROL_PROTOCOL });
-    writeln!(&mut { stream }, "{ping}")?;
+    let ping = ControlFrame::Ping {
+        protocol: CONTROL_PROTOCOL,
+    };
+    let ping_json = serde_json::to_string(&ping)?;
+    writeln!(&mut { stream }, "{ping_json}")?;
     Write::flush(&mut { stream })?;
 
     // Read one control line, bounded by the *cumulative* deadline (not per read
@@ -245,17 +367,23 @@ fn handshake(
     // cannot hang the probe or grow memory unbounded.
     let line = read_control_line(stream, deadline)?;
 
-    let frame: serde_json::Value = serde_json::from_str(line.trim())?;
-    let kind = frame.get("norn_control").and_then(|v| v.as_str());
-    let protocol = frame.get("protocol").and_then(|v| v.as_u64());
-    if kind != Some("pong") {
-        anyhow::bail!("unexpected control frame: {kind:?}");
+    // A pong missing `version` fails to deserialize here (it's a required
+    // field) and lands in the generic `Err` path below — a malformed frame,
+    // not a version skew.
+    let frame: ControlFrame = serde_json::from_str(line.trim())?;
+    match frame {
+        ControlFrame::Pong {
+            protocol, version, ..
+        } => {
+            if protocol != CONTROL_PROTOCOL {
+                anyhow::bail!(
+                    "control protocol mismatch: service spoke {protocol}, client wants {CONTROL_PROTOCOL}"
+                );
+            }
+            Ok(version)
+        }
+        other => anyhow::bail!("unexpected control frame: {other:?}"),
     }
-    if protocol != Some(u64::from(CONTROL_PROTOCOL)) {
-        anyhow::bail!("control protocol mismatch: service spoke {protocol:?}, client wants {CONTROL_PROTOCOL}");
-    }
-
-    Ok(())
 }
 
 /// Read a single newline-terminated control frame, bounded by a wall-clock
@@ -332,7 +460,10 @@ mod tests {
         ));
     }
 
-    /// A live listener that answers a prompt, well-formed pong => Route.
+    /// A live listener that answers a prompt, well-formed pong at the same
+    /// protocol AND the same build version => Route. The version match is
+    /// now load-bearing: a pong at the right protocol but a different
+    /// `version` must NOT route (see `version_skew_is_direct` below).
     #[test]
     fn live_service_answering_pong_is_routed() {
         let dir = tempfile::tempdir().unwrap();
@@ -344,13 +475,17 @@ mod tests {
             let mut reader = BufReader::new(conn.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            // Answer with a matching-version pong.
+            // Answer with a matching-protocol, matching-version pong,
+            // including the informational pid/uptime fields a real daemon
+            // sends.
+            let pong = ControlFrame::Pong {
+                protocol: CONTROL_PROTOCOL,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                pid: Some(std::process::id()),
+                uptime_secs: Some(42),
+            };
             let mut w = conn;
-            writeln!(
-                w,
-                "{{\"norn_control\":\"pong\",\"protocol\":{CONTROL_PROTOCOL}}}"
-            )
-            .unwrap();
+            writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
         });
 
@@ -412,7 +547,15 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
             let mut w = conn;
-            writeln!(w, "{{\"norn_control\":\"pong\",\"protocol\":9999}}").unwrap();
+            // Version matches (so the protocol check, not a version-skew
+            // check, is what's under test) but the protocol number doesn't.
+            let pong = ControlFrame::Pong {
+                protocol: 9999,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                pid: None,
+                uptime_secs: None,
+            };
+            writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
         });
 
@@ -421,6 +564,182 @@ mod tests {
             RouteDecision::Direct
         ));
         server.join().unwrap();
+    }
+
+    /// A live listener that answers with the right protocol but a different
+    /// build version => Direct at the `probe_socket` level, and specifically
+    /// `HandshakeError::VersionSkew` (carrying both versions) at the
+    /// `handshake` level — the case the client-side stderr line is keyed on.
+    #[test]
+    fn version_skew_is_direct() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut w = conn;
+            let pong = ControlFrame::Pong {
+                protocol: CONTROL_PROTOCOL,
+                version: "0.0.1".to_string(),
+                pid: Some(1),
+                uptime_secs: Some(1),
+            };
+            writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
+            w.flush().unwrap();
+        });
+
+        assert!(matches!(
+            probe_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT),
+            RouteDecision::Direct
+        ));
+        server.join().unwrap();
+    }
+
+    /// Unit-test `handshake` directly (rather than through `probe_socket`) to
+    /// assert the `VersionSkew` variant itself carries both the server's and
+    /// this client's version strings — the detail `probe_socket` discards
+    /// after printing (its result is just `RouteDecision`).
+    #[test]
+    fn handshake_reports_version_skew_with_both_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut w = conn;
+            let pong = ControlFrame::Pong {
+                protocol: CONTROL_PROTOCOL,
+                version: "0.0.1".to_string(),
+                pid: None,
+                uptime_secs: None,
+            };
+            writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
+            w.flush().unwrap();
+        });
+
+        let stream = connect_control(&path).unwrap();
+        let err = handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT).expect_err("expected VersionSkew");
+        match err {
+            HandshakeError::VersionSkew { server, client } => {
+                assert_eq!(server, "0.0.1");
+                assert_eq!(client, env!("CARGO_PKG_VERSION"));
+            }
+            HandshakeError::Other(e) => panic!("expected VersionSkew, got Other({e:?})"),
+        }
+        server.join().unwrap();
+    }
+
+    /// A well-formed pong missing the `version` field entirely is a
+    /// malformed frame => Direct, and specifically NOT `VersionSkew` (there
+    /// is no server version to report).
+    #[test]
+    fn pong_missing_version_is_direct_not_version_skew() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut w = conn;
+            // Hand-written: no `version` field at all.
+            writeln!(
+                w,
+                "{{\"norn_control\":\"pong\",\"protocol\":{CONTROL_PROTOCOL}}}"
+            )
+            .unwrap();
+            w.flush().unwrap();
+        });
+
+        let stream = connect_control(&path).unwrap();
+        let err =
+            handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT).expect_err("expected a handshake error");
+        assert!(
+            matches!(err, HandshakeError::Other(_)),
+            "a pong missing `version` must be Other, not VersionSkew: {err:?}"
+        );
+        server.join().unwrap();
+    }
+
+    /// Each control-frame variant serializes to exactly the documented wire
+    /// shape — the newline-delimited JSON contract shared by client and
+    /// daemon. Asserted via `serde_json::Value` equality so field order in
+    /// the struct literal doesn't matter, only the resulting JSON.
+    #[test]
+    fn control_frame_wire_shapes() {
+        let ping = ControlFrame::Ping {
+            protocol: CONTROL_PROTOCOL,
+        };
+        assert_eq!(
+            serde_json::to_value(&ping).unwrap(),
+            serde_json::json!({"norn_control": "ping", "protocol": 1})
+        );
+
+        let pong = ControlFrame::Pong {
+            protocol: CONTROL_PROTOCOL,
+            version: "1.2.3".to_string(),
+            pid: Some(4321),
+            uptime_secs: Some(99),
+        };
+        assert_eq!(
+            serde_json::to_value(&pong).unwrap(),
+            serde_json::json!({
+                "norn_control": "pong",
+                "protocol": 1,
+                "version": "1.2.3",
+                "pid": 4321,
+                "uptime_secs": 99,
+            })
+        );
+
+        let hello = ControlFrame::Hello {
+            protocol: CONTROL_PROTOCOL,
+            vault_root: "/vaults/atlas".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&hello).unwrap(),
+            serde_json::json!({
+                "norn_control": "hello",
+                "protocol": 1,
+                "vault_root": "/vaults/atlas",
+            })
+        );
+
+        let ready = ControlFrame::Ready {
+            protocol: CONTROL_PROTOCOL,
+            version: "1.2.3".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&ready).unwrap(),
+            serde_json::json!({
+                "norn_control": "ready",
+                "protocol": 1,
+                "version": "1.2.3",
+            })
+        );
+
+        let error = ControlFrame::Error {
+            protocol: CONTROL_PROTOCOL,
+            message: "vault not found".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            serde_json::json!({
+                "norn_control": "error",
+                "protocol": 1,
+                "message": "vault not found",
+            })
+        );
     }
 
     /// A live listener that closes without answering => Direct.
