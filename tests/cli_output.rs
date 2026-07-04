@@ -1753,6 +1753,19 @@ fn manpage_is_hidden_from_top_level_help() {
 }
 
 #[test]
+fn top_level_help_uses_norn_program_name() {
+    // Exercises the real binary (compiled with CARGO_BIN_NAME set), so this is
+    // the meaningful guard on `help::bin_name::BIN_NAME` that its now-removed
+    // unit test could not be under a library build. If the binary is renamed in
+    // Cargo.toml, the usage line changes and this fails.
+    let output = vault(&["--help"]);
+    assert!(
+        output.contains("norn [OPTIONS]"),
+        "top-level usage should name the program `norn`; got:\n{output}"
+    );
+}
+
+#[test]
 fn completions_init_subcommand_help_documents_supported_shells() {
     let output = vault(&["completions", "init", "--help"]);
     for shell in ["bash", "zsh", "fish", "powershell", "elvish", "nushell"] {
