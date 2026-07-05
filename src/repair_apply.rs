@@ -20,6 +20,15 @@ pub struct CreateApplyContext {
     /// create the full path via `create_dir_all` instead of refusing.
     /// Threaded from `NewArgs::parents` / the `-p` / `--parents` flag.
     pub parents: bool,
+    /// `files.ignore` glob patterns (from `VaultConfig`), re-checked against the
+    /// RESOLVED `create_document` path (post `{{seq}}` resolution) before any
+    /// write (NRN-138). `synth::build_plan`'s NRN-131 guard only sees the
+    /// literal template path (e.g. `logs/{{seq}}.md`) at plan time, so a pattern
+    /// that only matches the resolved filename (e.g. `logs/1.md`) would
+    /// otherwise slip through. Empty for callers that don't populate it (their
+    /// `create_document` changes are not `new`-synthesized, so there is no
+    /// build-time guard for this to backstop).
+    pub ignore: Vec<String>,
 }
 
 pub use crate::standards::apply::RepairApplyReport;
@@ -688,6 +697,19 @@ pub fn apply_repair_plan_with_context(
             change.path.clone()
         };
 
+        // NRN-138: re-check `files.ignore` against the RESOLVED path. For a
+        // literal (non-`{{seq}}`) path this repeats `synth::build_plan`'s
+        // NRN-131 guard (a no-op — that guard already refused an ignored path
+        // before a plan reached the applier); for a `{{seq}}`-templated path
+        // this is the first check the resolved filename ever sees, since
+        // `{{seq}}` only becomes concrete here. Must run BEFORE any write.
+        if crate::graph::is_ignored(&resolved_path, &ctx.ignore) {
+            return Err(anyhow::anyhow!(
+                "create_document: resolved path {} matches `files.ignore` — refusing to create",
+                resolved_path
+            ));
+        }
+
         let nv = change.new_value.as_ref().ok_or_else(|| {
             anyhow::anyhow!(ApplyError::MissingNewValue {
                 path: resolved_path.clone(),
@@ -1289,6 +1311,75 @@ mod tests {
         assert!(!written.contains("old content"), "got: {written}");
     }
 
+    // ── files.ignore re-check on resolved `{{seq}}` path (NRN-138) ─────────────
+
+    #[test]
+    fn apply_create_document_refuses_ignored_resolved_seq_path() {
+        // `files.ignore` constrains the RESOLVED seq filename (`logs/1.md`),
+        // not the literal template (`logs/{{seq}}.md`) synth-time saw. The
+        // applier must re-check post-resolution and refuse before any write.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-seq-ignored-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "logs/{{seq}}.md", fm, "Hello\n", false);
+
+        let ctx = CreateApplyContext {
+            parents: true,
+            ignore: vec!["logs/1.md".to_string()],
+        };
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let err = apply_repair_plan_with_context(
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("logs/1.md") && msg.contains("files.ignore"),
+            "expected resolved-path + files.ignore mention, got: {msg}"
+        );
+        assert!(
+            !root.join("logs/1.md").as_std_path().exists(),
+            "ignored resolved seq path must not be written"
+        );
+        assert!(
+            !root.join("logs").as_std_path().exists(),
+            "the ignore check must run before parent-dir creation"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_creates_non_ignored_resolved_seq_path() {
+        // Regression guard: a `{{seq}}` create whose resolved path is NOT
+        // covered by `files.ignore` must still create normally.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-seq-ok-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "logs/{{seq}}.md", fm, "Hello\n", false);
+
+        let ctx = CreateApplyContext {
+            parents: true,
+            ignore: vec!["other/**".to_string()],
+        };
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let report = apply_repair_plan_with_context(
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+        )
+        .unwrap();
+
+        assert_eq!(report.created_documents.len(), 1);
+        assert_eq!(
+            report.created_documents[0].path,
+            camino::Utf8PathBuf::from("logs/1.md")
+        );
+        let full = root.join("logs/1.md");
+        assert!(full.as_std_path().exists(), "file should exist after apply");
+        let written = std::fs::read_to_string(full.as_std_path()).unwrap();
+        assert!(written.contains("Hello\n"), "got: {written}");
+    }
+
     // ── -p / --parents tests ───────────────────────────────────────────────────
 
     #[test]
@@ -1302,7 +1393,10 @@ mod tests {
             false,
         );
 
-        let ctx = CreateApplyContext { parents: true };
+        let ctx = CreateApplyContext {
+            parents: true,
+            ..Default::default()
+        };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let report = apply_repair_plan_with_context(
@@ -1342,7 +1436,10 @@ mod tests {
         };
         let plan = crate::move_doc::preflight_and_plan(cfg).unwrap();
 
-        let create_ctx = CreateApplyContext { parents: false };
+        let create_ctx = CreateApplyContext {
+            parents: false,
+            ..Default::default()
+        };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let report = apply_repair_plan_with_context(
@@ -1378,7 +1475,10 @@ mod tests {
             false,
         );
 
-        let ctx = CreateApplyContext { parents: false };
+        let ctx = CreateApplyContext {
+            parents: false,
+            ..Default::default()
+        };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let err = apply_repair_plan_with_context(

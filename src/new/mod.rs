@@ -270,7 +270,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
             &index,
             &plan,
             body_bytes,
-            loaded_config.vault_config.telemetry.as_ref(),
+            &loaded_config.vault_config,
         );
     }
 
@@ -308,7 +308,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
             &index,
             &plan,
             body_bytes,
-            loaded_config.vault_config.telemetry.as_ref(),
+            &loaded_config.vault_config,
         );
     }
 
@@ -342,11 +342,12 @@ fn parse_var_args(var_args: &[String]) -> Result<BTreeMap<String, String>> {
 
 /// Call the apply orchestrator and render the post-apply output.
 ///
-/// `telemetry` is the loaded vault telemetry config, used to open a real
-/// (file-backed) event sink for the apply. `new` is a single `create_document`
-/// op, so it emits the same lifecycle → op_planned → action → finished stream
-/// as the applier-routed mutators, and the `trace_id` is threaded into the
-/// rendered report.
+/// `cfg` is the loaded vault config, used both to open a real (file-backed)
+/// event sink for the apply (`cfg.telemetry`) and to re-check `files.ignore`
+/// against the applier-resolved `{{seq}}` path (NRN-138). `new` is a single
+/// `create_document` op, so it emits the same lifecycle → op_planned → action
+/// → finished stream as the applier-routed mutators, and the `trace_id` is
+/// threaded into the rendered report.
 fn apply_and_render(
     args: &NewArgs,
     doc_path: &Utf8Path,
@@ -354,7 +355,7 @@ fn apply_and_render(
     index: &crate::core::GraphIndex,
     plan: &crate::new::synth::CreateDocumentPlan,
     body_bytes: usize,
-    telemetry: Option<&crate::standards::TelemetryConfig>,
+    cfg: &VaultConfig,
 ) -> Result<OutputBundle> {
     use camino::Utf8PathBuf;
 
@@ -373,15 +374,23 @@ fn apply_and_render(
         footnotes: vec![],
     };
 
-    // Thread the -p / --parents flag through to the create_document arm.
+    // Thread the -p / --parents flag and `files.ignore` through to the
+    // create_document arm — the latter re-checks the resolved `{{seq}}` path
+    // against `files.ignore` before any write (NRN-138).
     let ctx = crate::repair_apply::CreateApplyContext {
         parents: args.parents,
+        ignore: cfg.files.ignore.clone(),
     };
     let vault_root_buf = vault_root.to_owned();
 
     // Real apply: open a file-backed sink and emit the full event stream.
     let argv: Vec<String> = std::env::args().collect();
-    let mut sink = crate::open_event_sink(vault_root, /*dry_run=*/ false, telemetry, &argv);
+    let mut sink = crate::open_event_sink(
+        vault_root,
+        /*dry_run=*/ false,
+        cfg.telemetry.as_ref(),
+        &argv,
+    );
     crate::emit_invocation_started(
         &mut sink,
         "new",

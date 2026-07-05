@@ -178,6 +178,11 @@ pub(crate) fn apply_migration_plan(
 
     let create_ctx = CreateApplyContext {
         parents: ctx.parents,
+        // NRN-138 ignore re-check applies to `new`-synthesized create_document
+        // changes (already guarded at plan time by synth::build_plan); the
+        // migration-plan create_document ops routed through here have no such
+        // guard to backstop, so leave this empty.
+        ..Default::default()
     };
 
     let apply_result = apply_repair_plan_with_context(
