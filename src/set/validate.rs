@@ -239,6 +239,48 @@ fn display_allowed(allowed: &[Value]) -> String {
         .join(", ")
 }
 
+/// Build the post-state document for schema resolution: overlay the batch's
+/// scalar `--field`, `--field-json`, and `--remove` changes onto the document's
+/// current frontmatter so rule matching (which keys on `type`/`kind`) sees the
+/// INCOMING state (NRN-119). Values are lightly inferred — matching compares
+/// literals, so no schema coercion is needed here (and using it would be
+/// circular: the schema is what we're resolving). `--push`/`--pop` are not
+/// overlaid; list fields are not rule-match predicates.
+pub(crate) fn effective_match_doc(
+    doc: &Document,
+    current_frontmatter: &Value,
+    fields: &[String],
+    field_json: &[String],
+    remove: &[String],
+) -> Document {
+    let mut fm = doc
+        .frontmatter
+        .as_ref()
+        .or(Some(current_frontmatter))
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    for kv in fields {
+        if let Ok((k, raw)) = crate::set::synth::parse_kv(kv) {
+            fm.insert(k, crate::set::synth::infer_scalar(&raw));
+        }
+    }
+    for kv in field_json {
+        if let Ok((k, raw)) = crate::set::synth::parse_kv(kv) {
+            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                fm.insert(k, v);
+            }
+        }
+    }
+    for k in remove {
+        fm.remove(k);
+    }
+
+    let mut d = doc.clone();
+    d.frontmatter = Some(Value::Object(fm));
+    d
+}
+
 /// Output type for `coerce_kv_slice`: typed pairs + any emitted warnings.
 type CoercedKvs = (Vec<(String, Value)>, Vec<SetWarning>);
 
@@ -255,6 +297,7 @@ fn coerce_kv_slice(
     cfg: &VaultConfig,
     doc: &Document,
     enforce_allowed_values: bool,
+    element_wise: bool,
 ) -> Result<CoercedKvs> {
     let mut out = Vec::new();
     let mut w = Vec::new();
@@ -263,7 +306,18 @@ fn coerce_kv_slice(
         let coerced = match lookup_field_type(cfg, doc, &key) {
             Some(ty) if !force => {
                 let max_length = lookup_field_max_length(cfg, doc, &key);
-                coerce_value_for_type(&ty, &raw, max_length)?
+                // --push / --pop operate on a single list ELEMENT, so coerce a
+                // `list_of_strings` field's value as its element type (string)
+                // rather than wrapping it into a one-element array — otherwise
+                // --pop's drop-value becomes `["x"]` and never matches the
+                // string elements (silent no-op), and --push nests the array
+                // (NRN-127).
+                let effective_ty: &str = if element_wise && ty == "list_of_strings" {
+                    "string"
+                } else {
+                    ty.as_str()
+                };
+                coerce_value_for_type(effective_ty, &raw, max_length)?
             }
             Some(_) => {
                 w.push(SetWarning::ForceBypass {
@@ -332,14 +386,21 @@ pub fn synth_with_schema(
 
     let mut warnings: Vec<SetWarning> = Vec::new();
 
+    // Schema resolution must run against the POST-state document: a single call
+    // that changes `type`/`kind` AND sets another field must coerce that field
+    // under the incoming type's schema, not the outgoing one (NRN-119). Overlay
+    // the batch's field changes onto the document used for rule matching.
+    let effective = effective_match_doc(doc, current_frontmatter, fields, field_json, remove);
+    let doc = &effective;
+
     // --field is a scalar set → enforce allowed_values. --push / --pop operate on
     // list elements; per-element allowed_values is not a validated concept today,
     // so they only get the known-field warning suppression, not enforcement.
-    let (fields_typed, w) = coerce_kv_slice(fields, force, cfg, doc, true)?;
+    let (fields_typed, w) = coerce_kv_slice(fields, force, cfg, doc, true, false)?;
     warnings.extend(w);
-    let (push_typed, w) = coerce_kv_slice(push, force, cfg, doc, false)?;
+    let (push_typed, w) = coerce_kv_slice(push, force, cfg, doc, false, true)?;
     warnings.extend(w);
-    let (pop_typed, w) = coerce_kv_slice(pop, force, cfg, doc, false)?;
+    let (pop_typed, w) = coerce_kv_slice(pop, force, cfg, doc, false, true)?;
     warnings.extend(w);
 
     // --field-json: raw JSON; validate against schema unless --force.
@@ -519,6 +580,110 @@ validate:
 "#;
         crate::standards::parse_config(yaml, camino::Utf8Path::new("fixture.yaml"))
             .expect("config should parse")
+    }
+
+    fn fixture_config_type_transition() -> VaultConfig {
+        let yaml = r#"
+validate:
+  rules:
+    - name: note-base
+      match:
+        frontmatter:
+          kind: note
+      field_types:
+        workspace: wikilink
+        aliases: list_of_strings
+    - name: session-log-base
+      match:
+        frontmatter:
+          kind: session-log
+      field_types:
+        workspace: string
+        aliases: list_of_strings
+"#;
+        crate::standards::parse_config(yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config should parse")
+    }
+
+    #[test]
+    fn coercion_uses_post_state_schema_on_type_change() {
+        // Setting kind=session-log + workspace=Agents in one call must coerce
+        // workspace under the POST-state (session-log → bare string), not the
+        // outgoing note-base rule (→ wikilink "[[Agents]]"). NRN-119.
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_type_transition();
+        let current = json!({"kind": "note", "title": "Foo"});
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &current,
+            &["kind=session-log".into(), "workspace=Agents".into()],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        )
+        .expect("synth should succeed");
+        let ws = result
+            .changes
+            .iter()
+            .find(|c| c.field.as_deref() == Some("workspace"))
+            .expect("workspace change present");
+        assert_eq!(ws.new_value, Some(json!("Agents")));
+    }
+
+    #[test]
+    fn pop_coerces_per_element_not_whole_field_wrap() {
+        // --pop aliases=x on a list_of_strings field must drop the "x" element,
+        // not the array ["x"] (which never matches → silent no-op). NRN-127.
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_type_transition();
+        let current = json!({"kind": "note", "aliases": ["x", "y"]});
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &current,
+            &[],
+            &[],
+            &[],
+            &["aliases=x".into()],
+            &[],
+            false,
+        )
+        .expect("synth should succeed");
+        let al = result
+            .changes
+            .iter()
+            .find(|c| c.field.as_deref() == Some("aliases"))
+            .expect("pop should produce an aliases change, not a no-op");
+        assert_eq!(al.new_value, Some(json!(["y"])));
+    }
+
+    #[test]
+    fn push_coerces_per_element_not_nested_array() {
+        // --push aliases=z must append the scalar "z", not the array ["z"]. NRN-127.
+        let doc = fixture_doc_kind_note();
+        let cfg = fixture_config_type_transition();
+        let current = json!({"kind": "note", "aliases": ["x"]});
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &current,
+            &[],
+            &[],
+            &["aliases=z".into()],
+            &[],
+            &[],
+            false,
+        )
+        .expect("synth should succeed");
+        let al = result
+            .changes
+            .iter()
+            .find(|c| c.field.as_deref() == Some("aliases"))
+            .expect("aliases change present");
+        assert_eq!(al.new_value, Some(json!(["x", "z"])));
     }
 
     #[test]
