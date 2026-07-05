@@ -182,6 +182,128 @@ fn emit_op_action(
     }
 }
 
+/// The content-mutating ops for one document, bucketed by class. A document
+/// touched by more than one class (canonically: a frontmatter `set` plus an
+/// `append_to_section`) composes into ONE read + ONE write — see
+/// [`compose_content_ops`].
+#[derive(Default)]
+struct ContentOps<'a> {
+    frontmatter: Vec<&'a PlannedChange>,
+    rewrite_links: Vec<&'a PlannedChange>,
+    replace_bodies: Vec<&'a PlannedChange>,
+    edit_ops: Vec<&'a PlannedChange>,
+}
+
+/// The region class a content op mutates. Ordered as the composition chain runs:
+/// frontmatter → rewrite_link → replace_body → section-edits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentClass {
+    Frontmatter,
+    RewriteLink,
+    ReplaceBody,
+    EditOps,
+}
+
+/// One transform invocation within a composed file: the planned changes it
+/// covers and whether it altered the content it was handed. Frontmatter and edit
+/// ops each run as ONE grouped transform (so `changes` may hold several); link
+/// rewrites and body replacements run per-change. `changed` drives no-op
+/// suppression — a byte-identical transform emits no action and adds no
+/// `changed_files` entry.
+struct ComposedUnit<'a> {
+    changes: Vec<&'a PlannedChange>,
+    class: ContentClass,
+    changed: bool,
+}
+
+/// The composed result for one document: the fully-transformed content plus the
+/// per-transform record. `content == original` exactly when the whole
+/// composition was a no-op (no unit changed).
+struct ComposedFile<'a> {
+    content: String,
+    units: Vec<ComposedUnit<'a>>,
+}
+
+/// Chain every content-mutating op for one document into a single composed
+/// string. Classes apply in the fixed region order frontmatter → rewrite_link →
+/// replace_body → section-edits against the *evolving* content (each transform
+/// re-splits the frontmatter boundary from the string it is handed, so chaining
+/// — not byte-range merging against the original — is what keeps downstream
+/// offsets correct). Any transform failure propagates so the caller can abort the
+/// whole content phase before writing anything (NRN-139: no half-mutated file).
+fn compose_content_ops<'a>(
+    path: &Utf8Path,
+    ops: &ContentOps<'a>,
+    original: &str,
+) -> Result<ComposedFile<'a>> {
+    let mut content = original.to_string();
+    let mut units: Vec<ComposedUnit<'a>> = Vec::new();
+
+    // Frontmatter: one grouped transform over all set/remove/add changes.
+    if !ops.frontmatter.is_empty() {
+        let updated = apply_file_changes(&content, &ops.frontmatter)?;
+        let changed = updated != content;
+        units.push(ComposedUnit {
+            changes: ops.frontmatter.clone(),
+            class: ContentClass::Frontmatter,
+            changed,
+        });
+        content = updated;
+    }
+
+    // rewrite_link: per-change whole-file scans (matches the prior per-pass
+    // granularity so each rewrite's changed/no-op status is tracked independently).
+    for &change in &ops.rewrite_links {
+        let updated = apply_rewrite_link(&content, change)?;
+        let changed = updated != content;
+        units.push(ComposedUnit {
+            changes: vec![change],
+            class: ContentClass::RewriteLink,
+            changed,
+        });
+        content = updated;
+    }
+
+    // replace_body: per-change whole-body rewrites.
+    for &change in &ops.replace_bodies {
+        let updated = crate::standards::apply::apply_replace_body(&content, change)?;
+        let changed = updated != content;
+        units.push(ComposedUnit {
+            changes: vec![change],
+            class: ContentClass::ReplaceBody,
+            changed,
+        });
+        content = updated;
+    }
+
+    // Section/body edit ops: one grouped transform running the shared
+    // `edit::transform` engine in plan order against the evolving body.
+    if !ops.edit_ops.is_empty() {
+        let decoded: Vec<crate::edit::ops::EditOp> = ops
+            .edit_ops
+            .iter()
+            .map(|c| {
+                let payload = c
+                    .new_value
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("edit op missing payload for {}", c.path))?;
+                serde_json::from_value::<crate::edit::ops::EditOp>(payload.clone())
+                    .map_err(|e| anyhow::anyhow!("edit op decode for {}: {e}", c.path))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let updated = crate::standards::apply::apply_edit_ops(&content, &decoded, path)?;
+        let changed = updated != content;
+        units.push(ComposedUnit {
+            changes: ops.edit_ops.clone(),
+            class: ContentClass::EditOps,
+            changed,
+        });
+        content = updated;
+    }
+
+    Ok(ComposedFile { content, units })
+}
+
 /// Like `apply_repair_plan` but with additional context for `create_document`
 /// operations (e.g., the `-p` / `--parents` flag) and a telemetry sink + a
 /// `change_id -> op span id` map for emitting per-action events.
@@ -198,10 +320,12 @@ pub fn apply_repair_plan_with_context(
     use crate::telemetry::Severity;
     validate_plan_for_apply(cwd, plan)?;
 
-    // Pass 1: per-file frontmatter edits. changes_by_path skips
-    // move_document, so the grouped map only contains set/remove/add
-    // frontmatter changes.
-    let grouped = changes_by_path(plan)?;
+    // `changes_by_path` validates the frontmatter changes (rejecting conflicting
+    // field edits / divergent hashes / unsupported ops) and skips the
+    // orchestrator-pass ops. We call it purely as that validation gate — Phase A
+    // below re-buckets the content ops itself so all four content classes compose
+    // into ONE read + ONE write per document.
+    changes_by_path(plan)?;
 
     let mut report = RepairApplyReport::new(plan, dry_run);
 
@@ -211,83 +335,164 @@ pub fn apply_repair_plan_with_context(
         .map(|d| (d.path.clone(), d.hash.clone()))
         .collect();
 
-    for (rel_path, changes) in &grouped {
-        // Hash check against the first change in the group (all share the same
-        // document_hash for a given path — changes_by_path rejects mismatches).
-        check_hash(&current_hashes, changes[0])?;
+    // ── Phase A: content composition (NRN-139) ────────────────────────────────
+    // Every content-mutating class (frontmatter set/remove/add, rewrite_link,
+    // replace_body, and the section/body edit ops) is FILE-MAJOR: a document
+    // touched by more than one class is read once, transformed by chaining the
+    // classes in the fixed region order frontmatter → rewrite_link →
+    // replace_body → section-edits, and written once. This closes the latent
+    // half-mutation window where a frontmatter write in one pass could land
+    // before a later pass's failing edit aborted the plan.
+    //
+    // A1 (compute) runs every transform under whole-doc CAS BEFORE any write. A
+    // hash drift or a failing transform (missing heading, non-unique str_replace,
+    // etc.) aborts the whole content phase here, before the first byte is written.
+    const EDIT_KINDS: &[&str] = &[
+        "str_replace",
+        "replace_section",
+        "append_to_section",
+        "delete_section",
+        "insert_before_heading",
+        "insert_after_heading",
+    ];
 
-        let absolute_path = cwd.join(rel_path);
-        let original =
-            fs::read_to_string(&absolute_path).with_context(|| format!("read {absolute_path}"))?;
-        let updated = apply_file_changes(&original, changes)?;
-
-        if updated != original {
-            report.changed_files.push(rel_path.clone());
-            if !dry_run {
-                fs::write(&absolute_path, updated)
-                    .with_context(|| format!("write {absolute_path}"))?;
-                for change in changes {
-                    emit_op_action(sink, spans, change, Severity::Info, Vec::new());
-                }
-            }
+    // Bucket content ops per document, recording first-appearance path order for
+    // determinism.
+    let mut content_order: Vec<Utf8PathBuf> = Vec::new();
+    let mut content_ops: std::collections::BTreeMap<Utf8PathBuf, ContentOps> =
+        std::collections::BTreeMap::new();
+    for change in &plan.changes {
+        let op = change.operation.as_str();
+        let class = if matches!(
+            op,
+            "set_frontmatter" | "remove_frontmatter" | "add_frontmatter"
+        ) {
+            ContentClass::Frontmatter
+        } else if op == "rewrite_link" {
+            ContentClass::RewriteLink
+        } else if op == "replace_body" {
+            ContentClass::ReplaceBody
+        } else if EDIT_KINDS.contains(&op) {
+            ContentClass::EditOps
+        } else {
+            // Lifecycle op (create/delete/move) — handled by the Phase B passes.
+            continue;
+        };
+        if !content_ops.contains_key(&change.path) {
+            content_order.push(change.path.clone());
+        }
+        let bucket = content_ops.entry(change.path.clone()).or_default();
+        match class {
+            ContentClass::Frontmatter => bucket.frontmatter.push(change),
+            ContentClass::RewriteLink => bucket.rewrite_links.push(change),
+            ContentClass::ReplaceBody => bucket.replace_bodies.push(change),
+            ContentClass::EditOps => bucket.edit_ops.push(change),
         }
     }
 
-    // Pass 1b: rewrite_link operations (broken wikilink target rewrites).
-    // Hash check uses the index snapshot (same as Pass 1 frontmatter check).
-    for change in plan
-        .changes
-        .iter()
-        .filter(|c| c.operation == "rewrite_link")
-    {
-        check_hash(&current_hashes, change)?;
+    // A1: compute every file's composed content up front.
+    let mut composed: Vec<(Utf8PathBuf, ComposedFile)> = Vec::with_capacity(content_order.len());
+    for path in &content_order {
+        let ops = &content_ops[path];
+        // Hash-check EVERY content change for this path (not just the first): a
+        // divergent same-path hash must abort. There is exactly one current hash
+        // per path, so when the changes agree this is equivalent to a single
+        // check — collapsing the per-pass checks is behavior-preserving.
+        for change in ops
+            .frontmatter
+            .iter()
+            .chain(ops.rewrite_links.iter())
+            .chain(ops.replace_bodies.iter())
+            .chain(ops.edit_ops.iter())
+            .copied()
+        {
+            check_hash(&current_hashes, change)?;
+        }
+        let absolute_path = cwd.join(path);
+        let original =
+            fs::read_to_string(&absolute_path).with_context(|| format!("read {absolute_path}"))?;
+        let file = compose_content_ops(path, ops, &original)?;
+        composed.push((path.clone(), file));
+    }
 
-        if dry_run {
-            // Record what would be rewritten without touching the file.
-            if let (Some(from), Some(to)) = (
-                change.expected_old_value.as_ref().and_then(|v| v.as_str()),
-                change.new_value.as_ref().and_then(|v| v.as_str()),
-            ) {
-                report.rewritten_links.push(LinkRewriteResult {
-                    file: change.path.clone(),
-                    from: from.to_string(),
-                    to: to.to_string(),
-                });
-                if !report.changed_files.contains(&change.path) {
-                    report.changed_files.push(change.path.clone());
+    // A2: write every changed file (one write per document) and record report +
+    // telemetry. All computation/validation already succeeded, so no partial
+    // write is possible.
+    for (path, file) in &composed {
+        let overall_changed = file.units.iter().any(|u| u.changed);
+
+        // changed_files: the union of the prior passes' pushes — present once iff
+        // the composed file actually changed.
+        if overall_changed && !report.changed_files.contains(path) {
+            report.changed_files.push(path.clone());
+        }
+
+        // Per-class report forecasts, preserving the prior per-pass shapes.
+        for unit in &file.units {
+            match unit.class {
+                ContentClass::RewriteLink => {
+                    let change = unit.changes[0];
+                    // Dry-run forecasts every rewrite (with from/to) regardless of
+                    // whether it would change the file; apply records only the
+                    // rewrites that actually landed.
+                    if dry_run || unit.changed {
+                        if let (Some(from), Some(to)) = (
+                            change.expected_old_value.as_ref().and_then(|v| v.as_str()),
+                            change.new_value.as_ref().and_then(|v| v.as_str()),
+                        ) {
+                            report.rewritten_links.push(LinkRewriteResult {
+                                file: change.path.clone(),
+                                from: from.to_string(),
+                                to: to.to_string(),
+                            });
+                            if dry_run && !report.changed_files.contains(&change.path) {
+                                report.changed_files.push(change.path.clone());
+                            }
+                        }
+                    }
                 }
+                ContentClass::ReplaceBody => {
+                    let change = unit.changes[0];
+                    // replace_body is always recorded in replaced_bodies (both
+                    // modes); dry-run additionally forces changed_files.
+                    if dry_run && !report.changed_files.contains(&change.path) {
+                        report.changed_files.push(change.path.clone());
+                    }
+                    report.replaced_bodies.push(change.path.clone());
+                }
+                ContentClass::Frontmatter | ContentClass::EditOps => {}
             }
+        }
+
+        if dry_run || !overall_changed {
             continue;
         }
 
-        let absolute_path = cwd.join(&change.path);
-        let content =
-            fs::read_to_string(&absolute_path).with_context(|| format!("read {absolute_path}"))?;
-        let updated = apply_rewrite_link(&content, change)?;
-        if updated != content {
-            fs::write(&absolute_path, &updated)
-                .with_context(|| format!("write {absolute_path}"))?;
-            if !report.changed_files.contains(&change.path) {
-                report.changed_files.push(change.path.clone());
+        let absolute_path = cwd.join(path);
+        fs::write(&absolute_path, &file.content)
+            .with_context(|| format!("write {absolute_path}"))?;
+        // One action per contributing change_id: a unit that was a byte-identical
+        // no-op emits nothing.
+        for unit in &file.units {
+            if !unit.changed {
+                continue;
             }
-            if let (Some(from), Some(to)) = (
-                change.expected_old_value.as_ref().and_then(|v| v.as_str()),
-                change.new_value.as_ref().and_then(|v| v.as_str()),
-            ) {
-                report.rewritten_links.push(LinkRewriteResult {
-                    file: change.path.clone(),
-                    from: from.to_string(),
-                    to: to.to_string(),
-                });
+            for change in unit.changes.iter().copied() {
+                emit_op_action(sink, spans, change, Severity::Info, Vec::new());
             }
-            emit_op_action(sink, spans, change, Severity::Info, Vec::new());
         }
     }
 
-    // Pass 1c: delete_document operations.
-    // Sequenced after rewrite_link so --rewrite-to redirects backlinks before
-    // the target file disappears, and before move_document so delete-then-move
-    // on the same path is impossible.
+    // ── Phase B: lifecycle post-passes ────────────────────────────────────────
+    // create_document, delete_document (+ --rewrite-to cascade), and
+    // move_document (+ backlink rewrites + retry) run AFTER the content phase.
+    // They are whole-file ops with cross-FILE cascades that must resolve from the
+    // now-settled content state.
+
+    // Delete pass: sequenced after the content phase (so rewrite_link content is
+    // settled and --rewrite-to redirects backlinks before the target disappears)
+    // and before move_document (so delete-then-move on the same path is
+    // impossible).
     for change in plan
         .changes
         .iter()
@@ -295,8 +500,8 @@ pub fn apply_repair_plan_with_context(
     {
         check_hash(&current_hashes, change)?;
 
-        // Pass 1c.1: apply link rewrites if link_risk is attached (--rewrite-to case).
-        // This runs BEFORE the delete so links can be rewritten in source docs.
+        // Apply link rewrites if link_risk is attached (--rewrite-to case). This
+        // runs BEFORE the delete so links can be rewritten in source docs.
         if change.link_risk.is_some() {
             let planned = count_planned_links(change);
             if dry_run {
@@ -336,7 +541,7 @@ pub fn apply_repair_plan_with_context(
             }
         }
 
-        // Pass 1c.2: the actual file removal.
+        // The actual file removal.
         if !dry_run {
             let result = apply_delete(cwd, change)?;
             report.deleted_documents.push(result);
@@ -345,125 +550,6 @@ pub fn apply_repair_plan_with_context(
             report.deleted_documents.push(DeleteResult {
                 path: change.path.clone(),
             });
-        }
-    }
-
-    // Pass 1d: replace_body operations. Whole-body rewrites with hash-check
-    // discipline matching Passes 1a / 1b. Sequenced after delete_document so we
-    // never attempt a body-replace on a file that was just removed, and before
-    // move_document so the content is settled before any rename.
-    for change in plan
-        .changes
-        .iter()
-        .filter(|c| c.operation == "replace_body")
-    {
-        check_hash(&current_hashes, change)?;
-
-        if dry_run {
-            if !report.changed_files.contains(&change.path) {
-                report.changed_files.push(change.path.clone());
-            }
-            report.replaced_bodies.push(change.path.clone());
-            continue;
-        }
-
-        let absolute_path = cwd.join(&change.path);
-        let content =
-            fs::read_to_string(&absolute_path).with_context(|| format!("read {absolute_path}"))?;
-        let updated = crate::standards::apply::apply_replace_body(&content, change)?;
-        if updated != content {
-            fs::write(&absolute_path, &updated)
-                .with_context(|| format!("write {absolute_path}"))?;
-            if !report.changed_files.contains(&change.path) {
-                report.changed_files.push(change.path.clone());
-            }
-            emit_op_action(sink, spans, change, Severity::Info, Vec::new());
-        }
-        report.replaced_bodies.push(change.path.clone());
-    }
-
-    // Pass 1d2: section/body edit ops (NRN-98 / H1) — append_to_section,
-    // replace_section, delete_section, insert_before/after_heading, str_replace.
-    // Unlike replace_body (a pre-materialized whole body), these resolve at apply
-    // time: read the current body under whole-doc CAS and run the shared
-    // `edit::transform` engine. Grouped by path so multiple edits to one document
-    // apply in plan order against the evolving body (matching `norn edit`'s
-    // atomic `edits` array). Every target is hash-checked and transformed before
-    // any edit is written, so the whole edit batch either applies or aborts.
-    {
-        const EDIT_KINDS: &[&str] = &[
-            "str_replace",
-            "replace_section",
-            "append_to_section",
-            "delete_section",
-            "insert_before_heading",
-            "insert_after_heading",
-        ];
-        let mut order: Vec<Utf8PathBuf> = Vec::new();
-        let mut by_path: std::collections::BTreeMap<Utf8PathBuf, Vec<&PlannedChange>> =
-            std::collections::BTreeMap::new();
-        for change in plan
-            .changes
-            .iter()
-            .filter(|c| EDIT_KINDS.contains(&c.operation.as_str()))
-        {
-            if !by_path.contains_key(&change.path) {
-                order.push(change.path.clone());
-            }
-            by_path.entry(change.path.clone()).or_default().push(change);
-        }
-
-        // Compute-and-validate EVERY edit target before writing any of them:
-        // hash-check all of a path's changes (not just the first), then read +
-        // run the transform. A hash drift OR a failing edit anchor (missing
-        // heading, non-unique str_replace) aborts here, before the first write,
-        // so the edit batch never leaves the vault half-mutated. Running the real
-        // transform up front is also what makes dry-run honest — it reports the
-        // true change set (and fails the same way apply would), rather than
-        // assuming every op mutates.
-        //
-        // `resolved[i]` holds the new content for `order[i]`, or `None` when the
-        // edit is a no-op (result byte-identical to the current file).
-        let mut resolved: Vec<Option<String>> = Vec::with_capacity(order.len());
-        for path in &order {
-            let changes = &by_path[path];
-            for change in changes {
-                check_hash(&current_hashes, change)?;
-            }
-            let absolute_path = cwd.join(path);
-            let content = fs::read_to_string(&absolute_path)
-                .with_context(|| format!("read {absolute_path}"))?;
-            let ops: Vec<crate::edit::ops::EditOp> = changes
-                .iter()
-                .map(|c| {
-                    let payload = c
-                        .new_value
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("edit op missing payload for {}", c.path))?;
-                    serde_json::from_value::<crate::edit::ops::EditOp>(payload.clone())
-                        .map_err(|e| anyhow::anyhow!("edit op decode for {}: {e}", c.path))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let updated = crate::standards::apply::apply_edit_ops(&content, &ops, path)?;
-            resolved.push((updated != content).then_some(updated));
-        }
-
-        for (path, new_content) in order.iter().zip(resolved) {
-            let Some(new_content) = new_content else {
-                continue; // no-op edit: no write, no changed_files, no action event
-            };
-            if !report.changed_files.contains(path) {
-                report.changed_files.push(path.clone());
-            }
-            if dry_run {
-                continue;
-            }
-            let absolute_path = cwd.join(path);
-            fs::write(&absolute_path, &new_content)
-                .with_context(|| format!("write {absolute_path}"))?;
-            for change in &by_path[path] {
-                emit_op_action(sink, spans, change, Severity::Info, Vec::new());
-            }
         }
     }
 
