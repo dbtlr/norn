@@ -60,9 +60,13 @@ norn get a.md b.md --col title,status         # several docs, narrowed
 norn get notes/my-note.md --col .incoming_links
 norn get notes/my-note.md --all-cols --format json
 norn get notes/my-note.md --format markdown   # rebuild the doc as Markdown (get-only)
+norn get notes/my-note.md --section "Task Description","Annotations" --format json
+                                               # just those named sections' content (get-only)
 ```
 
 A target is a path, a unique stem, or a wikilink-shaped string. `get` returns every named target (no default limit), unlike `find`.
+
+`--section` reads named sections of the body — a distinct flag, not a `--col` facet, so it combines freely with `--col`/`--all-cols`. Each heading resolves with the same boundary semantics `edit --append-to-section`/`--replace-section` use (heading line through the next same-or-higher heading, or EOF): a section read mirrors a section write. `--format json`/`jsonl` add a `sections` object keyed by heading text; `records` prints one block per requested section; `paths`/`markdown` ignore it, like `--col`. A heading missing or ambiguous in a given document warns and is omitted from that document's `sections` without affecting siblings or other targets.
 
 ### Selecting fields — `--col`, facets, `--all-cols`
 
