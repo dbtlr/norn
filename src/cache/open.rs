@@ -67,6 +67,7 @@ impl crate::cache::Cache {
         open_impl(
             vault_root,
             alias_field,
+            &[],
             &index_set,
             &index_set_hash,
             /* authoritative */ false,
@@ -89,17 +90,31 @@ impl crate::cache::Cache {
     pub fn open_with_index(
         vault_root: &Utf8Path,
         alias_field: Option<&str>,
+        files_ignore: &[String],
         index_set: &BTreeSet<String>,
         index_set_hash: &str,
     ) -> Result<Self, CacheError> {
         open_impl(
             vault_root,
             alias_field,
+            files_ignore,
             index_set,
             index_set_hash,
             /* authoritative */ true,
         )
     }
+}
+
+/// The config-derived identity a `Cache` carries: the fields threaded from the
+/// operator's config into every constructed `Cache`. Bundled so the internal
+/// `open_impl`/`open_fresh` seam passes one reference instead of five positional
+/// args.
+struct CacheIdentity<'a> {
+    alias_field: Option<&'a str>,
+    files_ignore: &'a [String],
+    index_set: &'a BTreeSet<String>,
+    index_set_hash: &'a str,
+    authoritative: bool,
 }
 
 /// Shared implementation behind `open`/`open_with_config` (non-authoritative)
@@ -110,6 +125,7 @@ impl crate::cache::Cache {
 fn open_impl(
     vault_root: &Utf8Path,
     alias_field: Option<&str>,
+    files_ignore: &[String],
     index_set: &BTreeSet<String>,
     index_set_hash: &str,
     authoritative: bool,
@@ -130,10 +146,13 @@ fn open_impl(
                     &cache_dir,
                     &db_path,
                     &canonical,
-                    alias_field,
-                    index_set,
-                    index_set_hash,
-                    authoritative,
+                    &CacheIdentity {
+                        alias_field,
+                        files_ignore,
+                        index_set,
+                        index_set_hash,
+                        authoritative,
+                    },
                 );
             }
             InspectResult::Reuse(mut conn) => {
@@ -150,6 +169,7 @@ fn open_impl(
                     vault_root: canonical,
                     cache_dir,
                     alias_field: alias_field_owned,
+                    files_ignore: files_ignore.to_vec(),
                     index_set: index_set.clone(),
                     index_set_hash: index_set_hash.to_string(),
                     index_authoritative: authoritative,
@@ -310,10 +330,7 @@ fn open_fresh(
     cache_dir: &Utf8Path,
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
-    alias_field: Option<&str>,
-    index_set: &BTreeSet<String>,
-    index_set_hash: &str,
-    authoritative: bool,
+    identity: &CacheIdentity,
 ) -> Result<crate::cache::Cache, CacheError> {
     let conn = Connection::open(db_path.as_std_path())?;
     conn.busy_timeout(CACHE_BUSY_TIMEOUT)?;
@@ -321,15 +338,16 @@ fn open_fresh(
     conn.pragma_update(None, "foreign_keys", "ON")?;
     secure_file(db_path)?;
     crate::cache::schema::apply_schema(&conn)?;
-    init_meta(&conn, canonical_root, alias_field)?;
+    init_meta(&conn, canonical_root, identity.alias_field)?;
     Ok(crate::cache::Cache {
         conn,
         vault_root: canonical_root.to_owned(),
         cache_dir: cache_dir.to_owned(),
-        alias_field: alias_field.map(|s| s.to_string()),
-        index_set: index_set.clone(),
-        index_set_hash: index_set_hash.to_string(),
-        index_authoritative: authoritative,
+        alias_field: identity.alias_field.map(|s| s.to_string()),
+        files_ignore: identity.files_ignore.to_vec(),
+        index_set: identity.index_set.clone(),
+        index_set_hash: identity.index_set_hash.to_string(),
+        index_authoritative: identity.authoritative,
     })
 }
 
@@ -721,7 +739,7 @@ mod tests {
 
         let set1: BTreeSet<String> = ["status".to_string()].into_iter().collect();
         let mut cache =
-            crate::cache::Cache::open_with_index(&vault_root, None, &set1, "hash-1").unwrap();
+            crate::cache::Cache::open_with_index(&vault_root, None, &[], &set1, "hash-1").unwrap();
         cache.rebuild(&vault_root).unwrap();
         drop(cache);
 
@@ -729,7 +747,7 @@ mod tests {
         // silently re-shred document_fields from cached frontmatter_json.
         let set2: BTreeSet<String> = ["other".to_string()].into_iter().collect();
         let cache2 =
-            crate::cache::Cache::open_with_index(&vault_root, None, &set2, "hash-2").unwrap();
+            crate::cache::Cache::open_with_index(&vault_root, None, &[], &set2, "hash-2").unwrap();
 
         let status_rows: i64 = cache2
             .conn
@@ -781,7 +799,7 @@ mod tests {
 
         let set: BTreeSet<String> = ["status".to_string()].into_iter().collect();
         let mut cache =
-            crate::cache::Cache::open_with_index(&vault_root, None, &set, "hash-1").unwrap();
+            crate::cache::Cache::open_with_index(&vault_root, None, &[], &set, "hash-1").unwrap();
         cache.rebuild(&vault_root).unwrap();
 
         // Tamper a document_fields row directly; reopening with the SAME
@@ -796,7 +814,7 @@ mod tests {
         drop(cache);
 
         let cache2 =
-            crate::cache::Cache::open_with_index(&vault_root, None, &set, "hash-1").unwrap();
+            crate::cache::Cache::open_with_index(&vault_root, None, &[], &set, "hash-1").unwrap();
         let value: String = cache2
             .conn
             .query_row(
@@ -829,15 +847,20 @@ mod tests {
         // Authoritative build against a real configured index set.
         let set: BTreeSet<String> = ["status".to_string()].into_iter().collect();
         let mut cache =
-            crate::cache::Cache::open_with_index(&vault_root, None, &set, "real-config-hash")
+            crate::cache::Cache::open_with_index(&vault_root, None, &[], &set, "real-config-hash")
                 .unwrap();
         cache.rebuild(&vault_root).unwrap();
         drop(cache);
 
         let before_rows: i64 = {
-            let cache =
-                crate::cache::Cache::open_with_index(&vault_root, None, &set, "real-config-hash")
-                    .unwrap();
+            let cache = crate::cache::Cache::open_with_index(
+                &vault_root,
+                None,
+                &[],
+                &set,
+                "real-config-hash",
+            )
+            .unwrap();
             cache
                 .conn
                 .query_row("SELECT COUNT(*) FROM document_fields", [], |r| r.get(0))

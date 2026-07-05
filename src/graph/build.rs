@@ -171,7 +171,10 @@ fn is_hidden(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with('.'))
 }
 
-fn is_ignored(path: &Utf8Path, patterns: &[String]) -> bool {
+/// True if `path` (vault-relative) matches any `files.ignore` glob. Shared by
+/// the cache-build scan gate and the incremental change detector so both agree
+/// on exactly which paths are excluded from the graph (NRN-117).
+pub(crate) fn is_ignored(path: &Utf8Path, patterns: &[String]) -> bool {
     patterns
         .iter()
         .map(|pattern| pattern.trim())

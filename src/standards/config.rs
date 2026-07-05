@@ -498,16 +498,16 @@ pub struct CompiledRule {
     pub allowed_paths: Vec<PathPattern>,
 }
 
-/// Pre-compiled path patterns for `files.ignore` and `validate.ignore`.
+/// Pre-compiled path patterns for `validate.ignore`.
 /// Each entry in the vec corresponds to the pattern string at the same index
 /// in the source `Vec<String>`.
+///
+/// `files.ignore` has no compiled field here: it is applied at cache-build time
+/// via the graph scan gate (`Cache::files_ignore`, threaded from
+/// `config.files.ignore`), which matches with the cheap segment matcher rather
+/// than a compiled `PathPattern` (NRN-117, ADR 0007).
 #[derive(Debug, Clone, Default)]
 pub struct CompiledConfig {
-    // Populated by config compilation but no live consumer in norn yet.
-    // Mirrors `validate_ignore` (which is consumed). Safe to delete in a
-    // cleanup pass if the file-ignore wiring stays unused.
-    #[allow(dead_code)]
-    pub files_ignore: Vec<PathPattern>,
     pub validate_ignore: Vec<PathPattern>,
     pub rules: Vec<CompiledRule>,
 }
@@ -566,7 +566,10 @@ pub fn parse_config_compiled(
 ) -> Result<(VaultConfig, CompiledConfig), ConfigError> {
     let cfg = parse_config(yaml, source_path)?;
 
-    let files_ignore = compile_vec(&cfg.files.ignore, "files.ignore", source_path)?;
+    // files.ignore is not compiled to PathPatterns here: it is enforced at
+    // cache-build time by the graph scan gate's segment matcher (NRN-117), not
+    // by this regex-glob path. validate.ignore still compiles — it is consumed
+    // by the validation loop.
     let validate_ignore = compile_vec(&cfg.validate.ignore, "validate.ignore", source_path)?;
 
     let mut compiled_rules = Vec::with_capacity(cfg.validate.rules.len());
@@ -623,7 +626,6 @@ pub fn parse_config_compiled(
     Ok((
         cfg,
         CompiledConfig {
-            files_ignore,
             validate_ignore,
             rules: compiled_rules,
         },

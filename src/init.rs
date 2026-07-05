@@ -143,7 +143,7 @@ fn run_to(cwd: &Utf8Path, args: &InitArgs, out: &mut dyn Write) -> Result<i32> {
 fn scan_vault(cwd: &Utf8Path) -> Result<ScanResult> {
     let (index_set, index_set_hash) =
         crate::standards::resolved_index_set(&crate::standards::VaultConfig::default());
-    let mut cache = Cache::open_with_index(cwd, None, &index_set, &index_set_hash)?;
+    let mut cache = Cache::open_with_index(cwd, None, &[], &index_set, &index_set_hash)?;
     cache.rebuild(cwd)?;
     let docs = cache.documents_matching(&DocumentQuery::default())?;
     let total = docs.len();

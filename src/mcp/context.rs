@@ -550,6 +550,7 @@ fn open_warm_state(vault_root: &Utf8Path, config: &LoadedConfig) -> Result<WarmS
         let cache = Cache::open_with_index(
             vault_root,
             opts.alias_field.as_deref(),
+            &opts.ignore,
             &opts.resolved_index_set,
             &opts.resolved_index_set_hash,
         )?;
@@ -560,6 +561,7 @@ fn open_warm_state(vault_root: &Utf8Path, config: &LoadedConfig) -> Result<WarmS
         let cache = Cache::open_with_index(
             vault_root,
             opts.alias_field.as_deref(),
+            &opts.ignore,
             &opts.resolved_index_set,
             &opts.resolved_index_set_hash,
         )?;
