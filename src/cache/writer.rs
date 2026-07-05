@@ -138,25 +138,22 @@ impl crate::cache::Cache {
             match change {
                 FileChange::Deleted(path) => {
                     crate::cache::invalidation::drop_document(&tx, path)?;
-                    crate::cache::invalidation::unresolve_incoming(&tx, path)?;
                 }
                 FileChange::Added(path) | FileChange::Modified(path) => {
                     crate::cache::invalidation::drop_document(&tx, path)?;
                     if let Some(doc) = fresh_docs.get(path) {
                         insert_document(&tx, vault_root, doc, &mut report, &self.index_set)?;
                     }
-                    // Re-resolve incoming links that *might* now match this
-                    // new path/stem.
-                    crate::cache::invalidation::unresolve_incoming(&tx, path)?;
                 }
             }
         }
 
-        // Re-resolve unresolved links against the fresh index. Cheapest
-        // approach: drop and reinsert outgoing links for every source whose
-        // link targets touch a changed path/stem. The fresh build's
-        // resolved_path values are authoritative.
-        rerun_link_resolution(&tx, &fresh_index, &changes)?;
+        // Rewrite the entire links table from the fresh index. Link resolution is
+        // global, so this is the step that keeps an incremental refresh identical
+        // to a full rebuild — the per-doc invalidation above updates doc rows;
+        // link resolution is not decomposable per-doc (NRN-126). This supersedes
+        // any incoming-link fixup, so no `unresolve_incoming` is needed above.
+        rerun_link_resolution(&tx, &fresh_index)?;
 
         tx.commit()?;
 
@@ -165,50 +162,24 @@ impl crate::cache::Cache {
     }
 }
 
-fn rerun_link_resolution(
-    tx: &Transaction,
-    fresh_index: &GraphIndex,
-    changes: &[FileChange],
-) -> Result<(), CacheError> {
-    // Aggressive: for every doc in fresh_index whose links include a target
-    // that matches any changed path's stem or path, rewrite the entire
-    // doc's link rows from the fresh index.
-    let changed_stems: std::collections::HashSet<String> = changes
-        .iter()
-        .filter_map(|c| {
-            let p = match c {
-                FileChange::Added(p) | FileChange::Modified(p) | FileChange::Deleted(p) => p,
-            };
-            p.file_stem().map(|s| s.to_string())
-        })
-        .collect();
-    let changed_paths: std::collections::HashSet<String> = changes
-        .iter()
-        .map(|c| match c {
-            FileChange::Added(p) | FileChange::Modified(p) | FileChange::Deleted(p) => {
-                p.as_str().to_string()
-            }
-        })
-        .collect();
-
+/// Rewrite the entire links table from the authoritative fresh index.
+///
+/// Link resolution is a GLOBAL function of the whole document set: any doc's
+/// path, stem, or alias change can re-resolve links in OTHER, unchanged docs —
+/// e.g. adding an alias `foo` to one doc resolves a previously-missing
+/// `[[foo]]` in another. A per-doc "does this doc link a changed target"
+/// heuristic cannot capture alias-driven (or ambiguity-driven) re-resolution,
+/// which made an incremental refresh's link findings diverge from a full
+/// rebuild's (NRN-126) — a violation of the same-input-same-output principle.
+///
+/// `fresh_index` already holds the fully resolved links for every doc (it is a
+/// whole-vault parse + resolve), so rewriting the table from it makes an
+/// incremental refresh identical to a rebuild by construction. The parse is
+/// already paid for above; only the links table is fully rewritten (doc/field/
+/// heading rows for unchanged docs are left untouched).
+fn rerun_link_resolution(tx: &Transaction, fresh_index: &GraphIndex) -> Result<(), CacheError> {
+    tx.execute("DELETE FROM links", [])?;
     for doc in &fresh_index.documents {
-        let touches = doc.links.iter().any(|l| {
-            changed_paths.contains(l.target.as_str())
-                || changed_paths.contains(l.target.trim_end_matches(".md"))
-                || changed_stems.contains(l.target.as_str())
-                || (l.target.contains('/')
-                    && changed_paths
-                        .iter()
-                        .any(|p| p.starts_with(l.target.as_str())))
-        });
-        if !touches {
-            continue;
-        }
-        // Drop and rewrite this doc's outgoing link rows from the fresh state.
-        tx.execute(
-            "DELETE FROM links WHERE source_path = ?",
-            params![doc.path.as_str()],
-        )?;
         for link in &doc.links {
             insert_link(tx, link)?;
         }
@@ -627,6 +598,83 @@ mod tests {
             doc_count_under(&cache, "Archive/"),
             0,
             "incremental refresh must purge the newly-ignored doc"
+        );
+    }
+
+    #[test]
+    fn incremental_refresh_matches_rebuild_after_alias_change() {
+        // a.md links [[foo]]; b.md initially has no matching alias, so [[foo]] is
+        // unresolved. Adding alias `foo` to b.md must make [[foo]] resolve on the
+        // NEXT incremental refresh, identically to a full rebuild — link
+        // resolution is global, so a change to b's aliases re-resolves a's link
+        // even though a itself did not change (NRN-126, the determinism rule).
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntitle: A\n---\n\nsee [[foo]]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\n---\n\nB body\n",
+        )
+        .unwrap();
+
+        let resolved = |cache: &crate::cache::Cache| -> Option<String> {
+            cache
+                .conn
+                .query_row(
+                    "SELECT resolved_path FROM links WHERE source_path = 'a.md'",
+                    [],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+        };
+
+        // Build with alias_field configured so aliases participate in resolution.
+        let mut cache = crate::cache::Cache::open_with_index(
+            &root,
+            Some("aliases"),
+            &[],
+            &std::collections::BTreeSet::new(),
+            "hash",
+        )
+        .unwrap();
+        cache.rebuild(&root).unwrap();
+        assert_eq!(
+            resolved(&cache),
+            None,
+            "[[foo]] unresolved before the alias"
+        );
+
+        // Add alias `foo` to b.md on disk, then run an incremental refresh.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\naliases:\n  - foo\n---\n\nB body\n",
+        )
+        .unwrap();
+        cache
+            .index_incremental(&root, &crate::cache::ChangeDetectOptions::default())
+            .unwrap();
+        let incremental = resolved(&cache);
+
+        // A full rebuild is the determinism oracle.
+        cache.rebuild(&root).unwrap();
+        let rebuilt = resolved(&cache);
+
+        assert_eq!(
+            incremental, rebuilt,
+            "incremental link resolution must equal a full rebuild"
+        );
+        assert_eq!(
+            rebuilt,
+            Some("b.md".to_string()),
+            "[[foo]] should resolve to b.md via its new alias"
         );
     }
 
