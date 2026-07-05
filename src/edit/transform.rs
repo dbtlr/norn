@@ -131,12 +131,16 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
             // splice the new line in between.
             let head_len = existing.trim_end().len();
             let head = &existing[..head_len];
-            // An empty section (or one without a trailing newline) leaves no
-            // whitespace to separate the appended line from the following heading
-            // or EOF; terminate the line with a single newline in that case so it
-            // never welds onto the next heading (NRN-137).
+            // The section's trailing whitespace (`tail`) separates the appended
+            // line from the following heading or EOF. If it does not begin with a
+            // newline — an empty section, or one whose only trailing whitespace is
+            // spaces — the appended line would weld onto the next heading (or leave
+            // the document without a final newline), so substitute a single newline
+            // (NRN-137). A tail that already starts with a newline is preserved
+            // verbatim, keeping any blank line the section held before the next
+            // heading.
             let tail = &existing[head_len..];
-            let tail = if tail.is_empty() { "\n" } else { tail };
+            let tail = if tail.starts_with('\n') { tail } else { "\n" };
             let line = content.trim_matches('\n');
             let region = if head.is_empty() {
                 format!("{line}{tail}")
@@ -431,6 +435,35 @@ mod tests {
         };
         let out = apply_edits(doc, &[op]).unwrap();
         assert_eq!(out.new_body, "## Empty\nfirst\n");
+    }
+
+    #[test]
+    fn append_to_empty_section_with_whitespace_only_tail() {
+        // A section whose only trailing whitespace is spaces (no newline) at EOF:
+        // the tail is non-empty but does not start with a newline, so the appended
+        // line must still be newline-terminated rather than welded to the spaces
+        // and left without a final newline (NRN-137).
+        let doc = "## Empty\n   ";
+        let op = EditOp::AppendToSection {
+            heading: "Empty".into(),
+            content: "first".into(),
+        };
+        let out = apply_edits(doc, &[op]).unwrap();
+        assert_eq!(out.new_body, "## Empty\nfirst\n");
+    }
+
+    #[test]
+    fn append_to_nonempty_section_without_trailing_newline() {
+        // A non-empty final section lacking a trailing newline gains one, so the
+        // appended line is terminated and the document ends with a newline
+        // (NRN-137).
+        let doc = "## A\nx";
+        let op = EditOp::AppendToSection {
+            heading: "A".into(),
+            content: "y".into(),
+        };
+        let out = apply_edits(doc, &[op]).unwrap();
+        assert_eq!(out.new_body, "## A\nx\ny\n");
     }
 
     #[test]
