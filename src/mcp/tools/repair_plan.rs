@@ -119,16 +119,18 @@ pub struct RepairPlanOutput {
 pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutput> {
     // Load the graph index via the same entry point the CLI uses.
     // `false` means "allow cache refresh if stale" (mirrors `no_cache_refresh = false`).
-    // Use the warm server-lifetime config (ctx.config) — consistent with `validate.rs`
-    // and matching `norn repair`'s approach where config is loaded once per invocation.
-    let index = load_graph_index(&ctx.vault_root, &ctx.config.index_options, false)?;
+    // Use the context's current config (`ctx.config()`; hot-swapped in warm mode) —
+    // consistent with `validate.rs` and matching `norn repair`'s approach where
+    // config is loaded once per invocation.
+    let config = ctx.config();
+    let index = load_graph_index(&ctx.vault_root, &config.index_options, false)?;
 
-    // Collect all validation findings using the warm server-lifetime config.
+    // Collect all validation findings using the context's current config.
     let findings = validate_with_compiled(
         &index,
-        &ctx.config.validate,
-        &ctx.config.compiled,
-        ctx.config.index_options.alias_field.as_deref(),
+        &config.validate,
+        &config.compiled,
+        config.index_options.alias_field.as_deref(),
     );
 
     // Build a RepairArgs equivalent from the MCP params for the shared filter helpers.
@@ -187,7 +189,7 @@ pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutpu
         ctx.vault_root.clone(),
         plan_filters,
         filtered_findings,
-        &ctx.config.repair,
+        &config.repair,
         &index,
     );
 

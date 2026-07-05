@@ -36,6 +36,7 @@ mod repair_apply;
 mod rewrite_wikilink_cmd;
 mod self_update;
 mod seq_alloc;
+mod serve;
 mod service;
 mod set;
 mod show;
@@ -97,7 +98,7 @@ fn is_routable_read(command: &Command) -> bool {
 
 /// The CLI→service routing seam (NRN-92).
 ///
-/// For a routable read command, probe for a live warm service for `cwd`.
+/// For a routable read command, probe for a live warm host service.
 /// Returns `Some(result)` if the request was served by routing to the service,
 /// or `None` to fall through to the direct, integrity-verified dispatch.
 ///
@@ -106,20 +107,20 @@ fn is_routable_read(command: &Command) -> bool {
 /// Until then this always returns `None` — a live service is a safe
 /// fall-through, because the direct dispatch re-establishes trust locally and
 /// so preserves the invariant unconditionally (ADR 0005).
-fn try_route_read(command: &Command, cwd: &camino::Utf8Path) -> Option<Result<i32>> {
+fn try_route_read(command: &Command) -> Option<Result<i32>> {
     if !is_routable_read(command) {
         return None;
     }
-    match service::probe(cwd, service::DEFAULT_HANDSHAKE_TIMEOUT) {
-        service::RouteDecision::Direct => None,
-        #[cfg(unix)]
-        service::RouteDecision::Route(_client) => {
-            // NRN-94: send the translated request on `_client` and return
-            // `Some(rendered)`. For now, drop the connection and fall through to
-            // the verified direct open below.
-            None
-        }
-    }
+    // FIX-11: the probe is GATED OFF until NRN-94 fills the `Route` arm.
+    //
+    // With a live daemon, every routable read would otherwise pay connect + ping
+    // and then discard the result (the `Route` arm is a stub that falls through
+    // to Direct), plus possibly print a version-skew stderr note — pure tax on
+    // daemon adopters with no actionable benefit until routing is real. The probe
+    // machinery is complete and unit-tested in `src/service.rs`; NRN-94 activates
+    // it by replacing this early return with the `service::probe(...)` match and
+    // handling `Route`. Until then a live daemon must cost CLI reads nothing.
+    None
 }
 
 fn run(cli: Cli) -> Result<i32> {
@@ -152,6 +153,23 @@ fn run(cli: Cli) -> Result<i32> {
         return Ok(0);
     }
 
+    // The warm host daemon owns its own tokio runtime and opens vault contexts
+    // per-connection, so — like `mcp` — it is pre-handled here, before the
+    // cache-opening arms and the routing seam. It ignores `--cwd` for data
+    // (vaults arrive per connection) but refuses an explicit `--config`:
+    // warm contexts always load each vault's default config, so honoring a
+    // single CLI-level `--config` would be misleading. Exit 2 = bad invocation.
+    if let Command::Serve(_) = &command {
+        if config_path.is_some() {
+            eprintln!(
+                "norn serve: --config is not supported (each vault loads its own default .norn/config.yaml)"
+            );
+            return Ok(2);
+        }
+        crate::serve::run()?;
+        return Ok(0);
+    }
+
     // The explicit `cache prune` manages the sweep itself (and a --dry-run
     // must not be followed by a real sweep in the same invocation), so the
     // tail-hook lazy sweep is skipped for it.
@@ -165,7 +183,7 @@ fn run(cli: Cli) -> Result<i32> {
     // from an already-verified cache. When it returns `Some`, the request was
     // served by routing; otherwise we fall through to the direct, integrity-
     // verified dispatch below (today's behavior). No daemon => only a `stat`.
-    if let Some(result) = try_route_read(&command, &cwd) {
+    if let Some(result) = try_route_read(&command) {
         return result;
     }
 
@@ -1209,6 +1227,9 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Command::Mcp(_) => {
             unreachable!("mcp is handled before the cache-opening dispatch")
+        }
+        Command::Serve(_) => {
+            unreachable!("serve is handled before the cache-opening dispatch")
         }
     };
     // Per-invocation throttled lazy GC: best-effort, never affects the

@@ -111,7 +111,7 @@ pub fn handle(
     let cwd = ctx.vault_root.clone();
 
     // Load the graph index honoring files.ignore, exactly like the CLI path.
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config.index_options, false)?;
+    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config().index_options, false)?;
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.
     let plan = MigrationPlan {

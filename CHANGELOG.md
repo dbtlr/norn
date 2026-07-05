@@ -10,6 +10,14 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Added
+
+- **`norn serve` — a warm host daemon.** One foreground process (Unix only) serves the full MCP toolset for any vault on the host over a single well-known Unix socket (`~/.cache/norn/run/norn.sock`); at most one instance runs per user, guarded by a lifetime advisory lock. Each vault's integrity is verified once on first touch and held warm from then on, with per-request freshness, self-healing config changes, cache clears, and a vanished root. There is no `norn service` supervisor yet — run `norn serve` under your own process supervisor — and the CLI does not route reads through it yet (that lands with NRN-94); an MCP client can connect to the daemon directly. See [docs/service.md](docs/service.md).
+
+### Changed
+
+- **The CLI→service probe now targets the well-known host socket** instead of a per-vault path derived from the vault's identity hash — the derived form could exceed macOS's `sun_path` limit on some vault paths. Routing additionally requires the daemon to echo an exact version match, with a one-line stderr note on skew (`restart the norn serve daemon`), and the probe's connect is now timeout-bounded rather than a blocking connect.
+
 ## v0.42.0 - 2026-07-03
 
 Trusted mutation and vault inspection. `norn describe` becomes a first-class CLI command with a `--data` contents-summary; section/body edits compose into plans as apply-time actions; `norn edit` / `vault.edit` gain an optional expected-hash compare-and-swap and `.document_hash` becomes readable through `find`/`get`/`vault.get`; and rule targets can auto-allocate ids via `{{seq}}`. Query-plan work extends `document_fields` index routing to the date, numeric, and boolean predicate classes, with typed comparison semantics unified across the indexed and scan paths.

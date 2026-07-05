@@ -17,7 +17,7 @@
 //! calls `vault.new`.
 //!
 //! **Source of truth.** Both the path rules and the schema live in the same
-//! place: `ctx.config.validate.rules` (`Vec<ValidateRule>`). Each rule carries a
+//! place: `ctx.config().validate.rules` (`Vec<ValidateRule>`). Each rule carries a
 //! `match` selector (the path glob + frontmatter predicates), its
 //! `frontmatter_defaults` (what `norn new` scaffolds), plus the schema fields
 //! (`required_frontmatter`, `forbidden_frontmatter`, `field_types`,
@@ -204,7 +204,8 @@ pub fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> Result<Descri
     });
 
     let filters = params_to_filter_args(params);
-    crate::describe::describe(&cache, &ctx.config, &filters, data)
+    let config = ctx.config();
+    crate::describe::describe(&cache, &config, &filters, data)
 }
 
 #[cfg(test)]
@@ -503,7 +504,7 @@ mod tests {
             .unwrap();
         let expected = crate::describe::data::summarize(
             &docs,
-            &ctx.config,
+            &ctx.config(),
             &crate::describe::data::DataOptions::default(),
         );
 
@@ -542,7 +543,7 @@ mod tests {
             .unwrap();
         let expected = crate::describe::data::summarize(
             &docs,
-            &ctx.config,
+            &ctx.config(),
             &crate::describe::data::DataOptions::default(),
         );
 

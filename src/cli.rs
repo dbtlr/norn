@@ -269,6 +269,23 @@ Exit codes: 0 success or dry-run, 1 runtime failure, 2 pre-flight refusal."
     /// Run norn as a Model Context Protocol (MCP) stdio server over the vault at --cwd.
     Mcp(McpArgs),
     #[command(
+        about = "Run the warm host daemon: serves MCP for any vault on this host over a Unix socket",
+        long_about = "Run the warm host daemon.\n\n\
+            `norn serve` is ONE persistent foreground process (Unix only) that serves the full \
+            MCP toolset for any vault on this host over a single well-known Unix-domain socket \
+            (`<XDG_CACHE_HOME>/norn/run/norn.sock`). It runs in the foreground — run it under a \
+            process supervisor; supervision verbs (`norn service start/stop/status`) arrive later. \
+            At most one instance runs per user (guarded by a lifetime advisory lock next to the \
+            socket); a second `norn serve` refuses.\n\n\
+            Vaults are named per-connection, so `--cwd` is not used for data and `--config` is not \
+            accepted (each vault loads its own default `.norn/config.yaml`). Per vault, the daemon \
+            holds a verify-once warm cache: integrity is checked the first time a vault is touched, \
+            then maintained by a cheap per-request self-heal — so warm queries skip the repeated \
+            integrity check the one-shot CLI pays.\n\n\
+            Shut down cleanly with SIGINT/SIGTERM (the socket is unlinked on exit)."
+    )]
+    Serve(ServeArgs),
+    #[command(
         disable_help_flag = true,
         about = "Read the vault mutation audit trail (the append-only event stream): recent mutations with status / target / trace, filterable"
     )]
@@ -281,6 +298,13 @@ pub struct McpArgs {
     #[arg(long)]
     pub read_only: bool,
 }
+
+/// Arguments for `norn serve`. Phase 1 has no flags: there is no `--detach`,
+/// `--read-only`, or `--socket` — the daemon is a single foreground process at
+/// the well-known socket, serving the full toolset. Supervision is a later
+/// `norn service` layer (NRN-115).
+#[derive(Debug, clap::Args)]
+pub struct ServeArgs {}
 
 #[derive(Debug, Parser)]
 #[command(disable_help_flag = true)]

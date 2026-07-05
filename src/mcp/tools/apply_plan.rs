@@ -129,7 +129,7 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
     }
 
     // ── Step 3: load graph index (same entry point migrate uses) ────────────────
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config.index_options, false)?;
+    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config().index_options, false)?;
 
     let dry_run = !p.confirm;
 

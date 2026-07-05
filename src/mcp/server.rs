@@ -107,13 +107,46 @@ impl McpServer {
     /// macro additionally needs `T: JsonSchema` to emit each tool's
     /// `outputSchema`. Both bounds match what the existing methods already
     /// required, so the generic does not narrow any tool's contract.
+    ///
+    /// The lock is acquired FIRST (async), then the sync vault work runs on a
+    /// `spawn_blocking` thread rather than inline on the async worker. Under the
+    /// warm host daemon (`norn serve`) many connections share one runtime; a
+    /// long-running query executed inline would occupy a worker thread and could
+    /// starve the O(1) control-ping path (ADR 0005 requires pings answer
+    /// promptly regardless of query load). Running the SQLite work off the async
+    /// workers keeps them free for accepts, pings, and other vaults. The NRN-55
+    /// serialization guarantee is unchanged: `call_lock` is still held across the
+    /// whole blocking call, so per-vault work stays single-flight.
     async fn run_tool<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
     where
-        T: serde::Serialize + schemars::JsonSchema,
-        F: FnOnce(&VaultContext) -> anyhow::Result<T>,
+        T: serde::Serialize + schemars::JsonSchema + Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
     {
         let _guard = self.call_lock.lock().await;
-        f(&self.ctx).map(Json).map_err(to_mcp_error)
+        let ctx = Arc::clone(&self.ctx);
+        // The per-request seam (`begin_request`) runs under `call_lock`, off the
+        // async workers, before the tool body — so every tool (including the ones
+        // that bypass `query_cache` and go straight to `load_graph_index`) gets
+        // root-liveness + a fresh, request-stable config each call (FIX-1).
+        let joined = tokio::task::spawn_blocking(move || {
+            ctx.begin_request()?;
+            f(&ctx)
+        })
+        .await;
+        match joined {
+            Ok(Ok(value)) => Ok(Json(value)),
+            // A corruption-class SQLite failure evicts the warm state so the next
+            // request fully reopens (integrity_check → rebuild) — the warm-mode
+            // self-heal for in-place corruption (FIX-3). No-op in cold mode.
+            Ok(Err(err)) => {
+                self.ctx.note_tool_error(&err);
+                Err(to_mcp_error(err))
+            }
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("tool task failed: {join_err}"),
+                None,
+            )),
+        }
     }
 
     /// Run a *mutation* tool handler — like [`run_tool`](Self::run_tool), but
@@ -132,8 +165,8 @@ impl McpServer {
     /// client that calls a tool it was never advertised.
     async fn run_mutation<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
     where
-        T: serde::Serialize + schemars::JsonSchema,
-        F: FnOnce(&VaultContext) -> anyhow::Result<T>,
+        T: serde::Serialize + schemars::JsonSchema + Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
     {
         if self.read_only {
             return Err(rmcp::ErrorData::invalid_request(
@@ -142,7 +175,24 @@ impl McpServer {
             ));
         }
         let _guard = self.call_lock.lock().await;
-        f(&self.ctx).map(Json).map_err(to_mcp_error)
+        let ctx = Arc::clone(&self.ctx);
+        // Same per-request seam + corruption-eviction path as `run_tool`.
+        let joined = tokio::task::spawn_blocking(move || {
+            ctx.begin_request()?;
+            f(&ctx)
+        })
+        .await;
+        match joined {
+            Ok(Ok(value)) => Ok(Json(value)),
+            Ok(Err(err)) => {
+                self.ctx.note_tool_error(&err);
+                Err(to_mcp_error(err))
+            }
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("tool task failed: {join_err}"),
+                None,
+            )),
+        }
     }
 }
 
@@ -290,7 +340,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::describe::DescribeParams>,
     ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::describe::handle(ctx, &p))
+        self.run_tool(move |ctx| crate::mcp::tools::describe::handle(ctx, &p))
             .await
     }
 }
@@ -564,5 +614,63 @@ mod tests {
                 "vault.get for `alpha` should return exactly one record"
             );
         }
+    }
+
+    /// FIX-1 (NRN-93): a tool that bypasses `query_cache` (validate goes straight
+    /// to `load_graph_index`) must still observe a config change between two warm
+    /// requests. The per-request `begin_request` seam refreshes config before
+    /// every tool body; without it, warm-mode config for these tools goes stale
+    /// for the daemon's lifetime and routed results diverge from a direct CLI run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn warm_validate_reflects_config_change_across_requests() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-warm-cfg-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        // A broken wikilink inside templates/ — validate flags it until a later
+        // files.ignore rule hides it.
+        let templates = root.join("templates");
+        std::fs::create_dir_all(templates.as_std_path()).unwrap();
+        std::fs::write(
+            templates.join("tpl.md"),
+            "---\ntype: note\ntitle: T\n---\n\nSee [[MissingTarget]].\n",
+        )
+        .unwrap();
+
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let server = McpServer::new(ctx, /*read_only=*/ false);
+
+        let out1 = server
+            .validate(Parameters(
+                crate::mcp::tools::validate::ValidateParams::default(),
+            ))
+            .await
+            .expect("first validate");
+        assert!(
+            !out1.0.findings.is_empty(),
+            "baseline: broken wikilink must produce a finding"
+        );
+
+        // Add files.ignore for templates/** AFTER the warm context opened.
+        let norn_dir = root.join(".norn");
+        std::fs::create_dir_all(norn_dir.as_std_path()).unwrap();
+        std::fs::write(
+            norn_dir.join("config.yaml"),
+            "files:\n  ignore:\n    - \"templates/**\"\n",
+        )
+        .unwrap();
+
+        let out2 = server
+            .validate(Parameters(
+                crate::mcp::tools::validate::ValidateParams::default(),
+            ))
+            .await
+            .expect("second validate");
+        assert!(
+            out2.0.findings.is_empty(),
+            "config change (files.ignore) must be visible to the next warm request; got {:?}",
+            out2.0.findings
+        );
     }
 }
