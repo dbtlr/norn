@@ -323,8 +323,13 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         footnotes: vec![],
     };
 
-    // Thread `-p` / `--parents` through to the `create_document` applier arm.
-    let apply_ctx = crate::repair_apply::CreateApplyContext { parents: p.parents };
+    // Thread `-p` / `--parents` and `files.ignore` through to the
+    // `create_document` applier arm — the latter re-checks the resolved
+    // `{{seq}}` path against `files.ignore` before any write (NRN-138).
+    let apply_ctx = crate::repair_apply::CreateApplyContext {
+        parents: p.parents,
+        ignore: loaded_config.vault_config.files.ignore.clone(),
+    };
 
     // Emit one op_planned span for the single create_document change so action
     // events hang off it — mirrors `apply_and_render`'s span construction.
