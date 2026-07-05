@@ -182,6 +182,29 @@ fn emit_op_action(
     }
 }
 
+/// Crash-atomic write: serialize `contents` to a sibling temp file
+/// (`.{stem}.tmp`) then `fs::rename` it into place (atomic on POSIX). A SIGKILL /
+/// power loss / `ENOSPC` mid-write truncates only the throwaway temp, never the
+/// live document — which is exactly the half-mutation NRN-139 exists to prevent.
+/// Best-effort temp cleanup on rename failure. Shared by the Phase A2 content
+/// write and the `create_document` pass so there is a single implementation.
+fn atomic_write(full: &Utf8Path, contents: &str) -> Result<()> {
+    let tmp_path = {
+        let mut p = full.to_path_buf();
+        let stem = p.file_name().unwrap_or("doc").to_string();
+        p.set_file_name(format!(".{stem}.tmp"));
+        p
+    };
+    fs::write(tmp_path.as_std_path(), contents)
+        .with_context(|| format!("write temp file {tmp_path}"))?;
+    fs::rename(tmp_path.as_std_path(), full.as_std_path()).with_context(|| {
+        // Best-effort cleanup on rename failure.
+        let _ = fs::remove_file(tmp_path.as_std_path());
+        format!("rename temp to {full}")
+    })?;
+    Ok(())
+}
+
 /// The content-mutating ops for one document, bucketed by class. A document
 /// touched by more than one class (canonically: a frontmatter `set` plus an
 /// `append_to_section`) composes into ONE read + ONE write — see
@@ -471,7 +494,7 @@ pub fn apply_repair_plan_with_context(
         }
 
         let absolute_path = cwd.join(path);
-        fs::write(&absolute_path, &file.content)
+        atomic_write(&absolute_path, &file.content)
             .with_context(|| format!("write {absolute_path}"))?;
         // One action per contributing change_id: a unit that was a byte-identical
         // no-op emits nothing.
@@ -667,19 +690,8 @@ pub fn apply_repair_plan_with_context(
             .map_err(|e| anyhow::anyhow!("create_document: serialize failed: {e}"))?;
 
         // Atomic write: write to a sibling temp file, then rename into place.
-        let tmp_path = {
-            let mut p = full.clone();
-            let stem = p.file_name().unwrap_or("doc").to_string();
-            p.set_file_name(format!(".{stem}.tmp"));
-            p
-        };
-        fs::write(tmp_path.as_std_path(), &contents)
-            .with_context(|| format!("create_document: write temp file {tmp_path}"))?;
-        fs::rename(tmp_path.as_std_path(), full.as_std_path()).with_context(|| {
-            // Best-effort cleanup on rename failure.
-            let _ = fs::remove_file(tmp_path.as_std_path());
-            format!("create_document: rename temp to {full}")
-        })?;
+        atomic_write(&full, &contents)
+            .with_context(|| format!("create_document: write {resolved_path}"))?;
 
         report.created_documents.push(CreateDocumentResult {
             path: resolved_path.clone(),
@@ -1685,6 +1697,45 @@ mod tests {
         assert!(
             on_disk.contains("- created") && on_disk.contains("- done"),
             "{on_disk}"
+        );
+    }
+
+    /// The Phase A2 content write is crash-atomic (temp + rename, mirroring
+    /// `create_document`): the composed content lands correctly AND no `.tmp`
+    /// sibling is left behind after a successful write.
+    #[test]
+    fn content_write_is_atomic_and_leaves_no_temp() {
+        let initial = "---\nstatus: todo\n---\nbody\n";
+        let (_tmp, root, index, hash) =
+            make_vault_with_doc("norn-nrn139-atomicwrite-", "note.md", initial);
+
+        let plan = plan_with(
+            &root,
+            vec![set_frontmatter_change(
+                "note.md",
+                &hash,
+                "status",
+                serde_json::json!("todo"),
+                serde_json::json!("done"),
+            )],
+        );
+
+        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+
+        // Content landed via the atomic rename.
+        let on_disk = std::fs::read_to_string(root.join("note.md")).unwrap();
+        assert!(on_disk.contains("status: done"), "{on_disk}");
+
+        // No sibling temp left behind: the temp+rename mechanism cleaned up.
+        let leftovers: Vec<String> = std::fs::read_dir(root.as_std_path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with('.') && n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no .tmp sibling should remain after a successful atomic write; found: {leftovers:?}"
         );
     }
 }
