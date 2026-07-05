@@ -182,24 +182,11 @@ fn emit_op_action(
     }
 }
 
-/// Whether `op` is a content-mutating op — one handled by Phase A (frontmatter
-/// set/remove/add, rewrite_link, replace_body, or any of the six section/body
-/// edit kinds) rather than a lifecycle op (create/delete/move).
+/// Whether `op` is a content-mutating op — one handled by Phase A rather than a
+/// lifecycle op (create/delete/move). Delegates to [`content_class`] so there is
+/// one definition of the content-op vocabulary.
 fn is_content_op(op: &str) -> bool {
-    matches!(
-        op,
-        "set_frontmatter"
-            | "remove_frontmatter"
-            | "add_frontmatter"
-            | "rewrite_link"
-            | "replace_body"
-            | "str_replace"
-            | "replace_section"
-            | "append_to_section"
-            | "delete_section"
-            | "insert_before_heading"
-            | "insert_after_heading"
-    )
+    content_class(op).is_some()
 }
 
 /// Reject a plan that edits a document AFTER an earlier `delete_document` or
@@ -254,6 +241,14 @@ fn atomic_write(full: &Utf8Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Record `path` in `report.changed_files` if not already present (the list is
+/// de-duplicated).
+fn record_changed_file(report: &mut RepairApplyReport, path: &Utf8Path) {
+    if !report.changed_files.iter().any(|p| p.as_path() == path) {
+        report.changed_files.push(path.to_path_buf());
+    }
+}
+
 /// The content-mutating ops for one document, bucketed by class. A document
 /// touched by more than one class (canonically: a frontmatter `set` plus an
 /// `append_to_section`) composes into ONE read + ONE write — see
@@ -274,6 +269,24 @@ enum ContentClass {
     RewriteLink,
     ReplaceBody,
     EditOps,
+}
+
+/// Classify a plan op into its content region, or `None` for a lifecycle op
+/// (create/delete/move). The single source of truth for the content-op
+/// vocabulary — shared by the Phase A bucketing dispatch and the vacate guard.
+fn content_class(op: &str) -> Option<ContentClass> {
+    Some(match op {
+        "set_frontmatter" | "remove_frontmatter" | "add_frontmatter" => ContentClass::Frontmatter,
+        "rewrite_link" => ContentClass::RewriteLink,
+        "replace_body" => ContentClass::ReplaceBody,
+        "str_replace"
+        | "replace_section"
+        | "append_to_section"
+        | "delete_section"
+        | "insert_before_heading"
+        | "insert_after_heading" => ContentClass::EditOps,
+        _ => return None,
+    })
 }
 
 /// One transform invocation within a composed file: the planned changes it
@@ -307,18 +320,24 @@ struct ComposedFile<'a> {
 /// whole content phase before writing anything (NRN-139: no half-mutated file).
 fn compose_content_ops<'a>(
     path: &Utf8Path,
-    ops: &ContentOps<'a>,
+    ops: ContentOps<'a>,
     original: &str,
 ) -> Result<ComposedFile<'a>> {
+    let ContentOps {
+        frontmatter,
+        rewrite_links,
+        replace_bodies,
+        edit_ops,
+    } = ops;
     let mut content = original.to_string();
     let mut units: Vec<ComposedUnit<'a>> = Vec::new();
 
     // Frontmatter: one grouped transform over all set/remove/add changes.
-    if !ops.frontmatter.is_empty() {
-        let updated = apply_file_changes(&content, &ops.frontmatter)?;
+    if !frontmatter.is_empty() {
+        let updated = apply_file_changes(&content, &frontmatter)?;
         let changed = updated != content;
         units.push(ComposedUnit {
-            changes: ops.frontmatter.clone(),
+            changes: frontmatter,
             class: ContentClass::Frontmatter,
             changed,
         });
@@ -327,7 +346,7 @@ fn compose_content_ops<'a>(
 
     // rewrite_link: per-change whole-file scans (matches the prior per-pass
     // granularity so each rewrite's changed/no-op status is tracked independently).
-    for &change in &ops.rewrite_links {
+    for &change in &rewrite_links {
         let updated = apply_rewrite_link(&content, change)?;
         let changed = updated != content;
         units.push(ComposedUnit {
@@ -339,7 +358,7 @@ fn compose_content_ops<'a>(
     }
 
     // replace_body: per-change whole-body rewrites.
-    for &change in &ops.replace_bodies {
+    for &change in &replace_bodies {
         let updated = crate::standards::apply::apply_replace_body(&content, change)?;
         let changed = updated != content;
         units.push(ComposedUnit {
@@ -352,9 +371,8 @@ fn compose_content_ops<'a>(
 
     // Section/body edit ops: one grouped transform running the shared
     // `edit::transform` engine in plan order against the evolving body.
-    if !ops.edit_ops.is_empty() {
-        let decoded: Vec<crate::edit::ops::EditOp> = ops
-            .edit_ops
+    if !edit_ops.is_empty() {
+        let decoded: Vec<crate::edit::ops::EditOp> = edit_ops
             .iter()
             .map(|c| {
                 let payload = c
@@ -368,7 +386,7 @@ fn compose_content_ops<'a>(
         let updated = crate::standards::apply::apply_edit_ops(&content, &decoded, path)?;
         let changed = updated != content;
         units.push(ComposedUnit {
-            changes: ops.edit_ops.clone(),
+            changes: edit_ops,
             class: ContentClass::EditOps,
             changed,
         });
@@ -424,35 +442,15 @@ pub fn apply_repair_plan_with_context(
     // A1 (compute) runs every transform under whole-doc CAS BEFORE any write. A
     // hash drift or a failing transform (missing heading, non-unique str_replace,
     // etc.) aborts the whole content phase here, before the first byte is written.
-    const EDIT_KINDS: &[&str] = &[
-        "str_replace",
-        "replace_section",
-        "append_to_section",
-        "delete_section",
-        "insert_before_heading",
-        "insert_after_heading",
-    ];
 
     // Bucket content ops per document, recording first-appearance path order for
-    // determinism.
+    // determinism. Lifecycle ops (create/delete/move) classify as `None` and are
+    // handled by the Phase B passes.
     let mut content_order: Vec<Utf8PathBuf> = Vec::new();
     let mut content_ops: std::collections::BTreeMap<Utf8PathBuf, ContentOps> =
         std::collections::BTreeMap::new();
     for change in &plan.changes {
-        let op = change.operation.as_str();
-        let class = if matches!(
-            op,
-            "set_frontmatter" | "remove_frontmatter" | "add_frontmatter"
-        ) {
-            ContentClass::Frontmatter
-        } else if op == "rewrite_link" {
-            ContentClass::RewriteLink
-        } else if op == "replace_body" {
-            ContentClass::ReplaceBody
-        } else if EDIT_KINDS.contains(&op) {
-            ContentClass::EditOps
-        } else {
-            // Lifecycle op (create/delete/move) — handled by the Phase B passes.
+        let Some(class) = content_class(&change.operation) else {
             continue;
         };
         if !content_ops.contains_key(&change.path) {
@@ -470,7 +468,11 @@ pub fn apply_repair_plan_with_context(
     // A1: compute every file's composed content up front.
     let mut composed: Vec<(Utf8PathBuf, ComposedFile)> = Vec::with_capacity(content_order.len());
     for path in &content_order {
-        let ops = &content_ops[path];
+        // Drain the bucket so its `Vec<&PlannedChange>`s move into the composed
+        // units instead of being cloned.
+        let ops = content_ops
+            .remove(path)
+            .expect("content_order paths are keys of content_ops");
         // Hash-check EVERY content change for this path (not just the first): a
         // divergent same-path hash must abort. There is exactly one current hash
         // per path, so when the changes agree this is equivalent to a single
@@ -500,8 +502,8 @@ pub fn apply_repair_plan_with_context(
 
         // changed_files: the union of the prior passes' pushes — present once iff
         // the composed file actually changed.
-        if overall_changed && !report.changed_files.contains(path) {
-            report.changed_files.push(path.clone());
+        if overall_changed {
+            record_changed_file(&mut report, path);
         }
 
         // Per-class report forecasts, preserving the prior per-pass shapes.
@@ -522,8 +524,8 @@ pub fn apply_repair_plan_with_context(
                                 from: from.to_string(),
                                 to: to.to_string(),
                             });
-                            if dry_run && !report.changed_files.contains(&change.path) {
-                                report.changed_files.push(change.path.clone());
+                            if dry_run {
+                                record_changed_file(&mut report, &change.path);
                             }
                         }
                     }
@@ -532,8 +534,8 @@ pub fn apply_repair_plan_with_context(
                     let change = unit.changes[0];
                     // replace_body is always recorded in replaced_bodies (both
                     // modes); dry-run additionally forces changed_files.
-                    if dry_run && !report.changed_files.contains(&change.path) {
-                        report.changed_files.push(change.path.clone());
+                    if dry_run {
+                        record_changed_file(&mut report, &change.path);
                     }
                     report.replaced_bodies.push(change.path.clone());
                 }
@@ -1597,7 +1599,7 @@ mod tests {
         };
 
         let composed =
-            compose_content_ops(camino::Utf8Path::new("note.md"), &ops, original).unwrap();
+            compose_content_ops(camino::Utf8Path::new("note.md"), ops, original).unwrap();
 
         // A single composed string carries BOTH mutations — proving Phase A2
         // performs exactly one write for the multi-class document.
@@ -1639,7 +1641,7 @@ mod tests {
             edit_ops: Vec::new(),
         };
         let composed =
-            compose_content_ops(camino::Utf8Path::new("note.md"), &ops, original).unwrap();
+            compose_content_ops(camino::Utf8Path::new("note.md"), ops, original).unwrap();
         assert_eq!(composed.content, original);
         assert!(!composed.units[0].changed, "no-op frontmatter set");
     }
@@ -1663,8 +1665,7 @@ mod tests {
             replace_bodies: Vec::new(),
             edit_ops: vec![&edit],
         };
-        let err =
-            compose_content_ops(camino::Utf8Path::new("note.md"), &ops, original).unwrap_err();
+        let err = compose_content_ops(camino::Utf8Path::new("note.md"), ops, original).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("History")
