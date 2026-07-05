@@ -41,7 +41,9 @@
 //!    to evict the whole context.
 //! 1. **Config freshness** (`begin_request`)**.** Read `<vault_root>/.norn/config.yaml`
 //!    and compare a content-hash fingerprint (blake3 of the file bytes, plus
-//!    `exists`). Unchanged → proceed. Changed → re-parse: a parse error fails
+//!    `exists`). An existing-but-unreadable config (e.g. `chmod 000`) fails
+//!    *this* request too, distinctly from "absent" — see [`fingerprint_config`].
+//!    Unchanged → proceed. Changed → re-parse: a parse error fails
 //!    *this* request (mirroring a direct CLI invocation) and leaves the
 //!    fingerprint stale so the next request retries. On a successful re-parse, if
 //!    the resolved index-set hash or `alias_field` changed (the inputs to
@@ -89,8 +91,11 @@ pub(crate) enum WarmContextError {
 }
 
 /// Content-hash fingerprint of `<vault_root>/.norn/config.yaml`, used by warm
-/// mode to detect config edits between requests. A fingerprint for a nonexistent
-/// file carries `exists = false` and `hash = None`.
+/// mode to detect config edits between requests. A fingerprint for a
+/// genuinely nonexistent file carries `exists = false` and `hash = None`. An
+/// EXISTING-but-unreadable file (e.g. `chmod 000`) is NOT represented here —
+/// [`fingerprint_config`] returns `Err` for that case instead, so it is never
+/// silently conflated with "absent".
 ///
 /// The fingerprint is a blake3 hash of the file's bytes — NOT `(mtime, size)`.
 /// A stat-based fingerprint misses a same-size rewrite within mtime granularity
@@ -101,23 +106,35 @@ pub(crate) enum WarmContextError {
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct ConfigFingerprint {
     exists: bool,
-    /// blake3 of the file bytes; `None` when the file is absent/unreadable.
+    /// blake3 of the file bytes; `None` when the file is absent.
     hash: Option<[u8; 32]>,
 }
 
-/// Fingerprint the config file at `path` by content. A missing (or unreadable)
-/// file yields `exists = false`. We deliberately read + hash rather than stat:
-/// see [`ConfigFingerprint`] for why mtime/size can't gate the read.
-fn fingerprint_config(path: &Utf8Path) -> ConfigFingerprint {
+/// Fingerprint the config file at `path` by content. A genuinely missing file
+/// yields `Ok` with `exists = false`. Any OTHER read failure (permission
+/// denied, I/O error, ...) is a config that EXISTS but cannot be read, which
+/// must not be conflated with "absent" — that would let the daemon keep
+/// silently serving stale/default config while a direct CLI invocation on the
+/// same vault fails. Such failures are returned as `Err` so they propagate out
+/// of `begin_request` and fail that request, mirroring direct-CLI semantics
+/// (same shape as the existing parse-error path: the fingerprint is left
+/// stale so the next request retries).
+///
+/// We deliberately read + hash rather than stat: see [`ConfigFingerprint`]
+/// for why mtime/size can't gate the read.
+fn fingerprint_config(path: &Utf8Path) -> Result<ConfigFingerprint> {
     match std::fs::read(path.as_std_path()) {
-        Ok(bytes) => ConfigFingerprint {
+        Ok(bytes) => Ok(ConfigFingerprint {
             exists: true,
             hash: Some(*blake3::hash(&bytes).as_bytes()),
-        },
-        Err(_) => ConfigFingerprint {
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ConfigFingerprint {
             exists: false,
             hash: None,
-        },
+        }),
+        Err(error) => {
+            Err(anyhow::Error::new(error).context(format!("failed to read config {path}")))
+        }
     }
 }
 
@@ -242,7 +259,7 @@ impl VaultContext {
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn open_warm(cwd: &Utf8Path) -> Result<Self> {
         let config = load_config(&cwd.to_path_buf(), None)?;
-        let config_fp = fingerprint_config(&config_yaml_path(cwd));
+        let config_fp = fingerprint_config(&config_yaml_path(cwd))?;
         Ok(Self {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
@@ -398,7 +415,7 @@ impl VaultContext {
     /// change, hot-swaps the stored config `Arc` and returns `false`.
     fn refresh_config_warm(&self, slot: &WarmSlot) -> Result<bool> {
         let config_path = config_yaml_path(&self.vault_root);
-        let new_fp = fingerprint_config(&config_path);
+        let new_fp = fingerprint_config(&config_path)?;
 
         let mut fp_guard = slot.config_fp.lock().unwrap_or_else(|p| p.into_inner());
         if *fp_guard == new_fp {
@@ -443,20 +460,26 @@ fn config_yaml_path(vault_root: &Utf8Path) -> Utf8PathBuf {
     vault_root.join(".norn/config.yaml")
 }
 
-/// Lock the warm state, recovering from a poisoned mutex (FIX-6).
+/// Lock the warm state, healing a poisoned mutex once (FIX-6).
 ///
 /// A panic in a tool body while holding the warm guard poisons this lock; the
 /// poisoned state may be mid-mutation, so on recovery we EVICT it (set to
-/// `None`) and let the next `query_cache` fully reopen with a fresh integrity
+/// `None`) so the next `query_cache` fully reopens with a fresh integrity
 /// check — the warm-state invariant's own recovery path, re-establishing trust
-/// rather than papering over the panic. Without this every later request would
-/// panic at `.lock()`, wedging the vault until the daemon restarts.
+/// rather than papering over the panic. We then clear the poison flag on the
+/// mutex itself, so this is a ONE-TIME heal: the very next lock takes the
+/// ordinary `Ok` branch and warm mode resumes normal (non-evicting) operation.
+/// Without the `clear_poison()` call the flag stays sticky and every
+/// subsequent request — for the lifetime of the daemon — would take this
+/// recovery branch and re-evict, re-paying `integrity_check` per request
+/// instead of the intended verify-once.
 fn lock_warm_state(slot: &WarmSlot) -> std::sync::MutexGuard<'_, Option<WarmState>> {
     match slot.state.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             let mut guard = poisoned.into_inner();
             *guard = None;
+            slot.state.clear_poison();
             guard
         }
     }
@@ -1051,6 +1074,60 @@ mod tests {
         );
     }
 
+    /// An existing-but-unreadable config (`chmod 000`) must fail the request,
+    /// distinctly from an absent config — a direct CLI invocation on the same
+    /// vault would also fail to read it, and the daemon must not silently keep
+    /// serving stale/default config instead. Restoring readability lets the
+    /// next request retry and pick up the live config.
+    #[test]
+    #[cfg(unix)]
+    fn warm_unreadable_config_fails_request_then_recovers() {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        write_config(&root, "links:\n  alias_field: original\n");
+        let config_path = config_yaml_path(&root);
+
+        // Baseline: readable config, request succeeds.
+        ctx.begin_request()
+            .expect("begin_request with readable config");
+
+        // Make the config unreadable.
+        std::fs::set_permissions(config_path.as_std_path(), Permissions::from_mode(0o000)).unwrap();
+
+        // Probe: if we can still open the file for reading, we're root or the
+        // filesystem doesn't enforce permissions — skip the assertion rather
+        // than false-failing.
+        if std::fs::File::open(config_path.as_std_path()).is_ok() {
+            std::fs::set_permissions(config_path.as_std_path(), Permissions::from_mode(0o644))
+                .unwrap();
+            return;
+        }
+
+        let err = ctx
+            .begin_request()
+            .expect_err("unreadable config must fail this request, not read as absent");
+        assert!(
+            err.downcast_ref::<WarmContextError>().is_none(),
+            "an unreadable config should not surface as WarmContextError"
+        );
+
+        // Restore readability, then rewrite with new content — the next
+        // request must retry (fingerprint was not advanced past the
+        // unreadable state) and succeed with the new config live.
+        std::fs::set_permissions(config_path.as_std_path(), Permissions::from_mode(0o644)).unwrap();
+        write_config(&root, "links:\n  alias_field: restored\n");
+        ctx.begin_request()
+            .expect("begin_request must succeed once the config is readable again");
+        assert_eq!(
+            ctx.config().index_options.alias_field.as_deref(),
+            Some("restored"),
+            "config() must reflect the new config once readable again"
+        );
+    }
+
     // ---- FIX-1/2/3/6 regression tests (per-request seam) --------------------
 
     /// FIX-1 (split-brain): within ONE request the config the tool reads and the
@@ -1223,15 +1300,32 @@ mod tests {
             "the spawned thread must have panicked (poisoning the mutex)"
         );
 
-        // The main thread must recover: rebuilt state, marker gone.
+        // The first post-poison request (request 2) must recover: rebuilt
+        // state, marker gone. Plant a fresh marker here so request 3 below can
+        // prove the connection this request opened is REUSED, not re-evicted.
         ctx.begin_request().expect("begin_request after poison");
-        let cache = ctx
-            .query_cache()
-            .expect("query_cache must recover from a poisoned mutex, not panic");
+        {
+            let cache = ctx
+                .query_cache()
+                .expect("query_cache must recover from a poisoned mutex, not panic");
+            assert!(
+                !marker_present(&cache),
+                "warm state must be rebuilt after poison recovery"
+            );
+            assert_eq!(doc_count(&cache), 3);
+            create_marker(&cache);
+        }
+
+        // The poison flag must be cleared by the recovery above, not sticky:
+        // request 3 must reuse the SAME connection request 2 rebuilt (marker
+        // still present), proving the recovery branch does not keep evicting
+        // on every subsequent request.
+        ctx.begin_request().expect("begin_request request 3");
+        let cache = ctx.query_cache().expect("query_cache request 3");
         assert!(
-            !marker_present(&cache),
-            "warm state must be rebuilt after poison recovery"
+            marker_present(&cache),
+            "a second post-poison request must reuse the recovered connection, \
+             not evict it again — the poison flag must be cleared, not sticky"
         );
-        assert_eq!(doc_count(&cache), 3);
     }
 }

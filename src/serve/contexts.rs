@@ -165,19 +165,33 @@ impl Contexts {
 
         // Re-acquire and remove only entries that are STILL the same `Arc`.
         let mut map = self.map.lock().await;
-        for (hash, cell) in dead {
-            if let Some(existing) = map.get(&hash) {
-                if Arc::ptr_eq(existing, &cell) {
-                    map.remove(&hash);
-                }
-            }
-        }
+        remove_if_same_arc(&mut map, dead);
     }
 
     /// Number of vaults currently tracked (initialized or mid-init). Test-only.
     #[cfg(test)]
     pub(crate) async fn len(&self) -> usize {
         self.map.lock().await.len()
+    }
+}
+
+/// Remove entries in `dead` from `map`, but only when the stored `Arc` for
+/// that hash is STILL the same one that was snapshotted as dead — a
+/// concurrent re-insert under the same hash (a fresh open racing the sweep)
+/// must never be clobbered. Extracted from [`Contexts::sweep_dead_roots`] so
+/// the negative case (a re-inserted entry surviving a stale snapshot) is unit
+/// testable without going through the async sweep/resolve machinery; no
+/// behavior change.
+fn remove_if_same_arc(
+    map: &mut HashMap<String, Arc<OnceCell<McpServer>>>,
+    dead: Vec<(String, Arc<OnceCell<McpServer>>)>,
+) {
+    for (hash, cell) in dead {
+        if let Some(existing) = map.get(&hash) {
+            if Arc::ptr_eq(existing, &cell) {
+                map.remove(&hash);
+            }
+        }
     }
 }
 
@@ -270,6 +284,38 @@ mod tests {
             contexts.len().await,
             0,
             "the sweep must evict the dead-root entry"
+        );
+    }
+
+    /// Negative case for the `Arc::ptr_eq` removal guard: a stale dead-root
+    /// snapshot must NOT evict an entry that was re-inserted (a NEW `Arc`
+    /// under the same hash) after the snapshot was taken. This is the race
+    /// the ptr_eq check exists to close — without it a concurrent re-open
+    /// racing the sweep would be silently clobbered.
+    #[test]
+    fn remove_if_same_arc_keeps_reinserted_entry() {
+        let mut map: HashMap<String, Arc<OnceCell<McpServer>>> = HashMap::new();
+        let original: Arc<OnceCell<McpServer>> = Arc::new(OnceCell::new());
+        map.insert("vault-hash".to_string(), original.clone());
+
+        // Snapshot the entry as "dead" (as `sweep_dead_roots` would after a
+        // stat failure on the stored root)...
+        let dead = vec![("vault-hash".to_string(), original.clone())];
+
+        // ...but before removal runs, a concurrent re-insert replaces the map
+        // entry with a NEW `Arc` for the same hash (e.g. the root came back
+        // and a fresh open raced the sweep).
+        let replacement: Arc<OnceCell<McpServer>> = Arc::new(OnceCell::new());
+        map.insert("vault-hash".to_string(), replacement.clone());
+
+        remove_if_same_arc(&mut map, dead);
+
+        let stored = map
+            .get("vault-hash")
+            .expect("the re-inserted entry must survive a stale dead-root snapshot");
+        assert!(
+            Arc::ptr_eq(stored, &replacement),
+            "the surviving entry must be the NEW Arc, not evicted by the stale snapshot"
         );
     }
 }

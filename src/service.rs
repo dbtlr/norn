@@ -895,6 +895,62 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// The complementary case to `version_skew_beats_protocol_mismatch`: a
+    /// pong at the SAME version as this build but a mismatched/future
+    /// protocol must be silent `Other` -> Direct, NOT `VersionSkew`. A
+    /// version match must not be treated as license to skip the protocol
+    /// check; only a version MISMATCH is the actionable, stderr-worthy case.
+    /// Asserts both ends of the contract: `probe_socket` -> `Direct`, and the
+    /// underlying `handshake` error is specifically `Other`.
+    #[test]
+    fn matching_version_mismatched_protocol_is_silent_direct() {
+        fn stub_pong_server(path: &Utf8PathBuf) -> thread::JoinHandle<()> {
+            let listener = UnixListener::bind(path).unwrap();
+            thread::spawn(move || {
+                let (conn, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut w = conn;
+                // Same version as this build, but a mismatched protocol.
+                let pong = ControlFrame::Pong {
+                    protocol: 9999,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    pid: None,
+                    uptime_secs: None,
+                };
+                writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
+                w.flush().unwrap();
+            })
+        }
+
+        // probe_socket() must fall back to Direct.
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let server = stub_pong_server(&path);
+        assert!(
+            matches!(
+                probe_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT),
+                RouteDecision::Direct
+            ),
+            "matching version + mismatched protocol must still route to Direct"
+        );
+        server.join().unwrap();
+
+        // The underlying handshake() error must be Other, not VersionSkew.
+        let dir2 = tempfile::tempdir().unwrap();
+        let path2 = Utf8PathBuf::from_path_buf(dir2.path().join("service.sock")).unwrap();
+        let server2 = stub_pong_server(&path2);
+        let stream = connect_control(&path2, DEFAULT_HANDSHAKE_TIMEOUT).unwrap();
+        let err = handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT)
+            .expect_err("mismatched protocol must not route");
+        assert!(
+            matches!(err, HandshakeError::Other(_)),
+            "matching version + mismatched protocol must be Other, not VersionSkew: {err:?}"
+        );
+        server2.join().unwrap();
+    }
+
     /// A well-formed pong missing the `version` field entirely is a
     /// malformed frame => Direct, and specifically NOT `VersionSkew` (there
     /// is no server version to report).
