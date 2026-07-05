@@ -26,20 +26,29 @@
 //! self-heal pipeline, upholding the ADR-0005 trust invariant: reading through
 //! norn must always feel like touching the actual files.
 //!
-//! Each warm `query_cache()` runs this pipeline, in this exact order:
+//! The pipeline is split across two entry points so it runs ONCE per request in
+//! a fixed order, no matter which tool is calling. [`VaultContext::begin_request`]
+//! runs steps 0–1 at the per-request seam (the server calls it before every tool
+//! body — see `mcp::server`); [`VaultContext::query_cache`] runs steps 2–4 when a
+//! tool actually opens the cache. This matters because several tools bypass
+//! `query_cache` entirely (they build the graph index via `load_graph_index`):
+//! putting root-liveness + config-freshness in `begin_request` means *every* tool
+//! gets them, and config stays STABLE for the whole request (no mid-request swap,
+//! so one request can never mix an old-config graph index with a new-config cache).
 //!
-//! 0. **Root liveness.** Canonicalize `vault_root`; if it is gone, return a
-//!    typed [`WarmContextError::RootGone`] the daemon can downcast to evict the
-//!    whole context.
-//! 1. **Config freshness.** Stat `<vault_root>/.norn/config.yaml` and compare a
-//!    `(mtime, size, exists)` fingerprint. Unchanged → proceed. Changed →
-//!    re-parse: a parse error fails *this* request (mirroring a direct CLI
-//!    invocation) and leaves the fingerprint stale so the next request retries.
-//!    On a successful re-parse, if the resolved index-set hash or `alias_field`
-//!    changed (the inputs to `Cache::open_with_index`) the warm cache state is
-//!    dropped so step 3 fully reopens (re-paying `integrity_check` — deliberate);
-//!    otherwise only the stored config `Arc` is hot-swapped (no reopen).
-//! 2. **Ground-shift.** If warm state is present, stat `<cache_dir>/cache.db` and
+//! 0. **Root liveness** (`begin_request`)**.** Canonicalize `vault_root`; if it is
+//!    gone, return a typed [`WarmContextError::RootGone`] the daemon can downcast
+//!    to evict the whole context.
+//! 1. **Config freshness** (`begin_request`)**.** Read `<vault_root>/.norn/config.yaml`
+//!    and compare a content-hash fingerprint (blake3 of the file bytes, plus
+//!    `exists`). Unchanged → proceed. Changed → re-parse: a parse error fails
+//!    *this* request (mirroring a direct CLI invocation) and leaves the
+//!    fingerprint stale so the next request retries. On a successful re-parse, if
+//!    the resolved index-set hash or `alias_field` changed (the inputs to
+//!    `Cache::open_with_index`) the warm cache state is dropped so step 3 fully
+//!    reopens (re-paying `integrity_check` — deliberate); otherwise only the
+//!    stored config `Arc` is hot-swapped (no reopen).
+//! 2. **Ground-shift** (`query_cache`)**.** If warm state is present, stat `<cache_dir>/cache.db` and
 //!    compare its `(dev, ino)` against the identity captured at open. On a missing
 //!    file or a mismatch the warm state is dropped. This catches an out-of-band
 //!    `norn cache clear` / `prune` / manual `rm` under a live daemon: POSIX keeps
@@ -79,29 +88,35 @@ pub(crate) enum WarmContextError {
     },
 }
 
-/// `(mtime, size, exists)` fingerprint of `<vault_root>/.norn/config.yaml`, used
-/// by warm mode to detect config edits between requests. A fingerprint for a
-/// nonexistent file carries `exists = false`.
+/// Content-hash fingerprint of `<vault_root>/.norn/config.yaml`, used by warm
+/// mode to detect config edits between requests. A fingerprint for a nonexistent
+/// file carries `exists = false` and `hash = None`.
+///
+/// The fingerprint is a blake3 hash of the file's bytes — NOT `(mtime, size)`.
+/// A stat-based fingerprint misses a same-size rewrite within mtime granularity
+/// (e.g. an editor that preserves mtime, or two writes in the same clock tick),
+/// silently diverging the warm daemon from a direct CLI run. Hashing the content
+/// closes that hole; a few-KB read + blake3 per `begin_request` is negligible
+/// against the 50ms query budget.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct ConfigFingerprint {
     exists: bool,
-    mtime: Option<std::time::SystemTime>,
-    size: u64,
+    /// blake3 of the file bytes; `None` when the file is absent/unreadable.
+    hash: Option<[u8; 32]>,
 }
 
-/// Fingerprint the config file at `path`. A missing (or unstatable) file yields
-/// `exists = false`.
+/// Fingerprint the config file at `path` by content. A missing (or unreadable)
+/// file yields `exists = false`. We deliberately read + hash rather than stat:
+/// see [`ConfigFingerprint`] for why mtime/size can't gate the read.
 fn fingerprint_config(path: &Utf8Path) -> ConfigFingerprint {
-    match std::fs::metadata(path.as_std_path()) {
-        Ok(meta) => ConfigFingerprint {
+    match std::fs::read(path.as_std_path()) {
+        Ok(bytes) => ConfigFingerprint {
             exists: true,
-            mtime: meta.modified().ok(),
-            size: meta.len(),
+            hash: Some(*blake3::hash(&bytes).as_bytes()),
         },
         Err(_) => ConfigFingerprint {
             exists: false,
-            mtime: None,
-            size: 0,
+            hash: None,
         },
     }
 }
@@ -176,9 +191,9 @@ struct WarmSlot {
 #[allow(clippy::large_enum_variant)]
 enum Mode {
     Cold,
-    // Constructed only by `open_warm`, which the `norn serve` daemon wires in a
-    // following task; until then it is exercised solely by this module's tests.
-    #[allow(dead_code)]
+    // Constructed by `open_warm`, used by the unix-only `norn serve` daemon
+    // (`src/serve/`); dead on non-unix builds where the daemon can't run.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Warm(WarmSlot),
 }
 
@@ -222,8 +237,9 @@ impl VaultContext {
     /// daemon wire never carries a custom `--config` path, so this takes only
     /// `cwd` and hard-codes `config_path = None`. Config freshness is tracked
     /// against `<vault_root>/.norn/config.yaml` accordingly.
-    // Wired into `norn serve` in a following task; exercised here by tests.
-    #[allow(dead_code)]
+    // Used by the unix-only `norn serve` daemon (`src/serve/`); dead on non-unix
+    // builds where the daemon can't run.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn open_warm(cwd: &Utf8Path) -> Result<Self> {
         let config = load_config(&cwd.to_path_buf(), None)?;
         let config_fp = fingerprint_config(&config_yaml_path(cwd));
@@ -237,11 +253,75 @@ impl VaultContext {
         })
     }
 
+    /// Per-request entry seam (FIX-1): runs the warm pipeline's root-liveness
+    /// (step 0) and config-freshness (step 1) once per request, BEFORE the tool
+    /// body reads `config()` or opens the cache. No-op in cold mode (config is
+    /// fixed for the process lifetime and the cache is opened fresh each call).
+    ///
+    /// Split out of `query_cache` so every tool — including the ones that bypass
+    /// `query_cache` and build the graph index via `load_graph_index` — gets
+    /// root-liveness + a fresh config each request, and so config is STABLE for
+    /// the whole request: `query_cache` no longer swaps config mid-request,
+    /// closing the split-brain window where one request could mix an old-config
+    /// graph index with a new-config cache. A gone root surfaces here as the
+    /// typed [`WarmContextError::RootGone`] the daemon downcasts to evict.
+    pub(crate) fn begin_request(&self) -> Result<()> {
+        let Mode::Warm(slot) = &self.mode else {
+            return Ok(());
+        };
+
+        // Step 0 — root liveness. A gone root is a typed, downcast-matchable
+        // error so the daemon can evict this whole context.
+        std::fs::canonicalize(self.vault_root.as_std_path()).map_err(|source| {
+            anyhow::Error::new(WarmContextError::RootGone {
+                root: self.vault_root.clone(),
+                source,
+            })
+        })?;
+
+        // Step 1 — config freshness. An index-relevant change drops the warm
+        // state here so the next `query_cache` fully reopens against the new
+        // config (re-paying integrity_check — deliberate).
+        if self.refresh_config_warm(slot)? {
+            let mut guard = lock_warm_state(slot);
+            *guard = None;
+        }
+        Ok(())
+    }
+
+    /// Corruption-eviction seam (FIX-3): inspect a failed tool's error chain and,
+    /// in warm mode, evict the held cache state when the failure is a SQLite
+    /// corruption-class error (`DatabaseCorrupt` / `NotADatabase`). The next
+    /// request then fully reopens via the cold-open machinery
+    /// (integrity_check → detect → rebuild) — the same self-heal a one-shot CLI
+    /// gets for free. No-op in cold mode (each call already opens + verifies a
+    /// fresh cache).
+    ///
+    /// Trust framing (ADR 0005): warm mode verifies integrity once and never
+    /// re-runs integrity_check by design. That holds because corruption
+    /// *surfaces as errors*, and this error-evict-reverify loop re-establishes
+    /// trust on the next request. Silent wrong-data corruption that raises no
+    /// error is outside SQLite's own detection model too, so it is not in scope.
+    pub(crate) fn note_tool_error(&self, err: &anyhow::Error) {
+        let Mode::Warm(slot) = &self.mode else {
+            return;
+        };
+        if is_sqlite_corruption(err) {
+            let mut guard = lock_warm_state(slot);
+            *guard = None;
+        }
+    }
+
     /// The current config. Locks briefly, clones the `Arc`, and releases — so a
     /// warm config hot-swap can proceed independently of callers still reading
-    /// through an earlier `Arc`.
+    /// through an earlier `Arc`. A poisoned lock is recovered in place (the value
+    /// is an immutable `Arc` snapshot, so there is nothing to evict) rather than
+    /// panicking on every subsequent request.
     pub(crate) fn config(&self) -> Arc<LoadedConfig> {
-        self.config.lock().expect("config mutex poisoned").clone()
+        self.config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Open a query cache for one tool call. Serves both modes with the same call
@@ -266,27 +346,13 @@ impl VaultContext {
     /// The warm per-request pipeline. See the module-level docs for the ordered
     /// rationale of each step.
     fn query_cache_warm<'a>(&'a self, slot: &'a WarmSlot) -> Result<CacheHandle<'a>> {
-        // Step 0 — root liveness. A gone root is a typed, downcast-matchable
-        // error so the daemon can evict this whole context.
-        std::fs::canonicalize(self.vault_root.as_std_path()).map_err(|source| {
-            anyhow::Error::new(WarmContextError::RootGone {
-                root: self.vault_root.clone(),
-                source,
-            })
-        })?;
-
-        // Step 1 — config freshness. May request a full reopen when an
-        // index-relevant field changed; a parse error fails this request.
-        let reopen_for_config = self.refresh_config_warm(slot)?;
-
-        // Steps 2–4 run under the state lock. It is uncontended (callers are
+        // Steps 0–1 (root-liveness + config-freshness, with the index-relevant
+        // warm-state drop) already ran in `begin_request` at the per-request
+        // seam, so config is stable here for the whole request. This runs steps
+        // 2–4 under the state lock. The lock is uncontended (callers are
         // serialized by the server's call_lock) but must be correct; the guard
-        // is never held across an `.await`.
-        let mut guard = slot.state.lock().expect("warm state mutex poisoned");
-
-        if reopen_for_config {
-            *guard = None;
-        }
+        // is never held across an `.await`. A poisoned lock self-heals (FIX-6).
+        let mut guard = lock_warm_state(slot);
 
         // Step 2 — ground-shift: drop the held state if cache.db was cleared,
         // pruned, or rm'd out from under us (identity changed or file gone).
@@ -334,7 +400,7 @@ impl VaultContext {
         let config_path = config_yaml_path(&self.vault_root);
         let new_fp = fingerprint_config(&config_path);
 
-        let mut fp_guard = slot.config_fp.lock().expect("config_fp mutex poisoned");
+        let mut fp_guard = slot.config_fp.lock().unwrap_or_else(|p| p.into_inner());
         if *fp_guard == new_fp {
             return Ok(false);
         }
@@ -352,7 +418,7 @@ impl VaultContext {
             || old.index_options.alias_field != new_config.index_options.alias_field;
 
         {
-            let mut cfg = self.config.lock().expect("config mutex poisoned");
+            let mut cfg = self.config.lock().unwrap_or_else(|p| p.into_inner());
             *cfg = Arc::new(new_config);
         }
         *fp_guard = new_fp;
@@ -366,12 +432,7 @@ impl VaultContext {
     #[cfg(test)]
     pub(crate) fn warm_db_identity(&self) -> Option<(u64, u64)> {
         match &self.mode {
-            Mode::Warm(slot) => slot
-                .state
-                .lock()
-                .expect("warm state mutex poisoned")
-                .as_ref()
-                .map(|s| s.db_identity),
+            Mode::Warm(slot) => lock_warm_state(slot).as_ref().map(|s| s.db_identity),
             Mode::Cold => None,
         }
     }
@@ -380,6 +441,43 @@ impl VaultContext {
 /// Path to a vault's default config file, `<vault_root>/.norn/config.yaml`.
 fn config_yaml_path(vault_root: &Utf8Path) -> Utf8PathBuf {
     vault_root.join(".norn/config.yaml")
+}
+
+/// Lock the warm state, recovering from a poisoned mutex (FIX-6).
+///
+/// A panic in a tool body while holding the warm guard poisons this lock; the
+/// poisoned state may be mid-mutation, so on recovery we EVICT it (set to
+/// `None`) and let the next `query_cache` fully reopen with a fresh integrity
+/// check — the warm-state invariant's own recovery path, re-establishing trust
+/// rather than papering over the panic. Without this every later request would
+/// panic at `.lock()`, wedging the vault until the daemon restarts.
+fn lock_warm_state(slot: &WarmSlot) -> std::sync::MutexGuard<'_, Option<WarmState>> {
+    match slot.state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        }
+    }
+}
+
+/// Does this error chain carry a SQLite corruption-class failure
+/// (`DatabaseCorrupt` / `NotADatabase`)? Drives warm mode's error-triggered
+/// eviction (FIX-3). The rusqlite error is often wrapped (e.g. in `CacheError`),
+/// so we walk the whole `anyhow` chain and downcast each cause.
+fn is_sqlite_corruption(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(|e| e.sqlite_error_code())
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                )
+            })
+    })
 }
 
 /// Open a fresh [`WarmState`]: the held-open cache connection plus the `(dev,
@@ -711,6 +809,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("first warm query_cache");
             create_marker(&cache);
         }
@@ -718,6 +817,7 @@ mod tests {
         assert!(id1.is_some(), "warm state should be held after first call");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("second warm query_cache");
             assert!(
                 marker_present(&cache),
@@ -735,6 +835,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3, "initial count should be 3");
         }
@@ -746,6 +847,7 @@ mod tests {
         .unwrap();
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("second warm query_cache");
             assert_eq!(
                 doc_count(&cache),
@@ -764,6 +866,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("first warm query_cache");
             create_marker(&cache);
             assert_eq!(doc_count(&cache), 3);
@@ -777,6 +880,7 @@ mod tests {
         std::fs::remove_dir_all(cache_dir.as_std_path()).expect("remove cache dir");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx
                 .query_cache()
                 .expect("second warm query_cache after clear");
@@ -809,15 +913,18 @@ mod tests {
 
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 1);
         }
 
         std::fs::remove_dir_all(root.as_std_path()).expect("remove vault root");
 
+        // Root-liveness moved to the per-request seam (FIX-1), so the typed
+        // RootGone now surfaces from begin_request, not query_cache.
         let err = ctx
-            .query_cache()
-            .expect_err("query_cache must fail once the root is gone");
+            .begin_request()
+            .expect_err("begin_request must fail once the root is gone");
         match err.downcast_ref::<WarmContextError>() {
             Some(WarmContextError::RootGone { root: r, .. }) => {
                 assert_eq!(r, &root, "RootGone should carry the vault root");
@@ -835,6 +942,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("first warm query_cache");
             create_marker(&cache);
         }
@@ -848,6 +956,7 @@ mod tests {
         write_config(&root, "files:\n  ignore:\n    - \"drafts/**\"\n");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx
                 .query_cache()
                 .expect("second warm query_cache after non-index config change");
@@ -872,6 +981,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("first warm query_cache");
             create_marker(&cache);
         }
@@ -881,6 +991,7 @@ mod tests {
         write_config(&root, "links:\n  alias_field: aliases\n");
 
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx
                 .query_cache()
                 .expect("second warm query_cache after index-relevant config change");
@@ -906,14 +1017,16 @@ mod tests {
 
         // First call — clean, no config file yet.
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
 
-        // Invalid YAML (unterminated flow sequence).
+        // Invalid YAML (unterminated flow sequence). Config freshness moved to
+        // the seam (FIX-1), so the parse error surfaces from begin_request.
         write_config(&root, "links:\n  alias_field: [unterminated\n");
         let err = ctx
-            .query_cache()
+            .begin_request()
             .expect_err("invalid config must fail this request");
         // Not a RootGone — it is a plain config parse error.
         assert!(
@@ -925,6 +1038,7 @@ mod tests {
         // advanced past the broken file) and succeed with the new config live.
         write_config(&root, "links:\n  alias_field: fixed\n");
         {
+            ctx.begin_request().expect("begin_request");
             let cache = ctx
                 .query_cache()
                 .expect("query_cache must succeed once the config is valid again");
@@ -935,5 +1049,189 @@ mod tests {
             Some("fixed"),
             "config() must reflect the repaired config"
         );
+    }
+
+    // ---- FIX-1/2/3/6 regression tests (per-request seam) --------------------
+
+    /// FIX-1 (split-brain): within ONE request the config the tool reads and the
+    /// cache `query_cache` opens must be the SAME generation. The `begin_request`
+    /// seam refreshes config + drops index-relevant warm state BEFORE the tool
+    /// body reads `config()` or opens the cache, so an index-relevant change
+    /// (alias_field) can't leave one request mixing an old-config graph index
+    /// with a new-config cache. Pre-fix, the config swap happened inside
+    /// `query_cache` (after a tool already read `config()`), so `config()` read
+    /// before `query_cache` returned the stale alias.
+    #[test]
+    fn warm_begin_request_makes_config_and_cache_same_generation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Establish warm state with no alias.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            create_marker(&cache);
+        }
+        assert!(ctx.config().index_options.alias_field.is_none());
+
+        // Index-relevant change.
+        write_config(&root, "links:\n  alias_field: aliases\n");
+
+        // ONE request, in a tool's access order: begin_request, THEN read config,
+        // THEN open the cache.
+        ctx.begin_request()
+            .expect("begin_request after config change");
+        let config_alias = ctx.config().index_options.alias_field.clone();
+        let cache = ctx.query_cache().expect("query_cache after config change");
+        assert_eq!(
+            config_alias.as_deref(),
+            Some("aliases"),
+            "begin_request must swap config before the tool body reads it"
+        );
+        // The index-relevant drop happened in begin_request, so the cache was
+        // reopened this request — proving config and cache are one generation.
+        assert!(
+            !marker_present(&cache),
+            "index-relevant change must reopen the cache in the same request"
+        );
+    }
+
+    /// FIX-2 (content-hash fingerprint): a same-length config rewrite whose mtime
+    /// is restored to the original is invisible to a `(mtime, size)` fingerprint
+    /// but must be caught by a content hash. Uses `filetime` to pin mtime.
+    #[test]
+    fn warm_same_length_config_rewrite_detected_by_content_hash() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Config A.
+        write_config(&root, "links:\n  alias_field: aaaaaa\n");
+        ctx.begin_request().expect("begin_request A");
+        {
+            let _c = ctx.query_cache().expect("query_cache A");
+        }
+        assert_eq!(
+            ctx.config().index_options.alias_field.as_deref(),
+            Some("aaaaaa")
+        );
+
+        let cfg_path = root.join(".norn/config.yaml");
+        let orig_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(cfg_path.as_std_path()).unwrap(),
+        );
+
+        // Config B: SAME LENGTH, then restore the original mtime so a stat-based
+        // fingerprint sees no change.
+        write_config(&root, "links:\n  alias_field: bbbbbb\n");
+        filetime::set_file_mtime(cfg_path.as_std_path(), orig_mtime).unwrap();
+
+        ctx.begin_request().expect("begin_request B");
+        {
+            let _c = ctx.query_cache().expect("query_cache B");
+        }
+        assert_eq!(
+            ctx.config().index_options.alias_field.as_deref(),
+            Some("bbbbbb"),
+            "a same-length, same-mtime config rewrite must be detected by the content-hash fingerprint"
+        );
+    }
+
+    /// FIX-3 (corruption self-heal): a corruption-class rusqlite error fed to the
+    /// eviction seam drops the warm state, so the next request fully reopens.
+    #[test]
+    fn warm_evicts_state_on_sqlite_corruption_error() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            create_marker(&cache);
+        }
+        assert!(
+            ctx.warm_db_identity().is_some(),
+            "warm state held after first call"
+        );
+
+        // Synthesize a SQLITE_CORRUPT failure and feed it to the seam.
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        let err = anyhow::Error::new(corrupt).context("tool body failed");
+        ctx.note_tool_error(&err);
+
+        assert!(
+            ctx.warm_db_identity().is_none(),
+            "a corruption-class error must evict the warm state"
+        );
+
+        // Next request rebuilds cleanly (marker gone).
+        ctx.begin_request().expect("begin_request after eviction");
+        let cache = ctx.query_cache().expect("query_cache after eviction");
+        assert!(
+            !marker_present(&cache),
+            "state must be rebuilt after corruption eviction"
+        );
+        assert_eq!(doc_count(&cache), 3);
+    }
+
+    /// FIX-3 (negative): a non-corruption error must NOT evict the warm state.
+    #[test]
+    fn warm_keeps_state_on_non_corruption_error() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache().expect("first warm query_cache");
+        }
+        assert!(ctx.warm_db_identity().is_some());
+
+        let err = anyhow::anyhow!("some ordinary tool error");
+        ctx.note_tool_error(&err);
+        assert!(
+            ctx.warm_db_identity().is_some(),
+            "a non-corruption error must not evict the warm state"
+        );
+    }
+
+    /// FIX-6 (poisoned-mutex recovery): a panic while holding the warm guard
+    /// poisons the state mutex. The next request must still succeed with a
+    /// rebuilt state (the poisoned, possibly-mid-mutation state is evicted, then
+    /// reopened), not panic forever.
+    #[test]
+    fn warm_recovers_from_poisoned_state_mutex() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            create_marker(&cache);
+        }
+
+        // Poison the state mutex: panic on another thread while holding the guard.
+        let ctx2 = Arc::clone(&ctx);
+        let handle = std::thread::spawn(move || {
+            ctx2.begin_request()
+                .expect("begin_request on poison thread");
+            let _cache = ctx2.query_cache().expect("query_cache on poison thread");
+            panic!("intentional panic while holding the warm guard");
+        });
+        assert!(
+            handle.join().is_err(),
+            "the spawned thread must have panicked (poisoning the mutex)"
+        );
+
+        // The main thread must recover: rebuilt state, marker gone.
+        ctx.begin_request().expect("begin_request after poison");
+        let cache = ctx
+            .query_cache()
+            .expect("query_cache must recover from a poisoned mutex, not panic");
+        assert!(
+            !marker_present(&cache),
+            "warm state must be rebuilt after poison recovery"
+        );
+        assert_eq!(doc_count(&cache), 3);
     }
 }

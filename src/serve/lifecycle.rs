@@ -50,15 +50,28 @@ pub(crate) fn acquire_host_lock(lock_path: &Utf8Path) -> anyhow::Result<std::fs:
         .open(lock_path.as_std_path())
         .with_context(|| format!("failed to open host lock {lock_path}"))?;
 
-    if file.try_lock_exclusive().is_err() {
-        // Contended — the incumbent holds it. Report its pid if we can read it.
-        let mut body = String::new();
-        let _ = file.read_to_string(&mut body);
-        match body.split_whitespace().next() {
-            Some(pid) if !pid.is_empty() => {
-                anyhow::bail!("norn serve: another instance is already running (pid {pid})")
+    match file.try_lock_exclusive() {
+        Ok(()) => {}
+        // Contention — the incumbent holds it. fs2 signals a contended lock with
+        // `ErrorKind::WouldBlock` (its `lock_contended_error()`); report the
+        // incumbent's pid if we can read it. (FIX-9)
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            let mut body = String::new();
+            let _ = file.read_to_string(&mut body);
+            match body.split_whitespace().next() {
+                Some(pid) if !pid.is_empty() => {
+                    anyhow::bail!("norn serve: another instance is already running (pid {pid})")
+                }
+                _ => anyhow::bail!("norn serve: another instance is already running"),
             }
-            _ => anyhow::bail!("norn serve: another instance is already running"),
+        }
+        // Any OTHER error (NFS/flock-unsupported filesystem, EIO, …) is NOT
+        // contention; propagate it so the real failure is debuggable rather than
+        // masquerading as "already running". (FIX-9)
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("failed to lock host lock {lock_path}"))
+            );
         }
     }
 

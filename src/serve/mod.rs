@@ -108,7 +108,13 @@ async fn serve_loop(
                         }
                     });
                 }
-                Err(e) => eprintln!("norn serve: accept error: {e}"),
+                Err(e) => {
+                    eprintln!("norn serve: accept error: {e}");
+                    // Back off briefly so a persistent accept error (e.g. EMFILE
+                    // fd exhaustion) doesn't hot-spin the loop at 100% CPU. With
+                    // the sleep the worst case is ~10 log lines/sec — acceptable.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
             },
             _ = sigint.recv() => break,
             _ = sigterm.recv() => break,

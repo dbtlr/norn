@@ -33,13 +33,16 @@
 //! # Eviction
 //!
 //! Request-time `WarmContextError::RootGone` surfaces to the MCP client
-//! per-request (it comes out of `query_cache` inside a tool handler and is
-//! mapped by `to_mcp_error`); the daemon's connection loop never sees individual
-//! tool errors, so there is no in-loop eviction hook. Instead the entry
-//! self-heals lazily: on each `hello` we re-canonicalize the entry's stored root
-//! (a cheap stat) and drop the entry if the root has vanished, so a later `hello`
-//! rebuilds it cleanly. A vanished root with a live entry is otherwise harmless —
-//! every request against it simply errors. There is no background reaper.
+//! per-request (it comes out of the per-request seam inside a tool handler and
+//! is mapped by `to_mcp_error`); the daemon's connection loop never sees
+//! individual tool errors, so there is no in-loop eviction hook. Instead the map
+//! self-heals opportunistically: whenever an incoming `hello`'s OWN root fails to
+//! canonicalize, [`Contexts::resolve`] sweeps the map for any *other* entries
+//! whose stored root has vanished and evicts them, so a dead vault's warm context
+//! (its SQLite fds + sentinel `File`) can't leak for the daemon's lifetime. The
+//! sweep runs its blocking `stat`s OFF the map lock (see FIX-4), and removes an
+//! entry only if it is still the same `Arc` it snapshotted, so a concurrent
+//! re-insert is never clobbered. There is no background reaper.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -70,23 +73,36 @@ impl Contexts {
     /// - the vault root does not exist / cannot be canonicalized;
     /// - the first-touch warm open failed (config parse error, etc.).
     pub(crate) async fn resolve(&self, vault_root: &str) -> anyhow::Result<McpServer> {
-        // Derive identity ourselves — never trust a client-supplied hash. A
-        // canonicalize failure here means the root is gone/unreachable.
-        let (canonical, hash) = crate::cache::vault_identity(Utf8Path::new(vault_root))
-            .map_err(|_| anyhow::anyhow!("vault root does not exist: {vault_root}"))?;
+        // Derive identity ourselves — never trust a client-supplied hash. Run the
+        // canonicalize on a blocking thread, NOT under the map lock and not on an
+        // async worker: one hung/slow root (e.g. a stalled NFS mount) must not
+        // stall hellos for every other vault (FIX-4).
+        let owned_root = vault_root.to_string();
+        let identity = tokio::task::spawn_blocking(move || {
+            crate::cache::vault_identity(Utf8Path::new(&owned_root))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("vault identity task failed: {e}"))?;
 
-        // Get-or-create the per-entry cell under a brief map lock. Also
-        // self-heal: if an initialized entry's stored root has since vanished,
-        // drop it so this hello rebuilds it.
+        let (canonical, hash) = match identity {
+            Ok(id) => id,
+            Err(_) => {
+                // The incoming root is gone/unreachable, so it has no live entry
+                // to evict (its hash was never computed). Opportunistically sweep
+                // OTHER dead-root entries so their warm contexts don't leak, then
+                // return the hello error as before.
+                self.sweep_dead_roots().await;
+                return Err(anyhow::anyhow!("vault root does not exist: {vault_root}"));
+            }
+        };
+
+        // Get-or-create the per-entry cell under a brief map lock. The old
+        // per-hello stored-root re-check is deleted (FIX-4): a hash match here
+        // implies the same canonical root that just canonicalized successfully
+        // above, so the stored entry's root is live — and that re-check did
+        // blocking `std::fs::canonicalize` WHILE HOLDING the async map lock.
         let cell = {
             let mut map = self.map.lock().await;
-            if let Some(existing) = map.get(&hash) {
-                if let Some(server) = existing.get() {
-                    if std::fs::canonicalize(server.ctx.vault_root.as_std_path()).is_err() {
-                        map.remove(&hash);
-                    }
-                }
-            }
             map.entry(hash)
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
@@ -108,6 +124,54 @@ impl Contexts {
             .await?;
 
         Ok(server.clone())
+    }
+
+    /// Sweep the map for initialized entries whose stored vault root has vanished
+    /// and evict them (FIX-4). The blocking `stat`s run OFF the map lock (on a
+    /// blocking thread), so one hung root can't stall the lock for other hellos;
+    /// an entry is removed only if it is still the SAME `Arc` we snapshotted, so a
+    /// concurrent re-insert for the same hash is never clobbered.
+    async fn sweep_dead_roots(&self) {
+        // Snapshot (hash, cell, stored root) for INITIALIZED entries under a
+        // brief lock. Uninitialized (mid-init) cells have no root yet and can't
+        // be dead, so they are skipped.
+        let snapshot: Vec<(String, Arc<OnceCell<McpServer>>, camino::Utf8PathBuf)> = {
+            let map = self.map.lock().await;
+            map.iter()
+                .filter_map(|(hash, cell)| {
+                    cell.get()
+                        .map(|server| (hash.clone(), cell.clone(), server.ctx.vault_root.clone()))
+                })
+                .collect()
+        };
+        if snapshot.is_empty() {
+            return;
+        }
+
+        // Stat each stored root off the lock.
+        let dead: Vec<(String, Arc<OnceCell<McpServer>>)> =
+            tokio::task::spawn_blocking(move || {
+                snapshot
+                    .into_iter()
+                    .filter(|(_, _, root)| std::fs::canonicalize(root.as_std_path()).is_err())
+                    .map(|(hash, cell, _)| (hash, cell))
+                    .collect()
+            })
+            .await
+            .unwrap_or_default();
+        if dead.is_empty() {
+            return;
+        }
+
+        // Re-acquire and remove only entries that are STILL the same `Arc`.
+        let mut map = self.map.lock().await;
+        for (hash, cell) in dead {
+            if let Some(existing) = map.get(&hash) {
+                if Arc::ptr_eq(existing, &cell) {
+                    map.remove(&hash);
+                }
+            }
+        }
     }
 
     /// Number of vaults currently tracked (initialized or mid-init). Test-only.
@@ -172,5 +236,40 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(contexts.len().await, 0);
+    }
+
+    /// FIX-4: a later hello whose OWN root has vanished sweeps the map, evicting
+    /// the now-dead entry rather than leaking its warm context for the daemon's
+    /// lifetime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_sweeps_dead_root_on_later_hello() {
+        let (tmp, root) = seeded_vault();
+        let contexts = Contexts::new();
+
+        // First hello opens the vault → one live entry.
+        contexts
+            .resolve(root.as_str())
+            .await
+            .expect("first resolve");
+        assert_eq!(contexts.len().await, 1, "one entry after first hello");
+
+        // Delete the vault root out from under the daemon.
+        drop(tmp);
+
+        // A later hello for the (now-gone) root: canonicalize fails → error, and
+        // the sweep evicts the dead entry.
+        let err = match contexts.resolve(root.as_str()).await {
+            Ok(_) => panic!("a vanished root must error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("vault root does not exist"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            contexts.len().await,
+            0,
+            "the sweep must evict the dead-root entry"
+        );
     }
 }

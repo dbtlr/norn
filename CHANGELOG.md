@@ -16,7 +16,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 ### Changed
 
-- **The CLI→service probe now targets the well-known host socket** instead of a per-vault path derived from the vault's identity hash — the derived form could exceed macOS's `sun_path` limit on some vault paths. Routing additionally requires the daemon to echo an exact version match, with a one-line stderr note on skew (`run 'norn service restart'`), and the probe's connect is now timeout-bounded rather than a blocking connect.
+- **The CLI→service probe now targets the well-known host socket** instead of a per-vault path derived from the vault's identity hash — the derived form could exceed macOS's `sun_path` limit on some vault paths. Routing additionally requires the daemon to echo an exact version match, with a one-line stderr note on skew (`restart the norn serve daemon`), and the probe's connect is now timeout-bounded rather than a blocking connect.
 
 ## v0.42.0 - 2026-07-03
 

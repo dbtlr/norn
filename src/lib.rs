@@ -111,16 +111,16 @@ fn try_route_read(command: &Command) -> Option<Result<i32>> {
     if !is_routable_read(command) {
         return None;
     }
-    match service::probe(service::DEFAULT_HANDSHAKE_TIMEOUT) {
-        service::RouteDecision::Direct => None,
-        #[cfg(unix)]
-        service::RouteDecision::Route(_client) => {
-            // NRN-94: send the translated request on `_client` and return
-            // `Some(rendered)`. For now, drop the connection and fall through to
-            // the verified direct open below.
-            None
-        }
-    }
+    // FIX-11: the probe is GATED OFF until NRN-94 fills the `Route` arm.
+    //
+    // With a live daemon, every routable read would otherwise pay connect + ping
+    // and then discard the result (the `Route` arm is a stub that falls through
+    // to Direct), plus possibly print a version-skew stderr note — pure tax on
+    // daemon adopters with no actionable benefit until routing is real. The probe
+    // machinery is complete and unit-tested in `src/service.rs`; NRN-94 activates
+    // it by replacing this early return with the `service::probe(...)` match and
+    // handling `Route`. Until then a live daemon must cost CLI reads nothing.
+    None
 }
 
 fn run(cli: Cli) -> Result<i32> {

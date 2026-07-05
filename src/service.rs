@@ -111,15 +111,18 @@ pub enum ControlFrame {
     /// the module docs). Unused by the client until NRN-94 opens the request
     /// connection; defined now so the wire contract is settled for the
     /// daemon task.
-    #[allow(dead_code)]
+    // Parsed by the unix-only `norn serve` daemon (`src/serve/`); dead on
+    // non-unix builds where the daemon can't run.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Hello { protocol: u32, vault_root: String },
     /// Daemon -> client: the named vault's warm cache is ready to serve.
-    /// Unused until NRN-94.
-    #[allow(dead_code)]
+    // Constructed by the unix-only `norn serve` daemon; dead on non-unix builds.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Ready { protocol: u32, version: String },
     /// Daemon -> client: the request (handshake or named-vault open) failed
-    /// on the daemon side. Unused until NRN-94.
-    #[allow(dead_code)]
+    /// on the daemon side.
+    // Constructed by the unix-only `norn serve` daemon; dead on non-unix builds.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Error { protocol: u32, message: String },
 }
 
@@ -128,13 +131,22 @@ pub enum ControlFrame {
 ///
 /// Every handshake failure maps to [`RouteDecision::Direct`] — trust is never
 /// skipped just because routing didn't happen — but version skew is the one
-/// failure worth telling the operator about: it is actionable (the fix is
-/// `norn service restart`) and silent about it would leave the CLI quietly
+/// failure worth telling the operator about: it is actionable (the fix is to
+/// restart the `norn serve` daemon) and silent about it would leave the CLI quietly
 /// falling back to Direct forever after a client upgrade, with no signal that
 /// a stale daemon is the reason. Every other variant (`Other`) covers
 /// timeouts, I/O errors, protocol mismatches, and malformed frames, which
 /// stay silent because they are expected transient or environmental noise.
+//
+// NRN-94-gated probe path: the client probe is complete and unit-tested (this
+// module's tests) but switched off in `try_route_read` until NRN-94 fills the
+// `Route` arm, so it is dead in the non-test lib build today. Kept intact (not
+// deleted) because NRN-94 turns it back on unchanged. The same rationale
+// applies to every `#[allow(dead_code)]` on the probe-path items below
+// (`DEFAULT_HANDSHAKE_TIMEOUT`, `RouteDecision`, `probe`, `probe_socket`,
+// `connect_control`, `handshake`, `handshake_pong`, `read_control_line`).
 #[cfg(unix)]
+#[allow(dead_code)]
 #[derive(Debug)]
 enum HandshakeError {
     /// The daemon answered with a well-formed pong at the right protocol
@@ -156,9 +168,13 @@ enum HandshakeError {
 /// and the cost of a false-negative (running Direct when a daemon was merely
 /// slow) is only the loss of the warm-cache speedup, never a correctness or
 /// trust loss.
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// The routing decision for one CLI invocation.
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 pub enum RouteDecision {
     /// No live service — run the operation directly with a verified cache open.
     Direct,
@@ -210,11 +226,9 @@ pub fn host_socket_path() -> anyhow::Result<Utf8PathBuf> {
 /// The host daemon's advisory lock file: `<run_dir>/norn.lock`, used to keep
 /// at most one daemon instance bound to [`host_socket_path`] at a time.
 ///
-/// Unused by the client today — the daemon lifecycle that acquires this lock
-/// on startup is a later task (NRN-93's daemon binary). Kept `pub` and
-/// defined here now so the run-directory layout (socket + lock, one place)
-/// is settled by the same change that fixes the socket path.
-#[allow(dead_code)]
+/// Acquired on startup by the unix-only `norn serve` daemon (`src/serve/`); dead
+/// on non-unix builds where the daemon can't run.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn host_lock_path() -> anyhow::Result<Utf8PathBuf> {
     Ok(run_dir()?.join("norn.lock"))
 }
@@ -225,6 +239,8 @@ pub fn host_lock_path() -> anyhow::Result<Utf8PathBuf> {
 /// resolves to [`RouteDecision::Direct`] — the always-safe path. The daemon is
 /// a pure optimization, so its absence or malfunction must degrade to today's
 /// behavior, never surface as an error.
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 pub fn probe(timeout: std::time::Duration) -> RouteDecision {
     let Ok(socket_path) = host_socket_path() else {
         return RouteDecision::Direct;
@@ -241,6 +257,8 @@ pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024;
 /// Probe a specific socket path. Split from [`probe`] so tests can point it at a
 /// stub listener on a temp path.
 #[cfg(unix)]
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> RouteDecision {
     // Fast path: no socket file => no daemon. Just a stat; the common case pays
     // nothing beyond it. `exists()` follows symlinks and swallows errors as
@@ -276,7 +294,7 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
         // one line, then fall back like every other failure.
         Err(HandshakeError::VersionSkew { server, client }) => {
             eprintln!(
-                "norn: service is v{server}, client is v{client} — run 'norn service restart'"
+                "norn: service is v{server}, client is v{client} — restart the norn serve daemon"
             );
             RouteDecision::Direct
         }
@@ -293,6 +311,8 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
 
 /// Non-Unix stub: no UDS, so routing is never available; always run Direct.
 #[cfg(not(unix))]
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 pub fn probe_socket(_socket_path: &Utf8Path, _timeout: std::time::Duration) -> RouteDecision {
     RouteDecision::Direct
 }
@@ -326,6 +346,8 @@ pub fn probe_socket(_socket_path: &Utf8Path, _timeout: std::time::Duration) -> R
 /// nonblocking-state flakiness and macOS `setsockopt`-under-load `EINVAL`. And
 /// `poll`, not `select`, so there is no `FD_SETSIZE` (1024-fd) hazard.
 #[cfg(unix)]
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 fn connect_control(
     socket_path: &Utf8Path,
     timeout: std::time::Duration,
@@ -490,31 +512,52 @@ fn connect_control(
 /// The stream is used only to prove liveness and is dropped by the caller
 /// afterward, so the short handshake timeouts never leak onto a request channel.
 #[cfg(unix)]
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 fn handshake(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
 ) -> Result<(), HandshakeError> {
-    let version = handshake_pong_version(stream, timeout).map_err(HandshakeError::Other)?;
+    let (protocol, version) = handshake_pong(stream, timeout).map_err(HandshakeError::Other)?;
     let client_version = env!("CARGO_PKG_VERSION");
+
+    // FIX-8: compare the VERSION first. A well-formed pong at a *different*
+    // version is a VersionSkew regardless of protocol — otherwise a future
+    // `CONTROL_PROTOCOL` bump would short-circuit on the protocol check and
+    // silently map an old daemon to Direct, hiding exactly the skew the stderr
+    // note exists to report. Routing still requires BOTH to match.
     if version != client_version {
         return Err(HandshakeError::VersionSkew {
             server: version,
             client: client_version.to_string(),
         });
     }
+
+    // Same version but a different protocol is something weirder than staleness
+    // (a same-build daemon speaking a different wire) — fall back to Direct
+    // silently, as before.
+    if protocol != CONTROL_PROTOCOL {
+        return Err(HandshakeError::Other(anyhow::anyhow!(
+            "control protocol mismatch: service spoke {protocol}, client wants {CONTROL_PROTOCOL}"
+        )));
+    }
+
     Ok(())
 }
 
-/// Write the ping, read the reply, and return the pong's `version` string —
-/// the piece [`handshake`] needs to decide routing vs. version skew. Every
-/// failure short of a well-formed, protocol-matching pong is a plain
-/// `anyhow::Error`; [`handshake`] is the only place that turns "the version
-/// differs" into the distinguished [`HandshakeError::VersionSkew`].
+/// Write the ping, read the reply, and return the pong's `(protocol, version)` —
+/// the two pieces [`handshake`] compares to decide routing vs. version skew vs.
+/// protocol mismatch. Every failure short of a well-formed pong (I/O, timeout,
+/// wrong frame kind, missing `version`) is a plain `anyhow::Error`; [`handshake`]
+/// owns the version-then-protocol ordering that distinguishes skew from a silent
+/// protocol mismatch (FIX-8).
 #[cfg(unix)]
-fn handshake_pong_version(
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
+fn handshake_pong(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(u32, String)> {
     use std::io::Write;
 
     let deadline = std::time::Instant::now() + timeout;
@@ -546,16 +589,11 @@ fn handshake_pong_version(
     // not a version skew.
     let frame: ControlFrame = serde_json::from_str(line.trim())?;
     match frame {
+        // Return both fields raw; `handshake` applies the version-first,
+        // protocol-second ordering (FIX-8).
         ControlFrame::Pong {
             protocol, version, ..
-        } => {
-            if protocol != CONTROL_PROTOCOL {
-                anyhow::bail!(
-                    "control protocol mismatch: service spoke {protocol}, client wants {CONTROL_PROTOCOL}"
-                );
-            }
-            Ok(version)
-        }
+        } => Ok((protocol, version)),
         other => anyhow::bail!("unexpected control frame: {other:?}"),
     }
 }
@@ -569,6 +607,8 @@ fn handshake_pong_version(
 /// keep alive forever. Worst-case overshoot is one read's `SO_RCVTIMEO` past the
 /// deadline, which is fine for a liveness probe.
 #[cfg(unix)]
+// NRN-94-gated probe path (see the note on `HandshakeError`).
+#[allow(dead_code)]
 fn read_control_line(
     stream: &std::os::unix::net::UnixStream,
     deadline: std::time::Instant,
@@ -581,7 +621,13 @@ fn read_control_line(
         if std::time::Instant::now() >= deadline {
             anyhow::bail!("handshake timed out before a full control frame arrived");
         }
-        let n = Read::read(&mut { stream }, &mut chunk)?;
+        // FIX-10: a stray signal mid-handshake returns EINTR; retry rather than
+        // abandon routing. The loop's wall-clock deadline still bounds total time.
+        let n = match Read::read(&mut { stream }, &mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
         if n == 0 {
             anyhow::bail!("service closed the connection before answering the handshake");
         }
@@ -808,6 +854,44 @@ mod tests {
             }
             HandshakeError::Other(e) => panic!("expected VersionSkew, got Other({e:?})"),
         }
+        server.join().unwrap();
+    }
+
+    /// FIX-8 (NRN-93): the version is compared BEFORE the protocol
+    /// short-circuit, so a well-formed pong at a *different* version but a
+    /// future/other protocol is a `VersionSkew` (actionable stderr note), not a
+    /// silent `Other`. Guards against a future `CONTROL_PROTOCOL` bump silently
+    /// masking version skew and mapping an old daemon to Direct with no signal.
+    #[test]
+    fn version_skew_beats_protocol_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut w = conn;
+            // Different protocol AND different version.
+            let pong = ControlFrame::Pong {
+                protocol: 9999,
+                version: "0.0.1".to_string(),
+                pid: None,
+                uptime_secs: None,
+            };
+            writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
+            w.flush().unwrap();
+        });
+
+        let stream = connect_control(&path, DEFAULT_HANDSHAKE_TIMEOUT).unwrap();
+        let err = handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT)
+            .expect_err("expected VersionSkew, not Other");
+        assert!(
+            matches!(err, HandshakeError::VersionSkew { .. }),
+            "protocol 9999 + version 0.0.1 must be VersionSkew (version compared first), got {err:?}"
+        );
         server.join().unwrap();
     }
 
