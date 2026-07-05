@@ -182,6 +182,55 @@ fn emit_op_action(
     }
 }
 
+/// Whether `op` is a content-mutating op — one handled by Phase A (frontmatter
+/// set/remove/add, rewrite_link, replace_body, or any of the six section/body
+/// edit kinds) rather than a lifecycle op (create/delete/move).
+fn is_content_op(op: &str) -> bool {
+    matches!(
+        op,
+        "set_frontmatter"
+            | "remove_frontmatter"
+            | "add_frontmatter"
+            | "rewrite_link"
+            | "replace_body"
+            | "str_replace"
+            | "replace_section"
+            | "append_to_section"
+            | "delete_section"
+            | "insert_before_heading"
+            | "insert_after_heading"
+    )
+}
+
+/// Reject a plan that edits a document AFTER an earlier `delete_document` or
+/// `move_document` (its SOURCE) of the same path in plan order. Phase A (content)
+/// always runs before Phase B (delete/move), so a plan authored as "delete/move
+/// X, then edit X" would be silently reordered into edit-then-vacate — masking an
+/// incoherent intent (a document cannot be edited after it has been removed or
+/// moved away). The reverse order (edit X, then delete/move X) is the legitimate
+/// edit-then-vacate and stays valid. `create_document` at a vacated path is
+/// coherent (delete-then-recreate) and is not a content op, so it is not guarded.
+fn reject_content_op_after_vacate(plan: &RepairPlan) -> Result<()> {
+    // path -> (operation, change_id) of the earlier delete/move that vacated it.
+    let mut vacated: std::collections::BTreeMap<&Utf8Path, (&str, &str)> =
+        std::collections::BTreeMap::new();
+    for change in &plan.changes {
+        let op = change.operation.as_str();
+        if matches!(op, "delete_document" | "move_document") {
+            vacated.insert(change.path.as_path(), (op, change.change_id.as_str()));
+        } else if is_content_op(op) {
+            if let Some(&(earlier_op, earlier_id)) = vacated.get(change.path.as_path()) {
+                return Err(anyhow::anyhow!(ApplyError::ContentOpAfterVacate {
+                    path: change.path.clone(),
+                    earlier_op: earlier_op.to_string(),
+                    earlier_change_id: earlier_id.to_string(),
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Crash-atomic write: serialize `contents` to a sibling temp file
 /// (`.{stem}.tmp`) then `fs::rename` it into place (atomic on POSIX). A SIGKILL /
 /// power loss / `ENOSPC` mid-write truncates only the throwaway temp, never the
@@ -344,6 +393,9 @@ pub fn apply_repair_plan_with_context(
     use crate::telemetry::event;
     use crate::telemetry::Severity;
     validate_plan_for_apply(cwd, plan)?;
+    // Guard incoherent plans BEFORE any write: a content op cannot target a path
+    // that an earlier delete/move in the same plan already vacated (NRN-139).
+    reject_content_op_after_vacate(plan)?;
 
     // `changes_by_path` validates the frontmatter changes (rejecting conflicting
     // field edits / divergent hashes / unsupported ops) and skips the
@@ -1737,5 +1789,84 @@ mod tests {
             leftovers.is_empty(),
             "no .tmp sibling should remain after a successful atomic write; found: {leftovers:?}"
         );
+    }
+
+    // ── NRN-139: reject a content op after a delete/move of the same path ──────
+
+    fn op_change(change_id: &str, path: &str, operation: &str) -> PlannedChange {
+        PlannedChange {
+            change_id: change_id.into(),
+            path: path.into(),
+            document_hash: String::new(),
+            finding_code: "operator-request".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: operation.into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: None,
+            link_risk: None,
+            warnings: Vec::new(),
+            force: false,
+            parents: false,
+        }
+    }
+
+    fn dummy_root() -> camino::Utf8PathBuf {
+        camino::Utf8PathBuf::from("/vault")
+    }
+
+    #[test]
+    fn guard_rejects_content_op_after_delete_of_same_path() {
+        let plan = plan_with(
+            &dummy_root(),
+            vec![
+                op_change("del", "x.md", "delete_document"),
+                op_change("set", "x.md", "set_frontmatter"),
+            ],
+        );
+        let err = reject_content_op_after_vacate(&plan).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("x.md"), "error must name the path: {msg}");
+    }
+
+    #[test]
+    fn guard_rejects_content_op_after_move_of_same_path() {
+        let plan = plan_with(
+            &dummy_root(),
+            vec![
+                op_change("mv", "x.md", "move_document"),
+                op_change("edit", "x.md", "append_to_section"),
+            ],
+        );
+        let err = reject_content_op_after_vacate(&plan).unwrap_err();
+        assert!(err.to_string().contains("x.md"), "{err}");
+    }
+
+    #[test]
+    fn guard_allows_content_op_before_delete_of_same_path() {
+        // edit-then-delete is the legitimate reverse order: it executes as given.
+        let plan = plan_with(
+            &dummy_root(),
+            vec![
+                op_change("set", "x.md", "set_frontmatter"),
+                op_change("del", "x.md", "delete_document"),
+            ],
+        );
+        reject_content_op_after_vacate(&plan).unwrap();
+    }
+
+    #[test]
+    fn guard_allows_create_after_delete_of_same_path() {
+        // delete-then-recreate is coherent; create_document is not a content op.
+        let plan = plan_with(
+            &dummy_root(),
+            vec![
+                op_change("del", "x.md", "delete_document"),
+                op_change("new", "x.md", "create_document"),
+            ],
+        );
+        reject_content_op_after_vacate(&plan).unwrap();
     }
 }
