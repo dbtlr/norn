@@ -48,6 +48,7 @@ impl crate::cache::Cache {
         )?;
         let start = std::time::Instant::now();
         let options = crate::graph::IndexOptions {
+            ignore: self.files_ignore.clone(),
             alias_field: self.alias_field.clone(),
             ..Default::default()
         };
@@ -119,6 +120,7 @@ impl crate::cache::Cache {
         // per-doc cost dominates only on truly huge vaults where
         // parse-everything beats incremental in total time anyway.
         let options = crate::graph::IndexOptions {
+            ignore: self.files_ignore.clone(),
             alias_field: self.alias_field.clone(),
             ..Default::default()
         };
@@ -525,6 +527,107 @@ mod tests {
         )
         .unwrap();
         (tmp, root)
+    }
+
+    /// Vault with an `Archive/` subdir (a *visible* path — the stock ignore
+    /// entries are all hidden dirs the scanner skips anyway) plus a live doc
+    /// that links `[[archived]]`.
+    fn make_vault_with_archive() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::create_dir(root.join("Archive").as_std_path()).unwrap();
+        std::fs::write(
+            root.join("Archive/archived.md").as_std_path(),
+            "---\ntitle: Archived\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("live.md").as_std_path(),
+            "---\ntitle: Live\n---\n\nsee [[archived]]\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    fn doc_count_under(cache: &crate::cache::Cache, prefix: &str) -> i64 {
+        cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path LIKE ?",
+                [format!("{prefix}%")],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn files_ignore_excludes_docs_at_rebuild() {
+        // With Archive/** in files.ignore, a full rebuild must never index the
+        // archived doc — not present in the documents table, not queryable,
+        // not a link target (NRN-117).
+        let (_tmp, root) = make_vault_with_archive();
+        let ignore = vec!["Archive/**".to_string()];
+        let mut cache = crate::cache::Cache::open_with_index(
+            &root,
+            None,
+            &ignore,
+            &std::collections::BTreeSet::new(),
+            "test-hash",
+        )
+        .unwrap();
+        cache.rebuild(&root).unwrap();
+
+        assert_eq!(
+            doc_count_under(&cache, "Archive/"),
+            0,
+            "archived docs must be excluded from the cache"
+        );
+        assert_eq!(doc_count_under(&cache, "live.md"), 1, "live doc stays");
+
+        // The link [[archived]] into the now-ignored target must be unresolved
+        // (link-target-missing), not silently resolved to the excluded doc.
+        let resolved: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE resolved_path LIKE 'Archive/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved, 0, "no link may resolve into an ignored path");
+    }
+
+    #[test]
+    fn files_ignore_purges_newly_ignored_on_incremental() {
+        // Build WITHOUT ignore (archived doc indexed), then reopen WITH ignore
+        // and run an incremental refresh: the newly-ignored doc must be purged,
+        // matching a full rebuild (NRN-117 / determinism).
+        let (_tmp, root) = make_vault_with_archive();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        assert_eq!(doc_count_under(&cache, "Archive/"), 1, "indexed initially");
+        drop(cache);
+
+        let ignore = vec!["Archive/**".to_string()];
+        let mut cache = crate::cache::Cache::open_with_index(
+            &root,
+            None,
+            &ignore,
+            &std::collections::BTreeSet::new(),
+            "test-hash",
+        )
+        .unwrap();
+        cache
+            .index_incremental(&root, &crate::cache::ChangeDetectOptions::default())
+            .unwrap();
+        assert_eq!(
+            doc_count_under(&cache, "Archive/"),
+            0,
+            "incremental refresh must purge the newly-ignored doc"
+        );
     }
 
     #[test]

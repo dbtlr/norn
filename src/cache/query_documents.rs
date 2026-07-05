@@ -1319,7 +1319,7 @@ mod router_tests {
 
     fn open_authoritative(root: &Utf8PathBuf, fields: &[&str]) -> Cache {
         let set = index_set(fields);
-        let mut cache = Cache::open_with_index(root, None, &set, "test-hash").unwrap();
+        let mut cache = Cache::open_with_index(root, None, &[], &set, "test-hash").unwrap();
         cache.rebuild(root).unwrap();
         cache
     }

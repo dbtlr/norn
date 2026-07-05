@@ -72,6 +72,12 @@ pub(crate) struct Cache {
     pub(crate) vault_root: camino::Utf8PathBuf,
     pub(crate) cache_dir: camino::Utf8PathBuf,
     pub(crate) alias_field: Option<String>,
+    /// Compiled-out-of `files.ignore`: path globs whose matching files are
+    /// excluded from the graph at cache-build time — never parsed, indexed, or
+    /// link-resolvable (NRN-117, ADR 0007). Threaded in via `open_with_index`;
+    /// empty for the non-authoritative `open`/`open_with_config` constructors,
+    /// which have no config knowledge.
+    pub(crate) files_ignore: Vec<String>,
     pub(crate) index_set: std::collections::BTreeSet<String>,
     pub(crate) index_set_hash: String,
     pub(crate) index_authoritative: bool,

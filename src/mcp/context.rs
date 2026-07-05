@@ -46,10 +46,11 @@
 //!    Unchanged → proceed. Changed → re-parse: a parse error fails
 //!    *this* request (mirroring a direct CLI invocation) and leaves the
 //!    fingerprint stale so the next request retries. On a successful re-parse, if
-//!    the resolved index-set hash or `alias_field` changed (the inputs to
-//!    `Cache::open_with_index`) the warm cache state is dropped so step 3 fully
-//!    reopens (re-paying `integrity_check` — deliberate); otherwise only the
-//!    stored config `Arc` is hot-swapped (no reopen).
+//!    the resolved index-set hash, `alias_field`, or `files.ignore` changed (the
+//!    inputs to `Cache::open_with_index` that determine cache content) the warm
+//!    cache state is dropped so step 3 fully reopens (re-paying `integrity_check`
+//!    — deliberate); otherwise only the stored config `Arc` is hot-swapped (no
+//!    reopen).
 //! 2. **Ground-shift** (`query_cache`)**.** If warm state is present, stat `<cache_dir>/cache.db` and
 //!    compare its `(dev, ino)` against the identity captured at open. On a missing
 //!    file or a mismatch the warm state is dropped. This catches an out-of-band
@@ -426,13 +427,17 @@ impl VaultContext {
         // stale, mirroring what a direct CLI invocation would do on this vault.
         let new_config = load_config(&self.vault_root.to_path_buf(), None)?;
 
-        // Index-relevant = the fields that feed `Cache::open_with_index`: the
-        // resolved index-set hash and the alias field. (The hash is a function of
-        // the resolved set, so comparing it covers the whole set.)
+        // Index-relevant = the fields that feed `Cache::open_with_index` and so
+        // determine cache CONTENT: the resolved index-set hash, the alias field,
+        // and `files.ignore` — a files.ignore change adds/removes which documents
+        // are in the graph, so the warm cache must reopen to re-apply it, not
+        // just hot-swap the config (NRN-117). (The hash is a function of the
+        // resolved set, so comparing it covers the whole set.)
         let old = self.config();
         let index_relevant_changed = old.index_options.resolved_index_set_hash
             != new_config.index_options.resolved_index_set_hash
-            || old.index_options.alias_field != new_config.index_options.alias_field;
+            || old.index_options.alias_field != new_config.index_options.alias_field
+            || old.index_options.ignore != new_config.index_options.ignore;
 
         {
             let mut cfg = self.config.lock().unwrap_or_else(|p| p.into_inner());
@@ -550,6 +555,7 @@ fn open_warm_state(vault_root: &Utf8Path, config: &LoadedConfig) -> Result<WarmS
         let cache = Cache::open_with_index(
             vault_root,
             opts.alias_field.as_deref(),
+            &opts.ignore,
             &opts.resolved_index_set,
             &opts.resolved_index_set_hash,
         )?;
@@ -560,6 +566,7 @@ fn open_warm_state(vault_root: &Utf8Path, config: &LoadedConfig) -> Result<WarmS
         let cache = Cache::open_with_index(
             vault_root,
             opts.alias_field.as_deref(),
+            &opts.ignore,
             &opts.resolved_index_set,
             &opts.resolved_index_set_hash,
         )?;
@@ -963,9 +970,71 @@ mod tests {
         }
     }
 
-    /// Config swap (non-index): changing `files.ignore` between calls is picked
-    /// up by `config()` but does NOT reopen the cache (the marker survives),
-    /// because it does not feed `Cache::open_with_index`.
+    /// A `files.ignore` change is index-relevant: it changes which documents are
+    /// in the graph, so the warm cache must REOPEN (marker gone) and the
+    /// newly-ignored docs must be purged on the reopen's refresh (NRN-117).
+    #[test]
+    fn warm_files_ignore_change_reopens_and_purges() {
+        let (_tmp, root) = make_seeded_vault();
+        // A doc under an ignorable subdir, indexed on the first open.
+        std::fs::create_dir_all(root.join("Archive").as_std_path()).unwrap();
+        std::fs::write(
+            root.join("Archive/old.md"),
+            "---\ntype: note\n---\nArchived\n",
+        )
+        .unwrap();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+
+        let archived_count = |cache: &Cache| -> i64 {
+            cache
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM documents WHERE path LIKE 'Archive/%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+
+        {
+            ctx.begin_request().expect("begin_request");
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            create_marker(&cache);
+            assert_eq!(
+                archived_count(&cache),
+                1,
+                "archived doc indexed before ignore"
+            );
+        }
+
+        write_config(&root, "files:\n  ignore:\n    - \"Archive/**\"\n");
+
+        {
+            ctx.begin_request().expect("begin_request");
+            let cache = ctx
+                .query_cache()
+                .expect("second warm query_cache after files.ignore change");
+            assert!(
+                !marker_present(&cache),
+                "files.ignore change must reopen the cache"
+            );
+            assert_eq!(
+                archived_count(&cache),
+                0,
+                "newly-ignored doc must be purged after reopen"
+            );
+        }
+        assert_eq!(
+            ctx.config().index_options.ignore,
+            vec!["Archive/**".to_string()],
+            "config() must reflect the new files.ignore"
+        );
+    }
+
+    /// A genuinely non-index config change (here `validate.ignore`, which is
+    /// validation-scoped and feeds neither the resolved index set nor
+    /// `files.ignore`) is hot-swapped into `config()` WITHOUT reopening the
+    /// cache (the marker survives).
     #[test]
     fn warm_non_index_config_change_swaps_without_reopen() {
         let (_tmp, root) = make_seeded_vault();
@@ -976,14 +1045,8 @@ mod tests {
             let cache = ctx.query_cache().expect("first warm query_cache");
             create_marker(&cache);
         }
-        assert!(
-            ctx.config().index_options.ignore.is_empty(),
-            "no ignore configured initially"
-        );
 
-        // A non-index change: files.ignore does not affect the resolved index
-        // set hash or alias_field.
-        write_config(&root, "files:\n  ignore:\n    - \"drafts/**\"\n");
+        write_config(&root, "validate:\n  ignore:\n    - \"logs/**\"\n");
 
         {
             ctx.begin_request().expect("begin_request");
@@ -996,9 +1059,9 @@ mod tests {
             );
         }
         assert_eq!(
-            ctx.config().index_options.ignore,
-            vec!["drafts/**".to_string()],
-            "config() must reflect the new files.ignore"
+            ctx.config().validate.ignore,
+            vec!["logs/**".to_string()],
+            "config() must reflect the new validate.ignore"
         );
     }
 

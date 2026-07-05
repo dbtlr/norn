@@ -83,6 +83,10 @@ files:
 
 Ignored targets stay out of the graph entirely. If an indexed document links to an ignored file, that link is reported as `link-target-missing` rather than silently hidden.
 
+Patterns support literal path segments, `*` (matches within a single path segment), and `**` (matches across segments) — e.g. `Archive/**`, `**/*.tmp`, `Workspaces/*/drafts/**`. Richer glob syntax accepted by `validate.ignore` (`?`, `[...]` character classes, `{a,b}` alternation) is **not** interpreted here and matches literally.
+
+`files.ignore` is applied at cache-build time: a change takes effect on the next cache build or refresh (the daemon reopens automatically). A query run with `--no-cache-refresh` sees the cache as last built, so a just-added ignore entry is not reflected until a refresh runs.
+
 ## validate.ignore
 
 Path globs that remain in the graph but are skipped by `norn validate`. Use this for content you want indexed (so links resolve correctly) but don't want to assert standards against.

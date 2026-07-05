@@ -5,7 +5,6 @@ use crate::cache::prune::{EvictReason, EvictedEntry, PruneOptions, PruneReport};
 use crate::cache::{Cache, CacheError, ChangeDetectOptions};
 use crate::core::GraphIndex;
 use crate::graph::IndexOptions;
-use crate::standards::path_match::PathPattern;
 use anyhow::Result;
 use camino::Utf8Path;
 
@@ -13,9 +12,9 @@ use crate::cli::{CacheIndexArgs, CacheOutputFormat, CachePruneArgs, CacheStatusA
 
 /// Load the graph index for a query command. Opens the per-vault cache,
 /// optionally runs an implicit incremental refresh, then reconstructs the
-/// in-memory `GraphIndex` from the cached rows. Configured `ignore`
-/// patterns are applied as a read-time filter so cache contents stay
-/// independent of per-invocation config.
+/// in-memory `GraphIndex` from the cached rows. `files.ignore` is enforced at
+/// cache-build time (via `Cache::files_ignore`), so the loaded index is already
+/// filtered — no read-time pass here (NRN-117).
 ///
 /// Lock contention during the implicit refresh is non-fatal: the command
 /// proceeds against the current cache state and writes a single stderr
@@ -28,6 +27,7 @@ pub fn load_graph_index(
     let mut cache = Cache::open_with_index(
         vault_root,
         options.alias_field.as_deref(),
+        &options.ignore,
         &options.resolved_index_set,
         &options.resolved_index_set_hash,
     )?;
@@ -42,8 +42,13 @@ pub fn load_graph_index(
             Err(error) => return Err(error.into()),
         }
     }
-    let mut index = cache.load_graph_index()?;
-    apply_ignore_filter(&mut index, &options.ignore);
+    // files.ignore is applied at cache-build time (the scan gate in
+    // graph::build_index_with_options, threaded via Cache::files_ignore), so the
+    // loaded index is already filtered — ignored docs are absent and links into
+    // them are unresolved. No read-time retain is needed or wanted; the earlier
+    // one only dropped in-memory docs (not the SQLite rows count/find/get read)
+    // and never retracted already-resolved links (NRN-117, ADR 0007).
+    let index = cache.load_graph_index()?;
     Ok(index)
 }
 
@@ -61,6 +66,7 @@ pub fn open_for_query(
     let mut cache = Cache::open_with_index(
         vault_root,
         options.alias_field.as_deref(),
+        &options.ignore,
         &options.resolved_index_set,
         &options.resolved_index_set_hash,
     )?;
@@ -78,37 +84,6 @@ pub fn open_for_query(
     Ok(cache)
 }
 
-fn apply_ignore_filter(index: &mut GraphIndex, ignore: &[String]) {
-    // Pre-compile patterns once; PathPattern::parse (Regex::new) is expensive.
-    let compiled: Vec<PathPattern> = ignore
-        .iter()
-        .map(|p| p.trim())
-        .filter(|p| !p.is_empty())
-        .filter_map(|p| PathPattern::parse(p).ok())
-        .collect();
-    if compiled.is_empty() {
-        return;
-    }
-    let is_ignored = |path: &camino::Utf8Path| -> bool {
-        compiled
-            .iter()
-            .any(|p| p.match_path(path.as_str()).is_some())
-    };
-    let mut ignored_files: Vec<camino::Utf8PathBuf> = Vec::new();
-    index.files.retain(|f| {
-        if is_ignored(&f.path) {
-            ignored_files.push(f.path.clone());
-            false
-        } else {
-            true
-        }
-    });
-    index.documents.retain(|d| !is_ignored(&d.path));
-    index.ignored_files.extend(ignored_files);
-    index.ignored_files.sort();
-    index.ignored_files.dedup();
-}
-
 pub fn run_index(
     vault_root: &Utf8Path,
     options: &IndexOptions,
@@ -117,6 +92,7 @@ pub fn run_index(
     let mut cache = Cache::open_with_index(
         vault_root,
         options.alias_field.as_deref(),
+        &options.ignore,
         &options.resolved_index_set,
         &options.resolved_index_set_hash,
     )?;
@@ -145,6 +121,7 @@ pub fn run_rebuild(vault_root: &Utf8Path, options: &IndexOptions) -> Result<()> 
     let mut cache = Cache::open_with_index(
         vault_root,
         options.alias_field.as_deref(),
+        &options.ignore,
         &options.resolved_index_set,
         &options.resolved_index_set_hash,
     )?;
@@ -282,6 +259,7 @@ pub fn run_status(
     let cache = Cache::open_with_index(
         vault_root,
         options.alias_field.as_deref(),
+        &options.ignore,
         &options.resolved_index_set,
         &options.resolved_index_set_hash,
     )?;

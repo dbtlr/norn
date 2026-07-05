@@ -33,7 +33,10 @@ pub fn detect(
     options: &ChangeDetectOptions,
 ) -> Result<Vec<FileChange>, CacheError> {
     let cached = load_cached_metadata(&cache.conn)?;
-    let live = scan_filesystem(vault_root)?;
+    // Honor files.ignore in the live scan so a path newly added to files.ignore
+    // is seen as absent → detected as Deleted → purged from the cache, keeping
+    // the incremental path in agreement with a full rebuild (NRN-117).
+    let live = scan_filesystem(vault_root, &cache.files_ignore)?;
 
     let mut changes = Vec::new();
 
@@ -108,15 +111,19 @@ struct LiveMeta {
     size_bytes: i64,
 }
 
-fn scan_filesystem(root: &Utf8Path) -> Result<HashMap<Utf8PathBuf, LiveMeta>, CacheError> {
+fn scan_filesystem(
+    root: &Utf8Path,
+    ignore: &[String],
+) -> Result<HashMap<Utf8PathBuf, LiveMeta>, CacheError> {
     let mut out = HashMap::new();
-    walk(root, root, &mut out)?;
+    walk(root, root, ignore, &mut out)?;
     Ok(out)
 }
 
 fn walk(
     base: &Utf8Path,
     dir: &Utf8Path,
+    ignore: &[String],
     out: &mut HashMap<Utf8PathBuf, LiveMeta>,
 ) -> Result<(), CacheError> {
     for entry in std::fs::read_dir(dir.as_std_path()).map_err(|e| CacheError::Io {
@@ -140,9 +147,12 @@ fn walk(
             source: e,
         })?;
         if ft.is_dir() {
-            walk(base, &path, out)?;
+            walk(base, &path, ignore, out)?;
         } else if ft.is_file() && path.extension() == Some("md") {
             let rel = path.strip_prefix(base).unwrap_or(&path).to_owned();
+            if crate::graph::is_ignored(&rel, ignore) {
+                continue;
+            }
             let meta = entry.metadata().map_err(|e| CacheError::Io {
                 path: path.clone(),
                 source: e,

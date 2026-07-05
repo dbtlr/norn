@@ -104,7 +104,8 @@ validate:
             .collect::<BTreeSet<_>>(),
             "every declared field should auto-qualify under index.auto's default"
         );
-        let mut cache = Cache::open_with_index(root, None, &index_set, &index_set_hash).unwrap();
+        let mut cache =
+            Cache::open_with_index(root, None, &[], &index_set, &index_set_hash).unwrap();
         cache.rebuild(root).unwrap();
         cache
     }
@@ -546,7 +547,7 @@ validate:
                 .join("vault");
             timing_vault(&indexed_root, n);
             let mut indexed_cache =
-                Cache::open_with_index(&indexed_root, None, &index_fields, "timing-hash-idx")
+                Cache::open_with_index(&indexed_root, None, &[], &index_fields, "timing-hash-idx")
                     .unwrap();
             indexed_cache.rebuild(&indexed_root).unwrap();
             let routed = median_duration(
@@ -562,7 +563,7 @@ validate:
                 .join("vault");
             timing_vault(&scan_root, n);
             let mut scan_cache =
-                Cache::open_with_index(&scan_root, None, &BTreeSet::new(), "timing-hash-scan")
+                Cache::open_with_index(&scan_root, None, &[], &BTreeSet::new(), "timing-hash-scan")
                     .unwrap();
             scan_cache.rebuild(&scan_root).unwrap();
             let scanned = median_duration(
