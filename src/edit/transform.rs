@@ -131,7 +131,12 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
             // splice the new line in between.
             let head_len = existing.trim_end().len();
             let head = &existing[..head_len];
+            // An empty section (or one without a trailing newline) leaves no
+            // whitespace to separate the appended line from the following heading
+            // or EOF; terminate the line with a single newline in that case so it
+            // never welds onto the next heading (NRN-137).
             let tail = &existing[head_len..];
+            let tail = if tail.is_empty() { "\n" } else { tail };
             let line = content.trim_matches('\n');
             let region = if head.is_empty() {
                 format!("{line}{tail}")
@@ -398,6 +403,34 @@ mod tests {
         // The section's single separating newline is its only whitespace, so the
         // appended line consumes it; sections stay adjacent (deterministic).
         assert_eq!(out.new_body, "## Empty\nfirst\n## Next\nx\n");
+    }
+
+    #[test]
+    fn append_to_empty_section_adjacent_heading() {
+        // Empty section with NO blank line before the next heading (back-to-back
+        // headings — the `## History` / `## Annotations` scaffold shape). The
+        // appended line must still be terminated so it does not weld onto the
+        // following heading (NRN-137).
+        let doc = "## Empty\n## Next\nx\n";
+        let op = EditOp::AppendToSection {
+            heading: "Empty".into(),
+            content: "first".into(),
+        };
+        let out = apply_edits(doc, &[op]).unwrap();
+        assert_eq!(out.new_body, "## Empty\nfirst\n## Next\nx\n");
+    }
+
+    #[test]
+    fn append_to_empty_section_at_eof() {
+        // Empty section at end-of-document: the appended line keeps its trailing
+        // newline rather than leaving the file without one (NRN-137).
+        let doc = "## Empty\n";
+        let op = EditOp::AppendToSection {
+            heading: "Empty".into(),
+            content: "first".into(),
+        };
+        let out = apply_edits(doc, &[op]).unwrap();
+        assert_eq!(out.new_body, "## Empty\nfirst\n");
     }
 
     #[test]
