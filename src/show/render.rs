@@ -120,6 +120,21 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
         if allow.contains("body") {
             map.insert("body".into(), serde_json::to_value(&record.body).unwrap());
         }
+        // `sections` (`--section`) is a distinct flag, not a `--col` facet —
+        // orthogonal to `allow`/`fields`, so it's inserted unconditionally
+        // whenever the record carries it (i.e. `--section` was passed),
+        // mirroring how `document_hash`/`stem` are inserted above without an
+        // `allow.contains(...)` gate. Built as a JSON object keyed by heading
+        // text (request order goes in; `serde_json::Map` without the
+        // `preserve_order` crate feature re-sorts by key on output, same as
+        // every other object this function builds).
+        if let Some(sections) = &record.sections {
+            let mut obj = serde_json::Map::with_capacity(sections.len());
+            for (heading, content) in sections {
+                obj.insert(heading.clone(), Value::String(content.clone()));
+            }
+            map.insert("sections".into(), Value::Object(obj));
+        }
         // `.raw` last: the heaviest/most-derived facet (whole source file from
         // disk). Omit the key when the file was unreadable.
         if allow.contains("raw") {
@@ -325,6 +340,18 @@ fn build_text_fields(
                     value: body.trim().to_string(),
                 });
             }
+        }
+    }
+
+    // `--section`: a distinct flag, not a `--col` facet, so it renders
+    // unconditionally (no `all_cols`/`facet_set` gate) whenever requested —
+    // one labeled block per requested heading, in request order.
+    if let Some(sections) = &record.sections {
+        for (heading, content) in sections {
+            fields.push(FieldOwned {
+                label: heading.clone(),
+                value: content.trim().to_string(),
+            });
         }
     }
 

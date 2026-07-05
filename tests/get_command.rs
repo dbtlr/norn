@@ -812,3 +812,343 @@ fn get_markdown_col_is_inert_and_warns() {
     let disk = std::fs::read_to_string(vault.join("a.md")).unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), disk);
 }
+
+// ---------------------------------------------------------------------------
+// NRN-102: `get --section` — section-scoped body reads (read/write symmetry
+// with `edit`'s section ops).
+// ---------------------------------------------------------------------------
+
+/// A vault with one doc carrying several named sections (mirrors the
+/// `## History` / `## Annotations` task-doc scaffold), plus a duplicate
+/// heading elsewhere for the ambiguous case, and a second doc for
+/// multi-target coverage.
+fn section_fixture() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-section-int-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("task.md"),
+        "---\ntype: task\nstatus: active\n---\n\
+         intro line\n\n\
+         ## Task Description\n\
+         Do the thing.\n\
+         More detail.\n\n\
+         ## Annotations\n\
+         - note one\n\
+         - note two\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("dup.md"),
+        "---\ntype: task\n---\n## Dup\nfirst\n## Dup\nsecond\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("other.md"),
+        "---\ntype: task\n---\n## Task Description\nother doc's description.\n",
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn get_section_single_json() {
+    let tmp = section_fixture();
+    let v = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(tmp.path().join("vault"))
+            .args([
+                "get",
+                "task.md",
+                "--section",
+                "Task Description",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let sections = &v[0]["sections"];
+    let content = sections["Task Description"].as_str().unwrap();
+    assert!(
+        content.starts_with("## Task Description\n"),
+        "section content must include the heading line verbatim: {content:?}"
+    );
+    assert!(content.contains("Do the thing."), "got: {content:?}");
+    assert!(content.contains("More detail."), "got: {content:?}");
+    // Must not bleed into the next section.
+    assert!(
+        !content.contains("Annotations"),
+        "section must end before the next heading: {content:?}"
+    );
+    // Only the requested section is present.
+    assert!(sections.get("Annotations").is_none());
+}
+
+#[test]
+fn get_section_single_records() {
+    let tmp = section_fixture();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["get", "task.md", "--section", "Task Description"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Do the thing."), "got: {stdout}");
+    // The unrequested section must not appear.
+    assert!(!stdout.contains("note one"), "got: {stdout}");
+}
+
+#[test]
+fn get_section_multiple_in_request_order() {
+    let tmp = section_fixture();
+    let v = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(tmp.path().join("vault"))
+            .args([
+                "get",
+                "task.md",
+                "--section",
+                "Annotations,Task Description",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let sections = &v[0]["sections"];
+    assert!(sections["Task Description"]
+        .as_str()
+        .unwrap()
+        .contains("Do the thing."));
+    assert!(sections["Annotations"]
+        .as_str()
+        .unwrap()
+        .contains("note one"));
+}
+
+#[test]
+fn get_section_runs_to_eof() {
+    let tmp = section_fixture();
+    let v = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(tmp.path().join("vault"))
+            .args([
+                "get",
+                "task.md",
+                "--section",
+                "Annotations",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let content = v[0]["sections"]["Annotations"].as_str().unwrap();
+    assert!(content.starts_with("## Annotations\n"));
+    assert!(content.contains("- note one"));
+    assert!(content.contains("- note two"));
+    assert!(content.trim_end().ends_with("- note two"));
+}
+
+#[test]
+fn get_section_missing_heading_warns_and_omits_siblings_still_return() {
+    let tmp = section_fixture();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args([
+            "get",
+            "task.md",
+            "--section",
+            "Nonexistent,Task Description",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    // At least one section resolved, so this is a warn-not-fail case.
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Nonexistent") && stderr.contains("not found"),
+        "expected a missing-heading warning; got: {stderr}"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    let sections = &v[0]["sections"];
+    assert!(sections["Task Description"]
+        .as_str()
+        .unwrap()
+        .contains("Do the thing."));
+    assert!(
+        sections.get("Nonexistent").is_none(),
+        "missing heading must be omitted, not present as null/empty: {sections}"
+    );
+}
+
+#[test]
+fn get_section_all_missing_for_target_is_hard_failure_but_other_targets_return() {
+    let tmp = section_fixture();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args([
+            "get",
+            "dup.md",
+            "other.md",
+            "--section",
+            "Nonexistent",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    // dup.md and other.md both lack a "Nonexistent" heading -> each resolves
+    // zero of its requested sections -> hard failure -> nonzero exit — but
+    // both targets still resolved as documents, so both records return.
+    assert!(!out.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("none of the requested"),
+        "expected a hard-failure note; got: {stderr}"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    assert!(v[0]["sections"].as_object().unwrap().is_empty());
+    assert!(v[1]["sections"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn get_section_non_unique_heading_warns_and_omits() {
+    let tmp = section_fixture();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["get", "dup.md", "--section", "Dup", "--format", "json"])
+        .output()
+        .unwrap();
+    // Zero of one requested section resolved for this single target -> hard
+    // failure (nonzero exit), matching the existing fully-unresolved-target
+    // contract.
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ambiguous") && stderr.contains("Dup"),
+        "expected an ambiguous-heading warning; got: {stderr}"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    // The record is still present (only the section facet is empty), the
+    // doc target itself resolved fine.
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert!(v[0]["sections"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn get_section_combined_with_col() {
+    let tmp = section_fixture();
+    let v = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(tmp.path().join("vault"))
+            .args([
+                "get",
+                "task.md",
+                "--col",
+                "status",
+                "--section",
+                "Task Description",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let record = &v[0];
+    // --col narrowed to `status` normally excludes headings/links/etc, but
+    // `sections` is orthogonal to --col and still shows up.
+    assert_eq!(record["frontmatter"]["status"], "active");
+    assert!(record.get("headings").is_none());
+    assert!(record["sections"]["Task Description"]
+        .as_str()
+        .unwrap()
+        .contains("Do the thing."));
+}
+
+#[test]
+fn get_section_ignored_with_paths_format_warns() {
+    let tmp = section_fixture();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args([
+            "get",
+            "task.md",
+            "--section",
+            "Task Description",
+            "--format",
+            "paths",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--section is ignored with --format paths"),
+        "expected section-ignored warning; got: {stderr}"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "task.md");
+}
+
+#[test]
+fn get_section_ignored_with_markdown_format_warns() {
+    let tmp = section_fixture();
+    let vault = tmp.path().join("vault");
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args([
+            "get",
+            "task.md",
+            "--section",
+            "Task Description",
+            "--format",
+            "markdown",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--section is ignored with --format markdown"),
+        "expected section-ignored warning; got: {stderr}"
+    );
+    let disk = std::fs::read_to_string(vault.join("task.md")).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), disk);
+}

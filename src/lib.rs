@@ -330,6 +330,11 @@ fn run(cli: Cli) -> Result<i32> {
                     Some("markdown"),
                     &mut stderr_lock,
                 )?;
+                crate::output::projection::warn_section_ignored(
+                    &args.section,
+                    Some("markdown"),
+                    &mut stderr_lock,
+                )?;
                 for note in &report.notes {
                     eprintln!("{}", note);
                 }
@@ -378,6 +383,11 @@ fn run(cli: Cli) -> Result<i32> {
             let mut stderr_lock = stderr.lock();
             crate::output::projection::warn_col_ignored(
                 &args.col,
+                matches!(args.format, cli::GetFormat::Paths).then_some("paths"),
+                &mut stderr_lock,
+            )?;
+            crate::output::projection::warn_section_ignored(
+                &args.section,
                 matches!(args.format, cli::GetFormat::Paths).then_some("paths"),
                 &mut stderr_lock,
             )?;

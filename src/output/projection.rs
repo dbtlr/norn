@@ -204,6 +204,23 @@ pub fn warn_col_ignored(
     Ok(())
 }
 
+/// Warn (once) that `get --section` has no effect with a format that ignores
+/// it (`paths`/`markdown`) — `--section`'s sibling to [`warn_col_ignored`].
+/// A separate function (rather than generalizing `warn_col_ignored`) because
+/// `--section` is `get`-only; `find` never calls this.
+pub fn warn_section_ignored(
+    sections: &[String],
+    inert_format: Option<&str>,
+    stderr: &mut dyn Write,
+) -> std::io::Result<()> {
+    if let Some(fmt) = inert_format {
+        if !sections.is_empty() {
+            writeln!(stderr, "warning: --section is ignored with --format {fmt}")?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

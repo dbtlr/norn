@@ -34,8 +34,56 @@ pub struct ShowRecord {
     pub incoming_links: Vec<IncomingLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// `--section` facet: one entry per requested heading that resolved
+    /// uniquely, in request order, as `(heading, content)` where `content` is
+    /// the exact byte span `edit::transform::resolve_section` covers (the
+    /// heading line through end-of-section). Headings that were missing or
+    /// ambiguous in this document are omitted (a warning lands in
+    /// `ShowReport::notes` instead). `None` when `--section` was not passed
+    /// (omitted from JSON, like `.body`/`.raw`); `Some(vec![])` when it was
+    /// passed but zero requested headings resolved for this document.
+    /// Serialized as an ordered JSON object (`{heading: content, ...}`), not
+    /// serde_json's default array-of-tuples, via [`serialize_sections`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_sections"
+    )]
+    pub sections: Option<Vec<(String, String)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+}
+
+/// Serialize `Option<Vec<(String, String)>>` as a JSON object keyed by
+/// heading text, in the vec's (request) order — not the default
+/// array-of-2-tuples `serde` would otherwise emit for a `Vec<(String,
+/// String)>`. Only invoked when `Some` (the field's `skip_serializing_if`
+/// filters out `None` before this runs).
+///
+/// Note: `serde_json::Value` (what `--format json`/`jsonl` and the MCP
+/// envelope funnel every record through via `serde_json::to_value`) does not
+/// preserve object-key insertion order without the crate's `preserve_order`
+/// feature, which this crate does not enable — flipping it would reorder
+/// every other JSON object emitted by norn (frontmatter blocks, plan/report
+/// objects, etc.), a blast radius far outside this facet. So this function's
+/// ordered `serialize_map` calls are only observably ordered in output modes
+/// that serialize straight to a writer without a `Value` round-trip; today
+/// nothing in norn's `get`/MCP output paths does that. Request order is
+/// still exact for the `records`/TTY renderer, which iterates this same `Vec`
+/// directly rather than going through `Value`.
+fn serialize_sections<S>(
+    sections: &Option<Vec<(String, String)>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let pairs = sections.as_deref().unwrap_or(&[]);
+    let mut map = serializer.serialize_map(Some(pairs.len()))?;
+    for (heading, content) in pairs {
+        map.serialize_entry(heading, content)?;
+    }
+    map.end()
 }
 
 #[derive(Debug, Serialize)]
@@ -56,7 +104,15 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     // is requested; `.raw` (disk read) loads when `.raw` is requested.
     // `--all-cols` is cache-only by design, so it never triggers a `.raw` read.
     let (facets, _fields) = crate::output::projection::split_cols(&args.col);
-    let wants_body = args.all_cols || facets.iter().any(|f| f == "body");
+    // Whether the `body` FIELD should be displayed (the pre-existing
+    // contract: opt-in via `--all-cols` or `--col .body`).
+    let wants_body_display = args.all_cols || facets.iter().any(|f| f == "body");
+    // Whether the body needs to be LOADED from cache — additionally true for
+    // `--section`, which resolves spans against it but does not (on its own)
+    // display the whole `body` field. Loading is a superset of displaying;
+    // `wants_body_display` gates what actually lands on `ShowRecord.body`
+    // below, so `--section` alone never leaks the full body into output.
+    let wants_body_load = wants_body_display || !args.section.is_empty();
     let wants_raw = facets.iter().any(|f| f == "raw");
     // `.document_hash` is identity/metadata-class: opt-in only (never in the
     // default or `--all-cols` dump), like `.raw`. Populated only when requested
@@ -77,7 +133,8 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
             ));
         }
         for path in &resolved.paths {
-            let Some(deep) = cache.document_with_connections(path.as_path(), wants_body)? else {
+            let Some(deep) = cache.document_with_connections(path.as_path(), wants_body_load)?
+            else {
                 notes.push(format!(
                     "error: '{}' missing from cache after resolution",
                     path
@@ -89,6 +146,21 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
             } else {
                 None
             };
+            let sections = if args.section.is_empty() {
+                None
+            } else {
+                Some(resolve_requested_sections(
+                    deep.body.as_deref().unwrap_or(""),
+                    &args.section,
+                    &deep.path,
+                    &mut notes,
+                ))
+            };
+            // Only surface the whole-body field when it was independently
+            // requested (`--all-cols`/`--col .body`) — a body loaded solely
+            // to resolve `--section` spans must not leak into the default
+            // dump.
+            let body = if wants_body_display { deep.body } else { None };
             records.push(ShowRecord {
                 path: deep.path,
                 stem: deep.stem,
@@ -103,7 +175,8 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
                 outgoing_links: deep.outgoing_links,
                 unresolved_links: deep.unresolved_links,
                 incoming_links: deep.incoming_links,
-                body: deep.body,
+                body,
+                sections,
                 raw,
             });
         }
@@ -120,6 +193,64 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     }
 
     Ok(ShowReport { records, notes })
+}
+
+/// Resolve every `--section` heading against one document's `body`, reusing
+/// `edit`'s `resolve_section` so a section READ mirrors a section WRITE —
+/// identical byte spans, identical missing/ambiguous failure modes.
+///
+/// A heading that fails to resolve (missing or ambiguous in this document)
+/// is warned to `notes` and omitted from the returned pairs — it does not
+/// abort the document's other requested headings, nor sibling targets. If
+/// NONE of `headings` resolve for this document, one additional `error:`
+/// note is pushed so this target counts toward `get`'s existing nonzero-exit
+/// contract (mirroring how a target that fails to resolve to any document at
+/// all already behaves) — but the document's record is still returned, with
+/// an empty `sections`, rather than dropped.
+fn resolve_requested_sections(
+    body: &str,
+    headings: &[String],
+    path: &camino::Utf8Path,
+    notes: &mut Vec<String>,
+) -> Vec<(String, String)> {
+    let mut resolved = Vec::with_capacity(headings.len());
+    for heading in headings {
+        // index/kind are edit's per-op bookkeeping (used only inside
+        // EditError's Display); `get` has neither an op index nor an op
+        // kind, so these are placeholders — we only branch on the error
+        // variant, never surface these fields.
+        match crate::edit::transform::resolve_section(body, heading, 0, "get --section") {
+            Ok(span) => {
+                resolved.push((
+                    heading.clone(),
+                    body[span.heading_start..span.end].to_string(),
+                ));
+            }
+            Err(crate::edit::transform::EditError::HeadingNotFound { .. }) => {
+                notes.push(format!(
+                    "warn: --section heading '{heading}' not found in '{path}'"
+                ));
+            }
+            Err(crate::edit::transform::EditError::HeadingAmbiguous { count, .. }) => {
+                notes.push(format!(
+                    "warn: --section heading '{heading}' is ambiguous ({count} matches) in '{path}'"
+                ));
+            }
+            Err(other) => {
+                // resolve_section only ever returns the two variants matched
+                // above; any other variant would be a bug in that contract.
+                notes.push(format!(
+                    "warn: --section heading '{heading}' could not be resolved in '{path}': {other}"
+                ));
+            }
+        }
+    }
+    if resolved.is_empty() {
+        notes.push(format!(
+            "error: none of the requested --section headings resolved for '{path}'"
+        ));
+    }
+    resolved
 }
 
 /// Stably sort `records` by `field` (a frontmatter key or the identity `path`).
@@ -211,6 +342,7 @@ mod tests {
             targets: targets.into_iter().map(String::from).collect(),
             all_cols,
             col: vec![],
+            section: vec![],
             format: crate::cli::GetFormat::Records,
             paging: crate::cli::SortPaginateArgs {
                 sort: None,
@@ -284,6 +416,7 @@ mod tests {
                 starts_at: 1,
             },
             col: vec![".incoming_links".to_string()],
+            section: vec![],
             format: crate::cli::GetFormat::Json,
         };
         let r = run(&cache, &args).unwrap();
@@ -312,6 +445,7 @@ mod tests {
                 starts_at: 1,
             },
             col: vec![".headings".to_string(), ".outgoing_links".to_string()],
+            section: vec![],
             format: crate::cli::GetFormat::Json,
         };
         let r = run(&cache, &args).unwrap();
@@ -338,6 +472,7 @@ mod tests {
                 starts_at: 1,
             },
             col: vec![],
+            section: vec![],
             format: crate::cli::GetFormat::Json,
         };
         let r = run(&cache, &args).unwrap();
@@ -369,6 +504,7 @@ mod tests {
                 starts_at: 1,
             },
             col: vec![],
+            section: vec![],
             format: crate::cli::GetFormat::Records,
         };
         let r = run(&cache, &args).unwrap();
@@ -395,6 +531,7 @@ mod tests {
                 starts_at: 1,
             },
             col: vec!["nonexistent_field".to_string()],
+            section: vec![],
             format: crate::cli::GetFormat::Json,
         };
         let r = run(&cache, &args).unwrap();
@@ -403,6 +540,138 @@ mod tests {
         assert_eq!(r.records.len(), 1);
         // The render layer's warning is tested separately or via the
         // integration test in tests/get_command.rs.
+    }
+
+    // ---- `--section` (NRN-102) ----
+
+    fn args_with_section(targets: Vec<&str>, section: Vec<&str>) -> crate::cli::GetArgs {
+        crate::cli::GetArgs {
+            targets: targets.into_iter().map(String::from).collect(),
+            all_cols: false,
+            paging: crate::cli::SortPaginateArgs {
+                sort: None,
+                desc: false,
+                limit: None,
+                no_limit: false,
+                starts_at: 1,
+            },
+            col: vec![],
+            section: section.into_iter().map(String::from).collect(),
+            format: crate::cli::GetFormat::Json,
+        }
+    }
+
+    #[test]
+    fn section_resolves_requested_heading_span_only() {
+        let (_t, root) = synth_pair();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntype: note\n---\n## One\nfirst\n## Two\nsecond\n",
+        )
+        .unwrap();
+        let cache = open(&root);
+        let r = run(&cache, &args_with_section(vec!["a.md"], vec!["One"])).unwrap();
+        assert_eq!(r.records.len(), 1);
+        let sections = r.records[0].sections.as_ref().unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "One");
+        assert_eq!(sections[0].1, "## One\nfirst\n");
+        // The unrequested body facet does not leak in just because --section
+        // forced a body load.
+        assert!(r.records[0].body.is_none());
+    }
+
+    #[test]
+    fn section_absent_when_not_requested() {
+        let (_t, root) = synth_pair();
+        let cache = open(&root);
+        let r = run(&cache, &args_with_section(vec!["a.md"], vec![])).unwrap();
+        assert!(r.records[0].sections.is_none());
+    }
+
+    #[test]
+    fn section_missing_heading_warns_and_omits_but_siblings_resolve() {
+        let (_t, root) = synth_pair();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntype: note\n---\n## One\nfirst\n## Two\nsecond\n",
+        )
+        .unwrap();
+        let cache = open(&root);
+        let r = run(
+            &cache,
+            &args_with_section(vec!["a.md"], vec!["Missing", "One"]),
+        )
+        .unwrap();
+        let sections = r.records[0].sections.as_ref().unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "One");
+        assert!(
+            r.notes.iter().any(|n| n.starts_with("warn:")
+                && n.contains("Missing")
+                && n.contains("not found")),
+            "expected a missing-heading warning, got: {:?}",
+            r.notes
+        );
+        // Partial resolution is warn-not-fail: no `error:` note for this doc.
+        assert!(!r.notes.iter().any(|n| n.starts_with("error:")));
+    }
+
+    #[test]
+    fn section_ambiguous_heading_warns_and_omits() {
+        let (_t, root) = synth_pair();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntype: note\n---\n## Dup\nfirst\n## Dup\nsecond\n",
+        )
+        .unwrap();
+        let cache = open(&root);
+        let r = run(&cache, &args_with_section(vec!["a.md"], vec!["Dup"])).unwrap();
+        assert!(r.records[0].sections.as_ref().unwrap().is_empty());
+        assert!(r
+            .notes
+            .iter()
+            .any(|n| n.starts_with("warn:") && n.contains("ambiguous") && n.contains("Dup")));
+    }
+
+    #[test]
+    fn section_zero_resolved_for_target_is_hard_failure_note() {
+        let (_t, root) = synth_pair();
+        let cache = open(&root);
+        // "a.md" has no such heading at all.
+        let r = run(&cache, &args_with_section(vec!["a.md"], vec!["Nope"])).unwrap();
+        // Record still returned — only the section facet is empty.
+        assert_eq!(r.records.len(), 1);
+        assert!(r.records[0].sections.as_ref().unwrap().is_empty());
+        assert!(r
+            .notes
+            .iter()
+            .any(|n| n.starts_with("error:") && n.contains("none of the requested")));
+    }
+
+    #[test]
+    fn section_serializes_as_ordered_json_object_not_tuple_array() {
+        let (_t, root) = synth_pair();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntype: note\n---\n## One\nfirst\n## Two\nsecond\n",
+        )
+        .unwrap();
+        let cache = open(&root);
+        let r = run(&cache, &args_with_section(vec!["a.md"], vec!["One", "Two"])).unwrap();
+        let json = render::render_json(&r);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let sections = v[0]["sections"]
+            .as_object()
+            .expect("sections is a JSON object, not an array of tuples");
+        assert_eq!(
+            sections.get("One").unwrap().as_str().unwrap(),
+            "## One\nfirst\n"
+        );
+        assert_eq!(
+            sections.get("Two").unwrap().as_str().unwrap(),
+            "## Two\nsecond\n"
+        );
     }
 
     #[test]
@@ -420,6 +689,7 @@ mod tests {
                 starts_at: 1,
             },
             col: vec![],
+            section: vec![],
             format: crate::cli::GetFormat::Records,
         };
         let r = run(&cache, &args).unwrap();
@@ -451,6 +721,7 @@ mod tests {
             unresolved_links: vec![],
             incoming_links: vec![],
             body: None,
+            sections: None,
             raw: None,
         }
     }
