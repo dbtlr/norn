@@ -38,6 +38,10 @@ pub enum SetWarning {
 pub struct SynthResult {
     pub changes: Vec<PlannedChange>,
     pub warnings: Vec<SetWarning>,
+    /// The post-state document schema resolution ran against (NRN-119). Exposed
+    /// so the caller's wikilink-resolution sweep reuses it instead of rebuilding
+    /// the same overlay + Document clone.
+    pub(crate) effective_doc: Document,
 }
 
 /// Look up the declared schema type for `field` on the given document.
@@ -240,29 +244,34 @@ fn display_allowed(allowed: &[Value]) -> String {
 }
 
 /// Build the post-state document for schema resolution: overlay the batch's
-/// scalar `--field`, `--field-json`, and `--remove` changes onto the document's
-/// current frontmatter so rule matching (which keys on `type`/`kind`) sees the
-/// INCOMING state (NRN-119). Values are lightly inferred — matching compares
-/// literals, so no schema coercion is needed here (and using it would be
-/// circular: the schema is what we're resolving). `--push`/`--pop` are not
-/// overlaid; list fields are not rule-match predicates.
+/// `--field` / `--field-json` changes onto the document's current frontmatter so
+/// rule matching (which keys on `type`/`kind`) sees the INCOMING state (NRN-119).
+///
+/// Deliberate choices, each closing a review-found hole:
+/// - **Base on `current_frontmatter`** (the fresh pre-state the ops actually run
+///   against), not the possibly-staler cached `doc.frontmatter`, so schema
+///   resolution and value computation agree on the same pre-state.
+/// - **Overlay `--field` values as raw strings**, not `infer_scalar`: norn
+///   coerces every typed field (the enum fields rules discriminate on) to a
+///   string, so the string form models the post-write value; `infer_scalar`
+///   would turn `2` / `true` into a number/bool and flip a string-typed match
+///   predicate (matching is strict, no cross-type coercion).
+/// - **Do NOT apply `--remove` deletions.** Removing a field must not change the
+///   schema used to judge whether that field is required, or the removal-
+///   protection check would un-match its own rule and silently drop a required
+///   field. `--push`/`--pop` are likewise not overlaid; list fields are not
+///   rule-match predicates.
 pub(crate) fn effective_match_doc(
     doc: &Document,
     current_frontmatter: &Value,
     fields: &[String],
     field_json: &[String],
-    remove: &[String],
 ) -> Document {
-    let mut fm = doc
-        .frontmatter
-        .as_ref()
-        .or(Some(current_frontmatter))
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
+    let mut fm = current_frontmatter.as_object().cloned().unwrap_or_default();
 
     for kv in fields {
         if let Ok((k, raw)) = crate::set::synth::parse_kv(kv) {
-            fm.insert(k, crate::set::synth::infer_scalar(&raw));
+            fm.insert(k, Value::String(raw));
         }
     }
     for kv in field_json {
@@ -271,9 +280,6 @@ pub(crate) fn effective_match_doc(
                 fm.insert(k, v);
             }
         }
-    }
-    for k in remove {
-        fm.remove(k);
     }
 
     let mut d = doc.clone();
@@ -390,7 +396,7 @@ pub fn synth_with_schema(
     // that changes `type`/`kind` AND sets another field must coerce that field
     // under the incoming type's schema, not the outgoing one (NRN-119). Overlay
     // the batch's field changes onto the document used for rule matching.
-    let effective = effective_match_doc(doc, current_frontmatter, fields, field_json, remove);
+    let effective = effective_match_doc(doc, current_frontmatter, fields, field_json);
     let doc = &effective;
 
     // --field is a scalar set → enforce allowed_values. --push / --pop operate on
@@ -476,7 +482,11 @@ pub fn synth_with_schema(
         remove,
     )?;
 
-    Ok(SynthResult { changes, warnings })
+    Ok(SynthResult {
+        changes,
+        warnings,
+        effective_doc: effective,
+    })
 }
 
 /// Warn-class check: does the wikilink target resolve to a unique doc in the
@@ -658,6 +668,85 @@ validate:
             .find(|c| c.field.as_deref() == Some("aliases"))
             .expect("pop should produce an aliases change, not a no-op");
         assert_eq!(al.new_value, Some(json!(["y"])));
+    }
+
+    #[test]
+    fn remove_of_self_matching_required_field_still_protected() {
+        // Removing a field that is BOTH a rule's match predicate AND required by
+        // that rule must stay protected: the post-state doc used for schema
+        // resolution must not pre-apply the removal, or the rule un-matches
+        // itself and protection silently evaporates (review finding 4).
+        let yaml = r#"
+validate:
+  rules:
+    - name: note-requires-kind
+      match:
+        frontmatter:
+          kind: note
+      required_frontmatter:
+        - kind
+"#;
+        let cfg = crate::standards::parse_config(yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config parses");
+        let doc = fixture_doc_kind_note();
+        let current = json!({"kind": "note", "title": "Foo"});
+        let err = synth_with_schema(
+            &cfg,
+            &doc,
+            &current,
+            &[],
+            &[],
+            &[],
+            &[],
+            &["kind".into()],
+            false,
+        )
+        .expect_err("removing a required field must be refused without --force");
+        assert!(
+            err.to_string().contains("required field 'kind'"),
+            "expected required-field refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn field_overlay_preserves_string_predicate_matching() {
+        // A numeric-LOOKING but string-typed match predicate must keep matching
+        // when set to a bare numeric value: the overlay uses the raw string, not
+        // infer_scalar (which would make it Number and un-match). Review finding 2.
+        let yaml = r#"
+validate:
+  rules:
+    - name: edition-two
+      match:
+        frontmatter:
+          edition: "2"
+      field_types:
+        ref: wikilink
+"#;
+        let cfg = crate::standards::parse_config(yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config parses");
+        let doc = fixture_doc_kind_note();
+        let current = json!({"kind": "note", "edition": "2"});
+        // Set edition=2 (bare) + ref=Foo in one batch. edition stays string "2",
+        // the rule still matches, so ref is coerced as a wikilink.
+        let result = synth_with_schema(
+            &cfg,
+            &doc,
+            &current,
+            &["edition=2".into(), "ref=Foo".into()],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        )
+        .expect("synth succeeds");
+        let r = result
+            .changes
+            .iter()
+            .find(|c| c.field.as_deref() == Some("ref"))
+            .expect("ref change present");
+        assert_eq!(r.new_value, Some(json!("[[Foo]]")));
     }
 
     #[test]

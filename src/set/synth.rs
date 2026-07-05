@@ -485,18 +485,15 @@ pub fn preflight_and_plan(
 
     let mut all_changes = synth_result.changes;
     let mut warnings = synth_result.warnings;
+    // The post-state document schema resolution already ran against (NRN-119),
+    // reused here so the sweep resolves field types under the INCOMING type
+    // without rebuilding the overlay + Document clone.
+    let effective_doc = synth_result.effective_doc;
 
     // 7. Wikilink resolution sweep for wikilink-typed fields. Resolve field
     // types against the POST-state document so a type-changing batch does not
     // resolve a field as a wikilink under the outgoing type's schema — the same
     // pre-state-schema hazard fixed in synth_with_schema (NRN-119).
-    let effective_doc = crate::set::validate::effective_match_doc(
-        &doc,
-        &current_fm,
-        &args.fields,
-        &args.field_json,
-        &args.remove,
-    );
     for change in &all_changes {
         let Some(field_name) = change.field.as_deref() else {
             continue;

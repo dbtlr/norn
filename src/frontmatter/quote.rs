@@ -270,16 +270,34 @@ fn serialize_string_value(s: &str, original_style: ValueStyle) -> String {
     render_scalar_at_rank(s, RANK_DOUBLE)
 }
 
+/// Escape a string for a YAML double-quoted scalar. Double-quoted is the
+/// terminal quoting rank, so this must produce output that reparses byte-
+/// identically for EVERY input — in particular control characters, which YAML
+/// forbids literally inside quotes (they make the parser reject the document)
+/// and NEL / line- / paragraph-separators, which fold to a space if left bare.
+/// Uses YAML's named escapes where defined and `\xXX` for the rest (NRN-118).
 fn escape_double_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            '\u{07}' => out.push_str("\\a"),
+            '\u{08}' => out.push_str("\\b"),
             '\t' => out.push_str("\\t"),
-            _ => out.push(c),
+            '\n' => out.push_str("\\n"),
+            '\u{0b}' => out.push_str("\\v"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            '\u{1b}' => out.push_str("\\e"),
+            '\u{85}' => out.push_str("\\N"),
+            '\u{2028}' => out.push_str("\\L"),
+            '\u{2029}' => out.push_str("\\P"),
+            // Any remaining control character (C0, DEL, C1) must be escaped —
+            // all are <= 0xFF, so a two-hex `\xXX` is always sufficient.
+            c if c.is_control() => out.push_str(&format!("\\x{:02X}", c as u32)),
+            c => out.push(c),
         }
     }
     out
@@ -579,6 +597,42 @@ mod tests {
         let result = serialize_value_preserving_style(&json!("123"), ValueStyle::Plain).unwrap();
         assert_eq!(result, "'123'");
         assert_eq!(reparse(&result).as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn control_chars_round_trip_via_double_quoted_terminal() {
+        // The double-quoted terminal must be a TRUE terminal: control chars
+        // emitted literally make serde_yaml reject the doc, so all ranks fail
+        // round-trip and the fallback emits corrupt bytes. Every control char
+        // must escape and reparse to itself (NRN-118 round-trip review).
+        for c in [
+            '\u{0}', '\u{7}', '\u{8}', '\u{b}', '\u{c}', '\u{1b}', '\u{7f}',
+        ] {
+            let s = format!("a{c}b");
+            let result = serialize_value_preserving_style(&json!(s), ValueStyle::Plain).unwrap();
+            assert_eq!(
+                reparse(&result).as_deref(),
+                Some(s.as_str()),
+                "control char U+{:04X} did not round-trip (emitted {result:?})",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn nel_and_line_separators_round_trip_not_folded() {
+        // U+0085 (NEL), U+2028, U+2029 are folded to spaces inside double quotes
+        // unless escaped — silent value corruption at the terminal (NRN-118).
+        for c in ['\u{85}', '\u{2028}', '\u{2029}'] {
+            let s = format!("a{c}b");
+            let result = serialize_value_preserving_style(&json!(s), ValueStyle::Plain).unwrap();
+            assert_eq!(
+                reparse(&result).as_deref(),
+                Some(s.as_str()),
+                "U+{:04X} did not round-trip (emitted {result:?})",
+                c as u32
+            );
+        }
     }
 
     #[test]
