@@ -27,6 +27,9 @@ norn get notes/my-note.md --all-cols --format json
 
 norn get notes/my-note.md --format markdown
 # rebuild the document as Markdown (frontmatter + body)
+
+norn get notes/my-note.md --section "Task Description" --section "Annotations" --format json
+# just those two named sections' content (repeat --section per heading)
 ```
 
 ## Targets
@@ -49,6 +52,17 @@ The `--col` vocabulary is identical to `norn find`:
 - **`--all-cols`:** every frontmatter field plus every cache-served facet, including `.body`. Excludes `.raw` and `.document_hash` (opt-in/identity-class, requested only by name). Mutually exclusive with `--col`.
 
 `.body` is the parsed body from the cache; `.raw` is the file's exact bytes from disk. `.document_hash` is the blake3 hex of the full file content — the same value plan ops carry and `edit --expected-hash` / `vault.edit`'s `expected_hash` compare against, so `get --col .document_hash` is how you read a document's hash to guard a later edit.
+
+## Selecting sections — `--section`
+
+`--section "Heading"` reads a named section of the body instead of (or alongside) `--col`/`--all-cols` — it's a distinct flag, not a `--col` facet, so combine it freely. It is **repeatable**: pass it once per section (`--section "Task Description" --section "Annotations"`). Each occurrence is one whole heading string, so a heading that itself contains a comma (`--section "Risks, Open Questions"`) is addressable verbatim — the same way `edit` takes a heading as one whole string. Each heading is resolved with the exact same boundary and failure semantics as `edit --append-to-section` / `--replace-section`: the section spans the heading line through the next same-or-higher-level heading, or end-of-document. This makes `get --section X` and `edit --replace-section X` agree on what "the X section" means — a read mirrors a write.
+
+- **`--format json`/`jsonl`** add a `sections` object keyed by the requested heading text, e.g. `{"Task Description": "## Task Description\n..."}`. The object is a keyed lookup — keys are unordered (alphabetical), not request-ordered.
+- **`--format records`** (the TTY default) prints each requested section as its own labeled block, in request order.
+- The section content is byte-identical across formats (the verbatim span, heading line through end-of-section), so a value read from either round-trips to `edit --replace-section`.
+- **`--format paths`/`markdown`** ignore `--section` entirely (no section resolution runs), like they ignore `--col`, with a stderr warning — the lookup still succeeds and exits 0.
+- Repeating the same heading collapses to one entry (both formats agree on cardinality).
+- A heading that's missing or ambiguous (matches more than one heading) in a given document warns on stderr and is simply omitted from that document's `sections` — it does not affect other requested headings or other targets. If *none* of the requested headings resolve for a document, that counts toward `get`'s normal nonzero-exit contract for an unresolved target, but the document's record is still returned.
 
 ## Sorting and paging
 

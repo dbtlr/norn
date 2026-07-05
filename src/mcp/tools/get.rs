@@ -118,6 +118,10 @@ pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
         // cache-only `--all-cols` super-dump off the MCP surface.
         all_cols: false,
         col,
+        // `--section` is not on the v1 MCP surface yet (see `GetParams` doc
+        // comment) — no requested sections, so `show::run` never loads the
+        // body for this reason alone.
+        section: Vec::new(),
         // Records is `norn get`'s default format. The MCP wrapper serializes the
         // returned `ShowReport` to JSON regardless, so this only governs which
         // facets `show::run` loads (e.g. body), not a textual rendering.

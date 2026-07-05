@@ -189,20 +189,29 @@ fn splice(body: &str, range: std::ops::Range<usize>, replacement: &str) -> Strin
 }
 
 /// Byte ranges describing a section addressed by exact heading text.
-struct SectionSpan {
+///
+/// `pub(crate)` so `norn get --section` (`show::mod`) can resolve the same
+/// span `edit`'s section ops use — read mirrors write, same boundary and
+/// failure semantics.
+pub(crate) struct SectionSpan {
     /// Start of the heading line (the `#`).
-    heading_start: usize,
+    pub(crate) heading_start: usize,
     /// Start of the section body (just after the heading line's `\n`).
-    body_start: usize,
+    pub(crate) body_start: usize,
     /// End of the section: start of the next same-or-higher-level heading, or EOF.
-    end: usize,
+    pub(crate) end: usize,
 }
 
 /// Resolve a unique section by exact heading text against the CURRENT body.
 /// Re-parsed per op (sequential semantics) — cheap for vault-scale docs and
 /// avoids cross-op offset bookkeeping. Fence-safe: `pulldown_cmark` never emits
 /// a heading for `#` inside a fenced code block.
-fn resolve_section(
+///
+/// Shared by `edit`'s section ops and `norn get --section` (`pub(crate)`, not
+/// just `edit`-local) — both must resolve a heading to the exact same byte
+/// span and fail the exact same way (missing / ambiguous heading), so a
+/// section read mirrors a section write.
+pub(crate) fn resolve_section(
     body: &str,
     heading: &str,
     index: usize,
@@ -211,6 +220,22 @@ fn resolve_section(
     // content == body, body_start == 0 → spans are body-relative.
     let (headings, _links) =
         crate::links::parse_commonmark(camino::Utf8Path::new("edit"), body, body, 0);
+    resolve_section_in(&headings, body, heading, index, kind)
+}
+
+/// The span-resolution core, factored out of [`resolve_section`] so a caller
+/// resolving MANY headings against one immutable body can parse the headings
+/// ONCE and reuse the list (e.g. `norn get --section A --section B`). `edit`
+/// re-parses per op because each op mutates the body; `get` does not, so it
+/// parses once and calls this per requested heading. Both paths share the
+/// identical match/boundary/failure logic — the whole point of the reuse.
+pub(crate) fn resolve_section_in(
+    headings: &[crate::core::Heading],
+    body: &str,
+    heading: &str,
+    index: usize,
+    kind: &'static str,
+) -> Result<SectionSpan, EditError> {
     let matches: Vec<usize> = headings
         .iter()
         .enumerate()

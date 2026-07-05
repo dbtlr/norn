@@ -834,6 +834,31 @@ pub struct GetArgs {
     )]
     pub col: Vec<String>,
 
+    /// Named section to read, by exact heading text. Repeatable — pass once
+    /// per section (`--section "Task Description" --section "Annotations"`).
+    /// Each occurrence is one whole heading string, so a heading that itself
+    /// contains a comma (`--section "Risks, Open Questions"`) is addressable
+    /// verbatim — the same way `edit` takes a heading as one whole string.
+    /// Resolved with the same boundary and failure semantics as
+    /// `edit --append-to-section` / `--replace-section` (heading line through
+    /// the next same-or-higher heading, or EOF) — a section read mirrors a
+    /// section write. Orthogonal to `--col`/`--all-cols`; combine freely. A
+    /// heading missing or ambiguous in a given document warns on stderr and is
+    /// omitted from that document's `sections` (siblings and other documents
+    /// are unaffected); if none of the requested headings resolve for a
+    /// document, that is a hard failure (nonzero exit) for that target,
+    /// mirroring how `get` already treats a target that fails to resolve at
+    /// all. Ignored (with a warning) by `--format paths`/`markdown`, like
+    /// `--col`.
+    #[arg(
+        long,
+        value_name = "HEADING",
+        num_args = 1,
+        action = clap::ArgAction::Append,
+        help_heading = "Output"
+    )]
+    pub section: Vec<String>,
+
     /// Output format. Default records (vertical key-value block per doc).
     #[arg(long, value_enum, default_value_t = GetFormat::Records, help_heading = "Output")]
     pub format: GetFormat,
