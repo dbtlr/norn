@@ -18,6 +18,10 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 - **The CLI→service probe now targets the well-known host socket** instead of a per-vault path derived from the vault's identity hash — the derived form could exceed macOS's `sun_path` limit on some vault paths. Routing additionally requires the daemon to echo an exact version match, with a one-line stderr note on skew (`restart the norn serve daemon`), and the probe's connect is now timeout-bounded rather than a blocking connect.
 
+### Fixed
+
+- **Dotted-stem wikilinks no longer report as broken.** `validate`'s link resolver derived its stem-match key with `Path::file_stem`, which truncates at the last dot — so a wikilink like `[[v0.40.0]]` or `[[periodic-0.4-review]]` was looked up as `v0.40` / `periodic-0` and reported `link-target-missing` even though the file existed and `get` resolved it. It now strips only a trailing `.md` from the target's final path component, matching how document stems are keyed. Path-qualified (`[[dir/name]]`) stem fallback is preserved, and only `.md` is stripped — a `[[note.png]]` target no longer cross-resolves to `note.md`. Takes effect on the next cache rebuild. (NRN-123)
+
 ## v0.42.0 - 2026-07-03
 
 Trusted mutation and vault inspection. `norn describe` becomes a first-class CLI command with a `--data` contents-summary; section/body edits compose into plans as apply-time actions; `norn edit` / `vault.edit` gain an optional expected-hash compare-and-swap and `.document_hash` becomes readable through `find`/`get`/`vault.get`; and rule targets can auto-allocate ids via `{{seq}}`. Query-plan work extends `document_fields` index routing to the date, numeric, and boolean predicate classes, with typed comparison semantics unified across the indexed and scan paths.
