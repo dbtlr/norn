@@ -188,20 +188,24 @@ fn resolve_wikilink(
         }
     }
 
-    let stem = Utf8Path::new(target).file_stem().unwrap_or(target);
-    let stem_matches: Vec<Utf8PathBuf> = by_stem
-        .get(&stem.to_lowercase())
-        .cloned()
-        .unwrap_or_default();
+    // Derive the stem key WITHOUT `Path::file_stem`, which truncates at the LAST
+    // dot and mangles dotted stems (`v0.40.0` -> `v0.40`, `periodic-0.4-review`
+    // -> `periodic-0`), stranding otherwise-resolvable wikilinks (NRN-123).
+    // Replicate file_stem's two useful effects deliberately: take the final path
+    // component (so a stale `dir/name` target still falls back to the `name`
+    // stem, keeping such links in the move/delete cascade set), then strip only a
+    // literal `.md` (never an arbitrary extension). Lowercase once; by_stem/
+    // by_alias keys are lowercased at construction.
+    let target_lower = target.to_lowercase();
+    let last_component = target_lower.rsplit('/').next().unwrap_or(&target_lower);
+    let stem = last_component.strip_suffix(".md").unwrap_or(last_component);
+    let stem_matches: Vec<Utf8PathBuf> = by_stem.get(stem).cloned().unwrap_or_default();
     if !stem_matches.is_empty() {
         return stem_matches;
     }
 
     // Fallback: consult aliases only when stem returned ∅.
-    by_alias
-        .get(&stem.to_lowercase())
-        .cloned()
-        .unwrap_or_default()
+    by_alias.get(stem).cloned().unwrap_or_default()
 }
 
 fn resolve_path_like_target(
@@ -337,6 +341,120 @@ mod tests {
             link.unresolved_reason,
             Some(crate::core::UnresolvedReason::TargetMissing)
         );
+    }
+
+    #[test]
+    fn dotted_stem_wikilink_resolves() {
+        // NRN-123: Path::file_stem truncates at the last dot, mangling dotted
+        // stems like `v0.40.0` -> `v0.40`. The wikilink must resolve to the file.
+        let files = vec![make_file("notes/v0.40.0.md"), make_file("a.md")];
+        let mut documents = vec![make_document("notes/v0.40.0.md"), make_document("a.md")];
+        documents[1].links.push(make_wikilink("a.md", "v0.40.0"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[1].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("notes/v0.40.0.md".into()));
+    }
+
+    #[test]
+    fn dotted_stem_midstring_wikilink_resolves() {
+        // `periodic-0.4-review` would be chopped to `periodic-0` by file_stem.
+        let files = vec![make_file("logs/periodic-0.4-review.md"), make_file("a.md")];
+        let mut documents = vec![
+            make_document("logs/periodic-0.4-review.md"),
+            make_document("a.md"),
+        ];
+        documents[1]
+            .links
+            .push(make_wikilink("a.md", "periodic-0.4-review"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[1].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(
+            link.resolved_path,
+            Some("logs/periodic-0.4-review.md".into())
+        );
+    }
+
+    #[test]
+    fn path_qualified_wikilink_falls_back_to_final_component_stem() {
+        // A `dir/name` wikilink whose exact path is stale must still resolve via
+        // the final component's stem — the dotted-stem fix must NOT drop the
+        // path-qualified stem fallback that file_stem previously provided
+        // (otherwise these links silently leave the move/delete cascade set).
+        let files = vec![make_file("other/note.md"), make_file("src.md")];
+        let mut documents = vec![make_document("other/note.md"), make_document("src.md")];
+        documents[1]
+            .links
+            .push(make_wikilink("src.md", "folder/note"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[1].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("other/note.md".into()));
+    }
+
+    #[test]
+    fn dotted_alias_wikilink_resolves() {
+        // The by_alias lookup key was also mangled by file_stem; a dotted alias
+        // value must resolve now (was `v0.40` before, missing the alias).
+        let files = vec![make_file("release-notes.md"), make_file("a.md")];
+        let mut documents = vec![make_document("release-notes.md"), make_document("a.md")];
+        documents[0].aliases = vec!["v0.40.0".to_string()];
+        documents[1].links.push(make_wikilink("a.md", "v0.40.0"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[1].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("release-notes.md".into()));
+    }
+
+    #[test]
+    fn ambiguous_dotted_stem_wikilink_is_ambiguous() {
+        // A dotted stem shared by two docs must be Ambiguous, not silently
+        // resolved to one — the fix routes dotted stems into the multi-candidate
+        // branch, so pin that it still reports ambiguity.
+        let files = vec![
+            make_file("x/v0.40.0.md"),
+            make_file("y/v0.40.0.md"),
+            make_file("src.md"),
+        ];
+        let mut documents = vec![
+            make_document("x/v0.40.0.md"),
+            make_document("y/v0.40.0.md"),
+            make_document("src.md"),
+        ];
+        documents[2].links.push(make_wikilink("src.md", "v0.40.0"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[2].links[0];
+        assert_eq!(link.status, LinkStatus::Ambiguous);
+        assert_eq!(link.candidates.len(), 2);
+    }
+
+    #[test]
+    fn non_md_extension_target_does_not_cross_resolve_to_md() {
+        // NRN-123 intent: strip ONLY `.md`. A `[[diagram.png]]` wikilink must NOT
+        // resolve to a `diagram.md` doc (file_stem used to strip any extension,
+        // a false positive). This pins the deliberate behavior change.
+        let files = vec![make_file("diagram.md"), make_file("a.md")];
+        let mut documents = vec![make_document("diagram.md"), make_document("a.md")];
+        documents[1]
+            .links
+            .push(make_wikilink("a.md", "diagram.png"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[1].links[0];
+        assert_eq!(link.status, LinkStatus::Unresolved);
+    }
+
+    #[test]
+    fn wikilink_with_md_suffix_still_strips_extension() {
+        // Regression guard: a target that DOES carry a trailing `.md` must still
+        // resolve by stem after the file_stem->strip_suffix change.
+        let files = vec![make_file("a.md"), make_file("b.md")];
+        let mut documents = vec![make_document("a.md"), make_document("b.md")];
+        documents[0].links.push(make_wikilink("a.md", "b.md"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("b.md".into()));
     }
 
     #[test]
