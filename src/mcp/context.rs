@@ -894,7 +894,7 @@ mod tests {
             create_marker(&cache);
             assert_eq!(doc_count(&cache), 3);
         }
-        let id1 = ctx.warm_db_identity().expect("state held after first call");
+        let _id1 = ctx.warm_db_identity().expect("state held after first call");
 
         // Simulate `norn cache clear` / manual rm under a live daemon: remove the
         // whole cache dir (db + WAL + SHM). POSIX keeps the old inode alive
@@ -917,8 +917,15 @@ mod tests {
                 "reopened cache must be rebuilt against the live vault"
             );
         }
-        let id2 = ctx.warm_db_identity().expect("state held after reopen");
-        assert_ne!(id1, id2, "cache identity must change after a ground shift");
+        // Warm state must be re-established after the heal. Do NOT assert
+        // id1 != id2: eviction closes the old sentinel/connection, freeing the
+        // old inode, and inode-recycling filesystems (ext4) routinely hand the
+        // recreated cache.db the same (dev, ino) — observed on Linux CI. That
+        // recycling never defeats detection in production: while the old file
+        // is still *held*, its inode stays allocated, so a recreated file
+        // cannot collide until after the ground-shift check has already fired.
+        // The TEMP-table assertion above is the reopen proof.
+        let _id2 = ctx.warm_db_identity().expect("state held after reopen");
     }
 
     /// Root vanish: removing the vault root between calls yields the typed
