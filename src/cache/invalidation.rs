@@ -31,12 +31,3 @@ pub(crate) fn drop_document(tx: &Transaction, path: &Utf8Path) -> Result<(), Cac
     )?;
     Ok(())
 }
-
-/// Mark every link previously resolving to `path` as unresolved.
-pub(crate) fn unresolve_incoming(tx: &Transaction, path: &Utf8Path) -> Result<(), CacheError> {
-    tx.execute(
-        "UPDATE links SET resolved_path = NULL, status = 'unresolved' WHERE resolved_path = ?",
-        params![path.as_str()],
-    )?;
-    Ok(())
-}
