@@ -347,10 +347,25 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
     let mut diagnostics = Vec::new();
     let (frontmatter, frontmatter_range, _, _) = extract_frontmatter(content, &mut diagnostics);
     let Some(frontmatter_range) = frontmatter_range else {
-        return Err(ApplyError::CannotMinimalEdit {
-            path,
-            reason: "document has no frontmatter".into(),
-        });
+        // A malformed or unclosed block (no located range but a diagnostic) is a
+        // parse failure to surface — not something to prepend a second block onto.
+        if !diagnostics.is_empty() {
+            return Err(ApplyError::FrontmatterParseFailed {
+                path,
+                message: diagnostics
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            });
+        }
+        // NRN-120: a document with no frontmatter block gets an empty one
+        // synthesized so a new field can be added to initialize it (schema
+        // backfill on legacy files). The added fields flow through the normal
+        // add_frontmatter insertion path against the empty block — which is
+        // exactly what `set`/`new` on a missing field routes to.
+        let synthesized = format!("---\n---\n{content}");
+        return apply_file_changes(&synthesized, changes);
     };
     if !diagnostics.is_empty() {
         return Err(ApplyError::FrontmatterParseFailed {
@@ -368,11 +383,21 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
             message: "frontmatter could not be parsed".into(),
         });
     };
-    let Some(current_object) = frontmatter_value.as_object() else {
-        return Err(ApplyError::CannotMinimalEdit {
-            path,
-            reason: "frontmatter is not a top-level mapping".into(),
-        });
+    // An *empty* block (`---\n---\n`, or only whitespace) parses as YAML null;
+    // treat it as an empty mapping so additive operations can populate it
+    // (NRN-120). An explicit `null`/`~` scalar — or any other non-object value —
+    // is NOT empty: splicing a key after it would produce invalid YAML, so it
+    // stays a hard error, matching the pre-NRN-120 behavior.
+    let empty_object = serde_json::Map::new();
+    let current_object = match &frontmatter_value {
+        Value::Object(map) => map,
+        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => &empty_object,
+        _ => {
+            return Err(ApplyError::CannotMinimalEdit {
+                path,
+                reason: "frontmatter is not a top-level mapping".into(),
+            });
+        }
     };
 
     let spans = top_level_property_spans(content, frontmatter_range.clone());
@@ -1269,6 +1294,78 @@ mod tests {
         let change = make_change("a.md", "status", "h1", "remove_frontmatter", None);
         let err = apply_change(content, &change).unwrap_err();
         assert!(matches!(err, ApplyError::CannotMinimalEdit { .. }));
+    }
+
+    #[test]
+    fn apply_synthesizes_frontmatter_on_frontmatterless_document() {
+        // NRN-120: a legacy document with no frontmatter block gets one
+        // synthesized so schema fields can be initialized through norn.
+        let content = "just a body\n";
+        let change = make_change(
+            "a.md",
+            "title",
+            "h1",
+            "add_frontmatter",
+            Some(json!("Legacy")),
+        );
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntitle: Legacy\n---\njust a body\n");
+    }
+
+    #[test]
+    fn apply_synthesizes_frontmatter_on_empty_document() {
+        let content = "";
+        let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntitle: X\n---\n");
+    }
+
+    #[test]
+    fn apply_initializes_empty_frontmatter_block() {
+        // An existing but empty `---\n---\n` block also accepts field
+        // initialization (parses as YAML null → treated as an empty mapping).
+        let content = "---\n---\nbody\n";
+        let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntitle: X\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_refuses_explicit_null_scalar_block() {
+        // An explicit `null` scalar block is NOT an empty block: splicing a key
+        // after it would produce invalid YAML, so it must stay a hard error
+        // rather than be treated as an empty mapping (review Finding 1).
+        let content = "---\nnull\n---\nbody\n";
+        let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "expected CannotMinimalEdit, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn apply_initializes_whitespace_only_frontmatter_block() {
+        // A block whose content is only whitespace parses as null but IS empty —
+        // it stays initializable (the pre-existing whitespace line is preserved
+        // verbatim; the appended field still parses correctly).
+        let content = "---\n   \n---\nbody\n";
+        let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\n   \ntitle: X\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_reports_parse_failure_not_missing_frontmatter_for_unclosed_block() {
+        // An unclosed block must surface as a parse failure, not the misleading
+        // "document has no frontmatter" (and must not get a second block prepended).
+        let content = "---\ntitle: hi\nno closing fence\n";
+        let change = make_change("a.md", "status", "h1", "add_frontmatter", Some(json!("x")));
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::FrontmatterParseFailed { .. }),
+            "expected FrontmatterParseFailed, got {err:?}"
+        );
     }
 
     #[test]

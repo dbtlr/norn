@@ -89,7 +89,7 @@ Patterns support literal path segments, `*` (matches within a single path segmen
 
 ## validate.ignore
 
-Path globs that remain in the graph but are skipped by `norn validate`. Use this for content you want indexed (so links resolve correctly) but don't want to assert standards against.
+Path globs that remain in the graph but are skipped by `norn validate`. This is **tier 2** of the ignore model — where `files.ignore` removes a document from the graph entirely (tier 1), `validate.ignore` keeps it fully in the graph and only exempts it from standards enforcement.
 
 ```yaml
 validate:
@@ -97,6 +97,15 @@ validate:
     - "archive/**"
     - "templates/**"
 ```
+
+A `validate.ignore`'d document is:
+
+- **Indexed and queryable.** It counts in `norn count`, is returned by `norn find`, and `norn get` reads its frontmatter — indexing is independent of validation. Use this for content you want discoverable and link-resolvable but don't want to assert standards against.
+- **A valid link target.** Links into it resolve normally (it is not `link-target-missing`), and links it makes out are followed.
+- **Exempt from every validate finding.** Both schema findings (missing/disallowed frontmatter, type violations) and `link-target-missing` for its own outgoing links are suppressed.
+- **Allowed to have malformed or absent frontmatter.** A `validate.ignore`'d document need not parse as valid YAML — the `frontmatter-parse-failed` finding is suppressed along with the rest. (A malformed document is still skipped by frontmatter-dependent queries rather than crashing them.)
+
+Unlike `files.ignore` (literal path segments only), `validate.ignore` accepts the richer glob syntax — `?`, `[...]` character classes, and `{a,b}` alternation — in addition to `*` and `**`.
 
 ## validate.required_frontmatter
 

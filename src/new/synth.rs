@@ -76,6 +76,8 @@ pub enum SynthError {
     Substitution(String),
     #[error("schema-aware coercion failed for field `{field}`: {message}")]
     Coercion { field: String, message: String },
+    #[error("cannot create {path}: excluded by files.ignore (norn does not manage ignored paths)")]
+    PathIgnored { path: String },
 }
 
 // ── build_plan ────────────────────────────────────────────────────────────────
@@ -107,6 +109,22 @@ pub fn build_plan(
     body: String,
 ) -> Result<CreateDocumentPlan, SynthError> {
     let doc_path_buf = doc_path.to_owned();
+
+    // ── Step 0: hard-boundary ignore check (NRN-131) ─────────────────────────
+    // A `files.ignore`'d path is out of the graph entirely — norn does not
+    // create, read, edit, or delete it. Refuse to create one (using the exact
+    // matcher the graph build uses), so `new` cannot leave behind a document
+    // that `get`/`set`/`delete` then refuse to touch. `doc_path` is expected to
+    // be vault-relative (both callers enforce this via `preflight` before this
+    // point); an absolute path would not match the relative ignore globs.
+    // Note: an unresolved `{{seq}}` token is matched literally here — directory
+    // globs (`scratch/**`) still catch it, but an ignore pattern that constrains
+    // the resolved seq filename is not re-checked at apply time (NRN-138).
+    if crate::graph::is_ignored(doc_path, &cfg.files.ignore) {
+        return Err(SynthError::PathIgnored {
+            path: doc_path.as_str().to_string(),
+        });
+    }
 
     // ── Step 1: path variable extraction ─────────────────────────────────────
     // Walk compiled rules; for each whose path pattern matches, extract captures.
@@ -634,6 +652,44 @@ validate:
             matches!(err, SynthError::InvalidFieldJson { .. }),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn synth_refuses_ignored_path() {
+        // NRN-131 hard boundary: `new` refuses a files.ignore'd path.
+        let (cfg, compiled) = build("files:\n  ignore:\n    - \"scratch/**\"\n");
+        let (a, p) = args("scratch/plan.md", vec![]);
+        let err = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SynthError::PathIgnored { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn synth_allows_non_ignored_path_under_ignore_config() {
+        // A sibling path outside the ignore glob still builds normally.
+        let (cfg, compiled) = build("files:\n  ignore:\n    - \"scratch/**\"\n");
+        let (a, p) = args("docs/plan.md", vec![]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        );
+        assert!(plan.is_ok(), "got: {plan:?}");
     }
 
     #[test]
