@@ -88,6 +88,13 @@ pub enum ApplyError {
 
     #[error("delete source is a symlink, not a regular file: {path}")]
     DeleteSourceIsSymlink { path: Utf8PathBuf },
+
+    #[error("repair plan edits {path} after an earlier {earlier_op} of the same path (change '{earlier_change_id}'); a content op cannot follow a delete/move of its target in the same plan — reorder the edit before the {earlier_op}")]
+    ContentOpAfterVacate {
+        path: Utf8PathBuf,
+        earlier_op: String,
+        earlier_change_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
