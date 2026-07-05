@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.43.0 - 2026-07-05
+
+Correctness hardening plus the warm-daemon foundation. The headline is **`norn serve`** — a single host daemon that serves the full MCP toolset for any vault over one well-known socket (CLI read-routing lands next). Alongside it, eight fixes retire a cluster of frontmatter- and ignore-model defects surfaced by dogfooding: incremental-refresh link determinism, `files.ignore` actually excluding documents, a four-in-one `set`-hardening batch, dotted-stem wikilinks, an `append_to_section` boundary weld, `set` initializing frontmatter on a document that has none, and `new` honoring the hard ignore boundary.
+
 ### Added
 
 - **`norn serve` — a warm host daemon.** One foreground process (Unix only) serves the full MCP toolset for any vault on the host over a single well-known Unix socket (`~/.cache/norn/run/norn.sock`); at most one instance runs per user, guarded by a lifetime advisory lock. Each vault's integrity is verified once on first touch and held warm from then on, with per-request freshness, self-healing config changes, cache clears, and a vanished root. There is no `norn service` supervisor yet — run `norn serve` under your own process supervisor — and the CLI does not route reads through it yet (that lands with NRN-94); an MCP client can connect to the daemon directly. See [docs/service.md](docs/service.md).
