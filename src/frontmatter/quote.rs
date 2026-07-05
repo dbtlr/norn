@@ -209,40 +209,95 @@ fn render_array_item(item: &Value) -> Result<String, QuoteError> {
     }
 }
 
-fn serialize_string_value(s: &str, original_style: ValueStyle) -> String {
-    let plain_safe = is_plain_safe(s);
+/// YAML scalar quoting rank, ordered by strictness. Escalation only moves up
+/// this ladder, never down (so an explicit quote style is never weakened).
+/// Double-quoted with escaping is the guaranteed terminal — it can represent
+/// any string that YAML can hold.
+const RANK_PLAIN: u8 = 0;
+const RANK_SINGLE: u8 = 1;
+const RANK_DOUBLE: u8 = 2;
 
-    match original_style {
-        ValueStyle::Plain | ValueStyle::EmptyValue => {
-            if plain_safe {
-                s.to_string()
-            } else if !s.contains('\'') {
-                format!("'{s}'")
-            } else {
-                format!("\"{}\"", escape_double_quoted(s))
-            }
-        }
-        ValueStyle::SingleQuoted => {
-            let escaped = s.replace('\'', "''");
-            format!("'{escaped}'")
-        }
-        ValueStyle::DoubleQuoted => {
-            format!("\"{}\"", escape_double_quoted(s))
-        }
-        _ => unreachable!(),
+/// Render `s` as a YAML scalar at the given quoting rank.
+fn render_scalar_at_rank(s: &str, rank: u8) -> String {
+    match rank {
+        RANK_PLAIN => s.to_string(),
+        RANK_SINGLE => format!("'{}'", s.replace('\'', "''")),
+        _ => format!("\"{}\"", escape_double_quoted(s)),
     }
 }
 
+/// True if the rendered scalar, spliced into a `key: <rendered>` line, reparses
+/// through a real YAML parser back to exactly `expected` (as a string — a value
+/// that reparses to a number, bool, or mapping does NOT round-trip). This is the
+/// invariant that replaces the hand-maintained plain-scalar denylist: correctness
+/// is decided by the YAML standard, not by an enumerated hazard list (NRN-118).
+fn scalar_round_trips(rendered: &str, expected: &str) -> bool {
+    let doc = format!("k: {rendered}");
+    match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
+        Ok(v) => v.get("k").and_then(|x| x.as_str()) == Some(expected),
+        Err(_) => false,
+    }
+}
+
+fn serialize_string_value(s: &str, original_style: ValueStyle) -> String {
+    // Pick the starting style, preserving an explicit quote style and preferring
+    // plain for a plain/empty origin. `is_plain_safe` is only a fast first guess
+    // here — the round-trip check below is the authority.
+    let start_rank = match original_style {
+        ValueStyle::DoubleQuoted => RANK_DOUBLE,
+        ValueStyle::SingleQuoted => RANK_SINGLE,
+        // Plain / EmptyValue.
+        _ => {
+            if is_plain_safe(s) {
+                RANK_PLAIN
+            } else if !s.contains('\'') {
+                RANK_SINGLE
+            } else {
+                RANK_DOUBLE
+            }
+        }
+    };
+
+    // Emit at the starting style, then escalate up the ladder until the rendered
+    // scalar round-trips byte-identically. Double-quoted+escape is the terminal
+    // that always round-trips, so the loop is guaranteed to return a safe value.
+    for rank in start_rank..=RANK_DOUBLE {
+        let rendered = render_scalar_at_rank(s, rank);
+        if scalar_round_trips(&rendered, s) {
+            return rendered;
+        }
+    }
+    render_scalar_at_rank(s, RANK_DOUBLE)
+}
+
+/// Escape a string for a YAML double-quoted scalar. Double-quoted is the
+/// terminal quoting rank, so this must produce output that reparses byte-
+/// identically for EVERY input — in particular control characters, which YAML
+/// forbids literally inside quotes (they make the parser reject the document)
+/// and NEL / line- / paragraph-separators, which fold to a space if left bare.
+/// Uses YAML's named escapes where defined and `\xXX` for the rest (NRN-118).
 fn escape_double_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            '\u{07}' => out.push_str("\\a"),
+            '\u{08}' => out.push_str("\\b"),
             '\t' => out.push_str("\\t"),
-            _ => out.push(c),
+            '\n' => out.push_str("\\n"),
+            '\u{0b}' => out.push_str("\\v"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            '\u{1b}' => out.push_str("\\e"),
+            '\u{85}' => out.push_str("\\N"),
+            '\u{2028}' => out.push_str("\\L"),
+            '\u{2029}' => out.push_str("\\P"),
+            // Any remaining control character (C0, DEL, C1) must be escaped —
+            // all are <= 0xFF, so a two-hex `\xXX` is always sufficient.
+            c if c.is_control() => out.push_str(&format!("\\x{:02X}", c as u32)),
+            c => out.push(c),
         }
     }
     out
@@ -507,6 +562,77 @@ mod tests {
     fn null_renders_as_tilde() {
         let result = serialize_value_preserving_style(&json!(null), ValueStyle::Plain).unwrap();
         assert_eq!(result, "~");
+    }
+
+    /// Reparse `key: <rendered>` and return the value as a string, or `None` if
+    /// it did not round-trip to a string scalar. Mirrors the real splice site.
+    fn reparse(rendered: &str) -> Option<String> {
+        let doc = format!("k: {rendered}");
+        let v: serde_yaml::Value = serde_yaml::from_str(&doc).ok()?;
+        v.get("k").and_then(|x| x.as_str()).map(str::to_string)
+    }
+
+    #[test]
+    fn trailing_colon_string_round_trips_not_plain() {
+        // "foo:" passed the is_plain_safe denylist (no ": " space) and emitted
+        // plain, which reparses as a mapping — corrupt frontmatter (NRN-118).
+        let result = serialize_value_preserving_style(&json!("foo:"), ValueStyle::Plain).unwrap();
+        assert_eq!(result, "'foo:'");
+        assert_eq!(reparse(&result).as_deref(), Some("foo:"));
+    }
+
+    #[test]
+    fn embedded_newline_escalates_to_double_quoted_not_folded_single() {
+        // A newline string was emitted single-quoted, which folds the newline to
+        // a space (silent corruption). Only double-quoting preserves it (NRN-118).
+        let result =
+            serialize_value_preserving_style(&json!("a\nb"), ValueStyle::SingleQuoted).unwrap();
+        assert_eq!(result, "\"a\\nb\"");
+        assert_eq!(reparse(&result).as_deref(), Some("a\nb"));
+    }
+
+    #[test]
+    fn numeric_looking_string_is_quoted_to_stay_a_string() {
+        // "123" emitted plain reparses as the number 123, not the string (NRN-118).
+        let result = serialize_value_preserving_style(&json!("123"), ValueStyle::Plain).unwrap();
+        assert_eq!(result, "'123'");
+        assert_eq!(reparse(&result).as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn control_chars_round_trip_via_double_quoted_terminal() {
+        // The double-quoted terminal must be a TRUE terminal: control chars
+        // emitted literally make serde_yaml reject the doc, so all ranks fail
+        // round-trip and the fallback emits corrupt bytes. Every control char
+        // must escape and reparse to itself (NRN-118 round-trip review).
+        for c in [
+            '\u{0}', '\u{7}', '\u{8}', '\u{b}', '\u{c}', '\u{1b}', '\u{7f}',
+        ] {
+            let s = format!("a{c}b");
+            let result = serialize_value_preserving_style(&json!(s), ValueStyle::Plain).unwrap();
+            assert_eq!(
+                reparse(&result).as_deref(),
+                Some(s.as_str()),
+                "control char U+{:04X} did not round-trip (emitted {result:?})",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn nel_and_line_separators_round_trip_not_folded() {
+        // U+0085 (NEL), U+2028, U+2029 are folded to spaces inside double quotes
+        // unless escaped — silent value corruption at the terminal (NRN-118).
+        for c in ['\u{85}', '\u{2028}', '\u{2029}'] {
+            let s = format!("a{c}b");
+            let result = serialize_value_preserving_style(&json!(s), ValueStyle::Plain).unwrap();
+            assert_eq!(
+                reparse(&result).as_deref(),
+                Some(s.as_str()),
+                "U+{:04X} did not round-trip (emitted {result:?})",
+                c as u32
+            );
+        }
     }
 
     #[test]
