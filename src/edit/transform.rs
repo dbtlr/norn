@@ -220,6 +220,22 @@ pub(crate) fn resolve_section(
     // content == body, body_start == 0 → spans are body-relative.
     let (headings, _links) =
         crate::links::parse_commonmark(camino::Utf8Path::new("edit"), body, body, 0);
+    resolve_section_in(&headings, body, heading, index, kind)
+}
+
+/// The span-resolution core, factored out of [`resolve_section`] so a caller
+/// resolving MANY headings against one immutable body can parse the headings
+/// ONCE and reuse the list (e.g. `norn get --section A --section B`). `edit`
+/// re-parses per op because each op mutates the body; `get` does not, so it
+/// parses once and calls this per requested heading. Both paths share the
+/// identical match/boundary/failure logic — the whole point of the reuse.
+pub(crate) fn resolve_section_in(
+    headings: &[crate::core::Heading],
+    body: &str,
+    heading: &str,
+    index: usize,
+    kind: &'static str,
+) -> Result<SectionSpan, EditError> {
     let matches: Vec<usize> = headings
         .iter()
         .enumerate()
