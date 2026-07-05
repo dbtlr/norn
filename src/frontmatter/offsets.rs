@@ -213,8 +213,21 @@ pub fn top_level_property_spans(
             };
             while consume_index < lines.len() {
                 let cont = lines[consume_index];
+                // A no-indent block sequence (`key:` then `- item` at column 0)
+                // is the common hand-authored / Obsidian layout. Its item lines
+                // are continuation of the value, not the next top-level key, so
+                // absorb them while the value is (still) empty or a block
+                // sequence — otherwise the span covers only the `key:` line and
+                // a --remove/replace orphans the items (NRN-128).
+                let is_no_indent_seq_item = matches!(
+                    upgraded_style,
+                    ValueStyle::EmptyValue | ValueStyle::BlockSequence
+                ) && is_block_sequence_item(cont);
                 // Stop on a non-indented, non-blank line — that's the next top-level key.
-                if !cont.starts_with([' ', '\t']) && !cont.trim().is_empty() {
+                if !cont.starts_with([' ', '\t'])
+                    && !cont.trim().is_empty()
+                    && !is_no_indent_seq_item
+                {
                     break;
                 }
                 // If we were EmptyValue, the first non-blank indented line tells us the
@@ -273,6 +286,15 @@ fn is_valid_key_name(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// True if `line` is a YAML block-sequence item — `- value` or a bare `-` —
+/// ignoring leading indentation and the trailing newline. A top-level mapping
+/// key can never take this shape, so a column-0 match is unambiguously a
+/// continuation of the preceding block-sequence value, not the next key.
+fn is_block_sequence_item(line: &str) -> bool {
+    let t = line.trim();
+    t == "-" || t.starts_with("- ")
 }
 
 /// Classifies the value portion of a key line.
@@ -567,6 +589,25 @@ mod span_tests {
             &content[span.line_range.clone()],
             "aliases:\n  - one\n  - two\n"
         );
+    }
+
+    #[test]
+    fn empty_value_followed_by_no_indent_block_sequence() {
+        // The no-indent list layout (`aliases:` then `- x` at column 0) is the
+        // common hand-authored / Obsidian form. The span must absorb the item
+        // lines so a --remove/replace covers the whole sequence (NRN-128).
+        let content = "---\naliases:\n- one\n- two\ntype: note\n---\n";
+        let spans = top_level_property_spans(content, 4..36);
+        assert_eq!(spans.len(), 2);
+        let span = &spans[0];
+        assert_eq!(span.name, "aliases");
+        assert_eq!(span.style, ValueStyle::BlockSequence);
+        assert!(span.value_range.is_none());
+        assert_eq!(
+            &content[span.line_range.clone()],
+            "aliases:\n- one\n- two\n"
+        );
+        assert_eq!(spans[1].name, "type");
     }
 
     #[test]
