@@ -407,7 +407,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
         }
     };
 
-    let spans = top_level_property_spans(content, frontmatter_range.clone());
+    let spans = top_level_property_spans(content, frontmatter_range.clone(), current_object);
 
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
 

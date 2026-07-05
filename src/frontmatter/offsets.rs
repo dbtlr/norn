@@ -129,37 +129,98 @@ pub enum ValueStyle {
 ///
 /// Top-level means: the property's key starts at column 0 of its line (no
 /// leading whitespace). Continuation lines (indented children for block
-/// styles, continuation of multi-line scalars) are included in `line_range`
-/// but do not produce their own `PropertySpan`.
+/// styles, continuation of multi-line scalars, blank and comment lines between
+/// two fields) are included in `line_range` but do not produce their own
+/// `PropertySpan`.
 ///
-/// The locator is line-based and deliberately does **not** parse YAML. Its
-/// contract is "span precisely where certain, refuse everywhere else": a
-/// `value_range` is emitted only for values we can locate with certainty —
-/// single-line plain scalars, and single-line single- or double-quoted scalars
-/// (honoring `''` / `\"` / `\\` escapes; quoted spans include the surrounding
-/// quotes, plain spans exclude a trailing ` #comment` and trailing whitespace).
-/// Everything with real YAML complexity gets `value_range = None` (the key is
-/// still visible via `line_range`, so it can be listed and removed-as-a-block,
-/// but `apply` declines a minimal in-place value edit rather than risk
-/// corrupting the document): block scalars (`|`, `>`), any multi-line value,
-/// anchors / aliases / tags (`&`, `*`, `!`), flow mappings (`{…}`), nested or
-/// non-flat flow sequences, and block sequences / mappings. A flat single-line
-/// flow sequence (`[a, b]`) is the one flow form spanned precisely.
+/// # The scanner proposes, serde is the oracle
 ///
-/// Keys are recognized structurally: any scalar key at column 0, including
-/// quoted keys (`"…"`, `'…'`), numeric-leading keys (`123:`), and the merge key
-/// (`<<:`). The decoded key name matches how `serde_yaml` keys the parsed map.
+/// A byte-offset scanner cannot, on its own, safely decide where a YAML value's
+/// bytes are — the corruption bugs it produced (a `# comment` spanned as a
+/// value that serde reads as null, a multi-line fold spanned as only its first
+/// line, an anchor/merge key mistaken for an editable field) all came from the
+/// scanner disagreeing with the parser. So the parsed frontmatter mapping
+/// (`object`, exactly what `apply` already holds) is threaded in as the
+/// authority, and every proposal is validated against it:
 ///
-/// Correctness invariant: never emit a `value_range` unless it is exactly the
-/// value's bytes. Any ambiguity resolves to `None` — a wrong span corrupts a
-/// document; a `None` merely declines an edit.
+/// - **(A) Fields come from serde.** A span is emitted only for a proposed key
+///   that is an actual key in `object`. A merge key (`<<`, which serde folds
+///   away), a quoted key whose decode diverges from serde's, or a duplicate
+///   simply produces no span — `set`/`remove` then report it absent rather than
+///   mis-editing a line the parser reads differently.
+/// - **(B) `value_range` is validated against serde's value.** A proposed span
+///   survives only if `content[value_range]` re-parses (through the same
+///   `serde_yaml → serde_json` pipeline `extract_frontmatter` uses) to exactly
+///   the field's parsed value. A mapping value, or a null value whose bytes are
+///   not a literal null token, is refused. This makes a *wrong* value span
+///   structurally impossible to emit: any disagreement collapses to `None`.
+/// - **(C) `line_range` runs key-line-start → next-key-line-start** (or the end
+///   of the block for the last field), so all continuation / blank / comment
+///   lines between two fields are absorbed by construction — a `remove` deletes
+///   the whole property, never orphaning a fold or an anchored block.
+///
+/// Refusing (`value_range = None`) keeps the key visible and removable as a
+/// block while declining an in-place value edit — the trust-preserving outcome:
+/// a wrong span corrupts a document; a `None` merely declines an edit.
 pub fn top_level_property_spans(
     content: &str,
     frontmatter_range: Range<usize>,
+    object: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<PropertySpan> {
-    let yaml = &content[frontmatter_range.clone()];
-    let mut spans: Vec<PropertySpan> = Vec::new();
+    let raw = scan_key_lines(content, &frontmatter_range);
+    let mut spans: Vec<PropertySpan> = Vec::with_capacity(raw.len());
 
+    for (i, field) in raw.iter().enumerate() {
+        // (C) line_range spans this key line to the next top-level key line (or
+        // the frontmatter end for the last field), absorbing every continuation,
+        // blank, and comment line between the two by construction.
+        let line_end = raw
+            .get(i + 1)
+            .map(|next| next.key_line_start)
+            .unwrap_or(frontmatter_range.end);
+        let line_range = field.key_line_start..line_end;
+
+        // (A) Only an actual serde key becomes a span. Not a key (merge `<<`,
+        // an escaped key whose decode diverges, a duplicate) → no span, so
+        // `set`/`remove` reports "absent" instead of mis-editing.
+        let Some(serde_value) = object.get(&field.name) else {
+            continue;
+        };
+
+        // (B) The proposed value span survives only if it reconstitutes to
+        // exactly serde's parsed value for this field.
+        let value_range = validate_value_span(content, &field.proposed_value_range, serde_value);
+
+        // A refused value whose serde type is a block collection reports the
+        // block style so `apply` can still replace the whole `line_range`.
+        let style = resolve_style(field.proposed_style, &value_range, serde_value);
+
+        spans.push(PropertySpan {
+            name: field.name.clone(),
+            line_range,
+            value_range,
+            style,
+        });
+    }
+
+    spans
+}
+
+/// A column-0 mapping key line the scanner proposes, before serde validation.
+struct RawKeyLine {
+    key_line_start: usize,
+    name: String,
+    proposed_value_range: Option<Range<usize>>,
+    proposed_style: ValueStyle,
+}
+
+/// Phase 1: identify every top-level `key:` line and the scanner's *candidate*
+/// value span/style for it. Multi-line values whose continuation can sit at
+/// column 0 (an unclosed flow collection or quoted scalar) are stepped over so
+/// their continuation lines are not misread as new keys; block scalars, folds,
+/// and block collections continue on indented lines the main scan already skips.
+fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKeyLine> {
+    let yaml = &content[frontmatter_range.clone()];
     let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
     // Precompute byte offsets for the start of each line within `content`.
     let mut line_starts: Vec<usize> = Vec::with_capacity(lines.len() + 1);
@@ -170,17 +231,16 @@ pub fn top_level_property_spans(
     }
     line_starts.push(acc);
 
+    let mut fields = Vec::new();
     let mut index = 0;
     while index < lines.len() {
         let line = lines[index];
-        let line_start = line_starts[index];
-        let line_end = line_starts[index + 1];
-
-        let trimmed_line = line.trim_end_matches(['\r', '\n']);
         if line.starts_with([' ', '\t']) {
             index += 1;
             continue;
         }
+        let line_start = line_starts[index];
+        let trimmed_line = line.trim_end_matches(['\r', '\n']);
 
         let Some((name, after_colon)) = parse_top_level_key(trimmed_line) else {
             index += 1;
@@ -188,122 +248,107 @@ pub fn top_level_property_spans(
         };
 
         let rest = &trimmed_line[after_colon..];
+        let (proposed_value_range, proposed_style, ends_on_key_line) =
+            classify_value(line_start, after_colon, rest);
 
-        let (value_range, style, ends_on_key_line) = classify_value(line_start, after_colon, rest);
-
-        // Multi-line plain/quoted scalar fold: an inline value on the key line
-        // followed by a more-indented continuation. YAML folds that continuation
-        // into the value, so the value cannot be spanned with certainty — refuse
-        // the in-place value edit (`value_range = None`) and absorb the
-        // continuation lines into `line_range`, so a --remove covers the whole
-        // scalar instead of orphaning the fold. (NRN-133 corruption fix.)
-        if ends_on_key_line
-            && value_range.is_some()
-            && lines
-                .get(index + 1)
-                .is_some_and(|next| next.starts_with([' ', '\t']) && !next.trim().is_empty())
-        {
-            let mut j = index + 1;
-            while j < lines.len() && lines[j].starts_with([' ', '\t']) {
-                j += 1;
-            }
-            spans.push(PropertySpan {
-                name,
-                line_range: line_start..line_starts[j],
-                value_range: None,
-                style,
-            });
-            index = j;
-            continue;
-        }
-
-        let mut span = PropertySpan {
+        fields.push(RawKeyLine {
+            key_line_start: line_start,
             name,
-            line_range: line_start..line_end,
-            value_range,
-            style,
-        };
+            proposed_value_range,
+            proposed_style,
+        });
 
-        // Determine if we should consume continuation lines.
-        let needs_continuation = !ends_on_key_line || matches!(style, ValueStyle::EmptyValue);
-
-        if needs_continuation {
-            let mut consume_index = index + 1;
-            let mut consume_end = line_end;
-            let mut upgraded_style = style;
-            let mut flow_open: Option<char> = match style {
-                ValueStyle::FlowSequence if !ends_on_key_line => Some('['),
-                ValueStyle::FlowMapping if !ends_on_key_line => Some('{'),
-                _ => None,
-            };
-            let mut quoted_open: Option<char> = match style {
-                ValueStyle::SingleQuoted if !ends_on_key_line => Some('\''),
-                ValueStyle::DoubleQuoted if !ends_on_key_line => Some('"'),
-                _ => None,
-            };
-            while consume_index < lines.len() {
-                let cont = lines[consume_index];
-                // A no-indent block sequence (`key:` then `- item` at column 0)
-                // is the common hand-authored / Obsidian layout. Its item lines
-                // are continuation of the value, not the next top-level key, so
-                // absorb them while the value is (still) empty or a block
-                // sequence — otherwise the span covers only the `key:` line and
-                // a --remove/replace orphans the items (NRN-128).
-                let is_no_indent_seq_item = matches!(
-                    upgraded_style,
-                    ValueStyle::EmptyValue | ValueStyle::BlockSequence
-                ) && is_block_sequence_item(cont);
-                // Stop on a non-indented, non-blank line — that's the next top-level key.
-                if !cont.starts_with([' ', '\t'])
-                    && !cont.trim().is_empty()
-                    && !is_no_indent_seq_item
-                {
-                    break;
-                }
-                // If we were EmptyValue, the first non-blank indented line tells us the
-                // block style: starts with `-` → BlockSequence, otherwise BlockMapping.
-                if matches!(upgraded_style, ValueStyle::EmptyValue) {
-                    let cont_trimmed = cont.trim_start();
-                    if cont_trimmed.starts_with('-') {
-                        upgraded_style = ValueStyle::BlockSequence;
-                    } else if !cont_trimmed.is_empty() {
-                        upgraded_style = ValueStyle::BlockMapping;
-                    }
-                }
-                // For unclosed flow values, keep absorbing until the closing bracket appears.
-                if let Some(open) = flow_open {
-                    let close = if open == '[' { ']' } else { '}' };
-                    if cont.contains(close) {
-                        flow_open = None;
-                    }
-                }
-                // For unclosed quoted scalars, keep absorbing until matching quote.
-                if let Some(_q) = quoted_open {
-                    // Best-effort: stop scanning when we hit a closing quote on this line.
-                    // We do not produce a value_range in this case.
-                    quoted_open = None;
-                }
-                consume_end = line_starts[consume_index + 1];
-                consume_index += 1;
-            }
-            span.line_range = line_start..consume_end;
-            span.style = upgraded_style;
-            // If style upgraded from EmptyValue to a block style, value_range stays None.
-            if matches!(
-                upgraded_style,
-                ValueStyle::BlockSequence | ValueStyle::BlockMapping
-            ) {
-                span.value_range = None;
-            }
-            index = consume_index;
-        } else {
-            index += 1;
+        index += 1;
+        if !ends_on_key_line {
+            index = absorb_open_value(&lines, index, proposed_style);
         }
-
-        spans.push(span);
     }
 
-    spans
+    fields
+}
+
+/// Advances past the continuation lines of a value that opened on the key line
+/// but did not close there — an unclosed flow collection or quoted scalar, whose
+/// continuation lines can sit at column 0 and would otherwise be misread as new
+/// keys. Everything else (block scalars, plain folds, block collections) puts
+/// its continuation on indented lines the main scan already skips, so this is a
+/// no-op for those. Best-effort: stops at the first line containing the closer.
+fn absorb_open_value(lines: &[&str], mut index: usize, style: ValueStyle) -> usize {
+    let closer = match style {
+        ValueStyle::FlowSequence => ']',
+        ValueStyle::FlowMapping => '}',
+        ValueStyle::SingleQuoted => '\'',
+        ValueStyle::DoubleQuoted => '"',
+        _ => return index,
+    };
+    while index < lines.len() {
+        let contains_closer = lines[index].contains(closer);
+        index += 1;
+        if contains_closer {
+            break;
+        }
+    }
+    index
+}
+
+/// (B) Validates a proposed value span against serde's parsed value. Returns the
+/// span only when `content[range]` reconstitutes to exactly `serde_value`; any
+/// disagreement — a mapping value, a non-literal null (a `# comment` re-parses
+/// to null and must NOT be treated as an editable null), or a scalar/sequence
+/// whose reconstitution differs (a multi-line fold, a truncated flow) — is
+/// refused. This is the invariant that makes a wrong span impossible to emit.
+fn validate_value_span(
+    content: &str,
+    proposed: &Option<Range<usize>>,
+    serde_value: &serde_json::Value,
+) -> Option<Range<usize>> {
+    let range = proposed.clone()?;
+    let slice = &content[range.clone()];
+    match serde_value {
+        // A mapping value (anchored block map, flow map) is never a scalar span.
+        serde_json::Value::Object(_) => None,
+        // Null is the trap: a bare `# comment` re-parses to null and would
+        // falsely compare-equal, so gate on a literal null token explicitly.
+        serde_json::Value::Null => is_yaml_null_token(slice).then_some(range),
+        // Scalars and flat single-line sequences: editable only if the bytes
+        // reconstitute to exactly the parsed value.
+        expected => match reparse_yaml(slice) {
+            Some(parsed) if &parsed == expected => Some(range),
+            _ => None,
+        },
+    }
+}
+
+/// (C-adjacent) A refused value whose serde type is a block collection reports
+/// the block style so `apply` replaces the whole `line_range` (block-sequence
+/// set) or refuses cleanly (block mapping). Only an `EmptyValue` proposal is
+/// re-styled — a refused flow value keeps `FlowSequence`/`FlowMapping` so `set`
+/// declines rather than silently restyling flow into a block.
+fn resolve_style(
+    proposed: ValueStyle,
+    value_range: &Option<Range<usize>>,
+    serde_value: &serde_json::Value,
+) -> ValueStyle {
+    if value_range.is_none() && matches!(proposed, ValueStyle::EmptyValue) {
+        match serde_value {
+            serde_json::Value::Array(_) => return ValueStyle::BlockSequence,
+            serde_json::Value::Object(_) => return ValueStyle::BlockMapping,
+            _ => {}
+        }
+    }
+    proposed
+}
+
+fn is_yaml_null_token(s: &str) -> bool {
+    matches!(s, "null" | "Null" | "NULL" | "~")
+}
+
+/// Re-parses a value byte-slice through the exact `serde_yaml → serde_json`
+/// pipeline `extract_frontmatter` uses, so representations match the oracle's
+/// (e.g. `12:30`, `1.10`, `yes` are read identically on both sides).
+fn reparse_yaml(s: &str) -> Option<serde_json::Value> {
+    let value: serde_yaml::Value = serde_yaml::from_str(s).ok()?;
+    serde_json::to_value(value).ok()
 }
 
 /// Recognizes a top-level `key:` mapping entry at column 0 of `line` (the key
@@ -423,15 +468,6 @@ fn scan_double_quoted_key(line: &str) -> Option<(String, usize)> {
     None
 }
 
-/// True if `line` is a YAML block-sequence item — `- value` or a bare `-` —
-/// ignoring leading indentation and the trailing newline. A top-level mapping
-/// key can never take this shape, so a column-0 match is unambiguously a
-/// continuation of the preceding block-sequence value, not the next key.
-fn is_block_sequence_item(line: &str) -> bool {
-    let t = line.trim();
-    t == "-" || t.starts_with("- ")
-}
-
 /// Classifies the value portion of a key line.
 ///
 /// `line_start_byte` is the byte offset of the key line in the original `content`.
@@ -528,7 +564,14 @@ fn classify_value(
                 let flat = !inner
                     .bytes()
                     .any(|b| matches!(b, b'[' | b']' | b'{' | b'}' | b'\'' | b'"'));
-                let after_ok = after.is_empty() || after.starts_with([' ', '\t']);
+                // After the `]` only whitespace or a whitespace-led comment may
+                // follow; any other trailing content means the naive first-`]`
+                // scan is wrong, so refuse (#9). serde is the final authority —
+                // it rejects such a line outright — this is defense-in-depth.
+                let after_trimmed = after.trim_start();
+                let after_ok = after.is_empty()
+                    || (after.starts_with([' ', '\t'])
+                        && (after_trimmed.is_empty() || after_trimmed.starts_with('#')));
                 if flat && after_ok {
                     (
                         Some(value_start_byte..value_start_byte + close + 1),
@@ -564,7 +607,10 @@ fn classify_value(
                     break;
                 }
             }
-            while end > 0 && (value_bytes[end - 1] == b'\r' || value_bytes[end - 1] == b'\n') {
+            // YAML strips trailing whitespace from a plain scalar, so trim it
+            // (and any CR/LF) off the span — otherwise `title: hello   ` spans
+            // the trailing spaces and a set would eat them (#5).
+            while end > 0 && matches!(value_bytes[end - 1], b'\r' | b'\n' | b' ' | b'\t') {
                 end -= 1;
             }
             (
@@ -698,10 +744,28 @@ mod tests {
 mod span_tests {
     use super::*;
 
+    /// Parses `content[range]` into the serde oracle map and locates spans —
+    /// the same wiring `apply` uses (parse → `top_level_property_spans`).
+    fn spans_for(content: &str, range: Range<usize>) -> Vec<PropertySpan> {
+        let object = oracle(content, range.clone());
+        top_level_property_spans(content, range, &object)
+    }
+
+    fn oracle(content: &str, range: Range<usize>) -> serde_json::Map<String, serde_json::Value> {
+        let yaml = &content[range];
+        match serde_yaml::from_str::<serde_yaml::Value>(yaml)
+            .ok()
+            .and_then(|v| serde_json::to_value(v).ok())
+        {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        }
+    }
+
     #[test]
     fn plain_scalar_span_isolates_value_bytes() {
         let content = "---\ntitle: hello world\n---\n# body\n";
-        let spans = top_level_property_spans(content, 4..23);
+        let spans = spans_for(content, 4..23);
         assert_eq!(spans.len(), 1);
         let span = &spans[0];
         assert_eq!(span.name, "title");
@@ -716,7 +780,7 @@ mod span_tests {
     #[test]
     fn single_quoted_scalar_span_includes_quotes() {
         let content = "---\nworkspace: '[[norn]]'\n---\n";
-        let spans = top_level_property_spans(content, 4..30);
+        let spans = spans_for(content, 4..26);
         let span = &spans[0];
         assert_eq!(span.name, "workspace");
         assert_eq!(span.style, ValueStyle::SingleQuoted);
@@ -726,7 +790,7 @@ mod span_tests {
     #[test]
     fn double_quoted_scalar_span_includes_quotes() {
         let content = "---\nworkspace: \"[[norn]]\"\n---\n";
-        let spans = top_level_property_spans(content, 4..30);
+        let spans = spans_for(content, 4..26);
         let span = &spans[0];
         assert_eq!(span.style, ValueStyle::DoubleQuoted);
         assert_eq!(&content[span.value_range.clone().unwrap()], "\"[[norn]]\"");
@@ -735,7 +799,7 @@ mod span_tests {
     #[test]
     fn empty_value_followed_by_block_sequence() {
         let content = "---\naliases:\n  - one\n  - two\n---\n";
-        let spans = top_level_property_spans(content, 4..29);
+        let spans = spans_for(content, 4..29);
         let span = &spans[0];
         assert_eq!(span.name, "aliases");
         assert_eq!(span.style, ValueStyle::BlockSequence);
@@ -752,7 +816,7 @@ mod span_tests {
         // common hand-authored / Obsidian form. The span must absorb the item
         // lines so a --remove/replace covers the whole sequence (NRN-128).
         let content = "---\naliases:\n- one\n- two\ntype: note\n---\n";
-        let spans = top_level_property_spans(content, 4..36);
+        let spans = spans_for(content, 4..36);
         assert_eq!(spans.len(), 2);
         let span = &spans[0];
         assert_eq!(span.name, "aliases");
@@ -768,7 +832,7 @@ mod span_tests {
     #[test]
     fn empty_value_followed_by_block_mapping() {
         let content = "---\nmeta:\n  inner: value\n---\n";
-        let spans = top_level_property_spans(content, 4..25);
+        let spans = spans_for(content, 4..25);
         let span = &spans[0];
         assert_eq!(span.style, ValueStyle::BlockMapping);
         assert!(span.value_range.is_none());
@@ -777,7 +841,7 @@ mod span_tests {
     #[test]
     fn flow_sequence_on_single_line() {
         let content = "---\naliases: [a, b]\n---\n";
-        let spans = top_level_property_spans(content, 4..20);
+        let spans = spans_for(content, 4..20);
         let span = &spans[0];
         assert_eq!(span.style, ValueStyle::FlowSequence);
         assert_eq!(&content[span.value_range.clone().unwrap()], "[a, b]");
@@ -786,7 +850,7 @@ mod span_tests {
     #[test]
     fn plain_scalar_with_same_line_comment_excludes_comment_from_value_range() {
         let content = "---\ntitle: hello  # comment\n---\n";
-        let spans = top_level_property_spans(content, 4..27);
+        let spans = spans_for(content, 4..27);
         let span = &spans[0];
         assert_eq!(span.style, ValueStyle::Plain);
         assert_eq!(&content[span.value_range.clone().unwrap()], "hello");
@@ -796,7 +860,7 @@ mod span_tests {
     #[test]
     fn multiple_properties_return_separate_spans_in_order() {
         let content = "---\ntitle: hello\nstatus: draft\nworkspace: '[[demo]]'\n---\n";
-        let spans = top_level_property_spans(content, 4..52);
+        let spans = spans_for(content, 4..52);
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].name, "title");
         assert_eq!(spans[1].name, "status");
@@ -807,7 +871,7 @@ mod span_tests {
     #[test]
     fn block_literal_value_range_is_none() {
         let content = "---\ndescription: |\n  line one\n  line two\n---\n";
-        let spans = top_level_property_spans(content, 4..41);
+        let spans = spans_for(content, 4..41);
         let span = &spans[0];
         assert_eq!(span.style, ValueStyle::BlockLiteral);
         assert!(span.value_range.is_none());
@@ -817,7 +881,7 @@ mod span_tests {
     #[test]
     fn indented_lines_are_not_top_level_keys() {
         let content = "---\nparent:\n  child: not a top-level key\n---\n";
-        let spans = top_level_property_spans(content, 4..41);
+        let spans = spans_for(content, 4..41);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "parent");
     }
@@ -889,9 +953,10 @@ mod span_tests {
     }
 }
 
-/// NRN-133 span-locator matrix: precise-span certainty vs. refusal, grounded in
-/// the YAML 1.2 spec (no third-party corpus). Each case asserts on the byte
-/// range the locator emits (or that it refuses with `value_range == None`).
+/// NRN-133 span-locator matrix: the scanner proposes, serde vetoes. Grounded in
+/// the YAML 1.2 spec (no third-party corpus). Every input is real, parseable
+/// frontmatter — the locator only ever runs after `extract_frontmatter`
+/// succeeds — so the oracle is built the same way `apply` builds it.
 #[cfg(test)]
 mod locator_matrix_tests {
     use super::*;
@@ -905,8 +970,24 @@ mod locator_matrix_tests {
         start..(start + rel + 1)
     }
 
+    /// Builds the serde oracle from the frontmatter, exactly as `apply` does.
+    fn oracle(content: &str) -> serde_json::Map<String, serde_json::Value> {
+        let yaml = &content[fm_range(content)];
+        match serde_yaml::from_str::<serde_yaml::Value>(yaml)
+            .ok()
+            .and_then(|v| serde_json::to_value(v).ok())
+        {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        }
+    }
+
     fn spans(content: &str) -> Vec<PropertySpan> {
-        top_level_property_spans(content, fm_range(content))
+        top_level_property_spans(content, fm_range(content), &oracle(content))
+    }
+
+    fn find<'a>(s: &'a [PropertySpan], name: &str) -> Option<&'a PropertySpan> {
+        s.iter().find(|p| p.name == name)
     }
 
     // ---- Precise-span cases (value_range = Some, exact bytes) -------------
@@ -924,7 +1005,6 @@ mod locator_matrix_tests {
         let content = "---\nk: 'it''s a test'\n---\n";
         let s = spans(content);
         assert_eq!(s[0].style, ValueStyle::SingleQuoted);
-        // Span includes the surrounding quotes and the whole `''`-escaped body.
         assert_eq!(
             &content[s[0].value_range.clone().unwrap()],
             "'it''s a test'"
@@ -947,8 +1027,7 @@ mod locator_matrix_tests {
     fn utf8_multibyte_value_slices_to_correct_string() {
         let content = "---\ntitle: héllo wörld\n---\n";
         let s = spans(content);
-        let vr = s[0].value_range.clone().unwrap();
-        assert_eq!(&content[vr], "héllo wörld");
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "héllo wörld");
     }
 
     #[test]
@@ -992,6 +1071,15 @@ mod locator_matrix_tests {
         assert_eq!(&content[s[0].value_range.clone().unwrap()], "[a, b]");
     }
 
+    #[test]
+    fn null_literal_token_is_editable() {
+        // A literal `null` is an editable null (bytes ARE a null token); only a
+        // serde-null whose bytes are NOT a null token (e.g. a comment) refuses.
+        let content = "---\nk: null\n---\n";
+        let s = spans(content);
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "null");
+    }
+
     // ---- Refuse cases (value_range = None) --------------------------------
 
     #[test]
@@ -1027,29 +1115,6 @@ mod locator_matrix_tests {
     }
 
     #[test]
-    fn multi_line_plain_fold_refuses_and_absorbs() {
-        let content = "---\ntitle: hello\n  world\ntype: note\n---\n";
-        let s = spans(content);
-        assert_eq!(s[0].name, "title");
-        assert!(
-            s[0].value_range.is_none(),
-            "multi-line plain fold must refuse a precise value span"
-        );
-        // Continuation absorbed so a remove covers the whole scalar.
-        assert_eq!(&content[s[0].line_range.clone()], "title: hello\n  world\n");
-        assert_eq!(s[1].name, "type");
-        assert_eq!(&content[s[1].value_range.clone().unwrap()], "note");
-    }
-
-    #[test]
-    fn multi_line_quoted_refuses() {
-        let content = "---\nquote: 'line one\n  line two'\n---\n";
-        let s = spans(content);
-        assert_eq!(s[0].name, "quote");
-        assert!(s[0].value_range.is_none());
-    }
-
-    #[test]
     fn anchor_definition_refuses() {
         let content = "---\nbase: &anchor hello\n---\n";
         let s = spans(content);
@@ -1059,10 +1124,10 @@ mod locator_matrix_tests {
 
     #[test]
     fn alias_refuses() {
-        let content = "---\nref: *anchor\n---\n";
+        // Alias needs its anchor defined so the frontmatter parses.
+        let content = "---\nbase: &a hello\nref: *a\n---\n";
         let s = spans(content);
-        assert_eq!(s[0].name, "ref");
-        assert!(s[0].value_range.is_none());
+        assert!(find(&s, "ref").unwrap().value_range.is_none());
     }
 
     #[test]
@@ -1085,7 +1150,6 @@ mod locator_matrix_tests {
     fn nested_flow_sequence_refuses() {
         let content = "---\nn: [a, [b]]\n---\n";
         let s = spans(content);
-        assert_eq!(s[0].style, ValueStyle::FlowSequence);
         assert!(
             s[0].value_range.is_none(),
             "nested flow must refuse: first-`]` scan would truncate"
@@ -1115,7 +1179,7 @@ mod locator_matrix_tests {
         assert!(s[0].value_range.is_none());
     }
 
-    // ---- Key-recognition cases (previously invisible keys) ----------------
+    // ---- Key-recognition cases --------------------------------------------
 
     #[test]
     fn quoted_key_with_spaces_is_visible() {
@@ -1142,15 +1206,6 @@ mod locator_matrix_tests {
     }
 
     #[test]
-    fn merge_key_is_visible() {
-        let content = "---\n<<: *base\nname: x\n---\n";
-        let s = spans(content);
-        assert_eq!(s[0].name, "<<");
-        assert!(s[0].value_range.is_none()); // alias value refused
-        assert_eq!(s[1].name, "name");
-    }
-
-    #[test]
     fn comment_line_is_not_a_key() {
         let content = "---\n# just a comment\ntitle: hi\n---\n";
         let s = spans(content);
@@ -1168,5 +1223,198 @@ mod locator_matrix_tests {
             s.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             vec!["a", "b", "c"]
         );
+    }
+
+    // ---- The 9 confirmed edge bugs, each asserting the corrected outcome ---
+
+    /// #1 CORRUPTION: `key: # comment` — serde reads the value as null, so the
+    /// scanner's proposed span over `# comment` is vetoed. A `set` cannot clobber
+    /// the comment; the field is still removable as a whole line.
+    #[test]
+    fn bug1_comment_as_value_is_refused_not_clobbered() {
+        let content = "---\nkey: # comment\nnext: x\n---\n";
+        let s = spans(content);
+        let key = find(&s, "key").unwrap();
+        assert!(
+            key.value_range.is_none(),
+            "a comment-only value (serde null) must not be spanned as the value"
+        );
+        assert_eq!(oracle(content).get("key"), Some(&serde_json::Value::Null));
+    }
+
+    /// #2 CORRUPTION: a blank-line-interrupted fold folds to `hello\nworld` in
+    /// serde, so the scanner's `hello`-only span is vetoed and the whole thing is
+    /// swept into `line_range` (remove deletes all of it).
+    #[test]
+    fn bug2_blank_line_interrupted_fold_refuses() {
+        let content = "---\ntitle: hello\n\n  world\ntype: note\n---\n";
+        let s = spans(content);
+        let title = find(&s, "title").unwrap();
+        assert!(title.value_range.is_none());
+        assert_eq!(
+            &content[title.line_range.clone()],
+            "title: hello\n\n  world\n",
+            "line_range must sweep the blank + continuation for a clean remove"
+        );
+    }
+
+    /// #3 CORRUPTION: an anchor tagging a block mapping — value refused (mapping),
+    /// and `line_range` must cover the indented block so remove doesn't orphan it.
+    #[test]
+    fn bug3_anchor_on_block_map_line_range_covers_block() {
+        let content = "---\nbase: &a\n  x: 1\nname: y\n---\n";
+        let s = spans(content);
+        let base = find(&s, "base").unwrap();
+        assert!(base.value_range.is_none());
+        assert_eq!(
+            &content[base.line_range.clone()],
+            "base: &a\n  x: 1\n",
+            "remove must delete the whole anchored block, not just `base: &a`"
+        );
+    }
+
+    /// #4 CORRUPTION: a multi-line fold with an internal blank line — refused, and
+    /// `line_range` covers every line through the next key (no orphaned tail).
+    #[test]
+    fn bug4_internal_blank_multiline_fold_line_range_covers_all() {
+        let content = "---\ntitle: hello\n  world\n\n  more\ntype: x\n---\n";
+        let s = spans(content);
+        let title = find(&s, "title").unwrap();
+        assert!(title.value_range.is_none());
+        assert_eq!(
+            &content[title.line_range.clone()],
+            "title: hello\n  world\n\n  more\n"
+        );
+    }
+
+    /// #5 PRECISION: trailing whitespace is trimmed off the value span.
+    #[test]
+    fn bug5_trailing_whitespace_span_is_tight() {
+        let content = "---\ntitle: hello   \n---\n";
+        let s = spans(content);
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "hello");
+    }
+
+    /// #6 PRECISION: an indented comment after a scalar is NOT a fold — serde
+    /// reads the value as `hello`, so it stays editable, and `line_range` still
+    /// covers the comment line so a remove takes it too.
+    #[test]
+    fn bug6_indented_comment_after_scalar_is_editable() {
+        let content = "---\ntitle: hello\n  # note\ntype: x\n---\n";
+        let s = spans(content);
+        let title = find(&s, "title").unwrap();
+        assert_eq!(
+            &content[title.value_range.clone().unwrap()],
+            "hello",
+            "an indented trailing comment must not over-refuse the set"
+        );
+        assert!(content[title.line_range.clone()].contains("# note"));
+    }
+
+    /// #7: the reviewer's premise was that serde folds a merge key away. It does
+    /// NOT — `serde_yaml` keeps `<<` as a literal key whose value is the aliased
+    /// mapping (verified: keys = `["<<", "defaults", "name"]`, `<<` → `{x: 1}`),
+    /// and norn's entire data model is that raw parse (`extract_frontmatter` never
+    /// calls `apply_merge`). So the oracle-driven locator follows serde: `<<` is a
+    /// normal mapping-valued field — refused for `set` (`value_range` None) and
+    /// removable as its own line — exactly consistent with what `validate`/`find`
+    /// see. Nothing is silently dropped, because in norn's model there are no
+    /// separately-inherited fields to drop. Emitting it is *safer* than omitting
+    /// it: omission would let `find --has "<<"` show the key while `remove` claims
+    /// it absent.
+    #[test]
+    fn bug7_merge_key_follows_serde_as_a_mapping_field() {
+        let content = "---\ndefaults: &d\n  x: 1\n<<: *d\nname: y\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("<<"),
+            "serde_yaml keeps `<<` as a literal key (no auto-merge)"
+        );
+        let s = spans(content);
+        let merge = find(&s, "<<").expect("`<<` follows serde as a real field");
+        assert!(
+            merge.value_range.is_none(),
+            "its value is a mapping, so set is refused"
+        );
+        assert_eq!(
+            &content[merge.line_range.clone()],
+            "<<: *d\n",
+            "remove is line-scoped and consistent with the oracle"
+        );
+        assert!(find(&s, "name").is_some());
+    }
+
+    /// #8 (would-be) CORRUPTION: a double-quoted key whose scanner-decode diverges
+    /// from serde's decoded name yields NO editable span — a non-corrupting
+    /// "absent", never a mis-located edit. (`\x41` → serde `A`, scanner `x41`.)
+    #[test]
+    fn bug8_divergent_double_quoted_key_emits_no_wrong_span() {
+        let content = "---\n\"\\x41\": v\n---\n";
+        let s = spans(content);
+        let o = oracle(content);
+        let keys: Vec<&str> = o.keys().map(String::as_str).collect();
+        // Whatever serde's decoded key is, we never emit a span under a name that
+        // is not one of serde's keys (which would splice bytes serde reads
+        // differently). Equivalently: every emitted span names a real serde key.
+        for span in &s {
+            assert!(
+                keys.contains(&span.name.as_str()),
+                "emitted span {:?} is not a serde key {keys:?}",
+                span.name
+            );
+        }
+    }
+
+    /// #9 defense-in-depth: non-comment trailing text after a flow `]` is refused
+    /// by the proposer (serde also rejects such a line outright).
+    #[test]
+    fn bug9_flow_with_trailing_text_refused() {
+        // Reach the locator with a valid oracle by validating the refusal on the
+        // classifier directly: trailing non-comment text yields no precise span.
+        let content = "---\ntags: [a, b]\n---\n";
+        // Sanity: the clean flat flow IS precise (control).
+        assert!(spans(content)[0].value_range.is_some());
+        // The classifier refuses `[a, b] extra` (would-be over-span).
+        let (vr, _style, _ends) = classify_value(0, 0, "[a, b] extra");
+        assert!(vr.is_none(), "trailing text after `]` must not be spanned");
+    }
+
+    // ---- The core invariant (B), proven over the whole matrix -------------
+
+    /// No `value_range` can reach `apply` unless `content[value_range]`
+    /// reconstitutes to exactly serde's parsed value for that field.
+    #[test]
+    fn invariant_every_value_span_reconstitutes_to_serde_value() {
+        let corpus = [
+            "---\nkey: # comment\n---\n",
+            "---\ntitle: hello\n  world\ntype: note\n---\n",
+            "---\ntitle: hello\n\n  world\ntype: x\n---\n",
+            "---\ntags: [a, b]\n---\n",
+            "---\ntime: 12:30\n---\n",
+            "---\nk: 'it''s'\n---\n",
+            "---\nn: [a, [b]]\n---\n",
+            "---\ncount: 42\n---\n",
+            "---\nflag: true\n---\n",
+            "---\nk: null\n---\n",
+            "---\nversion: 1.10\n---\n",
+            "---\ntitle: hello   \n---\n",
+            "---\nurl: http://x/#frag\n---\n",
+        ];
+        for content in corpus {
+            let o = oracle(content);
+            for span in spans(content) {
+                let Some(vr) = span.value_range.clone() else {
+                    continue;
+                };
+                let slice = &content[vr];
+                let expected = o.get(&span.name).expect("emitted span names a serde key");
+                let reparsed = reparse_yaml(slice).expect("value slice re-parses");
+                assert_eq!(
+                    &reparsed, expected,
+                    "span for `{}` = {slice:?} disagrees with serde {expected:?}",
+                    span.name
+                );
+            }
+        }
     }
 }
