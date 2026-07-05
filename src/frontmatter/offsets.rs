@@ -132,16 +132,27 @@ pub enum ValueStyle {
 /// styles, continuation of multi-line scalars) are included in `line_range`
 /// but do not produce their own `PropertySpan`.
 ///
-/// The scanner is line-based and does not fully parse YAML. Cases it handles
-/// correctly: plain scalars, single- and double-quoted scalars, block lists,
-/// block mappings, empty values, block literal (`|`) and folded (`>`) scalars,
-/// flow sequences and mappings on a single line. Comments on the property's
-/// key line are preserved inside `line_range` but excluded from `value_range`.
+/// The locator is line-based and deliberately does **not** parse YAML. Its
+/// contract is "span precisely where certain, refuse everywhere else": a
+/// `value_range` is emitted only for values we can locate with certainty —
+/// single-line plain scalars, and single-line single- or double-quoted scalars
+/// (honoring `''` / `\"` / `\\` escapes; quoted spans include the surrounding
+/// quotes, plain spans exclude a trailing ` #comment` and trailing whitespace).
+/// Everything with real YAML complexity gets `value_range = None` (the key is
+/// still visible via `line_range`, so it can be listed and removed-as-a-block,
+/// but `apply` declines a minimal in-place value edit rather than risk
+/// corrupting the document): block scalars (`|`, `>`), any multi-line value,
+/// anchors / aliases / tags (`&`, `*`, `!`), flow mappings (`{…}`), nested or
+/// non-flat flow sequences, and block sequences / mappings. A flat single-line
+/// flow sequence (`[a, b]`) is the one flow form spanned precisely.
 ///
-/// Multi-line flow values (e.g., a `[` opened on one line and `]` on a later
-/// line) are treated as having `value_range = None` and style
-/// `FlowSequence`/`FlowMapping` for safety — `apply_file_changes` rejects
-/// mutating those.
+/// Keys are recognized structurally: any scalar key at column 0, including
+/// quoted keys (`"…"`, `'…'`), numeric-leading keys (`123:`), and the merge key
+/// (`<<:`). The decoded key name matches how `serde_yaml` keys the parsed map.
+///
+/// Correctness invariant: never emit a `value_range` unless it is exactly the
+/// value's bytes. Any ambiguity resolves to `None` — a wrong span corrupts a
+/// document; a `None` merely declines an edit.
 pub fn top_level_property_spans(
     content: &str,
     frontmatter_range: Range<usize>,
@@ -171,21 +182,40 @@ pub fn top_level_property_spans(
             continue;
         }
 
-        let Some(colon_pos) = trimmed_line.find(':') else {
+        let Some((name, after_colon)) = parse_top_level_key(trimmed_line) else {
             index += 1;
             continue;
         };
 
-        let name = trimmed_line[..colon_pos].to_string();
-        if !is_valid_key_name(&name) {
-            index += 1;
-            continue;
-        }
-
-        let after_colon = colon_pos + 1;
         let rest = &trimmed_line[after_colon..];
 
         let (value_range, style, ends_on_key_line) = classify_value(line_start, after_colon, rest);
+
+        // Multi-line plain/quoted scalar fold: an inline value on the key line
+        // followed by a more-indented continuation. YAML folds that continuation
+        // into the value, so the value cannot be spanned with certainty — refuse
+        // the in-place value edit (`value_range = None`) and absorb the
+        // continuation lines into `line_range`, so a --remove covers the whole
+        // scalar instead of orphaning the fold. (NRN-133 corruption fix.)
+        if ends_on_key_line
+            && value_range.is_some()
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| next.starts_with([' ', '\t']) && !next.trim().is_empty())
+        {
+            let mut j = index + 1;
+            while j < lines.len() && lines[j].starts_with([' ', '\t']) {
+                j += 1;
+            }
+            spans.push(PropertySpan {
+                name,
+                line_range: line_start..line_starts[j],
+                value_range: None,
+                style,
+            });
+            index = j;
+            continue;
+        }
 
         let mut span = PropertySpan {
             name,
@@ -276,16 +306,121 @@ pub fn top_level_property_spans(
     spans
 }
 
-fn is_valid_key_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
+/// Recognizes a top-level `key:` mapping entry at column 0 of `line` (the key
+/// line with its trailing newline already stripped). Returns the *decoded* key
+/// name — matching how `serde_yaml` keys the parsed map, so `apply` can pair a
+/// span with the field it edits — and the byte offset in `line` immediately
+/// after the `:` separator.
+///
+/// Recognized structurally (no identifier allowlist): plain keys, single- and
+/// double-quoted keys (`"key with spaces"`, `'it''s'`), numeric-leading keys
+/// (`123:`), and the merge key (`<<:`). Returns `None` for a YAML comment line
+/// or any line that is not a mapping entry (no `:` separator).
+fn parse_top_level_key(line: &str) -> Option<(String, usize)> {
+    // A `#` at column 0 begins a YAML comment, never a key.
+    if line.starts_with('#') {
+        return None;
     }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
+    match line.as_bytes().first()? {
+        b'\'' => {
+            let (name, end) = scan_single_quoted_key(line)?;
+            let after_colon = colon_after(line, end)?;
+            Some((name, after_colon))
+        }
+        b'"' => {
+            let (name, end) = scan_double_quoted_key(line)?;
+            let after_colon = colon_after(line, end)?;
+            Some((name, after_colon))
+        }
+        _ => {
+            let sep = find_plain_key_separator(line)?;
+            let name = line[..sep].trim_end();
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), sep + 1))
+        }
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// Byte index of the first `:` that acts as a YAML block-mapping separator — a
+/// colon followed by whitespace or end-of-line. Returns `None` when the line has
+/// no separator (e.g. a bare plain scalar), so such a line is not mistaken for a
+/// key. A `time: 12:30` value is unaffected: the first `:` (after `time`) is the
+/// separator; the later `12:30` colon has no following whitespace.
+fn find_plain_key_separator(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b':' {
+            match bytes.get(i + 1) {
+                None | Some(b' ') | Some(b'\t') => return Some(i),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Skips inline whitespace from `from` and returns the byte offset just past a
+/// `:` separator, or `None` if the next non-space byte is not a colon.
+fn colon_after(line: &str, from: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut i = from;
+    while matches!(bytes.get(i), Some(b' ') | Some(b'\t')) {
+        i += 1;
+    }
+    if bytes.get(i) == Some(&b':') {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+/// Decodes a single-quoted key starting at byte 0 of `line`, honoring the `''`
+/// escape. Returns `(decoded_name, byte_offset_after_closing_quote)` or `None`
+/// if the quote never closes.
+fn scan_single_quoted_key(line: &str) -> Option<(String, usize)> {
+    let mut out = String::new();
+    let mut chars = line[1..].char_indices();
+    while let Some((rel, c)) = chars.next() {
+        let abs = 1 + rel;
+        if c == '\'' {
+            if line[abs + 1..].starts_with('\'') {
+                out.push('\'');
+                chars.next();
+                continue;
+            }
+            return Some((out, abs + 1));
+        }
+        out.push(c);
+    }
+    None
+}
+
+/// Decodes a double-quoted key starting at byte 0 of `line`, honoring `\"`,
+/// `\\`, and the common control escapes. Returns
+/// `(decoded_name, byte_offset_after_closing_quote)` or `None` if unclosed.
+fn scan_double_quoted_key(line: &str) -> Option<(String, usize)> {
+    let mut out = String::new();
+    let mut chars = line[1..].char_indices();
+    while let Some((rel, c)) = chars.next() {
+        let abs = 1 + rel;
+        match c {
+            '\\' => {
+                let (_, e) = chars.next()?;
+                out.push(match e {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '0' => '\0',
+                    other => other,
+                });
+            }
+            '"' => return Some((out, abs + 1)),
+            _ => out.push(c),
+        }
+    }
+    None
 }
 
 /// True if `line` is a YAML block-sequence item — `- value` or a bare `-` —
@@ -328,6 +463,13 @@ fn classify_value(
     match first_char {
         '|' => (None, ValueStyle::BlockLiteral, false),
         '>' => (None, ValueStyle::BlockFolded, false),
+        // Anchors (`&a`), aliases (`*a`), and tags (`!!str`, `!foo`) are YAML
+        // markup we cannot span as literal value bytes — deleting or rewriting
+        // the marker would corrupt the document. Refuse (`None`); the key stays
+        // visible via `line_range` so a whole-line remove still works. No
+        // dedicated `ValueStyle`, so report `Plain` — `apply` never serializes
+        // it because `value_range` is `None`.
+        '&' | '*' | '!' => (None, ValueStyle::Plain, true),
         '\'' => {
             let bytes = value_text.as_bytes();
             let mut i = 1;
@@ -373,26 +515,39 @@ fn classify_value(
             }
             (None, ValueStyle::DoubleQuoted, false)
         }
-        '[' => {
-            if let Some(close) = value_text.find(']') {
-                return (
-                    Some(value_start_byte..value_start_byte + close + 1),
-                    ValueStyle::FlowSequence,
-                    true,
-                );
+        '[' => match value_text.find(']') {
+            // Only a *flat* single-line flow sequence is spanned precisely: the
+            // bracketed content must contain no nested `[]`/`{}` and no quotes
+            // (which could hide a bracket or comma), and nothing but whitespace
+            // or a comment may follow the `]`. Anything else — nested,
+            // quote-bearing, or trailing content — is refused, because the naive
+            // first-`]` scan would truncate or misplace the span.
+            Some(close) => {
+                let inner = &value_text[1..close];
+                let after = &value_text[close + 1..];
+                let flat = !inner
+                    .bytes()
+                    .any(|b| matches!(b, b'[' | b']' | b'{' | b'}' | b'\'' | b'"'));
+                let after_ok = after.is_empty() || after.starts_with([' ', '\t']);
+                if flat && after_ok {
+                    (
+                        Some(value_start_byte..value_start_byte + close + 1),
+                        ValueStyle::FlowSequence,
+                        true,
+                    )
+                } else {
+                    (None, ValueStyle::FlowSequence, true)
+                }
             }
-            (None, ValueStyle::FlowSequence, false)
-        }
-        '{' => {
-            if let Some(close) = value_text.find('}') {
-                return (
-                    Some(value_start_byte..value_start_byte + close + 1),
-                    ValueStyle::FlowMapping,
-                    true,
-                );
-            }
-            (None, ValueStyle::FlowMapping, false)
-        }
+            None => (None, ValueStyle::FlowSequence, false),
+        },
+        // Flow mappings are always refused: a `{a: {b: 1}}` first-`}` scan
+        // truncates, and there is no green contract requiring a precise
+        // single-line flow-mapping span. When in doubt, refuse.
+        '{' => match value_text.find('}') {
+            Some(_) => (None, ValueStyle::FlowMapping, true),
+            None => (None, ValueStyle::FlowMapping, false),
+        },
         _ => {
             let value_bytes = value_text.as_bytes();
             let mut end = value_bytes.len();
@@ -731,5 +886,287 @@ mod span_tests {
             append_frontmatter_field(content, frontmatter_range, "count", &serde_json::json!(42))
                 .unwrap();
         assert!(result.contains("count: 42"));
+    }
+}
+
+/// NRN-133 span-locator matrix: precise-span certainty vs. refusal, grounded in
+/// the YAML 1.2 spec (no third-party corpus). Each case asserts on the byte
+/// range the locator emits (or that it refuses with `value_range == None`).
+#[cfg(test)]
+mod locator_matrix_tests {
+    use super::*;
+
+    /// Byte range of the YAML content between the opening `---\n` and the
+    /// closing `---` line, matching what `extract_frontmatter` produces
+    /// (includes the trailing newline before the closing fence).
+    fn fm_range(content: &str) -> Range<usize> {
+        let start = 4; // past the leading "---\n"
+        let rel = content[start..].find("\n---").expect("closing fence");
+        start..(start + rel + 1)
+    }
+
+    fn spans(content: &str) -> Vec<PropertySpan> {
+        top_level_property_spans(content, fm_range(content))
+    }
+
+    // ---- Precise-span cases (value_range = Some, exact bytes) -------------
+
+    #[test]
+    fn plain_single_line_scalar_is_precise() {
+        let content = "---\ntitle: hello world\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::Plain);
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "hello world");
+    }
+
+    #[test]
+    fn single_quoted_honors_doubled_quote_escape() {
+        let content = "---\nk: 'it''s a test'\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::SingleQuoted);
+        // Span includes the surrounding quotes and the whole `''`-escaped body.
+        assert_eq!(
+            &content[s[0].value_range.clone().unwrap()],
+            "'it''s a test'"
+        );
+    }
+
+    #[test]
+    fn double_quoted_honors_backslash_escapes() {
+        // YAML: k: "a\"b\\c"  -> logical value a"b\c
+        let content = "---\nk: \"a\\\"b\\\\c\"\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::DoubleQuoted);
+        assert_eq!(
+            &content[s[0].value_range.clone().unwrap()],
+            "\"a\\\"b\\\\c\""
+        );
+    }
+
+    #[test]
+    fn utf8_multibyte_value_slices_to_correct_string() {
+        let content = "---\ntitle: héllo wörld\n---\n";
+        let s = spans(content);
+        let vr = s[0].value_range.clone().unwrap();
+        assert_eq!(&content[vr], "héllo wörld");
+    }
+
+    #[test]
+    fn value_containing_colon_is_precise() {
+        let content = "---\ntime: 12:30\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "time");
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "12:30");
+    }
+
+    #[test]
+    fn hash_without_leading_space_is_not_a_comment() {
+        let content = "---\nurl: http://x/#frag\n---\n";
+        let s = spans(content);
+        assert_eq!(
+            &content[s[0].value_range.clone().unwrap()],
+            "http://x/#frag"
+        );
+    }
+
+    #[test]
+    fn same_line_comment_excluded_from_plain_span() {
+        let content = "---\ntitle: hello  # note\n---\n";
+        let s = spans(content);
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "hello");
+        assert!(content[s[0].line_range.clone()].contains("# note"));
+    }
+
+    #[test]
+    fn flat_single_line_flow_sequence_is_precise() {
+        let content = "---\ntags: [a, b]\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::FlowSequence);
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "[a, b]");
+    }
+
+    #[test]
+    fn flat_flow_sequence_with_trailing_comment_is_precise() {
+        let content = "---\ntags: [a, b] # note\n---\n";
+        let s = spans(content);
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "[a, b]");
+    }
+
+    // ---- Refuse cases (value_range = None) --------------------------------
+
+    #[test]
+    fn block_literal_refuses() {
+        let content = "---\ndesc: |\n  line one\n  line two\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::BlockLiteral);
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn block_literal_with_chomping_refuses() {
+        let content = "---\ndesc: |-\n  only\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::BlockLiteral);
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn block_folded_refuses() {
+        let content = "---\ndesc: >\n  folded text\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::BlockFolded);
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn block_folded_with_keep_chomping_refuses() {
+        let content = "---\ndesc: >+\n  folded\n\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::BlockFolded);
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn multi_line_plain_fold_refuses_and_absorbs() {
+        let content = "---\ntitle: hello\n  world\ntype: note\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "title");
+        assert!(
+            s[0].value_range.is_none(),
+            "multi-line plain fold must refuse a precise value span"
+        );
+        // Continuation absorbed so a remove covers the whole scalar.
+        assert_eq!(&content[s[0].line_range.clone()], "title: hello\n  world\n");
+        assert_eq!(s[1].name, "type");
+        assert_eq!(&content[s[1].value_range.clone().unwrap()], "note");
+    }
+
+    #[test]
+    fn multi_line_quoted_refuses() {
+        let content = "---\nquote: 'line one\n  line two'\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "quote");
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn anchor_definition_refuses() {
+        let content = "---\nbase: &anchor hello\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "base");
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn alias_refuses() {
+        let content = "---\nref: *anchor\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "ref");
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn explicit_tag_refuses() {
+        let content = "---\ncount: !!str 5\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "count");
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn flow_mapping_refuses() {
+        let content = "---\nm: {a: 1}\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::FlowMapping);
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn nested_flow_sequence_refuses() {
+        let content = "---\nn: [a, [b]]\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::FlowSequence);
+        assert!(
+            s[0].value_range.is_none(),
+            "nested flow must refuse: first-`]` scan would truncate"
+        );
+    }
+
+    #[test]
+    fn nested_flow_mapping_refuses() {
+        let content = "---\nk: {a: {b: 1}}\n---\n";
+        let s = spans(content);
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn block_sequence_refuses() {
+        let content = "---\naliases:\n  - one\n  - two\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::BlockSequence);
+        assert!(s[0].value_range.is_none());
+    }
+
+    #[test]
+    fn block_mapping_refuses() {
+        let content = "---\nmeta:\n  inner: value\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].style, ValueStyle::BlockMapping);
+        assert!(s[0].value_range.is_none());
+    }
+
+    // ---- Key-recognition cases (previously invisible keys) ----------------
+
+    #[test]
+    fn quoted_key_with_spaces_is_visible() {
+        let content = "---\n\"key with spaces\": value\n---\n";
+        let s = spans(content);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].name, "key with spaces");
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "value");
+    }
+
+    #[test]
+    fn single_quoted_key_decodes_escape() {
+        let content = "---\n'it''s': value\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "it's");
+    }
+
+    #[test]
+    fn numeric_leading_key_is_visible() {
+        let content = "---\n123: value\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "123");
+        assert_eq!(&content[s[0].value_range.clone().unwrap()], "value");
+    }
+
+    #[test]
+    fn merge_key_is_visible() {
+        let content = "---\n<<: *base\nname: x\n---\n";
+        let s = spans(content);
+        assert_eq!(s[0].name, "<<");
+        assert!(s[0].value_range.is_none()); // alias value refused
+        assert_eq!(s[1].name, "name");
+    }
+
+    #[test]
+    fn comment_line_is_not_a_key() {
+        let content = "---\n# just a comment\ntitle: hi\n---\n";
+        let s = spans(content);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].name, "title");
+    }
+
+    // ---- Order ------------------------------------------------------------
+
+    #[test]
+    fn multiple_properties_return_separate_spans_in_document_order() {
+        let content = "---\na: 1\nb: 2\nc: 3\n---\n";
+        let s = spans(content);
+        assert_eq!(
+            s.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
     }
 }
