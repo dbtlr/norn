@@ -920,7 +920,9 @@ fn get_section_multiple_in_request_order() {
                 "get",
                 "task.md",
                 "--section",
-                "Annotations,Task Description",
+                "Annotations",
+                "--section",
+                "Task Description",
                 "--format",
                 "json",
             ])
@@ -973,7 +975,9 @@ fn get_section_missing_heading_warns_and_omits_siblings_still_return() {
             "get",
             "task.md",
             "--section",
-            "Nonexistent,Task Description",
+            "Nonexistent",
+            "--section",
+            "Task Description",
             "--format",
             "json",
         ])
@@ -1094,7 +1098,12 @@ fn get_section_combined_with_col() {
 }
 
 #[test]
-fn get_section_ignored_with_paths_format_warns() {
+fn get_section_ignored_with_paths_format_warns_and_exits_zero_even_if_missing() {
+    // Fix 1 (P1 regression): a heading that does NOT exist must still exit 0
+    // under --format paths (which documents --section as ignored). Before the
+    // fix, resolution ran regardless of format, pushed an `error:` note, and
+    // the paths branch's error-note check flipped the exit to 1 — a flag
+    // documented as ignored broke a successful lookup.
     let tmp = section_fixture();
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
@@ -1103,7 +1112,7 @@ fn get_section_ignored_with_paths_format_warns() {
             "get",
             "task.md",
             "--section",
-            "Task Description",
+            "Nonexistent Heading",
             "--format",
             "paths",
         ])
@@ -1111,7 +1120,7 @@ fn get_section_ignored_with_paths_format_warns() {
         .unwrap();
     assert!(
         out.status.success(),
-        "stderr: {}",
+        "must exit 0 for an ignored format even with a missing heading; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1119,11 +1128,16 @@ fn get_section_ignored_with_paths_format_warns() {
         stderr.contains("--section is ignored with --format paths"),
         "expected section-ignored warning; got: {stderr}"
     );
+    // No per-heading resolution ran: no `error:`/`not found` diagnostics.
+    assert!(
+        !stderr.contains("none of the requested") && !stderr.contains("not found"),
+        "an ignored format must not resolve sections; got: {stderr}"
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "task.md");
 }
 
 #[test]
-fn get_section_ignored_with_markdown_format_warns() {
+fn get_section_ignored_with_markdown_format_warns_and_exits_zero_even_if_missing() {
     let tmp = section_fixture();
     let vault = tmp.path().join("vault");
     let out = norn_cmd(&tmp)
@@ -1133,7 +1147,7 @@ fn get_section_ignored_with_markdown_format_warns() {
             "get",
             "task.md",
             "--section",
-            "Task Description",
+            "Nonexistent Heading",
             "--format",
             "markdown",
         ])
@@ -1141,7 +1155,7 @@ fn get_section_ignored_with_markdown_format_warns() {
         .unwrap();
     assert!(
         out.status.success(),
-        "stderr: {}",
+        "must exit 0 for markdown even with a missing heading; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1149,6 +1163,106 @@ fn get_section_ignored_with_markdown_format_warns() {
         stderr.contains("--section is ignored with --format markdown"),
         "expected section-ignored warning; got: {stderr}"
     );
+    assert!(
+        !stderr.contains("none of the requested") && !stderr.contains("not found"),
+        "an ignored format must not resolve sections; got: {stderr}"
+    );
     let disk = std::fs::read_to_string(vault.join("task.md")).unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), disk);
+}
+
+#[test]
+fn get_section_heading_with_comma_is_addressable() {
+    // Fix 2 headline (read/write parity): a heading whose text contains a
+    // comma is passed as one whole `--section` value and resolves to exactly
+    // that section — no delimiter splitting.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-get-section-comma-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("r.md"),
+        "---\ntype: task\n---\n## Risks, Open Questions\nrisky\n## Next\nx\n",
+    )
+    .unwrap();
+
+    let v = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(&root)
+            .args([
+                "get",
+                "r.md",
+                "--section",
+                "Risks, Open Questions",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let sections = v[0]["sections"].as_object().unwrap();
+    assert_eq!(sections.len(), 1, "one whole heading, not comma-split");
+    assert_eq!(
+        sections
+            .get("Risks, Open Questions")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "## Risks, Open Questions\nrisky\n"
+    );
+}
+
+#[test]
+fn get_section_repeated_heading_collapses_across_formats() {
+    // Fix 3: `--section One --section One` yields one section in BOTH json
+    // (keyed) and records (per-block) — no cross-format cardinality mismatch.
+    let tmp = section_fixture();
+    let vault = tmp.path().join("vault");
+
+    let v = json_of(
+        &norn_cmd(&tmp)
+            .args(["--cwd"])
+            .arg(&vault)
+            .args([
+                "get",
+                "task.md",
+                "--section",
+                "Task Description",
+                "--section",
+                "Task Description",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        v[0]["sections"].as_object().unwrap().len(),
+        1,
+        "json must collapse the duplicate to one key"
+    );
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args([
+            "get",
+            "task.md",
+            "--section",
+            "Task Description",
+            "--section",
+            "Task Description",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let blocks = stdout.matches("Do the thing.").count();
+    assert_eq!(
+        blocks, 1,
+        "records must emit the duplicate section once, matching json; got: {stdout}"
+    );
 }
