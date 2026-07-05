@@ -114,7 +114,12 @@ pub fn build_plan(
     // A `files.ignore`'d path is out of the graph entirely — norn does not
     // create, read, edit, or delete it. Refuse to create one (using the exact
     // matcher the graph build uses), so `new` cannot leave behind a document
-    // that `get`/`set`/`delete` then refuse to touch.
+    // that `get`/`set`/`delete` then refuse to touch. `doc_path` is expected to
+    // be vault-relative (both callers enforce this via `preflight` before this
+    // point); an absolute path would not match the relative ignore globs.
+    // Note: an unresolved `{{seq}}` token is matched literally here — directory
+    // globs (`scratch/**`) still catch it, but an ignore pattern that constrains
+    // the resolved seq filename is not re-checked at apply time (NRN-138).
     if crate::graph::is_ignored(doc_path, &cfg.files.ignore) {
         return Err(SynthError::PathIgnored {
             path: doc_path.as_str().to_string(),

@@ -360,9 +360,10 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
             });
         }
         // NRN-120: a document with no frontmatter block gets an empty one
-        // synthesized so additive `set`/`add` operations can initialize it
-        // (schema backfill on legacy files). The added fields flow through the
-        // normal add_frontmatter insertion path against the empty block.
+        // synthesized so a new field can be added to initialize it (schema
+        // backfill on legacy files). The added fields flow through the normal
+        // add_frontmatter insertion path against the empty block — which is
+        // exactly what `set`/`new` on a missing field routes to.
         let synthesized = format!("---\n---\n{content}");
         return apply_file_changes(&synthesized, changes);
     };
@@ -382,14 +383,15 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
             message: "frontmatter could not be parsed".into(),
         });
     };
-    // An empty (`---\n---\n`) or explicitly null block parses as YAML null; treat
-    // it as an empty mapping so additive operations can populate it (NRN-120). A
-    // non-null, non-object block (a scalar or sequence as the whole document) is
-    // still a hard error.
+    // An *empty* block (`---\n---\n`, or only whitespace) parses as YAML null;
+    // treat it as an empty mapping so additive operations can populate it
+    // (NRN-120). An explicit `null`/`~` scalar — or any other non-object value —
+    // is NOT empty: splicing a key after it would produce invalid YAML, so it
+    // stays a hard error, matching the pre-NRN-120 behavior.
     let empty_object = serde_json::Map::new();
     let current_object = match &frontmatter_value {
         Value::Object(map) => map,
-        Value::Null => &empty_object,
+        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => &empty_object,
         _ => {
             return Err(ApplyError::CannotMinimalEdit {
                 path,
@@ -1326,6 +1328,31 @@ mod tests {
         let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
         let result = apply_change(content, &change).unwrap();
         assert_eq!(result, "---\ntitle: X\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_refuses_explicit_null_scalar_block() {
+        // An explicit `null` scalar block is NOT an empty block: splicing a key
+        // after it would produce invalid YAML, so it must stay a hard error
+        // rather than be treated as an empty mapping (review Finding 1).
+        let content = "---\nnull\n---\nbody\n";
+        let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "expected CannotMinimalEdit, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn apply_initializes_whitespace_only_frontmatter_block() {
+        // A block whose content is only whitespace parses as null but IS empty —
+        // it stays initializable (the pre-existing whitespace line is preserved
+        // verbatim; the appended field still parses correctly).
+        let content = "---\n   \n---\nbody\n";
+        let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\n   \ntitle: X\n---\nbody\n");
     }
 
     #[test]
