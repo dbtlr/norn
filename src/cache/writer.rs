@@ -624,7 +624,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = |cache: &crate::cache::Cache| -> Option<String> {
+        let a_resolved = |cache: &crate::cache::Cache| -> Option<String> {
             cache
                 .conn
                 .query_row(
@@ -633,6 +633,31 @@ mod tests {
                     |r| r.get::<_, Option<String>>(0),
                 )
                 .unwrap()
+        };
+        // The determinism invariant is that an incremental refresh leaves the
+        // WHOLE links table byte-identical to a rebuild — snapshot every
+        // resolution-bearing column in a stable order, not just one row.
+        type LinkRow = (String, String, Option<String>, String, Option<String>);
+        let links_snapshot = |cache: &crate::cache::Cache| -> Vec<LinkRow> {
+            let mut stmt = cache
+                .conn
+                .prepare(
+                    "SELECT source_path, target_raw, resolved_path, status, unresolved_reason \
+                     FROM links ORDER BY source_path, target_raw, resolved_path",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
         };
 
         // Build with alias_field configured so aliases participate in resolution.
@@ -646,7 +671,7 @@ mod tests {
         .unwrap();
         cache.rebuild(&root).unwrap();
         assert_eq!(
-            resolved(&cache),
+            a_resolved(&cache),
             None,
             "[[foo]] unresolved before the alias"
         );
@@ -661,18 +686,18 @@ mod tests {
         cache
             .index_incremental(&root, &crate::cache::ChangeDetectOptions::default())
             .unwrap();
-        let incremental = resolved(&cache);
+        let incremental = links_snapshot(&cache);
 
         // A full rebuild is the determinism oracle.
         cache.rebuild(&root).unwrap();
-        let rebuilt = resolved(&cache);
+        let rebuilt = links_snapshot(&cache);
 
         assert_eq!(
             incremental, rebuilt,
-            "incremental link resolution must equal a full rebuild"
+            "the whole links table after an incremental refresh must equal a full rebuild"
         );
         assert_eq!(
-            rebuilt,
+            a_resolved(&cache),
             Some("b.md".to_string()),
             "[[foo]] should resolve to b.md via its new alias"
         );
