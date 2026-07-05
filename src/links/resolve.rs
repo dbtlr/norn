@@ -188,20 +188,19 @@ fn resolve_wikilink(
         }
     }
 
-    let stem = Utf8Path::new(target).file_stem().unwrap_or(target);
-    let stem_matches: Vec<Utf8PathBuf> = by_stem
-        .get(&stem.to_lowercase())
-        .cloned()
-        .unwrap_or_default();
+    // Strip only a literal trailing `.md`, never `Path::file_stem` — file_stem
+    // truncates at the LAST dot, mangling dotted stems (`v0.40.0` -> `v0.40`,
+    // `periodic-0.4-review` -> `periodic-0`) and stranding otherwise-resolvable
+    // wikilinks (NRN-123). Lowercase once; by_stem/by_alias keys are lowercased.
+    let target_lower = target.to_lowercase();
+    let stem = target_lower.strip_suffix(".md").unwrap_or(&target_lower);
+    let stem_matches: Vec<Utf8PathBuf> = by_stem.get(stem).cloned().unwrap_or_default();
     if !stem_matches.is_empty() {
         return stem_matches;
     }
 
     // Fallback: consult aliases only when stem returned ∅.
-    by_alias
-        .get(&stem.to_lowercase())
-        .cloned()
-        .unwrap_or_default()
+    by_alias.get(stem).cloned().unwrap_or_default()
 }
 
 fn resolve_path_like_target(
@@ -337,6 +336,52 @@ mod tests {
             link.unresolved_reason,
             Some(crate::core::UnresolvedReason::TargetMissing)
         );
+    }
+
+    #[test]
+    fn dotted_stem_wikilink_resolves() {
+        // NRN-123: Path::file_stem truncates at the last dot, mangling dotted
+        // stems like `v0.40.0` -> `v0.40`. The wikilink must resolve to the file.
+        let files = vec![make_file("notes/v0.40.0.md"), make_file("a.md")];
+        let mut documents = vec![make_document("notes/v0.40.0.md"), make_document("a.md")];
+        documents[1].links.push(make_wikilink("a.md", "v0.40.0"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[1].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("notes/v0.40.0.md".into()));
+    }
+
+    #[test]
+    fn dotted_stem_midstring_wikilink_resolves() {
+        // `periodic-0.4-review` would be chopped to `periodic-0` by file_stem.
+        let files = vec![make_file("logs/periodic-0.4-review.md"), make_file("a.md")];
+        let mut documents = vec![
+            make_document("logs/periodic-0.4-review.md"),
+            make_document("a.md"),
+        ];
+        documents[1]
+            .links
+            .push(make_wikilink("a.md", "periodic-0.4-review"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[1].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(
+            link.resolved_path,
+            Some("logs/periodic-0.4-review.md".into())
+        );
+    }
+
+    #[test]
+    fn wikilink_with_md_suffix_still_strips_extension() {
+        // Regression guard: a target that DOES carry a trailing `.md` must still
+        // resolve by stem after the file_stem->strip_suffix change.
+        let files = vec![make_file("a.md"), make_file("b.md")];
+        let mut documents = vec![make_document("a.md"), make_document("b.md")];
+        documents[0].links.push(make_wikilink("a.md", "b.md"));
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("b.md".into()));
     }
 
     #[test]
