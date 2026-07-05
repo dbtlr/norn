@@ -196,7 +196,7 @@ struct ContentOps<'a> {
 
 /// The region class a content op mutates. Ordered as the composition chain runs:
 /// frontmatter → rewrite_link → replace_body → section-edits.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentClass {
     Frontmatter,
     RewriteLink,
@@ -210,6 +210,7 @@ enum ContentClass {
 /// rewrites and body replacements run per-change. `changed` drives no-op
 /// suppression — a byte-identical transform emits no action and adds no
 /// `changed_files` entry.
+#[derive(Debug)]
 struct ComposedUnit<'a> {
     changes: Vec<&'a PlannedChange>,
     class: ContentClass,
@@ -219,6 +220,7 @@ struct ComposedUnit<'a> {
 /// The composed result for one document: the fully-transformed content plus the
 /// per-transform record. `content == original` exactly when the whole
 /// composition was a no-op (no unit changed).
+#[derive(Debug)]
 struct ComposedFile<'a> {
     content: String,
     units: Vec<ComposedUnit<'a>>,
@@ -1432,6 +1434,257 @@ mod tests {
             cascades[0].failed.len(),
             1,
             "survivor remains failed after 3 rounds"
+        );
+    }
+
+    // ── NRN-139: file-major content composition ───────────────────────────────
+
+    fn set_frontmatter_change(
+        path: &str,
+        hash: &str,
+        field: &str,
+        old: serde_json::Value,
+        new: serde_json::Value,
+    ) -> PlannedChange {
+        PlannedChange {
+            change_id: format!("set-{field}"),
+            path: path.into(),
+            document_hash: hash.to_string(),
+            finding_code: "operator-request".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: "set_frontmatter".into(),
+            field: Some(field.to_string()),
+            expected_old_value: Some(old),
+            new_value: Some(new),
+            destination: None,
+            link_risk: None,
+            warnings: Vec::new(),
+            force: false,
+            parents: false,
+        }
+    }
+
+    fn append_to_section_change(
+        path: &str,
+        hash: &str,
+        heading: &str,
+        content: &str,
+    ) -> PlannedChange {
+        let payload = serde_json::json!({
+            "op": "append_to_section",
+            "heading": heading,
+            "content": content,
+        });
+        PlannedChange {
+            change_id: format!("append-{heading}"),
+            path: path.into(),
+            document_hash: hash.to_string(),
+            finding_code: "operator-request".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: "append_to_section".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: Some(payload),
+            destination: None,
+            link_risk: None,
+            warnings: Vec::new(),
+            force: false,
+            parents: false,
+        }
+    }
+
+    fn plan_with(vault_root: &camino::Utf8PathBuf, changes: Vec<PlannedChange>) -> RepairPlan {
+        RepairPlan {
+            schema_version: REPAIR_PLAN_SCHEMA_VERSION,
+            vault_root: vault_root.clone(),
+            source_filters: RepairPlanFilters::default(),
+            summary: RepairPlanSummary {
+                findings: 0,
+                planned_changes: changes.len(),
+                skipped: SkippedSummary::default(),
+            },
+            changes,
+            skipped_findings: Vec::new(),
+            footnotes: Vec::new(),
+        }
+    }
+
+    /// The pure composition helper chains a frontmatter set and a section edit on
+    /// one document into a SINGLE composed string (one write in Phase A2), with a
+    /// changed unit recorded per contributing transform.
+    #[test]
+    fn compose_content_ops_chains_frontmatter_and_edit_into_one_output() {
+        let original = "---\nstatus: todo\n---\n## History\n- created\n";
+        let fm = set_frontmatter_change(
+            "note.md",
+            "h",
+            "status",
+            serde_json::json!("todo"),
+            serde_json::json!("done"),
+        );
+        let edit = append_to_section_change("note.md", "h", "History", "- done");
+        let ops = ContentOps {
+            frontmatter: vec![&fm],
+            rewrite_links: Vec::new(),
+            replace_bodies: Vec::new(),
+            edit_ops: vec![&edit],
+        };
+
+        let composed =
+            compose_content_ops(camino::Utf8Path::new("note.md"), &ops, original).unwrap();
+
+        // A single composed string carries BOTH mutations — proving Phase A2
+        // performs exactly one write for the multi-class document.
+        assert!(
+            composed.content.contains("status: done"),
+            "{}",
+            composed.content
+        );
+        assert!(
+            composed.content.contains("- created") && composed.content.contains("- done"),
+            "{}",
+            composed.content
+        );
+        assert_eq!(
+            composed.units.len(),
+            2,
+            "one unit per contributing transform"
+        );
+        assert!(composed.units.iter().all(|u| u.changed));
+    }
+
+    /// A no-op transform is detected (unit.changed == false) so A2 suppresses the
+    /// write / action.
+    #[test]
+    fn compose_content_ops_detects_noop() {
+        let original = "---\nstatus: done\n---\nbody\n";
+        // set status to the value it already holds → byte-identical.
+        let fm = set_frontmatter_change(
+            "note.md",
+            "h",
+            "status",
+            serde_json::json!("done"),
+            serde_json::json!("done"),
+        );
+        let ops = ContentOps {
+            frontmatter: vec![&fm],
+            rewrite_links: Vec::new(),
+            replace_bodies: Vec::new(),
+            edit_ops: Vec::new(),
+        };
+        let composed =
+            compose_content_ops(camino::Utf8Path::new("note.md"), &ops, original).unwrap();
+        assert_eq!(composed.content, original);
+        assert!(!composed.units[0].changed, "no-op frontmatter set");
+    }
+
+    /// A failing edit transform (missing heading) propagates as Err from the
+    /// helper, so the orchestrator aborts BEFORE any write.
+    #[test]
+    fn compose_content_ops_propagates_transform_failure() {
+        let original = "---\nstatus: todo\n---\n## History\n- created\n";
+        let fm = set_frontmatter_change(
+            "note.md",
+            "h",
+            "status",
+            serde_json::json!("todo"),
+            serde_json::json!("done"),
+        );
+        let edit = append_to_section_change("note.md", "h", "NoSuchHeading", "- x");
+        let ops = ContentOps {
+            frontmatter: vec![&fm],
+            rewrite_links: Vec::new(),
+            replace_bodies: Vec::new(),
+            edit_ops: vec![&edit],
+        };
+        let err =
+            compose_content_ops(camino::Utf8Path::new("note.md"), &ops, original).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("History")
+                || msg.to_lowercase().contains("heading")
+                || msg.contains("NoSuchHeading"),
+            "expected a missing-heading edit failure, got: {msg}"
+        );
+    }
+
+    /// End-to-end per-document atomicity (the NRN-139 headline): a plan with a
+    /// frontmatter `set` AND a section edit on ONE doc. When the section edit's
+    /// anchor is missing, the WHOLE content phase aborts before any write — the
+    /// frontmatter change is NOT flushed, so the file is byte-identical to the
+    /// original (no half-mutation across the two classes on one file).
+    #[test]
+    fn content_phase_is_atomic_on_edit_failure_for_one_doc() {
+        let initial = "---\nstatus: todo\n---\n## History\n- created\n";
+        let (_tmp, root, index, hash) =
+            make_vault_with_doc("norn-nrn139-atomic-", "note.md", initial);
+
+        let plan = plan_with(
+            &root,
+            vec![
+                set_frontmatter_change(
+                    "note.md",
+                    &hash,
+                    "status",
+                    serde_json::json!("todo"),
+                    serde_json::json!("done"),
+                ),
+                // Missing heading → apply_edit_ops fails during A1 compute.
+                append_to_section_change("note.md", &hash, "NoSuchHeading", "- done"),
+            ],
+        );
+
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("heading")
+                || err.to_string().contains("NoSuchHeading")
+                || err.to_string().contains("History"),
+            "expected an edit-anchor failure, got: {err}"
+        );
+
+        // The frontmatter mutation must NOT have been written: the file is exactly
+        // the original bytes.
+        let on_disk = std::fs::read_to_string(root.join("note.md")).unwrap();
+        assert_eq!(
+            on_disk, initial,
+            "content phase aborted before writing; file must be byte-identical"
+        );
+    }
+
+    /// The success path of the same canonical case: both the frontmatter set and
+    /// the section append land in the single composed write.
+    #[test]
+    fn content_phase_applies_frontmatter_and_edit_for_one_doc() {
+        let initial = "---\nstatus: todo\n---\n## History\n- created\n";
+        let (_tmp, root, index, hash) =
+            make_vault_with_doc("norn-nrn139-both-", "note.md", initial);
+
+        let plan = plan_with(
+            &root,
+            vec![
+                set_frontmatter_change(
+                    "note.md",
+                    &hash,
+                    "status",
+                    serde_json::json!("todo"),
+                    serde_json::json!("done"),
+                ),
+                append_to_section_change("note.md", &hash, "History", "- done"),
+            ],
+        );
+
+        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        assert!(report
+            .changed_files
+            .contains(&camino::Utf8PathBuf::from("note.md")));
+
+        let on_disk = std::fs::read_to_string(root.join("note.md")).unwrap();
+        assert!(on_disk.contains("status: done"), "{on_disk}");
+        assert!(
+            on_disk.contains("- created") && on_disk.contains("- done"),
+            "{on_disk}"
         );
     }
 }

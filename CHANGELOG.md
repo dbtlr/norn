@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Fixed
+
+- **The plan applier now writes each document atomically across all mutation classes.** The applier was pass-major: frontmatter, link-rewrite, body-replace, and section-edit ops each ran as an independent pass that read → transformed → wrote the file, so a document touched by two classes (canonically a status transition: `set` a frontmatter field *plus* `append_to_section` on the same doc) was written twice, and a failure between the two writes left the file half-mutated. Content ops are now file-major: every content-mutating class for a document composes into a single read and a single write, and the whole content phase computes (and validates, under whole-doc CAS) every file before writing any of them — so a hash drift or a failing transform (e.g. a missing edit heading) aborts before the first byte is written, leaving every file byte-identical to its original. Lifecycle ops (create/delete/move and their backlink cascades) are unchanged. (NRN-139)
+
 ## v0.43.0 - 2026-07-05
 
 Correctness hardening plus the warm-daemon foundation. The headline is **`norn serve`** — a single host daemon that serves the full MCP toolset for any vault over one well-known socket (CLI read-routing lands next). Alongside it, eight fixes retire a cluster of frontmatter- and ignore-model defects surfaced by dogfooding: incremental-refresh link determinism, `files.ignore` actually excluding documents, a four-in-one `set`-hardening batch, dotted-stem wikilinks, an `append_to_section` boundary weld, `set` initializing frontmatter on a document that has none, and `new` honoring the hard ignore boundary.
