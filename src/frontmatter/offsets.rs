@@ -309,7 +309,7 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
 
         index += 1;
         if !ends_on_key_line {
-            index = absorb_open_value(&lines, index, proposed_style);
+            index = absorb_open_value(&lines, index, proposed_style, rest);
         }
     }
 
@@ -326,12 +326,20 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
 /// A flow collection's closer (`]`/`}`) is matched only OUTSIDE a quoted scalar:
 /// a `]` inside `"b]c"` or a `}` inside `a: "}"` is structural to the item, not
 /// the flow, so stopping there would leave an interior `key:`-shaped line to be
-/// misread as a phantom candidate (NRN-141). A quoted-scalar value keeps the
-/// prior best-effort "stop at the first line containing the closing quote".
-fn absorb_open_value(lines: &[&str], index: usize, style: ValueStyle) -> usize {
+/// misread as a phantom candidate (NRN-141). `key_line_rest` — the key line's
+/// bytes after the `:` separator — seeds the flow quote state, so a quote opened
+/// on the key line (`foo: ["a,`) is still open on the first continuation line.
+/// A quoted-scalar value keeps the prior best-effort "stop at the first line
+/// containing the closing quote".
+fn absorb_open_value(
+    lines: &[&str],
+    index: usize,
+    style: ValueStyle,
+    key_line_rest: &str,
+) -> usize {
     match style {
-        ValueStyle::FlowSequence => absorb_flow_value(lines, index, b']'),
-        ValueStyle::FlowMapping => absorb_flow_value(lines, index, b'}'),
+        ValueStyle::FlowSequence => absorb_flow_value(lines, index, b']', key_line_rest),
+        ValueStyle::FlowMapping => absorb_flow_value(lines, index, b'}', key_line_rest),
         ValueStyle::SingleQuoted => absorb_until_line_contains(lines, index, '\''),
         ValueStyle::DoubleQuoted => absorb_until_line_contains(lines, index, '"'),
         _ => index,
@@ -356,52 +364,74 @@ fn absorb_until_line_contains(lines: &[&str], mut index: usize, closer: char) ->
 /// the first line that contains `closer` OUTSIDE a quoted scalar. Quote state
 /// (single-quote with `''` doubling, double-quote with `\` escapes) is tracked
 /// across the absorbed lines, so a closer shadowed inside a quoted item does not
-/// terminate the value early (NRN-141). State is seeded outside quotes at the
-/// first absorbed line — the common case, where the key line opened the flow but
-/// left no still-open quote hanging into the continuation.
-fn absorb_flow_value(lines: &[&str], mut index: usize, closer: u8) -> usize {
+/// terminate the value early (NRN-141). The state is seeded by scanning
+/// `key_line_rest` first: a quote opened on the key line after the bracket
+/// (`foo: ["a,`) is still open on the first continuation line, and seeding
+/// "outside quotes" there inverts every quote toggle that follows — misreading a
+/// closing `"` as opening (skipping the real closer) or a shielded closer as
+/// real (re-exposing an interior phantom line). The seed pass cannot itself find
+/// the closer: absorb only runs when the key line contains no closer byte at all
+/// (`ends_on_key_line` was false).
+fn absorb_flow_value(lines: &[&str], mut index: usize, closer: u8, key_line_rest: &str) -> usize {
     let mut in_single = false;
     let mut in_double = false;
+    scan_flow_line(
+        key_line_rest.as_bytes(),
+        closer,
+        &mut in_single,
+        &mut in_double,
+    );
     while index < lines.len() {
-        let bytes = lines[index].as_bytes();
-        let mut i = 0;
-        let mut found = false;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if in_single {
-                // A doubled `''` is an escaped quote, still inside the scalar.
-                if b == b'\'' {
-                    if bytes.get(i + 1) == Some(&b'\'') {
-                        i += 2;
-                        continue;
-                    }
-                    in_single = false;
-                }
-            } else if in_double {
-                if b == b'\\' {
-                    // Skip the escaped byte (e.g. `\"`).
-                    i += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    in_double = false;
-                }
-            } else if b == b'\'' {
-                in_single = true;
-            } else if b == b'"' {
-                in_double = true;
-            } else if b == closer {
-                found = true;
-                break;
-            }
-            i += 1;
-        }
+        let found = scan_flow_line(
+            lines[index].as_bytes(),
+            closer,
+            &mut in_single,
+            &mut in_double,
+        );
         index += 1;
         if found {
             break;
         }
     }
     index
+}
+
+/// One line of the flow-absorb scan: advances the quote state across `bytes`
+/// and reports whether `closer` occurred outside quotes. The single copy of the
+/// flow quote-state machine — the key-line seed pass and the continuation-line
+/// loop both run through here.
+fn scan_flow_line(bytes: &[u8], closer: u8, in_single: &mut bool, in_double: &mut bool) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if *in_single {
+            // A doubled `''` is an escaped quote, still inside the scalar.
+            if b == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                *in_single = false;
+            }
+        } else if *in_double {
+            if b == b'\\' {
+                // Skip the escaped byte (e.g. `\"`).
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                *in_double = false;
+            }
+        } else if b == b'\'' {
+            *in_single = true;
+        } else if b == b'"' {
+            *in_double = true;
+        } else if b == closer {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// (B) Validates a proposed value span against serde's parsed value. Returns the
@@ -1650,6 +1680,56 @@ mod locator_matrix_tests {
         assert!(
             s.is_empty(),
             "serde key `bar` has no candidate line, so the whole doc must refuse, got {s:?}"
+        );
+    }
+
+    /// NRN-141 round 2 (a): a double quote opened on the KEY line after the
+    /// bracket. The continuation's `"` is a CLOSING quote, so the `]` after it
+    /// is a real closer — the absorb must stop there and `title` must stay a
+    /// separate editable field. Seeding the quote state at the first
+    /// continuation line (ignoring the key line) misread that `"` as opening,
+    /// skipped the real `]`, and absorbed `title` → whole-doc refusal of a
+    /// valid document.
+    #[test]
+    fn flow_absorb_seeds_quote_state_from_key_line() {
+        let content = "---\nfoo: [\"a,\nb\", c]\ntitle: hi\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("title"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        let title = find(&s, "title").expect("title must not be absorbed into foo");
+        assert_eq!(&content[title.value_range.clone().unwrap()], "hi");
+        let foo = find(&s, "foo").expect("foo must be located");
+        assert_eq!(
+            &content[foo.line_range.clone()],
+            "foo: [\"a,\nb\", c]\n",
+            "foo's range covers exactly the flow value's lines"
+        );
+    }
+
+    /// NRN-141 round 2 (b): the quote opened on the key line spans the
+    /// continuation, shielding the `]` inside `b]: c` — it must NOT terminate
+    /// the absorb. With the seeded state, the interior `phantom: v]` line stays
+    /// absorbed into `tags`, so the mis-decoded serde key `phantom` (from
+    /// `"\x70hantom"`, scanner-decoded `x70hantom`) has zero candidates and the
+    /// whole document refuses. The unseeded absorb stopped at the shielded `]`
+    /// and re-exposed the phantom as `phantom`'s candidate — the V2 class.
+    #[test]
+    fn flow_absorb_key_line_quote_shields_continuation_closer() {
+        let content = "---\ntags: [\"a,\nb]: c\",\nphantom: v]\n\"\\x70hantom\": real\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("tags") && o.contains_key("phantom"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "serde key `phantom` must have no candidate line (whole-doc refusal), got {s:?}"
         );
     }
 

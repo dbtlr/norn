@@ -2725,4 +2725,42 @@ mod tests {
             "the absorb fix must refuse at the guard, got {err:?}"
         );
     }
+
+    #[test]
+    fn apply_set_sibling_of_flow_with_key_line_quote_applies() {
+        // NRN-141 round 2 (a): the flow's first item opens a double quote on
+        // the KEY line and closes it on the continuation, where the real `]`
+        // follows. With the quote state seeded from the key line, the absorb
+        // stops at that `]` and the sibling `title` stays uniquely located —
+        // an unseeded absorb misread the closing `"` as opening, skipped the
+        // `]`, absorbed `title`, and refused this valid document whole.
+        let content = "---\nfoo: [\"a,\nb\", c]\ntitle: hi\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let result = apply_change(content, &change).expect("sibling set must apply");
+        assert_eq!(result, "---\nfoo: [\"a,\nb\", c]\ntitle: bye\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_remove_shielded_closer_phantom_refused_at_guard() {
+        // NRN-141 round 2 (b): the key-line quote spans the continuation and
+        // shields the `]` in `b]: c`, so the absorb must run through it and
+        // keep the interior `phantom: v]` absorbed — leaving the mis-decoded
+        // serde key `phantom` (`"\x70hantom"`) with zero candidates and the
+        // whole doc refused at the guard (CannotMinimalEdit). The unseeded
+        // absorb stopped at the shielded `]`, re-exposed the phantom, and the
+        // remove corrupted the doc (caught only by the post-image gate).
+        let content = "---\ntags: [\"a,\nb]: c\",\nphantom: v]\n\"\\x70hantom\": real\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("real")),
+            ..make_change("a.md", "phantom", "h1", "remove_frontmatter", None)
+        };
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "the seeded absorb must refuse at the guard, got {err:?}"
+        );
+    }
 }
