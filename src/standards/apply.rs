@@ -512,7 +512,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 let Some(span) = span else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
-                        reason: format!("field {field} not present in frontmatter"),
+                        reason: span_absent_reason(field, current_object),
                     });
                 };
                 let new_value = change
@@ -595,7 +595,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 let Some(span) = span else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
-                        reason: format!("field {field} not present in frontmatter"),
+                        reason: span_absent_reason(field, current_object),
                     });
                 };
                 // Mirror the op's semantic effect for the post-image gate below.
@@ -773,6 +773,23 @@ fn post_image_matches(
             Some(Value::Null) => matches!(expected_value, Value::Array(items) if items.is_empty()),
             _ => false,
         })
+}
+
+/// The reason for a span-absent `set`/`remove`, told truthfully from the parsed
+/// mapping (in scope at both call sites). A field that IS a parsed key but has no
+/// editable span was declined wholesale — an ambiguous-key document the span
+/// locator refused (NRN-141 guard). Reporting that as "not present" is false and
+/// dangerous: it invites an `add_frontmatter` that would splice a duplicate key.
+/// A field genuinely absent keeps the plain not-present message (NRN-141 / V10).
+fn span_absent_reason(field: &str, current_object: &serde_json::Map<String, Value>) -> String {
+    if current_object.contains_key(field) {
+        format!(
+            "field {field} is present but cannot be minimal-edited in place \
+             (document declined: a frontmatter key cannot be reliably located; see NRN-140)"
+        )
+    } else {
+        format!("field {field} not present in frontmatter")
+    }
 }
 
 fn check_expected_old_value(
@@ -1487,7 +1504,13 @@ mod tests {
         let content = "---\ntitle: hi\n---\n";
         let change = make_change("a.md", "status", "h1", "remove_frontmatter", None);
         let err = apply_change(content, &change).unwrap_err();
-        assert!(matches!(err, ApplyError::CannotMinimalEdit { .. }));
+        let ApplyError::CannotMinimalEdit { reason, .. } = &err else {
+            panic!("expected CannotMinimalEdit, got {err:?}");
+        };
+        assert!(
+            reason.contains("not present in frontmatter"),
+            "a genuinely absent field keeps the not-present message, got: {reason}"
+        );
     }
 
     #[test]
@@ -1761,13 +1784,31 @@ mod tests {
             ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
         };
         let err = apply_change(content, &change).unwrap_err();
+        let ApplyError::CannotMinimalEdit { reason, .. } = &err else {
+            panic!("expected CannotMinimalEdit, got {err:?}");
+        };
+        // V10: `title` IS present in the parsed mapping — the refusal must say
+        // so, not claim it absent (which would invite an add_frontmatter that
+        // splices a duplicate).
         assert!(
-            matches!(err, ApplyError::CannotMinimalEdit { .. }),
-            "unlocatable sibling key must force a clean refusal, got {err:?}"
+            reason.contains("present but cannot be minimal-edited"),
+            "a located-but-declined field must not report as absent, got: {reason}"
         );
-        // No write path is reached — a remove of the same field also refuses.
-        let remove = make_change("a.md", "title", "h1", "remove_frontmatter", None);
-        assert!(apply_change(content, &remove).is_err());
+        // No write path is reached — a remove of the same field also refuses at
+        // the span-absent site with the same truthful diagnostic. (expected_old
+        // is supplied so the precondition passes and we reach that site.)
+        let remove = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "remove_frontmatter", None)
+        };
+        let remove_err = apply_change(content, &remove).unwrap_err();
+        let ApplyError::CannotMinimalEdit { reason, .. } = &remove_err else {
+            panic!("expected CannotMinimalEdit, got {remove_err:?}");
+        };
+        assert!(
+            reason.contains("present but cannot be minimal-edited"),
+            "remove of a located-but-declined field must not report as absent, got: {reason}"
+        );
     }
 
     #[test]
