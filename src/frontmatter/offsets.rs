@@ -208,13 +208,17 @@ pub fn top_level_property_spans(
     }
 
     // (A)+(C) A candidate is CONFIRMED — a real field and a trustworthy
-    // `line_range` boundary — only if its name is a serde key claimed by exactly
-    // one candidate. Phantoms (a `- name:` item, a `key:`-lookalike inside a
-    // value) and ambiguous collisions are dropped here, so they are absorbed
-    // into the preceding confirmed field's range rather than truncating it.
+    // `line_range` boundary — iff its name is a serde key. The whole-document
+    // guard above already refused unless EVERY serde key is claimed by exactly
+    // one candidate, so here a `contains_key` match is necessarily that unique
+    // candidate; a per-candidate count check would be redundant. Phantoms (a
+    // `- name:` item, a `key:`-lookalike inside a value) are not serde keys, so
+    // they drop out and are absorbed into the preceding confirmed field's range
+    // rather than truncating it. Collisions are the guard's to refuse, not this
+    // filter's.
     let confirmed: Vec<&RawKeyLine> = candidates
         .iter()
-        .filter(|c| object.contains_key(&c.name) && name_counts[c.name.as_str()] == 1)
+        .filter(|c| object.contains_key(&c.name))
         .collect();
 
     let mut spans: Vec<PropertySpan> = Vec::with_capacity(confirmed.len());

@@ -2661,7 +2661,7 @@ mod tests {
         // composes to a document that re-parses to exactly the intended mapping,
         // so it applies unchanged in behavior.
         let content = "---\ntitle: hi\nstatus: draft\nkind: old\n---\nbody\n";
-        let changes = vec![
+        let changes = [
             PlannedChange {
                 expected_old_value: Some(json!("draft")),
                 ..make_change(
