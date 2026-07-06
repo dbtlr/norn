@@ -437,11 +437,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
         if !diagnostics.is_empty() {
             return Err(ApplyError::FrontmatterParseFailed {
                 path,
-                message: diagnostics
-                    .iter()
-                    .map(|d| d.message.clone())
-                    .collect::<Vec<_>>()
-                    .join("; "),
+                message: join_diagnostics(&diagnostics),
             });
         }
         // NRN-120: a document with no frontmatter block gets an empty one
@@ -455,11 +451,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
     if !diagnostics.is_empty() {
         return Err(ApplyError::FrontmatterParseFailed {
             path,
-            message: diagnostics
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("; "),
+            message: join_diagnostics(&diagnostics),
         });
     }
     let Some(frontmatter_value) = frontmatter else {
@@ -468,21 +460,17 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
             message: "frontmatter could not be parsed".into(),
         });
     };
-    // An *empty* block (`---\n---\n`, or only whitespace) parses as YAML null;
-    // treat it as an empty mapping so additive operations can populate it
-    // (NRN-120). An explicit `null`/`~` scalar — or any other non-object value —
-    // is NOT empty: splicing a key after it would produce invalid YAML, so it
-    // stays a hard error, matching the pre-NRN-120 behavior.
     let empty_object = serde_json::Map::new();
-    let current_object = match &frontmatter_value {
-        Value::Object(map) => map,
-        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => &empty_object,
-        _ => {
-            return Err(ApplyError::CannotMinimalEdit {
-                path,
-                reason: "frontmatter is not a top-level mapping".into(),
-            });
-        }
+    let Some(current_object) = frontmatter_as_mapping(
+        &frontmatter_value,
+        content,
+        &frontmatter_range,
+        &empty_object,
+    ) else {
+        return Err(ApplyError::CannotMinimalEdit {
+            path,
+            reason: "frontmatter is not a top-level mapping".into(),
+        });
     };
 
     let spans = top_level_property_spans(content, frontmatter_range.clone(), current_object);
@@ -723,20 +711,20 @@ fn verify_post_image(
             path: path.clone(),
             detail: format!(
                 "result no longer parses: {}",
-                diagnostics
-                    .iter()
-                    .map(|d| d.message.clone())
-                    .collect::<Vec<_>>()
-                    .join("; ")
+                join_diagnostics(&diagnostics)
             ),
         });
     }
     let empty = serde_json::Map::new();
     let actual = match (&frontmatter, &frontmatter_range) {
-        (Some(Value::Object(map)), _) => map,
-        // An emptied block re-parses as YAML null; treat null over an empty /
-        // whitespace-only block as the empty mapping (mirrors the input gate).
-        (Some(Value::Null), Some(range)) if content[range.clone()].trim().is_empty() => &empty,
+        // The mapping-or-empty normalization mirrors the input gate; an emptied
+        // block re-parsing as YAML null counts as the empty mapping.
+        (Some(value), Some(range)) => frontmatter_as_mapping(value, content, range, &empty)
+            .ok_or_else(|| ApplyError::PostImageVerificationFailed {
+                path: path.clone(),
+                detail: "result frontmatter is no longer a top-level mapping".into(),
+            })?,
+        // A document with no frontmatter block at all has the empty mapping.
         (None, None) => &empty,
         _ => {
             return Err(ApplyError::PostImageVerificationFailed {
@@ -752,6 +740,36 @@ fn verify_post_image(
         });
     }
     Ok(())
+}
+
+/// Normalizes a parsed frontmatter value to its mapping form: a mapping is
+/// itself; a YAML-null parse over an empty or whitespace-only block is the
+/// empty mapping (an initializable `---\n---\n` block, NRN-120). Anything else
+/// — an explicit `null`/`~` scalar, a sequence, a bare scalar — is not a
+/// mapping and yields `None` (splicing keys around it would produce invalid
+/// YAML, so callers refuse). Shared by `apply_file_changes`' input gate and
+/// `verify_post_image` so both ends of an edit agree on what counts as a
+/// mapping.
+fn frontmatter_as_mapping<'a>(
+    value: &'a Value,
+    content: &str,
+    frontmatter_range: &Range<usize>,
+    empty: &'a serde_json::Map<String, Value>,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    match value {
+        Value::Object(map) => Some(map),
+        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => Some(empty),
+        _ => None,
+    }
+}
+
+/// Joins frontmatter parse diagnostics into one `; `-separated message.
+fn join_diagnostics(diagnostics: &[crate::core::Diagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// (NRN-141) Parse-degradation check for content rewrites, run at the applier's
@@ -782,11 +800,7 @@ pub(crate) fn verify_frontmatter_not_degraded(
             path: path.to_path_buf(),
             detail: format!(
                 "a content rewrite broke the frontmatter: {}",
-                diagnostics
-                    .iter()
-                    .map(|d| d.message.clone())
-                    .collect::<Vec<_>>()
-                    .join("; ")
+                join_diagnostics(&diagnostics)
             ),
         });
     }
