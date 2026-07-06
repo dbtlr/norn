@@ -13,6 +13,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 ### Changed
 
 - Bumped `clap_complete` 4.6.5 → 4.6.7 (patch). Lockfile-only; no source changes. Pulls a transitive `windows-sys` 0.52 → 0.61 bump (Windows-only build targets; no effect on the macOS/Linux runtime path).
+- Bumped `rmcp` 1.8.0 → 2.1.0 (major), both the `server`/`transport-io`/`macros` runtime side and the `client` dev side. No source migration required — the MCP surface norn uses (`ServiceExt`, `ToolRouter`, the `wrapper::{Json, Parameters}` handlers, `ErrorData`, `transport::io::stdio`, `model`) is unchanged across the major. Verified end to end: full test suite green and a live stdio `initialize` + `tools/list` handshake returns the complete tool catalog with intact input/output schemas.
 
 ### Fixed
 
