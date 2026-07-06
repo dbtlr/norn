@@ -2644,4 +2644,44 @@ mod tests {
             "---\ntitle: hi\nstatus: done\nauthor: me\n---\nbody\n"
         );
     }
+
+    // ── NRN-141 quote-aware flow absorb ───────────────────────────────────────
+
+    #[test]
+    fn apply_v3a_quoted_flow_sibling_set_applies_after_absorb_fix() {
+        // V3a: a flow mapping whose closing `}` is shadowed inside `a: "}"`. The
+        // buggy absorb stopped at that quoted `}`, exposing the interior
+        // `next: 1` as a second `next` candidate and refusing the whole
+        // (well-formed) document. Quote-aware absorb steps over the quoted `}`,
+        // so the sibling `title` is uniquely located and editable again.
+        let content = "---\ntitle: hi\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let result = apply_change(content, &change).expect("well-formed sibling set must apply");
+        assert_eq!(
+            result,
+            "---\ntitle: bye\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\nbody\n"
+        );
+    }
+
+    #[test]
+    fn apply_v2_phantom_remove_refused_by_guard_after_absorb_fix() {
+        // Companion to `apply_v2_phantom_remove_is_refused_not_corrupted`: after
+        // the quote-aware absorb, the interior `bar: v]` is no longer a
+        // candidate, so serde key `bar` is unlocatable and the guard empties
+        // spans — `remove bar` refuses at the span layer (CannotMinimalEdit),
+        // earlier than the post-image gate, never reaching a corrupting edit.
+        let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("realvalue")),
+            ..make_change("a.md", "bar", "h1", "remove_frontmatter", None)
+        };
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "the absorb fix must refuse at the guard, got {err:?}"
+        );
+    }
 }

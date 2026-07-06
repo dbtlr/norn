@@ -317,19 +317,83 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
 /// continuation lines can sit at column 0 and would otherwise be misread as new
 /// keys. Everything else (block scalars, plain folds, block collections) puts
 /// its continuation on indented lines the main scan already skips, so this is a
-/// no-op for those. Best-effort: stops at the first line containing the closer.
-fn absorb_open_value(lines: &[&str], mut index: usize, style: ValueStyle) -> usize {
-    let closer = match style {
-        ValueStyle::FlowSequence => ']',
-        ValueStyle::FlowMapping => '}',
-        ValueStyle::SingleQuoted => '\'',
-        ValueStyle::DoubleQuoted => '"',
-        _ => return index,
-    };
+/// no-op for those.
+///
+/// A flow collection's closer (`]`/`}`) is matched only OUTSIDE a quoted scalar:
+/// a `]` inside `"b]c"` or a `}` inside `a: "}"` is structural to the item, not
+/// the flow, so stopping there would leave an interior `key:`-shaped line to be
+/// misread as a phantom candidate (NRN-141). A quoted-scalar value keeps the
+/// prior best-effort "stop at the first line containing the closing quote".
+fn absorb_open_value(lines: &[&str], index: usize, style: ValueStyle) -> usize {
+    match style {
+        ValueStyle::FlowSequence => absorb_flow_value(lines, index, b']'),
+        ValueStyle::FlowMapping => absorb_flow_value(lines, index, b'}'),
+        ValueStyle::SingleQuoted => absorb_until_line_contains(lines, index, '\''),
+        ValueStyle::DoubleQuoted => absorb_until_line_contains(lines, index, '"'),
+        _ => index,
+    }
+}
+
+/// Best-effort absorb for an unclosed quoted scalar: stop after the first line
+/// that contains the closing quote character. The pre-NRN-141 behavior for the
+/// quoted-scalar styles, preserved exactly.
+fn absorb_until_line_contains(lines: &[&str], mut index: usize, closer: char) -> usize {
     while index < lines.len() {
         let contains_closer = lines[index].contains(closer);
         index += 1;
         if contains_closer {
+            break;
+        }
+    }
+    index
+}
+
+/// Absorb the continuation lines of an unclosed flow collection, stopping after
+/// the first line that contains `closer` OUTSIDE a quoted scalar. Quote state
+/// (single-quote with `''` doubling, double-quote with `\` escapes) is tracked
+/// across the absorbed lines, so a closer shadowed inside a quoted item does not
+/// terminate the value early (NRN-141). State is seeded outside quotes at the
+/// first absorbed line — the common case, where the key line opened the flow but
+/// left no still-open quote hanging into the continuation.
+fn absorb_flow_value(lines: &[&str], mut index: usize, closer: u8) -> usize {
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < lines.len() {
+        let bytes = lines[index].as_bytes();
+        let mut i = 0;
+        let mut found = false;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_single {
+                // A doubled `''` is an escaped quote, still inside the scalar.
+                if b == b'\'' {
+                    if bytes.get(i + 1) == Some(&b'\'') {
+                        i += 2;
+                        continue;
+                    }
+                    in_single = false;
+                }
+            } else if in_double {
+                if b == b'\\' {
+                    // Skip the escaped byte (e.g. `\"`).
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    in_double = false;
+                }
+            } else if b == b'\'' {
+                in_single = true;
+            } else if b == b'"' {
+                in_double = true;
+            } else if b == closer {
+                found = true;
+                break;
+            }
+            i += 1;
+        }
+        index += 1;
+        if found {
             break;
         }
     }
@@ -1531,6 +1595,59 @@ mod locator_matrix_tests {
     }
 
     // ---- The core invariant (B), proven over the whole matrix -------------
+
+    /// NRN-141 quote-aware absorb: a flow mapping whose closing `}` is shadowed
+    /// inside a quoted scalar (`a: "}"`) must not terminate the absorb early. The
+    /// buggy absorb stopped at that quoted `}`, exposing the interior `next: 1` as
+    /// a second `next` candidate (`name_counts[next] == 2` → whole-doc refusal).
+    /// The fix steps over the quoted `}`, so the top-level `title`, `meta`, and
+    /// the single `next` (value `2`) are each uniquely located and editable.
+    #[test]
+    fn quote_aware_absorb_does_not_expose_interior_flow_map_key() {
+        let content = "---\ntitle: hi\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("title") && o.contains_key("meta") && o.contains_key("next"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            find(&s, "title").is_some(),
+            "the well-formed sibling must stay editable"
+        );
+        let next = find(&s, "next").expect("the single top-level next must be located");
+        assert_eq!(
+            &content[next.value_range.clone().unwrap()],
+            "2",
+            "next must point at the top-level value 2, not the interior 1"
+        );
+    }
+
+    /// NRN-141 quote-aware absorb: the V2 phantom doc. `foo: [a,` / `"b]c",` /
+    /// `bar: v]` is a single flow sequence (its last element is a nested
+    /// `{bar: v}`); the only top-level keys are `foo` and `bar` (the latter from
+    /// `"\x62ar"`, which the scanner mis-decodes as `x62ar`). With the buggy
+    /// absorb the `]` inside `"b]c"` stopped the scan, exposing the interior
+    /// `bar: v]` as a phantom `bar` that stood in for the mis-decoded real key —
+    /// the guard passed and a `remove bar` corrupted the doc. Quote-aware absorb
+    /// steps over the quoted `]`, so serde key `bar` has zero candidates and the
+    /// whole document refuses (empty spans).
+    #[test]
+    fn quote_aware_absorb_v2_phantom_leaves_serde_key_unlocatable() {
+        let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("bar"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "serde key `bar` has no candidate line, so the whole doc must refuse, got {s:?}"
+        );
+    }
 
     /// No `value_range` can reach `apply` unless `content[value_range]`
     /// reconstitutes to exactly serde's parsed value for that field.
