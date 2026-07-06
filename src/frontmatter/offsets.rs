@@ -154,10 +154,23 @@ pub enum ValueStyle {
 ///   the field's parsed value. A mapping value, or a null value whose bytes are
 ///   not a literal null token, is refused. This makes a *wrong* value span
 ///   structurally impossible to emit: any disagreement collapses to `None`.
-/// - **(C) `line_range` runs key-line-start → next-key-line-start** (or the end
-///   of the block for the last field), so all continuation / blank / comment
-///   lines between two fields are absorbed by construction — a `remove` deletes
-///   the whole property, never orphaning a fold or an anchored block.
+/// - **(C) `line_range` boundaries are serde-confirmed, not scanner-guessed.**
+///   The scanner detects candidate `key:` lines, but serde anchors values, not
+///   spans, so a candidate line that is NOT a real serde key — a `- name:`
+///   block-sequence-of-mappings item, a `key:`-looking line inside a multi-line
+///   quoted/flow value — is a *phantom* that would truncate the preceding
+///   field's range and orphan content on remove. So only a candidate whose name
+///   resolves to exactly one serde key is a confirmed boundary; every other
+///   candidate is absorbed into the preceding confirmed field. `line_range` runs
+///   from a confirmed key-line to the next confirmed key-line (or block end),
+///   so a `remove` deletes the whole property — including a list-of-mappings
+///   block or an anchored block — never orphaning a tail.
+///
+/// **Ambiguity refuses.** If a serde key matches zero candidate lines, or more
+/// than one candidate decodes to the same name (a key-escape collision such as
+/// `"\x61"` + `x61` both decoding to `x61`), those keys get no editable span and
+/// are not used as boundaries — `set`/`remove` cleanly reports not-editable
+/// rather than splicing the wrong field.
 ///
 /// Refusing (`value_range = None`) keeps the key visible and removable as a
 /// block while declining an in-place value edit — the trust-preserving outcome:
@@ -167,25 +180,40 @@ pub fn top_level_property_spans(
     frontmatter_range: Range<usize>,
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<PropertySpan> {
-    let raw = scan_key_lines(content, &frontmatter_range);
-    let mut spans: Vec<PropertySpan> = Vec::with_capacity(raw.len());
+    let candidates = scan_key_lines(content, &frontmatter_range);
 
-    for (i, field) in raw.iter().enumerate() {
-        // (C) line_range spans this key line to the next top-level key line (or
-        // the frontmatter end for the last field), absorbing every continuation,
-        // blank, and comment line between the two by construction.
-        let line_end = raw
+    // Count how many candidate lines decode to each name. A name claimed by more
+    // than one candidate is ambiguous (we cannot tell which line is the real
+    // field), so it is neither editable nor a trustworthy boundary.
+    let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for candidate in &candidates {
+        *name_counts.entry(candidate.name.as_str()).or_insert(0) += 1;
+    }
+
+    // (A)+(C) A candidate is CONFIRMED — a real field and a trustworthy
+    // `line_range` boundary — only if its name is a serde key claimed by exactly
+    // one candidate. Phantoms (a `- name:` item, a `key:`-lookalike inside a
+    // value) and ambiguous collisions are dropped here, so they are absorbed
+    // into the preceding confirmed field's range rather than truncating it.
+    let confirmed: Vec<&RawKeyLine> = candidates
+        .iter()
+        .filter(|c| object.contains_key(&c.name) && name_counts[c.name.as_str()] == 1)
+        .collect();
+
+    let mut spans: Vec<PropertySpan> = Vec::with_capacity(confirmed.len());
+    for (i, field) in confirmed.iter().enumerate() {
+        // (C) line_range spans this confirmed key-line to the NEXT confirmed
+        // key-line (or the frontmatter end), absorbing every phantom /
+        // continuation / blank / comment line between them by construction.
+        let line_end = confirmed
             .get(i + 1)
             .map(|next| next.key_line_start)
             .unwrap_or(frontmatter_range.end);
         let line_range = field.key_line_start..line_end;
 
-        // (A) Only an actual serde key becomes a span. Not a key (merge `<<`,
-        // an escaped key whose decode diverges, a duplicate) → no span, so
-        // `set`/`remove` reports "absent" instead of mis-editing.
-        let Some(serde_value) = object.get(&field.name) else {
-            continue;
-        };
+        let serde_value = object
+            .get(&field.name)
+            .expect("a confirmed candidate is a serde key");
 
         // (B) The proposed value span survives only if it reconstitutes to
         // exactly serde's parsed value for this field.
@@ -551,46 +579,15 @@ fn classify_value(
             }
             (None, ValueStyle::DoubleQuoted, false)
         }
-        '[' => match value_text.find(']') {
-            // Only a *flat* single-line flow sequence is spanned precisely: the
-            // bracketed content must contain no nested `[]`/`{}` and no quotes
-            // (which could hide a bracket or comma), and nothing but whitespace
-            // or a comment may follow the `]`. Anything else — nested,
-            // quote-bearing, or trailing content — is refused, because the naive
-            // first-`]` scan would truncate or misplace the span.
-            Some(close) => {
-                let inner = &value_text[1..close];
-                let after = &value_text[close + 1..];
-                let flat = !inner
-                    .bytes()
-                    .any(|b| matches!(b, b'[' | b']' | b'{' | b'}' | b'\'' | b'"'));
-                // After the `]` only whitespace or a whitespace-led comment may
-                // follow; any other trailing content means the naive first-`]`
-                // scan is wrong, so refuse (#9). serde is the final authority —
-                // it rejects such a line outright — this is defense-in-depth.
-                let after_trimmed = after.trim_start();
-                let after_ok = after.is_empty()
-                    || (after.starts_with([' ', '\t'])
-                        && (after_trimmed.is_empty() || after_trimmed.starts_with('#')));
-                if flat && after_ok {
-                    (
-                        Some(value_start_byte..value_start_byte + close + 1),
-                        ValueStyle::FlowSequence,
-                        true,
-                    )
-                } else {
-                    (None, ValueStyle::FlowSequence, true)
-                }
-            }
-            None => (None, ValueStyle::FlowSequence, false),
-        },
-        // Flow mappings are always refused: a `{a: {b: 1}}` first-`}` scan
-        // truncates, and there is no green contract requiring a precise
-        // single-line flow-mapping span. When in doubt, refuse.
-        '{' => match value_text.find('}') {
-            Some(_) => (None, ValueStyle::FlowMapping, true),
-            None => (None, ValueStyle::FlowMapping, false),
-        },
+        // Flow collections are never precisely value-spanned — quotes, nesting,
+        // and trailing content all defeat a byte scan. They carry
+        // `value_range = None` and, for sequences, route through whole-field
+        // `line_range` replacement in `apply` (`is_sequence_style`), so a flow
+        // list stays editable without fragile flow parsing. `ends_on_key_line`
+        // is whether the closer appears on the key line; an unclosed flow spills
+        // onto continuation lines that `absorb_open_value` steps over.
+        '[' => (None, ValueStyle::FlowSequence, value_text.contains(']')),
+        '{' => (None, ValueStyle::FlowMapping, value_text.contains('}')),
         _ => {
             let value_bytes = value_text.as_bytes();
             let mut end = value_bytes.len();
@@ -840,11 +837,16 @@ mod span_tests {
 
     #[test]
     fn flow_sequence_on_single_line() {
+        // NRN-133 round 3: flow sequences are no longer precisely value-spanned
+        // (a quote/nest/trailing-text inside `[...]` defeats a byte scan). They
+        // carry value_range = None and are `set` via whole-`line_range` replace;
+        // style is preserved so `apply` keeps the flow form.
         let content = "---\naliases: [a, b]\n---\n";
         let spans = spans_for(content, 4..20);
         let span = &spans[0];
         assert_eq!(span.style, ValueStyle::FlowSequence);
-        assert_eq!(&content[span.value_range.clone().unwrap()], "[a, b]");
+        assert!(span.value_range.is_none());
+        assert_eq!(&content[span.line_range.clone()], "aliases: [a, b]\n");
     }
 
     #[test]
@@ -1057,18 +1059,33 @@ mod locator_matrix_tests {
     }
 
     #[test]
-    fn flat_single_line_flow_sequence_is_precise() {
+    fn flat_flow_sequence_refuses_precise_span_but_is_line_editable() {
+        // Round 3: flow is not precisely value-spanned; set routes through the
+        // whole line_range (see apply::is_sequence_style). Style is preserved.
         let content = "---\ntags: [a, b]\n---\n";
         let s = spans(content);
         assert_eq!(s[0].style, ValueStyle::FlowSequence);
-        assert_eq!(&content[s[0].value_range.clone().unwrap()], "[a, b]");
+        assert!(s[0].value_range.is_none());
+        assert_eq!(&content[s[0].line_range.clone()], "tags: [a, b]\n");
     }
 
     #[test]
-    fn flat_flow_sequence_with_trailing_comment_is_precise() {
-        let content = "---\ntags: [a, b] # note\n---\n";
+    fn quoted_element_flow_sequence_refuses_precise_span() {
+        // The regression this round fixes: a quote inside `[...]` used to
+        // over-refuse the whole field. Now flow is line-editable regardless.
+        let content = "---\ntags: [\"a\", \"b\"]\n---\n";
         let s = spans(content);
-        assert_eq!(&content[s[0].value_range.clone().unwrap()], "[a, b]");
+        assert_eq!(s[0].style, ValueStyle::FlowSequence);
+        assert!(s[0].value_range.is_none());
+        assert_eq!(
+            oracle(content)
+                .get("tags")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -1365,18 +1382,90 @@ mod locator_matrix_tests {
         }
     }
 
-    /// #9 defense-in-depth: non-comment trailing text after a flow `]` is refused
-    /// by the proposer (serde also rejects such a line outright).
+    /// #9 (now subsumed): flow is never precisely value-spanned, so trailing
+    /// text after `]` can no longer cause a wrong span — every flow sequence
+    /// carries `value_range = None` and is edited via whole-`line_range` replace.
     #[test]
-    fn bug9_flow_with_trailing_text_refused() {
-        // Reach the locator with a valid oracle by validating the refusal on the
-        // classifier directly: trailing non-comment text yields no precise span.
-        let content = "---\ntags: [a, b]\n---\n";
-        // Sanity: the clean flat flow IS precise (control).
-        assert!(spans(content)[0].value_range.is_some());
-        // The classifier refuses `[a, b] extra` (would-be over-span).
-        let (vr, _style, _ends) = classify_value(0, 0, "[a, b] extra");
-        assert!(vr.is_none(), "trailing text after `]` must not be spanned");
+    fn bug9_flow_is_never_precisely_spanned() {
+        for content in [
+            "---\ntags: [a, b]\n---\n",
+            "---\ntags: [a, [b]]\n---\n",
+            "---\ntags: [\"a\", \"b\"]\n---\n",
+        ] {
+            let s = spans(content);
+            assert!(
+                s[0].value_range.is_none(),
+                "flow value must not be precisely spanned: {content:?}"
+            );
+            assert_eq!(s[0].style, ValueStyle::FlowSequence);
+        }
+    }
+
+    // ---- Round 3: serde-confirmed line_range boundaries -------------------
+
+    /// PHANTOM #1: a no-indent list of mappings. The `- name:` item lines parse
+    /// as `- name` — NOT a serde key — so they are absorbed into `contacts`'s
+    /// line_range instead of truncating it. A `remove contacts` deletes the whole
+    /// block; `owner` is a clean separate span.
+    #[test]
+    fn phantom_list_of_mappings_line_range_covers_whole_block() {
+        let content = "---\ncontacts:\n- name: Bob\n- name: Alice\nowner: x\n---\n";
+        let s = spans(content);
+        let contacts = find(&s, "contacts").unwrap();
+        assert_eq!(
+            &content[contacts.line_range.clone()],
+            "contacts:\n- name: Bob\n- name: Alice\n",
+            "remove must delete every item line, not orphan them"
+        );
+        assert!(
+            find(&s, "- name").is_none(),
+            "`- name` is a phantom, not a field"
+        );
+        assert!(find(&s, "owner").is_some());
+    }
+
+    /// PHANTOM #2: a multi-line quoted value whose continuation looks like a key
+    /// (`word: ...`). It is absorbed into `desc`'s line_range; `word` is not a
+    /// field; `next` stays a clean separate span.
+    #[test]
+    fn phantom_key_inside_multiline_quoted_value_is_absorbed() {
+        let content = "---\ndesc: 'line one\nword: two'\nnext: keep\n---\n";
+        let s = spans(content);
+        let desc = find(&s, "desc").unwrap();
+        assert!(desc.value_range.is_none());
+        assert_eq!(
+            &content[desc.line_range.clone()],
+            "desc: 'line one\nword: two'\n"
+        );
+        assert!(find(&s, "word").is_none());
+        assert!(find(&s, "next").is_some());
+    }
+
+    /// COLLISION: two candidate lines decode to the same name (`"\x61"` → `x61`
+    /// by the scanner, and a literal `x61`), while serde's real keys are `a` and
+    /// `x61`. Both x61-decoding candidates are ambiguous → neither is editable
+    /// nor a boundary, and `a` (matched by zero candidates) is not editable —
+    /// so `set x61=NEW` can never clobber serde's `a`.
+    #[test]
+    fn key_escape_collision_refuses_both_ambiguous_keys() {
+        let content = "---\n\"\\x61\": v\nx61: w\n---\n";
+        let o = oracle(content);
+        // Precondition: serde sees two distinct keys, `a` and `x61`.
+        assert!(
+            o.contains_key("a") && o.contains_key("x61"),
+            "keys: {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        // No confident span for either colliding/unmatched key.
+        assert!(
+            find(&s, "x61").is_none(),
+            "ambiguous x61 must not be editable"
+        );
+        assert!(
+            find(&s, "a").is_none(),
+            "unmatched `a` must not be editable"
+        );
     }
 
     // ---- The core invariant (B), proven over the whole matrix -------------

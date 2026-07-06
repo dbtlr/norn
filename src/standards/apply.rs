@@ -344,6 +344,13 @@ pub fn changes_by_path(
     Ok(grouped)
 }
 
+/// A sequence-valued field (block or flow). Both have `value_range = None` and
+/// are `set` by replacing the whole `line_range` with a freshly serialized
+/// field, so a flow list stays flow and a block list stays block.
+fn is_sequence_style(style: ValueStyle) -> bool {
+    matches!(style, ValueStyle::BlockSequence | ValueStyle::FlowSequence)
+}
+
 pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<String, ApplyError> {
     let path = if let Some(change) = changes.first() {
         change.path.clone()
@@ -437,11 +444,29 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                     .as_ref()
                     .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
 
-                // Block-sequence arrays: value_range is None; replace the
-                // entire line_range (which covers `key:\n  - item\n …`) with
-                // a freshly serialized block.
-                if span.style == ValueStyle::BlockSequence {
-                    if let Value::Array(items) = new_value {
+                // Sequence styles (block AND flow) carry no scalar value_range;
+                // replace the field's whole serde-aligned line_range with a
+                // freshly serialized field, preserving the original collection
+                // style (block stays block, flow stays flow). This is what makes
+                // a flow list like `tags: ["a", "b"]` editable without fragile
+                // flow-item span parsing.
+                if is_sequence_style(span.style) {
+                    let Value::Array(items) = new_value else {
+                        return Err(ApplyError::CannotMinimalEdit {
+                            path: path.clone(),
+                            reason: format!(
+                                "field {field} is a sequence; set_frontmatter requires an array value"
+                            ),
+                        });
+                    };
+                    let replacement = if span.style == ValueStyle::FlowSequence {
+                        let rendered = serialize_value_preserving_style(new_value, span.style)
+                            .map_err(|e| ApplyError::CannotMinimalEdit {
+                                path: path.clone(),
+                                reason: e.to_string(),
+                            })?;
+                        format!("{field}: {rendered}\n")
+                    } else {
                         let block_items =
                             serialize_array_block_for_new_field(items).map_err(|e| {
                                 ApplyError::CannotMinimalEdit {
@@ -449,25 +474,20 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                                     reason: e.to_string(),
                                 }
                             })?;
-                        let replacement = format!("{field}:\n{block_items}");
-                        edits.push((span.line_range.clone(), replacement));
-                        continue;
-                    }
-                    // Scalar value into a block-sequence field — refuse.
-                    return Err(ApplyError::CannotMinimalEdit {
-                        path: path.clone(),
-                        reason: format!(
-                            "field {field} has style {:?}; set_frontmatter requires a scalar value",
-                            span.style
-                        ),
-                    });
+                        format!("{field}:\n{block_items}")
+                    };
+                    edits.push((span.line_range.clone(), replacement));
+                    continue;
                 }
 
                 let Some(value_range) = span.value_range.clone() else {
+                    // A mapping, block scalar, anchor/alias/tag, or refused
+                    // multi-line value: no editable scalar span. Decline in
+                    // place (an accurate message — not "requires a scalar").
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
                         reason: format!(
-                            "field {field} has style {:?}; set_frontmatter requires a scalar value",
+                            "field {field} value (style {:?}) cannot be minimally edited in place",
                             span.style
                         ),
                     });
@@ -1448,6 +1468,68 @@ mod tests {
             "expected inline flow array: {result}"
         );
         assert!(!result.contains("old"), "old item should be gone: {result}");
+    }
+
+    #[test]
+    fn apply_set_frontmatter_quoted_flow_list_is_editable() {
+        // Round 3 regression fix: a quote inside `[...]` used to over-refuse the
+        // whole field. It now edits through whole-line replacement, and the new
+        // value re-parses to the requested array.
+        let content = "---\ntags: [\"a\", \"b\"]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a", "b"])),
+            ..make_change(
+                "a.md",
+                "tags",
+                "h1",
+                "set_frontmatter",
+                Some(json!(["Foo Bar", "c"])),
+            )
+        };
+        let result = apply_change(content, &change).unwrap();
+        // Re-extract the new value and assert it equals the requested array —
+        // whatever quoting the serializer chose must be valid.
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = extract_frontmatter(&result, &mut diags);
+        assert!(diags.is_empty(), "result must re-parse cleanly: {result}");
+        assert_eq!(
+            fm.unwrap().get("tags").unwrap(),
+            &json!(["Foo Bar", "c"]),
+            "flow list must round-trip: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_remove_frontmatter_deletes_whole_list_of_mappings_block() {
+        // Phantom-boundary fix: `- name:` item lines are not confirmed keys, so
+        // `contacts`'s line_range covers the whole block — remove takes it all.
+        let content = "---\ncontacts:\n- name: Bob\n- name: Alice\nowner: x\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!([{"name": "Bob"}, {"name": "Alice"}])),
+            ..make_change("a.md", "contacts", "h1", "remove_frontmatter", None)
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\nowner: x\n---\nbody\n", "no orphaned items");
+    }
+
+    #[test]
+    fn apply_set_key_escape_collision_does_not_clobber_other_field() {
+        // `"\x61"` (serde `a`) collides with a literal `x61` at the scanner
+        // level; both ambiguous keys refuse, so setting `x61` cannot touch `a`.
+        let content = "---\n\"\\x61\": v\nx61: w\n---\nbody\n";
+        // expected_old_value matches serde's x61 so the precondition passes and
+        // we exercise the span-level refusal specifically.
+        let change = PlannedChange {
+            expected_old_value: Some(json!("w")),
+            ..make_change("a.md", "x61", "h1", "set_frontmatter", Some(json!("NEW")))
+        };
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "ambiguous key must refuse at the span level, got {err:?}"
+        );
+        // And crucially, serde's `a` field is untouched (no write happened).
+        assert!(apply_change(content, &change).is_err());
     }
 
     #[test]
