@@ -772,17 +772,18 @@ fn join_diagnostics(diagnostics: &[crate::core::Diagnostic]) -> String {
         .join("; ")
 }
 
-/// (NRN-141) Parse-degradation check for content rewrites, run at the applier's
-/// compose seam after every content class for a document has been composed.
-/// `apply_rewrite_link` rewrites `[[...]]` across the whole file — frontmatter
-/// values included — without going through the frontmatter editor's own
-/// post-image gate, so a rewrite target carrying YAML-structural bytes can
-/// silently break the block (collapsing every field to null on the next read).
-/// If the ORIGINAL frontmatter parsed as a mapping and the composed result no
-/// longer does, the document is refused unwritten. Deliberately weaker than
-/// mapping-equality: link rewrites legitimately change values, so only parse
-/// degradation refuses — and a document whose frontmatter was already broken
-/// (or absent, or a non-mapping) stays rewritable.
+/// (NRN-141) Parse-degradation check for content rewrites. `apply_rewrite_link`
+/// rewrites `[[...]]` across the whole file — frontmatter values included —
+/// without going through the frontmatter editor's own post-image gate, so a
+/// rewrite target carrying YAML-structural bytes can silently break the block
+/// (collapsing every field to null on the next read). If the BASELINE
+/// frontmatter (the content entering the rewrite: the post-frontmatter-ops
+/// state at the applier's compose seam, or a backlinker's on-disk bytes in the
+/// move/delete cascade) parsed as a mapping and the rewritten result no longer
+/// does, the rewrite is refused. Deliberately weaker than mapping-equality:
+/// link rewrites legitimately change values, so only parse degradation refuses
+/// — and a document whose frontmatter was already broken (or absent, or a
+/// non-mapping) stays rewritable.
 pub(crate) fn verify_frontmatter_not_degraded(
     path: &Utf8Path,
     original: &str,

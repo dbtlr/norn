@@ -355,15 +355,33 @@ fn compose_content_ops<'a>(
 
     // rewrite_link: per-change whole-file scans (matches the prior per-pass
     // granularity so each rewrite's changed/no-op status is tracked independently).
-    for &change in &rewrite_links {
-        let updated = apply_rewrite_link(&content, change)?;
-        let changed = updated != content;
-        units.push(ComposedUnit {
-            changes: vec![change],
-            class: ContentClass::RewriteLink,
-            changed,
-        });
-        content = updated;
+    if !rewrite_links.is_empty() {
+        // NRN-141: rewrite_link rewrites `[[...]]` anywhere in the file,
+        // frontmatter values included, without the frontmatter editor's own
+        // post-image gate — a target carrying YAML-structural bytes can break
+        // the block. The degradation baseline is the state ENTERING the rewrite
+        // stage (post-frontmatter-ops), so frontmatter created by ops earlier
+        // in this same plan is protected too; the check only runs when link
+        // rewrites are actually composed (the other classes splice onto the
+        // verbatim frontmatter prefix and cannot degrade it).
+        let rewrite_baseline = content.clone();
+        for &change in &rewrite_links {
+            let updated = apply_rewrite_link(&content, change)?;
+            let changed = updated != content;
+            units.push(ComposedUnit {
+                changes: vec![change],
+                class: ContentClass::RewriteLink,
+                changed,
+            });
+            content = updated;
+        }
+        if content != rewrite_baseline {
+            crate::standards::apply::verify_frontmatter_not_degraded(
+                path,
+                &rewrite_baseline,
+                &content,
+            )?;
+        }
     }
 
     // replace_body: per-change whole-body rewrites.
@@ -400,15 +418,6 @@ fn compose_content_ops<'a>(
             changed,
         });
         content = updated;
-    }
-
-    // NRN-141: a content rewrite (rewrite_link rewrites `[[...]]` anywhere in
-    // the file, frontmatter values included) can break the frontmatter without
-    // going through the frontmatter editor's own post-image gate. Refuse the
-    // document unwritten if the composition degraded a previously-parsing
-    // frontmatter block.
-    if content != original {
-        crate::standards::apply::verify_frontmatter_not_degraded(path, original, &content)?;
     }
 
     Ok(ComposedFile { content, units })
@@ -1218,6 +1227,57 @@ mod tests {
         assert_eq!(
             fm.unwrap().get("up"),
             Some(&serde_json::json!("[[parent-two]]"))
+        );
+    }
+
+    #[test]
+    fn rewrite_breaking_same_plan_created_frontmatter_is_refused() {
+        // NRN-141 round 3: the degradation baseline was the pre-ALL-ops on-disk
+        // original, so frontmatter CREATED by ops in the same plan escaped the
+        // check — add_frontmatter `up: '[[Parent]]'` on a frontmatter-less doc,
+        // then a structural-byte rewrite_link in the same plan, wrote the broken
+        // block (the on-disk original had no frontmatter → early Ok). The
+        // baseline is now the content state ENTERING the rewrite stage
+        // (post-frontmatter ops), so the same-plan-created mapping is protected
+        // too. add_frontmatter single-quotes the wikilink, so the structural
+        // byte here is a single quote in the new target.
+        let doc = "see [[Parent]]\n";
+        let (_tmp, root, index, hash) =
+            make_vault_with_doc("norn-orch-rewrite-created-", "doc.md", doc);
+        let mut plan = rewrite_link_plan(&root, "doc.md", &hash, "Parent", "Parent's Two");
+        plan.changes.insert(
+            0,
+            PlannedChange {
+                change_id: "add-up".into(),
+                path: "doc.md".into(),
+                document_hash: hash.clone(),
+                finding_code: "operator-mutation".into(),
+                finding_rule: None,
+                repair_rule: "vault-set".into(),
+                operation: "add_frontmatter".into(),
+                field: Some("up".into()),
+                expected_old_value: None,
+                new_value: Some(serde_json::json!("[[Parent]]")),
+                destination: None,
+                link_risk: None,
+                warnings: Vec::new(),
+                force: false,
+                parents: false,
+            },
+        );
+        plan.summary.planned_changes = 2;
+
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false)
+            .expect_err("breaking same-plan-created frontmatter must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("doc.md") && msg.contains("frontmatter"),
+            "refusal must name the doc and the broken frontmatter, got: {msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("doc.md")).unwrap(),
+            doc,
+            "file must be byte-identical after the refusal"
         );
     }
 
