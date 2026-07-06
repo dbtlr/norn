@@ -190,6 +190,23 @@ pub fn top_level_property_spans(
         *name_counts.entry(candidate.name.as_str()).or_insert(0) += 1;
     }
 
+    // NRN-141 whole-document guard: a scanner span is only ever safe when the
+    // scan agrees with serde across the ENTIRE block. If any serde key cannot be
+    // located to exactly one candidate line — zero candidates (a key the scanner
+    // mis-decodes, e.g. double-quoted `"\x61"` → serde `a`, scanner `x61`) or
+    // more than one — then the scan and the parser disagree somewhere, and the
+    // mis-located key's bytes would be absorbed into a neighbor's `line_range`
+    // and silently deleted on `remove`/`set`. There is no safe per-field split
+    // (the record's decision is whole-document), so refuse spans for everything:
+    // `apply` then reports each field not-editable and never writes a corrupt
+    // document. NRN-140 replaces this scanner with a real span parser.
+    let every_key_uniquely_located = object
+        .keys()
+        .all(|key| name_counts.get(key.as_str()).copied() == Some(1));
+    if !every_key_uniquely_located {
+        return Vec::new();
+    }
+
     // (A)+(C) A candidate is CONFIRMED — a real field and a trustworthy
     // `line_range` boundary — only if its name is a serde key claimed by exactly
     // one candidate. Phantoms (a `- name:` item, a `key:`-lookalike inside a
@@ -1465,6 +1482,51 @@ mod locator_matrix_tests {
         assert!(
             find(&s, "a").is_none(),
             "unmatched `a` must not be editable"
+        );
+    }
+
+    /// NRN-141 GUARD (zero candidates): `"\x61"` decodes to serde `a`, but the
+    /// scanner decodes the key line as `x61`, so serde key `a` matches no
+    /// candidate line. Without a whole-document refusal, `a`'s bytes would be
+    /// absorbed into the preceding confirmed field (`title`) — a `remove`/`set`
+    /// of `title` would then silently delete the unrelated real `a`. The scanner
+    /// must instead refuse spans for the whole document.
+    #[test]
+    fn unlocatable_serde_key_refuses_whole_document() {
+        let content = "---\ntitle: hi\n\"\\x61\": 1\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("a") && o.contains_key("title"),
+            "precondition: serde sees keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "a serde key with no candidate line must refuse the whole doc, got {s:?}"
+        );
+    }
+
+    /// NRN-141 GUARD (whole-doc, not per-field): a key-escape collision (`"\x61"`
+    /// and a literal `x61` both scanner-decode to `x61`; serde sees distinct keys
+    /// `a` and `x61`) sits above a perfectly well-formed `keep`. Pre-guard, `keep`
+    /// resolved to exactly one candidate and stayed editable — but `a` is
+    /// unlocatable, so trusting `keep`'s boundaries means trusting a scan that
+    /// already disagrees with serde elsewhere in the block. The refusal decision
+    /// is whole-document: `keep` gets no span either.
+    #[test]
+    fn collision_plus_wellformed_field_refuses_whole_document() {
+        let content = "---\n\"\\x61\": v\nx61: w\nkeep: z\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("a") && o.contains_key("x61") && o.contains_key("keep"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "an unlocatable sibling must refuse the whole doc, including well-formed `keep`, got {s:?}"
         );
     }
 

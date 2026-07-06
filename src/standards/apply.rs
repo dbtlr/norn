@@ -1533,6 +1533,27 @@ mod tests {
     }
 
     #[test]
+    fn apply_refuses_whole_doc_when_a_serde_key_is_unlocatable() {
+        // NRN-141: `"\x61"` (serde `a`) is mis-decoded by the scanner, so serde
+        // key `a` has no candidate line. Setting the well-formed `title` on the
+        // same document must refuse (the whole-doc span refusal), never write —
+        // otherwise `a` would be absorbed into `title`'s line and clobbered.
+        let content = "---\ntitle: hi\n\"\\x61\": 1\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "unlocatable sibling key must force a clean refusal, got {err:?}"
+        );
+        // No write path is reached — a remove of the same field also refuses.
+        let remove = make_change("a.md", "title", "h1", "remove_frontmatter", None);
+        assert!(apply_change(content, &remove).is_err());
+    }
+
+    #[test]
     fn apply_set_frontmatter_scalar_into_scalar_still_works() {
         let content = "---\nstatus: draft\n---\nbody\n";
         let change = PlannedChange {
