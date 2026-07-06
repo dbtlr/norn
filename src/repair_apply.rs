@@ -402,6 +402,15 @@ fn compose_content_ops<'a>(
         content = updated;
     }
 
+    // NRN-141: a content rewrite (rewrite_link rewrites `[[...]]` anywhere in
+    // the file, frontmatter values included) can break the frontmatter without
+    // going through the frontmatter editor's own post-image gate. Refuse the
+    // document unwritten if the composition degraded a previously-parsing
+    // frontmatter block.
+    if content != original {
+        crate::standards::apply::verify_frontmatter_not_degraded(path, original, &content)?;
+    }
+
     Ok(ComposedFile { content, units })
 }
 
@@ -1057,6 +1066,99 @@ mod tests {
             skipped_findings: Vec::new(),
             footnotes: Vec::new(),
         }
+    }
+
+    fn rewrite_link_plan(
+        vault_root: &camino::Utf8PathBuf,
+        doc_rel: &str,
+        hash: &str,
+        old_target: &str,
+        new_target: &str,
+    ) -> RepairPlan {
+        RepairPlan {
+            schema_version: REPAIR_PLAN_SCHEMA_VERSION,
+            vault_root: vault_root.clone(),
+            source_filters: RepairPlanFilters::default(),
+            summary: RepairPlanSummary {
+                findings: 0,
+                planned_changes: 1,
+                skipped: SkippedSummary::default(),
+            },
+            changes: vec![PlannedChange {
+                change_id: "rewrite-test".into(),
+                path: doc_rel.into(),
+                document_hash: hash.to_string(),
+                finding_code: "link-target-missing".into(),
+                finding_rule: None,
+                repair_rule: "operator-request".into(),
+                operation: "rewrite_link".into(),
+                field: None,
+                expected_old_value: Some(serde_json::json!(old_target)),
+                new_value: Some(serde_json::json!(new_target)),
+                destination: None,
+                link_risk: None,
+                warnings: Vec::new(),
+                force: false,
+                parents: false,
+            }],
+            skipped_findings: Vec::new(),
+            footnotes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rewrite_link_that_breaks_frontmatter_is_refused_unwritten() {
+        // NRN-141: apply_rewrite_link rewrites `[[...]]` across the WHOLE file,
+        // frontmatter values included, without the frontmatter editor's own
+        // post-image gate. A new target carrying YAML-structural bytes (a `"`
+        // inside the quoted-wikilink convention) turns `up: "[[Parent]]"` into
+        // `up: "[[Parent "Two"]]"` — unparseable YAML that collapses the whole
+        // mapping to null on the next read. The compose seam's parse-degradation
+        // check must refuse the document unwritten.
+        let doc = "---\nup: \"[[Parent]]\"\n---\nsee [[Parent]]\n";
+        let (_tmp, root, index, hash) =
+            make_vault_with_doc("norn-orch-rewrite-fmbreak-", "doc.md", doc);
+        let plan = rewrite_link_plan(&root, "doc.md", &hash, "Parent", "Parent \"Two\"");
+
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false)
+            .expect_err("a frontmatter-breaking rewrite must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("doc.md") && msg.contains("frontmatter"),
+            "refusal must name the doc and the broken frontmatter, got: {msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("doc.md")).unwrap(),
+            doc,
+            "file must be byte-identical after the refusal"
+        );
+    }
+
+    #[test]
+    fn rewrite_link_benign_frontmatter_rewrite_still_applies() {
+        // The degradation check is deliberately weaker than mapping-equality:
+        // a rewrite legitimately changes frontmatter values, so a structural-
+        // char-free target applies cleanly (frontmatter and body both rewritten).
+        let doc = "---\nup: \"[[Parent]]\"\n---\nsee [[Parent]]\n";
+        let (_tmp, root, index, hash) =
+            make_vault_with_doc("norn-orch-rewrite-benign-", "doc.md", doc);
+        let plan = rewrite_link_plan(&root, "doc.md", &hash, "Parent", "parent-two");
+
+        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        assert_eq!(report.changed_files.len(), 1);
+        let written = std::fs::read_to_string(root.join("doc.md")).unwrap();
+        assert_eq!(
+            written,
+            "---\nup: \"[[parent-two]]\"\n---\nsee [[parent-two]]\n"
+        );
+        // The rewritten frontmatter still parses to a mapping.
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = crate::frontmatter::extract_frontmatter(&written, &mut diags);
+        assert!(diags.is_empty());
+        assert_eq!(
+            fm.unwrap().get("up"),
+            Some(&serde_json::json!("[[parent-two]]"))
+        );
     }
 
     #[test]

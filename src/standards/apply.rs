@@ -707,8 +707,12 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
 /// are compared, so key order and formatting are irrelevant. On a parse failure
 /// or a mismatch, refuse: the span locator is a best-effort scanner (NRN-140
 /// replaces it), so this is the trust-preserving backstop that converts a
-/// corrupting write into a clean decline. Runs on every frontmatter-mutating
-/// path, including a document whose frontmatter was freshly synthesized.
+/// corrupting write into a clean decline. Runs on every path through the
+/// frontmatter-op editor ([`apply_file_changes`]), including a document whose
+/// frontmatter was freshly synthesized. Content rewrites that mutate frontmatter
+/// values *outside* this editor (`rewrite_link`) are covered by the weaker
+/// parse-degradation check [`verify_frontmatter_not_degraded`] at the applier's
+/// compose seam.
 fn verify_post_image(
     path: &Utf8PathBuf,
     content: &str,
@@ -773,6 +777,52 @@ fn post_image_matches(
             Some(Value::Null) => matches!(expected_value, Value::Array(items) if items.is_empty()),
             _ => false,
         })
+}
+
+/// (NRN-141) Parse-degradation check for content rewrites, run at the applier's
+/// compose seam after every content class for a document has been composed.
+/// `apply_rewrite_link` rewrites `[[...]]` across the whole file — frontmatter
+/// values included — without going through the frontmatter editor's own
+/// post-image gate, so a rewrite target carrying YAML-structural bytes can
+/// silently break the block (collapsing every field to null on the next read).
+/// If the ORIGINAL frontmatter parsed as a mapping and the composed result no
+/// longer does, the document is refused unwritten. Deliberately weaker than
+/// mapping-equality: link rewrites legitimately change values, so only parse
+/// degradation refuses — and a document whose frontmatter was already broken
+/// (or absent, or a non-mapping) stays rewritable.
+pub(crate) fn verify_frontmatter_not_degraded(
+    path: &Utf8Path,
+    original: &str,
+    composed: &str,
+) -> Result<(), ApplyError> {
+    let mut diagnostics = Vec::new();
+    let (original_fm, _, _, _) = extract_frontmatter(original, &mut diagnostics);
+    if !diagnostics.is_empty() || !matches!(original_fm, Some(Value::Object(_))) {
+        return Ok(());
+    }
+    let mut diagnostics = Vec::new();
+    let (composed_fm, _, _, _) = extract_frontmatter(composed, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.to_path_buf(),
+            detail: format!(
+                "a content rewrite broke the frontmatter: {}",
+                diagnostics
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        });
+    }
+    if !matches!(composed_fm, Some(Value::Object(_))) {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.to_path_buf(),
+            detail: "a content rewrite broke the frontmatter (no longer a top-level mapping)"
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 /// The reason for a span-absent `set`/`remove`, told truthfully from the parsed
