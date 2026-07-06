@@ -786,32 +786,18 @@ pub fn apply_repair_plan_with_context(
                 resolved_path
             ));
         }
-        if let Some(parent) = full.parent() {
-            if !parent.as_std_path().exists() {
-                if ctx.parents {
-                    if !dry_run {
-                        fs::create_dir_all(parent.as_std_path()).with_context(|| {
-                            format!("create_document: create parent dirs for {}", resolved_path)
-                        })?;
-                    }
-                } else {
+        let parent_to_create = match full.parent() {
+            Some(parent) if !parent.as_std_path().exists() => {
+                if !ctx.parents {
                     return Err(anyhow::anyhow!(
                         "create_document: parent directory does not exist (use -p / --parents to auto-create): {}",
                         resolved_path
                     ));
                 }
+                Some(parent.to_path_buf())
             }
-        }
-
-        if dry_run {
-            report.created_documents.push(CreateDocumentResult {
-                path: resolved_path.clone(),
-            });
-            if !report.changed_files.contains(&resolved_path) {
-                report.changed_files.push(resolved_path.clone());
-            }
-            continue;
-        }
+            _ => None,
+        };
 
         // Serialize the document.
         let fm_btree: std::collections::BTreeMap<String, serde_json::Value> =
@@ -827,8 +813,26 @@ pub fn apply_repair_plan_with_context(
         // top-level mapping is refused unwritten — a refusal is recoverable, a
         // written document whose frontmatter can never be read back is not. An
         // empty frontmatter block reads back as YAML null; that is the empty
-        // mapping, not a refusal.
+        // mapping, not a refusal. Runs on dry-run too, so a plan preview refuses
+        // exactly where the real apply would; and it runs BEFORE parent-dir
+        // creation, so a refusal leaves no empty directory behind.
         verify_created_document(&resolved_path, &contents)?;
+
+        if dry_run {
+            report.created_documents.push(CreateDocumentResult {
+                path: resolved_path.clone(),
+            });
+            if !report.changed_files.contains(&resolved_path) {
+                report.changed_files.push(resolved_path.clone());
+            }
+            continue;
+        }
+
+        if let Some(parent) = parent_to_create {
+            fs::create_dir_all(parent.as_std_path()).with_context(|| {
+                format!("create_document: create parent dirs for {}", resolved_path)
+            })?;
+        }
 
         // Atomic write: write to a sibling temp file, then rename into place.
         atomic_write(&full, &contents)
@@ -1555,6 +1559,55 @@ mod tests {
         assert!(
             !root.join("foo.md").as_std_path().exists(),
             "nothing may be written on a refused create"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_dry_run_refuses_unparseable_frontmatter() {
+        // NRN-142: dry-run must run the same serialize + gate as the real apply,
+        // so a plan preview refuses exactly where the apply would — no
+        // "would create" for a document the real apply then declines.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-dry-badkey-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("k".repeat(1100), serde_json::json!("v"));
+        let plan = create_plan(&root, "foo.md", fm, "body\n", false);
+
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("foo.md") && msg.contains("parse"),
+            "dry-run must surface the gate refusal, got: {msg}"
+        );
+        assert!(
+            !root.join("foo.md").as_std_path().exists(),
+            "dry-run must not touch disk"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_gate_refusal_leaves_no_parent_dir() {
+        // NRN-142: a `-p` create refused by the gate must be side-effect free —
+        // parent directories are created only after the gate passes, so a
+        // refusal leaves no empty directory behind.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-nodirs-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("k".repeat(1100), serde_json::json!("v"));
+        let plan = create_plan(&root, "sub/dir/foo.md", fm, "body\n", false);
+
+        let ctx = CreateApplyContext {
+            parents: true,
+            ..Default::default()
+        };
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let err = apply_repair_plan_with_context(
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("parse"), "got: {err}");
+        assert!(
+            !root.join("sub").as_std_path().exists(),
+            "a refused create must not leave parent directories behind"
         );
     }
 
