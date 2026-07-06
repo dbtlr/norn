@@ -61,6 +61,9 @@ pub enum ApplyError {
     #[error("frontmatter parse failed for {path}: {message}")]
     FrontmatterParseFailed { path: Utf8PathBuf, message: String },
 
+    #[error("refusing write for {path}: post-edit frontmatter failed verification ({detail})")]
+    PostImageVerificationFailed { path: Utf8PathBuf, detail: String },
+
     #[error("edit op failed for {path}: {message}")]
     EditFailed {
         path: camino::Utf8PathBuf,
@@ -484,6 +487,11 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
 
     let spans = top_level_property_spans(content, frontmatter_range.clone(), current_object);
 
+    // The mapping the composed ops intend to produce: the parsed original with
+    // each op's semantic effect applied. The post-image gate at the end compares
+    // the re-parsed result against this (NRN-141).
+    let mut expected: serde_json::Map<String, Value> = current_object.clone();
+
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
 
     for change in changes {
@@ -511,6 +519,8 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                     .new_value
                     .as_ref()
                     .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
+                // Mirror the op's semantic effect for the post-image gate below.
+                expected.insert(field.to_string(), new_value.clone());
 
                 // Sequence styles (block AND flow) carry no scalar value_range;
                 // replace the field's whole serde-aligned line_range with a
@@ -588,6 +598,8 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                         reason: format!("field {field} not present in frontmatter"),
                     });
                 };
+                // Mirror the op's semantic effect for the post-image gate below.
+                expected.remove(field);
                 edits.push((span.line_range.clone(), String::new()));
             }
             "add_frontmatter" => {
@@ -618,6 +630,8 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                     .new_value
                     .as_ref()
                     .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
+                // Mirror the op's semantic effect for the post-image gate below.
+                expected.insert(field.to_string(), new_value.clone());
                 // Insert at end of frontmatter block. extract_frontmatter
                 // returns a range over the YAML content (between the leading
                 // and trailing `---` lines). It ends at the byte just after
@@ -677,7 +691,88 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
     for (range, replacement) in edits {
         out.replace_range(range, &replacement);
     }
+
+    // NRN-141 post-image gate: the composed frontmatter must re-parse to exactly
+    // the mapping the ops intended. A splice that produced unparseable YAML (a
+    // duplicate key, an unclosed flow) or silently dropped/renamed a key (an
+    // unquoted `#foo:` line YAML reads as a comment) is caught here and refused
+    // before any write — a wrong write corrupts a document, a refusal does not.
+    verify_post_image(&path, &out, &expected)?;
+
     Ok(out)
+}
+
+/// (NRN-141) Re-parse the composed frontmatter and confirm it equals `expected`
+/// — the parsed original with each op's semantic effect applied. Parsed mappings
+/// are compared, so key order and formatting are irrelevant. On a parse failure
+/// or a mismatch, refuse: the span locator is a best-effort scanner (NRN-140
+/// replaces it), so this is the trust-preserving backstop that converts a
+/// corrupting write into a clean decline. Runs on every frontmatter-mutating
+/// path, including a document whose frontmatter was freshly synthesized.
+fn verify_post_image(
+    path: &Utf8PathBuf,
+    content: &str,
+    expected: &serde_json::Map<String, Value>,
+) -> Result<(), ApplyError> {
+    let mut diagnostics = Vec::new();
+    let (frontmatter, frontmatter_range, _, _) = extract_frontmatter(content, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.clone(),
+            detail: format!(
+                "result no longer parses: {}",
+                diagnostics
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        });
+    }
+    let empty = serde_json::Map::new();
+    let actual = match (&frontmatter, &frontmatter_range) {
+        (Some(Value::Object(map)), _) => map,
+        // An emptied block re-parses as YAML null; treat null over an empty /
+        // whitespace-only block as the empty mapping (mirrors the input gate).
+        (Some(Value::Null), Some(range)) if content[range.clone()].trim().is_empty() => &empty,
+        (None, None) => &empty,
+        _ => {
+            return Err(ApplyError::PostImageVerificationFailed {
+                path: path.clone(),
+                detail: "result frontmatter is no longer a top-level mapping".into(),
+            });
+        }
+    };
+    if !post_image_matches(expected, actual) {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.clone(),
+            detail: "result frontmatter does not match the intended fields".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the re-parsed `actual` frontmatter matches the intended `expected`,
+/// tolerating the one benign serializer normalization: an empty array is emitted
+/// as a bare `key:` line, which YAML reads back as null — so an expected `[]`
+/// matches an actual null for that key. `[]` and null both mean "no elements,"
+/// so this is a serialization choice, not data loss; every other difference
+/// (a dropped key, a wrong scalar, a non-empty array read as null) is a real
+/// mismatch and refuses.
+fn post_image_matches(
+    expected: &serde_json::Map<String, Value>,
+    actual: &serde_json::Map<String, Value>,
+) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    expected
+        .iter()
+        .all(|(key, expected_value)| match actual.get(key) {
+            Some(actual_value) if actual_value == expected_value => true,
+            Some(Value::Null) => matches!(expected_value, Value::Array(items) if items.is_empty()),
+            _ => false,
+        })
 }
 
 fn check_expected_old_value(
@@ -2456,6 +2551,97 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("good-backlinker.md")).unwrap(),
             "see [[b]] here\n"
+        );
+    }
+
+    // ── NRN-141 post-image verification gate ──────────────────────────────────
+
+    #[test]
+    fn apply_v2_phantom_remove_is_refused_not_corrupted() {
+        // V2: `"\x62ar"` decodes to serde `bar`, but the scanner reads `x62ar`,
+        // and the flow value `foo: [a,` / `"b]c",` / `bar: v]` hides an interior
+        // `bar: v]` phantom. On the buggy absorb, that phantom is confirmed as
+        // `bar`'s span, so `remove bar` deletes to block end and leaves an
+        // unclosed flow (`foo: [a,` / `"b]c",`) that re-parses to null — silent
+        // corruption. This asserts the durable property (a refusal, no write);
+        // the refusal mechanism shifts from the post-image gate (this commit) to
+        // the quote-aware absorb guard (NRN-141 absorb fix) — see the guard-
+        // specific test below.
+        let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("realvalue")),
+            ..make_change("a.md", "bar", "h1", "remove_frontmatter", None)
+        };
+        let result = apply_change(content, &change);
+        assert!(
+            result.is_err(),
+            "unclosed-flow corruption must be refused, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn apply_post_image_gate_refuses_hashfoo_collection_set() {
+        // Pre-existing corruption converted to a refusal: a `"#foo"` key emits an
+        // unquoted `#foo:` line on a collection `set` — which YAML reads as a
+        // comment, dropping the key. The post-image loses `#foo`, so the gate
+        // refuses rather than writing frontmatter that silently lost the field.
+        let content = "---\n\"#foo\": [a, b]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a", "b"])),
+            ..make_change("a.md", "#foo", "h1", "set_frontmatter", Some(json!(["x"])))
+        };
+        let result = apply_change(content, &change);
+        assert!(
+            matches!(result, Err(ApplyError::PostImageVerificationFailed { .. })),
+            "a key that reserializes to a comment line must be refused, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn apply_post_image_gate_refuses_colon_key_collection_set() {
+        // Same class: a `"a: b"` key emits `a: b: [..]` on a collection `set`,
+        // which is not valid YAML — the post-image no longer parses, so the gate
+        // refuses instead of writing a frontmatter-parse-failed document.
+        let content = "---\n\"a: b\": [x]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["x"])),
+            ..make_change("a.md", "a: b", "h1", "set_frontmatter", Some(json!(["y"])))
+        };
+        let result = apply_change(content, &change);
+        assert!(
+            matches!(result, Err(ApplyError::PostImageVerificationFailed { .. })),
+            "an invalid reserialized key line must be refused, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn apply_post_image_gate_allows_ordinary_multi_op_doc() {
+        // The gate must not false-positive: a normal set + remove + add batch
+        // composes to a document that re-parses to exactly the intended mapping,
+        // so it applies unchanged in behavior.
+        let content = "---\ntitle: hi\nstatus: draft\nkind: old\n---\nbody\n";
+        let changes = vec![
+            PlannedChange {
+                expected_old_value: Some(json!("draft")),
+                ..make_change(
+                    "a.md",
+                    "status",
+                    "h1",
+                    "set_frontmatter",
+                    Some(json!("done")),
+                )
+            },
+            PlannedChange {
+                expected_old_value: Some(json!("old")),
+                ..make_change("a.md", "kind", "h1", "remove_frontmatter", None)
+            },
+            make_change("a.md", "author", "h1", "add_frontmatter", Some(json!("me"))),
+        ];
+        let refs: Vec<&PlannedChange> = changes.iter().collect();
+        let result = apply_file_changes(content, &refs).expect("ordinary batch must apply");
+        assert_eq!(
+            result,
+            "---\ntitle: hi\nstatus: done\nauthor: me\n---\nbody\n"
         );
     }
 }

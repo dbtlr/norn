@@ -841,4 +841,56 @@ mod tests {
         assert_eq!(cascade.rewrites.len(), 1);
         assert_eq!(cascade.rewrites[0].file, "b.md");
     }
+
+    #[test]
+    fn migrate_add_frontmatter_on_ambiguous_key_doc_is_refused_not_duplicated() {
+        // V1 (NRN-141): `"\x61"` decodes to serde key `a` but the scanner reads
+        // `x61`, so the span locator refuses the whole document (empty spans). A
+        // migrate-plan `add_frontmatter` for the ALREADY-present `title` then
+        // slips past the `FieldAlreadyPresent` refusal (which keys off span
+        // presence) and would splice a duplicate `title:` line — unparseable YAML
+        // that drops every field while the run reports success. The post-image
+        // gate must refuse before any write, leaving the file byte-identical.
+        let tmp = tempfile::Builder::new()
+            .prefix("applier-v1-ambig-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        let doc = "---\ntitle: hi\n\"\\x61\": 1\nstatus: draft\n---\nbody\n";
+        std::fs::write(root.join("doc.md"), doc).unwrap();
+        let index = crate::graph::build_index(Utf8Path::from_path(root).unwrap()).unwrap();
+
+        let plan = MigrationPlan {
+            schema_version: 1,
+            vault_root: root.to_string_lossy().to_string(),
+            generator: None,
+            generated_at: None,
+            operations: vec![MigrationOp {
+                kind: "add_frontmatter".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({
+                    "path": "doc.md", "field": "title", "new_value": "DUP"
+                }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let ctx = ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+        };
+        let result = apply_migration_plan(&plan, &index, ctx, &mut test_sink());
+        assert!(
+            result.is_err(),
+            "duplicate-key splice on an ambiguous-key doc must be refused, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("doc.md")).unwrap(),
+            doc,
+            "file must be byte-identical after the refusal"
+        );
+    }
 }
