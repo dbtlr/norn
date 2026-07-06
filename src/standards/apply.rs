@@ -351,6 +351,74 @@ fn is_sequence_style(style: ValueStyle) -> bool {
     matches!(style, ValueStyle::BlockSequence | ValueStyle::FlowSequence)
 }
 
+/// The trailing same-line YAML comment (with its leading whitespace, excluding
+/// the newline) on the single line `content[line_range]`, or `""` when there is
+/// none. Only single-line ranges are handled — a multi-line flow value's
+/// comment recovery is out of scope, so its comment is dropped as before.
+/// A `#` inside a quoted scalar is never a comment (NRN-141).
+fn single_line_trailing_comment(content: &str, line_range: &Range<usize>) -> String {
+    let body = content[line_range.clone()].trim_end_matches(['\r', '\n']);
+    // A multi-line range (unclosed flow spanning continuation lines) is out of
+    // scope; leave its comment untouched (dropped, as before).
+    if body.contains('\n') {
+        return String::new();
+    }
+    trailing_line_comment(body).unwrap_or("").to_string()
+}
+
+/// Locates a trailing YAML comment in a single newline-free `line`. Returns the
+/// slice from the whitespace preceding `#` to end of line (e.g. `"  # note"`),
+/// or `None`. A comment opener is a `#` preceded by whitespace and NOT inside a
+/// single- or double-quoted scalar (honoring `''` and `\` escapes), matching
+/// where YAML actually begins a comment.
+fn trailing_line_comment(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut comment_start = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_single {
+            if b == b'\'' {
+                // A doubled `''` is an escaped quote, still inside the scalar.
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+        } else if in_double {
+            if b == b'\\' {
+                // Skip the escaped byte (e.g. `\"`).
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_double = false;
+            }
+        } else {
+            match b {
+                b'\'' => in_single = true,
+                b'"' => in_double = true,
+                b'#' if i > 0 && matches!(bytes[i - 1], b' ' | b'\t') => {
+                    comment_start = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    let start = comment_start?;
+    // Back up over the whitespace run that precedes the `#` so it is preserved.
+    let mut ws = start;
+    while ws > 0 && matches!(bytes[ws - 1], b' ' | b'\t') {
+        ws -= 1;
+    }
+    Some(&line[ws..])
+}
+
 pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<String, ApplyError> {
     let path = if let Some(change) = changes.first() {
         change.path.clone()
@@ -465,7 +533,11 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                                 path: path.clone(),
                                 reason: e.to_string(),
                             })?;
-                        format!("{field}: {rendered}\n")
+                        // A flow `set` rewrites the whole line, so a trailing
+                        // same-line comment would be dropped. Recover it (with its
+                        // leading whitespace) for the single-line case (NRN-141).
+                        let comment = single_line_trailing_comment(content, &span.line_range);
+                        format!("{field}: {rendered}{comment}\n")
                     } else {
                         let block_items =
                             serialize_array_block_for_new_field(items).map_err(|e| {
@@ -1497,6 +1569,56 @@ mod tests {
             &json!(["Foo Bar", "c"]),
             "flow list must round-trip: {result}"
         );
+    }
+
+    #[test]
+    fn apply_set_flow_list_preserves_trailing_comment() {
+        // NRN-141 P3: a flow-list `set` replaces the whole line via line_range,
+        // which dropped a trailing same-line comment. The comment (with its
+        // leading whitespace) is now re-appended after the replacement.
+        let content = "---\ntags: [a, b]  # note\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a", "b"])),
+            ..make_change("a.md", "tags", "h1", "set_frontmatter", Some(json!(["x"])))
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntags: [x]  # note\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_set_flow_list_does_not_treat_quoted_hash_as_comment() {
+        // A `#` inside a quoted scalar is not a comment opener — it must not be
+        // captured as a trailing comment, and a real trailing comment after the
+        // quoted `#` must still be preserved.
+        let content = "---\ntags: [\"a#b\"]  # real\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a#b"])),
+            ..make_change("a.md", "tags", "h1", "set_frontmatter", Some(json!(["c"])))
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntags: [c]  # real\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_set_flow_list_quoted_hash_only_captures_no_comment() {
+        // With only a quoted `#` and no real comment, nothing is appended and
+        // the value round-trips cleanly (no spurious `# ...` bytes).
+        let content = "---\ntags: [\"a#b\"]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a#b"])),
+            ..make_change(
+                "a.md",
+                "tags",
+                "h1",
+                "set_frontmatter",
+                Some(json!(["c#d"])),
+            )
+        };
+        let result = apply_change(content, &change).unwrap();
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = extract_frontmatter(&result, &mut diags);
+        assert!(diags.is_empty(), "result must re-parse cleanly: {result}");
+        assert_eq!(fm.unwrap().get("tags").unwrap(), &json!(["c#d"]));
     }
 
     #[test]
