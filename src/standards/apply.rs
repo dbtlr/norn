@@ -2879,6 +2879,65 @@ mod tests {
         assert_eq!(fm["title"], json!("hi"));
     }
 
+    // ── NRN-141/NRN-142 post-image gate regression pins ──────────────────────
+    // Direct pins on both refusal arms of `verify_post_image` (the key-quoting
+    // vectors that used to exercise them now apply cleanly). A future
+    // gate-weakening refactor must fail these.
+
+    #[test]
+    fn verify_post_image_refuses_mapping_mismatch() {
+        // The composed frontmatter parses fine but is not the intended mapping —
+        // the semantic-mismatch arm must fire.
+        let mut expected = serde_json::Map::new();
+        expected.insert("status".to_string(), json!("done"));
+        let content = "---\nstatus: draft\n---\nbody\n";
+        let err = verify_post_image(&Utf8PathBuf::from("a.md"), content, &expected).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::PostImageVerificationFailed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_post_image_refuses_unparseable_frontmatter() {
+        // The composed frontmatter no longer parses — the parse-failure arm must
+        // fire regardless of what was intended.
+        let expected = serde_json::Map::new();
+        let content = "---\nkey: [unclosed\n---\nbody\n";
+        let err = verify_post_image(&Utf8PathBuf::from("a.md"), content, &expected).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::PostImageVerificationFailed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_post_image_accepts_matching_mapping() {
+        // Positive control: a post-image equal to the intended mapping passes.
+        let mut expected = serde_json::Map::new();
+        expected.insert("status".to_string(), json!("done"));
+        let content = "---\nstatus: done\n---\nbody\n";
+        verify_post_image(&Utf8PathBuf::from("a.md"), content, &expected)
+            .expect("matching post-image must pass");
+    }
+
+    #[test]
+    fn apply_gate_refuses_key_no_quoting_can_represent() {
+        // Integration pin: `PostImageVerificationFailed` still surfaces through
+        // `apply_file_changes`. A field name past YAML's 1024-byte simple-key
+        // parse limit cannot round-trip at ANY quoting rank, so render_key's
+        // terminal fallback splices a key line the reader rejects — the gate
+        // must convert that write into a refusal.
+        let content = "---\ntitle: hi\n---\nbody\n";
+        let long_key = "k".repeat(1100);
+        let change = make_change("a.md", &long_key, "h1", "add_frontmatter", Some(json!("v")));
+        let result = apply_change(content, &change);
+        assert!(
+            matches!(result, Err(ApplyError::PostImageVerificationFailed { .. })),
+            "unrepresentable key must be refused by the gate, got {result:?}"
+        );
+    }
+
     #[test]
     fn apply_post_image_gate_allows_ordinary_multi_op_doc() {
         // The gate must not false-positive: a normal set + remove + add batch
