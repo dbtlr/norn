@@ -1106,6 +1106,66 @@ mod tests {
         }
     }
 
+    fn remove_field_plan(
+        vault_root: &camino::Utf8PathBuf,
+        doc_rel: &str,
+        hash: &str,
+        field: &str,
+        expected_old: serde_json::Value,
+    ) -> RepairPlan {
+        RepairPlan {
+            schema_version: REPAIR_PLAN_SCHEMA_VERSION,
+            vault_root: vault_root.clone(),
+            source_filters: RepairPlanFilters::default(),
+            summary: RepairPlanSummary {
+                findings: 0,
+                planned_changes: 1,
+                skipped: SkippedSummary::default(),
+            },
+            changes: vec![PlannedChange {
+                change_id: "remove-test".into(),
+                path: doc_rel.into(),
+                document_hash: hash.to_string(),
+                finding_code: "operator-mutation".into(),
+                finding_rule: None,
+                repair_rule: "vault-set".into(),
+                operation: "remove_frontmatter".into(),
+                field: Some(field.to_string()),
+                expected_old_value: Some(expected_old),
+                new_value: None,
+                destination: None,
+                link_risk: None,
+                warnings: Vec::new(),
+                force: false,
+                parents: false,
+            }],
+            skipped_findings: Vec::new(),
+            footnotes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn remove_last_frontmatter_field_applies_through_compose_path() {
+        // NRN-141 round 3: removing the ONLY frontmatter field leaves an empty
+        // `---\n---\n` block, which re-parses as YAML null. verify_post_image
+        // accepts that as the empty mapping, but the compose seam's degradation
+        // check tested raw is-a-mapping on the composed side and refused this
+        // perfectly valid edit whole. The composed side must accept
+        // mapping-or-empty-block.
+        let doc = "---\nstatus: draft\n---\nbody\n";
+        let (_tmp, root, index, hash) =
+            make_vault_with_doc("norn-orch-remove-last-", "doc.md", doc);
+        let plan = remove_field_plan(&root, "doc.md", &hash, "status", serde_json::json!("draft"));
+
+        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false)
+            .expect("removing the last frontmatter field must apply");
+        assert_eq!(report.changed_files.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("doc.md")).unwrap(),
+            "---\n---\nbody\n"
+        );
+    }
+
     #[test]
     fn rewrite_link_that_breaks_frontmatter_is_refused_unwritten() {
         // NRN-141: apply_rewrite_link rewrites `[[...]]` across the WHOLE file,

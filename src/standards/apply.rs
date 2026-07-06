@@ -794,7 +794,7 @@ pub(crate) fn verify_frontmatter_not_degraded(
         return Ok(());
     }
     let mut diagnostics = Vec::new();
-    let (composed_fm, _, _, _) = extract_frontmatter(composed, &mut diagnostics);
+    let (composed_fm, composed_range, _, _) = extract_frontmatter(composed, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(ApplyError::PostImageVerificationFailed {
             path: path.to_path_buf(),
@@ -804,7 +804,19 @@ pub(crate) fn verify_frontmatter_not_degraded(
             ),
         });
     }
-    if !matches!(composed_fm, Some(Value::Object(_))) {
+    // The composed side accepts a mapping OR an emptied block: a plan that
+    // removes the last frontmatter field legitimately leaves `---\n---\n`,
+    // which re-parses as null — verify_post_image already accepted it as the
+    // empty mapping, and refusing it here would decline a valid edit whole.
+    // Anything else — a non-empty non-mapping, or a vanished block — degrades.
+    let empty = serde_json::Map::new();
+    let composed_ok = match (&composed_fm, &composed_range) {
+        (Some(value), Some(range)) => {
+            frontmatter_as_mapping(value, composed, range, &empty).is_some()
+        }
+        _ => false,
+    };
+    if !composed_ok {
         return Err(ApplyError::PostImageVerificationFailed {
             path: path.to_path_buf(),
             detail: "a content rewrite broke the frontmatter (no longer a top-level mapping)"
