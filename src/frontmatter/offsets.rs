@@ -740,43 +740,6 @@ fn classify_value(
     }
 }
 
-/// Inserts a new `field: value` line into the frontmatter block, immediately
-/// before the closing `---` delimiter.
-///
-/// `frontmatter_range` is the byte range of the YAML content between the
-/// opening `---\n` and closing `---\n` markers — the range produced by
-/// [`super::extract_frontmatter`]. For an empty frontmatter block, the range
-/// is empty (e.g., `4..4` for `"---\n---\n..."`).
-///
-/// The value is rendered via [`super::quote::serialize_value_preserving_style`]
-/// starting from [`ValueStyle::Plain`] — meaning plain when safe, upgraded to
-/// single-quoted when the value needs quoting. Never produces double quotes
-/// unless the value contains a single quote.
-///
-/// Returns the full content with the new line spliced in just before the
-/// closing `---` delimiter.
-// Superseded by the set/repair_apply mutation paths; safe to delete in a cleanup pass.
-#[cfg(test)]
-pub fn append_frontmatter_field(
-    content: &str,
-    frontmatter_range: Range<usize>,
-    field: &str,
-    value: &serde_json::Value,
-) -> Result<String, super::quote::QuoteError> {
-    let rendered_value = super::quote::serialize_value_preserving_style(value, ValueStyle::Plain)?;
-
-    let new_line = format!("{field}: {rendered_value}\n");
-
-    let mut result = String::with_capacity(content.len() + new_line.len());
-    result.push_str(&content[..frontmatter_range.end]);
-    if !result.is_empty() && !result.ends_with('\n') {
-        result.push('\n');
-    }
-    result.push_str(&new_line);
-    result.push_str(&content[frontmatter_range.end..]);
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1007,72 +970,6 @@ mod span_tests {
         let spans = spans_for(content, 4..41);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "parent");
-    }
-
-    #[test]
-    fn append_field_to_existing_frontmatter() {
-        let content = "---\ntitle: hi\n---\n# body\n";
-        let frontmatter_range = 4..14; // "title: hi\n"
-        let result = append_frontmatter_field(
-            content,
-            frontmatter_range,
-            "kind",
-            &serde_json::json!("research"),
-        )
-        .unwrap();
-        assert_eq!(result, "---\ntitle: hi\nkind: research\n---\n# body\n");
-    }
-
-    #[test]
-    fn append_field_with_special_chars_quotes_value() {
-        let content = "---\ntitle: hi\n---\n";
-        let frontmatter_range = 4..14;
-        let result = append_frontmatter_field(
-            content,
-            frontmatter_range,
-            "url",
-            &serde_json::json!("a: b"),
-        )
-        .unwrap();
-        assert!(result.contains("url: 'a: b'") || result.contains("url: \"a: b\""));
-    }
-
-    #[test]
-    fn append_field_with_wikilink_value_single_quotes_safely() {
-        let content = "---\ntitle: hi\n---\n";
-        let frontmatter_range = 4..14;
-        let result = append_frontmatter_field(
-            content,
-            frontmatter_range,
-            "workspace",
-            &serde_json::json!("[[demo]]"),
-        )
-        .unwrap();
-        assert!(result.contains("workspace: '[[demo]]'"));
-    }
-
-    #[test]
-    fn append_field_to_empty_frontmatter_block() {
-        let content = "---\n---\n# body\n";
-        let frontmatter_range = 4..4;
-        let result = append_frontmatter_field(
-            content,
-            frontmatter_range,
-            "title",
-            &serde_json::json!("hi"),
-        )
-        .unwrap();
-        assert_eq!(result, "---\ntitle: hi\n---\n# body\n");
-    }
-
-    #[test]
-    fn append_field_numeric_value_plain() {
-        let content = "---\ntitle: hi\n---\n";
-        let frontmatter_range = 4..14;
-        let result =
-            append_frontmatter_field(content, frontmatter_range, "count", &serde_json::json!(42))
-                .unwrap();
-        assert!(result.contains("count: 42"));
     }
 }
 

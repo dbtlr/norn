@@ -3,7 +3,7 @@ use std::fs;
 use std::ops::Range;
 
 use crate::frontmatter::{
-    extract_frontmatter, serialize_array_block_field, serialize_value_preserving_style,
+    extract_frontmatter, render_key, serialize_array_block_field, serialize_value_preserving_style,
     top_level_property_spans, QuoteError, ValueStyle,
 };
 use camino::{Utf8Path, Utf8PathBuf};
@@ -542,7 +542,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                         // same-line comment would be dropped. Recover it (with its
                         // leading whitespace) for the single-line case (NRN-141).
                         let comment = single_line_trailing_comment(content, &span.line_range);
-                        format!("{field}: {rendered}{comment}\n")
+                        format!("{}: {rendered}{comment}\n", render_key(field))
                     } else {
                         serialize_array_block_field(field, items).map_err(|e| {
                             ApplyError::CannotMinimalEdit {
@@ -657,7 +657,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                                     path: path.clone(),
                                     reason: e.to_string(),
                                 })?;
-                        format!("{leading_newline}{field}: {rendered}\n")
+                        format!("{leading_newline}{}: {rendered}\n", render_key(field))
                     }
                 };
                 edits.push((insertion..insertion, line_to_insert));
@@ -1396,6 +1396,18 @@ mod tests {
 
     fn apply_change(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
         apply_file_changes(content, &[change])
+    }
+
+    /// Parse the frontmatter block of an applied result into a JSON object so
+    /// tests can assert a key reads back byte-exactly with its new value.
+    fn frontmatter_json(content: &str) -> serde_json::Value {
+        let yaml = content
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split("\n---\n").next())
+            .expect("frontmatter block");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(yaml).expect("applied frontmatter must parse");
+        serde_json::to_value(parsed).expect("yaml → json")
     }
 
     #[test]
@@ -2824,37 +2836,105 @@ mod tests {
     }
 
     #[test]
-    fn apply_post_image_gate_refuses_hashfoo_collection_set() {
-        // Pre-existing corruption converted to a refusal: a `"#foo"` key emits an
-        // unquoted `#foo:` line on a collection `set` — which YAML reads as a
-        // comment, dropping the key. The post-image loses `#foo`, so the gate
-        // refuses rather than writing frontmatter that silently lost the field.
+    fn apply_hashfoo_collection_set_applies_with_key_requoting() {
+        // NRN-142: a `"#foo"` key that requires quoting now re-emits quoted on a
+        // collection `set`, so the rebuilt line round-trips instead of reading
+        // back as a comment (pre-v0.44 corruption; v0.44 refused). The key reads
+        // back byte-exact with its new array value.
         let content = "---\n\"#foo\": [a, b]\n---\nbody\n";
         let change = PlannedChange {
             expected_old_value: Some(json!(["a", "b"])),
             ..make_change("a.md", "#foo", "h1", "set_frontmatter", Some(json!(["x"])))
         };
-        let result = apply_change(content, &change);
-        assert!(
-            matches!(result, Err(ApplyError::PostImageVerificationFailed { .. })),
-            "a key that reserializes to a comment line must be refused, got {result:?}"
-        );
+        let result = apply_change(content, &change).expect("quote-needing key must apply");
+        let fm = frontmatter_json(&result);
+        assert_eq!(fm["#foo"], json!(["x"]));
     }
 
     #[test]
-    fn apply_post_image_gate_refuses_colon_key_collection_set() {
-        // Same class: a `"a: b"` key emits `a: b: [..]` on a collection `set`,
-        // which is not valid YAML — the post-image no longer parses, so the gate
-        // refuses instead of writing a frontmatter-parse-failed document.
-        let content = "---\n\"a: b\": [x]\n---\nbody\n";
+    fn apply_colon_key_collection_set_applies_with_key_requoting() {
+        // NRN-142: a `"a: b"` key emits a quoted key line on a collection `set`,
+        // so the post-image is valid YAML and round-trips (pre-v0.44 produced
+        // invalid `a: b: [..]`; v0.44 refused). Sibling fields stay intact.
+        let content = "---\n\"a: b\": [x]\nkeep: kept\n---\nbody\n";
         let change = PlannedChange {
             expected_old_value: Some(json!(["x"])),
             ..make_change("a.md", "a: b", "h1", "set_frontmatter", Some(json!(["y"])))
         };
+        let result = apply_change(content, &change).expect("quote-needing key must apply");
+        let fm = frontmatter_json(&result);
+        assert_eq!(fm["a: b"], json!(["y"]));
+        assert_eq!(fm["keep"], json!("kept"));
+    }
+
+    #[test]
+    fn apply_add_frontmatter_quote_needing_key_applies() {
+        // NRN-142: add_frontmatter with a key that requires quoting emits a quoted
+        // key line, so the spliced field round-trips and sibling fields survive.
+        let content = "---\ntitle: hi\n---\n# body\n";
+        let change = make_change("a.md", "#foo", "h1", "add_frontmatter", Some(json!("bar")));
+        let result = apply_change(content, &change).expect("quote-needing key add must apply");
+        let fm = frontmatter_json(&result);
+        assert_eq!(fm["#foo"], json!("bar"));
+        assert_eq!(fm["title"], json!("hi"));
+    }
+
+    // ── NRN-141/NRN-142 post-image gate regression pins ──────────────────────
+    // Direct pins on both refusal arms of `verify_post_image` (the key-quoting
+    // vectors that used to exercise them now apply cleanly). A future
+    // gate-weakening refactor must fail these.
+
+    #[test]
+    fn verify_post_image_refuses_mapping_mismatch() {
+        // The composed frontmatter parses fine but is not the intended mapping —
+        // the semantic-mismatch arm must fire.
+        let mut expected = serde_json::Map::new();
+        expected.insert("status".to_string(), json!("done"));
+        let content = "---\nstatus: draft\n---\nbody\n";
+        let err = verify_post_image(&Utf8PathBuf::from("a.md"), content, &expected).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::PostImageVerificationFailed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_post_image_refuses_unparseable_frontmatter() {
+        // The composed frontmatter no longer parses — the parse-failure arm must
+        // fire regardless of what was intended.
+        let expected = serde_json::Map::new();
+        let content = "---\nkey: [unclosed\n---\nbody\n";
+        let err = verify_post_image(&Utf8PathBuf::from("a.md"), content, &expected).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::PostImageVerificationFailed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_post_image_accepts_matching_mapping() {
+        // Positive control: a post-image equal to the intended mapping passes.
+        let mut expected = serde_json::Map::new();
+        expected.insert("status".to_string(), json!("done"));
+        let content = "---\nstatus: done\n---\nbody\n";
+        verify_post_image(&Utf8PathBuf::from("a.md"), content, &expected)
+            .expect("matching post-image must pass");
+    }
+
+    #[test]
+    fn apply_gate_refuses_key_no_quoting_can_represent() {
+        // Integration pin: `PostImageVerificationFailed` still surfaces through
+        // `apply_file_changes`. A field name past YAML's 1024-byte simple-key
+        // parse limit cannot round-trip at ANY quoting rank, so render_key's
+        // terminal fallback splices a key line the reader rejects — the gate
+        // must convert that write into a refusal.
+        let content = "---\ntitle: hi\n---\nbody\n";
+        let long_key = "k".repeat(1100);
+        let change = make_change("a.md", &long_key, "h1", "add_frontmatter", Some(json!("v")));
         let result = apply_change(content, &change);
         assert!(
             matches!(result, Err(ApplyError::PostImageVerificationFailed { .. })),
-            "an invalid reserialized key line must be refused, got {result:?}"
+            "unrepresentable key must be refused by the gate, got {result:?}"
         );
     }
 

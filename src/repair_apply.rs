@@ -250,6 +250,42 @@ fn atomic_write(full: &Utf8Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// (NRN-142) Post-serialization gate for `create_document`: the freshly
+/// serialized document must re-parse through the same read pipeline
+/// (`extract_frontmatter`) to a top-level mapping before it is written. YAML
+/// null over an empty/whitespace-only block counts as the empty mapping (the
+/// `---\n---\n` a fieldless create emits), mirroring the apply-path
+/// normalization. Everything else — a parse diagnostic, or a non-mapping
+/// frontmatter value — refuses the create with the document named, before any
+/// byte reaches disk.
+fn verify_created_document(resolved_path: &Utf8Path, contents: &str) -> Result<()> {
+    let mut diagnostics = Vec::new();
+    let (frontmatter, frontmatter_range, _, _) =
+        crate::frontmatter::extract_frontmatter(contents, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        let detail = diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(anyhow::anyhow!(
+            "create_document: refusing write {resolved_path}: serialized frontmatter failed to parse: {detail}"
+        ));
+    }
+    let is_mapping = match (&frontmatter, &frontmatter_range) {
+        (Some(serde_json::Value::Object(_)), Some(_)) => true,
+        (Some(serde_json::Value::Null), Some(range)) => contents[range.clone()].trim().is_empty(),
+        (None, None) => true, // no frontmatter block at all: nothing to corrupt
+        _ => false,
+    };
+    if !is_mapping {
+        return Err(anyhow::anyhow!(
+            "create_document: refusing write {resolved_path}: serialized frontmatter failed to parse as a top-level mapping"
+        ));
+    }
+    Ok(())
+}
+
 /// Record `path` in `report.changed_files` if not already present (the list is
 /// de-duplicated).
 fn record_changed_file(report: &mut RepairApplyReport, path: &Utf8Path) {
@@ -750,22 +786,37 @@ pub fn apply_repair_plan_with_context(
                 resolved_path
             ));
         }
-        if let Some(parent) = full.parent() {
-            if !parent.as_std_path().exists() {
-                if ctx.parents {
-                    if !dry_run {
-                        fs::create_dir_all(parent.as_std_path()).with_context(|| {
-                            format!("create_document: create parent dirs for {}", resolved_path)
-                        })?;
-                    }
-                } else {
+        let parent_to_create = match full.parent() {
+            Some(parent) if !parent.as_std_path().exists() => {
+                if !ctx.parents {
                     return Err(anyhow::anyhow!(
                         "create_document: parent directory does not exist (use -p / --parents to auto-create): {}",
                         resolved_path
                     ));
                 }
+                Some(parent.to_path_buf())
             }
-        }
+            _ => None,
+        };
+
+        // Serialize the document.
+        let fm_btree: std::collections::BTreeMap<String, serde_json::Value> =
+            fm_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let contents = crate::frontmatter::serialize_new_document(&fm_btree, body)
+            .map_err(|e| anyhow::anyhow!("create_document: serialize failed: {e}"))?;
+
+        // NRN-142 create-path gate: this is the one frontmatter-write path with
+        // no post-image verification, so re-parse the fresh document through the
+        // same read pipeline before writing. A serializer output that fails to
+        // parse (e.g. a field name past libyaml's 1024-byte simple-key limit,
+        // where render_key's terminal fallback is unverified) or that is not a
+        // top-level mapping is refused unwritten — a refusal is recoverable, a
+        // written document whose frontmatter can never be read back is not. An
+        // empty frontmatter block reads back as YAML null; that is the empty
+        // mapping, not a refusal. Runs on dry-run too, so a plan preview refuses
+        // exactly where the real apply would; and it runs BEFORE parent-dir
+        // creation, so a refusal leaves no empty directory behind.
+        verify_created_document(&resolved_path, &contents)?;
 
         if dry_run {
             report.created_documents.push(CreateDocumentResult {
@@ -777,11 +828,11 @@ pub fn apply_repair_plan_with_context(
             continue;
         }
 
-        // Serialize the document.
-        let fm_btree: std::collections::BTreeMap<String, serde_json::Value> =
-            fm_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let contents = crate::frontmatter::serialize_new_document(&fm_btree, body)
-            .map_err(|e| anyhow::anyhow!("create_document: serialize failed: {e}"))?;
+        if let Some(parent) = parent_to_create {
+            fs::create_dir_all(parent.as_std_path()).with_context(|| {
+                format!("create_document: create parent dirs for {}", resolved_path)
+            })?;
+        }
 
         // Atomic write: write to a sibling temp file, then rename into place.
         atomic_write(&full, &contents)
@@ -1484,6 +1535,113 @@ mod tests {
         assert!(written.starts_with("---\n"), "got: {written}");
         assert!(written.contains("type: note"), "got: {written}");
         assert!(written.contains("Hello\n"), "got: {written}");
+    }
+
+    #[test]
+    fn apply_create_document_refuses_unparseable_serialized_frontmatter() {
+        // NRN-142: render_key's terminal fallback returns an UNVERIFIED double-
+        // quoted render when no quoting rank round-trips — reachable for a field
+        // name past libyaml's 1024-byte simple-key parse limit, where the parse
+        // side rejects every rank. The create path must gate the fresh document
+        // through the read pipeline before writing, refusing cleanly instead of
+        // writing frontmatter that can never be read back.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-badkey-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("k".repeat(1100), serde_json::json!("v"));
+        let plan = create_plan(&root, "foo.md", fm, "body\n", false);
+
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("foo.md") && msg.contains("parse"),
+            "refusal must name the doc and the parse failure, got: {msg}"
+        );
+        assert!(
+            !root.join("foo.md").as_std_path().exists(),
+            "nothing may be written on a refused create"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_dry_run_refuses_unparseable_frontmatter() {
+        // NRN-142: dry-run must run the same serialize + gate as the real apply,
+        // so a plan preview refuses exactly where the apply would — no
+        // "would create" for a document the real apply then declines.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-dry-badkey-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("k".repeat(1100), serde_json::json!("v"));
+        let plan = create_plan(&root, "foo.md", fm, "body\n", false);
+
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("foo.md") && msg.contains("parse"),
+            "dry-run must surface the gate refusal, got: {msg}"
+        );
+        assert!(
+            !root.join("foo.md").as_std_path().exists(),
+            "dry-run must not touch disk"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_gate_refusal_leaves_no_parent_dir() {
+        // NRN-142: a `-p` create refused by the gate must be side-effect free —
+        // parent directories are created only after the gate passes, so a
+        // refusal leaves no empty directory behind.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-nodirs-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("k".repeat(1100), serde_json::json!("v"));
+        let plan = create_plan(&root, "sub/dir/foo.md", fm, "body\n", false);
+
+        let ctx = CreateApplyContext {
+            parents: true,
+            ..Default::default()
+        };
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let err = apply_repair_plan_with_context(
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("parse"), "got: {err}");
+        assert!(
+            !root.join("sub").as_std_path().exists(),
+            "a refused create must not leave parent directories behind"
+        );
+    }
+
+    #[test]
+    fn apply_create_document_quote_needing_key_round_trips() {
+        // NRN-142: a quote-requiring field name creates fine — the key is emitted
+        // quoted and the created document's frontmatter reads back byte-exact.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-hashkey-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("#foo".to_string(), serde_json::json!("bar"));
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "foo.md", fm, "body\n", false);
+
+        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        let written = std::fs::read_to_string(root.join("foo.md").as_std_path()).unwrap();
+        let mut diagnostics = Vec::new();
+        let (parsed, _, _, _) = crate::frontmatter::extract_frontmatter(&written, &mut diagnostics);
+        assert!(diagnostics.is_empty(), "created doc must parse: {written}");
+        let map = parsed.unwrap();
+        assert_eq!(map["#foo"], serde_json::json!("bar"), "got: {written}");
+        assert_eq!(map["type"], serde_json::json!("note"));
+    }
+
+    #[test]
+    fn apply_create_document_empty_frontmatter_passes_gate() {
+        // An empty frontmatter map serializes to `---\n---\n`, which reads back
+        // as YAML null over an empty block — the gate must treat that as the
+        // empty mapping, not refuse the create.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-emptyfm-");
+        let plan = create_plan(&root, "foo.md", serde_json::Map::new(), "body\n", false);
+
+        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        let written = std::fs::read_to_string(root.join("foo.md").as_std_path()).unwrap();
+        assert_eq!(written, "---\n---\nbody\n");
     }
 
     #[test]

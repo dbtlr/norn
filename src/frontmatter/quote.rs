@@ -145,7 +145,7 @@ pub fn serialize_new_document(
         } else {
             let style = scalar_style_for(value);
             let serialized = serialize_value_preserving_style(value, style)?;
-            out.push_str(&format!("{field}: {serialized}\n"));
+            out.push_str(&format!("{}: {serialized}\n", render_key(field)));
         }
     }
     out.push_str("---\n");
@@ -178,10 +178,11 @@ fn scalar_style_for(value: &Value) -> ValueStyle {
 /// single entry point for every path that writes an array-valued field line
 /// (`norn new`, `add_frontmatter`, block-sequence `set`).
 pub fn serialize_array_block_field(field: &str, items: &[Value]) -> Result<String, QuoteError> {
+    let key = render_key(field);
     if items.is_empty() {
-        return Ok(format!("{field}: []\n"));
+        return Ok(format!("{key}: []\n"));
     }
-    Ok(format!("{field}:\n{}", serialize_array_block_items(items)?))
+    Ok(format!("{key}:\n{}", serialize_array_block_items(items)?))
 }
 
 /// Serialize an array as block-style YAML items: the items portion only
@@ -206,11 +207,15 @@ fn serialize_array_block_items(items: &[Value]) -> Result<String, QuoteError> {
 /// `: `, and leading/trailing space are structural where a `Block` context
 /// (`k: <val>`) treats them as legal plain bytes. Emitting a flow item verified
 /// only in block context silently mis-splits (`a,b` → two items) or produces
-/// invalid YAML (`a]b` → `[a]b]`) (NRN-141).
+/// invalid YAML (`a]b` → `[a]b]`) (NRN-141). In a `Key` context (`<key>: x`)
+/// the scalar is a mapping KEY: a bare `#` turns the line into a comment, an
+/// embedded `: ` splits it into nested mappings, and `123`/`true`/`null` parse
+/// to non-string keys — all must escalate to a quote (NRN-142).
 #[derive(Debug, Clone, Copy)]
 enum ScalarContext {
     Block,
     Flow,
+    Key,
 }
 
 /// Render a single array item as a YAML scalar string in the given lexical
@@ -250,11 +255,12 @@ fn render_scalar_at_rank(s: &str, rank: u8) -> String {
     }
 }
 
-/// True if the rendered scalar, spliced into a `key: <rendered>` line, reparses
-/// through a real YAML parser back to exactly `expected` (as a string — a value
-/// that reparses to a number, bool, or mapping does NOT round-trip). This is the
-/// invariant that replaces the hand-maintained plain-scalar denylist: correctness
-/// is decided by the YAML standard, not by an enumerated hazard list (NRN-118).
+/// True if the rendered scalar, spliced into the template line for `context`,
+/// reparses through a real YAML parser back to exactly `expected` (as a string —
+/// a value that reparses to a number, bool, or mapping does NOT round-trip).
+/// This is the invariant that replaces the hand-maintained plain-scalar
+/// denylist: correctness is decided by the YAML standard, not by an enumerated
+/// hazard list (NRN-118).
 fn scalar_round_trips(rendered: &str, expected: &str, context: ScalarContext) -> bool {
     match context {
         ScalarContext::Block => {
@@ -277,7 +283,39 @@ fn scalar_round_trips(rendered: &str, expected: &str, context: ScalarContext) ->
                 Err(_) => false,
             }
         }
+        ScalarContext::Key => {
+            // Verify in KEY position: the scalar reparses only if the mapping has
+            // exactly one entry whose key is byte-exactly `expected` and whose
+            // value is the sentinel `x`. A plain `#foo` fails (the line becomes a
+            // comment); a plain `a: b` fails (`a: b: x` is invalid or mis-keyed);
+            // `123`/`true`/`null` fail as strings (non-string keys).
+            let doc = format!("{rendered}: x\n");
+            match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
+                Ok(serde_yaml::Value::Mapping(m)) if m.len() == 1 => m
+                    .iter()
+                    .next()
+                    .is_some_and(|(k, v)| k.as_str() == Some(expected) && v.as_str() == Some("x")),
+                _ => false,
+            }
+        }
     }
+}
+
+/// Render a field NAME for YAML key position, quoting only when required.
+///
+/// The mapping-value counterpart is [`serialize_string_value`]: both are entry
+/// points into the same [`escalate_to_round_trip`] ladder, differing only in
+/// context (`Key` vs `Block`/`Flow`) and starting rank (a key always proposes
+/// plain first). A plain identifier key (`status`, `title`) round-trips at
+/// [`RANK_PLAIN`], so it renders byte-identically to the bare name — no
+/// gratuitous quoting.
+///
+/// Every line-rebuild that emits a key (flow/block collection `set`,
+/// `add_frontmatter` splices, `norn new` field lines) routes through here so a
+/// quote-requiring key (`#foo`, `a: b`) reserializes correctly instead of
+/// producing a comment line or invalid YAML (NRN-142).
+pub fn render_key(field: &str) -> String {
+    escalate_to_round_trip(field, RANK_PLAIN, ScalarContext::Key)
 }
 
 fn serialize_string_value(s: &str, original_style: ValueStyle, context: ScalarContext) -> String {
@@ -298,10 +336,21 @@ fn serialize_string_value(s: &str, original_style: ValueStyle, context: ScalarCo
             }
         }
     };
+    escalate_to_round_trip(s, start_rank, context)
+}
 
-    // Emit at the starting style, then escalate up the ladder until the rendered
-    // scalar round-trips byte-identically. Double-quoted+escape is the terminal
-    // that always round-trips, so the loop is guaranteed to return a safe value.
+/// The single quoting-escalation loop behind every scalar emission (values via
+/// [`serialize_string_value`], keys via [`render_key`]): emit at `start_rank`,
+/// then climb the ladder until the rendered scalar round-trips byte-identically
+/// in `context`. Double-quoted+escape is the terminal that round-trips every
+/// representable string in VALUE position, so for values the trailing fallback
+/// is unreachable. In KEY position one input class defeats every rank — a
+/// simple key past libyaml's 1024-byte parse limit, which no quoting style can
+/// make parseable — so the terminal render is returned UNVERIFIED there; the
+/// post-image gates (apply's `verify_post_image`, create's
+/// `verify_created_document`) backstop it, converting the resulting write into
+/// a clean refusal (NRN-142).
+fn escalate_to_round_trip(s: &str, start_rank: u8, context: ScalarContext) -> String {
     for rank in start_rank..=RANK_DOUBLE {
         let rendered = render_scalar_at_rank(s, rank);
         if scalar_round_trips(&rendered, s, context) {
@@ -524,6 +573,25 @@ mod serialize_new_document_tests {
         let fm = BTreeMap::new();
         let out = serialize_new_document(&fm, "").unwrap();
         assert_eq!(out, "---\n---\n");
+    }
+
+    #[test]
+    fn serialize_new_document_quotes_keys_that_require_quoting() {
+        // NRN-142: a quote-needing field name (reachable via `norn new
+        // --field '#foo=bar'`) must emit a quoted key line so the created
+        // document round-trips instead of dropping the key to a comment. The
+        // create_document path has no post-image gate, so this is the only guard.
+        let mut fm = BTreeMap::new();
+        fm.insert("#foo".into(), json!("bar"));
+        fm.insert("a: b".into(), json!(["x"]));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        let yaml = out.trim_start_matches("---\n").trim_end_matches("---\n");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml)
+            .unwrap_or_else(|e| panic!("created frontmatter must parse: {out:?}: {e}"));
+        let json = serde_json::to_value(parsed).unwrap();
+        assert_eq!(json["#foo"], json!("bar"));
+        assert_eq!(json["a: b"], json!(["x"]));
     }
 
     #[test]
@@ -771,6 +839,73 @@ mod tests {
         let value = json!([42, true, null]);
         let out = serialize_value_preserving_style(&value, ValueStyle::FlowSequence).unwrap();
         assert_eq!(out, "[42, true, ~]");
+    }
+
+    #[test]
+    fn render_key_round_trips_adversarial_names() {
+        // Every adversarial field name must survive render_key → spliced into a
+        // `{key}: x` KEY line → serde parse → a single mapping entry whose key is
+        // byte-exactly the intended name. The serializer decides quoting by round-
+        // tripping in a key template, not a character blacklist (NRN-142).
+        let cases: Vec<&str> = vec![
+            "#foo",
+            "a: b",
+            "a:b",
+            "-foo",
+            "?x",
+            "[x]",
+            "{x}",
+            "a,b",
+            "&anchor",
+            "*alias",
+            "!tag",
+            "\"quoted\"",
+            "'single'",
+            "key with spaces",
+            " leading",
+            "trailing ",
+            "",
+            "123",
+            "true",
+            "false",
+            "null",
+            "~",
+            "café ☕",
+            "status",
+            "title",
+            "a_b_c",
+        ];
+        for name in &cases {
+            let rendered = render_key(name);
+            let doc = format!("{rendered}: x\n");
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&doc).unwrap_or_else(|e| {
+                panic!("key line must be valid YAML for {name:?} (rendered {rendered:?}): {e}")
+            });
+            let map = parsed
+                .as_mapping()
+                .unwrap_or_else(|| panic!("expected mapping for {name:?}: {rendered:?}"));
+            assert_eq!(map.len(), 1, "exactly one key for {name:?}: {rendered:?}");
+            let (k, v) = map.iter().next().unwrap();
+            assert_eq!(
+                k.as_str(),
+                Some(*name),
+                "key must round-trip byte-exact for {name:?}: {rendered:?}"
+            );
+            assert_eq!(v.as_str(), Some("x"), "value for {name:?}: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn render_key_leaves_plain_identifiers_unquoted() {
+        // Minimal churn: an identifier-plain key must render byte-identically to
+        // the bare name (no gratuitous quoting) — the oracle passes plain for it.
+        for name in ["status", "title", "kind", "aliases", "a_b", "field123"] {
+            assert_eq!(
+                render_key(name),
+                name,
+                "plain identifier must render unquoted"
+            );
+        }
     }
 
     #[test]
