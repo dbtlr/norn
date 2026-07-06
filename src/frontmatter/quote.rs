@@ -126,7 +126,7 @@ fn serialize_array(items: &[Value], original_style: ValueStyle) -> Result<String
 /// - Fields are emitted in key order (BTreeMap iteration order).
 /// - `Value::Null` fields are skipped (e.g., required-but-undefaulted
 ///   fields per the `norn new` warn-don't-block model).
-/// - Array values use [`serialize_array_block_for_new_field`].
+/// - Array values use [`serialize_array_block_field`].
 /// - Scalar values pick a style based on YAML safety: wikilinks / strings
 ///   with `:` / strings starting with YAML indicators are quoted; others
 ///   are plain.
@@ -141,8 +141,7 @@ pub fn serialize_new_document(
             continue;
         }
         if let Some(items) = value.as_array() {
-            let block = serialize_array_block_for_new_field(items)?;
-            out.push_str(&format!("{field}:\n{block}"));
+            out.push_str(&serialize_array_block_field(field, items)?);
         } else {
             let style = scalar_style_for(value);
             let serialized = serialize_value_preserving_style(value, style)?;
@@ -172,17 +171,24 @@ fn scalar_style_for(value: &Value) -> ValueStyle {
     ValueStyle::Plain
 }
 
-/// Serialize an array as block-style YAML items for a brand-new field.
-///
-/// Output is the items portion only: `  - item1\n  - item2\n` (2-space
-/// indent, trailing newline). Each item is quoted per scalar rules.
-/// The caller emits `field:\n` before this output.
-///
-/// An empty array emits an empty string (the caller still emits `field:\n`).
-pub fn serialize_array_block_for_new_field(items: &[Value]) -> Result<String, QuoteError> {
-    serialize_array_block_items(items)
+/// Serialize a complete `field: <array>` frontmatter entry (trailing newline
+/// included). Non-empty arrays emit block style (`field:\n  - item1\n`); an
+/// empty array emits an explicit `field: []\n` — a bare `field:` line reads
+/// back as YAML null, not the empty list it was written as (NRN-141). The
+/// single entry point for every path that writes an array-valued field line
+/// (`norn new`, `add_frontmatter`, block-sequence `set`).
+pub fn serialize_array_block_field(field: &str, items: &[Value]) -> Result<String, QuoteError> {
+    if items.is_empty() {
+        return Ok(format!("{field}: []\n"));
+    }
+    Ok(format!("{field}:\n{}", serialize_array_block_items(items)?))
 }
 
+/// Serialize an array as block-style YAML items: the items portion only
+/// (`  - item1\n  - item2\n`, 2-space indent, trailing newline), each item
+/// quoted per scalar rules. An empty array emits an empty string — callers
+/// route through [`serialize_array_block_field`], which renders an empty
+/// array as `field: []` instead.
 fn serialize_array_block_items(items: &[Value]) -> Result<String, QuoteError> {
     let mut out = String::new();
     for item in items {
@@ -497,6 +503,23 @@ mod serialize_new_document_tests {
     }
 
     #[test]
+    fn serialize_new_document_empty_array_emits_empty_flow_list() {
+        // NRN-141: a bare `field:` line reads back as null; an empty array must
+        // serialize as `field: []` so it round-trips to the empty list.
+        let mut fm = BTreeMap::new();
+        fm.insert("aliases".into(), json!([]));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        assert_eq!(out, "---\naliases: []\n---\n");
+        let yaml = out.trim_start_matches("---\n").trim_end_matches("---\n");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap().get("aliases"),
+            Some(&json!([]))
+        );
+    }
+
+    #[test]
     fn serialize_new_document_empty_frontmatter_emits_just_fences() {
         let fm = BTreeMap::new();
         let out = serialize_new_document(&fm, "").unwrap();
@@ -721,16 +744,18 @@ mod tests {
     }
 
     #[test]
-    fn serialize_array_block_for_new_field_emits_indented_items() {
+    fn serialize_array_block_field_emits_key_and_indented_items() {
         let items = vec![json!("foo"), json!("bar")];
-        let out = serialize_array_block_for_new_field(&items).unwrap();
-        assert_eq!(out, "  - foo\n  - bar\n");
+        let out = serialize_array_block_field("aliases", &items).unwrap();
+        assert_eq!(out, "aliases:\n  - foo\n  - bar\n");
     }
 
     #[test]
-    fn serialize_array_block_for_new_field_empty_emits_empty_string() {
-        let out = serialize_array_block_for_new_field(&[]).unwrap();
-        assert_eq!(out, "");
+    fn serialize_array_block_field_empty_emits_empty_flow_list() {
+        // NRN-141: a bare `field:` line reads back as null; an explicit `[]`
+        // round-trips as the empty list.
+        let out = serialize_array_block_field("aliases", &[]).unwrap();
+        assert_eq!(out, "aliases: []\n");
     }
 
     #[test]

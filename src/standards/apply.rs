@@ -3,7 +3,7 @@ use std::fs;
 use std::ops::Range;
 
 use crate::frontmatter::{
-    extract_frontmatter, serialize_array_block_for_new_field, serialize_value_preserving_style,
+    extract_frontmatter, serialize_array_block_field, serialize_value_preserving_style,
     top_level_property_spans, QuoteError, ValueStyle,
 };
 use camino::{Utf8Path, Utf8PathBuf};
@@ -549,14 +549,12 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                         let comment = single_line_trailing_comment(content, &span.line_range);
                         format!("{field}: {rendered}{comment}\n")
                     } else {
-                        let block_items =
-                            serialize_array_block_for_new_field(items).map_err(|e| {
-                                ApplyError::CannotMinimalEdit {
-                                    path: path.clone(),
-                                    reason: e.to_string(),
-                                }
-                            })?;
-                        format!("{field}:\n{block_items}")
+                        serialize_array_block_field(field, items).map_err(|e| {
+                            ApplyError::CannotMinimalEdit {
+                                path: path.clone(),
+                                reason: e.to_string(),
+                            }
+                        })?
                     };
                     edits.push((span.line_range.clone(), replacement));
                     continue;
@@ -647,15 +645,15 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 let line_to_insert = match new_value {
                     Value::Array(items) => {
                         // Default to block style for new array fields — more
-                        // readable in Markdown frontmatter.
-                        let block_items =
-                            serialize_array_block_for_new_field(items).map_err(|e| {
-                                ApplyError::CannotMinimalEdit {
-                                    path: path.clone(),
-                                    reason: e.to_string(),
-                                }
-                            })?;
-                        format!("{leading_newline}{field}:\n{block_items}")
+                        // readable in Markdown frontmatter (an empty array
+                        // renders as `field: []`).
+                        let rendered = serialize_array_block_field(field, items).map_err(|e| {
+                            ApplyError::CannotMinimalEdit {
+                                path: path.clone(),
+                                reason: e.to_string(),
+                            }
+                        })?;
+                        format!("{leading_newline}{rendered}")
                     }
                     _ => {
                         let rendered =
@@ -747,36 +745,13 @@ fn verify_post_image(
             });
         }
     };
-    if !post_image_matches(expected, actual) {
+    if actual != expected {
         return Err(ApplyError::PostImageVerificationFailed {
             path: path.clone(),
             detail: "result frontmatter does not match the intended fields".into(),
         });
     }
     Ok(())
-}
-
-/// Whether the re-parsed `actual` frontmatter matches the intended `expected`,
-/// tolerating the one benign serializer normalization: an empty array is emitted
-/// as a bare `key:` line, which YAML reads back as null — so an expected `[]`
-/// matches an actual null for that key. `[]` and null both mean "no elements,"
-/// so this is a serialization choice, not data loss; every other difference
-/// (a dropped key, a wrong scalar, a non-empty array read as null) is a real
-/// mismatch and refuses.
-fn post_image_matches(
-    expected: &serde_json::Map<String, Value>,
-    actual: &serde_json::Map<String, Value>,
-) -> bool {
-    if expected.len() != actual.len() {
-        return false;
-    }
-    expected
-        .iter()
-        .all(|(key, expected_value)| match actual.get(key) {
-            Some(actual_value) if actual_value == expected_value => true,
-            Some(Value::Null) => matches!(expected_value, Value::Array(items) if items.is_empty()),
-            _ => false,
-        })
 }
 
 /// (NRN-141) Parse-degradation check for content rewrites, run at the applier's
@@ -1655,14 +1630,38 @@ mod tests {
     }
 
     #[test]
-    fn apply_add_frontmatter_empty_array_inserts_key_only() {
+    fn apply_add_frontmatter_empty_array_inserts_empty_flow_list() {
+        // NRN-141: a bare `aliases:` line reads back as null, not `[]`. An empty
+        // array now serializes as `aliases: []` so the field round-trips to the
+        // empty list it was written as.
         let content = "---\ntitle: Foo\n---\nbody\n";
         let change = make_change("a.md", "aliases", "h1", "add_frontmatter", Some(json!([])));
         let result = apply_change(content, &change).unwrap();
         assert!(
-            result.contains("aliases:\n"),
-            "expected key line with no items: {result}"
+            result.contains("aliases: []\n"),
+            "expected an explicit empty list: {result}"
         );
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = extract_frontmatter(&result, &mut diags);
+        assert!(diags.is_empty(), "result must re-parse cleanly: {result}");
+        assert_eq!(fm.unwrap().get("aliases"), Some(&json!([])));
+    }
+
+    #[test]
+    fn apply_set_block_list_to_empty_round_trips_as_empty_list() {
+        // NRN-141: `set aliases=[]` on a block list must write `aliases: []`
+        // (not a bare `aliases:` that reads back as null).
+        let content = "---\naliases:\n  - old\ntitle: hi\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["old"])),
+            ..make_change("a.md", "aliases", "h1", "set_frontmatter", Some(json!([])))
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\naliases: []\ntitle: hi\n---\nbody\n");
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = extract_frontmatter(&result, &mut diags);
+        assert!(diags.is_empty());
+        assert_eq!(fm.unwrap().get("aliases"), Some(&json!([])));
     }
 
     #[test]
