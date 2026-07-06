@@ -893,4 +893,59 @@ mod tests {
             "file must be byte-identical after the refusal"
         );
     }
+
+    #[test]
+    fn migrate_duplicate_field_ops_are_refused_before_any_write() {
+        // NRN-141 round 2 ground truth: `apply_file_changes` computes spans once
+        // against the ORIGINAL content and accumulates byte-range edits, so two
+        // ops on the same path+field would splice with stale offsets. Such a
+        // plan can never reach it: `changes_by_path` — the validation gate every
+        // apply path runs before Phase A — refuses duplicate (path, field) ops
+        // with ConflictingFieldChange. This pins that refusal for the claimed
+        // vector, a hand-authored migrate plan; the file must stay untouched.
+        let tmp = tempfile::Builder::new()
+            .prefix("applier-dup-field-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        let doc = "---\nstatus: draft\n---\nbody\n";
+        std::fs::write(root.join("doc.md"), doc).unwrap();
+        let index = crate::graph::build_index(Utf8Path::from_path(root).unwrap()).unwrap();
+
+        let set_status = |value: &str| MigrationOp {
+            kind: "set_frontmatter".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({
+                "path": "doc.md", "field": "status",
+                "expected_old_value": "draft", "new_value": value,
+            }),
+            footnote: None,
+        };
+        let plan = MigrationPlan {
+            schema_version: 1,
+            vault_root: root.to_string_lossy().to_string(),
+            generator: None,
+            generated_at: None,
+            operations: vec![set_status("x"), set_status("longer-value")],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let ctx = ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+        };
+        let result = apply_migration_plan(&plan, &index, ctx, &mut test_sink());
+        let err = result.expect_err("duplicate-field plan must be refused up front");
+        assert!(
+            err.to_string().contains("conflicting changes"),
+            "expected the ConflictingFieldChange refusal, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("doc.md")).unwrap(),
+            doc,
+            "file must be byte-identical after the refusal"
+        );
+    }
 }
