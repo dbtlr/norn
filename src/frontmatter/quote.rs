@@ -207,11 +207,15 @@ fn serialize_array_block_items(items: &[Value]) -> Result<String, QuoteError> {
 /// `: `, and leading/trailing space are structural where a `Block` context
 /// (`k: <val>`) treats them as legal plain bytes. Emitting a flow item verified
 /// only in block context silently mis-splits (`a,b` → two items) or produces
-/// invalid YAML (`a]b` → `[a]b]`) (NRN-141).
+/// invalid YAML (`a]b` → `[a]b]`) (NRN-141). In a `Key` context (`<key>: x`)
+/// the scalar is a mapping KEY: a bare `#` turns the line into a comment, an
+/// embedded `: ` splits it into nested mappings, and `123`/`true`/`null` parse
+/// to non-string keys — all must escalate to a quote (NRN-142).
 #[derive(Debug, Clone, Copy)]
 enum ScalarContext {
     Block,
     Flow,
+    Key,
 }
 
 /// Render a single array item as a YAML scalar string in the given lexical
@@ -251,11 +255,12 @@ fn render_scalar_at_rank(s: &str, rank: u8) -> String {
     }
 }
 
-/// True if the rendered scalar, spliced into a `key: <rendered>` line, reparses
-/// through a real YAML parser back to exactly `expected` (as a string — a value
-/// that reparses to a number, bool, or mapping does NOT round-trip). This is the
-/// invariant that replaces the hand-maintained plain-scalar denylist: correctness
-/// is decided by the YAML standard, not by an enumerated hazard list (NRN-118).
+/// True if the rendered scalar, spliced into the template line for `context`,
+/// reparses through a real YAML parser back to exactly `expected` (as a string —
+/// a value that reparses to a number, bool, or mapping does NOT round-trip).
+/// This is the invariant that replaces the hand-maintained plain-scalar
+/// denylist: correctness is decided by the YAML standard, not by an enumerated
+/// hazard list (NRN-118).
 fn scalar_round_trips(rendered: &str, expected: &str, context: ScalarContext) -> bool {
     match context {
         ScalarContext::Block => {
@@ -278,50 +283,39 @@ fn scalar_round_trips(rendered: &str, expected: &str, context: ScalarContext) ->
                 Err(_) => false,
             }
         }
+        ScalarContext::Key => {
+            // Verify in KEY position: the scalar reparses only if the mapping has
+            // exactly one entry whose key is byte-exactly `expected` and whose
+            // value is the sentinel `x`. A plain `#foo` fails (the line becomes a
+            // comment); a plain `a: b` fails (`a: b: x` is invalid or mis-keyed);
+            // `123`/`true`/`null` fail as strings (non-string keys).
+            let doc = format!("{rendered}: x\n");
+            match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
+                Ok(serde_yaml::Value::Mapping(m)) if m.len() == 1 => m
+                    .iter()
+                    .next()
+                    .is_some_and(|(k, v)| k.as_str() == Some(expected) && v.as_str() == Some("x")),
+                _ => false,
+            }
+        }
     }
 }
 
 /// Render a field NAME for YAML key position, quoting only when required.
 ///
-/// The mapping-value counterpart is [`serialize_string_value`]: this is the
-/// key-position member of the same round-trip oracle. It proposes the plain key
-/// name, then verifies by parsing a `{candidate}: x\n` KEY template and checking
-/// the parsed mapping has exactly one key whose name is byte-exactly `field`
-/// (mapping to the sentinel value `x`); if not, it escalates up the same
-/// quoting ladder the value path uses (single-quoted with `''` doubling, then
-/// double-quoted with escapes). A plain identifier key (`status`, `title`)
-/// round-trips at [`RANK_PLAIN`], so it renders byte-identically to the bare
-/// name — no gratuitous quoting.
+/// The mapping-value counterpart is [`serialize_string_value`]: both are entry
+/// points into the same [`escalate_to_round_trip`] ladder, differing only in
+/// context (`Key` vs `Block`/`Flow`) and starting rank (a key always proposes
+/// plain first). A plain identifier key (`status`, `title`) round-trips at
+/// [`RANK_PLAIN`], so it renders byte-identically to the bare name — no
+/// gratuitous quoting.
 ///
-/// Every line-rebuild that emits a bare key (flow/block collection `set`,
+/// Every line-rebuild that emits a key (flow/block collection `set`,
 /// `add_frontmatter` splices, `norn new` field lines) routes through here so a
 /// quote-requiring key (`#foo`, `a: b`) reserializes correctly instead of
 /// producing a comment line or invalid YAML (NRN-142).
 pub fn render_key(field: &str) -> String {
-    for rank in RANK_PLAIN..=RANK_DOUBLE {
-        let rendered = render_scalar_at_rank(field, rank);
-        if key_round_trips(&rendered, field) {
-            return rendered;
-        }
-    }
-    render_scalar_at_rank(field, RANK_DOUBLE)
-}
-
-/// True if `rendered`, spliced into a `{rendered}: x` KEY line, reparses through
-/// a real YAML parser to a mapping with exactly one entry whose key is byte-
-/// exactly `expected` and whose value is the sentinel string `x`. A plain `#foo`
-/// fails (the line becomes a comment); a plain `a: b` fails (`a: b: x` is invalid
-/// or mis-keyed); `123`/`true`/`null` fail as strings (parse to non-string keys)
-/// and escalate to a quote.
-fn key_round_trips(rendered: &str, expected: &str) -> bool {
-    let doc = format!("{rendered}: x\n");
-    match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
-        Ok(serde_yaml::Value::Mapping(m)) if m.len() == 1 => m
-            .iter()
-            .next()
-            .is_some_and(|(k, v)| k.as_str() == Some(expected) && v.as_str() == Some("x")),
-        _ => false,
-    }
+    escalate_to_round_trip(field, RANK_PLAIN, ScalarContext::Key)
 }
 
 fn serialize_string_value(s: &str, original_style: ValueStyle, context: ScalarContext) -> String {
@@ -342,10 +336,21 @@ fn serialize_string_value(s: &str, original_style: ValueStyle, context: ScalarCo
             }
         }
     };
+    escalate_to_round_trip(s, start_rank, context)
+}
 
-    // Emit at the starting style, then escalate up the ladder until the rendered
-    // scalar round-trips byte-identically. Double-quoted+escape is the terminal
-    // that always round-trips, so the loop is guaranteed to return a safe value.
+/// The single quoting-escalation loop behind every scalar emission (values via
+/// [`serialize_string_value`], keys via [`render_key`]): emit at `start_rank`,
+/// then climb the ladder until the rendered scalar round-trips byte-identically
+/// in `context`. Double-quoted+escape is the terminal that round-trips every
+/// representable string in VALUE position, so for values the trailing fallback
+/// is unreachable. In KEY position one input class defeats every rank — a
+/// simple key past libyaml's 1024-byte parse limit, which no quoting style can
+/// make parseable — so the terminal render is returned UNVERIFIED there; the
+/// post-image gates (apply's `verify_post_image`, create's
+/// `verify_created_document`) backstop it, converting the resulting write into
+/// a clean refusal (NRN-142).
+fn escalate_to_round_trip(s: &str, start_rank: u8, context: ScalarContext) -> String {
     for rank in start_rank..=RANK_DOUBLE {
         let rendered = render_scalar_at_rank(s, rank);
         if scalar_round_trips(&rendered, s, context) {
