@@ -229,6 +229,69 @@ fn set_applies_combined_field_push_remove_and_body_atomically() {
 }
 
 #[test]
+fn set_quote_requiring_key_collection_applies_and_round_trips() {
+    // NRN-142: a `"#foo"` key that requires quoting must re-emit quoted on a
+    // collection `set` (was pre-v0.44 corruption / v0.44 refusal). End-to-end:
+    // the write succeeds and `get` reads the new array back under `#foo`.
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\n\"#foo\": [a, b]\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "note.md",
+            "--field-json",
+            "#foo=[\"z\"]",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "set of quote-requiring key must succeed: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The written file must still parse and read the key back byte-exactly.
+    let final_content = fs::read_to_string(&doc).unwrap();
+    let yaml = final_content
+        .strip_prefix("---\n")
+        .and_then(|r| r.split("\n---\n").next())
+        .unwrap();
+    let parsed: serde_json::Value =
+        serde_yaml::from_str(yaml).expect("written frontmatter must parse");
+    assert_eq!(parsed["#foo"], serde_json::json!(["z"]), "{final_content}");
+
+    let get = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "get",
+            "note.md",
+            "--col",
+            "#foo",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        get.status.success(),
+        "get failed: {}",
+        String::from_utf8_lossy(&get.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&get.stdout).expect("get json");
+    let hay = json.to_string();
+    assert!(
+        hay.contains("\"z\""),
+        "get output should carry the value: {hay}"
+    );
+}
+
+#[test]
 fn set_body_from_stdin_matching_existing_body_is_noop_write() {
     let tmp = fixture_tempdir();
     let doc = tmp.path().join("note.md");

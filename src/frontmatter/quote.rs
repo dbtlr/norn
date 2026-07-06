@@ -145,7 +145,7 @@ pub fn serialize_new_document(
         } else {
             let style = scalar_style_for(value);
             let serialized = serialize_value_preserving_style(value, style)?;
-            out.push_str(&format!("{field}: {serialized}\n"));
+            out.push_str(&format!("{}: {serialized}\n", render_key(field)));
         }
     }
     out.push_str("---\n");
@@ -178,10 +178,11 @@ fn scalar_style_for(value: &Value) -> ValueStyle {
 /// single entry point for every path that writes an array-valued field line
 /// (`norn new`, `add_frontmatter`, block-sequence `set`).
 pub fn serialize_array_block_field(field: &str, items: &[Value]) -> Result<String, QuoteError> {
+    let key = render_key(field);
     if items.is_empty() {
-        return Ok(format!("{field}: []\n"));
+        return Ok(format!("{key}: []\n"));
     }
-    Ok(format!("{field}:\n{}", serialize_array_block_items(items)?))
+    Ok(format!("{key}:\n{}", serialize_array_block_items(items)?))
 }
 
 /// Serialize an array as block-style YAML items: the items portion only
@@ -277,6 +278,49 @@ fn scalar_round_trips(rendered: &str, expected: &str, context: ScalarContext) ->
                 Err(_) => false,
             }
         }
+    }
+}
+
+/// Render a field NAME for YAML key position, quoting only when required.
+///
+/// The mapping-value counterpart is [`serialize_string_value`]: this is the
+/// key-position member of the same round-trip oracle. It proposes the plain key
+/// name, then verifies by parsing a `{candidate}: x\n` KEY template and checking
+/// the parsed mapping has exactly one key whose name is byte-exactly `field`
+/// (mapping to the sentinel value `x`); if not, it escalates up the same
+/// quoting ladder the value path uses (single-quoted with `''` doubling, then
+/// double-quoted with escapes). A plain identifier key (`status`, `title`)
+/// round-trips at [`RANK_PLAIN`], so it renders byte-identically to the bare
+/// name — no gratuitous quoting.
+///
+/// Every line-rebuild that emits a bare key (flow/block collection `set`,
+/// `add_frontmatter` splices, `norn new` field lines) routes through here so a
+/// quote-requiring key (`#foo`, `a: b`) reserializes correctly instead of
+/// producing a comment line or invalid YAML (NRN-142).
+pub fn render_key(field: &str) -> String {
+    for rank in RANK_PLAIN..=RANK_DOUBLE {
+        let rendered = render_scalar_at_rank(field, rank);
+        if key_round_trips(&rendered, field) {
+            return rendered;
+        }
+    }
+    render_scalar_at_rank(field, RANK_DOUBLE)
+}
+
+/// True if `rendered`, spliced into a `{rendered}: x` KEY line, reparses through
+/// a real YAML parser to a mapping with exactly one entry whose key is byte-
+/// exactly `expected` and whose value is the sentinel string `x`. A plain `#foo`
+/// fails (the line becomes a comment); a plain `a: b` fails (`a: b: x` is invalid
+/// or mis-keyed); `123`/`true`/`null` fail as strings (parse to non-string keys)
+/// and escalate to a quote.
+fn key_round_trips(rendered: &str, expected: &str) -> bool {
+    let doc = format!("{rendered}: x\n");
+    match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
+        Ok(serde_yaml::Value::Mapping(m)) if m.len() == 1 => m
+            .iter()
+            .next()
+            .is_some_and(|(k, v)| k.as_str() == Some(expected) && v.as_str() == Some("x")),
+        _ => false,
     }
 }
 
@@ -527,6 +571,25 @@ mod serialize_new_document_tests {
     }
 
     #[test]
+    fn serialize_new_document_quotes_keys_that_require_quoting() {
+        // NRN-142: a quote-needing field name (reachable via `norn new
+        // --field '#foo=bar'`) must emit a quoted key line so the created
+        // document round-trips instead of dropping the key to a comment. The
+        // create_document path has no post-image gate, so this is the only guard.
+        let mut fm = BTreeMap::new();
+        fm.insert("#foo".into(), json!("bar"));
+        fm.insert("a: b".into(), json!(["x"]));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        let yaml = out.trim_start_matches("---\n").trim_end_matches("---\n");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml)
+            .unwrap_or_else(|e| panic!("created frontmatter must parse: {out:?}: {e}"));
+        let json = serde_json::to_value(parsed).unwrap();
+        assert_eq!(json["#foo"], json!("bar"));
+        assert_eq!(json["a: b"], json!(["x"]));
+    }
+
+    #[test]
     fn serialize_new_document_value_with_colon_is_quoted() {
         // Strings containing `:` must be quoted to avoid YAML ambiguity
         // (`time: 10:30` would parse `10:30` as a sexagesimal in older YAML).
@@ -771,6 +834,73 @@ mod tests {
         let value = json!([42, true, null]);
         let out = serialize_value_preserving_style(&value, ValueStyle::FlowSequence).unwrap();
         assert_eq!(out, "[42, true, ~]");
+    }
+
+    #[test]
+    fn render_key_round_trips_adversarial_names() {
+        // Every adversarial field name must survive render_key → spliced into a
+        // `{key}: x` KEY line → serde parse → a single mapping entry whose key is
+        // byte-exactly the intended name. The serializer decides quoting by round-
+        // tripping in a key template, not a character blacklist (NRN-142).
+        let cases: Vec<&str> = vec![
+            "#foo",
+            "a: b",
+            "a:b",
+            "-foo",
+            "?x",
+            "[x]",
+            "{x}",
+            "a,b",
+            "&anchor",
+            "*alias",
+            "!tag",
+            "\"quoted\"",
+            "'single'",
+            "key with spaces",
+            " leading",
+            "trailing ",
+            "",
+            "123",
+            "true",
+            "false",
+            "null",
+            "~",
+            "café ☕",
+            "status",
+            "title",
+            "a_b_c",
+        ];
+        for name in &cases {
+            let rendered = render_key(name);
+            let doc = format!("{rendered}: x\n");
+            let parsed: serde_yaml::Value = serde_yaml::from_str(&doc).unwrap_or_else(|e| {
+                panic!("key line must be valid YAML for {name:?} (rendered {rendered:?}): {e}")
+            });
+            let map = parsed
+                .as_mapping()
+                .unwrap_or_else(|| panic!("expected mapping for {name:?}: {rendered:?}"));
+            assert_eq!(map.len(), 1, "exactly one key for {name:?}: {rendered:?}");
+            let (k, v) = map.iter().next().unwrap();
+            assert_eq!(
+                k.as_str(),
+                Some(*name),
+                "key must round-trip byte-exact for {name:?}: {rendered:?}"
+            );
+            assert_eq!(v.as_str(), Some("x"), "value for {name:?}: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn render_key_leaves_plain_identifiers_unquoted() {
+        // Minimal churn: an identifier-plain key must render byte-identically to
+        // the bare name (no gratuitous quoting) — the oracle passes plain for it.
+        for name in ["status", "title", "kind", "aliases", "a_b", "field123"] {
+            assert_eq!(
+                render_key(name),
+                name,
+                "plain identifier must render unquoted"
+            );
+        }
     }
 
     #[test]
