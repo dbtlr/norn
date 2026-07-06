@@ -3,7 +3,7 @@ use std::fs;
 use std::ops::Range;
 
 use crate::frontmatter::{
-    extract_frontmatter, serialize_array_block_for_new_field, serialize_value_preserving_style,
+    extract_frontmatter, serialize_array_block_field, serialize_value_preserving_style,
     top_level_property_spans, QuoteError, ValueStyle,
 };
 use camino::{Utf8Path, Utf8PathBuf};
@@ -60,6 +60,9 @@ pub enum ApplyError {
 
     #[error("frontmatter parse failed for {path}: {message}")]
     FrontmatterParseFailed { path: Utf8PathBuf, message: String },
+
+    #[error("refusing write for {path}: post-edit frontmatter failed verification ({detail})")]
+    PostImageVerificationFailed { path: Utf8PathBuf, detail: String },
 
     #[error("edit op failed for {path}: {message}")]
     EditFailed {
@@ -120,6 +123,12 @@ pub enum LinkSkipReason {
     /// The backlinker file no longer exists (deleted or moved away by
     /// something outside this run); there is nothing to rewrite. Not retried.
     SourceMissing,
+    /// The rewritten link text would break the backlinker's frontmatter (the
+    /// new target carries YAML-structural bytes and the rewrite lands inside a
+    /// frontmatter value, degrading a parsing mapping). The rewrite is skipped
+    /// — the stale link remains, detectable by `validate` and repairable — a
+    /// skipped rewrite is recoverable, a corrupted document is not (NRN-141).
+    WouldCorruptFrontmatter,
 }
 
 impl LinkSkipReason {
@@ -127,6 +136,7 @@ impl LinkSkipReason {
         match self {
             LinkSkipReason::Drifted => "drifted",
             LinkSkipReason::SourceMissing => "source_missing",
+            LinkSkipReason::WouldCorruptFrontmatter => "would_corrupt_frontmatter",
         }
     }
 }
@@ -351,6 +361,74 @@ fn is_sequence_style(style: ValueStyle) -> bool {
     matches!(style, ValueStyle::BlockSequence | ValueStyle::FlowSequence)
 }
 
+/// The trailing same-line YAML comment (with its leading whitespace, excluding
+/// the newline) on the single line `content[line_range]`, or `""` when there is
+/// none. Only single-line ranges are handled — a multi-line flow value's
+/// comment recovery is out of scope, so its comment is dropped as before.
+/// A `#` inside a quoted scalar is never a comment (NRN-141).
+fn single_line_trailing_comment(content: &str, line_range: &Range<usize>) -> String {
+    let body = content[line_range.clone()].trim_end_matches(['\r', '\n']);
+    // A multi-line range (unclosed flow spanning continuation lines) is out of
+    // scope; leave its comment untouched (dropped, as before).
+    if body.contains('\n') {
+        return String::new();
+    }
+    trailing_line_comment(body).unwrap_or("").to_string()
+}
+
+/// Locates a trailing YAML comment in a single newline-free `line`. Returns the
+/// slice from the whitespace preceding `#` to end of line (e.g. `"  # note"`),
+/// or `None`. A comment opener is a `#` preceded by whitespace and NOT inside a
+/// single- or double-quoted scalar (honoring `''` and `\` escapes), matching
+/// where YAML actually begins a comment.
+fn trailing_line_comment(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut comment_start = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_single {
+            if b == b'\'' {
+                // A doubled `''` is an escaped quote, still inside the scalar.
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+        } else if in_double {
+            if b == b'\\' {
+                // Skip the escaped byte (e.g. `\"`).
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_double = false;
+            }
+        } else {
+            match b {
+                b'\'' => in_single = true,
+                b'"' => in_double = true,
+                b'#' if i > 0 && matches!(bytes[i - 1], b' ' | b'\t') => {
+                    comment_start = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    let start = comment_start?;
+    // Back up over the whitespace run that precedes the `#` so it is preserved.
+    let mut ws = start;
+    while ws > 0 && matches!(bytes[ws - 1], b' ' | b'\t') {
+        ws -= 1;
+    }
+    Some(&line[ws..])
+}
+
 pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<String, ApplyError> {
     let path = if let Some(change) = changes.first() {
         change.path.clone()
@@ -366,11 +444,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
         if !diagnostics.is_empty() {
             return Err(ApplyError::FrontmatterParseFailed {
                 path,
-                message: diagnostics
-                    .iter()
-                    .map(|d| d.message.clone())
-                    .collect::<Vec<_>>()
-                    .join("; "),
+                message: join_diagnostics(&diagnostics),
             });
         }
         // NRN-120: a document with no frontmatter block gets an empty one
@@ -384,11 +458,7 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
     if !diagnostics.is_empty() {
         return Err(ApplyError::FrontmatterParseFailed {
             path,
-            message: diagnostics
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("; "),
+            message: join_diagnostics(&diagnostics),
         });
     }
     let Some(frontmatter_value) = frontmatter else {
@@ -397,24 +467,25 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
             message: "frontmatter could not be parsed".into(),
         });
     };
-    // An *empty* block (`---\n---\n`, or only whitespace) parses as YAML null;
-    // treat it as an empty mapping so additive operations can populate it
-    // (NRN-120). An explicit `null`/`~` scalar — or any other non-object value —
-    // is NOT empty: splicing a key after it would produce invalid YAML, so it
-    // stays a hard error, matching the pre-NRN-120 behavior.
     let empty_object = serde_json::Map::new();
-    let current_object = match &frontmatter_value {
-        Value::Object(map) => map,
-        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => &empty_object,
-        _ => {
-            return Err(ApplyError::CannotMinimalEdit {
-                path,
-                reason: "frontmatter is not a top-level mapping".into(),
-            });
-        }
+    let Some(current_object) = frontmatter_as_mapping(
+        &frontmatter_value,
+        content,
+        &frontmatter_range,
+        &empty_object,
+    ) else {
+        return Err(ApplyError::CannotMinimalEdit {
+            path,
+            reason: "frontmatter is not a top-level mapping".into(),
+        });
     };
 
     let spans = top_level_property_spans(content, frontmatter_range.clone(), current_object);
+
+    // The mapping the composed ops intend to produce: the parsed original with
+    // each op's semantic effect applied. The post-image gate at the end compares
+    // the re-parsed result against this (NRN-141).
+    let mut expected: serde_json::Map<String, Value> = current_object.clone();
 
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
 
@@ -436,13 +507,15 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 let Some(span) = span else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
-                        reason: format!("field {field} not present in frontmatter"),
+                        reason: span_absent_reason(field, current_object),
                     });
                 };
                 let new_value = change
                     .new_value
                     .as_ref()
                     .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
+                // Mirror the op's semantic effect for the post-image gate below.
+                expected.insert(field.to_string(), new_value.clone());
 
                 // Sequence styles (block AND flow) carry no scalar value_range;
                 // replace the field's whole serde-aligned line_range with a
@@ -465,16 +538,18 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                                 path: path.clone(),
                                 reason: e.to_string(),
                             })?;
-                        format!("{field}: {rendered}\n")
+                        // A flow `set` rewrites the whole line, so a trailing
+                        // same-line comment would be dropped. Recover it (with its
+                        // leading whitespace) for the single-line case (NRN-141).
+                        let comment = single_line_trailing_comment(content, &span.line_range);
+                        format!("{field}: {rendered}{comment}\n")
                     } else {
-                        let block_items =
-                            serialize_array_block_for_new_field(items).map_err(|e| {
-                                ApplyError::CannotMinimalEdit {
-                                    path: path.clone(),
-                                    reason: e.to_string(),
-                                }
-                            })?;
-                        format!("{field}:\n{block_items}")
+                        serialize_array_block_field(field, items).map_err(|e| {
+                            ApplyError::CannotMinimalEdit {
+                                path: path.clone(),
+                                reason: e.to_string(),
+                            }
+                        })?
                     };
                     edits.push((span.line_range.clone(), replacement));
                     continue;
@@ -513,9 +588,11 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 let Some(span) = span else {
                     return Err(ApplyError::CannotMinimalEdit {
                         path: path.clone(),
-                        reason: format!("field {field} not present in frontmatter"),
+                        reason: span_absent_reason(field, current_object),
                     });
                 };
+                // Mirror the op's semantic effect for the post-image gate below.
+                expected.remove(field);
                 edits.push((span.line_range.clone(), String::new()));
             }
             "add_frontmatter" => {
@@ -546,6 +623,8 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                     .new_value
                     .as_ref()
                     .ok_or_else(|| ApplyError::MissingNewValue { path: path.clone() })?;
+                // Mirror the op's semantic effect for the post-image gate below.
+                expected.insert(field.to_string(), new_value.clone());
                 // Insert at end of frontmatter block. extract_frontmatter
                 // returns a range over the YAML content (between the leading
                 // and trailing `---` lines). It ends at the byte just after
@@ -561,15 +640,15 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
                 let line_to_insert = match new_value {
                     Value::Array(items) => {
                         // Default to block style for new array fields — more
-                        // readable in Markdown frontmatter.
-                        let block_items =
-                            serialize_array_block_for_new_field(items).map_err(|e| {
-                                ApplyError::CannotMinimalEdit {
-                                    path: path.clone(),
-                                    reason: e.to_string(),
-                                }
-                            })?;
-                        format!("{leading_newline}{field}:\n{block_items}")
+                        // readable in Markdown frontmatter (an empty array
+                        // renders as `field: []`).
+                        let rendered = serialize_array_block_field(field, items).map_err(|e| {
+                            ApplyError::CannotMinimalEdit {
+                                path: path.clone(),
+                                reason: e.to_string(),
+                            }
+                        })?;
+                        format!("{leading_newline}{rendered}")
                     }
                     _ => {
                         let rendered =
@@ -605,7 +684,171 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
     for (range, replacement) in edits {
         out.replace_range(range, &replacement);
     }
+
+    // NRN-141 post-image gate: the composed frontmatter must re-parse to exactly
+    // the mapping the ops intended. A splice that produced unparseable YAML (a
+    // duplicate key, an unclosed flow) or silently dropped/renamed a key (an
+    // unquoted `#foo:` line YAML reads as a comment) is caught here and refused
+    // before any write — a wrong write corrupts a document, a refusal does not.
+    verify_post_image(&path, &out, &expected)?;
+
     Ok(out)
+}
+
+/// (NRN-141) Re-parse the composed frontmatter and confirm it equals `expected`
+/// — the parsed original with each op's semantic effect applied. Parsed mappings
+/// are compared, so key order and formatting are irrelevant. On a parse failure
+/// or a mismatch, refuse: the span locator is a best-effort scanner (NRN-140
+/// replaces it), so this is the trust-preserving backstop that converts a
+/// corrupting write into a clean decline. Runs on every path through the
+/// frontmatter-op editor ([`apply_file_changes`]), including a document whose
+/// frontmatter was freshly synthesized. Content rewrites that mutate frontmatter
+/// values *outside* this editor (`rewrite_link`) are covered by the weaker
+/// parse-degradation check [`verify_frontmatter_not_degraded`] at the applier's
+/// compose seam.
+fn verify_post_image(
+    path: &Utf8PathBuf,
+    content: &str,
+    expected: &serde_json::Map<String, Value>,
+) -> Result<(), ApplyError> {
+    let mut diagnostics = Vec::new();
+    let (frontmatter, frontmatter_range, _, _) = extract_frontmatter(content, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.clone(),
+            detail: format!(
+                "result no longer parses: {}",
+                join_diagnostics(&diagnostics)
+            ),
+        });
+    }
+    let empty = serde_json::Map::new();
+    let actual = match (&frontmatter, &frontmatter_range) {
+        // The mapping-or-empty normalization mirrors the input gate; an emptied
+        // block re-parsing as YAML null counts as the empty mapping.
+        (Some(value), Some(range)) => frontmatter_as_mapping(value, content, range, &empty)
+            .ok_or_else(|| ApplyError::PostImageVerificationFailed {
+                path: path.clone(),
+                detail: "result frontmatter is no longer a top-level mapping".into(),
+            })?,
+        // A document with no frontmatter block at all has the empty mapping.
+        (None, None) => &empty,
+        _ => {
+            return Err(ApplyError::PostImageVerificationFailed {
+                path: path.clone(),
+                detail: "result frontmatter is no longer a top-level mapping".into(),
+            });
+        }
+    };
+    if actual != expected {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.clone(),
+            detail: "result frontmatter does not match the intended fields".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Normalizes a parsed frontmatter value to its mapping form: a mapping is
+/// itself; a YAML-null parse over an empty or whitespace-only block is the
+/// empty mapping (an initializable `---\n---\n` block, NRN-120). Anything else
+/// — an explicit `null`/`~` scalar, a sequence, a bare scalar — is not a
+/// mapping and yields `None` (splicing keys around it would produce invalid
+/// YAML, so callers refuse). Shared by `apply_file_changes`' input gate and
+/// `verify_post_image` so both ends of an edit agree on what counts as a
+/// mapping.
+fn frontmatter_as_mapping<'a>(
+    value: &'a Value,
+    content: &str,
+    frontmatter_range: &Range<usize>,
+    empty: &'a serde_json::Map<String, Value>,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    match value {
+        Value::Object(map) => Some(map),
+        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => Some(empty),
+        _ => None,
+    }
+}
+
+/// Joins frontmatter parse diagnostics into one `; `-separated message.
+fn join_diagnostics(diagnostics: &[crate::core::Diagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// (NRN-141) Parse-degradation check for content rewrites. `apply_rewrite_link`
+/// rewrites `[[...]]` across the whole file — frontmatter values included —
+/// without going through the frontmatter editor's own post-image gate, so a
+/// rewrite target carrying YAML-structural bytes can silently break the block
+/// (collapsing every field to null on the next read). If the BASELINE
+/// frontmatter (the content entering the rewrite: the post-frontmatter-ops
+/// state at the applier's compose seam, or a backlinker's on-disk bytes in the
+/// move/delete cascade) parsed as a mapping and the rewritten result no longer
+/// does, the rewrite is refused. Deliberately weaker than mapping-equality:
+/// link rewrites legitimately change values, so only parse degradation refuses
+/// — and a document whose frontmatter was already broken (or absent, or a
+/// non-mapping) stays rewritable.
+pub(crate) fn verify_frontmatter_not_degraded(
+    path: &Utf8Path,
+    original: &str,
+    composed: &str,
+) -> Result<(), ApplyError> {
+    let mut diagnostics = Vec::new();
+    let (original_fm, _, _, _) = extract_frontmatter(original, &mut diagnostics);
+    if !diagnostics.is_empty() || !matches!(original_fm, Some(Value::Object(_))) {
+        return Ok(());
+    }
+    let mut diagnostics = Vec::new();
+    let (composed_fm, composed_range, _, _) = extract_frontmatter(composed, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.to_path_buf(),
+            detail: format!(
+                "a content rewrite broke the frontmatter: {}",
+                join_diagnostics(&diagnostics)
+            ),
+        });
+    }
+    // The composed side accepts a mapping OR an emptied block: a plan that
+    // removes the last frontmatter field legitimately leaves `---\n---\n`,
+    // which re-parses as null — verify_post_image already accepted it as the
+    // empty mapping, and refusing it here would decline a valid edit whole.
+    // Anything else — a non-empty non-mapping, or a vanished block — degrades.
+    let empty = serde_json::Map::new();
+    let composed_ok = match (&composed_fm, &composed_range) {
+        (Some(value), Some(range)) => {
+            frontmatter_as_mapping(value, composed, range, &empty).is_some()
+        }
+        _ => false,
+    };
+    if !composed_ok {
+        return Err(ApplyError::PostImageVerificationFailed {
+            path: path.to_path_buf(),
+            detail: "a content rewrite broke the frontmatter (no longer a top-level mapping)"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+/// The reason for a span-absent `set`/`remove`, told truthfully from the parsed
+/// mapping (in scope at both call sites). A field that IS a parsed key but has no
+/// editable span was declined wholesale — an ambiguous-key document the span
+/// locator refused (NRN-141 guard). Reporting that as "not present" is false and
+/// dangerous: it invites an `add_frontmatter` that would splice a duplicate key.
+/// A field genuinely absent keeps the plain not-present message (NRN-141 / V10).
+fn span_absent_reason(field: &str, current_object: &serde_json::Map<String, Value>) -> String {
+    if current_object.contains_key(field) {
+        format!(
+            "field {field} is present but cannot be minimal-edited in place \
+             (document declined: a frontmatter key cannot be reliably located; see NRN-140)"
+        )
+    } else {
+        format!("field {field} not present in frontmatter")
+    }
 }
 
 fn check_expected_old_value(
@@ -767,6 +1010,8 @@ pub(crate) enum LinkAttempt {
 /// - other io error on read   -> Failed(ReadFailed, detail)
 /// - other io error on write  -> Failed(WriteFailed, detail)
 /// - planned text not present -> Skipped(Drifted)
+/// - would break the backlinker's parsing frontmatter
+///   -> Skipped(WouldCorruptFrontmatter), unwritten
 /// - success                  -> Rewritten
 pub(crate) fn rewrite_one_backlink(
     cwd: &Utf8Path,
@@ -785,6 +1030,14 @@ pub(crate) fn rewrite_one_backlink(
     let updated = original.replacen(raw, rewritten, 1);
     if updated == original {
         return LinkAttempt::Skipped(LinkSkipReason::Drifted);
+    }
+    // NRN-141: a rewrite landing inside a frontmatter value can break the
+    // backlinker's block when the new target carries YAML-structural bytes
+    // (a move destination is a free-form filename). Skip rather than corrupt —
+    // and rather than abort the whole cascade mid-move: the stale link stays
+    // detectable by `validate` and repairable, while a nulled mapping is not.
+    if verify_frontmatter_not_degraded(source_path, &original, &updated).is_err() {
+        return LinkAttempt::Skipped(LinkSkipReason::WouldCorruptFrontmatter);
     }
     match fs::write(abs.as_std_path(), &updated) {
         Ok(()) => LinkAttempt::Rewritten,
@@ -1320,7 +1573,13 @@ mod tests {
         let content = "---\ntitle: hi\n---\n";
         let change = make_change("a.md", "status", "h1", "remove_frontmatter", None);
         let err = apply_change(content, &change).unwrap_err();
-        assert!(matches!(err, ApplyError::CannotMinimalEdit { .. }));
+        let ApplyError::CannotMinimalEdit { reason, .. } = &err else {
+            panic!("expected CannotMinimalEdit, got {err:?}");
+        };
+        assert!(
+            reason.contains("not present in frontmatter"),
+            "a genuinely absent field keeps the not-present message, got: {reason}"
+        );
     }
 
     #[test]
@@ -1415,14 +1674,38 @@ mod tests {
     }
 
     #[test]
-    fn apply_add_frontmatter_empty_array_inserts_key_only() {
+    fn apply_add_frontmatter_empty_array_inserts_empty_flow_list() {
+        // NRN-141: a bare `aliases:` line reads back as null, not `[]`. An empty
+        // array now serializes as `aliases: []` so the field round-trips to the
+        // empty list it was written as.
         let content = "---\ntitle: Foo\n---\nbody\n";
         let change = make_change("a.md", "aliases", "h1", "add_frontmatter", Some(json!([])));
         let result = apply_change(content, &change).unwrap();
         assert!(
-            result.contains("aliases:\n"),
-            "expected key line with no items: {result}"
+            result.contains("aliases: []\n"),
+            "expected an explicit empty list: {result}"
         );
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = extract_frontmatter(&result, &mut diags);
+        assert!(diags.is_empty(), "result must re-parse cleanly: {result}");
+        assert_eq!(fm.unwrap().get("aliases"), Some(&json!([])));
+    }
+
+    #[test]
+    fn apply_set_block_list_to_empty_round_trips_as_empty_list() {
+        // NRN-141: `set aliases=[]` on a block list must write `aliases: []`
+        // (not a bare `aliases:` that reads back as null).
+        let content = "---\naliases:\n  - old\ntitle: hi\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["old"])),
+            ..make_change("a.md", "aliases", "h1", "set_frontmatter", Some(json!([])))
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\naliases: []\ntitle: hi\n---\nbody\n");
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = extract_frontmatter(&result, &mut diags);
+        assert!(diags.is_empty());
+        assert_eq!(fm.unwrap().get("aliases"), Some(&json!([])));
     }
 
     #[test]
@@ -1500,6 +1783,56 @@ mod tests {
     }
 
     #[test]
+    fn apply_set_flow_list_preserves_trailing_comment() {
+        // NRN-141 P3: a flow-list `set` replaces the whole line via line_range,
+        // which dropped a trailing same-line comment. The comment (with its
+        // leading whitespace) is now re-appended after the replacement.
+        let content = "---\ntags: [a, b]  # note\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a", "b"])),
+            ..make_change("a.md", "tags", "h1", "set_frontmatter", Some(json!(["x"])))
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntags: [x]  # note\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_set_flow_list_does_not_treat_quoted_hash_as_comment() {
+        // A `#` inside a quoted scalar is not a comment opener — it must not be
+        // captured as a trailing comment, and a real trailing comment after the
+        // quoted `#` must still be preserved.
+        let content = "---\ntags: [\"a#b\"]  # real\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a#b"])),
+            ..make_change("a.md", "tags", "h1", "set_frontmatter", Some(json!(["c"])))
+        };
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntags: [c]  # real\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_set_flow_list_quoted_hash_only_captures_no_comment() {
+        // With only a quoted `#` and no real comment, nothing is appended and
+        // the value round-trips cleanly (no spurious `# ...` bytes).
+        let content = "---\ntags: [\"a#b\"]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a#b"])),
+            ..make_change(
+                "a.md",
+                "tags",
+                "h1",
+                "set_frontmatter",
+                Some(json!(["c#d"])),
+            )
+        };
+        let result = apply_change(content, &change).unwrap();
+        let mut diags = Vec::new();
+        let (fm, _, _, _) = extract_frontmatter(&result, &mut diags);
+        assert!(diags.is_empty(), "result must re-parse cleanly: {result}");
+        assert_eq!(fm.unwrap().get("tags").unwrap(), &json!(["c#d"]));
+    }
+
+    #[test]
     fn apply_remove_frontmatter_deletes_whole_list_of_mappings_block() {
         // Phantom-boundary fix: `- name:` item lines are not confirmed keys, so
         // `contacts`'s line_range covers the whole block — remove takes it all.
@@ -1530,6 +1863,45 @@ mod tests {
         );
         // And crucially, serde's `a` field is untouched (no write happened).
         assert!(apply_change(content, &change).is_err());
+    }
+
+    #[test]
+    fn apply_refuses_whole_doc_when_a_serde_key_is_unlocatable() {
+        // NRN-141: `"\x61"` (serde `a`) is mis-decoded by the scanner, so serde
+        // key `a` has no candidate line. Setting the well-formed `title` on the
+        // same document must refuse (the whole-doc span refusal), never write —
+        // otherwise `a` would be absorbed into `title`'s line and clobbered.
+        let content = "---\ntitle: hi\n\"\\x61\": 1\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let err = apply_change(content, &change).unwrap_err();
+        let ApplyError::CannotMinimalEdit { reason, .. } = &err else {
+            panic!("expected CannotMinimalEdit, got {err:?}");
+        };
+        // V10: `title` IS present in the parsed mapping — the refusal must say
+        // so, not claim it absent (which would invite an add_frontmatter that
+        // splices a duplicate).
+        assert!(
+            reason.contains("present but cannot be minimal-edited"),
+            "a located-but-declined field must not report as absent, got: {reason}"
+        );
+        // No write path is reached — a remove of the same field also refuses at
+        // the span-absent site with the same truthful diagnostic. (expected_old
+        // is supplied so the precondition passes and we reach that site.)
+        let remove = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "remove_frontmatter", None)
+        };
+        let remove_err = apply_change(content, &remove).unwrap_err();
+        let ApplyError::CannotMinimalEdit { reason, .. } = &remove_err else {
+            panic!("expected CannotMinimalEdit, got {remove_err:?}");
+        };
+        assert!(
+            reason.contains("present but cannot be minimal-edited"),
+            "remove of a located-but-declined field must not report as absent, got: {reason}"
+        );
     }
 
     #[test]
@@ -2090,6 +2462,116 @@ mod tests {
         assert_eq!(LinkFailReason::WriteFailed.code(), "write_failed");
         assert_eq!(LinkSkipReason::Drifted.code(), "drifted");
         assert_eq!(LinkSkipReason::SourceMissing.code(), "source_missing");
+        assert_eq!(
+            LinkSkipReason::WouldCorruptFrontmatter.code(),
+            "would_corrupt_frontmatter"
+        );
+    }
+
+    #[test]
+    fn cascade_skips_backlink_rewrite_that_would_corrupt_frontmatter() {
+        // NRN-141 round 3: a move/delete backlink cascade rewrites `[[...]]`
+        // inside OTHER documents' frontmatter with a raw replace + write, no
+        // degradation check. Moving a doc to a stem with a YAML-structural byte
+        // (`Parent "Two"` — a legal filename) rewrote B's `up: "[[Parent]]"`
+        // into unparseable YAML, silently nulling B's whole mapping. The
+        // corrupting rewrite is now SKIPPED (B's bytes untouched, reported with
+        // a truthful reason — a stale link is detectable and repairable; a
+        // corrupted doc is not), while safe rewrites in the same cascade still
+        // land.
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-cascade-fmguard-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let b_doc = "---\nup: \"[[Parent]]\"\n---\nbody\n";
+        std::fs::write(root.join("b.md"), b_doc).unwrap();
+        std::fs::write(root.join("c.md"), "---\ntype: note\n---\nsee [[Parent]]\n").unwrap();
+
+        let change = PlannedChange {
+            change_id: "move-parent".into(),
+            path: camino::Utf8PathBuf::from("Parent.md"),
+            document_hash: String::new(),
+            finding_code: "move_document".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: "move_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: Some(camino::Utf8PathBuf::from("Parent \"Two\".md")),
+            link_risk: Some(crate::standards::repair::link_risk::LinkRisk {
+                stem_changed: true,
+                directory_changed: false,
+                stem_links: vec![
+                    crate::standards::repair::link_risk::AffectedLink {
+                        source_path: camino::Utf8PathBuf::from("b.md"),
+                        raw: "[[Parent]]".into(),
+                        kind: crate::core::LinkKind::Wikilink,
+                        source_span: None,
+                        rewritten: "[[Parent \"Two\"]]".into(),
+                    },
+                    crate::standards::repair::link_risk::AffectedLink {
+                        source_path: camino::Utf8PathBuf::from("c.md"),
+                        raw: "[[Parent]]".into(),
+                        kind: crate::core::LinkKind::Wikilink,
+                        source_span: None,
+                        rewritten: "[[Parent \"Two\"]]".into(),
+                    },
+                ],
+                path_qualified_wikilinks: vec![],
+                markdown_links: vec![],
+            }),
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(
+            outcome.skipped.len(),
+            1,
+            "the frontmatter-corrupting rewrite must be skipped, got {outcome:?}"
+        );
+        assert_eq!(outcome.skipped[0].file.as_str(), "b.md");
+        assert_eq!(
+            outcome.skipped[0].reason.code(),
+            "would_corrupt_frontmatter"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.md")).unwrap(),
+            b_doc,
+            "b.md must be byte-identical"
+        );
+        // The safe body-only rewrite in the same cascade still lands.
+        assert_eq!(outcome.rewritten.len(), 1);
+        assert_eq!(outcome.rewritten[0].file.as_str(), "c.md");
+        assert_eq!(
+            std::fs::read_to_string(root.join("c.md")).unwrap(),
+            "---\ntype: note\n---\nsee [[Parent \"Two\"]]\n"
+        );
+        assert!(outcome.failed.is_empty());
+    }
+
+    #[test]
+    fn cascade_safe_stem_rewrites_frontmatter_backlink_as_before() {
+        // Control: a structural-char-free stem rewrites a frontmatter wikilink
+        // backlink exactly as before (no spurious skip).
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-cascade-fmsafe-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::write(root.join("b.md"), "---\nup: \"[[Parent]]\"\n---\nbody\n").unwrap();
+
+        let change = make_move_change_with_backlinker("b.md", "[[Parent]]", "[[parent-two]]");
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(outcome.rewritten.len(), 1, "got {outcome:?}");
+        assert!(outcome.skipped.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.md")).unwrap(),
+            "---\nup: \"[[parent-two]]\"\n---\nbody\n"
+        );
     }
 
     #[test]
@@ -2313,6 +2795,194 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("good-backlinker.md")).unwrap(),
             "see [[b]] here\n"
+        );
+    }
+
+    // ── NRN-141 post-image verification gate ──────────────────────────────────
+
+    #[test]
+    fn apply_v2_phantom_remove_is_refused_not_corrupted() {
+        // V2: `"\x62ar"` decodes to serde `bar`, but the scanner reads `x62ar`,
+        // and the flow value `foo: [a,` / `"b]c",` / `bar: v]` hides an interior
+        // `bar: v]` phantom. On the buggy absorb, that phantom is confirmed as
+        // `bar`'s span, so `remove bar` deletes to block end and leaves an
+        // unclosed flow (`foo: [a,` / `"b]c",`) that re-parses to null — silent
+        // corruption. This asserts the durable property (a refusal, no write);
+        // the refusal mechanism shifts from the post-image gate (this commit) to
+        // the quote-aware absorb guard (NRN-141 absorb fix) — see the guard-
+        // specific test below.
+        let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("realvalue")),
+            ..make_change("a.md", "bar", "h1", "remove_frontmatter", None)
+        };
+        let result = apply_change(content, &change);
+        assert!(
+            result.is_err(),
+            "unclosed-flow corruption must be refused, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn apply_post_image_gate_refuses_hashfoo_collection_set() {
+        // Pre-existing corruption converted to a refusal: a `"#foo"` key emits an
+        // unquoted `#foo:` line on a collection `set` — which YAML reads as a
+        // comment, dropping the key. The post-image loses `#foo`, so the gate
+        // refuses rather than writing frontmatter that silently lost the field.
+        let content = "---\n\"#foo\": [a, b]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["a", "b"])),
+            ..make_change("a.md", "#foo", "h1", "set_frontmatter", Some(json!(["x"])))
+        };
+        let result = apply_change(content, &change);
+        assert!(
+            matches!(result, Err(ApplyError::PostImageVerificationFailed { .. })),
+            "a key that reserializes to a comment line must be refused, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn apply_post_image_gate_refuses_colon_key_collection_set() {
+        // Same class: a `"a: b"` key emits `a: b: [..]` on a collection `set`,
+        // which is not valid YAML — the post-image no longer parses, so the gate
+        // refuses instead of writing a frontmatter-parse-failed document.
+        let content = "---\n\"a: b\": [x]\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!(["x"])),
+            ..make_change("a.md", "a: b", "h1", "set_frontmatter", Some(json!(["y"])))
+        };
+        let result = apply_change(content, &change);
+        assert!(
+            matches!(result, Err(ApplyError::PostImageVerificationFailed { .. })),
+            "an invalid reserialized key line must be refused, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn apply_post_image_gate_allows_ordinary_multi_op_doc() {
+        // The gate must not false-positive: a normal set + remove + add batch
+        // composes to a document that re-parses to exactly the intended mapping,
+        // so it applies unchanged in behavior.
+        let content = "---\ntitle: hi\nstatus: draft\nkind: old\n---\nbody\n";
+        let changes = [
+            PlannedChange {
+                expected_old_value: Some(json!("draft")),
+                ..make_change(
+                    "a.md",
+                    "status",
+                    "h1",
+                    "set_frontmatter",
+                    Some(json!("done")),
+                )
+            },
+            PlannedChange {
+                expected_old_value: Some(json!("old")),
+                ..make_change("a.md", "kind", "h1", "remove_frontmatter", None)
+            },
+            make_change("a.md", "author", "h1", "add_frontmatter", Some(json!("me"))),
+        ];
+        let refs: Vec<&PlannedChange> = changes.iter().collect();
+        let result = apply_file_changes(content, &refs).expect("ordinary batch must apply");
+        assert_eq!(
+            result,
+            "---\ntitle: hi\nstatus: done\nauthor: me\n---\nbody\n"
+        );
+    }
+
+    // ── NRN-141 quote-aware flow absorb ───────────────────────────────────────
+
+    #[test]
+    fn apply_v3a_quoted_flow_sibling_set_applies_after_absorb_fix() {
+        // V3a: a flow mapping whose closing `}` is shadowed inside `a: "}"`. The
+        // buggy absorb stopped at that quoted `}`, exposing the interior
+        // `next: 1` as a second `next` candidate and refusing the whole
+        // (well-formed) document. Quote-aware absorb steps over the quoted `}`,
+        // so the sibling `title` is uniquely located and editable again.
+        let content = "---\ntitle: hi\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let result = apply_change(content, &change).expect("well-formed sibling set must apply");
+        assert_eq!(
+            result,
+            "---\ntitle: bye\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\nbody\n"
+        );
+    }
+
+    #[test]
+    fn apply_v2_phantom_remove_refused_by_guard_after_absorb_fix() {
+        // Companion to `apply_v2_phantom_remove_is_refused_not_corrupted`: after
+        // the quote-aware absorb, the interior `bar: v]` is no longer a
+        // candidate, so serde key `bar` is unlocatable and the guard empties
+        // spans — `remove bar` refuses at the span layer (CannotMinimalEdit),
+        // earlier than the post-image gate, never reaching a corrupting edit.
+        let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("realvalue")),
+            ..make_change("a.md", "bar", "h1", "remove_frontmatter", None)
+        };
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "the absorb fix must refuse at the guard, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn apply_set_sibling_of_flow_with_key_line_quote_applies() {
+        // NRN-141 round 2 (a): the flow's first item opens a double quote on
+        // the KEY line and closes it on the continuation, where the real `]`
+        // follows. With the quote state seeded from the key line, the absorb
+        // stops at that `]` and the sibling `title` stays uniquely located —
+        // an unseeded absorb misread the closing `"` as opening, skipped the
+        // `]`, absorbed `title`, and refused this valid document whole.
+        let content = "---\nfoo: [\"a,\nb\", c]\ntitle: hi\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let result = apply_change(content, &change).expect("sibling set must apply");
+        assert_eq!(result, "---\nfoo: [\"a,\nb\", c]\ntitle: bye\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_remove_shielded_closer_phantom_refused_at_guard() {
+        // NRN-141 round 2 (b): the key-line quote spans the continuation and
+        // shields the `]` in `b]: c`, so the absorb must run through it and
+        // keep the interior `phantom: v]` absorbed — leaving the mis-decoded
+        // serde key `phantom` (`"\x70hantom"`) with zero candidates and the
+        // whole doc refused at the guard (CannotMinimalEdit). The unseeded
+        // absorb stopped at the shielded `]`, re-exposed the phantom, and the
+        // remove corrupted the doc (caught only by the post-image gate).
+        let content = "---\ntags: [\"a,\nb]: c\",\nphantom: v]\n\"\\x70hantom\": real\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("real")),
+            ..make_change("a.md", "phantom", "h1", "remove_frontmatter", None)
+        };
+        let err = apply_change(content, &change).unwrap_err();
+        assert!(
+            matches!(err, ApplyError::CannotMinimalEdit { .. }),
+            "the seeded absorb must refuse at the guard, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn apply_set_sibling_of_flow_with_key_line_comment_applies() {
+        // NRN-141 round 3 (a): the key line's trailing `# "x` comment is
+        // comment text, not content — the `"` inside it must not shield the
+        // real `]` on the continuation. With the comment-aware scan, `title`
+        // stays uniquely located and editable; the comment-blind scan absorbed
+        // it and refused this valid document whole.
+        let content = "---\nfoo: [ # \"x\n  a, b ]\ntitle: hi\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let result = apply_change(content, &change).expect("sibling set must apply");
+        assert_eq!(
+            result,
+            "---\nfoo: [ # \"x\n  a, b ]\ntitle: bye\n---\nbody\n"
         );
     }
 }

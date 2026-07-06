@@ -66,7 +66,11 @@ pub fn serialize_value_preserving_style(
             "false".to_string()
         }),
         Value::Number(n) => Ok(n.to_string()),
-        Value::String(s) => Ok(serialize_string_value(s, original_style)),
+        Value::String(s) => Ok(serialize_string_value(
+            s,
+            original_style,
+            ScalarContext::Block,
+        )),
         // Array / Object already handled above.
         Value::Array(_) | Value::Object(_) => unreachable!(),
     }
@@ -95,7 +99,7 @@ fn serialize_array(items: &[Value], original_style: ValueStyle) -> Result<String
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&render_array_item(item)?);
+                out.push_str(&render_array_item(item, ScalarContext::Flow)?);
             }
             out.push(']');
             Ok(out)
@@ -122,7 +126,7 @@ fn serialize_array(items: &[Value], original_style: ValueStyle) -> Result<String
 /// - Fields are emitted in key order (BTreeMap iteration order).
 /// - `Value::Null` fields are skipped (e.g., required-but-undefaulted
 ///   fields per the `norn new` warn-don't-block model).
-/// - Array values use [`serialize_array_block_for_new_field`].
+/// - Array values use [`serialize_array_block_field`].
 /// - Scalar values pick a style based on YAML safety: wikilinks / strings
 ///   with `:` / strings starting with YAML indicators are quoted; others
 ///   are plain.
@@ -137,8 +141,7 @@ pub fn serialize_new_document(
             continue;
         }
         if let Some(items) = value.as_array() {
-            let block = serialize_array_block_for_new_field(items)?;
-            out.push_str(&format!("{field}:\n{block}"));
+            out.push_str(&serialize_array_block_field(field, items)?);
         } else {
             let style = scalar_style_for(value);
             let serialized = serialize_value_preserving_style(value, style)?;
@@ -168,21 +171,28 @@ fn scalar_style_for(value: &Value) -> ValueStyle {
     ValueStyle::Plain
 }
 
-/// Serialize an array as block-style YAML items for a brand-new field.
-///
-/// Output is the items portion only: `  - item1\n  - item2\n` (2-space
-/// indent, trailing newline). Each item is quoted per scalar rules.
-/// The caller emits `field:\n` before this output.
-///
-/// An empty array emits an empty string (the caller still emits `field:\n`).
-pub fn serialize_array_block_for_new_field(items: &[Value]) -> Result<String, QuoteError> {
-    serialize_array_block_items(items)
+/// Serialize a complete `field: <array>` frontmatter entry (trailing newline
+/// included). Non-empty arrays emit block style (`field:\n  - item1\n`); an
+/// empty array emits an explicit `field: []\n` — a bare `field:` line reads
+/// back as YAML null, not the empty list it was written as (NRN-141). The
+/// single entry point for every path that writes an array-valued field line
+/// (`norn new`, `add_frontmatter`, block-sequence `set`).
+pub fn serialize_array_block_field(field: &str, items: &[Value]) -> Result<String, QuoteError> {
+    if items.is_empty() {
+        return Ok(format!("{field}: []\n"));
+    }
+    Ok(format!("{field}:\n{}", serialize_array_block_items(items)?))
 }
 
+/// Serialize an array as block-style YAML items: the items portion only
+/// (`  - item1\n  - item2\n`, 2-space indent, trailing newline), each item
+/// quoted per scalar rules. An empty array emits an empty string — callers
+/// route through [`serialize_array_block_field`], which renders an empty
+/// array as `field: []` instead.
 fn serialize_array_block_items(items: &[Value]) -> Result<String, QuoteError> {
     let mut out = String::new();
     for item in items {
-        let rendered = render_array_item(item)?;
+        let rendered = render_array_item(item, ScalarContext::Block)?;
         out.push_str("  - ");
         out.push_str(&rendered);
         out.push('\n');
@@ -190,14 +200,28 @@ fn serialize_array_block_items(items: &[Value]) -> Result<String, QuoteError> {
     Ok(out)
 }
 
-/// Render a single array item as a YAML scalar string.
+/// The YAML lexical context a scalar is being emitted into. Round-trip
+/// verification must reparse the scalar in the same context it will live in:
+/// in a `Flow` context (`k: [<val>]`) the flow indicators (`,` `[` `]` `{` `}`),
+/// `: `, and leading/trailing space are structural where a `Block` context
+/// (`k: <val>`) treats them as legal plain bytes. Emitting a flow item verified
+/// only in block context silently mis-splits (`a,b` → two items) or produces
+/// invalid YAML (`a]b` → `[a]b]`) (NRN-141).
+#[derive(Debug, Clone, Copy)]
+enum ScalarContext {
+    Block,
+    Flow,
+}
+
+/// Render a single array item as a YAML scalar string in the given lexical
+/// context.
 ///
 /// Strings are rendered via plain-style quoting (upgraded when necessary).
 /// Numbers, booleans, and null are rendered without quotes.
 /// Objects produce `QuoteError::NonScalarValue`.
-fn render_array_item(item: &Value) -> Result<String, QuoteError> {
+fn render_array_item(item: &Value, context: ScalarContext) -> Result<String, QuoteError> {
     match item {
-        Value::String(s) => Ok(serialize_string_value(s, ValueStyle::Plain)),
+        Value::String(s) => Ok(serialize_string_value(s, ValueStyle::Plain, context)),
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(if *b {
             "true".to_string()
@@ -231,15 +255,32 @@ fn render_scalar_at_rank(s: &str, rank: u8) -> String {
 /// that reparses to a number, bool, or mapping does NOT round-trip). This is the
 /// invariant that replaces the hand-maintained plain-scalar denylist: correctness
 /// is decided by the YAML standard, not by an enumerated hazard list (NRN-118).
-fn scalar_round_trips(rendered: &str, expected: &str) -> bool {
-    let doc = format!("k: {rendered}");
-    match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
-        Ok(v) => v.get("k").and_then(|x| x.as_str()) == Some(expected),
-        Err(_) => false,
+fn scalar_round_trips(rendered: &str, expected: &str, context: ScalarContext) -> bool {
+    match context {
+        ScalarContext::Block => {
+            let doc = format!("k: {rendered}");
+            match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
+                Ok(v) => v.get("k").and_then(|x| x.as_str()) == Some(expected),
+                Err(_) => false,
+            }
+        }
+        ScalarContext::Flow => {
+            // Verify inside a flow sequence: the scalar reparses only if it is the
+            // sole element AND decodes to exactly `expected` — so a value that
+            // would mis-split on `,`/`]`/`[` fails here and escalates to a quote.
+            let doc = format!("k: [{rendered}]");
+            match serde_yaml::from_str::<serde_yaml::Value>(&doc) {
+                Ok(v) => match v.get("k").and_then(|x| x.as_sequence()) {
+                    Some(seq) if seq.len() == 1 => seq[0].as_str() == Some(expected),
+                    _ => false,
+                },
+                Err(_) => false,
+            }
+        }
     }
 }
 
-fn serialize_string_value(s: &str, original_style: ValueStyle) -> String {
+fn serialize_string_value(s: &str, original_style: ValueStyle, context: ScalarContext) -> String {
     // Pick the starting style, preserving an explicit quote style and preferring
     // plain for a plain/empty origin. `is_plain_safe` is only a fast first guess
     // here — the round-trip check below is the authority.
@@ -263,7 +304,7 @@ fn serialize_string_value(s: &str, original_style: ValueStyle) -> String {
     // that always round-trips, so the loop is guaranteed to return a safe value.
     for rank in start_rank..=RANK_DOUBLE {
         let rendered = render_scalar_at_rank(s, rank);
-        if scalar_round_trips(&rendered, s) {
+        if scalar_round_trips(&rendered, s, context) {
             return rendered;
         }
     }
@@ -459,6 +500,23 @@ mod serialize_new_document_tests {
         let z_pos = out.find("z_last:").unwrap();
         assert!(a_pos < m_pos);
         assert!(m_pos < z_pos);
+    }
+
+    #[test]
+    fn serialize_new_document_empty_array_emits_empty_flow_list() {
+        // NRN-141: a bare `field:` line reads back as null; an empty array must
+        // serialize as `field: []` so it round-trips to the empty list.
+        let mut fm = BTreeMap::new();
+        fm.insert("aliases".into(), json!([]));
+
+        let out = serialize_new_document(&fm, "").unwrap();
+        assert_eq!(out, "---\naliases: []\n---\n");
+        let yaml = out.trim_start_matches("---\n").trim_end_matches("---\n");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap().get("aliases"),
+            Some(&json!([]))
+        );
     }
 
     #[test]
@@ -686,16 +744,18 @@ mod tests {
     }
 
     #[test]
-    fn serialize_array_block_for_new_field_emits_indented_items() {
+    fn serialize_array_block_field_emits_key_and_indented_items() {
         let items = vec![json!("foo"), json!("bar")];
-        let out = serialize_array_block_for_new_field(&items).unwrap();
-        assert_eq!(out, "  - foo\n  - bar\n");
+        let out = serialize_array_block_field("aliases", &items).unwrap();
+        assert_eq!(out, "aliases:\n  - foo\n  - bar\n");
     }
 
     #[test]
-    fn serialize_array_block_for_new_field_empty_emits_empty_string() {
-        let out = serialize_array_block_for_new_field(&[]).unwrap();
-        assert_eq!(out, "");
+    fn serialize_array_block_field_empty_emits_empty_flow_list() {
+        // NRN-141: a bare `field:` line reads back as null; an explicit `[]`
+        // round-trips as the empty list.
+        let out = serialize_array_block_field("aliases", &[]).unwrap();
+        assert_eq!(out, "aliases: []\n");
     }
 
     #[test]
@@ -711,5 +771,59 @@ mod tests {
         let value = json!([42, true, null]);
         let out = serialize_value_preserving_style(&value, ValueStyle::FlowSequence).unwrap();
         assert_eq!(out, "[42, true, ~]");
+    }
+
+    #[test]
+    fn flow_sequence_items_round_trip_in_flow_context() {
+        // Every adversarial item must survive serialize → embed as `key: [...]`
+        // → serde parse → identical list. In a FLOW context the flow indicators
+        // (`,` `[` `]` `{` `}`), `: `, and leading/trailing space are structural,
+        // so an item that would be plain-safe in a block context must be quoted
+        // here. The serializer decides this by round-tripping in a flow template,
+        // not a character blacklist (NRN-141).
+        let cases: Vec<&str> = vec![
+            "a,b",
+            "a]b",
+            "a[b",
+            "a: b",
+            "a:b",
+            "{x}",
+            "}x{",
+            "#x",
+            " a",
+            "a ",
+            "\"q\"",
+            "'q'",
+            "a\nb",
+            "*ref",
+            "&anch",
+            "!tag",
+            "-",
+            "?",
+            "null",
+            "true",
+            "123",
+            "",
+            "café ☕",
+            "plain",
+            "hello world",
+        ];
+        let items: Vec<Value> = cases.iter().map(|s| json!(s)).collect();
+        let rendered =
+            serialize_value_preserving_style(&Value::Array(items), ValueStyle::FlowSequence)
+                .unwrap();
+        let doc = format!("key: {rendered}");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&doc)
+            .unwrap_or_else(|e| panic!("rendered flow must be valid YAML: {rendered:?}: {e}"));
+        let seq = parsed
+            .get("key")
+            .and_then(|v| v.as_sequence())
+            .unwrap_or_else(|| panic!("expected a sequence, got: {rendered:?}"));
+        let got: Vec<String> = seq
+            .iter()
+            .map(|v| v.as_str().expect("string item").to_string())
+            .collect();
+        let expected: Vec<String> = cases.iter().map(|s| s.to_string()).collect();
+        assert_eq!(got, expected, "rendered: {rendered:?}");
     }
 }

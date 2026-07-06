@@ -190,14 +190,35 @@ pub fn top_level_property_spans(
         *name_counts.entry(candidate.name.as_str()).or_insert(0) += 1;
     }
 
+    // NRN-141 whole-document guard: a scanner span is only ever safe when the
+    // scan agrees with serde across the ENTIRE block. If any serde key cannot be
+    // located to exactly one candidate line — zero candidates (a key the scanner
+    // mis-decodes, e.g. double-quoted `"\x61"` → serde `a`, scanner `x61`) or
+    // more than one — then the scan and the parser disagree somewhere, and the
+    // mis-located key's bytes would be absorbed into a neighbor's `line_range`
+    // and silently deleted on `remove`/`set`. There is no safe per-field split
+    // (the record's decision is whole-document), so refuse spans for everything:
+    // `apply` then reports each field not-editable and never writes a corrupt
+    // document. NRN-140 replaces this scanner with a real span parser.
+    let every_key_uniquely_located = object
+        .keys()
+        .all(|key| name_counts.get(key.as_str()).copied() == Some(1));
+    if !every_key_uniquely_located {
+        return Vec::new();
+    }
+
     // (A)+(C) A candidate is CONFIRMED — a real field and a trustworthy
-    // `line_range` boundary — only if its name is a serde key claimed by exactly
-    // one candidate. Phantoms (a `- name:` item, a `key:`-lookalike inside a
-    // value) and ambiguous collisions are dropped here, so they are absorbed
-    // into the preceding confirmed field's range rather than truncating it.
+    // `line_range` boundary — iff its name is a serde key. The whole-document
+    // guard above already refused unless EVERY serde key is claimed by exactly
+    // one candidate, so here a `contains_key` match is necessarily that unique
+    // candidate; a per-candidate count check would be redundant. Phantoms (a
+    // `- name:` item, a `key:`-lookalike inside a value) are not serde keys, so
+    // they drop out and are absorbed into the preceding confirmed field's range
+    // rather than truncating it. Collisions are the guard's to refuse, not this
+    // filter's.
     let confirmed: Vec<&RawKeyLine> = candidates
         .iter()
-        .filter(|c| object.contains_key(&c.name) && name_counts[c.name.as_str()] == 1)
+        .filter(|c| object.contains_key(&c.name))
         .collect();
 
     let mut spans: Vec<PropertySpan> = Vec::with_capacity(confirmed.len());
@@ -288,7 +309,7 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
 
         index += 1;
         if !ends_on_key_line {
-            index = absorb_open_value(&lines, index, proposed_style);
+            index = absorb_open_value(&lines, index, proposed_style, rest);
         }
     }
 
@@ -300,15 +321,35 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
 /// continuation lines can sit at column 0 and would otherwise be misread as new
 /// keys. Everything else (block scalars, plain folds, block collections) puts
 /// its continuation on indented lines the main scan already skips, so this is a
-/// no-op for those. Best-effort: stops at the first line containing the closer.
-fn absorb_open_value(lines: &[&str], mut index: usize, style: ValueStyle) -> usize {
-    let closer = match style {
-        ValueStyle::FlowSequence => ']',
-        ValueStyle::FlowMapping => '}',
-        ValueStyle::SingleQuoted => '\'',
-        ValueStyle::DoubleQuoted => '"',
-        _ => return index,
-    };
+/// no-op for those.
+///
+/// A flow collection's closer (`]`/`}`) is matched only OUTSIDE a quoted scalar:
+/// a `]` inside `"b]c"` or a `}` inside `a: "}"` is structural to the item, not
+/// the flow, so stopping there would leave an interior `key:`-shaped line to be
+/// misread as a phantom candidate (NRN-141). `key_line_rest` — the key line's
+/// bytes after the `:` separator — seeds the flow quote state, so a quote opened
+/// on the key line (`foo: ["a,`) is still open on the first continuation line.
+/// A quoted-scalar value keeps the prior best-effort "stop at the first line
+/// containing the closing quote".
+fn absorb_open_value(
+    lines: &[&str],
+    index: usize,
+    style: ValueStyle,
+    key_line_rest: &str,
+) -> usize {
+    match style {
+        ValueStyle::FlowSequence => absorb_flow_value(lines, index, b']', key_line_rest),
+        ValueStyle::FlowMapping => absorb_flow_value(lines, index, b'}', key_line_rest),
+        ValueStyle::SingleQuoted => absorb_until_line_contains(lines, index, '\''),
+        ValueStyle::DoubleQuoted => absorb_until_line_contains(lines, index, '"'),
+        _ => index,
+    }
+}
+
+/// Best-effort absorb for an unclosed quoted scalar: stop after the first line
+/// that contains the closing quote character. The pre-NRN-141 behavior for the
+/// quoted-scalar styles, preserved exactly.
+fn absorb_until_line_contains(lines: &[&str], mut index: usize, closer: char) -> usize {
     while index < lines.len() {
         let contains_closer = lines[index].contains(closer);
         index += 1;
@@ -317,6 +358,86 @@ fn absorb_open_value(lines: &[&str], mut index: usize, style: ValueStyle) -> usi
         }
     }
     index
+}
+
+/// Absorb the continuation lines of an unclosed flow collection, stopping after
+/// the first line that contains `closer` OUTSIDE a quoted scalar. Quote state
+/// (single-quote with `''` doubling, double-quote with `\` escapes) is tracked
+/// across the absorbed lines, so a closer shadowed inside a quoted item does not
+/// terminate the value early (NRN-141). The state is seeded by scanning
+/// `key_line_rest` first: a quote opened on the key line after the bracket
+/// (`foo: ["a,`) is still open on the first continuation line, and seeding
+/// "outside quotes" there inverts every quote toggle that follows — misreading a
+/// closing `"` as opening (skipping the real closer) or a shielded closer as
+/// real (re-exposing an interior phantom line). The seed pass cannot itself find
+/// the closer: absorb only runs when the key line contains no closer byte at all
+/// (`ends_on_key_line` was false).
+fn absorb_flow_value(lines: &[&str], mut index: usize, closer: u8, key_line_rest: &str) -> usize {
+    let mut in_single = false;
+    let mut in_double = false;
+    scan_flow_line(
+        key_line_rest.as_bytes(),
+        closer,
+        &mut in_single,
+        &mut in_double,
+    );
+    while index < lines.len() {
+        let found = scan_flow_line(
+            lines[index].as_bytes(),
+            closer,
+            &mut in_single,
+            &mut in_double,
+        );
+        index += 1;
+        if found {
+            break;
+        }
+    }
+    index
+}
+
+/// One line of the flow-absorb scan: advances the quote state across `bytes`
+/// and reports whether `closer` occurred outside quotes. The single copy of the
+/// flow quote-state machine — the key-line seed pass and the continuation-line
+/// loop both run through here. An unquoted `#` at line start or preceded by
+/// whitespace begins a YAML comment (legal inside a flow collection): the rest
+/// of the line is comment text, so scanning stops there — a quote or closer
+/// inside a comment is neither a quote toggle nor a real closer.
+fn scan_flow_line(bytes: &[u8], closer: u8, in_single: &mut bool, in_double: &mut bool) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if *in_single {
+            // A doubled `''` is an escaped quote, still inside the scalar.
+            if b == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                *in_single = false;
+            }
+        } else if *in_double {
+            if b == b'\\' {
+                // Skip the escaped byte (e.g. `\"`).
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                *in_double = false;
+            }
+        } else if b == b'\'' {
+            *in_single = true;
+        } else if b == b'"' {
+            *in_double = true;
+        } else if b == b'#' && (i == 0 || matches!(bytes[i - 1], b' ' | b'\t')) {
+            // Comment through end of line; quote state is unaffected by it.
+            return false;
+        } else if b == closer {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// (B) Validates a proposed value span against serde's parsed value. Returns the
@@ -1468,7 +1589,199 @@ mod locator_matrix_tests {
         );
     }
 
+    /// NRN-141 GUARD (zero candidates): `"\x61"` decodes to serde `a`, but the
+    /// scanner decodes the key line as `x61`, so serde key `a` matches no
+    /// candidate line. Without a whole-document refusal, `a`'s bytes would be
+    /// absorbed into the preceding confirmed field (`title`) — a `remove`/`set`
+    /// of `title` would then silently delete the unrelated real `a`. The scanner
+    /// must instead refuse spans for the whole document.
+    #[test]
+    fn unlocatable_serde_key_refuses_whole_document() {
+        let content = "---\ntitle: hi\n\"\\x61\": 1\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("a") && o.contains_key("title"),
+            "precondition: serde sees keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "a serde key with no candidate line must refuse the whole doc, got {s:?}"
+        );
+    }
+
+    /// NRN-141 GUARD (whole-doc, not per-field): a key-escape collision (`"\x61"`
+    /// and a literal `x61` both scanner-decode to `x61`; serde sees distinct keys
+    /// `a` and `x61`) sits above a perfectly well-formed `keep`. Pre-guard, `keep`
+    /// resolved to exactly one candidate and stayed editable — but `a` is
+    /// unlocatable, so trusting `keep`'s boundaries means trusting a scan that
+    /// already disagrees with serde elsewhere in the block. The refusal decision
+    /// is whole-document: `keep` gets no span either.
+    #[test]
+    fn collision_plus_wellformed_field_refuses_whole_document() {
+        let content = "---\n\"\\x61\": v\nx61: w\nkeep: z\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("a") && o.contains_key("x61") && o.contains_key("keep"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "an unlocatable sibling must refuse the whole doc, including well-formed `keep`, got {s:?}"
+        );
+    }
+
     // ---- The core invariant (B), proven over the whole matrix -------------
+
+    /// NRN-141 quote-aware absorb: a flow mapping whose closing `}` is shadowed
+    /// inside a quoted scalar (`a: "}"`) must not terminate the absorb early. The
+    /// buggy absorb stopped at that quoted `}`, exposing the interior `next: 1` as
+    /// a second `next` candidate (`name_counts[next] == 2` → whole-doc refusal).
+    /// The fix steps over the quoted `}`, so the top-level `title`, `meta`, and
+    /// the single `next` (value `2`) are each uniquely located and editable.
+    #[test]
+    fn quote_aware_absorb_does_not_expose_interior_flow_map_key() {
+        let content = "---\ntitle: hi\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("title") && o.contains_key("meta") && o.contains_key("next"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            find(&s, "title").is_some(),
+            "the well-formed sibling must stay editable"
+        );
+        let next = find(&s, "next").expect("the single top-level next must be located");
+        assert_eq!(
+            &content[next.value_range.clone().unwrap()],
+            "2",
+            "next must point at the top-level value 2, not the interior 1"
+        );
+    }
+
+    /// NRN-141 quote-aware absorb: the V2 phantom doc. `foo: [a,` / `"b]c",` /
+    /// `bar: v]` is a single flow sequence (its last element is a nested
+    /// `{bar: v}`); the only top-level keys are `foo` and `bar` (the latter from
+    /// `"\x62ar"`, which the scanner mis-decodes as `x62ar`). With the buggy
+    /// absorb the `]` inside `"b]c"` stopped the scan, exposing the interior
+    /// `bar: v]` as a phantom `bar` that stood in for the mis-decoded real key —
+    /// the guard passed and a `remove bar` corrupted the doc. Quote-aware absorb
+    /// steps over the quoted `]`, so serde key `bar` has zero candidates and the
+    /// whole document refuses (empty spans).
+    #[test]
+    fn quote_aware_absorb_v2_phantom_leaves_serde_key_unlocatable() {
+        let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("bar"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "serde key `bar` has no candidate line, so the whole doc must refuse, got {s:?}"
+        );
+    }
+
+    /// NRN-141 round 2 (a): a double quote opened on the KEY line after the
+    /// bracket. The continuation's `"` is a CLOSING quote, so the `]` after it
+    /// is a real closer — the absorb must stop there and `title` must stay a
+    /// separate editable field. Seeding the quote state at the first
+    /// continuation line (ignoring the key line) misread that `"` as opening,
+    /// skipped the real `]`, and absorbed `title` → whole-doc refusal of a
+    /// valid document.
+    #[test]
+    fn flow_absorb_seeds_quote_state_from_key_line() {
+        let content = "---\nfoo: [\"a,\nb\", c]\ntitle: hi\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("title"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        let title = find(&s, "title").expect("title must not be absorbed into foo");
+        assert_eq!(&content[title.value_range.clone().unwrap()], "hi");
+        let foo = find(&s, "foo").expect("foo must be located");
+        assert_eq!(
+            &content[foo.line_range.clone()],
+            "foo: [\"a,\nb\", c]\n",
+            "foo's range covers exactly the flow value's lines"
+        );
+    }
+
+    /// NRN-141 round 2 (b): the quote opened on the key line spans the
+    /// continuation, shielding the `]` inside `b]: c` — it must NOT terminate
+    /// the absorb. With the seeded state, the interior `phantom: v]` line stays
+    /// absorbed into `tags`, so the mis-decoded serde key `phantom` (from
+    /// `"\x70hantom"`, scanner-decoded `x70hantom`) has zero candidates and the
+    /// whole document refuses. The unseeded absorb stopped at the shielded `]`
+    /// and re-exposed the phantom as `phantom`'s candidate — the V2 class.
+    #[test]
+    fn flow_absorb_key_line_quote_shields_continuation_closer() {
+        let content = "---\ntags: [\"a,\nb]: c\",\nphantom: v]\n\"\\x70hantom\": real\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("tags") && o.contains_key("phantom"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        assert!(
+            s.is_empty(),
+            "serde key `phantom` must have no candidate line (whole-doc refusal), got {s:?}"
+        );
+    }
+
+    /// NRN-141 round 3 (a): a trailing comment on the KEY line inside an
+    /// unclosed flow (`foo: [ # "x`) — comments are legal in flow context, and
+    /// the `"` inside the comment is comment text, not a quote opener. Scanning
+    /// it as content set the double-quote state, shielded the real `]` on the
+    /// continuation, and absorbed `title` → false whole-doc refusal of a valid
+    /// document. The scan must stop at an unquoted whitespace-preceded `#`.
+    #[test]
+    fn flow_absorb_ignores_key_line_comment() {
+        let content = "---\nfoo: [ # \"x\n  a, b ]\ntitle: hi\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("title"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        let title = find(&s, "title").expect("title must not be absorbed into foo");
+        assert_eq!(&content[title.value_range.clone().unwrap()], "hi");
+    }
+
+    /// NRN-141 round 3 (b): a comment on a CONTINUATION line containing a quote
+    /// (`b, # it's`) — the `'` is comment text; scanning it as content set the
+    /// single-quote state and shielded the real `]` on the next line, absorbing
+    /// `title`. The comment-aware scan stops at the `#`, so the closer is found.
+    #[test]
+    fn flow_absorb_ignores_continuation_line_comment() {
+        let content = "---\nfoo: [ a,\n  b, # it's\n  c ]\ntitle: hi\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("title"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        let title = find(&s, "title").expect("title must not be absorbed into foo");
+        assert_eq!(&content[title.value_range.clone().unwrap()], "hi");
+        let foo = find(&s, "foo").expect("foo must be located");
+        assert_eq!(
+            &content[foo.line_range.clone()],
+            "foo: [ a,\n  b, # it's\n  c ]\n",
+            "foo's range covers exactly the flow value's lines"
+        );
+    }
 
     /// No `value_range` can reach `apply` unless `content[value_range]`
     /// reconstitutes to exactly serde's parsed value for that field.
