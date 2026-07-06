@@ -123,6 +123,12 @@ pub enum LinkSkipReason {
     /// The backlinker file no longer exists (deleted or moved away by
     /// something outside this run); there is nothing to rewrite. Not retried.
     SourceMissing,
+    /// The rewritten link text would break the backlinker's frontmatter (the
+    /// new target carries YAML-structural bytes and the rewrite lands inside a
+    /// frontmatter value, degrading a parsing mapping). The rewrite is skipped
+    /// — the stale link remains, detectable by `validate` and repairable — a
+    /// skipped rewrite is recoverable, a corrupted document is not (NRN-141).
+    WouldCorruptFrontmatter,
 }
 
 impl LinkSkipReason {
@@ -130,6 +136,7 @@ impl LinkSkipReason {
         match self {
             LinkSkipReason::Drifted => "drifted",
             LinkSkipReason::SourceMissing => "source_missing",
+            LinkSkipReason::WouldCorruptFrontmatter => "would_corrupt_frontmatter",
         }
     }
 }
@@ -1003,6 +1010,8 @@ pub(crate) enum LinkAttempt {
 /// - other io error on read   -> Failed(ReadFailed, detail)
 /// - other io error on write  -> Failed(WriteFailed, detail)
 /// - planned text not present -> Skipped(Drifted)
+/// - would break the backlinker's parsing frontmatter
+///   -> Skipped(WouldCorruptFrontmatter), unwritten
 /// - success                  -> Rewritten
 pub(crate) fn rewrite_one_backlink(
     cwd: &Utf8Path,
@@ -1021,6 +1030,14 @@ pub(crate) fn rewrite_one_backlink(
     let updated = original.replacen(raw, rewritten, 1);
     if updated == original {
         return LinkAttempt::Skipped(LinkSkipReason::Drifted);
+    }
+    // NRN-141: a rewrite landing inside a frontmatter value can break the
+    // backlinker's block when the new target carries YAML-structural bytes
+    // (a move destination is a free-form filename). Skip rather than corrupt —
+    // and rather than abort the whole cascade mid-move: the stale link stays
+    // detectable by `validate` and repairable, while a nulled mapping is not.
+    if verify_frontmatter_not_degraded(source_path, &original, &updated).is_err() {
+        return LinkAttempt::Skipped(LinkSkipReason::WouldCorruptFrontmatter);
     }
     match fs::write(abs.as_std_path(), &updated) {
         Ok(()) => LinkAttempt::Rewritten,
@@ -2445,6 +2462,116 @@ mod tests {
         assert_eq!(LinkFailReason::WriteFailed.code(), "write_failed");
         assert_eq!(LinkSkipReason::Drifted.code(), "drifted");
         assert_eq!(LinkSkipReason::SourceMissing.code(), "source_missing");
+        assert_eq!(
+            LinkSkipReason::WouldCorruptFrontmatter.code(),
+            "would_corrupt_frontmatter"
+        );
+    }
+
+    #[test]
+    fn cascade_skips_backlink_rewrite_that_would_corrupt_frontmatter() {
+        // NRN-141 round 3: a move/delete backlink cascade rewrites `[[...]]`
+        // inside OTHER documents' frontmatter with a raw replace + write, no
+        // degradation check. Moving a doc to a stem with a YAML-structural byte
+        // (`Parent "Two"` — a legal filename) rewrote B's `up: "[[Parent]]"`
+        // into unparseable YAML, silently nulling B's whole mapping. The
+        // corrupting rewrite is now SKIPPED (B's bytes untouched, reported with
+        // a truthful reason — a stale link is detectable and repairable; a
+        // corrupted doc is not), while safe rewrites in the same cascade still
+        // land.
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-cascade-fmguard-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let b_doc = "---\nup: \"[[Parent]]\"\n---\nbody\n";
+        std::fs::write(root.join("b.md"), b_doc).unwrap();
+        std::fs::write(root.join("c.md"), "---\ntype: note\n---\nsee [[Parent]]\n").unwrap();
+
+        let change = PlannedChange {
+            change_id: "move-parent".into(),
+            path: camino::Utf8PathBuf::from("Parent.md"),
+            document_hash: String::new(),
+            finding_code: "move_document".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: "move_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: Some(camino::Utf8PathBuf::from("Parent \"Two\".md")),
+            link_risk: Some(crate::standards::repair::link_risk::LinkRisk {
+                stem_changed: true,
+                directory_changed: false,
+                stem_links: vec![
+                    crate::standards::repair::link_risk::AffectedLink {
+                        source_path: camino::Utf8PathBuf::from("b.md"),
+                        raw: "[[Parent]]".into(),
+                        kind: crate::core::LinkKind::Wikilink,
+                        source_span: None,
+                        rewritten: "[[Parent \"Two\"]]".into(),
+                    },
+                    crate::standards::repair::link_risk::AffectedLink {
+                        source_path: camino::Utf8PathBuf::from("c.md"),
+                        raw: "[[Parent]]".into(),
+                        kind: crate::core::LinkKind::Wikilink,
+                        source_span: None,
+                        rewritten: "[[Parent \"Two\"]]".into(),
+                    },
+                ],
+                path_qualified_wikilinks: vec![],
+                markdown_links: vec![],
+            }),
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(
+            outcome.skipped.len(),
+            1,
+            "the frontmatter-corrupting rewrite must be skipped, got {outcome:?}"
+        );
+        assert_eq!(outcome.skipped[0].file.as_str(), "b.md");
+        assert_eq!(
+            outcome.skipped[0].reason.code(),
+            "would_corrupt_frontmatter"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.md")).unwrap(),
+            b_doc,
+            "b.md must be byte-identical"
+        );
+        // The safe body-only rewrite in the same cascade still lands.
+        assert_eq!(outcome.rewritten.len(), 1);
+        assert_eq!(outcome.rewritten[0].file.as_str(), "c.md");
+        assert_eq!(
+            std::fs::read_to_string(root.join("c.md")).unwrap(),
+            "---\ntype: note\n---\nsee [[Parent \"Two\"]]\n"
+        );
+        assert!(outcome.failed.is_empty());
+    }
+
+    #[test]
+    fn cascade_safe_stem_rewrites_frontmatter_backlink_as_before() {
+        // Control: a structural-char-free stem rewrites a frontmatter wikilink
+        // backlink exactly as before (no spurious skip).
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-cascade-fmsafe-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::write(root.join("b.md"), "---\nup: \"[[Parent]]\"\n---\nbody\n").unwrap();
+
+        let change = make_move_change_with_backlinker("b.md", "[[Parent]]", "[[parent-two]]");
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(outcome.rewritten.len(), 1, "got {outcome:?}");
+        assert!(outcome.skipped.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.md")).unwrap(),
+            "---\nup: \"[[parent-two]]\"\n---\nbody\n"
+        );
     }
 
     #[test]
