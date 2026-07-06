@@ -399,7 +399,10 @@ fn absorb_flow_value(lines: &[&str], mut index: usize, closer: u8, key_line_rest
 /// One line of the flow-absorb scan: advances the quote state across `bytes`
 /// and reports whether `closer` occurred outside quotes. The single copy of the
 /// flow quote-state machine — the key-line seed pass and the continuation-line
-/// loop both run through here.
+/// loop both run through here. An unquoted `#` at line start or preceded by
+/// whitespace begins a YAML comment (legal inside a flow collection): the rest
+/// of the line is comment text, so scanning stops there — a quote or closer
+/// inside a comment is neither a quote toggle nor a real closer.
 fn scan_flow_line(bytes: &[u8], closer: u8, in_single: &mut bool, in_double: &mut bool) -> bool {
     let mut i = 0;
     while i < bytes.len() {
@@ -426,6 +429,9 @@ fn scan_flow_line(bytes: &[u8], closer: u8, in_single: &mut bool, in_double: &mu
             *in_single = true;
         } else if b == b'"' {
             *in_double = true;
+        } else if b == b'#' && (i == 0 || matches!(bytes[i - 1], b' ' | b'\t')) {
+            // Comment through end of line; quote state is unaffected by it.
+            return false;
         } else if b == closer {
             return true;
         }
@@ -1730,6 +1736,50 @@ mod locator_matrix_tests {
         assert!(
             s.is_empty(),
             "serde key `phantom` must have no candidate line (whole-doc refusal), got {s:?}"
+        );
+    }
+
+    /// NRN-141 round 3 (a): a trailing comment on the KEY line inside an
+    /// unclosed flow (`foo: [ # "x`) — comments are legal in flow context, and
+    /// the `"` inside the comment is comment text, not a quote opener. Scanning
+    /// it as content set the double-quote state, shielded the real `]` on the
+    /// continuation, and absorbed `title` → false whole-doc refusal of a valid
+    /// document. The scan must stop at an unquoted whitespace-preceded `#`.
+    #[test]
+    fn flow_absorb_ignores_key_line_comment() {
+        let content = "---\nfoo: [ # \"x\n  a, b ]\ntitle: hi\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("title"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        let title = find(&s, "title").expect("title must not be absorbed into foo");
+        assert_eq!(&content[title.value_range.clone().unwrap()], "hi");
+    }
+
+    /// NRN-141 round 3 (b): a comment on a CONTINUATION line containing a quote
+    /// (`b, # it's`) — the `'` is comment text; scanning it as content set the
+    /// single-quote state and shielded the real `]` on the next line, absorbing
+    /// `title`. The comment-aware scan stops at the `#`, so the closer is found.
+    #[test]
+    fn flow_absorb_ignores_continuation_line_comment() {
+        let content = "---\nfoo: [ a,\n  b, # it's\n  c ]\ntitle: hi\n---\n";
+        let o = oracle(content);
+        assert!(
+            o.contains_key("foo") && o.contains_key("title"),
+            "precondition: serde keys {:?}",
+            o.keys().collect::<Vec<_>>()
+        );
+        let s = spans(content);
+        let title = find(&s, "title").expect("title must not be absorbed into foo");
+        assert_eq!(&content[title.value_range.clone().unwrap()], "hi");
+        let foo = find(&s, "foo").expect("foo must be located");
+        assert_eq!(
+            &content[foo.line_range.clone()],
+            "foo: [ a,\n  b, # it's\n  c ]\n",
+            "foo's range covers exactly the flow value's lines"
         );
     }
 

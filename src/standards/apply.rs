@@ -2839,4 +2839,23 @@ mod tests {
             "the seeded absorb must refuse at the guard, got {err:?}"
         );
     }
+
+    #[test]
+    fn apply_set_sibling_of_flow_with_key_line_comment_applies() {
+        // NRN-141 round 3 (a): the key line's trailing `# "x` comment is
+        // comment text, not content — the `"` inside it must not shield the
+        // real `]` on the continuation. With the comment-aware scan, `title`
+        // stays uniquely located and editable; the comment-blind scan absorbed
+        // it and refused this valid document whole.
+        let content = "---\nfoo: [ # \"x\n  a, b ]\ntitle: hi\n---\nbody\n";
+        let change = PlannedChange {
+            expected_old_value: Some(json!("hi")),
+            ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
+        };
+        let result = apply_change(content, &change).expect("sibling set must apply");
+        assert_eq!(
+            result,
+            "---\nfoo: [ # \"x\n  a, b ]\ntitle: bye\n---\nbody\n"
+        );
+    }
 }
