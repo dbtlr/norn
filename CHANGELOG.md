@@ -10,10 +10,6 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
-### Added
-
-- **CI now enforces CLI↔MCP surface parity (ADR 0009).** A build-breaking test enumerates every CLI command's flags (via the derive-generated clap `Command`) and every MCP tool's published `input_schema` (via the server's own tool routers — the same surface `tools/list` serves) and fails when a CLI flag has no MCP twin, or an MCP field no CLI twin, without a justified carve-out. The carve-out allowlist is exact-match in both directions: adding an unmapped flag breaks the build, and closing a tracked gap (so its field now exists on both surfaces) makes the seeded allowlist entry stale and *also* breaks the build — so parity debt is burned down, not just prevented from growing. Sanctioned carve-outs are the CLI's prompt/`--yes`/`--dry-run` safety model (mapped to the MCP `confirm` param), CLI-only presentation and surface-shape flags (`--format`, `--no-pager`, mode/guard/alias flags), local-only commands with no in-vault twin (`completions`, `cache`, `serve`, …), and a temporary rename map (`migrate`↔`vault.apply_plan`, `repair`↔`vault.repair_plan`, positional renames). Today's known field gaps ship allowlisted and tagged with their burndown task so the gate is green on landing. (NRN-178)
-
 ### Changed
 
 - Bumped `clap_complete` 4.6.5 → 4.6.7 (patch). Lockfile-only; no source changes. Pulls a transitive `windows-sys` 0.52 → 0.61 bump (Windows-only build targets; no effect on the macOS/Linux runtime path).

@@ -12,12 +12,15 @@
 //!   `get_subcommands()` / `get_arguments()`. This is the *same* derive-generated
 //!   [`clap::Command`] the binary parses with, so the enumerated flags are exactly
 //!   what the CLI accepts — no hand-maintained flag list to fall out of sync.
-//! * **MCP:** [`McpServer::read_router()`] + [`McpServer::mutate_router()`], then
+//! * **MCP:** [`McpServer::routers`]`(false)` — the same seam `McpServer::new`
+//!   builds the served router from — then
 //!   [`rmcp::handler::server::router::tool::ToolRouter::list_all`]. Each returned
 //!   [`rmcp::model::Tool`] carries the `input_schema` the server publishes in
 //!   `tools/list`. Reading param names out of that schema means the test sees
 //!   precisely what an MCP client sees — not a re-derivation that could diverge
-//!   from the served surface.
+//!   from the served surface. Consuming the shared `routers` seam (rather than a
+//!   hardcoded router list) means a future third router is enumerated here for
+//!   free.
 //!
 //! Only the **mapping** between the two is declared by hand (below). That mapping
 //! *is* the parity documentation: which CLI command backs which MCP tool, which
@@ -51,8 +54,8 @@
 //! # Seeded field-level gaps (ship green; each tagged with its burndown task)
 //!
 //! Enumerated empirically from the code, not assumed:
-//! * `vault.get` lacks `sort`/`desc`/`limit`/`no_limit`/`starts_at`/`section` —
-//!   NRN-173; and `all_cols` — **UNTRACKED** (get column-projection parity).
+//! * `vault.get` lacks `sort`/`desc`/`limit`/`no_limit`/`starts_at`/`section` and
+//!   `all_cols` (get's column-projection + paging surface) — all NRN-173.
 //! * `vault.set` lacks the coercing `--field`, `--push`, `--pop` — NRN-181.
 //! * `vault.move` lacks `--force` and `--no-link-rewrite` — NRN-180.
 //! * `vault.validate` lacks `--summary` — NRN-182.
@@ -72,6 +75,19 @@
 //! flag fails (forward). Closing a seeded gap (e.g. NRN-180 adds `force` to
 //! `vault.move`) makes its allowlist entry STALE and *also* fails — so burndown is
 //! enforced, not just growth.
+//!
+//! # Deliberate limits of this model
+//!
+//! * **The gap class is one-directional (CLI-ahead).** Every seeded gap says "CLI
+//!   has it, MCP lacks it"; there is no MCP-ahead gap class today because no MCP
+//!   param leads the CLI. When the first MCP-first param arrives, add a
+//!   `TrackedGapMcp` class (its mirror image) rather than abusing the naming map to
+//!   launder an MCP-only field into apparent parity.
+//! * **This is a *presence* gate, not a *semantics* gate.** Two surfaces can share
+//!   a field name yet diverge in meaning (e.g. `get --col` narrows the projection
+//!   on the CLI but only opts-in extra facets on MCP). A presence test cannot
+//!   express that; such divergences are tracked per-field out of band (col:
+//!   NRN-173), not papered over by the name match.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -170,11 +186,11 @@ fn specs() -> Vec<Spec> {
                     ("no_limit", "NRN-173"),
                     ("starts_at", "NRN-173"),
                     ("section", "NRN-173"),
-                    // UNTRACKED: get column-projection parity. vault.get always
+                    // NRN-173 (get column-projection parity): vault.get always
                     // returns the full structured record (dump-everything), so
-                    // `--all-cols` has no MCP field. Fold into NRN-173 or file its
-                    // own task — flagged loudly, not silently absorbed.
-                    ("all_cols", "UNTRACKED"),
+                    // `--all-cols` has no MCP field. Folded into NRN-173, which now
+                    // owns get's projection + paging surface.
+                    ("all_cols", "NRN-173"),
                 ],
             },
         },
@@ -437,15 +453,32 @@ fn tool_field_names(tool: &rmcp::model::Tool) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// Map of `tool name -> advertised param names`, unioning the read and mutation
-/// routers exactly as `McpServer::new` does.
+/// Map of `tool name -> advertised param names` over the full served surface.
+///
+/// Consumes `McpServer::routers(false)` — the same seam `McpServer::new` builds
+/// from — so a future third router lands here automatically without editing this
+/// function. Passing `read_only = false` enumerates every tool, read and
+/// mutation, which is what the parity gate must check.
+///
+/// Panics on a duplicate tool name across routers: two tools sharing a name would
+/// silently overwrite each other in the map, dropping one from the gate's view
+/// (and it would be a real `tools/list` collision besides).
 fn mcp_tools() -> BTreeMap<String, BTreeSet<String>> {
-    let mut tools = McpServer::read_router().list_all();
-    tools.extend(McpServer::mutate_router().list_all());
+    let mut tools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for router in McpServer::routers(false) {
+        for tool in router.list_all() {
+            let name = tool.name.to_string();
+            let fields = tool_field_names(&tool);
+            if tools.insert(name.clone(), fields).is_some() {
+                panic!(
+                    "duplicate MCP tool name '{name}' across routers — a name \
+                     collision silently drops a tool from the parity gate and \
+                     from tools/list; give each tool a unique name"
+                );
+            }
+        }
+    }
     tools
-        .iter()
-        .map(|t| (t.name.to_string(), tool_field_names(t)))
-        .collect()
 }
 
 /// Walk the clap command tree to `leaf path -> {arg ids}`, excluding the ids in
@@ -484,6 +517,52 @@ fn cli_leaf_commands(ignore: &BTreeSet<String>) -> BTreeMap<String, BTreeSet<Str
     out
 }
 
+/// Walk every NON-leaf (subcommand-bearing) node and record `path -> {non-global
+/// arg ids}` for any that carries arguments of its own.
+///
+/// [`cli_leaf_commands`] models args only at leaves, so an arg declared on a
+/// subcommand-bearing parent would never be parity-checked — and a leaf that
+/// later grows a subcommand would silently drop all of its checks. This is the
+/// tripwire: any hit here fails the gate loudly (see `cli_mcp_surface_parity`),
+/// forcing the author to move the flag to a leaf or extend the gate's model.
+fn cli_parent_args(ignore: &BTreeSet<String>) -> BTreeMap<String, BTreeSet<String>> {
+    fn walk(
+        cmd: &clap::Command,
+        path: &str,
+        ignore: &BTreeSet<String>,
+        out: &mut BTreeMap<String, BTreeSet<String>>,
+    ) {
+        let mut has_sub = false;
+        for sub in cmd.get_subcommands() {
+            has_sub = true;
+            let name = sub.get_name();
+            let child = if path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{path} {name}")
+            };
+            walk(sub, &child, ignore, out);
+        }
+        // Skip the root (`path.is_empty()`): its args ARE the globals, already in
+        // `ignore`. Record only non-root parents carrying their own non-global args.
+        if has_sub && !path.is_empty() {
+            let args: BTreeSet<String> = cmd
+                .get_arguments()
+                .map(|a| a.get_id().as_str().to_string())
+                .filter(|id| !ignore.contains(id))
+                .collect();
+            if !args.is_empty() {
+                out.insert(path.to_string(), args);
+            }
+        }
+    }
+
+    let root = Cli::command();
+    let mut out = BTreeMap::new();
+    walk(&root, "", ignore, &mut out);
+    out
+}
+
 /// Global (root-level) arg ids, which every subcommand inherits — connection and
 /// presentation concerns, not per-command capability.
 fn global_ignore() -> BTreeSet<String> {
@@ -508,6 +587,20 @@ fn cli_mcp_surface_parity() {
     let specs = specs();
 
     let mut violations: Vec<String> = Vec::new();
+
+    // ── Tripwire: no subcommand-bearing node may carry its own non-global arg.
+    // The gate models args only at leaves, so a flag on a parent (or on a leaf
+    // that later grows a subcommand) would escape every parity check. Fail loudly
+    // rather than pass a silent false green.
+    for (parent, args) in cli_parent_args(&ignore) {
+        let flags = args.iter().cloned().collect::<Vec<_>>().join(", ");
+        violations.push(format!(
+            "CLI command '{parent}' has subcommands AND carries its own non-global \
+             arg(s) [{flags}]; the parity gate only models leaf args, so these escape \
+             all parity checks. Move the flag(s) down to a leaf subcommand, or extend \
+             the gate to model parent-node args ({POINTER})"
+        ));
+    }
 
     // Every CLI leaf must be covered by exactly one spec.
     let spec_paths: BTreeSet<&str> = specs.iter().map(|s| s.cli).collect();
@@ -549,10 +642,12 @@ fn cli_mcp_surface_parity() {
                     ));
                 }
                 // A local-only command must NOT collide with a served MCP tool.
-                if let Some(t) = mcp
-                    .keys()
-                    .find(|t| t.as_str() == format!("vault.{}", spec.cli))
-                {
+                // Normalize spaces/hyphens to `_` so multi-word and hyphenated
+                // paths ("config edit", "self-update") map to their tool-name
+                // shape ("vault.config_edit") — otherwise the guard could never
+                // fire for them and would be dead for every such entry.
+                let expected_tool = format!("vault.{}", spec.cli.replace([' ', '-'], "_"));
+                if let Some(t) = mcp.keys().find(|t| t.as_str() == expected_tool) {
                     violations.push(format!(
                         "command '{}' is allowlisted local-only but MCP tool '{t}' exists — reclassify ({POINTER})",
                         spec.cli
@@ -668,6 +763,25 @@ fn cli_mcp_surface_parity() {
                     if naming_mcp.contains(m) {
                         continue;
                     }
+                    // A name collision with a CLI carve-out id is NOT identity
+                    // parity: presentation/shape/safety flags compute nothing the
+                    // MCP surface can twin, so an MCP field that merely shares one
+                    // of their names (`format`/`out`/`section`/`all`/…) would
+                    // greenlight against a flag with no real capability behind it.
+                    // Demand an explicit mapping instead of accepting the collision.
+                    if presentation_set.contains(m)
+                        || shape_set.contains(m)
+                        || safety_set.contains(m)
+                    {
+                        violations.push(format!(
+                            "MCP tool '{tool}' field '{m}' name-collides with CLI '{}' carve-out \
+                             flag --{m} (presentation/shape/safety), which computes nothing on the \
+                             MCP surface — an identity match here is a false green. Add an explicit \
+                             naming-map entry, or back it with a real CLI capability twin ({POINTER})",
+                            spec.cli
+                        ));
+                        continue;
+                    }
                     if cli_fields.contains(m) {
                         continue; // identity
                     }
@@ -701,6 +815,15 @@ fn cli_mcp_surface_parity() {
                     }
                 }
                 for (c, task) in *gaps {
+                    // Governance: a seeded gap must name a real burndown task, the
+                    // same discipline TrackedGap enforces — no `UNTRACKED` / empty
+                    // placeholders that never get closed.
+                    if task.trim().is_empty() || !task.starts_with("NRN-") {
+                        violations.push(format!(
+                            "'{}' gap for --{c} has a malformed task id '{task}' (expected NRN-XXX) ({POINTER})",
+                            spec.cli
+                        ));
+                    }
                     if !cli_fields.contains(*c) {
                         violations.push(format!(
                             "'{}' gap {task} references CLI flag --{c}, which no longer exists — stale entry ({POINTER})",
