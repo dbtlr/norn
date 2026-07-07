@@ -30,11 +30,13 @@ pub fn resolve_target(cache: &Cache, raw: &str) -> Result<Utf8PathBuf> {
     }
 }
 
-/// Split `KEY=VALUE` at the first `=`. Returns Err on missing `=` or empty KEY.
-/// VALUE may contain additional `=` characters (preserved verbatim).
+/// Split `KEY=VALUE` at the first separator. Canonically `=` (assignment
+/// idiom); a `:` is also accepted (ADR 0010 separator forgiveness) — the split
+/// point is the first `:` or `=`, whichever comes first. Returns Err on missing
+/// separator or empty KEY. VALUE may contain additional separator characters
+/// (preserved verbatim).
 pub fn parse_kv(raw: &str) -> Result<(String, String)> {
-    let (k, v) = raw
-        .split_once('=')
+    let (k, v) = crate::grammar::split_field_value(raw)
         .ok_or_else(|| anyhow!("expected KEY=VALUE, got: {raw}"))?;
     if k.is_empty() {
         bail!("KEY cannot be empty in: {raw}");
@@ -790,6 +792,23 @@ mod tests {
         let (k, v) = parse_kv("note=key=value=embedded").expect("should split");
         assert_eq!(k, "note");
         assert_eq!(v, "key=value=embedded");
+    }
+
+    #[test]
+    fn parse_kv_accepts_colon_separator() {
+        // ADR 0010 separator forgiveness: an assignment token spelled with the
+        // predicate idiom `:` parses identically to the canonical `=` form.
+        let (k, v) = parse_kv("status:active").expect("should split");
+        assert_eq!(k, "status");
+        assert_eq!(v, "active");
+    }
+
+    #[test]
+    fn parse_kv_first_separator_wins_equals_before_colon() {
+        // `=` comes first, so a value-embedded `:` is preserved verbatim.
+        let (k, v) = parse_kv("ref=note:anchor").expect("should split");
+        assert_eq!(k, "ref");
+        assert_eq!(v, "note:anchor");
     }
 
     #[test]

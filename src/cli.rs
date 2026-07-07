@@ -509,7 +509,8 @@ pub struct FilterArgs {
     #[arg(long, value_name = "NEEDLE", help_heading = "Filter options")]
     pub text: Option<String>,
 
-    /// Frontmatter equality predicate `field:value`. JSON-typed.
+    /// Frontmatter equality predicate `field:value`. JSON-typed. An unknown
+    /// `--field value` filters as `--eq field:value` for fields this vault knows.
     #[arg(
         long = "eq",
         value_name = "FIELD:VALUE",

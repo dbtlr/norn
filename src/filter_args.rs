@@ -114,8 +114,7 @@ pub fn resolve_links_to(
 }
 
 fn parse_field_value(spec: &str, flag: &str) -> Result<(String, Value)> {
-    let (field, raw) = spec
-        .split_once(':')
+    let (field, raw) = crate::grammar::split_field_value(spec)
         .ok_or_else(|| anyhow!("invalid {} value, expected field:value: {}", flag, spec))?;
     let field = field.trim().to_string();
     let raw = raw.trim();
@@ -130,8 +129,7 @@ fn parse_field_value(spec: &str, flag: &str) -> Result<(String, Value)> {
 }
 
 fn parse_field_value_list(spec: &str, flag: &str) -> Result<(String, Vec<Value>)> {
-    let (field, raw) = spec
-        .split_once(':')
+    let (field, raw) = crate::grammar::split_field_value(spec)
         .ok_or_else(|| anyhow!("invalid {} value, expected field:v1,v2,...: {}", flag, spec))?;
     let field = field.trim().to_string();
     if field.is_empty() {
@@ -163,8 +161,7 @@ fn parse_field_value_list(spec: &str, flag: &str) -> Result<(String, Vec<Value>)
 /// operators the boundary characters are exactly what the user asserts, so
 /// `--ends-with 'title:done '` keeps its trailing space.
 fn parse_field_text(spec: &str, flag: &str) -> Result<(String, String)> {
-    let (field, raw) = spec
-        .split_once(':')
+    let (field, raw) = crate::grammar::split_field_value(spec)
         .ok_or_else(|| anyhow!("invalid {} value, expected field:value: {}", flag, spec))?;
     let field = field.trim().to_string();
     if field.is_empty() || raw.is_empty() {
@@ -178,8 +175,7 @@ fn parse_field_text(spec: &str, flag: &str) -> Result<(String, String)> {
 }
 
 fn parse_field_date(spec: &str, flag: &str) -> Result<(String, String)> {
-    let (field, raw) = spec
-        .split_once(':')
+    let (field, raw) = crate::grammar::split_field_value(spec)
         .ok_or_else(|| anyhow!("invalid {} value, expected field:DATE: {}", flag, spec))?;
     let field = field.trim().to_string();
     let raw = raw.trim();
@@ -296,6 +292,28 @@ mod tests {
         a.eq = vec!["type:note".into()];
         let q = build_document_query(&a).unwrap();
         assert_eq!(q.frontmatter_eq, vec![("type".to_string(), json!("note"))]);
+    }
+
+    #[test]
+    fn eq_accepts_equals_separator() {
+        // ADR 0010 separator forgiveness: a predicate token spelled with `=`
+        // parses identically to the canonical `:` form.
+        let mut a = empty();
+        a.eq = vec!["type=note".into()];
+        let q = build_document_query(&a).unwrap();
+        assert_eq!(q.frontmatter_eq, vec![("type".to_string(), json!("note"))]);
+    }
+
+    #[test]
+    fn eq_date_value_embedded_colon_uses_first_separator() {
+        // `=` comes first, so the value keeps its embedded `:` verbatim.
+        let mut a = empty();
+        a.on = vec!["modified=2026-07-01".into()];
+        let q = build_document_query(&a).unwrap();
+        assert_eq!(
+            q.date_on,
+            vec![("modified".to_string(), "2026-07-01".to_string())]
+        );
     }
 
     #[test]

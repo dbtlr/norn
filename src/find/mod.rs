@@ -54,16 +54,24 @@ fn resolve_format(explicit: Option<crate::cli::FindFormat>) -> crate::cli::FindF
 pub fn run(
     args: FindArgs,
     cwd: &Utf8Path,
-    index_options: &crate::graph::IndexOptions,
+    loaded_config: &crate::config_loader::LoadedConfig,
     no_cache_refresh: bool,
     color: crate::cli::ColorWhen,
+    dynamic_keys: &[String],
 ) -> Result<i32> {
     if !args.all && !has_predicate(&args) {
         print_find_help()?;
         return Ok(2);
     }
 
-    let cache = crate::cache_cmd::open_for_query(cwd, index_options, no_cache_refresh)?;
+    let cache =
+        crate::cache_cmd::open_for_query(cwd, &loaded_config.index_options, no_cache_refresh)?;
+    crate::gate_dynamic_query(
+        &cache,
+        loaded_config,
+        dynamic_keys,
+        crate::grammar::QueryCmd::Find,
+    )?;
 
     // Shared selection seam: matched docs + deep/raw fetches. The MCP
     // `vault.find` tool consumes the same `select`/`query` path, so the two
