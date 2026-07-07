@@ -619,6 +619,7 @@ mod tests {
                     .get(Parameters(crate::mcp::tools::get::GetParams {
                         targets: vec!["alpha".to_string()],
                         col: None,
+                        ..Default::default()
                     }))
                     .await
             });
