@@ -27,6 +27,7 @@ Set `NORN_ROOT` to a vault path to make that the default root for every invocati
 |---|---|
 | [`find`](commands/find.md) | Find documents by frontmatter, body text, path, or link relationship. |
 | [`count`](commands/count.md) | Count documents, total or grouped, over the find filter surface. |
+| [`describe`](commands/describe.md) | Describe the vault: folder tree, path/creatable rules, inbox, schema — plus a contents-summary with `--data`. |
 | [`get`](commands/get.md) | Get one or more documents in full — frontmatter, headings, links. |
 | [`audit`](commands/audit.md) | Read the per-vault mutation audit trail (append-only event stream). |
 

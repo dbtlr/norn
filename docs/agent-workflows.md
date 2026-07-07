@@ -56,9 +56,11 @@ These commands never write to the vault. An agent can run them with confidence:
 
 - `norn find`
 - `norn count`
+- `norn describe` (with or without `--data`/`--stats`/`--by`)
 - `norn get`
 - `norn validate` (with or without `--summary`, with or without filters)
 - `norn repair --plan` (produces a `MigrationPlan` artifact; does not modify the vault)
+- `norn audit`
 
 `norn new`, `norn set`, `norn move`, `norn delete`, and `norn migrate` are mutation commands; pass `--dry-run` to preview without writing. Only `norn migrate`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The migration plan is provided to `norn migrate` via a positional file path, via `-`, or via stdin (the pipeline form `norn repair --plan --format json | norn migrate -` composes plan generation and apply in one shot).
 

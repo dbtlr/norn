@@ -1,7 +1,7 @@
 ---
 name: norn
 description: Use when inspecting, querying, validating, or mutating Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, query, and validation/repair workflows.
-version: 1.3.2
+version: 1.4.0
 author: Drew Butler <hi@dbtlr.com>
 license: MIT
 ---
@@ -31,6 +31,27 @@ Pick a vault root before running anything. Three ways, in precedence order:
 3. **Process cwd.** With neither set, `norn` runs against the current directory and discovers `.norn/config.yaml` if present.
 
 When in doubt, pass `-C <path>`.
+
+## Discover the vault before creating or mutating
+
+Once the vault root is picked, orient before querying or writing anything — don't guess at folder layout, rule names, or the frontmatter schema.
+
+```bash
+norn describe --format json    # the orient-first move
+```
+
+`describe` returns `folders` (every directory currently holding a document), `path_rules` (each rule's `match.path` glob plus the `frontmatter_defaults` a document there inherits), `creatable_rules` (rules usable with `norn new --as <rule>`: `name`, `target` template, `required_vars`, `frontmatter_defaults`, optional `body` scaffold), `inbox` (the `inbox.path` fallback target for `norn new --title "…"` with no path/`--as`, or `null`), and `schema` (the full `validate` config verbatim — every rule's `required_frontmatter`, `field_types`, `allowed_values`). Add `--data`/`--stats` for a contents-summary (`total`, per-field value distributions, date bounds) over the same filter surface `find`/`count` share — `--by field1,field2` names exact fields (bypassing the auto identity-skip that drops near-unique fields like `title`), and `--limit N` caps shown value-buckets per field (default 20, `0` = no cap). Read-only; never writes.
+
+No `.norn/config.yaml` yet? `norn init` scaffolds one with commented example rules (refuses to overwrite an existing config unless `--force`). Once it exists:
+
+```bash
+norn config show       # effective config: resolved paths, counts
+norn config validate   # check the config file itself for errors
+norn config edit       # open it in $VISUAL/$EDITOR (auto-validates after)
+norn config migrate    # upgrade an older config to the current schema version
+```
+
+`config show`/`validate` are read-only; `config edit`/`migrate` write to `.norn/config.yaml` itself (not vault documents). `describe` reads that config back as `path_rules`/`creatable_rules`/`inbox`/`schema` — after editing rules, re-run `describe` to confirm what an agent now sees.
 
 ## Query and read — the everyday surface
 
@@ -174,7 +195,28 @@ norn new --as task --title "Fix the cache" --var workspace=norn --yes
 norn new --title "Quick capture" --yes                   # inbox fallback (inbox.path required)
 ```
 
-`new` operates in three modes: (A) explicit path — supply the vault-relative path directly; (B) rule-targeted (`--as <rule>`) — derives the path from the named rule's `target` template, applies the rule's `frontmatter_defaults`, and seeds the body from its `body` scaffold; (C) inbox fallback — no path and no `--as`, routes to `inbox.path/<title|slugify>.md`. Template placeholders: `{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`, `{{var.KEY}}` (filled by `--var KEY=VALUE`). `--field` overrides always win. Refuses (exit 2) when a required `{{var.KEY}}` is missing, `--title` is absent where the template needs it, the rule is unknown or non-creatable, or the inbox is unconfigured for Mode C. Also refuses if the path exists (unless `--force`) or a parent dir is missing (unless `-p`). After writing, `validate` runs against the new doc; findings surface as report warnings.
+`new` operates in three modes: (A) explicit path — supply the vault-relative path directly; (B) rule-targeted (`--as <rule>`) — derives the path from the named rule's `target` template, applies the rule's `frontmatter_defaults`, and seeds the body from its `body` scaffold; (C) inbox fallback — no path and no `--as`, routes to `inbox.path/<title|slugify>.md`. Template placeholders: `{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`, `{{var.KEY}}` (filled by `--var KEY=VALUE`), `{{seq}}` (auto-incrementing id — see below). `--field` overrides always win. Refuses (exit 2) when a required `{{var.KEY}}` is missing, `--title` is absent where the template needs it, the rule is unknown or non-creatable, or the inbox is unconfigured for Mode C. Also refuses if the path exists (unless `--force`) or a parent dir is missing (unless `-p`). After writing, `validate` runs against the new doc; findings surface as report warnings.
+
+#### `{{seq}}` — auto-incrementing ids, no hand-rolled next-id logic
+
+A rule's `target` template can include `{{seq}}` instead of an agent computing the next id itself (e.g. by `find`-ing existing files and counting):
+
+```yaml
+validate:
+  rules:
+    - name: task
+      target: "tasks/NRN-{{seq}}.md"
+      frontmatter_defaults:
+        type: task
+        status: backlog
+```
+
+```bash
+norn new --as task --title "Fix the query planner" --yes
+# → tasks/NRN-<next-id>.md, id = max existing NRN-* file + 1 (first is 1)
+```
+
+The id is allocated at apply time under the per-vault mutation lock, so concurrent creates never collide, and it's scoped per resolved prefix (`NRN-{{seq}}` counts only `NRN-*` files, independent of any other `{{seq}}`-templated rule). Ids are plain, unpadded integers — don't point a `{{seq}}` rule at a directory using zero-padded ids (`task-007.md`); the next id would be `task-8.md`, breaking lexical sort. On `--dry-run`, the reported `path` keeps the literal `{{seq}}` token and a separate `predicted_path` shows the id that would be allocated (non-binding — a concurrent create could take it first).
 
 **MCP off-filesystem placement:** call `vault.describe` to inspect `creatable_rules` (each carries `name`, `target`, `required_vars`, `frontmatter_defaults`, `body`) and `inbox`. Then call `vault.new { rule: "task", title: "…", vars: { "workspace": "norn" }, confirm: true }` — norn derives the concrete path from the rule's template with no path guessing.
 
@@ -201,7 +243,7 @@ norn -C /path/to/vault validate --severity error --path 'notes/**' --format json
 
 `--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (pipe default — a finding has no path), `json` (`{ total, findings[] }`), `paths` (unique source paths). Exit code reflects **whole-vault** error-severity diagnostics — it does not change with `--code`/`--severity`/`--path`, and most finding codes default to `warning` severity. Don't gate a pipeline on exit code alone; check `--summary` totals or the returned findings instead.
 
-Stable finding codes: `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-disallowed-value`, `frontmatter-invalid-type`, `frontmatter-forbidden-field`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`, `frontmatter-alias-malformed`, `frontmatter-reference-type`, `document-misrouted`. Renames are CHANGELOG breaking changes.
+Stable finding codes (18): `read-failed`, `frontmatter-unclosed`, `frontmatter-parse-failed`, `frontmatter-json-conversion-failed`, `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-forbidden-field`, `frontmatter-invalid-type`, `frontmatter-exceeds-max-length`, `frontmatter-disallowed-value`, `document-misrouted`, `frontmatter-reference-type`, `frontmatter-alias-malformed`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`. See [validation.md](https://github.com/dbtlr/norn/tree/main/docs/validation.md) for severity and source per code. Renames are CHANGELOG breaking changes.
 
 ### The plan/apply loop
 
