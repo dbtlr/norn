@@ -126,6 +126,27 @@ impl Cache {
     pub fn alias_field(&self) -> Option<&str> {
         self.alias_field.as_deref()
     }
+
+    /// Every distinct top-level frontmatter key observed across the vault's
+    /// documents. Drives the dynamic-field-predicate universe (ADR 0010,
+    /// NRN-207): a `--key value` guess is only accepted when `key` is a field
+    /// this vault actually carries. Uses SQLite's JSON1 `json_each` over the
+    /// cached `frontmatter_json`, so no filesystem re-parse is needed.
+    pub fn observed_field_names(&self) -> Result<std::collections::BTreeSet<String>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT je.key \
+             FROM documents, json_each(documents.frontmatter_json) je \
+             WHERE documents.frontmatter_json IS NOT NULL \
+               AND json_valid(documents.frontmatter_json) \
+               AND json_type(documents.frontmatter_json) = 'object'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut fields = std::collections::BTreeSet::new();
+        for row in rows {
+            fields.insert(row?);
+        }
+        Ok(fields)
+    }
 }
 
 #[cfg(test)]

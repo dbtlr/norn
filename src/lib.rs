@@ -16,6 +16,7 @@ mod filter;
 mod filter_args;
 mod find;
 mod frontmatter;
+mod grammar;
 mod graph;
 mod help;
 mod init;
@@ -74,9 +75,32 @@ pub fn cli_main() {
     if !self_update::receipt::exists() {
         cmd = cmd.mut_subcommand("self-update", |sc| sc.hide(true));
     }
-    let matches = cmd.get_matches();
+    // ADR 0010 forgiving-input pass (NRN-206/207/209): resolve aliases and
+    // desugar dynamic `--key value` predicates into canonical `--eq`/`--in`
+    // BEFORE clap parses. Canonical invocations pass through byte-identically.
+    // The dynamic keys are validated against the vault's field universe once
+    // the cache is open (see `gate_dynamic_fields` calls in `run`).
+    let raw_argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let (matches, dynamic_keys) = match raw_argv
+        .iter()
+        .map(|s| s.to_str().map(str::to_string))
+        .collect::<Option<Vec<String>>>()
+    {
+        Some(utf8_argv) => match grammar::normalize_argv(utf8_argv) {
+            Ok(normalized) => (
+                cmd.get_matches_from(normalized.argv),
+                normalized.dynamic_keys,
+            ),
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                process::exit(2);
+            }
+        },
+        // Non-UTF-8 argv: skip the forgiving pass and let clap parse verbatim.
+        None => (cmd.get_matches(), Vec::new()),
+    };
     let cli = Cli::from_arg_matches(&matches).expect("clap-derive contract: parse from matches");
-    match run(cli) {
+    match run(cli, &dynamic_keys) {
         Ok(exit_code) => process::exit(exit_code),
         Err(error) if is_broken_pipe(&error) => process::exit(0),
         Err(error) => {
@@ -224,7 +248,7 @@ fn route_count(
     None
 }
 
-fn run(cli: Cli) -> Result<i32> {
+fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     let Cli {
         cwd,
         config,
@@ -284,14 +308,19 @@ fn run(cli: Cli) -> Result<i32> {
     // from an already-verified cache. When it returns `Some`, the request was
     // served by routing; otherwise we fall through to the direct, integrity-
     // verified dispatch below (today's behavior). No daemon => only a `stat`.
-    if let Some(result) = try_route_read(
-        &command,
-        &cwd,
-        config_path.is_some(),
-        no_cache_refresh,
-        verbose,
-    ) {
-        return result;
+    // A dynamic-predicate invocation forces Direct: the field-universe gate
+    // (NRN-207) needs the vault's known fields, which the warm-daemon routed
+    // path doesn't surface — so validate + serve on the direct, cache-open path.
+    if dynamic_keys.is_empty() {
+        if let Some(result) = try_route_read(
+            &command,
+            &cwd,
+            config_path.is_some(),
+            no_cache_refresh,
+            verbose,
+        ) {
+            return result;
+        }
     }
 
     let outcome = match command {
@@ -518,9 +547,10 @@ fn run(cli: Cli) -> Result<i32> {
             find::run(
                 args,
                 &cwd,
-                &loaded_config.index_options,
+                &loaded_config,
                 no_cache_refresh,
                 color,
+                dynamic_keys,
             )
         }
         Command::Count(args) => {
@@ -529,6 +559,12 @@ fn run(cli: Cli) -> Result<i32> {
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
+            )?;
+            gate_dynamic_query(
+                &cache,
+                &loaded_config,
+                dynamic_keys,
+                crate::grammar::QueryCmd::Count,
             )?;
             let out = count::run(&cache, &args)?;
             // Shared with the NRN-94 routed path (`route_count`) so routed and
@@ -543,6 +579,12 @@ fn run(cli: Cli) -> Result<i32> {
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
+            )?;
+            gate_dynamic_query(
+                &cache,
+                &loaded_config,
+                dynamic_keys,
+                crate::grammar::QueryCmd::Describe,
             )?;
             // Normalize `--by` ONCE up front so the want_data gate and the
             // DataOptions.by mode-selection agree (shared with MCP via
@@ -1382,6 +1424,24 @@ fn run(cli: Cli) -> Result<i32> {
         crate::cache::prune::lazy_sweep(&cwd, config_path.as_ref());
     }
     outcome
+}
+
+/// Validate dynamically-desugared field-predicate keys (ADR 0010 / NRN-207)
+/// against this vault's field universe. A no-op when no dynamic predicate was
+/// used (the common canonical path pays nothing). Shared by every query-family
+/// command so the gate can't drift between `find`, `count`, and `describe`.
+pub(crate) fn gate_dynamic_query(
+    cache: &crate::cache::Cache,
+    config: &crate::config_loader::LoadedConfig,
+    dynamic_keys: &[String],
+    cmd: crate::grammar::QueryCmd,
+) -> Result<()> {
+    if dynamic_keys.is_empty() {
+        return Ok(());
+    }
+    let universe = crate::grammar::field_universe(cache, config)?;
+    let known_flags = crate::grammar::query_known_flags(cmd);
+    crate::grammar::gate_dynamic_fields(dynamic_keys, &universe, &known_flags)
 }
 
 fn run_completions_command(cmd: crate::cli::CompletionsCommand) -> Result<i32> {

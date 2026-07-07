@@ -442,9 +442,11 @@ pub fn build_plan(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Split `KEY=VALUE` at the first `=`. Returns Err when no `=` is found.
+/// Split `KEY=VALUE` at the first separator. Canonically `=`; a `:` is also
+/// accepted (ADR 0010 separator forgiveness) — the split point is the first
+/// `:` or `=`, whichever comes first. Returns Err when neither is found.
 fn split_kv(raw: &str) -> Result<(String, String), ()> {
-    let (k, v) = raw.split_once('=').ok_or(())?;
+    let (k, v) = crate::grammar::split_field_value(raw).ok_or(())?;
     if k.is_empty() {
         return Err(());
     }
