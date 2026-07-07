@@ -140,15 +140,15 @@ pub enum ControlFrame {
 /// timeouts, I/O errors, protocol mismatches, and malformed frames, which
 /// stay silent because they are expected transient or environmental noise.
 //
-// The probe path is live on unix (NRN-94 wired `try_route_read` → `probe` in
-// `src/lib.rs`). The `#[allow(dead_code)]` on the probe-path items below
-// (`RouteDecision`, `probe`, `probe_socket`, `connect_control`, `handshake`,
-// `handshake_pong`, `read_control_line`) is retained only for the non-unix
-// build, where the daemon cannot run and these are unreachable; on unix it is a
-// harmless no-op. `HandshakeError::Other`'s wrapped error is deliberately never
-// read (callers only distinguish it from `VersionSkew`).
+// This whole probe path is live on unix — NRN-94 wired `route_count` → `probe`
+// in `src/lib.rs`, so `probe_socket`/`connect_control`/`handshake`/
+// `handshake_pong` (all `#[cfg(unix)]`, absent on non-unix) need no dead-code
+// allow. Only the two cross-platform items — [`RouteDecision`] and [`probe`] —
+// are unreachable on the non-unix build (the non-unix `route_count` stub never
+// calls them), so those two carry a `cfg_attr(not(unix), …)` allow.
+// `HandshakeError::Other`'s wrapped error is deliberately never read (callers
+// only distinguish it from `VersionSkew`).
 #[cfg(unix)]
-#[allow(dead_code)]
 #[derive(Debug)]
 enum HandshakeError {
     /// The daemon answered with a well-formed pong at the right protocol
@@ -172,19 +172,71 @@ enum HandshakeError {
 /// trust loss.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// The request connection's OWN I/O budget (NRN-94), deliberately far larger
-/// than [`DEFAULT_HANDSHAKE_TIMEOUT`]: the probe's short timeout only bounds the
-/// O(1) liveness ping, whereas a real query on a large cold vault (first touch,
-/// integrity check, index build) can legitimately take seconds. Reusing the
-/// 250ms probe budget here would false-timeout a healthy-but-busy daemon and
-/// fall back to Direct on every routed read. A wedged daemon is still bounded —
-/// this caps the wait, then the CLI falls back to a verified direct open.
+/// Undocumented env override for the handshake probe timeout, in milliseconds
+/// (NRN-94 review F8). The 250ms [`DEFAULT_HANDSHAKE_TIMEOUT`] is tuned for an
+/// idle developer machine; under heavy CI load a live daemon can be scheduled
+/// late enough that the probe times out and every routed read silently falls
+/// back to Direct — which the per-shape routing proof (`serve_count_routing`)
+/// now catches as a hard failure rather than a silent pass. This lets the e2e
+/// suite set a generous budget so scheduler jitter can't flake it. Deliberately
+/// undocumented: it exists for tests and emergency operator use, not as a
+/// supported knob.
+const HANDSHAKE_TIMEOUT_ENV: &str = "NORN_SERVICE_HANDSHAKE_TIMEOUT_MS";
+
+/// The probe handshake timeout, honoring [`HANDSHAKE_TIMEOUT_ENV`] when it parses
+/// to a positive integer, otherwise [`DEFAULT_HANDSHAKE_TIMEOUT`].
+pub fn handshake_timeout() -> std::time::Duration {
+    match std::env::var(HANDSHAKE_TIMEOUT_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(ms) if ms > 0 => std::time::Duration::from_millis(ms),
+            _ => DEFAULT_HANDSHAKE_TIMEOUT,
+        },
+        Err(_) => DEFAULT_HANDSHAKE_TIMEOUT,
+    }
+}
+
+/// The OVERALL wall-clock budget for one routed read (NRN-94 review F3).
+///
+/// This is a *tight overall deadline*, not a generous per-read timeout: connect,
+/// the `hello`/`ready` preamble, MCP `initialize`, and the `tools/call` all share
+/// it, so a routed read costs at most this before falling back to a verified
+/// direct open. The old 30s per-read timeout let a daemon that passed the 250ms
+/// liveness ping but then wedged in its serve path stall EVERY count for 30s,
+/// while direct execution costs ~50ms.
+///
+/// 5s is the deliberate balance: a genuinely cold daemon open (first touch,
+/// integrity check, index build) can legitimately take a second or two and
+/// should still route; but if it exceeds 5s, falling back to Direct is nearly
+/// free because Direct pays a comparable cold-open cost anyway — and a truly
+/// wedged daemon then costs at most 5s, once per invocation, instead of 30s.
 #[cfg(unix)]
-const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const ROUTED_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Per-read `SO_RCVTIMEO` for the request path: short enough that the reader
+/// wakes to re-check the [`ROUTED_READ_BUDGET`] deadline, bounding total
+/// overshoot to one interval, without the per-read `setsockopt` churn that trips
+/// EINVAL on macOS under load (so we set it ONCE, not per read).
+#[cfg(unix)]
+const REQUEST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Upper bound on a single request-path frame (NRN-94 review F2). Far larger
+/// than [`MAX_CONTROL_FRAME_BYTES`] because a tool response (e.g. a large
+/// `vault.count` grouping envelope) is legitimately bigger than a control frame,
+/// but still bounded so a peer that streams bytes without a newline becomes a
+/// bounded `Err` (→ Direct) rather than unbounded memory growth.
+#[cfg(unix)]
+const MAX_REQUEST_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Upper bound on blank/non-JSON noise lines skipped while looking for the next
+/// JSON value on the request path (NRN-94 review F2). A well-behaved daemon
+/// interleaves none; a chatty or hostile peer cannot loop us forever.
+#[cfg(unix)]
+const MAX_SKIPPED_FRAMES: usize = 1024;
 
 /// The routing decision for one CLI invocation.
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
+// Cross-platform, but unreachable on non-unix (its `route_count` stub never
+// probes); allow dead code only there (see the note on `HandshakeError`).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum RouteDecision {
     /// No live service — run the operation directly with a verified cache open.
     Direct,
@@ -205,12 +257,9 @@ pub enum RouteDecision {
 ///
 /// [`socket_path`]: ServiceClient::socket_path
 #[cfg(unix)]
-// `socket_path` is written by the probe and consumed by NRN-94's routing
-// implementation, which does not exist yet. Allow until then rather than
-// dropping the field the very next task needs.
-#[allow(dead_code)]
 pub struct ServiceClient {
-    /// The socket a handshake just succeeded against — where NRN-94 connects.
+    /// The socket a handshake just succeeded against, and where the request
+    /// connection ([`ServiceClient::call_tool_structured`]) reconnects.
     pub socket_path: Utf8PathBuf,
 }
 
@@ -249,8 +298,8 @@ pub fn host_lock_path() -> anyhow::Result<Utf8PathBuf> {
 /// resolves to [`RouteDecision::Direct`] — the always-safe path. The daemon is
 /// a pure optimization, so its absence or malfunction must degrade to today's
 /// behavior, never surface as an error.
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
+// Cross-platform, but unreachable on non-unix (see the note on `HandshakeError`).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn probe(timeout: std::time::Duration) -> RouteDecision {
     let Ok(socket_path) = host_socket_path() else {
         return RouteDecision::Direct;
@@ -267,8 +316,6 @@ pub(crate) const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024;
 /// Probe a specific socket path. Split from [`probe`] so tests can point it at a
 /// stub listener on a temp path.
 #[cfg(unix)]
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
 pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> RouteDecision {
     // Fast path: no socket file => no daemon. Just a stat; the common case pays
     // nothing beyond it. `exists()` follows symlinks and swallows errors as
@@ -321,7 +368,8 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
 
 /// Non-Unix stub: no UDS, so routing is never available; always run Direct.
 #[cfg(not(unix))]
-// NRN-94-gated probe path (see the note on `HandshakeError`).
+// Unreachable on non-unix (only `probe` calls it, and `probe` is itself dead
+// here — see the note on `HandshakeError`).
 #[allow(dead_code)]
 pub fn probe_socket(_socket_path: &Utf8Path, _timeout: std::time::Duration) -> RouteDecision {
     RouteDecision::Direct
@@ -356,8 +404,6 @@ pub fn probe_socket(_socket_path: &Utf8Path, _timeout: std::time::Duration) -> R
 /// nonblocking-state flakiness and macOS `setsockopt`-under-load `EINVAL`. And
 /// `poll`, not `select`, so there is no `FD_SETSIZE` (1024-fd) hazard.
 #[cfg(unix)]
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
 fn connect_control(
     socket_path: &Utf8Path,
     timeout: std::time::Duration,
@@ -522,8 +568,6 @@ fn connect_control(
 /// The stream is used only to prove liveness and is dropped by the caller
 /// afterward, so the short handshake timeouts never leak onto a request channel.
 #[cfg(unix)]
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
 fn handshake(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
@@ -562,16 +606,14 @@ fn handshake(
 /// owns the version-then-protocol ordering that distinguishes skew from a silent
 /// protocol mismatch (FIX-8).
 #[cfg(unix)]
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
 fn handshake_pong(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
 ) -> anyhow::Result<(u32, String)> {
-    use std::io::Write;
+    use std::io::BufReader;
 
     let deadline = std::time::Instant::now() + timeout;
-    // Set the I/O timeouts once. `SO_RCVTIMEO` bounds each read; the read loop's
+    // Set the I/O timeouts once. `SO_RCVTIMEO` bounds each read; the reader's
     // wall-clock deadline check bounds the *total*, so a single set suffices —
     // and setting it once (rather than per read) avoids the repeated setsockopt
     // that spuriously trips EINVAL on macOS under heavy concurrency.
@@ -581,23 +623,25 @@ fn handshake_pong(
     // All I/O rides the borrowed stream directly — `&UnixStream` implements
     // `Read`/`Write`, so no `try_clone` is needed. (Cloning then dropping a
     // dup'd socket fd before touching `SO_RCVTIMEO` on the original trips EINVAL
-    // on macOS; borrowing sidesteps that and avoids the fd churn.)
+    // on macOS; borrowing sidesteps that and avoids the fd churn.) The probe and
+    // request paths share ONE capped, deadline-aware reader ([`read_line_capped`])
+    // and ONE writer ([`write_json_line`]) — see NRN-94 review F2.
     let ping = ControlFrame::Ping {
         protocol: CONTROL_PROTOCOL,
     };
-    let ping_json = serde_json::to_string(&ping)?;
-    writeln!(&mut { stream }, "{ping_json}")?;
-    Write::flush(&mut { stream })?;
+    write_json_line(stream, &ping)?;
 
     // Read one control line, bounded by the *cumulative* deadline (not per read
-    // syscall) and by a max byte cap, so a trickle of bytes without a newline
-    // cannot hang the probe or grow memory unbounded.
-    let line = read_control_line(stream, deadline)?;
+    // syscall) and by [`MAX_CONTROL_FRAME_BYTES`], so a trickle of bytes without
+    // a newline cannot hang the probe or grow memory unbounded.
+    let mut reader = BufReader::new(stream);
+    let line = read_line_capped(&mut reader, MAX_CONTROL_FRAME_BYTES, deadline)?
+        .ok_or_else(|| anyhow::anyhow!("service closed the connection before answering"))?;
 
     // A pong missing `version` fails to deserialize here (it's a required
     // field) and lands in the generic `Err` path below — a malformed frame,
     // not a version skew.
-    let frame: ControlFrame = serde_json::from_str(line.trim())?;
+    let frame: ControlFrame = serde_json::from_slice(&line)?;
     match frame {
         // Return both fields raw; `handshake` applies the version-first,
         // protocol-second ordering (FIX-8).
@@ -608,48 +652,77 @@ fn handshake_pong(
     }
 }
 
-/// Read a single newline-terminated control frame, bounded by a wall-clock
-/// `deadline` and [`MAX_CONTROL_FRAME_BYTES`].
+/// Read a single newline-terminated line from a buffered reader, bounded by a
+/// wall-clock `deadline` and `cap` bytes. Returns `Ok(None)` on EOF before any
+/// byte, `Ok(Some(line))` (newline stripped), or `Err` on a cap/deadline breach.
+///
+/// This is the ONE line reader shared by the probe handshake and the request
+/// path (NRN-94 review F2) — previously two divergent copies, one of which (the
+/// request path's `read_line`) had neither a byte cap nor a cumulative deadline.
 ///
 /// The caller sets `SO_RCVTIMEO` (bounding each individual read); this loop's
 /// deadline check bounds the *cumulative* time — the key fix over a plain
 /// `read_line`, which a peer that dribbles bytes under the per-read timeout can
-/// keep alive forever. Worst-case overshoot is one read's `SO_RCVTIMEO` past the
-/// deadline, which is fine for a liveness probe.
+/// keep alive forever. A per-read timeout (`WouldBlock`/`TimedOut`) or a stray
+/// signal (`Interrupted`) is retried, always re-gated by the deadline, so the
+/// only ways out are: a full line, EOF, the cap, or the deadline.
+///
+/// Uses `fill_buf`/`consume` so it never over-reads past the newline — any
+/// pipelined bytes stay buffered for the next call (the request path reads
+/// several frames from one `BufReader`).
 #[cfg(unix)]
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
-fn read_control_line(
-    stream: &std::os::unix::net::UnixStream,
+fn read_line_capped<R: std::io::BufRead>(
+    reader: &mut R,
+    cap: usize,
     deadline: std::time::Instant,
-) -> anyhow::Result<String> {
-    use std::io::Read;
+) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::{Error, ErrorKind};
 
     let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 256];
     loop {
         if std::time::Instant::now() >= deadline {
-            anyhow::bail!("handshake timed out before a full control frame arrived");
+            return Err(Error::new(
+                ErrorKind::TimedOut,
+                "deadline exceeded before a full line arrived",
+            ));
         }
-        // FIX-10: a stray signal mid-handshake returns EINTR; retry rather than
-        // abandon routing. The loop's wall-clock deadline still bounds total time.
-        let n = match Read::read(&mut { stream }, &mut chunk) {
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.into()),
+        let available = match reader.fill_buf() {
+            Ok(a) => a,
+            // A per-read `SO_RCVTIMEO` expiry or a stray signal: loop and let the
+            // deadline check above decide whether to keep waiting.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(e),
         };
-        if n == 0 {
-            anyhow::bail!("service closed the connection before answering the handshake");
+        if available.is_empty() {
+            // Clean EOF before any newline: a partial buffer is discarded.
+            return Ok(None);
         }
-        if let Some(nl) = chunk[..n].iter().position(|&b| b == b'\n') {
-            buf.extend_from_slice(&chunk[..nl]);
-            return Ok(String::from_utf8_lossy(&buf).into_owned());
+        // Bound how much of `available` we look at this iteration so `buf` can
+        // overshoot `cap` by at most one byte before the cap trips — never by a
+        // whole extra `fill_buf` chunk. `buf.len() <= cap` is the invariant, so
+        // this budget is always >= 1.
+        let budget = cap - buf.len() + 1;
+        let window = &available[..available.len().min(budget)];
+        if let Some(pos) = window.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&window[..pos]);
+            reader.consume(pos + 1);
+            return Ok(Some(buf));
         }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > MAX_CONTROL_FRAME_BYTES {
-            anyhow::bail!(
-                "control frame exceeded {MAX_CONTROL_FRAME_BYTES} bytes without a newline"
-            );
+        let taken = window.len();
+        buf.extend_from_slice(window);
+        reader.consume(taken);
+        if buf.len() > cap {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "line exceeded the byte cap without a newline",
+            ));
         }
     }
 }
@@ -658,19 +731,21 @@ fn read_control_line(
 ///
 /// A [`ServiceClient`] is proof that a daemon answered the liveness ping on a
 /// *separate* control connection. This opens a fresh REQUEST connection to the
-/// same socket — with its own I/O budget ([`DEFAULT_REQUEST_TIMEOUT`], not the
-/// probe's short handshake timeout) — sends the `hello` vault preamble, runs the
-/// MCP `initialize` + `tools/call` exchange as raw newline-delimited JSON-RPC,
-/// and returns the tool's `structuredContent`.
+/// same socket — under the tight overall [`ROUTED_READ_BUDGET`] deadline, not the
+/// probe's short handshake timeout — verifies the socket is ours, sends the
+/// `hello` vault preamble, runs the MCP `initialize` + `tools/call` exchange as
+/// raw newline-delimited JSON-RPC, and returns the tool's `structuredContent`.
 ///
-/// Every failure — connect refused (daemon died in the probe→request gap), a
+/// Every failure — a socket that fails the ownership check (a squatter on the
+/// well-known path), connect refused (daemon died in the probe→request gap), a
 /// non-`ready` preamble reply (vault open failed daemon-side), an MCP transport
-/// error, or a JSON-RPC `error` (the tool itself failed) — is returned as `Err`.
-/// The caller maps ALL of them to a verified direct open, so a routed read never
-/// fails a read that direct execution could serve. Because reads are idempotent
-/// and side-effect-free, this attempt-then-fall-back is safe: a tool-level error
-/// (e.g. an invalid `--by`) is re-produced identically by the direct path, so
-/// error output and exit codes stay byte-identical too.
+/// error, a JSON-RPC `error`, or a result flagged `isError` (the tool itself
+/// failed) — is returned as `Err`. The caller maps ALL of them to a verified
+/// direct open, so a routed read never fails a read that direct execution could
+/// serve. Because reads are idempotent and side-effect-free, this
+/// attempt-then-fall-back is safe: a tool-level error (e.g. an invalid `--by`) is
+/// re-produced identically by the direct path, so error output and exit codes
+/// stay byte-identical too.
 #[cfg(unix)]
 impl ServiceClient {
     /// Route one read tool call to the warm daemon and return its
@@ -686,12 +761,30 @@ impl ServiceClient {
     ) -> anyhow::Result<serde_json::Value> {
         use std::io::BufReader;
 
-        // Fresh request connection with its OWN I/O budget — never the probe's
-        // short handshake timeout (NRN-92 review F, NRN-94 constraint).
-        let stream = connect_control(&self.socket_path, DEFAULT_REQUEST_TIMEOUT)?;
-        stream.set_read_timeout(Some(DEFAULT_REQUEST_TIMEOUT))?;
-        stream.set_write_timeout(Some(DEFAULT_REQUEST_TIMEOUT))?;
-        let mut reader = BufReader::new(stream.try_clone()?);
+        // TRUST (NRN-94 review F4): before naming the vault, verify the socket is
+        // ours. A squatter who binds the well-known path must not learn vault
+        // paths (from the `hello`) or serve forged counts. On any mismatch, bail
+        // so the caller falls back to a verified direct open — trust over speed.
+        if !socket_is_trusted(&self.socket_path) {
+            anyhow::bail!("service socket failed the ownership check; using direct execution");
+        }
+
+        // One overall wall-clock deadline for the whole routed read (F3): a
+        // daemon that passed the 250ms liveness ping but then wedges costs at
+        // most the budget, not the old 30s. Every read below shares this deadline.
+        let deadline = std::time::Instant::now() + ROUTED_READ_BUDGET;
+
+        // Fresh request connection, bounded by the same budget.
+        let stream = connect_control(&self.socket_path, ROUTED_READ_BUDGET)?;
+        // `SO_RCVTIMEO` is the per-read poll interval (short, so the reader wakes
+        // to re-check the deadline); the deadline bounds the cumulative time. Set
+        // once — per-read `setsockopt` trips EINVAL on macOS under load.
+        stream.set_read_timeout(Some(REQUEST_POLL_INTERVAL))?;
+        stream.set_write_timeout(Some(ROUTED_READ_BUDGET))?;
+        // Read via a BufReader over `&stream`; write via `&stream` directly. Both
+        // are shared borrows, so no `try_clone` (whose dup'd-fd churn trips the
+        // macOS `SO_RCVTIMEO` EINVAL noted on the probe path).
+        let mut reader = BufReader::new(&stream);
 
         // 1. Vault preamble: name the vault for this connection, then require a
         //    `ready` frame. Anything else (an `error` frame, EOF, garbage) means
@@ -700,8 +793,8 @@ impl ServiceClient {
             protocol: CONTROL_PROTOCOL,
             vault_root: vault_root.as_str().to_string(),
         };
-        write_json_line(&stream, &serde_json::to_value(&hello)?)?;
-        let ready = read_json_line(&mut reader)?
+        write_json_line(&stream, &hello)?;
+        let ready = read_json_value(&mut reader, deadline)?
             .ok_or_else(|| anyhow::anyhow!("daemon closed before answering hello"))?;
         match ready.get("norn_control").and_then(|v| v.as_str()) {
             Some("ready") => {}
@@ -720,32 +813,63 @@ impl ServiceClient {
             }),
         );
         write_json_line(&stream, &init)?;
-        let init_resp = read_rpc_response(&mut reader, 1)?;
+        let init_resp = read_rpc_response(&mut reader, 1, deadline)?;
         if let Some(err) = init_resp.get("error") {
             anyhow::bail!("MCP initialize failed: {err}");
         }
 
-        // 3. The actual tool call. A JSON-RPC `error` here is a tool-level
-        //    failure (e.g. an invalid predicate) — bail so the caller falls back
-        //    to Direct, which re-produces the identical error and exit code.
+        // 3. The actual tool call. A JSON-RPC `error` OR a `result` flagged
+        //    `isError` is a tool-level failure — bail so the caller falls back to
+        //    Direct, which re-produces the identical error and exit code.
         let call = json_rpc_request(
             2,
             "tools/call",
             serde_json::json!({ "name": tool, "arguments": arguments }),
         );
         write_json_line(&stream, &call)?;
-        let resp = read_rpc_response(&mut reader, 2)?;
+        let resp = read_rpc_response(&mut reader, 2, deadline)?;
         if let Some(err) = resp.get("error") {
             anyhow::bail!("tool '{tool}' failed on the daemon: {err}");
         }
-        let structured = resp
+        let result = resp
             .get("result")
-            .and_then(|r| r.get("structuredContent"))
+            .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no result"))?;
+        // F5: a successful JSON-RPC envelope can still carry a tool-level failure
+        // via `isError: true` (an MCP CallToolResult convention). Treat it as a
+        // failure so we do not render a forged/error payload as a real count.
+        if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+            anyhow::bail!("tool '{tool}' reported isError; using direct execution");
+        }
+        let structured = result
+            .get("structuredContent")
             .cloned()
             .filter(|v| !v.is_null())
             .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no structuredContent"))?;
         Ok(structured)
     }
+}
+
+/// Whether the socket at `path` is trustworthy to route through (NRN-94 F4):
+/// owned by the current effective uid and not world-writable. Cheap (one
+/// `stat`), unix-only, best-effort — any doubt (unreadable metadata, wrong
+/// owner, world-writable) returns `false` so the caller falls back to Direct.
+#[cfg(unix)]
+fn socket_is_trusted(path: &Utf8Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
+    // SAFETY: `geteuid(2)` is always successful and takes no arguments.
+    let euid = unsafe { libc::geteuid() };
+    // Owned by us: a squatter running as another uid is rejected here.
+    if md.uid() != euid {
+        return false;
+    }
+    // Refuse a world-writable socket — anyone could have replaced it.
+    if md.mode() & 0o002 != 0 {
+        return false;
+    }
+    true
 }
 
 /// Build a JSON-RPC 2.0 request frame.
@@ -759,11 +883,12 @@ fn json_rpc_request(id: u32, method: &str, params: serde_json::Value) -> serde_j
     })
 }
 
-/// Write one newline-delimited JSON value to `stream` and flush.
+/// Write one newline-delimited JSON value to `stream` and flush. The ONE writer
+/// shared by the probe handshake and the request path (NRN-94 review F2).
 #[cfg(unix)]
-fn write_json_line(
+fn write_json_line<T: serde::Serialize>(
     mut stream: &std::os::unix::net::UnixStream,
-    value: &serde_json::Value,
+    value: &T,
 ) -> std::io::Result<()> {
     use std::io::Write;
     let mut bytes = serde_json::to_vec(value)?;
@@ -772,37 +897,46 @@ fn write_json_line(
     stream.flush()
 }
 
-/// Read one newline-delimited JSON value, skipping blank / non-JSON noise lines.
-/// Returns `Ok(None)` on EOF before any JSON value.
+/// Read one newline-delimited JSON value, skipping blank / non-JSON noise lines,
+/// bounded by [`MAX_REQUEST_FRAME_BYTES`], the `deadline`, and
+/// [`MAX_SKIPPED_FRAMES`] (NRN-94 review F2 — the skip loop was previously
+/// unbounded). Returns `Ok(None)` on EOF before any JSON value.
 #[cfg(unix)]
-fn read_json_line<R: std::io::BufRead>(
+fn read_json_value<R: std::io::BufRead>(
     reader: &mut R,
-) -> std::io::Result<Option<serde_json::Value>> {
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+    deadline: std::time::Instant,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    for _ in 0..MAX_SKIPPED_FRAMES {
+        let Some(line) = read_line_capped(reader, MAX_REQUEST_FRAME_BYTES, deadline)? else {
             return Ok(None);
-        }
-        let trimmed = line.trim();
+        };
+        let trimmed = line
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .map(|start| &line[start..])
+            .unwrap_or(&[]);
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(trimmed) {
             return Ok(Some(v));
         }
-        // Non-JSON line on the wire: skip and keep reading.
+        // Non-JSON line on the wire: skip and keep reading (bounded by the loop).
     }
+    anyhow::bail!("too many non-JSON frames before a JSON value")
 }
 
 /// Read JSON-RPC responses until one matches `id` (skipping notifications and
-/// out-of-order frames), bounded so a chatty peer cannot loop forever.
+/// out-of-order frames), bounded by the `deadline` (F3) and a frame count so a
+/// chatty peer cannot loop forever.
 #[cfg(unix)]
 fn read_rpc_response<R: std::io::BufRead>(
     reader: &mut R,
     id: u32,
+    deadline: std::time::Instant,
 ) -> anyhow::Result<serde_json::Value> {
     for _ in 0..10_000 {
-        let v = read_json_line(reader)?
+        let v = read_json_value(reader, deadline)?
             .ok_or_else(|| anyhow::anyhow!("daemon closed before answering request {id}"))?;
         if v.get("id").and_then(|i| i.as_u64()) == Some(u64::from(id)) {
             return Ok(v);
@@ -818,6 +952,17 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
     use std::thread;
+
+    /// Bind a stub listener and pin the socket to 0600, so the request path's
+    /// F4 trust gate (`socket_is_trusted`) accepts it regardless of the ambient
+    /// umask (which could otherwise leave it group/other-writable).
+    fn bind_trusted(path: &Utf8PathBuf) -> UnixListener {
+        use std::os::unix::fs::PermissionsExt;
+        let listener = UnixListener::bind(path).unwrap();
+        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        listener
+    }
 
     /// The host socket path is deterministic (same process env => same
     /// answer every call) and lands at the well-known `norn/run/norn.sock`
@@ -848,7 +993,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = bind_trusted(&path);
 
         // Channel so the test can assert the vault_root the client sent in hello.
         let (tx, rx) = mpsc::channel::<String>();
@@ -935,7 +1080,7 @@ mod tests {
     fn call_tool_structured_error_preamble_is_err() {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
-        let listener = UnixListener::bind(&path).unwrap();
+        let listener = bind_trusted(&path);
 
         let server = thread::spawn(move || {
             let (conn, _) = listener.accept().unwrap();
@@ -966,6 +1111,150 @@ mod tests {
         );
         assert!(result.is_err(), "an error preamble must be Err (→ Direct)");
         server.join().unwrap();
+    }
+
+    /// F5: a tools/call whose JSON-RPC envelope is a success (no `error` member)
+    /// but whose `result` carries `isError: true` must be treated as a failure —
+    /// otherwise a forged/error payload with `structuredContent` renders as a
+    /// real count. The stub replays a full, otherwise-valid exchange and only
+    /// flips `isError`.
+    #[test]
+    fn call_tool_structured_is_error_result_is_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+            // hello → ready
+            let mut hello_line = String::new();
+            reader.read_line(&mut hello_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+            // initialize → result
+            let mut init_line = String::new();
+            reader.read_line(&mut init_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+            )
+            .unwrap();
+            w.flush().unwrap();
+            // tools/call → result flagged isError, but WITH structuredContent.
+            let mut call_line = String::new();
+            reader.read_line(&mut call_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2,
+                    "result": {
+                        "content": [{"type": "text", "text": "boom"}],
+                        "structuredContent": {"total": 999},
+                        "isError": true,
+                    }
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let result = client.call_tool_structured(
+            &Utf8PathBuf::from("/vaults/atlas"),
+            "vault.count",
+            serde_json::json!({}),
+        );
+        assert!(
+            result.is_err(),
+            "isError:true must be Err (→ Direct), even with structuredContent present"
+        );
+        server.join().unwrap();
+    }
+
+    /// F4: the request path refuses to route through a socket it does not own.
+    /// A normally-created socket (owned by us, not world-writable) passes;
+    /// making it world-writable fails the trust gate.
+    #[test]
+    fn socket_trust_gate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let _listener = UnixListener::bind(&path).unwrap();
+        // Pin owner-only first so the "trusted" assertion is umask-independent.
+        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert!(
+            socket_is_trusted(&path),
+            "an owner-only socket we own must be trusted"
+        );
+
+        // World-writable => untrusted (a squatter could have replaced it).
+        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        assert!(
+            !socket_is_trusted(&path),
+            "a world-writable socket must fail the trust gate"
+        );
+
+        // A missing socket is untrusted (metadata fails).
+        let missing = Utf8PathBuf::from_path_buf(dir.path().join("nope.sock")).unwrap();
+        assert!(
+            !socket_is_trusted(&missing),
+            "absent socket must be untrusted"
+        );
+    }
+
+    /// F2: `read_line_capped` bounds a peer that streams bytes without a newline
+    /// to a `cap`-sized `Err`, rather than growing memory unbounded. Exercised
+    /// with a `Cursor` (never times out) so only the byte cap can stop it.
+    #[test]
+    fn read_line_capped_enforces_the_byte_cap() {
+        use std::io::{BufReader, Cursor};
+        let no_newline = vec![b'x'; 100];
+        let mut reader = BufReader::new(Cursor::new(no_newline));
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let err = read_line_capped(&mut reader, 16, far).expect_err("cap must trip");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "got {err:?}");
+    }
+
+    /// F2: `read_line_capped` is bounded by the cumulative `deadline`, not just
+    /// per-read `SO_RCVTIMEO`. A socketpair peer that sends nothing (and never
+    /// closes) must time out near the deadline, not hang.
+    #[test]
+    fn read_line_capped_enforces_the_deadline() {
+        use std::io::BufReader;
+        use std::os::unix::net::UnixStream;
+
+        let (a, _b) = UnixStream::pair().unwrap();
+        // Short per-read timeout so the reader wakes to re-check the deadline;
+        // `_b` is held open so there is no EOF — only the deadline stops us.
+        a.set_read_timeout(Some(std::time::Duration::from_millis(40)))
+            .unwrap();
+        let mut reader = BufReader::new(&a);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(120);
+        let start = std::time::Instant::now();
+        let err = read_line_capped(&mut reader, MAX_CONTROL_FRAME_BYTES, deadline)
+            .expect_err("deadline must trip");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "got {err:?}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "must give up near the 120ms deadline, not hang (elapsed {:?})",
+            start.elapsed()
+        );
     }
 
     /// No socket file present => the fast Direct path.

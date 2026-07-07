@@ -7,8 +7,12 @@
 //! private `XDG_CACHE_HOME` has no daemon socket) and the routed output (a CLI
 //! run whose `XDG_CACHE_HOME` is the running daemon's) and diff them exactly.
 //! The daemon's stderr is captured to a file so we can prove routing actually
-//! happened (a served `hello` opens the vault warm and logs it) rather than
-//! silently falling back — which would make the diff trivially pass.
+//! happened rather than silently falling back — which would make the diff
+//! trivially pass. The proof is per-CALL (NRN-94 review F6): the daemon emits one
+//! "served vault.count" line for each tools/call it actually serves, so we assert
+//! the count equals the number of routed shapes (an envelope break that kills
+//! routing after the vault is open goes red), and that `--no-cache-refresh` does
+//! NOT increment it (F1).
 
 #![cfg(unix)]
 
@@ -59,6 +63,13 @@ fn run_count(
     let out = Command::new(norn_bin())
         .env("XDG_CACHE_HOME", cache_home)
         .env("XDG_STATE_HOME", state_home)
+        // F8: a generous handshake budget so a daemon scheduled late under CI
+        // load still answers the probe. Without it the 250ms default can trip
+        // and a shape silently falls back to Direct — which the per-shape
+        // routing proof below now catches as a HARD failure, so an unbounded
+        // handshake budget here is the difference between a real regression and
+        // a scheduler-jitter flake. Harmless on direct runs (no socket to find).
+        .env("NORN_SERVICE_HANDSHAKE_TIMEOUT_MS", "5000")
         .arg("--cwd")
         .arg(vault)
         .arg("count")
@@ -105,19 +116,20 @@ fn no_daemon_runs_direct() {
 fn routed_count_is_byte_identical_to_direct() {
     let vault = seed_vault();
 
-    // ── Direct captures: a private cache home with no daemon socket. ──
+    // ── Direct captures: a private cache home with no daemon socket. Capture
+    //    the FULL triple (stdout, stderr, exit code) per shape so routing can be
+    //    proven identical on all three, not just stdout (NRN-94 review F7). ──
     let direct_cache = TempDir::new().unwrap();
     let direct_state = TempDir::new().unwrap();
-    let direct: Vec<(Vec<u8>, i32)> = arg_shapes()
+    let direct: Vec<(Vec<u8>, Vec<u8>, i32)> = arg_shapes()
         .iter()
         .map(|shape| {
-            let (stdout, _stderr, code) = run_count(
+            run_count(
                 direct_cache.path(),
                 direct_state.path(),
                 vault.path(),
                 shape,
-            );
-            (stdout, code)
+            )
         })
         .collect();
 
@@ -160,8 +172,11 @@ fn routed_count_is_byte_identical_to_direct() {
     wait_for_ready(&socket, Duration::from_secs(10));
 
     // ── Routed captures: the CLI's cache home IS the daemon's, so its probe
-    //    finds the live socket and routes. ──
-    for (shape, (direct_stdout, direct_code)) in arg_shapes().iter().zip(direct.iter()) {
+    //    finds the live socket and routes. Assert the FULL triple matches direct
+    //    (F7): stdout, stderr, AND exit code, byte-for-byte, per shape. ──
+    for (shape, (direct_stdout, direct_stderr, direct_code)) in
+        arg_shapes().iter().zip(direct.iter())
+    {
         let (routed_stdout, routed_stderr, routed_code) =
             run_count(&cache_home, &state_home, vault.path(), shape);
 
@@ -174,23 +189,61 @@ fn routed_count_is_byte_identical_to_direct() {
             String::from_utf8_lossy(direct_stdout),
         );
         assert_eq!(
+            routed_stderr,
+            *direct_stderr,
+            "routed stderr must be byte-identical to direct for count {shape:?}\n\
+             routed: {:?}\n direct: {:?}",
+            String::from_utf8_lossy(&routed_stderr),
+            String::from_utf8_lossy(direct_stderr),
+        );
+        assert_eq!(
             routed_code, *direct_code,
             "routed exit code must match direct for count {shape:?}"
         );
-        assert!(
-            routed_stderr.is_empty(),
-            "a routed read must be silent on the CLI's stderr for count {shape:?}, got: {}",
-            String::from_utf8_lossy(&routed_stderr)
-        );
     }
 
-    // ── Prove routing actually happened: the daemon logs the vault open on the
-    //    first served request. If the CLI had silently fallen back to Direct the
-    //    daemon would never have opened the vault. ──
+    // ── Per-shape routing proof (NRN-94 review F6). The daemon emits one
+    //    "served vault.count" line for EACH actually-served tools/call (unlike
+    //    "opened vault", which fires once at hello time and so cannot detect an
+    //    envelope break that kills routing after the vault is open). Assert the
+    //    count equals the number of routed shapes: if even ONE shape silently
+    //    fell back to Direct, or an rmcp change killed the tool call entirely,
+    //    this is short and the test goes red. ──
     let daemon_log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
     assert!(
         daemon_log.contains("opened vault"),
-        "the daemon must have served at least one routed request (its log should \
-         show a vault open), got stderr:\n{daemon_log}"
+        "the daemon must have opened the vault at least once, got stderr:\n{daemon_log}"
     );
+    let served = count_served(&daemon_log);
+    assert_eq!(
+        served,
+        arg_shapes().len(),
+        "the daemon must have SERVED exactly one vault.count per routed shape \
+         ({} expected), got {served}; daemon stderr:\n{daemon_log}",
+        arg_shapes().len(),
+    );
+
+    // ── F1: `--no-cache-refresh` must NOT route (the daemon always serves a
+    //    freshly-refreshed cache, so routing that flag could differ from direct
+    //    on a stale cache). Prove it two ways: output is byte-identical to a
+    //    DIRECT `--no-cache-refresh` run, and the daemon's served counter does
+    //    NOT increment (no new tools/call reached it). ──
+    let ncr = &["--no-cache-refresh"][..];
+    let direct_ncr = run_count(direct_cache.path(), direct_state.path(), vault.path(), ncr);
+    let routed_ncr = run_count(&cache_home, &state_home, vault.path(), ncr);
+    assert_eq!(
+        routed_ncr, direct_ncr,
+        "--no-cache-refresh must produce the same (stdout, stderr, code) as a direct run"
+    );
+    let served_after = count_served(&std::fs::read_to_string(&stderr_path).unwrap_or_default());
+    assert_eq!(
+        served_after, served,
+        "--no-cache-refresh must NOT route: the daemon's served counter must not \
+         increment (was {served}, now {served_after})"
+    );
+}
+
+/// Count the daemon's per-call "served vault.count" markers in its stderr log.
+fn count_served(log: &str) -> usize {
+    log.matches("served vault.count").count()
 }

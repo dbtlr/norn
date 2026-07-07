@@ -86,6 +86,22 @@ pub fn cli_main() {
     }
 }
 
+/// Whether a routable read must bypass the warm daemon and run Direct, purely
+/// from the two invocation flags that break the routed↔direct equivalence.
+///
+/// - `--config` (`explicit_config`): the wire speaks canonical vault roots only,
+///   never config paths, so a warm context (which loads each vault's own default
+///   config) could silently ignore the flag. The verified direct open honors
+///   `--config` exactly (ADR 0005 config-freshness note).
+/// - `--no-cache-refresh` (`no_cache_refresh`): the daemon ALWAYS serves from a
+///   freshly-refreshed warm cache, so routing a `--no-cache-refresh` read would
+///   contradict the flag's intent (serve whatever the on-disk cache holds without
+///   a refresh) and could return counts that differ from the direct path on a
+///   stale cache. Direct honors it exactly.
+fn routing_forced_direct(explicit_config: bool, no_cache_refresh: bool) -> bool {
+    explicit_config || no_cache_refresh
+}
+
 /// The CLI→service routing seam (NRN-92/94).
 ///
 /// For a routable read, probe for a live warm host daemon; if one answers,
@@ -93,6 +109,8 @@ pub fn cli_main() {
 /// cache, and render the structured response in CLI format. Returns
 /// `Some(result)` when the request was served by routing, or `None` to fall
 /// through to the direct, integrity-verified dispatch (today's behavior).
+/// `--config` / `--no-cache-refresh` force Direct up front (see
+/// [`routing_forced_direct`]).
 ///
 /// **Routing coverage (NRN-94).** Only `count` routes today. Its `vault.count`
 /// tool returns a `CountEnvelope` that losslessly re-encodes `CountOutput`, so
@@ -108,13 +126,10 @@ fn try_route_read(
     command: &Command,
     cwd: &camino::Utf8Path,
     explicit_config: bool,
+    no_cache_refresh: bool,
     verbose: bool,
 ) -> Option<Result<i32>> {
-    // An explicit `--config` forces Direct: the wire speaks canonical vault
-    // roots only, never config paths, so a warm context (which loads each
-    // vault's own default config) could silently ignore the flag. The verified
-    // direct open honors `--config` exactly (ADR 0005 config-freshness note).
-    if explicit_config {
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
         return None;
     }
     match command {
@@ -145,6 +160,10 @@ fn try_route_read(
 /// failure mode — un-canonicalizable root, no/stale daemon, preamble mismatch,
 /// transport error, tool error, or an unreadable envelope — returns `None`, so
 /// the direct dispatch serves the read (and re-produces any error canonically).
+///
+/// NOTE (NRN-214): this is the FIRST routed command. The SECOND (find/get) is the
+/// trigger to extract a generic `route_read` helper (probe → hello → tool call →
+/// reconstruct) — do NOT copy this probe/render skeleton a third time.
 #[cfg(unix)]
 fn route_count(
     args: &crate::cli::CountArgs,
@@ -158,7 +177,7 @@ fn route_count(
 
     // Probe the well-known control socket. No daemon => a cheap stat => Direct,
     // with zero added latency (the common case pays nothing beyond the stat).
-    let client = match crate::service::probe(crate::service::DEFAULT_HANDSHAKE_TIMEOUT) {
+    let client = match crate::service::probe(crate::service::handshake_timeout()) {
         crate::service::RouteDecision::Route(client) => client,
         crate::service::RouteDecision::Direct => return None,
     };
@@ -265,7 +284,13 @@ fn run(cli: Cli) -> Result<i32> {
     // from an already-verified cache. When it returns `Some`, the request was
     // served by routing; otherwise we fall through to the direct, integrity-
     // verified dispatch below (today's behavior). No daemon => only a `stat`.
-    if let Some(result) = try_route_read(&command, &cwd, config_path.is_some(), verbose) {
+    if let Some(result) = try_route_read(
+        &command,
+        &cwd,
+        config_path.is_some(),
+        no_cache_refresh,
+        verbose,
+    ) {
         return result;
     }
 
@@ -1678,5 +1703,28 @@ fn exit_code_for(index: &GraphIndex) -> i32 {
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::routing_forced_direct;
+
+    /// F1 seam-level gate: BOTH `--config` and `--no-cache-refresh` force a
+    /// routable read onto the Direct path, independent of any live daemon. The
+    /// `--no-cache-refresh` arm is the NRN-94 fix — the daemon always serves a
+    /// freshly-refreshed cache, so routing that flag could return counts that
+    /// differ from direct on a stale cache. The live-daemon half of this proof
+    /// (the flag actually not incrementing the daemon's served-call counter) is
+    /// the e2e `no_cache_refresh_shape_is_not_routed` test.
+    #[test]
+    fn routing_forced_direct_truth_table() {
+        assert!(!routing_forced_direct(false, false), "no flags => routable");
+        assert!(routing_forced_direct(true, false), "--config forces Direct");
+        assert!(
+            routing_forced_direct(false, true),
+            "--no-cache-refresh forces Direct"
+        );
+        assert!(routing_forced_direct(true, true), "both flags force Direct");
     }
 }

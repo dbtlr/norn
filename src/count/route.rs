@@ -204,4 +204,112 @@ mod tests {
             groups,
         });
     }
+
+    // ── Adversarial round-trip coverage (NRN-94 review F9): the reconstruct↔
+    //    envelope isomorphism must survive every group-key shape the count path
+    //    can actually emit, not just the tidy alpha-numeric ones above. ──
+
+    /// An empty-string group key round-trips (a document with an empty-valued
+    /// field lands under the `""` key).
+    #[test]
+    fn round_trip_empty_string_key() {
+        let groups = [(String::new(), 5)].into_iter().collect();
+        assert_round_trip(CountOutput::Grouped {
+            by: "status".into(),
+            total: 5,
+            groups,
+        });
+    }
+
+    /// Unicode and whitespace-laden keys round-trip byte-for-byte (JSON escaping
+    /// and BTreeMap ordering must not mangle them).
+    #[test]
+    fn round_trip_unicode_and_whitespace_keys() {
+        let groups = [
+            ("café ☕".to_string(), 2),
+            ("  leading+trailing  ".to_string(), 1),
+            ("tab\there".to_string(), 3),
+            ("日本語".to_string(), 4),
+        ]
+        .into_iter()
+        .collect();
+        assert_round_trip(CountOutput::Grouped {
+            by: "title".into(),
+            total: 10,
+            groups,
+        });
+    }
+
+    /// The `(missing)` / `(null)` sentinels count::run emits for absent/null
+    /// field values are ordinary string keys on the wire and must round-trip.
+    #[test]
+    fn round_trip_missing_and_null_sentinels() {
+        let groups = [
+            ("(missing)".to_string(), 3),
+            ("(null)".to_string(), 2),
+            ("real".to_string(), 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_round_trip(CountOutput::Grouped {
+            by: "status".into(),
+            total: 6,
+            groups,
+        });
+    }
+
+    /// Numeric-string keys (a field whose values look like numbers) must stay
+    /// strings, never get coerced to JSON numbers by the envelope round-trip.
+    #[test]
+    fn round_trip_numeric_string_keys() {
+        let groups = [
+            ("0".to_string(), 1),
+            ("42".to_string(), 2),
+            ("007".to_string(), 3),
+            ("3.14".to_string(), 4),
+        ]
+        .into_iter()
+        .collect();
+        assert_round_trip(CountOutput::Grouped {
+            by: "priority".into(),
+            total: 10,
+            groups,
+        });
+    }
+
+    /// Total = 0 with an empty group map (a `--by` over a vault where nothing
+    /// matches) round-trips to the same empty distribution.
+    #[test]
+    fn round_trip_zero_total_empty_groups() {
+        assert_round_trip(CountOutput::Total { total: 0 });
+        assert_round_trip(CountOutput::Grouped {
+            by: "status".into(),
+            total: 0,
+            groups: BTreeMap::new(),
+        });
+        assert_round_trip(CountOutput::GroupedMulti {
+            by: vec!["type".into(), "status".into()],
+            total: 0,
+            groups: BTreeMap::new(),
+        });
+    }
+
+    /// Nesting deeper than two levels (`--by a,b,c`) round-trips: Branch →
+    /// Branch → Leaf must reconstruct the exact nested shape.
+    #[test]
+    fn round_trip_three_level_nesting() {
+        let mut lvl3 = BTreeMap::new();
+        lvl3.insert("high".to_string(), GroupNode::Leaf(2));
+        lvl3.insert("low".to_string(), GroupNode::Leaf(1));
+        let mut lvl2 = BTreeMap::new();
+        lvl2.insert("active".to_string(), GroupNode::Branch(lvl3));
+        lvl2.insert("done".to_string(), GroupNode::Leaf(3));
+        let mut groups = BTreeMap::new();
+        groups.insert("note".to_string(), GroupNode::Branch(lvl2));
+        assert_round_trip(CountOutput::GroupedMulti {
+            by: vec!["type".into(), "status".into(), "priority".into()],
+            total: 6,
+            groups,
+        });
+    }
 }
