@@ -22,8 +22,14 @@ Manage the per-vault `.norn/config.yaml` — the file that declares your rules a
 norn config show
 # effective paths, counts, and where the cache and logs live
 
+norn config show --format json
+# machine-readable snapshot for pipelines
+
 norn config validate
 # check the config file for errors before relying on it
+
+norn config validate --format json
+# machine-readable validation findings
 
 norn config edit
 # open .norn/config.yaml in your editor
@@ -31,6 +37,14 @@ norn config edit
 norn config migrate
 # upgrade an older config to the current schema
 ```
+
+## Options
+
+| Flag | Subcommand | Effect |
+|---|---|---|
+| `--format records\|json\|jsonl` | `show`, `validate` | Output format. Defaults to `records` regardless of TTY/pipe. |
+| `--no-pager` | `show` | Bypass the pager even for TTY `records` output. |
+| `--no-validate` | `edit` | Skip auto-validation after the editor exits. |
 
 ## See also
 

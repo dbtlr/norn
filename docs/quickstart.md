@@ -80,12 +80,14 @@ norn -C /path/to/vault repair --plan --out plan.json
 cat plan.json | head -40
 ```
 
-Inspect the plan. The `changes` array is what apply will write; `skipped_findings` is what couldn't be planned deterministically. Dry-run, then apply with verification:
+Inspect the plan. The `operations` array is what apply will write; `skipped` is what couldn't be planned deterministically. Dry-run, then apply — apply itself re-checks every frontmatter write against its intended value before reporting success:
 
 ```bash
 norn -C /path/to/vault migrate plan.json --dry-run --format json
-norn -C /path/to/vault migrate plan.json --verify --format json
+norn -C /path/to/vault migrate plan.json --format json
 ```
+
+Run `norn -C /path/to/vault validate --summary` afterward as the post-hoc check across the whole vault.
 
 For the full repair workflow including snapshot tags and live maintenance recipes, see [validation.md](validation.md).
 

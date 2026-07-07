@@ -56,7 +56,7 @@ Their `fields` are the edit anchor (`heading` + `content`, or `old` + `new`) plu
 
 ## Output formats
 
-`--format records` (TTY summary) or `json` (the full `ApplyReport` envelope: `dry_run`, `changed_files`, `applied_changes`, `moved_files`, `rewritten_links`, `warnings`, `plan_context`). `--out` writes the JSON report independently of `--format`.
+`--format records` (the default; human summary) or `json` (the full `ApplyReport` envelope: `schema_version`, `trace_id`, `plan_hash`, `vault_root`, `dry_run`, `applied`, `skipped`, `failed`, `remaining`, `operations`, `warnings`). The default is always `records` — there is no TTY/pipe auto-detection and no `paths` format. `--out` writes the JSON report independently of `--format`.
 
 ## See also
 

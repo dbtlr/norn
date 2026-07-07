@@ -43,7 +43,7 @@ Filters combine with AND across types and OR within a type (comma-separated). Gl
 | Filter | Matches |
 |---|---|
 | `--code <CODE>` | Finding code. Comma-separated = any; globs like `link-*` work. |
-| `--severity <SEVERITY>` | `error`, `warning`, or `info`. |
+| `--severity <SEVERITY>` | `error` or `warning`. |
 | `--field <FIELD>` | Frontmatter field name. |
 | `--rule <RULE>` | Validate rule name. |
 | `--path <GLOB>` | Vault-relative path glob. |
@@ -56,6 +56,10 @@ Codes are stable; renames are called out as breaking changes in the CHANGELOG.
 
 | Code | Meaning |
 |---|---|
+| `read-failed` | The document could not be read from disk. |
+| `frontmatter-unclosed` | Frontmatter `---` opener has no closing `---`. |
+| `frontmatter-parse-failed` | YAML frontmatter could not be parsed. |
+| `frontmatter-json-conversion-failed` | Parsed YAML frontmatter could not be converted to JSON. |
 | `link-target-missing` | A link target doesn't exist in the vault. |
 | `link-anchor-missing` | The target exists but the `#anchor` isn't present. |
 | `link-block-missing` | The target exists but the `^block-ref` isn't present. |
@@ -63,11 +67,15 @@ Codes are stable; renames are called out as breaking changes in the CHANGELOG.
 | `frontmatter-required-field-missing` | A required field is absent. |
 | `frontmatter-disallowed-value` | A field's value is not in the configured set. |
 | `frontmatter-invalid-type` | A field's value doesn't match its declared type. |
+| `frontmatter-exceeds-max-length` | A field's value exceeds its effective max length. |
 | `frontmatter-forbidden-field` | A field the rule forbids is present. |
+| `frontmatter-reference-type` | A frontmatter wikilink resolves to a document of a disallowed `type`. |
 | `frontmatter-alias-shadowed-by-stem` | An alias matches another doc's stem, so it's dead — stem resolution wins. |
 | `frontmatter-alias-duplicate-across-docs` | Two or more docs claim the same alias. |
 | `frontmatter-alias-malformed` | The alias field holds a non-scalar value. |
 | `document-misrouted` | A document is in a directory its rule's path selector excludes. |
+
+All codes above are `warning` severity except `read-failed`, which is `error`. See [Validation and repair](../validation.md#finding-codes) for the fields each code carries.
 
 ## Output formats
 
