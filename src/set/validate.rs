@@ -171,8 +171,9 @@ pub fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool
     false
 }
 
-/// Is `field` known to the schema for this document? True when any matching rule
-/// declares it via `field_types`, `allowed_values`, or `required_frontmatter`.
+/// Is `field` declared by any rule in `rules` via `field_types`,
+/// `allowed_values`, `required_frontmatter`, `field_references`, or
+/// `forbidden_frontmatter`?
 ///
 /// This is deliberately separate from [`lookup_field_type`]: that answers "what
 /// coercion type does the field have?" and returns `None` for a field governed
@@ -180,11 +181,30 @@ pub fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool
 /// type lookup as the "is this field known?" oracle is what produced the
 /// spurious `unknown field` warning — a field can be fully schema-declared yet
 /// have no special coercion type.
-pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
-    for rule in &cfg.validate.rules {
-        if !crate::standards::engine::rule_matches(doc, rule) {
-            continue;
-        }
+///
+/// `field_references` (NRN-37 F2) is a documented field-declaring construct
+/// (`docs/rule-shape.md`'s own example: `field_references: { parent: {
+/// target_type: [...] } }`) that this check omitted, so a typed-reference-only
+/// field (no `field_types`/`allowed_values`/`required_frontmatter` entry) was
+/// wrongly flagged unknown.
+///
+/// `forbidden_frontmatter` (NRN-37 F2) counts too: a forbidden field is known
+/// to the schema — it's just disallowed — and already gets the dedicated
+/// `frontmatter-forbidden-field` finding. Counting it here as "known"
+/// suppresses the redundant unknown-field label so the field surfaces exactly
+/// one finding instead of two.
+///
+/// Takes an already rule-matched slice rather than a `Document` so it can be
+/// shared by callers that match rules differently: `is_known_field` below
+/// matches against a real `Document` (via `rule_matches`); `norn new`
+/// (`new::synth::build_plan`, no document exists yet) matches by path +
+/// in-progress frontmatter (via `applicable_rules`). Both feed the same
+/// "declared anywhere?" check (NRN-37).
+pub fn field_known_in_rules<'a>(
+    rules: impl IntoIterator<Item = &'a crate::standards::ValidateRule>,
+    field: &str,
+) -> bool {
+    for rule in rules {
         // A type-less extended entry (`{ indexed: bool }`) contributes only to
         // the index vote — it must not make the field "known" to the schema.
         let has_typed_field_type = rule
@@ -194,11 +214,24 @@ pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
         if has_typed_field_type
             || rule.allowed_values.contains_key(field)
             || rule.required_frontmatter.iter().any(|f| f == field)
+            || rule.field_references.contains_key(field)
+            || rule.forbidden_frontmatter.iter().any(|f| f == field)
         {
             return true;
         }
     }
     false
+}
+
+/// Is `field` known to the schema for this document? True when any matching rule
+/// declares it via `field_types`, `allowed_values`, or `required_frontmatter`.
+pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
+    let matching = cfg
+        .validate
+        .rules
+        .iter()
+        .filter(|rule| crate::standards::engine::rule_matches(doc, rule));
+    field_known_in_rules(matching, field)
 }
 
 /// The allowed-value set for `field` from the first matching rule that declares
@@ -1174,6 +1207,35 @@ validate:
         assert!(is_known_field(&cfg, &doc, "status"));
         // ...even though it has no field_type (the conflation that caused the bug).
         assert_eq!(lookup_field_type(&cfg, &doc, "status"), None);
+        // A genuinely undeclared field is still unknown.
+        assert!(!is_known_field(&cfg, &doc, "madeup"));
+    }
+
+    /// NRN-37 F2: `field_references` is a documented field-declaring
+    /// construct (`docs/rule-shape.md`'s own example uses `field_references:
+    /// { parent: { target_type: [...] } }`), but `field_known_in_rules`
+    /// checked only `field_types`/`allowed_values`/`required_frontmatter` —
+    /// so `set` (which shares this seam with `norn new`) would also
+    /// false-flag a `field_references`-only field as unknown.
+    #[test]
+    fn is_known_field_true_for_field_references_only_field() {
+        let doc = fixture_doc_kind_note();
+        let yaml = r#"
+validate:
+  rules:
+    - name: note-parent
+      match:
+        frontmatter:
+          kind: note
+      field_references:
+        parent:
+          target_type: [phase]
+"#;
+        let cfg = crate::standards::parse_config(yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config should parse");
+        assert!(is_known_field(&cfg, &doc, "parent"));
+        // No field_type declared for `parent` (the conflation that caused the bug).
+        assert_eq!(lookup_field_type(&cfg, &doc, "parent"), None);
         // A genuinely undeclared field is still unknown.
         assert!(!is_known_field(&cfg, &doc, "madeup"));
     }

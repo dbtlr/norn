@@ -200,7 +200,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
     };
 
     // ── Step 6: Synthesize the plan ───────────────────────────────────────────
-    let plan = crate::new::synth::build_plan(
+    let mut plan = crate::new::synth::build_plan(
         args,
         &doc_path,
         &path_vars,
@@ -210,6 +210,19 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         body.clone(),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // NRN-37c: `--title` has no effect in Mode A (explicit path, no `--as`) —
+    // `{{title}}` substitution always derives from the path stem
+    // (`resolve_to_fixpoint`'s Context), and Mode A supplies no body scaffold
+    // to render a title into either. Warn instead of silently discarding it.
+    if args.path.is_some() && args.as_rule.is_none() {
+        if let Some(title) = &args.title {
+            plan.warnings
+                .push(crate::new::synth::Warning::TitleIgnored {
+                    title: title.clone(),
+                });
+        }
+    }
 
     let body_bytes = body.len();
     let doc_path_str = doc_path.as_str().to_owned();
@@ -534,18 +547,33 @@ pub(crate) fn post_create_validate(
         })
         .collect();
 
+    // NRN-37a: every post-create finding must surface as a report warning, not
+    // just RequiredFrontmatterMissing — a `norn new --field status=someday`
+    // that violates `allowed_values` (or any other rule) previously produced a
+    // false-clean envelope (`"warnings": []`) that only a separate `validate`
+    // run would reveal.
     let mut extra = Vec::new();
     for f in relevant {
-        if let crate::standards::FindingBody::RequiredFrontmatterMissing { field, rule } = &f.body {
-            // Deduplicate with synth-phase warnings.
-            if !already_warned.contains(field) {
-                extra.push(Warning::MissingRequiredField {
-                    field: field.clone(),
-                    rules: rule.as_ref().map(|r| vec![r.clone()]).unwrap_or_default(),
+        match &f.body {
+            crate::standards::FindingBody::RequiredFrontmatterMissing { field, rule } => {
+                // Deduplicate with synth-phase warnings.
+                if !already_warned.contains(field) {
+                    extra.push(Warning::MissingRequiredField {
+                        field: field.clone(),
+                        rules: rule.as_ref().map(|r| vec![r.clone()]).unwrap_or_default(),
+                    });
+                }
+            }
+            _ => {
+                // Every other finding code: reuse the same code/message the
+                // `validate` command renders (`Finding::code` / `Finding::message`)
+                // rather than hand-rolling per-code text here.
+                extra.push(Warning::ValidationFinding {
+                    code: f.code.clone(),
+                    message: f.message.clone(),
                 });
             }
         }
-        // Other finding codes are not yet mapped to Warning variants (v1).
     }
 
     Ok(extra)
@@ -780,6 +808,176 @@ validate:
             locs.iter()
                 .any(|l| l.as_str().unwrap_or("").contains("notes/foo.md")),
             "expected notes/foo.md in collision locations: {locs:?}"
+        );
+    }
+
+    // ── NRN-37: post-create validate surfaces ALL finding codes, not just
+    //    required-field-missing ──────────────────────────────────────────────
+
+    #[test]
+    fn post_create_validate_surfaces_allowed_values_violation() {
+        let root = vault();
+        // `status` is constrained to backlog/done; `--field status=someday`
+        // passes synth-time coercion (new does not enforce allowed_values the
+        // way `set` does) and is only caught by the post-create validate pass.
+        write_config(
+            root.path(),
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      allowed_values:
+        status:
+          - backlog
+          - done
+"#,
+        );
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = false;
+        args.yes = true;
+        args.format = crate::cli::NewFormat::Json;
+        args.field = vec!["status=someday".to_string()];
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(true));
+
+        // Before the fix, only `RequiredFrontmatterMissing` findings are mapped
+        // to report warnings — an allowed_values violation is silently dropped,
+        // producing a false-clean envelope (`"warnings": []`).
+        let warnings = v["warnings"].as_array().unwrap();
+        let has_disallowed = warnings
+            .iter()
+            .any(|w| w["kind"] == "frontmatter-disallowed-value");
+        assert!(
+            has_disallowed,
+            "expected frontmatter-disallowed-value in warnings: {warnings:?}"
+        );
+    }
+
+    // ── NRN-37: unknown --field key parity with `set`'s `unknown field: X` ────
+
+    #[test]
+    fn typo_field_key_warns_unknown_field() {
+        let root = vault();
+        write_config(
+            root.path(),
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      frontmatter_defaults:
+        type: note
+"#,
+        );
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = false;
+        args.yes = true;
+        args.format = crate::cli::NewFormat::Json;
+        // `staus` is a typo for `status` and is declared nowhere in the schema.
+        args.field = vec!["staus=inprogress".to_string()];
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(true));
+
+        // Before the fix, `new` writes the typo'd key silently — no warning at
+        // all (unlike `set`, which emits `unknown field: X`).
+        let warnings = v["warnings"].as_array().unwrap();
+        let has_unknown = warnings
+            .iter()
+            .any(|w| w["kind"] == "unknown-field" && w["field"] == "staus");
+        assert!(
+            has_unknown,
+            "expected unknown-field warning for `staus` in warnings: {warnings:?}"
+        );
+        // The stray key must still land in frontmatter (warn, don't block).
+        assert!(root.path().join("foo.md").exists());
+    }
+
+    // ── NRN-37 F2(b): forbidden field is one finding, not two ────────────────
+
+    #[test]
+    fn forbidden_field_emits_single_finding_not_double_warned() {
+        let root = vault();
+        write_config(
+            root.path(),
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      forbidden_frontmatter: [legacy_field]
+"#,
+        );
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = false;
+        args.yes = true;
+        args.format = crate::cli::NewFormat::Json;
+        args.field = vec!["legacy_field=oldvalue".to_string()];
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(true));
+
+        let warnings = v["warnings"].as_array().unwrap();
+
+        // Before the fix: `legacy_field` is declared nowhere in `field_types`/
+        // `allowed_values`/`required_frontmatter`, so it was ALSO flagged
+        // `unknown-field` on top of the correct `frontmatter-forbidden-field`
+        // finding — a forbidden field is known to the schema (just
+        // disallowed), so only the forbidden finding should surface.
+        let unknown_count = warnings
+            .iter()
+            .filter(|w| w["kind"] == "unknown-field" && w["field"] == "legacy_field")
+            .count();
+        assert_eq!(
+            unknown_count, 0,
+            "expected no unknown-field warning for forbidden-but-declared `legacy_field`, \
+             warnings: {warnings:?}"
+        );
+
+        let forbidden_count = warnings
+            .iter()
+            .filter(|w| w["kind"] == "frontmatter-forbidden-field")
+            .count();
+        assert_eq!(
+            forbidden_count, 1,
+            "expected exactly one frontmatter-forbidden-field finding, warnings: {warnings:?}"
+        );
+    }
+
+    // ── NRN-37: --title is inert (and unwarned) in Mode A (explicit path) ─────
+
+    #[test]
+    fn explicit_path_with_title_warns_title_ignored() {
+        let root = vault();
+        write_config(root.path(), "validate: {}\n");
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = true;
+        args.format = crate::cli::NewFormat::Json;
+        args.title = Some("My Title".to_string());
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+
+        // Before the fix, `--title` silently does nothing in Mode A — the
+        // `{{title}}` substitution context is derived from the path stem, and
+        // Mode A supplies no body scaffold to render it into either.
+        let warnings = v["warnings"].as_array().unwrap();
+        let has_title_ignored = warnings.iter().any(|w| w["kind"] == "title-ignored");
+        assert!(
+            has_title_ignored,
+            "expected title-ignored warning in envelope: {warnings:?}"
         );
     }
 }
