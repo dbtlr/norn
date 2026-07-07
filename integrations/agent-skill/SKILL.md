@@ -119,10 +119,10 @@ One asymmetry to know: `rewrite-wikilink` retargets wikilinks only. Relative Mar
 | `edit` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `EditReport` |
 | `move` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
 | `delete` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
-| `migrate` | confirm | dry-run (no write) | apply | preview | `ApplyReport` |
-| `rewrite-wikilink` | confirm | dry-run (no write) | apply | preview | `ApplyReport` |
+| `migrate` | confirm | dry-run (no write) | apply | preview | **applies without `--yes`**, `ApplyReport` |
+| `rewrite-wikilink` | confirm | dry-run (no write) | apply | preview | **applies without `--yes`**, `ApplyReport` |
 
-**Footgun:** for every command in this table, running without `--yes` in a non-TTY context (i.e. from an agent) **writes nothing** — it dry-runs, same as `--dry-run`, even though the exit code is 0. Always pass `--yes` from an agent when you intend to apply.
+**Footgun:** for every command in this table, running without `--yes` in a non-TTY context (i.e. from an agent) **writes nothing** — it dry-runs, same as `--dry-run`, even though the exit code is 0. Always pass `--yes` from an agent when you intend to apply. **One exception:** `migrate` and `rewrite-wikilink` treat `--format json` as consent to apply — with `--format json` and no `--yes` they **write**, even in a non-TTY context (`set`/`delete` and the rest do not; JSON output there is still an implicit dry-run). Don't lean on that divergence: pass `--yes` when you mean to apply and `--dry-run` when you don't.
 
 ### set
 
