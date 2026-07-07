@@ -238,22 +238,31 @@ fn move_with_unwritable_backlinker_emits_failed_action_and_retry() {
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("target.md"), "---\ntype: note\n---\n# Target\n").unwrap();
+    // linker.md lives in its own subdirectory so its containing directory's
+    // permissions can be locked down without also blocking the primary move
+    // (target.md -> renamed.md), which needs to create/remove entries in
+    // `root` itself.
+    let sub = root.join("sub");
+    std::fs::create_dir(&sub).unwrap();
     std::fs::write(
-        root.join("linker.md"),
+        sub.join("linker.md"),
         "---\ntype: note\n---\n# Linker\n[[target]]\n",
     )
     .unwrap();
 
-    let linker_path = root.join("linker.md");
-    std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    // (NRN-146) The cascade write now goes through `atomic_write` (temp file +
+    // rename), so a read-only linker.md file no longer fails the write —
+    // `rename(2)` doesn't consult the replaced file's permission bits, only
+    // the containing directory's. Lock down `sub` itself instead, which still
+    // blocks creation of the sibling temp file.
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
 
     // Skip when unix perms are not enforced (e.g. running as root).
-    if std::fs::OpenOptions::new()
-        .write(true)
-        .open(&linker_path)
-        .is_ok()
-    {
-        std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let probe_path = sub.join(".rowb-perm-probe");
+    let probe_writable = std::fs::write(&probe_path, "x").is_ok();
+    let _ = std::fs::remove_file(&probe_path);
+    if probe_writable {
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
         return;
     }
 
@@ -275,7 +284,7 @@ fn move_with_unwritable_backlinker_emits_failed_action_and_retry() {
         .unwrap();
 
     // Restore perms before assertions so tempdir cleanup always works.
-    std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     // Primary move succeeded → exit 0 (best-effort cascade semantics).
     assert_eq!(
@@ -295,7 +304,7 @@ fn move_with_unwritable_backlinker_emits_failed_action_and_retry() {
         })
         .expect("failed rewrite_link action");
     assert_eq!(failed["SeverityNumber"], 17);
-    assert_eq!(failed["Attributes"]["norn.target"], "linker.md");
+    assert_eq!(failed["Attributes"]["norn.target"], "sub/linker.md");
     assert_eq!(failed["Attributes"]["norn.reason.code"], "write_failed");
     assert!(
         failed["Attributes"]["norn.reason.message"].is_string(),

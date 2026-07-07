@@ -4,9 +4,9 @@ use std::time::Duration;
 use crate::core::GraphIndex;
 use crate::standards::apply::{
     apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
-    changes_by_path, ensure_within_vault, validate_plan_for_apply, ApplyError, CascadeRecord,
-    CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult, LinkRewriteResult,
-    LinkSkipResult, MoveResult, RepairApplyWarning,
+    atomic_write, changes_by_path, ensure_within_vault, validate_plan_for_apply, ApplyError,
+    CascadeRecord, CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult,
+    LinkRewriteResult, LinkSkipResult, MoveResult, RepairApplyWarning,
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
@@ -224,29 +224,6 @@ fn reject_content_op_after_vacate(plan: &RepairPlan) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-/// Crash-atomic write: serialize `contents` to a sibling temp file
-/// (`.{stem}.tmp`) then `fs::rename` it into place (atomic on POSIX). A SIGKILL /
-/// power loss / `ENOSPC` mid-write truncates only the throwaway temp, never the
-/// live document — which is exactly the half-mutation NRN-139 exists to prevent.
-/// Best-effort temp cleanup on rename failure. Shared by the Phase A2 content
-/// write and the `create_document` pass so there is a single implementation.
-fn atomic_write(full: &Utf8Path, contents: &str) -> Result<()> {
-    let tmp_path = {
-        let mut p = full.to_path_buf();
-        let stem = p.file_name().unwrap_or("doc").to_string();
-        p.set_file_name(format!(".{stem}.tmp"));
-        p
-    };
-    fs::write(tmp_path.as_std_path(), contents)
-        .with_context(|| format!("write temp file {tmp_path}"))?;
-    fs::rename(tmp_path.as_std_path(), full.as_std_path()).with_context(|| {
-        // Best-effort cleanup on rename failure.
-        let _ = fs::remove_file(tmp_path.as_std_path());
-        format!("rename temp to {full}")
-    })?;
     Ok(())
 }
 
@@ -1599,6 +1576,46 @@ mod tests {
         assert!(written.starts_with("---\n"), "got: {written}");
         assert!(written.contains("type: note"), "got: {written}");
         assert!(written.contains("Hello\n"), "got: {written}");
+    }
+
+    /// (NRN-146) `atomic_write`'s destination-mode preservation only applies
+    /// when the destination already exists. A brand-new `create_document`
+    /// target has no prior mode to preserve, so it must land with ordinary
+    /// umask-based permissions — the same as any other fresh file written in
+    /// this process — not some leftover/default mode from the mode-copy path.
+    #[test]
+    #[cfg(unix)]
+    fn apply_create_document_new_file_gets_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-mode-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "foo.md", fm, "Hello\n", false);
+
+        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+
+        // A plain fresh write in the same process, for comparison against
+        // whatever the ambient umask makes "default" here.
+        let reference_path = root.join("reference.md");
+        std::fs::write(reference_path.as_std_path(), "x").unwrap();
+        let reference_mode = std::fs::metadata(reference_path.as_std_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        let created_mode = std::fs::metadata(root.join("foo.md").as_std_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(
+            created_mode, reference_mode,
+            "a brand-new create_document target must get ordinary umask-based \
+             permissions, not a mode inherited from a nonexistent destination"
+        );
     }
 
     #[test]
