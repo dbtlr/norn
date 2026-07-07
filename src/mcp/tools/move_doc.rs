@@ -63,6 +63,18 @@ pub struct MoveParams {
     #[serde(default)]
     pub parents: bool,
 
+    /// Overwrite the destination if it already exists. Without this, a move onto
+    /// an existing path is refused. Mirrors `norn move --force`. (Single-file
+    /// moves only — like the CLI, it is inert on a folder move.)
+    #[serde(default)]
+    pub force: bool,
+
+    /// Move the file but skip the cascading backlink rewrites — incoming
+    /// `[[wikilinks]]` are left pointing at the old target. Mirrors
+    /// `norn move --no-link-rewrite`. (Single-file moves only, like the CLI.)
+    #[serde(default)]
+    pub no_link_rewrite: bool,
+
     /// Apply the move. **Defaults to `false` (dry-run): the call returns the
     /// planned move (with the forecast backlink cascade) and writes nothing.**
     /// Pass `true` to acquire the vault mutation lock and move the file +
@@ -150,8 +162,8 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
         let cfg = crate::move_doc::PreflightConfig {
             src: &p.from,
             dst: &p.to,
-            force: false,
-            no_link_rewrite: false,
+            force: p.force,
+            no_link_rewrite: p.no_link_rewrite,
             vault_root: &cwd,
             index: &index,
         };
@@ -166,11 +178,19 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     } else {
         "move_document"
     };
-    let fields = serde_json::json!({
+    let mut fields = serde_json::json!({
         "src": p.from.clone(),
         "dst": p.to.clone(),
         "parents": p.parents,
     });
+    // Mirror the CLI: `force` / `no_link_rewrite` are single-file op fields, added
+    // only when set. Folder moves route through the expander and ignore them.
+    if !is_folder && p.force {
+        fields["force"] = serde_json::Value::Bool(true);
+    }
+    if !is_folder && p.no_link_rewrite {
+        fields["no_link_rewrite"] = serde_json::Value::Bool(true);
+    }
     let migration_plan = MigrationPlan {
         schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
         vault_root: cwd.to_string(),
@@ -277,6 +297,8 @@ mod tests {
                 to: "renamed.md".into(),
                 recursive: false,
                 parents: false,
+                force: false,
+                no_link_rewrite: false,
                 confirm: false,
             },
         )
@@ -316,6 +338,8 @@ mod tests {
                 to: "renamed.md".into(),
                 recursive: false,
                 parents: false,
+                force: false,
+                no_link_rewrite: false,
                 confirm: true,
             },
         )
@@ -343,6 +367,88 @@ mod tests {
         assert!(
             !b.contains("[[a]]"),
             "confirm must not leave the old backlink:\n{b}"
+        );
+    }
+
+    /// NRN-180: `no_link_rewrite` moves the file but leaves incoming backlinks
+    /// untouched — `b.md` still points at `[[a]]` after the move.
+    #[test]
+    fn confirm_no_link_rewrite_leaves_backlink() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let report = handle(
+            &ctx,
+            MoveParams {
+                from: "a.md".into(),
+                to: "renamed.md".into(),
+                no_link_rewrite: true,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (no_link_rewrite) should succeed");
+
+        assert!(report.applied >= 1, "the move itself must still apply");
+        // File moved…
+        assert!(
+            root.join("renamed.md").exists(),
+            "the file must still move even with no_link_rewrite"
+        );
+        // …but the backlink was deliberately NOT rewritten.
+        let b = std::fs::read_to_string(root.join("b.md")).unwrap();
+        assert!(
+            b.contains("[[a]]"),
+            "no_link_rewrite must leave b.md's [[a]] backlink unchanged:\n{b}"
+        );
+        assert!(
+            !b.contains("[[renamed]]"),
+            "no_link_rewrite must NOT rewrite the backlink to the new stem:\n{b}"
+        );
+    }
+
+    /// NRN-180: without `force`, a move onto an existing destination is refused;
+    /// with `force`, it overwrites.
+    #[test]
+    fn force_overwrites_existing_destination() {
+        let (_tmp, root) = seeded_vault();
+        // `b.md` already exists; moving `a.md` onto it must be refused by default.
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let refused = handle(
+            &ctx,
+            MoveParams {
+                from: "a.md".into(),
+                to: "b.md".into(),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            refused.is_err(),
+            "a move onto an existing destination must be refused without force"
+        );
+
+        // With force, the same move is allowed (destination overwritten).
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let report = handle(
+            &ctx,
+            MoveParams {
+                from: "a.md".into(),
+                to: "b.md".into(),
+                force: true,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (force) should succeed");
+        assert!(report.applied >= 1, "force move must apply");
+        assert!(
+            !root.join("a.md").exists(),
+            "force move must remove the source"
+        );
+        assert!(
+            root.join("b.md").exists(),
+            "force move must leave the (overwritten) destination in place"
         );
     }
 }

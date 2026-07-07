@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use super::context::VaultContext;
@@ -540,10 +540,15 @@ impl McpServer {
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` (alias for `InitializeResult`) is `#[non_exhaustive]` in
-        // rmcp 1.7.0, so the struct-literal form from the plan snippet does not
-        // compile — start from `Default` and override the tools capability.
+        // rmcp, so the struct-literal form does not compile — start from `Default`
+        // and override the fields we care about.
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        // NRN-187: identify as "norn" at the crate version. `Default` inherits the
+        // rmcp crate's own build env (name="rmcp"), so a client's `initialize`
+        // response would otherwise advertise the transport library, not this
+        // server. Set it explicitly so `serverInfo.name`/`.version` name norn.
+        info.server_info = Implementation::new("norn", env!("CARGO_PKG_VERSION"));
         info
     }
 }
@@ -678,7 +683,7 @@ mod tests {
             .await
             .expect("first validate");
         assert!(
-            !out1.0.findings.is_empty(),
+            out1.0.findings.as_ref().is_some_and(|f| !f.is_empty()),
             "baseline: broken wikilink must produce a finding"
         );
 
@@ -698,9 +703,34 @@ mod tests {
             .await
             .expect("second validate");
         assert!(
-            out2.0.findings.is_empty(),
+            out2.0.findings.as_ref().is_some_and(|f| f.is_empty()),
             "config change (files.ignore) must be visible to the next warm request; got {:?}",
             out2.0.findings
+        );
+    }
+
+    /// NRN-187: `get_info` must advertise this server as "norn" at the crate
+    /// version — not rmcp's build-env default (name="rmcp"). This is the payload
+    /// a client reads out of the `initialize` response's `serverInfo`.
+    #[test]
+    fn get_info_advertises_norn_server_identity() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-serverinfo-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let ctx = Arc::new(VaultContext::open(&root, None).expect("VaultContext::open"));
+        let server = McpServer::new(ctx, /*read_only=*/ false);
+
+        let info = server.get_info();
+        assert_eq!(
+            info.server_info.name, "norn",
+            "serverInfo.name must be 'norn', not rmcp's build-env default"
+        );
+        assert_eq!(
+            info.server_info.version,
+            env!("CARGO_PKG_VERSION"),
+            "serverInfo.version must be norn's crate version"
         );
     }
 }

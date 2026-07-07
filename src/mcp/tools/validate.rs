@@ -70,6 +70,13 @@ pub struct ValidateParams {
     /// Filter link findings by unresolved reason. Comma-separated.
     #[serde(default)]
     pub reason: Vec<String>,
+
+    /// Return the grouped finding-count rollup (by code / severity / rule /
+    /// field / path-prefix) instead of the raw findings list — the structured
+    /// analogue of `norn validate --summary`. When set, `findings` is empty and
+    /// `summary` carries the rollup. Triage filters still apply first.
+    #[serde(default)]
+    pub summary: bool,
 }
 
 /// Structured output for `vault.validate`.
@@ -80,11 +87,24 @@ pub struct ValidateParams {
 /// see module docs).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ValidateOutput {
-    /// Validation findings, filtered by any supplied triage predicates.
-    /// Each entry is the JSON form of a `Finding`: `{code, severity, path,
-    /// message, …}` with the finding-specific body flattened in. Empty array
-    /// means the vault is clean (or all findings were filtered out).
-    pub findings: Vec<serde_json::Value>,
+    /// Validation findings, filtered by any supplied triage predicates. Each
+    /// entry is the JSON form of a `Finding`: `{code, severity, path, message,
+    /// …}` with the finding-specific body flattened in. An **empty array** means
+    /// the vault is clean (or all findings were filtered out).
+    ///
+    /// **Absent** (F3) in `summary` mode: the findings are rolled up into
+    /// `summary` instead, and this field is omitted from the JSON entirely — so
+    /// `findings: []` unambiguously means CLEAN, never "a dirty vault under
+    /// summary". Present (possibly empty) in the default projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<serde_json::Value>>,
+
+    /// The grouped finding-count rollup, present only when `summary: true` was
+    /// requested. Byte-for-byte the same shape `norn validate --summary --format
+    /// json` emits: `{findings, codes, severities, rules, fields,
+    /// disallowed_values, invalid_types, path_prefixes}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<serde_json::Value>,
 }
 
 /// Pure handler for `vault.validate`.
@@ -123,13 +143,31 @@ pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
     };
     let filtered = filter_findings(findings, &filter_opts)?;
 
+    // `--summary` projection: roll the (post-filter) findings up into grouped
+    // counts and return that instead of the raw list. Reuses the CLI's
+    // `standards::summarize` — the same function `norn validate --summary`'s JSON
+    // renderer calls — so the two rollups cannot drift.
+    if p.summary {
+        let rollup = crate::standards::summarize(&filtered);
+        return Ok(ValidateOutput {
+            // F3: omit `findings` entirely in summary mode. Emitting `[]` here
+            // would be indistinguishable from a CLEAN vault; a dirty vault under
+            // `--summary` must not present an empty findings array.
+            findings: None,
+            summary: Some(serde_json::to_value(&rollup)?),
+        });
+    }
+
     // Serialize each Finding to a serde_json::Value.
     let findings = filtered
         .into_iter()
         .map(|f| serde_json::to_value(&f))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ValidateOutput { findings })
+    Ok(ValidateOutput {
+        findings: Some(findings),
+        summary: None,
+    })
 }
 
 #[cfg(test)]
@@ -162,13 +200,16 @@ mod tests {
 
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert!(
-            !out.findings.is_empty(),
+            !findings.is_empty(),
             "expected at least one finding for a broken wikilink, got 0"
         );
 
-        let link_finding = out
-            .findings
+        let link_finding = findings
             .iter()
             .find(|f| {
                 f["code"]
@@ -179,7 +220,7 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!(
                     "expected a link-* finding, got: {:?}",
-                    out.findings
+                    findings
                         .iter()
                         .map(|f| f["code"].as_str().unwrap_or("?"))
                         .collect::<Vec<_>>()
@@ -222,11 +263,14 @@ mod tests {
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert_eq!(
-            out.findings.len(),
+            findings.len(),
             0,
-            "clean vault with no broken links should yield 0 findings, got: {:?}",
-            out.findings
+            "clean vault with no broken links should yield 0 findings, got: {findings:?}"
         );
     }
 
@@ -245,16 +289,122 @@ mod tests {
         )
         .expect("handle with code filter should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert!(
-            !out.findings.is_empty(),
+            !findings.is_empty(),
             "code filter link-target-missing should still return findings for a broken link"
         );
-        for f in &out.findings {
+        for f in findings {
             assert_eq!(
                 f["code"], "link-target-missing",
                 "code filter should only return link-target-missing findings, got: {f}"
             );
         }
+    }
+
+    /// NRN-182: `summary: true` returns the grouped rollup (not the raw list).
+    /// `findings` is empty and `summary` carries per-code / per-severity counts
+    /// for the same post-filter finding set.
+    #[test]
+    fn handle_summary_returns_grouped_rollup() {
+        let (_tmp, root) = vault_with_broken_link();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            ValidateParams {
+                summary: true,
+                ..ValidateParams::default()
+            },
+        )
+        .expect("handle with summary should succeed");
+
+        // F3: summary mode OMITS the findings field entirely (None), so the raw
+        // list is never present as an empty `[]` that would read as CLEAN.
+        assert!(
+            out.findings.is_none(),
+            "summary mode must omit the findings field, got: {:?}",
+            out.findings
+        );
+        let summary = out
+            .summary
+            .as_ref()
+            .expect("summary mode must populate the summary rollup");
+
+        // F6: the fixture has exactly ONE broken link and no schema rules, so the
+        // rollup totals are exact — not merely `>= 1`.
+        assert_eq!(
+            summary["findings"].as_u64().unwrap_or(0),
+            1,
+            "summary.findings must count exactly the one broken link: {summary}"
+        );
+        assert_eq!(
+            summary["codes"]["link-target-missing"]
+                .as_u64()
+                .unwrap_or(0),
+            1,
+            "summary.codes must tally exactly one link-target-missing: {summary}"
+        );
+    }
+
+    /// F3 serialization contract: the `findings` key is ABSENT from the serialized
+    /// output in summary mode, and PRESENT (as an array) in the default mode — so
+    /// a client cannot confuse a summarized dirty vault with a clean one.
+    #[test]
+    fn summary_mode_omits_findings_key_in_serialized_output() {
+        let (_tmp, root) = vault_with_broken_link();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let summary_out = handle(
+            &ctx,
+            ValidateParams {
+                summary: true,
+                ..ValidateParams::default()
+            },
+        )
+        .expect("summary handle should succeed");
+        let summary_json = serde_json::to_value(&summary_out).expect("serialize summary output");
+        assert!(
+            summary_json.get("findings").is_none(),
+            "summary mode must omit the `findings` key from serialized output, got: {summary_json}"
+        );
+        assert!(
+            summary_json.get("summary").is_some(),
+            "summary mode must carry the `summary` key: {summary_json}"
+        );
+
+        let default_out =
+            handle(&ctx, ValidateParams::default()).expect("default handle should succeed");
+        let default_json = serde_json::to_value(&default_out).expect("serialize default output");
+        assert!(
+            default_json.get("findings").is_some(),
+            "default mode must carry the `findings` key: {default_json}"
+        );
+        assert!(
+            default_json.get("summary").is_none(),
+            "default mode must omit the `summary` key: {default_json}"
+        );
+    }
+
+    /// Companion: without `summary`, the raw findings list is returned and the
+    /// summary rollup is absent — the default projection is unchanged.
+    #[test]
+    fn handle_without_summary_omits_rollup() {
+        let (_tmp, root) = vault_with_broken_link();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
+        assert!(
+            out.findings.as_ref().is_some_and(|f| !f.is_empty()),
+            "default mode must return the raw findings list"
+        );
+        assert!(
+            out.summary.is_none(),
+            "default mode must not populate the summary rollup"
+        );
     }
 
     #[test]
@@ -272,8 +422,12 @@ mod tests {
         )
         .expect("handle with non-matching filter should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert_eq!(
-            out.findings.len(),
+            findings.len(),
             0,
             "filter for frontmatter-required-field-missing should return 0 findings in a link-only vault"
         );
@@ -325,13 +479,17 @@ mod tests {
         let out = handle(&ctx, ValidateParams::default())
             .expect("handle should succeed on ignored vault");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert_eq!(
-            out.findings.len(),
+            findings.len(),
             0,
             "broken wikilink in files.ignore-d directory must produce 0 findings; \
              got {} finding(s): {:?}",
-            out.findings.len(),
-            out.findings
+            findings.len(),
+            findings
                 .iter()
                 .map(|f| f["code"].as_str().unwrap_or("?"))
                 .collect::<Vec<_>>()
@@ -372,13 +530,17 @@ mod tests {
         let out = handle(&ctx, ValidateParams::default())
             .expect("handle should succeed on vault with non-ignored broken link");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert!(
-            !out.findings.is_empty(),
+            !findings.is_empty(),
             "broken wikilink in non-ignored doc must still produce findings when files.ignore \
              is configured; got 0 findings"
         );
 
-        let has_link_finding = out.findings.iter().any(|f| {
+        let has_link_finding = findings.iter().any(|f| {
             f["code"]
                 .as_str()
                 .map(|c| c.starts_with("link-"))
@@ -388,7 +550,7 @@ mod tests {
             has_link_finding,
             "expected a link-* finding for the broken wikilink outside the ignored directory, \
              got: {:?}",
-            out.findings
+            findings
                 .iter()
                 .map(|f| f["code"].as_str().unwrap_or("?"))
                 .collect::<Vec<_>>()
