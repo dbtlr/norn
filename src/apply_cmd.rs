@@ -77,9 +77,13 @@ pub fn run(
     // ------------------------------------------------------------------
     // 4a. Acquire mutation lock (apply-only; dry-run is lock-free).
     //
-    // is_apply: --dry-run → never; --yes or JSON format → yes; stdin
-    // terminal (interactive) → yes (conservative — will confirm via TTY);
+    // is_apply: --dry-run → never; --yes → yes; stdin terminal
+    // (interactive) → yes (conservative — will confirm via TTY);
     // non-TTY without --yes → no (implicit dry-run, treat as reader).
+    // NRN-212: `--format json` is output-shape-only — it does NOT imply
+    // consent to apply, matching every other mutation command (set/delete/
+    // new/edit/move). A non-TTY json caller without --yes is an implicit
+    // dry-run, not an apply.
     // ------------------------------------------------------------------
     let (_, state_dir) =
         state_dir_for(cwd).map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
@@ -87,10 +91,7 @@ pub fn run(
     sweep_pending(&state_dir);
     let _mutation_lock = {
         use std::io::IsTerminal;
-        let is_apply = !args.dry_run
-            && (args.yes
-                || matches!(args.format, ApplyFormat::Json)
-                || std::io::stdin().is_terminal());
+        let is_apply = !args.dry_run && (args.yes || std::io::stdin().is_terminal());
         match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
             Ok(guard) => guard,
             Err(crate::cache::CacheError::MutationLockTimeout) => {
@@ -128,7 +129,10 @@ pub fn run(
     // 6. Determine whether to apply
     //    - --dry-run: never apply
     //    - --yes: skip TTY confirmation
-    //    - --format json: implicitly non-interactive
+    //    - --format json (without --yes): non-interactive (no prompt — you
+    //      can't prompt when emitting machine JSON), but NOT consent to
+    //      apply → implicit dry-run (NRN-212; json is output-shape-only,
+    //      matching every other mutation command)
     //    - TTY without --yes: prompt
     //    - Non-TTY without --yes: implicit dry-run
     // ------------------------------------------------------------------
@@ -136,8 +140,11 @@ pub fn run(
 
     let dry_run = if args.dry_run {
         true
-    } else if args.yes || matches!(args.format, ApplyFormat::Json) {
+    } else if args.yes {
         false
+    } else if matches!(args.format, ApplyFormat::Json) {
+        // Non-interactive, no --yes → implicit dry-run.
+        true
     } else if std::io::stdin().is_terminal() {
         // TTY interactive: prompt
         use std::io::Write;

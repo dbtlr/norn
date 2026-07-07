@@ -41,7 +41,7 @@ For a typical drift-healing task:
 3. **Plan.** `norn repair --plan --out plan.json` (with the same filters). Read the plan's `changes` and `skipped_findings`.
 4. **Review.** Confirm `changes` are intended; surface `skipped_findings` to the human or follow `next_actions`.
 5. **Dry-run.** `norn apply plan.json --dry-run --format json` — confirms the plan is applyable without writing. (Or pipe directly: `norn repair --plan --format json | norn apply - --dry-run --format json`.)
-6. **Apply.** `norn apply plan.json --format json` — writes. Every frontmatter write is re-parsed and checked against the intended value before apply reports success (the post-image verification gate); there is no separate `--verify` flag.
+6. **Apply.** `norn apply plan.json --format json --yes` — writes. (`--format json` is output-shape-only; `--yes` is what gives consent to write — omit it and the same invocation is an implicit dry-run.) Every frontmatter write is re-parsed and checked against the intended value before apply reports success (the post-image verification gate); there is no separate `--verify` flag.
 7. **Verify.** Inspect the apply report's `operations` and `warnings`, then run `norn validate --summary --format json` again as the post-hoc check that the vault is now clean.
 
 For a read-only inspection task (no mutation):

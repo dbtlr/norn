@@ -75,6 +75,109 @@ operations:
     );
 }
 
+/// NRN-212: `--format json` is output-shape-only, matching every other
+/// mutation command (set/delete/new/edit/move) — it must NOT be treated as
+/// consent to apply. Without `--yes` and outside a TTY, `apply --format
+/// json` must behave as an implicit dry-run: nothing written, report says
+/// `dry_run: true`. Regression: the old code forced `is_apply`/`dry_run =
+/// false` whenever `--format json` was present, so this call used to WRITE
+/// the file with no `--yes` anywhere on the command line.
+#[test]
+fn apply_json_without_yes_is_implicit_dry_run_and_writes_nothing() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let plan = format!(
+        r#"schema_version: 1
+vault_root: {}
+operations:
+  - kind: move_document
+    fields:
+      src: a.md
+      dst: renamed.md
+"#,
+        vault.to_str().unwrap()
+    );
+    let plan_path = tmp.path().join("plan.yaml");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let before = std::fs::read(vault.join("a.md")).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        report["dry_run"], true,
+        "no --yes → implicit dry-run even under --format json: {report}"
+    );
+    assert!(
+        vault.join("a.md").exists(),
+        "a.md must NOT have been moved away"
+    );
+    assert!(
+        !vault.join("renamed.md").exists(),
+        "renamed.md must not exist — --format json alone must not apply"
+    );
+    let after = std::fs::read(vault.join("a.md")).unwrap();
+    assert_eq!(before, after, "a.md must be byte-unchanged");
+}
+
+/// NRN-212 regression guard: `--format json --yes` must still apply.
+#[test]
+fn apply_json_with_yes_applies() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let plan = format!(
+        r#"schema_version: 1
+vault_root: {}
+operations:
+  - kind: move_document
+    fields:
+      src: a.md
+      dst: renamed.md
+"#,
+        vault.to_str().unwrap()
+    );
+    let plan_path = tmp.path().join("plan.yaml");
+    std::fs::write(&plan_path, plan).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--format", "json", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["dry_run"], false);
+    assert!(
+        vault.join("renamed.md").exists(),
+        "renamed.md must exist after --format json --yes"
+    );
+    assert!(
+        !vault.join("a.md").exists(),
+        "a.md must have been moved away"
+    );
+}
+
 #[test]
 fn apply_rejects_wrong_schema_version() {
     let tmp = synth();

@@ -76,6 +76,82 @@ fn rewrite_wikilink_dry_run_shows_body_and_frontmatter() {
     assert_eq!(fm_updates.len(), 1, "a.md workspace → 1 set_frontmatter op");
 }
 
+/// NRN-212: `--format json` is output-shape-only, matching every other
+/// mutation command — it must NOT be treated as consent to apply. Without
+/// `--yes` and outside a TTY, `rewrite-wikilink --format json` must behave
+/// as an implicit dry-run: nothing written. Regression: the old code forced
+/// `dry_run = false` whenever `--format json` was present, so this call
+/// used to WRITE the rewrite with no `--yes` anywhere on the command line.
+#[test]
+fn rewrite_wikilink_json_without_yes_is_implicit_dry_run_and_writes_nothing() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let before_a = std::fs::read(vault.join("a.md")).unwrap();
+    let before_b = std::fs::read(vault.join("b.md")).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args([
+            "rewrite-wikilink",
+            "target",
+            "new-target",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        report["dry_run"], true,
+        "no --yes → implicit dry-run even under --format json: {report}"
+    );
+    let after_a = std::fs::read(vault.join("a.md")).unwrap();
+    let after_b = std::fs::read(vault.join("b.md")).unwrap();
+    assert_eq!(before_a, after_a, "a.md must be byte-unchanged");
+    assert_eq!(before_b, after_b, "b.md must be byte-unchanged");
+}
+
+/// NRN-212 regression guard: `--format json --yes` must still apply.
+#[test]
+fn rewrite_wikilink_json_with_yes_applies() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args([
+            "rewrite-wikilink",
+            "target",
+            "new-target",
+            "--format",
+            "json",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["dry_run"], false);
+    let a_content = std::fs::read_to_string(vault.join("a.md")).unwrap();
+    assert!(
+        a_content.contains("[[new-target]]"),
+        "a.md body should be rewritten: {a_content}"
+    );
+}
+
 #[test]
 fn rewrite_wikilink_refuses_when_old_unresolvable() {
     let tmp = synth();
