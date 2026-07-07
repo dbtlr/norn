@@ -790,6 +790,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 dry_run,
                 parents: args.parents,
                 verbose,
+                refuse_as_report: false,
             };
 
             let argv: Vec<String> = std::env::args().collect();
@@ -811,12 +812,22 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             let report = match apply_migration_plan(&migration_plan, &index, ctx, &mut sink) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    // NRN-150: structured envelope on stdout for `--format json`;
+                    // prose on stderr otherwise. Preflight refusal → exit 2.
+                    match args.format {
+                        crate::cli::MoveFormat::Json => render_json_error_envelope(&e)?,
+                        crate::cli::MoveFormat::Records => eprintln!("error: {e}"),
+                    }
                     return Ok(2);
                 }
             };
 
-            let exit = if report.failed > 0 { 1 } else { 0 };
+            // NRN-150/183: the exit code is the report's own outcome mapping — a
+            // partial-apply failure (a write landed, then an op failed) is now
+            // returned as `Ok(report)` with `outcome = failed` → exit 1, not the
+            // hardcoded exit 2 of a preflight refusal. A byte-identical refusal
+            // still arrives on the `Err` arm above (exit 2); success → exit 0.
+            let exit = report.exit_code();
 
             emit_invocation_finished(&mut sink, "move", exit, &report);
 
@@ -996,6 +1007,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 dry_run,
                 parents: false,
                 verbose,
+                refuse_as_report: false,
             };
 
             let argv: Vec<String> = std::env::args().collect();
@@ -1010,12 +1022,22 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             let report = match apply_migration_plan(&plan, &index, ctx, &mut sink) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    // NRN-150: structured envelope on stdout for `--format json`;
+                    // prose on stderr otherwise. Preflight refusal → exit 2.
+                    match args.format {
+                        crate::cli::DeleteFormat::Json => render_json_error_envelope(&e)?,
+                        crate::cli::DeleteFormat::Records => eprintln!("error: {e}"),
+                    }
                     return Ok(2);
                 }
             };
 
-            let exit = if report.failed > 0 { 1 } else { 0 };
+            // NRN-150/183: the exit code is the report's own outcome mapping — a
+            // partial-apply failure (a write landed, then an op failed) is now
+            // returned as `Ok(report)` with `outcome = failed` → exit 1, not the
+            // hardcoded exit 2 of a preflight refusal. A byte-identical refusal
+            // still arrives on the `Err` arm above (exit 2); success → exit 0.
+            let exit = report.exit_code();
 
             emit_invocation_finished(&mut sink, "delete", exit, &report);
 
@@ -1191,6 +1213,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     &crate::repair_apply::CreateApplyContext::default(),
                     &mut sink,
                     &spans,
+                    None,
                 );
 
                 let trace_id = sink.trace_id().to_string();
@@ -1386,6 +1409,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     &crate::repair_apply::CreateApplyContext::default(),
                     &mut sink,
                     &spans,
+                    None,
                 );
                 let trace_id = sink.trace_id().to_string();
                 let exit = if apply_outcome.is_ok() { 0 } else { 2 };
@@ -1622,6 +1646,22 @@ fn emit_cascade_failure_warnings(report: &crate::apply_report::ApplyReport) {
         }
         eprintln!("  fix manually, or run `norn validate` to list dangling links.");
     }
+}
+
+/// Render the structured error envelope `{ code, message, path? }` to STDOUT as
+/// pretty JSON (NRN-150). Called by a mutation command's `--format json` failure
+/// arm so a JSON consumer gets a machine-branchable failure — not a bare nonzero
+/// exit plus prose on stderr. The `code` is recovered by downcasting the opaque
+/// `anyhow::Error` (see `apply_report::ApplyError::from_anyhow`).
+pub(crate) fn render_json_error_envelope(e: &anyhow::Error) -> anyhow::Result<()> {
+    use std::io::Write;
+    let envelope = crate::apply_report::ApplyError::from_anyhow(e);
+    let json = serde_json::to_string_pretty(&envelope)?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    out.write_all(json.as_bytes())?;
+    out.write_all(b"\n")?;
+    Ok(())
 }
 
 /// Build the telemetry EventSink for a mutating command. Dry-runs and resolution

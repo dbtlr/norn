@@ -65,3 +65,4 @@ Set `NORN_ROOT` to a vault path to make that the default root for every invocati
 - [Configuration](configuration.md) — every config key.
 - [Validation and repair](validation.md) — finding codes and recipes.
 - [Agent workflows](agent-workflows.md) — the stable JSON/JSONL contracts.
+- [Error and outcome contract](errors.md) — exit codes, the `outcome` field, and the error-code taxonomy.

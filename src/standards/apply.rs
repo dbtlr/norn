@@ -103,6 +103,107 @@ pub enum ApplyError {
     Containment(#[from] ContainmentError),
 }
 
+impl ApplyError {
+    /// A stable, machine-branchable KEBAB code for this failure variant (NRN-150).
+    ///
+    /// This is the contract an agent branches on — retry-vs-reread-vs-giveup —
+    /// WITHOUT string-matching the human-facing `Display` prose. Codes are
+    /// canonically kebab-case per norn's three-form-identity principle (code
+    /// VALUES are kebab everywhere; JSON/MCP field KEYS stay snake_case). Never
+    /// rename an existing code without a CHANGELOG breaking-change entry.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ApplyError::UnsupportedSchemaVersion { .. } => "unsupported-schema-version",
+            ApplyError::VaultRootMismatch { .. } => "vault-root-mismatch",
+            ApplyError::UnknownPath { .. } => "unknown-path",
+            ApplyError::StaleDocumentHash { .. } => "stale-document-hash",
+            ApplyError::ConflictingFieldChange { .. } => "conflicting-field-change",
+            ApplyError::ConflictingHashes { .. } => "conflicting-hashes",
+            ApplyError::ExpectedOldValueMismatch { .. } => "expected-old-value-mismatch",
+            ApplyError::UnsupportedOperation { .. } => "unsupported-operation",
+            ApplyError::CannotMinimalEdit { .. } => "cannot-minimal-edit",
+            ApplyError::FrontmatterParseFailed { .. } => "frontmatter-parse-failed",
+            ApplyError::PostImageVerificationFailed { .. } => "post-image-verification-failed",
+            ApplyError::EditFailed { .. } => "edit-failed",
+            ApplyError::MissingNewValue { .. } => "missing-new-value",
+            ApplyError::FieldAlreadyPresent { .. } => "field-already-present",
+            ApplyError::MoveSourceMissing { .. } => "move-source-missing",
+            ApplyError::MoveSourceIsSymlink { .. } => "move-source-is-symlink",
+            ApplyError::MoveDestinationExists { .. } => "move-destination-exists",
+            ApplyError::DeleteSourceMissing { .. } => "delete-source-missing",
+            ApplyError::DeleteSourceIsSymlink { .. } => "delete-source-is-symlink",
+            ApplyError::ContentOpAfterVacate { .. } => "content-op-after-vacate",
+            ApplyError::Containment(inner) => inner.code(),
+        }
+    }
+
+    /// The vault-relative path this failure is about, when the variant carries one.
+    /// Feeds the `path` field of the structured error envelope.
+    pub fn path(&self) -> Option<&Utf8Path> {
+        match self {
+            ApplyError::UnknownPath { path }
+            | ApplyError::StaleDocumentHash { path, .. }
+            | ApplyError::ConflictingFieldChange { path, .. }
+            | ApplyError::ConflictingHashes { path }
+            | ApplyError::ExpectedOldValueMismatch { path, .. }
+            | ApplyError::UnsupportedOperation { path, .. }
+            | ApplyError::CannotMinimalEdit { path, .. }
+            | ApplyError::FrontmatterParseFailed { path, .. }
+            | ApplyError::PostImageVerificationFailed { path, .. }
+            | ApplyError::EditFailed { path, .. }
+            | ApplyError::MissingNewValue { path }
+            | ApplyError::FieldAlreadyPresent { path, .. }
+            | ApplyError::MoveSourceMissing { path }
+            | ApplyError::MoveSourceIsSymlink { path }
+            | ApplyError::DeleteSourceMissing { path }
+            | ApplyError::DeleteSourceIsSymlink { path }
+            | ApplyError::ContentOpAfterVacate { path, .. } => Some(path.as_path()),
+            ApplyError::MoveDestinationExists { destination } => Some(destination.as_path()),
+            ApplyError::Containment(inner) => Some(inner.target()),
+            ApplyError::UnsupportedSchemaVersion { .. } | ApplyError::VaultRootMismatch { .. } => {
+                None
+            }
+        }
+    }
+
+    /// A per-variant HINT that this failure *class* is typically raised at a
+    /// pre-write validation site. **It is NOT the refused-vs-failed gate** — that
+    /// gate is the runtime write-state fact threaded through the applier
+    /// (`apply_repair_plan_with_context`'s `wrote_any`), because a single variant
+    /// is structurally ambiguous: `stale-document-hash` / `unknown-path` are
+    /// raised from BOTH the pre-write Phase-A1 content CAS AND the Phase-B delete
+    /// pass (which runs AFTER Phase A2 has already written other ops in a mixed
+    /// plan). Keying the byte-identical-refusal decision off this flag produced
+    /// the NRN-150/183 byte-identity lie (a `refused` report over a mutated
+    /// vault); the applier now decides on whether a write actually landed, so this
+    /// method remains only as a coarse taxonomy hint and no longer gates output.
+    pub fn is_precondition(&self) -> bool {
+        match self {
+            ApplyError::UnsupportedSchemaVersion { .. }
+            | ApplyError::VaultRootMismatch { .. }
+            | ApplyError::UnknownPath { .. }
+            | ApplyError::StaleDocumentHash { .. }
+            | ApplyError::ConflictingFieldChange { .. }
+            | ApplyError::ConflictingHashes { .. }
+            | ApplyError::ExpectedOldValueMismatch { .. }
+            | ApplyError::UnsupportedOperation { .. }
+            | ApplyError::CannotMinimalEdit { .. }
+            | ApplyError::FrontmatterParseFailed { .. }
+            | ApplyError::PostImageVerificationFailed { .. }
+            | ApplyError::EditFailed { .. }
+            | ApplyError::FieldAlreadyPresent { .. }
+            | ApplyError::ContentOpAfterVacate { .. }
+            | ApplyError::Containment(_) => true,
+            ApplyError::MissingNewValue { .. }
+            | ApplyError::MoveSourceMissing { .. }
+            | ApplyError::MoveSourceIsSymlink { .. }
+            | ApplyError::MoveDestinationExists { .. }
+            | ApplyError::DeleteSourceMissing { .. }
+            | ApplyError::DeleteSourceIsSymlink { .. } => false,
+        }
+    }
+}
+
 /// (NRN-145) Refusal from the shared vault-root containment gate. A vault is
 /// self-contained: an op target that resolves outside the vault root — via an
 /// absolute path, `..` parent-traversal, or a directory symlinked out of the
@@ -120,6 +221,29 @@ pub enum ContainmentError {
 
     #[error("refusing to operate on '{target}': cannot verify vault-root containment ({detail})")]
     Unresolvable { target: Utf8PathBuf, detail: String },
+}
+
+impl ContainmentError {
+    /// Stable KEBAB code per variant (NRN-150). Namespaced under `containment-`
+    /// so a consumer can branch on the whole class with a prefix match.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ContainmentError::AbsolutePath { .. } => "containment-absolute-path",
+            ContainmentError::ParentTraversal { .. } => "containment-parent-traversal",
+            ContainmentError::EscapesVault { .. } => "containment-escapes-vault",
+            ContainmentError::Unresolvable { .. } => "containment-unresolvable",
+        }
+    }
+
+    /// The offending target path (always present on a containment refusal).
+    pub fn target(&self) -> &Utf8Path {
+        match self {
+            ContainmentError::AbsolutePath { target }
+            | ContainmentError::ParentTraversal { target }
+            | ContainmentError::EscapesVault { target }
+            | ContainmentError::Unresolvable { target, .. } => target.as_path(),
+        }
+    }
 }
 
 /// (NRN-145) Refuse an op target that would resolve outside the vault root. The
@@ -1419,6 +1543,216 @@ mod tests {
     use super::*;
     use crate::standards::repair::{RepairPlanFilters, RepairPlanSummary, SkippedSummary};
     use serde_json::json;
+
+    /// NRN-150: every `ApplyError` variant reports a stable, non-empty KEBAB
+    /// code, and the CAS-drift variants report the exact codes the MMR-202
+    /// acceptance branches on. Asserting kebab-shape (lowercase / digits /
+    /// hyphens, no underscores) here pins the canonical-form mandate so a future
+    /// snake_case addition fails the build.
+    #[test]
+    fn apply_error_codes_are_stable_kebab() {
+        fn is_kebab(s: &str) -> bool {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && !s.starts_with('-')
+                && !s.ends_with('-')
+        }
+
+        let p = || Utf8PathBuf::from("doc.md");
+        let variants: Vec<(ApplyError, &str)> = vec![
+            (
+                ApplyError::UnsupportedSchemaVersion {
+                    expected: 1,
+                    got: 2,
+                },
+                "unsupported-schema-version",
+            ),
+            (
+                ApplyError::VaultRootMismatch {
+                    plan: p(),
+                    cwd: p(),
+                },
+                "vault-root-mismatch",
+            ),
+            (ApplyError::UnknownPath { path: p() }, "unknown-path"),
+            (
+                ApplyError::StaleDocumentHash {
+                    path: p(),
+                    expected: "a".into(),
+                    actual: "b".into(),
+                },
+                "stale-document-hash",
+            ),
+            (
+                ApplyError::ConflictingFieldChange {
+                    path: p(),
+                    field: "f".into(),
+                },
+                "conflicting-field-change",
+            ),
+            (
+                ApplyError::ConflictingHashes { path: p() },
+                "conflicting-hashes",
+            ),
+            (
+                ApplyError::ExpectedOldValueMismatch {
+                    path: p(),
+                    field: "f".into(),
+                    expected: "a".into(),
+                    actual: "b".into(),
+                },
+                "expected-old-value-mismatch",
+            ),
+            (
+                ApplyError::UnsupportedOperation {
+                    path: p(),
+                    operation: "op".into(),
+                },
+                "unsupported-operation",
+            ),
+            (
+                ApplyError::CannotMinimalEdit {
+                    path: p(),
+                    reason: "r".into(),
+                },
+                "cannot-minimal-edit",
+            ),
+            (
+                ApplyError::FrontmatterParseFailed {
+                    path: p(),
+                    message: "m".into(),
+                },
+                "frontmatter-parse-failed",
+            ),
+            (
+                ApplyError::PostImageVerificationFailed {
+                    path: p(),
+                    detail: "d".into(),
+                },
+                "post-image-verification-failed",
+            ),
+            (
+                ApplyError::EditFailed {
+                    path: p(),
+                    message: "m".into(),
+                },
+                "edit-failed",
+            ),
+            (
+                ApplyError::MissingNewValue { path: p() },
+                "missing-new-value",
+            ),
+            (
+                ApplyError::FieldAlreadyPresent {
+                    path: p(),
+                    field: "f".into(),
+                },
+                "field-already-present",
+            ),
+            (
+                ApplyError::MoveSourceMissing { path: p() },
+                "move-source-missing",
+            ),
+            (
+                ApplyError::MoveSourceIsSymlink { path: p() },
+                "move-source-is-symlink",
+            ),
+            (
+                ApplyError::MoveDestinationExists { destination: p() },
+                "move-destination-exists",
+            ),
+            (
+                ApplyError::DeleteSourceMissing { path: p() },
+                "delete-source-missing",
+            ),
+            (
+                ApplyError::DeleteSourceIsSymlink { path: p() },
+                "delete-source-is-symlink",
+            ),
+            (
+                ApplyError::ContentOpAfterVacate {
+                    path: p(),
+                    earlier_op: "delete_document".into(),
+                    earlier_change_id: "c0".into(),
+                },
+                "content-op-after-vacate",
+            ),
+            (
+                ApplyError::Containment(ContainmentError::AbsolutePath { target: p() }),
+                "containment-absolute-path",
+            ),
+            (
+                ApplyError::Containment(ContainmentError::ParentTraversal { target: p() }),
+                "containment-parent-traversal",
+            ),
+            (
+                ApplyError::Containment(ContainmentError::EscapesVault { target: p() }),
+                "containment-escapes-vault",
+            ),
+            (
+                ApplyError::Containment(ContainmentError::Unresolvable {
+                    target: p(),
+                    detail: "d".into(),
+                }),
+                "containment-unresolvable",
+            ),
+        ];
+
+        let mut seen = std::collections::BTreeSet::new();
+        for (err, expected) in &variants {
+            assert_eq!(err.code(), *expected, "code drift for {err:?}");
+            assert!(is_kebab(err.code()), "non-kebab code: {}", err.code());
+            assert!(seen.insert(err.code()), "duplicate code: {}", err.code());
+        }
+
+        // CAS-drift (retryable) codes the MMR-202 acceptance keys on.
+        assert_eq!(
+            ApplyError::StaleDocumentHash {
+                path: p(),
+                expected: "a".into(),
+                actual: "b".into()
+            }
+            .code(),
+            "stale-document-hash"
+        );
+        assert_eq!(
+            ApplyError::ExpectedOldValueMismatch {
+                path: p(),
+                field: "f".into(),
+                expected: "a".into(),
+                actual: "b".into()
+            }
+            .code(),
+            "expected-old-value-mismatch"
+        );
+    }
+
+    /// The CAS-drift variants are precondition (byte-identical) refusals; the
+    /// Phase-B lifecycle variants are not.
+    #[test]
+    fn precondition_classification() {
+        let p = || Utf8PathBuf::from("d.md");
+        assert!(ApplyError::StaleDocumentHash {
+            path: p(),
+            expected: "a".into(),
+            actual: "b".into()
+        }
+        .is_precondition());
+        assert!(ApplyError::ExpectedOldValueMismatch {
+            path: p(),
+            field: "f".into(),
+            expected: "a".into(),
+            actual: "b".into()
+        }
+        .is_precondition());
+        assert!(
+            ApplyError::Containment(ContainmentError::AbsolutePath { target: p() })
+                .is_precondition()
+        );
+        assert!(!ApplyError::MoveDestinationExists { destination: p() }.is_precondition());
+        assert!(!ApplyError::DeleteSourceMissing { path: p() }.is_precondition());
+    }
 
     fn empty_plan(schema_version: u32, vault_root: &str) -> RepairPlan {
         RepairPlan {

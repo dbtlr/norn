@@ -92,6 +92,24 @@ fn vault_error(args: &[&str]) -> String {
     String::from_utf8(output.stderr).expect("stderr should be UTF-8")
 }
 
+/// Like [`vault_error`] but returns STDOUT — where a `--format json` failure now
+/// emits the structured `{ code, message, path? }` error envelope (NRN-150).
+fn vault_error_stdout(args: &[&str]) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
+    command.args(args);
+    let _cache_dir = isolate_cache(&mut command);
+    let output = command.output().expect("vault command should run");
+
+    assert!(
+        !output.status.success(),
+        "vault command succeeded unexpectedly\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout).expect("stdout should be UTF-8")
+}
+
 fn temp_cache_dir() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -584,7 +602,10 @@ fn repair_apply_rejects_stale_plan() {
     )
     .expect("task should write");
 
-    let error = vault_error(&[
+    // NRN-150: a `--format json` failure emits the structured `{ code, message,
+    // path? }` envelope on STDOUT with the stable kebab code; the prose survives
+    // inside `message`.
+    let stdout = vault_error_stdout(&[
         "-C",
         root.to_str().unwrap(),
         "--config",
@@ -595,10 +616,17 @@ fn repair_apply_rejects_stale_plan() {
         "--format",
         "json",
     ]);
-
+    let envelope: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be a JSON error envelope");
+    assert_eq!(
+        envelope["code"], "stale-document-hash",
+        "expected stale-plan refusal code; got: {envelope}"
+    );
     assert!(
-        error.contains("stale repair plan"),
-        "expected stale-plan refusal; got: {error}"
+        envelope["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("stale repair plan")),
+        "envelope message preserves the prose; got: {envelope}"
     );
 
     fs::remove_dir_all(root).ok();
@@ -2574,6 +2602,83 @@ repair:
     fs::remove_file(&config_path).ok();
 }
 
+/// NRN-150/183: a MULTI-op migrate that partially applies — op0 renames a→b
+/// (a real write), then op1's move refuses because its destination exists — now
+/// exits `1` (a partial-apply runtime failure), NOT `2` (a byte-identical
+/// preflight refusal). The old CLI arm mapped every apply `Err` to exit 2, so a
+/// partial folder-style move reported "refused, nothing written" while files had
+/// already moved. The exit is now the report's own outcome mapping.
+#[test]
+fn migrate_partial_apply_exits_1_not_2_when_a_move_already_landed() {
+    let root = temp_cache_dir();
+    let config_path = root.with_extension("yaml");
+    fs::write(&config_path, "validate: {}\n").expect("config should write");
+    fs::create_dir_all(&root).expect("temp dir should be created");
+    fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").expect("a");
+    fs::write(root.join("c.md"), "---\ntype: note\n---\n# C\n").expect("c");
+    // Pre-existing destination for op1's move → MoveDestinationExists.
+    fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n").expect("d");
+
+    let plan = serde_json::json!({
+        "schema_version": 1,
+        "vault_root": root.to_str().unwrap(),
+        "operations": [
+            { "kind": "move_document", "fields": { "src": "a.md", "dst": "b.md" } },
+            { "kind": "move_document", "fields": { "src": "c.md", "dst": "d.md" } }
+        ]
+    });
+    let plan_path = root.join("plan.json");
+    fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).expect("plan should write");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
+    command.args([
+        "-C",
+        root.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "migrate",
+        plan_path.to_str().unwrap(),
+        "--yes",
+        "--format",
+        "json",
+    ]);
+    let _cache = isolate_cache(&mut command);
+    let output = command.output().expect("migrate should run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a partial apply (a move already landed) must exit 1, not 2\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // op0 landed on disk; op1 was refused.
+    assert!(!root.join("a.md").exists(), "op0 renamed a→b");
+    assert!(root.join("b.md").exists(), "op0's destination exists");
+    assert!(
+        root.join("c.md").exists(),
+        "op1's source remains — the move refused"
+    );
+
+    // The report on stdout reflects the truthful partial state.
+    let report: serde_json::Value =
+        serde_json::from_str(String::from_utf8(output.stdout).unwrap().trim())
+            .expect("stdout is the ApplyReport JSON");
+    assert_eq!(
+        report["outcome"], "failed",
+        "partial apply → outcome failed"
+    );
+    assert_eq!(report["operations"][0]["status"], "applied");
+    assert_eq!(report["operations"][1]["status"], "failed");
+    assert_eq!(
+        report["operations"][1]["error"]["code"],
+        "move-destination-exists"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_file(&config_path).ok();
+}
+
 #[test]
 fn repair_apply_refuses_move_when_destination_exists() {
     let root = temp_cache_dir();
@@ -2625,7 +2730,8 @@ repair:
         "--out",
         plan_path.to_str().unwrap(),
     ]);
-    let stderr = vault_error(&[
+    // NRN-150: `--format json` failure → structured envelope on STDOUT.
+    let stdout = vault_error_stdout(&[
         "-C",
         root.to_str().unwrap(),
         "--config",
@@ -2636,9 +2742,11 @@ repair:
         "--format",
         "json",
     ]);
-    assert!(
-        stderr.contains("destination already exists") || stderr.contains("MoveDestinationExists"),
-        "expected destination-exists error in stderr; got: {stderr}"
+    let envelope: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be a JSON error envelope");
+    assert_eq!(
+        envelope["code"], "move-destination-exists",
+        "expected destination-exists refusal code; got: {envelope}"
     );
     assert!(
         root.join("Inbox/task.md").exists(),
