@@ -229,7 +229,7 @@ The JSON `ApplyReport` (`--format json`, or `--out <PATH>`) carries top-level co
 }
 ```
 
-`skipped`/`failed`/`remaining` are apply-time counts (operations the batch didn't apply because an earlier precondition aborted the run, or that failed outright) — they are not the plan's `skipped_findings` roster. To see why a finding never made it into the plan at all, read the `MigrationPlan`'s own `skipped_findings` (see above), not the apply report.
+`skipped`/`failed`/`remaining` are apply-time counts (operations the batch didn't apply because an earlier precondition aborted the run, or that failed outright) — they are not the plan's roster of findings that never became operations. To see why a finding never made it into the plan at all, read the `MigrationPlan`'s own `skipped` list, not the apply report.
 
 ## Stable repair loop
 

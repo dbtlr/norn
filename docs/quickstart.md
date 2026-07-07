@@ -80,7 +80,7 @@ norn -C /path/to/vault repair --plan --out plan.json
 cat plan.json | head -40
 ```
 
-Inspect the plan. The `changes` array is what apply will write; `skipped_findings` is what couldn't be planned deterministically. Dry-run, then apply — apply itself re-checks every frontmatter write against its intended value before reporting success:
+Inspect the plan. The `operations` array is what apply will write; `skipped` is what couldn't be planned deterministically. Dry-run, then apply — apply itself re-checks every frontmatter write against its intended value before reporting success:
 
 ```bash
 norn -C /path/to/vault migrate plan.json --dry-run --format json
