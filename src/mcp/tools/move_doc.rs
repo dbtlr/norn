@@ -34,6 +34,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.move`.
 ///
@@ -108,9 +109,14 @@ impl MoveOutput {
 }
 
 /// Build the MCP output envelope for `vault.move`.
-pub fn handle_output(ctx: &VaultContext, p: MoveParams) -> Result<MoveOutput> {
+pub fn handle_output(ctx: &VaultContext, p: MoveParams) -> Result<MutationResult<MoveOutput>> {
     let report = handle(ctx, p)?;
-    MoveOutput::from_report(&report)
+    // BUG-3 / NRN-219: `isError` derived from the report's outcome. See
+    // `apply::handle_output` and `MutationResult::from_apply_report`.
+    Ok(MutationResult::from_apply_report(
+        MoveOutput::from_report(&report)?,
+        &report,
+    ))
 }
 
 /// Pure handler for `vault.move`.

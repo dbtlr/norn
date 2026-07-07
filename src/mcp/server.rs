@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
+
+use super::mutation_result::MutationResult;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
@@ -176,19 +178,28 @@ impl McpServer {
     ///
     /// The read-only check runs FIRST, before acquiring `call_lock` or touching
     /// the vault: a refused mutation must observe nothing and mutate nothing. When
-    /// not read-only, the body is identical to `run_tool` — it acquires the
-    /// NRN-55 serialization lock and maps the result. The 6 mutation tools call
-    /// this; the 6 read tools keep calling `run_tool`. This split also documents
-    /// the read/mutate boundary in code (mirroring the two `#[tool_router]`
-    /// blocks).
+    /// not read-only, the body mirrors `run_tool` — it acquires the NRN-55
+    /// serialization lock and passes the handler's result through. The 7 mutation
+    /// tools call this; the 7 read tools keep calling `run_tool`. This split also
+    /// documents the read/mutate boundary in code (mirroring the two
+    /// `#[tool_router]` blocks).
+    ///
+    /// Generic over the returned wrapper `R` rather than a bare payload, so a tool
+    /// picks the wrapper its outcome model needs: the always-success mutators
+    /// (`new` / `set` / `edit`, which surface an apply failure as a plain MCP
+    /// `Err`) return `Json<T>` and its auto-derived `outputSchema`; the four
+    /// cascade tools (apply/move/delete/rewrite-wikilink) return
+    /// [`MutationResult<T>`], which renders `isError: true` on a not-applied
+    /// outcome while preserving the structured report (BUG-3 / NRN-219) and carries
+    /// an explicit `output_schema` attribute (rmcp only auto-derives for `Json`).
     ///
     /// Under `--read-only` the mutation tools are also absent from `tools/list`
     /// (see [`new`](Self::new)), so this runtime guard is defense in depth for a
     /// client that calls a tool it was never advertised.
-    async fn run_mutation<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
+    async fn run_mutation<R, F>(&self, f: F) -> Result<R, rmcp::ErrorData>
     where
-        T: serde::Serialize + schemars::JsonSchema + Send + 'static,
-        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
+        R: Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<R> + Send + 'static,
     {
         if self.read_only {
             return Err(rmcp::ErrorData::invalid_request(
@@ -205,7 +216,7 @@ impl McpServer {
         })
         .await;
         match joined {
-            Ok(Ok(value)) => Ok(Json(value)),
+            Ok(Ok(value)) => Ok(value),
             Ok(Err(err)) => {
                 self.ctx.note_tool_error(&err);
                 Err(to_mcp_error(err))
@@ -400,7 +411,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::new::NewParams>,
     ) -> Result<Json<NewOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::new::handle_output(ctx, p))
+        // `new` has no in-band not-applied outcome — an apply failure propagates
+        // as `Err` (mapped to a bare MCP error), so the result is always applied.
+        // `Json` keeps rmcp's auto-derived `outputSchema` (BUG-3 does not reach it).
+        self.run_mutation(|ctx| crate::mcp::tools::new::handle_output(ctx, p).map(Json))
             .await
     }
 
@@ -426,7 +440,11 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
     ) -> Result<Json<SetOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
+        // Like `new`: a failed/refused apply propagates as `Err`, so the result is
+        // always applied — `Json` keeps the auto-derived schema. (Structured
+        // refusal codes for the single-op mutators are a separate follow-up,
+        // NRN-220.)
+        self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p).map(Json))
             .await
     }
 
@@ -447,7 +465,9 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::edit::EditParams>,
     ) -> Result<Json<EditOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::edit::handle_output(ctx, p))
+        // Like `new`/`set`: an apply failure propagates as `Err`, so the result is
+        // always applied — `Json` keeps the auto-derived schema.
+        self.run_mutation(|ctx| crate::mcp::tools::edit::handle_output(ctx, p).map(Json))
             .await
     }
 
@@ -461,12 +481,15 @@ impl McpServer {
     /// backlink rewrites). Same mutation-safety + audit contract as `vault.set`.
     #[tool(
         name = "vault.move",
-        description = "Move/rename a document, cascading backlink rewrites across the vault. DRY-RUN by default; confirm:true to apply."
+        description = "Move/rename a document, cascading backlink rewrites across the vault. DRY-RUN by default; confirm:true to apply.",
+        // MutationResult<T> is not the literal `Json`, so rmcp cannot auto-derive
+        // the schema — publish it explicitly (NRN-219).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<MoveOutput>()
     )]
     async fn move_doc(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::move_doc::MoveParams>,
-    ) -> Result<Json<MoveOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<MoveOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::move_doc::handle_output(ctx, p))
             .await
     }
@@ -482,12 +505,14 @@ impl McpServer {
     /// incoming links). DESTRUCTIVE: the `confirm:false` dry-run removes nothing.
     #[tool(
         name = "vault.delete",
-        description = "Delete a document, optionally redirecting incoming links to an alternate target. DRY-RUN by default; confirm:true to apply."
+        description = "Delete a document, optionally redirecting incoming links to an alternate target. DRY-RUN by default; confirm:true to apply.",
+        // Explicit schema — MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<DeleteOutput>()
     )]
     async fn delete(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::delete::DeleteParams>,
-    ) -> Result<Json<DeleteOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<DeleteOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::delete::handle_output(ctx, p))
             .await
     }
@@ -503,12 +528,14 @@ impl McpServer {
     /// per-file body + frontmatter rewrites). No file is moved.
     #[tool(
         name = "vault.rewrite_wikilink",
-        description = "Rewrite all occurrences of a wikilink target across the vault (body + frontmatter), without moving any file. DRY-RUN by default; confirm:true to apply."
+        description = "Rewrite all occurrences of a wikilink target across the vault (body + frontmatter), without moving any file. DRY-RUN by default; confirm:true to apply.",
+        // Explicit schema — MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<RewriteWikilinkOutput>()
     )]
     async fn rewrite_wikilink(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams>,
-    ) -> Result<Json<RewriteWikilinkOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<RewriteWikilinkOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p))
             .await
     }
@@ -525,12 +552,14 @@ impl McpServer {
     /// Same mutation-safety + audit contract as `vault.move` / `vault.delete`.
     #[tool(
         name = "vault.apply",
-        description = "Apply a MigrationPlan (e.g. from vault.repair) to the vault — moves, deletes, link rewrites, frontmatter ops. DRY-RUN by default (forecasts the apply); pass confirm:true to execute."
+        description = "Apply a MigrationPlan (e.g. from vault.repair) to the vault — moves, deletes, link rewrites, frontmatter ops. DRY-RUN by default (forecasts the apply); pass confirm:true to execute.",
+        // Explicit schema — MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<ApplyOutput>()
     )]
     async fn apply(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::apply::ApplyParams>,
-    ) -> Result<Json<ApplyOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<ApplyOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::apply::handle_output(ctx, p))
             .await
     }
