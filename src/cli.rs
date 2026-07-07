@@ -959,6 +959,14 @@ pub struct SetArgs {
     #[arg(long = "field", value_name = "KEY=VALUE")]
     pub fields: Vec<String>,
 
+    /// Trailing `KEY=VALUE` positionals — sugar for `--field KEY=VALUE` (ADR
+    /// 0010). Identical semantics: same schema coercion, same
+    /// repeat-accumulates-to-array. Every positional AFTER DOC must contain a
+    /// `:` or `=` separator or it is a hard error; the first positional is
+    /// always DOC (a doc literally named `a=b.md` is still addressed as DOC).
+    #[arg(value_name = "KEY=VALUE")]
+    pub field_pos: Vec<String>,
+
     /// Set a frontmatter field with a JSON-parsed value. Escape hatch for
     /// structured values (arrays, nested objects, explicit null). KEY=JSON.
     #[arg(long = "field-json", value_name = "KEY=JSON")]

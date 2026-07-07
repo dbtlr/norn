@@ -44,6 +44,24 @@ pub fn parse_kv(raw: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
+/// Fold trailing `KEY=VALUE` positionals (ADR 0010, NRN-208) into the explicit
+/// `--field` list so a positional `k=v` and a `--field k=v` are indistinguishable
+/// downstream (same coercion, same accumulation). Each positional MUST carry a
+/// `:` or `=` separator — inheriting batch A's [`split_field_value`] forgiveness
+/// (first separator wins) — or it is a hard error. Explicit `--field` values
+/// come first; positionals are appended in argv order, so a key present in both
+/// accumulates into an array reading left-to-right.
+pub fn desugar_positional_fields(positionals: &[String], fields: &[String]) -> Result<Vec<String>> {
+    let mut combined = fields.to_vec();
+    for token in positionals {
+        if crate::grammar::split_field_value(token).is_none() {
+            bail!("expected key=value, got '{token}'");
+        }
+        combined.push(token.clone());
+    }
+    Ok(combined)
+}
+
 /// Refuse with a clear error if any key appears across multiple mutation
 /// classes (--field/--field-json/--push/--pop/--remove). Within-class
 /// multi-instance is fine (accumulation semantics).
@@ -472,12 +490,15 @@ pub fn preflight_and_plan(
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("doc not in index: {target_path}"))?;
 
-    // 6. Schema-aware synth.
+    // 6. Schema-aware synth. Trailing `KEY=VALUE` positionals desugar into the
+    // `--field` list (ADR 0010, NRN-208) so they flow through the identical
+    // coercing path — a positional `k=v` is indistinguishable from `--field k=v`.
+    let combined_fields = desugar_positional_fields(&args.field_pos, &args.fields)?;
     let synth_result = crate::set::validate::synth_with_schema(
         cfg,
         &doc,
         &current_fm,
-        &args.fields,
+        &combined_fields,
         &args.field_json,
         &args.push,
         &args.pop,

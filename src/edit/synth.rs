@@ -30,6 +30,7 @@ pub fn preflight_and_plan(
     let set_args = crate::cli::SetArgs {
         target: target.to_string(),
         fields: Vec::new(),
+        field_pos: Vec::new(),
         field_json: Vec::new(),
         push: Vec::new(),
         pop: Vec::new(),
