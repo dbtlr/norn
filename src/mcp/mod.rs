@@ -30,14 +30,21 @@ use camino::Utf8PathBuf;
 use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
 
-/// Map an `anyhow::Error` to an rmcp internal-error response carrying the message.
+/// Map an `anyhow::Error` to an rmcp internal-error response carrying BOTH the
+/// human message and a structured `data` envelope (NRN-150).
 ///
 /// Shared by every `#[tool]` wrapper: the pure handlers return `anyhow::Result`,
 /// and this is the single seam that turns a failure into a JSON-RPC error. The
-/// message is rendered to an owned `String` (which satisfies the constructor's
-/// `Into<Cow<'static, str>>` bound); no structured `data` payload for v1.
+/// `data` payload is the `{ code, message, path? }` error envelope — recovered by
+/// downcasting through the known failure types (`ApplyError`, `ContainmentError`,
+/// `CacheError`), falling back to `internal-error`. A consumer branches on
+/// `error.data.code`, never on the prose. (Validation-phase precondition refusals
+/// on the mutation tools never reach here — those return a report-on-refusal with
+/// the offending op `failed`; see `ApplyContext::refuse_as_report`.)
 pub(crate) fn to_mcp_error(e: anyhow::Error) -> rmcp::ErrorData {
-    rmcp::ErrorData::internal_error(e.to_string(), None)
+    let envelope = crate::apply_report::ApplyError::from_anyhow(&e);
+    let data = serde_json::to_value(&envelope).ok();
+    rmcp::ErrorData::internal_error(e.to_string(), data)
 }
 
 use self::context::VaultContext;

@@ -92,6 +92,24 @@ fn vault_error(args: &[&str]) -> String {
     String::from_utf8(output.stderr).expect("stderr should be UTF-8")
 }
 
+/// Like [`vault_error`] but returns STDOUT — where a `--format json` failure now
+/// emits the structured `{ code, message, path? }` error envelope (NRN-150).
+fn vault_error_stdout(args: &[&str]) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
+    command.args(args);
+    let _cache_dir = isolate_cache(&mut command);
+    let output = command.output().expect("vault command should run");
+
+    assert!(
+        !output.status.success(),
+        "vault command succeeded unexpectedly\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout).expect("stdout should be UTF-8")
+}
+
 fn temp_cache_dir() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -584,7 +602,10 @@ fn repair_apply_rejects_stale_plan() {
     )
     .expect("task should write");
 
-    let error = vault_error(&[
+    // NRN-150: a `--format json` failure emits the structured `{ code, message,
+    // path? }` envelope on STDOUT with the stable kebab code; the prose survives
+    // inside `message`.
+    let stdout = vault_error_stdout(&[
         "-C",
         root.to_str().unwrap(),
         "--config",
@@ -595,10 +616,17 @@ fn repair_apply_rejects_stale_plan() {
         "--format",
         "json",
     ]);
-
+    let envelope: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be a JSON error envelope");
+    assert_eq!(
+        envelope["code"], "stale-document-hash",
+        "expected stale-plan refusal code; got: {envelope}"
+    );
     assert!(
-        error.contains("stale repair plan"),
-        "expected stale-plan refusal; got: {error}"
+        envelope["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("stale repair plan")),
+        "envelope message preserves the prose; got: {envelope}"
     );
 
     fs::remove_dir_all(root).ok();
@@ -2625,7 +2653,8 @@ repair:
         "--out",
         plan_path.to_str().unwrap(),
     ]);
-    let stderr = vault_error(&[
+    // NRN-150: `--format json` failure → structured envelope on STDOUT.
+    let stdout = vault_error_stdout(&[
         "-C",
         root.to_str().unwrap(),
         "--config",
@@ -2636,9 +2665,11 @@ repair:
         "--format",
         "json",
     ]);
-    assert!(
-        stderr.contains("destination already exists") || stderr.contains("MoveDestinationExists"),
-        "expected destination-exists error in stderr; got: {stderr}"
+    let envelope: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be a JSON error envelope");
+    assert_eq!(
+        envelope["code"], "move-destination-exists",
+        "expected destination-exists refusal code; got: {envelope}"
     );
     assert!(
         root.join("Inbox/task.md").exists(),

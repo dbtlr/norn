@@ -137,6 +137,7 @@ pub fn handle(
         dry_run,
         parents: false,
         verbose: false,
+        refuse_as_report: true,
     };
 
     // ── DRY-RUN (default): no lock, discard sink, applier in dry-run mode ───────
@@ -146,8 +147,9 @@ pub fn handle(
             crate::telemetry::Clock::System,
         );
         // Pre-flight refusal (OLD unresolvable) surfaces as Err here, same as CLI.
-        let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)
-            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        // Propagate the original error so `to_mcp_error` recovers the structured
+        // `{ code, message, path? }` envelope (NRN-150).
+        let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
         return Ok(report);
     }
 
@@ -167,11 +169,9 @@ pub fn handle(
         &["rewrite-wikilink".to_string(), p.from.clone(), p.to.clone()],
     );
 
-    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)
-        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
 
-    let exit = if report.failed > 0 { 1 } else { 0 };
-    crate::emit_invocation_finished(&mut sink, "rewrite-wikilink", exit, &report);
+    crate::emit_invocation_finished(&mut sink, "rewrite-wikilink", report.exit_code(), &report);
 
     Ok(report)
 }

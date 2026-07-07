@@ -215,6 +215,7 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
         dry_run,
         parents: p.parents,
         verbose: false,
+        refuse_as_report: true,
     };
 
     // ── DRY-RUN (default): no lock, discard sink, applier in dry-run mode ───────
@@ -223,8 +224,9 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
             crate::telemetry::IdGen::new(),
             crate::telemetry::Clock::System,
         );
-        let report = apply_migration_plan(&migration_plan, &index, apply_ctx, &mut sink)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Propagate the original error so `to_mcp_error` recovers the structured
+        // `{ code, message, path? }` envelope (NRN-150).
+        let report = apply_migration_plan(&migration_plan, &index, apply_ctx, &mut sink)?;
         return Ok(report);
     }
 
@@ -245,15 +247,13 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
         &["move".to_string(), p.from.clone(), p.to.clone()],
     );
 
-    let report = apply_migration_plan(&migration_plan, &index, apply_ctx, &mut sink)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let report = apply_migration_plan(&migration_plan, &index, apply_ctx, &mut sink)?;
 
-    let exit = if report.failed > 0 { 1 } else { 0 };
-    crate::emit_invocation_finished(&mut sink, "move", exit, &report);
+    crate::emit_invocation_finished(&mut sink, "move", report.exit_code(), &report);
 
     // After a live folder move, clean up empty source directories — mirrors the
     // CLI's `remove_empty_dirs` call on the move_folder apply path.
-    if is_folder && exit == 0 {
+    if is_folder && report.exit_code() == 0 {
         crate::remove_empty_dirs(src_full.as_std_path());
     }
 

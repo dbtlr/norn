@@ -145,6 +145,7 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
         dry_run,
         parents: p.parents,
         verbose: false,
+        refuse_as_report: true,
     };
 
     // ── DRY-RUN (default): no lock, discard sink, applier in dry-run mode ───────
@@ -153,8 +154,11 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
             crate::telemetry::IdGen::new(),
             crate::telemetry::Clock::System,
         );
-        let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Propagate the original error (NOT rewrapped) so `to_mcp_error` can
+        // downcast it to the rich `ApplyError` and attach the `{ code, message,
+        // path? }` structured envelope (NRN-150). A precondition refusal instead
+        // returns `Ok(report)` (report-on-refusal) via `refuse_as_report`.
+        let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
         return Ok(report);
     }
 
@@ -174,11 +178,11 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
         &["apply_plan".to_string()],
     );
 
-    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Propagate the original error (see the dry-run branch) so the structured
+    // envelope survives to `to_mcp_error`.
+    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
 
-    let exit = if report.failed > 0 { 1 } else { 0 };
-    crate::emit_invocation_finished(&mut sink, "migrate", exit, &report);
+    crate::emit_invocation_finished(&mut sink, "migrate", report.exit_code(), &report);
 
     Ok(report)
 }
@@ -427,6 +431,75 @@ mod tests {
             a.contains("type: note") && a.contains("# A (rewritten)"),
             "replace_body landed via MCP with frontmatter preserved; got:\n{a}"
         );
+    }
+
+    /// NRN-150 / MMR-202: a VALIDATION-PHASE precondition refusal (here a
+    /// `stale-document-hash` CAS drift) is returned to an MCP caller as the
+    /// ApplyReport — the offending op `failed` carrying `error.code`, the rest
+    /// `not_run`, `outcome = refused` — NOT a bare `internal_error`. A consumer
+    /// branches on the CODE (retryable CAS drift vs terminal refusal) without
+    /// string-matching prose, and the vault is byte-identical.
+    #[test]
+    fn precondition_refusal_returns_report_with_failed_op_code() {
+        use crate::apply_report::{ApplyOutcome, OpStatus};
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-refusal-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        let doc = "---\ntype: note\n---\n# A\n";
+        std::fs::write(root.join("a.md"), doc).unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        // Non-empty WRONG document_hash: hydration only fills empty hashes, so
+        // this survives to the CAS check and refuses with stale-document-hash.
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [{
+                "kind": "add_frontmatter",
+                "fields": {
+                    "path": "a.md",
+                    "field": "status",
+                    "new_value": "done",
+                    "document_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }]
+        });
+
+        // confirm:true (the apply path) — the refusal must still return a report,
+        // never a bare Err, so an MCP client sees structuredContent not isError.
+        let report = handle(
+            &ctx,
+            ApplyPlanParams {
+                plan,
+                confirm: true,
+                parents: false,
+            },
+        )
+        .expect("a precondition refusal must return a report, not Err");
+
+        assert_eq!(report.outcome, ApplyOutcome::Refused);
+        assert_eq!(report.failed, 1, "exactly the offending op failed");
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.exit_code(), 2, "refusal maps to exit 2");
+        let op = &report.operations[0];
+        assert_eq!(op.status, OpStatus::Failed);
+        let err = op
+            .error
+            .as_ref()
+            .expect("failed op carries an error envelope");
+        assert_eq!(
+            err.code, "stale-document-hash",
+            "consumer branches on the stable kebab code"
+        );
+        assert_eq!(err.path.as_deref(), Some("a.md"));
+
+        // Byte-identical: a validation-phase refusal wrote nothing.
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), doc);
     }
 
     /// A malformed plan (garbage JSON) must return Err, applying nothing.

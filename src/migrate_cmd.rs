@@ -160,6 +160,7 @@ pub fn run(
         dry_run,
         parents: args.parents,
         verbose,
+        refuse_as_report: false,
     };
 
     let argv: Vec<String> = std::env::args().collect();
@@ -174,7 +175,13 @@ pub fn run(
     let report = match apply_migration_plan(&plan, &index, ctx, &mut sink) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            // NRN-150: a `--format json` consumer gets the structured
+            // `{ code, message, path? }` envelope on stdout; a records/TTY caller
+            // gets the prose on stderr. Either way this is a preflight refusal.
+            match args.format {
+                MigrateFormat::Json => crate::render_json_error_envelope(&e)?,
+                MigrateFormat::Records => eprintln!("error: {e:#}"),
+            }
             return Ok(EXIT_PREFLIGHT);
         }
     };

@@ -22,6 +22,53 @@ pub struct ApplyReport {
     pub operations: Vec<ApplyReportOp>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<ApplyWarning>,
+    /// The single machine-readable outcome of this apply (NRN-183). Collapses the
+    /// process-exit tri-state — `applied` (exit 0) / `failed` (exit 1, a runtime
+    /// op-failure) / `refused` (exit 2, a validation-phase precondition refusal) —
+    /// into ONE field exposed identically by the CLI (`--format json`) and the MCP
+    /// `structuredContent`. A consumer keys on `outcome`, never on inspecting the
+    /// `failed` count or the process exit code, to distinguish a refused apply
+    /// (nothing written) from a partially-failed one. Defaulted for
+    /// backward-compatible deserialization of pre-NRN-183 reports.
+    #[serde(default)]
+    pub outcome: ApplyOutcome,
+}
+
+/// The machine-readable outcome of an apply (NRN-183) — the shared vocabulary
+/// that reconciles the per-command process-exit codes across surfaces.
+///
+/// Values are canonically kebab-case per norn's three-form-identity principle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApplyOutcome {
+    /// Every op applied (or was a no-op), or a dry-run forecast — exit 0.
+    #[default]
+    Applied,
+    /// At least one op FAILED at runtime after the apply began — exit 1.
+    Failed,
+    /// A validation-phase precondition refused the plan before any write; the
+    /// vault is byte-identical — exit 2.
+    Refused,
+    /// RESERVED for NRN-152 (rebase-on-drift): a plan whose stale-hash
+    /// precondition was auto-rebased onto current content and re-applied. NOT
+    /// produced today — rebase-on-drift is deferred to NRN-152; reserved here so
+    /// the outcome vocabulary is forward-compatible without a breaking add.
+    #[allow(dead_code)]
+    Rebased,
+}
+
+impl ApplyReport {
+    /// The process exit code this outcome maps to: `applied` → 0, `failed` → 1
+    /// (runtime op-failure), `refused` → 2 (preflight refusal). `rebased` is
+    /// reserved (NRN-152) and maps to 0 until implemented. This is the one place
+    /// the outcome→exit mapping is defined, shared by every CLI mutation arm.
+    pub fn exit_code(&self) -> i32 {
+        match self.outcome {
+            ApplyOutcome::Applied | ApplyOutcome::Rebased => 0,
+            ApplyOutcome::Failed => 1,
+            ApplyOutcome::Refused => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,10 +169,66 @@ pub enum OpStatus {
     NotRun,
 }
 
+/// The structured failure envelope (NRN-150): a stable machine-branchable `code`
+/// (kebab), a human `message`, and the offending `path` when one is known.
+///
+/// Serves two roles with one shape: it is both the per-op `error` on a
+/// [`ApplyReportOp`] (report-on-refusal) AND the top-level error envelope a CLI
+/// `--format json` consumer / an MCP structured-error consumer branches on. A
+/// consumer distinguishes RETRYABLE CAS drift (`stale-document-hash` /
+/// `expected-old-value-mismatch`) from a TERMINAL refusal by comparing `code`,
+/// never the prose.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyError {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub path: Option<String>,
+}
+
+impl ApplyError {
+    /// Build the envelope from the rich apply-time error (NRN-150).
+    pub fn from_rich(e: &crate::standards::apply::ApplyError) -> Self {
+        Self {
+            code: e.code().to_string(),
+            message: e.to_string(),
+            path: e.path().map(|p| p.to_string()),
+        }
+    }
+
+    /// Build the envelope from an opaque `anyhow::Error`, recovering structure by
+    /// downcasting through the known failure types. Falls back to a generic
+    /// `internal-error` code for anything unrecognized so a JSON consumer ALWAYS
+    /// gets `{ code, message }`, never a bare exit + prose. This is the single
+    /// seam that turns the CLI/MCP `Err` path into a structured envelope.
+    pub fn from_anyhow(e: &anyhow::Error) -> Self {
+        if let Some(rich) = e.downcast_ref::<crate::standards::apply::ApplyError>() {
+            return Self::from_rich(rich);
+        }
+        if let Some(c) = e.downcast_ref::<crate::standards::apply::ContainmentError>() {
+            return Self {
+                code: c.code().to_string(),
+                message: c.to_string(),
+                path: Some(c.target().to_string()),
+            };
+        }
+        if let Some(cache) = e.downcast_ref::<crate::cache::CacheError>() {
+            if matches!(cache, crate::cache::CacheError::MutationLockTimeout) {
+                return Self {
+                    code: "mutation-lock-timeout".to_string(),
+                    message: cache.to_string(),
+                    path: None,
+                };
+            }
+        }
+        Self {
+            code: "internal-error".to_string(),
+            // `{:#}` renders the full anyhow context chain, matching the prose the
+            // CLI previously printed to stderr.
+            message: format!("{e:#}"),
+            path: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,11 +268,69 @@ mod tests {
                 cascade: None,
             }],
             warnings: vec![],
+            outcome: ApplyOutcome::Applied,
         };
         let json = serde_json::to_string(&report).unwrap();
         let back: ApplyReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back.applied, 1);
         assert_eq!(back.operations[0].status, OpStatus::Applied);
+        assert_eq!(back.outcome, ApplyOutcome::Applied);
+    }
+
+    /// NRN-183: `outcome` serializes kebab and round-trips; a pre-NRN-183 report
+    /// with no `outcome` field defaults to `applied` on deserialization.
+    #[test]
+    fn outcome_serializes_kebab_and_defaults() {
+        assert_eq!(
+            serde_json::to_string(&ApplyOutcome::Refused).unwrap(),
+            "\"refused\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ApplyOutcome::Failed).unwrap(),
+            "\"failed\""
+        );
+        // A report JSON emitted before `outcome` existed still deserializes.
+        let legacy = serde_json::json!({
+            "schema_version": 2,
+            "trace_id": "",
+            "plan_hash": "h",
+            "vault_root": "/v",
+            "dry_run": false,
+            "applied": 0,
+            "skipped": 0,
+            "failed": 0,
+            "remaining": 0,
+            "operations": [],
+        });
+        let back: ApplyReport = serde_json::from_value(legacy).unwrap();
+        assert_eq!(back.outcome, ApplyOutcome::Applied);
+        assert_eq!(back.exit_code(), 0);
+    }
+
+    /// NRN-150: the error envelope carries `path` only when present, and
+    /// `ApplyError::from_rich` maps a rich apply error to its kebab code + path.
+    #[test]
+    fn error_envelope_shape_and_from_rich() {
+        let rich = crate::standards::apply::ApplyError::StaleDocumentHash {
+            path: "a.md".into(),
+            expected: "aaa".into(),
+            actual: "bbb".into(),
+        };
+        let env = ApplyError::from_rich(&rich);
+        assert_eq!(env.code, "stale-document-hash");
+        assert_eq!(env.path.as_deref(), Some("a.md"));
+        let json = serde_json::to_value(&env).unwrap();
+        assert_eq!(json["code"], "stale-document-hash");
+        assert_eq!(json["path"], "a.md");
+
+        // A pathless error omits the `path` key entirely.
+        let pathless = ApplyError {
+            code: "internal-error".into(),
+            message: "boom".into(),
+            path: None,
+        };
+        let pj = serde_json::to_value(&pathless).unwrap();
+        assert!(pj.get("path").is_none(), "path omitted when None");
     }
 
     #[test]

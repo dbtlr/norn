@@ -39,6 +39,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::BTreeSet;
 
 /// Context for `apply_migration_plan`.
+#[derive(Default)]
 pub(crate) struct ApplyContext {
     /// When true, no filesystem mutations are made; report shows what would happen.
     pub dry_run: bool,
@@ -46,6 +47,16 @@ pub(crate) struct ApplyContext {
     pub parents: bool,
     /// When true, per-op cascade summaries include the full rewrite/skip lists.
     pub verbose: bool,
+    /// When true (NRN-150/MMR-202), a VALIDATION-PHASE precondition refusal (e.g.
+    /// `stale-document-hash`, `expected-old-value-mismatch`) is returned as an
+    /// `ApplyReport` — the offending op `failed` with a structured `error.code`,
+    /// the untouched ops `not_run`, `outcome = refused` — instead of a bare
+    /// `Err`. Only precondition (byte-identical) refusals are converted (see
+    /// `ApplyError::is_precondition`); a post-write failure still propagates as
+    /// `Err`. The MCP mutation tools set this so a client branches on `code`
+    /// rather than receiving an opaque `internal_error`. The CLI leaves it false
+    /// and renders the structured envelope from the `Err` itself.
+    pub refuse_as_report: bool,
 }
 
 /// Apply a `MigrationPlan` against an in-memory `GraphIndex`, delegating to the
@@ -185,7 +196,7 @@ pub(crate) fn apply_migration_plan(
         ..Default::default()
     };
 
-    let apply_result = apply_repair_plan_with_context(
+    let apply_result = match apply_repair_plan_with_context(
         &vault_root,
         index,
         &repair_plan,
@@ -193,7 +204,29 @@ pub(crate) fn apply_migration_plan(
         &create_ctx,
         sink,
         &spans,
-    )?;
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            // Return-report-on-refusal (NRN-150/MMR-202): when the caller opted in
+            // (`refuse_as_report`) and the failure is a VALIDATION-PHASE
+            // precondition (byte-identical vault), surface the offending op as
+            // `failed` with a structured `error.code`, the rest `not_run`,
+            // `outcome = refused` — instead of a bare `Err`. Any other failure
+            // (post-write, or refusal not opted in) propagates unchanged.
+            match e.downcast_ref::<crate::standards::apply::ApplyError>() {
+                Some(rich) if ctx.refuse_as_report && rich.is_precondition() => {
+                    return Ok(build_refusal_report(
+                        plan,
+                        &hydrated,
+                        &provenance,
+                        ctx.dry_run,
+                        rich,
+                    ));
+                }
+                _ => return Err(e),
+            }
+        }
+    };
 
     // ------------------------------------------------------------------
     // Phase 4: convert RepairApplyReport → ApplyReport
@@ -260,6 +293,16 @@ pub(crate) fn apply_migration_plan(
         })
         .collect();
 
+    // NRN-183: collapse the tri-state into one machine-readable field. A
+    // runtime op-failure (`failed > 0`) maps to `failed` (exit 1); otherwise the
+    // apply/dry-run succeeded (`applied`, exit 0). The `refused` outcome (exit 2)
+    // is produced only by `build_refusal_report` on a precondition refusal.
+    let outcome = if failed > 0 {
+        crate::apply_report::ApplyOutcome::Failed
+    } else {
+        crate::apply_report::ApplyOutcome::Applied
+    };
+
     Ok(ApplyReport {
         schema_version: APPLY_REPORT_SCHEMA_VERSION,
         // Dry-runs persist no log, so the trace_id correlates to nothing — emit
@@ -278,7 +321,82 @@ pub(crate) fn apply_migration_plan(
         remaining,
         operations: ops,
         warnings,
+        outcome,
     })
+}
+
+/// Build a return-report-on-refusal (NRN-150/MMR-202) from a VALIDATION-PHASE
+/// precondition error. The refusal is byte-identical (nothing was written), so
+/// every expanded change becomes a `not_run` op EXCEPT the first whose path
+/// matches the error's path, which becomes `failed` carrying the structured
+/// `error` envelope. `outcome = refused`. When the error carries no path (a
+/// plan-level refusal), the first op is marked failed so the code is never lost.
+fn build_refusal_report(
+    plan: &MigrationPlan,
+    changes: &[PlannedChange],
+    provenance: &[usize],
+    dry_run: bool,
+    rich: &crate::standards::apply::ApplyError,
+) -> ApplyReport {
+    use crate::apply_report::{ApplyError as ErrorEnvelope, ApplyOutcome};
+
+    let envelope = ErrorEnvelope::from_rich(rich);
+    // Index of the op to mark failed: the first change whose path matches the
+    // error path; else the first op (pathless plan-level refusal).
+    let failed_idx = rich
+        .path()
+        .and_then(|ep| changes.iter().position(|c| c.path == ep))
+        .unwrap_or(0);
+
+    let ops: Vec<ApplyReportOp> = changes
+        .iter()
+        .enumerate()
+        .map(|(i, change)| {
+            let parent_idx = provenance[i];
+            let parent_op = &plan.operations[parent_idx];
+            let from = if is_high_level_op(parent_op) {
+                Some(parent_idx.to_string())
+            } else {
+                None
+            };
+            let (status, error) = if i == failed_idx {
+                (OpStatus::Failed, Some(envelope.clone()))
+            } else {
+                (OpStatus::NotRun, None)
+            };
+            ApplyReportOp {
+                op_id: i.to_string(),
+                kind: change.operation.clone(),
+                status,
+                from,
+                path: None,
+                stem: None,
+                summary: build_summary(change, /*dry_run=*/ true, None),
+                error,
+                footnote: parent_op.footnote.clone(),
+                cascade: None,
+            }
+        })
+        .collect();
+
+    // A refusal writes nothing: exactly one op `failed`, the rest `not_run`.
+    let failed = ops.iter().filter(|o| o.status == OpStatus::Failed).count();
+    let remaining = ops.iter().filter(|o| o.status == OpStatus::NotRun).count();
+
+    ApplyReport {
+        schema_version: APPLY_REPORT_SCHEMA_VERSION,
+        trace_id: String::new(),
+        plan_hash: plan.canonical_hash(),
+        vault_root: plan.vault_root.clone(),
+        dry_run,
+        applied: 0,
+        skipped: 0,
+        failed,
+        remaining,
+        operations: ops,
+        warnings: Vec::new(),
+        outcome: ApplyOutcome::Refused,
+    }
 }
 
 /// Returns true for operation kinds that the existing apply orchestrator
@@ -709,6 +827,7 @@ mod tests {
             dry_run: true,
             parents: false,
             verbose: false,
+            refuse_as_report: false,
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         assert_eq!(report.schema_version, APPLY_REPORT_SCHEMA_VERSION);
@@ -743,6 +862,7 @@ mod tests {
             dry_run: false,
             parents: false,
             verbose: false,
+            refuse_as_report: false,
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         assert_eq!(report.applied, 1);
@@ -898,6 +1018,7 @@ mod tests {
             dry_run: true,
             parents: false,
             verbose: false,
+            refuse_as_report: false,
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         // Expanded ops should reference parent op_id 0
@@ -935,6 +1056,7 @@ mod tests {
             dry_run: false,
             parents: false,
             verbose: false,
+            refuse_as_report: false,
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         let op = report
@@ -974,6 +1096,7 @@ mod tests {
             dry_run: false,
             parents: false,
             verbose: true,
+            refuse_as_report: false,
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         let op = report
@@ -1025,6 +1148,7 @@ mod tests {
             dry_run: false,
             parents: false,
             verbose: false,
+            refuse_as_report: false,
         };
         let result = apply_migration_plan(&plan, &index, ctx, &mut test_sink());
         assert!(
@@ -1079,6 +1203,7 @@ mod tests {
             dry_run: false,
             parents: false,
             verbose: false,
+            refuse_as_report: false,
         };
         let result = apply_migration_plan(&plan, &index, ctx, &mut test_sink());
         let err = result.expect_err("duplicate-field plan must be refused up front");

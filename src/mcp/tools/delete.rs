@@ -162,6 +162,7 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
         dry_run,
         parents: false,
         verbose: false,
+        refuse_as_report: true,
     };
 
     // ── DRY-RUN (default): no lock, discard sink, applier in dry-run mode ───────
@@ -173,8 +174,9 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
             crate::telemetry::IdGen::new(),
             crate::telemetry::Clock::System,
         );
-        let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Propagate the original error so `to_mcp_error` recovers the structured
+        // `{ code, message, path? }` envelope (NRN-150).
+        let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
         return Ok(report);
     }
 
@@ -194,11 +196,9 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
         &["delete".to_string(), p.target.clone()],
     );
 
-    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
 
-    let exit = if report.failed > 0 { 1 } else { 0 };
-    crate::emit_invocation_finished(&mut sink, "delete", exit, &report);
+    crate::emit_invocation_finished(&mut sink, "delete", report.exit_code(), &report);
 
     Ok(report)
 }

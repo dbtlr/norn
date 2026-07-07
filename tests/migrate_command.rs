@@ -105,6 +105,64 @@ operations: []
     );
 }
 
+/// NRN-150: a precondition refusal under `--format json` emits the structured
+/// `{ code, message, path? }` error envelope on STDOUT (not just prose on stderr),
+/// with the stable kebab code an agent branches on. Here a bogus `document_hash`
+/// forces a `stale-document-hash` CAS refusal; exit is the preflight code 2.
+#[test]
+fn migrate_json_failure_emits_structured_envelope_on_stdout() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let plan = serde_json::json!({
+        "schema_version": 1,
+        "vault_root": vault.to_str().unwrap(),
+        "operations": [{
+            "kind": "add_frontmatter",
+            "fields": {
+                "path": "a.md",
+                "field": "status",
+                "new_value": "done",
+                // Non-empty wrong hash: hydration only fills EMPTY hashes, so this
+                // survives to the CAS check and refuses with stale-document-hash.
+                "document_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            }
+        }]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["migrate"])
+        .arg(&plan_path)
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "CAS refusal is a preflight refusal (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let envelope: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be a JSON envelope, got {stdout:?}: {e}"));
+    assert_eq!(
+        envelope["code"], "stale-document-hash",
+        "envelope carries the stable kebab code: {envelope}"
+    );
+    assert_eq!(envelope["path"], "a.md", "envelope carries the path");
+    assert!(
+        envelope["message"].as_str().is_some(),
+        "envelope carries a human message: {envelope}"
+    );
+    // The vault must be byte-identical after a precondition refusal.
+    let a = std::fs::read_to_string(vault.join("a.md")).unwrap();
+    assert_eq!(a, "---\ntype: note\n---\n# A\n");
+}
+
 #[test]
 fn migrate_reads_plan_from_stdin() {
     let tmp = synth();

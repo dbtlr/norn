@@ -128,6 +128,7 @@ pub fn run(
         dry_run,
         parents: false,
         verbose,
+        refuse_as_report: false,
     };
 
     let argv: Vec<String> = std::env::args().collect();
@@ -152,7 +153,12 @@ pub fn run(
     let report = match apply_migration_plan(&plan, &index, ctx, &mut sink) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            // NRN-150: structured `{ code, message, path? }` envelope on stdout
+            // for `--format json`; prose on stderr otherwise. Preflight refusal.
+            match args.format {
+                RewriteWikilinkFormat::Json => crate::render_json_error_envelope(&e)?,
+                RewriteWikilinkFormat::Records => eprintln!("error: {e:#}"),
+            }
             return Ok(EXIT_PREFLIGHT);
         }
     };
