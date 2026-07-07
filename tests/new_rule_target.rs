@@ -681,3 +681,49 @@ validate:
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ── NRN-211: unknown bare {{key}} placeholder suggests {{var.key}} ──
+
+#[test]
+fn new_unknown_bare_var_suggests_namespaced_form() {
+    // A rule target references the bare `{{workspace}}` (missing the `var.`
+    // namespace). The operator passed `--var workspace=norn`, so the render
+    // error should suggest the namespaced `{{var.workspace}}` spelling.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: ws
+      target: "Workspaces/{{workspace}}/{{title|slugify}}.md"
+      frontmatter_defaults:
+        type: note
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args([
+            "new",
+            "--as",
+            "ws",
+            "--title",
+            "Design Note",
+            "--var",
+            "workspace=norn",
+            "--yes",
+            "-p",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unknown bare var should refuse: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("{{var.workspace}}"),
+        "error should suggest the namespaced form: {stderr}"
+    );
+}

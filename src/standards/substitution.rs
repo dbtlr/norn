@@ -226,8 +226,8 @@ pub struct Context {
 /// Errors produced by [`render`].
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
-    #[error("unknown variable `{0}`")]
-    UnknownVariable(String),
+    #[error("unknown variable `{name}`{hint}")]
+    UnknownVariable { name: String, hint: String },
     #[error("unknown transform `{0}`")]
     UnknownTransform(String),
     #[error("malformed template: {0}")]
@@ -407,8 +407,32 @@ fn render_var(expr: &str, ctx: &Context) -> Result<String, RenderError> {
             let key = &n["var.".len()..];
             Ok(ctx.path_vars.get(key).cloned().unwrap_or_default())
         }
-        other => Err(RenderError::UnknownVariable(other.into())),
+        other => Err(RenderError::UnknownVariable {
+            name: other.into(),
+            hint: unknown_var_hint(other, ctx),
+        }),
     }
+}
+
+/// Build a did-you-mean hint for an unknown bare `{{name}}` placeholder
+/// (NRN-211). Caller-supplied `--var KEY=VALUE` values land in `ctx.path_vars`;
+/// a common slip is writing `{{workspace}}` instead of the namespaced
+/// `{{var.workspace}}`. When the bare name matches a supplied var key, suggest
+/// the namespaced form; otherwise, when any vars were supplied, list them.
+fn unknown_var_hint(name: &str, ctx: &Context) -> String {
+    if ctx.path_vars.contains_key(name) {
+        return format!(" (did you mean `{{{{var.{name}}}}}`?)");
+    }
+    if ctx.path_vars.is_empty() {
+        return String::new();
+    }
+    let avail = ctx
+        .path_vars
+        .keys()
+        .map(|k| format!("`{{{{var.{k}}}}}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" (available template vars: {avail})")
 }
 
 #[cfg(test)]
@@ -514,8 +538,34 @@ mod var_tests {
         let ctx = ctx_for("foo");
         let err = render("{{whatever}}", &ctx).unwrap_err();
         assert!(
-            matches!(err, RenderError::UnknownVariable(ref name) if name == "whatever"),
+            matches!(err, RenderError::UnknownVariable { ref name, .. } if name == "whatever"),
             "expected UnknownVariable(\"whatever\"), got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_var_matching_supplied_var_key_suggests_namespaced_form() {
+        // NRN-211: `{{workspace}}` when `--var workspace=X` was passed should
+        // suggest the namespaced `{{var.workspace}}`.
+        let mut ctx = ctx_for("foo");
+        ctx.path_vars.insert("workspace".into(), "norn".into());
+        let err = render("{{workspace}}", &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("{{var.workspace}}"),
+            "hint should suggest namespaced form, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_var_lists_available_vars_when_no_exact_match() {
+        let mut ctx = ctx_for("foo");
+        ctx.path_vars.insert("workspace".into(), "norn".into());
+        let err = render("{{nope}}", &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("{{var.workspace}}"),
+            "hint should list available vars, got: {msg}"
         );
     }
 }
