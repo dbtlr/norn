@@ -176,9 +176,9 @@ The validate → plan → apply → verify loop closes for these finding classes
 | `document-misrouted` | `move_document` | Move the file to a configured destination (with backlink rewriting). |
 | `link-target-missing` | `rewrite_link` | Closest-match rewrite proposed automatically. Use `--confidence high` to keep only slug-normalized-identity matches. |
 
-Findings without a matching deterministic rule are reported as skipped fallout in the MigrationPlan with `skip_reason: no_rule_matched`.
+Findings without a matching deterministic rule are reported as skipped fallout in the MigrationPlan's `skipped[]` with `reason: "no-rule-matched"`.
 
-## Migrate (apply)
+## Apply
 
 `norn apply [<plan>]` applies `MigrationPlan` artifacts. Apply writes by default; pass `--dry-run` to preview.
 

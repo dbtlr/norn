@@ -4,7 +4,7 @@
 //! This module is the integration point that wires the MigrationPlan →
 //! PlannedChange expansion to the existing pass-based apply orchestrator
 //! (repair_apply.rs). Every document-mutation command (move, delete,
-//! rewrite-wikilink, migrate) builds a MigrationPlan and applies it here,
+//! rewrite-wikilink, apply) builds a MigrationPlan and applies it here,
 //! emitting a single ApplyReport envelope.
 //!
 //! # Provenance tracking
