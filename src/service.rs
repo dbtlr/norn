@@ -49,12 +49,14 @@
 //!
 //! ## Scope of this module (NRN-92 / NRN-93)
 //!
-//! This lands the *client half*: host-socket-path derivation, the probe, and
-//! the control-frame protocol. It returns a [`RouteDecision`]; the daemon that
-//! answers the handshake is NRN-93, and translating the CLI args to the MCP
-//! contract and rendering the routed response is NRN-94. Until NRN-94 fills the
-//! `Route` arm, callers treat a live service as a safe fall-through to Direct —
-//! a verified direct open always preserves the trust invariant.
+//! This lands the *client half*: host-socket-path derivation, the probe, the
+//! control-frame protocol, and (NRN-94) the request path —
+//! [`ServiceClient::call_tool_structured`] sends the `hello` vault preamble and
+//! runs the MCP `initialize` + `tools/call` exchange over the same stream. The
+//! daemon that answers is NRN-93. The routing seam in `src/lib.rs` decides which
+//! commands actually route (only `count` today — see `try_route_read`); every
+//! other read, and every routing failure, falls through to a verified direct
+//! open, which always preserves the trust invariant.
 //!
 //! Unix-domain sockets are Unix-only; on non-Unix targets [`probe`] is a
 //! compile-time `Direct`, so the crate still builds everywhere.
@@ -138,13 +140,13 @@ pub enum ControlFrame {
 /// timeouts, I/O errors, protocol mismatches, and malformed frames, which
 /// stay silent because they are expected transient or environmental noise.
 //
-// NRN-94-gated probe path: the client probe is complete and unit-tested (this
-// module's tests) but switched off in `try_route_read` until NRN-94 fills the
-// `Route` arm, so it is dead in the non-test lib build today. Kept intact (not
-// deleted) because NRN-94 turns it back on unchanged. The same rationale
-// applies to every `#[allow(dead_code)]` on the probe-path items below
-// (`DEFAULT_HANDSHAKE_TIMEOUT`, `RouteDecision`, `probe`, `probe_socket`,
-// `connect_control`, `handshake`, `handshake_pong`, `read_control_line`).
+// The probe path is live on unix (NRN-94 wired `try_route_read` → `probe` in
+// `src/lib.rs`). The `#[allow(dead_code)]` on the probe-path items below
+// (`RouteDecision`, `probe`, `probe_socket`, `connect_control`, `handshake`,
+// `handshake_pong`, `read_control_line`) is retained only for the non-unix
+// build, where the daemon cannot run and these are unreachable; on unix it is a
+// harmless no-op. `HandshakeError::Other`'s wrapped error is deliberately never
+// read (callers only distinguish it from `VersionSkew`).
 #[cfg(unix)]
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -168,9 +170,17 @@ enum HandshakeError {
 /// and the cost of a false-negative (running Direct when a daemon was merely
 /// slow) is only the loss of the warm-cache speedup, never a correctness or
 /// trust loss.
-// NRN-94-gated probe path (see the note on `HandshakeError`).
-#[allow(dead_code)]
 pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The request connection's OWN I/O budget (NRN-94), deliberately far larger
+/// than [`DEFAULT_HANDSHAKE_TIMEOUT`]: the probe's short timeout only bounds the
+/// O(1) liveness ping, whereas a real query on a large cold vault (first touch,
+/// integrity check, index build) can legitimately take seconds. Reusing the
+/// 250ms probe budget here would false-timeout a healthy-but-busy daemon and
+/// fall back to Direct on every routed read. A wedged daemon is still bounded —
+/// this caps the wait, then the CLI falls back to a verified direct open.
+#[cfg(unix)]
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The routing decision for one CLI invocation.
 // NRN-94-gated probe path (see the note on `HandshakeError`).
@@ -644,6 +654,164 @@ fn read_control_line(
     }
 }
 
+/// The request half of the routing seam (NRN-94).
+///
+/// A [`ServiceClient`] is proof that a daemon answered the liveness ping on a
+/// *separate* control connection. This opens a fresh REQUEST connection to the
+/// same socket — with its own I/O budget ([`DEFAULT_REQUEST_TIMEOUT`], not the
+/// probe's short handshake timeout) — sends the `hello` vault preamble, runs the
+/// MCP `initialize` + `tools/call` exchange as raw newline-delimited JSON-RPC,
+/// and returns the tool's `structuredContent`.
+///
+/// Every failure — connect refused (daemon died in the probe→request gap), a
+/// non-`ready` preamble reply (vault open failed daemon-side), an MCP transport
+/// error, or a JSON-RPC `error` (the tool itself failed) — is returned as `Err`.
+/// The caller maps ALL of them to a verified direct open, so a routed read never
+/// fails a read that direct execution could serve. Because reads are idempotent
+/// and side-effect-free, this attempt-then-fall-back is safe: a tool-level error
+/// (e.g. an invalid `--by`) is re-produced identically by the direct path, so
+/// error output and exit codes stay byte-identical too.
+#[cfg(unix)]
+impl ServiceClient {
+    /// Route one read tool call to the warm daemon and return its
+    /// `structuredContent` JSON. `vault_root` is the canonical vault root the
+    /// caller computed once (the wire speaks canonical paths only — ADR 0005);
+    /// `tool` is the MCP tool name (e.g. `"vault.count"`); `arguments` is the
+    /// tool's parameter object.
+    pub fn call_tool_structured(
+        &self,
+        vault_root: &Utf8Path,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        use std::io::BufReader;
+
+        // Fresh request connection with its OWN I/O budget — never the probe's
+        // short handshake timeout (NRN-92 review F, NRN-94 constraint).
+        let stream = connect_control(&self.socket_path, DEFAULT_REQUEST_TIMEOUT)?;
+        stream.set_read_timeout(Some(DEFAULT_REQUEST_TIMEOUT))?;
+        stream.set_write_timeout(Some(DEFAULT_REQUEST_TIMEOUT))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+
+        // 1. Vault preamble: name the vault for this connection, then require a
+        //    `ready` frame. Anything else (an `error` frame, EOF, garbage) means
+        //    the daemon could not serve this vault — fall back to Direct.
+        let hello = ControlFrame::Hello {
+            protocol: CONTROL_PROTOCOL,
+            vault_root: vault_root.as_str().to_string(),
+        };
+        write_json_line(&stream, &serde_json::to_value(&hello)?)?;
+        let ready = read_json_line(&mut reader)?
+            .ok_or_else(|| anyhow::anyhow!("daemon closed before answering hello"))?;
+        match ready.get("norn_control").and_then(|v| v.as_str()) {
+            Some("ready") => {}
+            _ => anyhow::bail!("daemon did not answer hello with ready: {ready}"),
+        }
+
+        // 2. MCP handshake. The daemon serves rmcp over the remainder of the
+        //    stream; `initialize` must succeed before any `tools/call`.
+        let init = json_rpc_request(
+            1,
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "norn-cli", "version": env!("CARGO_PKG_VERSION") },
+            }),
+        );
+        write_json_line(&stream, &init)?;
+        let init_resp = read_rpc_response(&mut reader, 1)?;
+        if let Some(err) = init_resp.get("error") {
+            anyhow::bail!("MCP initialize failed: {err}");
+        }
+
+        // 3. The actual tool call. A JSON-RPC `error` here is a tool-level
+        //    failure (e.g. an invalid predicate) — bail so the caller falls back
+        //    to Direct, which re-produces the identical error and exit code.
+        let call = json_rpc_request(
+            2,
+            "tools/call",
+            serde_json::json!({ "name": tool, "arguments": arguments }),
+        );
+        write_json_line(&stream, &call)?;
+        let resp = read_rpc_response(&mut reader, 2)?;
+        if let Some(err) = resp.get("error") {
+            anyhow::bail!("tool '{tool}' failed on the daemon: {err}");
+        }
+        let structured = resp
+            .get("result")
+            .and_then(|r| r.get("structuredContent"))
+            .cloned()
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no structuredContent"))?;
+        Ok(structured)
+    }
+}
+
+/// Build a JSON-RPC 2.0 request frame.
+#[cfg(unix)]
+fn json_rpc_request(id: u32, method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    })
+}
+
+/// Write one newline-delimited JSON value to `stream` and flush.
+#[cfg(unix)]
+fn write_json_line(
+    mut stream: &std::os::unix::net::UnixStream,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    stream.write_all(&bytes)?;
+    stream.flush()
+}
+
+/// Read one newline-delimited JSON value, skipping blank / non-JSON noise lines.
+/// Returns `Ok(None)` on EOF before any JSON value.
+#[cfg(unix)]
+fn read_json_line<R: std::io::BufRead>(
+    reader: &mut R,
+) -> std::io::Result<Option<serde_json::Value>> {
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return Ok(Some(v));
+        }
+        // Non-JSON line on the wire: skip and keep reading.
+    }
+}
+
+/// Read JSON-RPC responses until one matches `id` (skipping notifications and
+/// out-of-order frames), bounded so a chatty peer cannot loop forever.
+#[cfg(unix)]
+fn read_rpc_response<R: std::io::BufRead>(
+    reader: &mut R,
+    id: u32,
+) -> anyhow::Result<serde_json::Value> {
+    for _ in 0..10_000 {
+        let v = read_json_line(reader)?
+            .ok_or_else(|| anyhow::anyhow!("daemon closed before answering request {id}"))?;
+        if v.get("id").and_then(|i| i.as_u64()) == Some(u64::from(id)) {
+            return Ok(v);
+        }
+        // A notification (no id) or a response to a different id: keep reading.
+    }
+    anyhow::bail!("no JSON-RPC response for request {id}")
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -667,6 +835,137 @@ mod tests {
         let b = host_socket_path().expect("derive again");
         assert_eq!(a, b, "same process env => same host socket path");
         assert!(a.as_str().ends_with("norn/run/norn.sock"), "path was {a}");
+    }
+
+    /// NRN-94 request path: a `ServiceClient` sends the `hello` vault preamble,
+    /// runs the MCP `initialize` + `tools/call` exchange, and returns the tool's
+    /// `structuredContent`. A stub listener replays exactly the wire the real
+    /// daemon speaks (ready frame → JSON-RPC over the same stream) and asserts
+    /// the client named the vault it was asked to.
+    #[test]
+    fn call_tool_structured_completes_the_hello_and_mcp_exchange() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        // Channel so the test can assert the vault_root the client sent in hello.
+        let (tx, rx) = mpsc::channel::<String>();
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+
+            // hello → ready
+            let mut hello_line = String::new();
+            reader.read_line(&mut hello_line).unwrap();
+            let hello: serde_json::Value = serde_json::from_str(hello_line.trim()).unwrap();
+            assert_eq!(hello["norn_control"], "hello");
+            tx.send(hello["vault_root"].as_str().unwrap().to_string())
+                .unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "norn_control": "ready",
+                    "protocol": CONTROL_PROTOCOL,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+
+            // initialize (id=1) → result
+            let mut init_line = String::new();
+            reader.read_line(&mut init_line).unwrap();
+            let init: serde_json::Value = serde_json::from_str(init_line.trim()).unwrap();
+            assert_eq!(init["method"], "initialize");
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+            )
+            .unwrap();
+            w.flush().unwrap();
+
+            // tools/call (id=2) → result with structuredContent
+            let mut call_line = String::new();
+            reader.read_line(&mut call_line).unwrap();
+            let call: serde_json::Value = serde_json::from_str(call_line.trim()).unwrap();
+            assert_eq!(call["method"], "tools/call");
+            assert_eq!(call["params"]["name"], "vault.count");
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"total\":3}"}],
+                        "structuredContent": {"total": 3},
+                        "isError": false,
+                    }
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let vault_root = Utf8PathBuf::from("/vaults/atlas");
+        let structured = client
+            .call_tool_structured(
+                &vault_root,
+                "vault.count",
+                serde_json::json!({"by": "type"}),
+            )
+            .expect("routed tool call should succeed");
+
+        assert_eq!(structured, serde_json::json!({"total": 3}));
+        assert_eq!(rx.recv().unwrap(), "/vaults/atlas", "hello named the vault");
+        server.join().unwrap();
+    }
+
+    /// A daemon that answers `hello` with an `error` frame (vault open failed on
+    /// its side) surfaces as `Err`, so the caller falls back to Direct.
+    #[test]
+    fn call_tool_structured_error_preamble_is_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+            let mut hello_line = String::new();
+            reader.read_line(&mut hello_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "norn_control": "error",
+                    "protocol": CONTROL_PROTOCOL,
+                    "message": "vault not found",
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let result = client.call_tool_structured(
+            &Utf8PathBuf::from("/vaults/atlas"),
+            "vault.count",
+            serde_json::json!({}),
+        );
+        assert!(result.is_err(), "an error preamble must be Err (→ Direct)");
+        server.join().unwrap();
     }
 
     /// No socket file present => the fast Direct path.
