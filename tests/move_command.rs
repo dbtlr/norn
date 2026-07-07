@@ -100,6 +100,101 @@ fn move_yes_applies_and_rewrites_backlinks() {
     );
 }
 
+/// NRN-216: `norn move <stem> <dest> --yes` must resolve the bare stem to
+/// its full vault-relative path (as preflight_and_plan already does) and
+/// build the MigrationOp from the RESOLVED src/dst, not the raw CLI args.
+/// Regression: the move arm in src/lib.rs built `MigrationOp.fields` from
+/// `args.src`/`args.dst` verbatim, so `--dry-run` looked fine (dry-run never
+/// touches the filesystem) but `--yes` failed with "move source missing in
+/// filesystem: b" because the applier tried to rename a literal file named
+/// `b` instead of `b.md`.
+#[test]
+fn move_stem_yes_resolves_and_applies() {
+    let tmp = synth();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["move", "b", "renamed.md", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("✓ moved b → renamed.md") || stdout.contains("✓ moved b.md → renamed.md"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(
+        !tmp.path().join("vault/b.md").exists(),
+        "b.md should have been moved"
+    );
+    assert!(
+        tmp.path().join("vault/renamed.md").exists(),
+        "renamed.md should exist"
+    );
+    let a_content = std::fs::read_to_string(tmp.path().join("vault/a.md")).unwrap();
+    assert!(
+        a_content.contains("[[renamed]]"),
+        "a.md should now reference renamed: {a_content}"
+    );
+}
+
+/// NRN-216 regression guard: stem-addressed dry-run must keep working
+/// (it never touched the filesystem, so it was never broken, but this
+/// pins the behavior so a future fix to the --yes path can't regress it).
+#[test]
+fn move_stem_dry_run_still_previews() {
+    let tmp = synth();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["move", "b", "renamed.md", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        tmp.path().join("vault/b.md").exists(),
+        "b.md should not be moved"
+    );
+    assert!(
+        !tmp.path().join("vault/renamed.md").exists(),
+        "renamed.md should not exist"
+    );
+}
+
+/// NRN-216 regression guard: full-path move by --yes must keep working
+/// unchanged (this is the case that already worked before the fix).
+#[test]
+fn move_full_path_yes_still_applies() {
+    let tmp = synth();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["move", "b.md", "renamed.md", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.path().join("vault/b.md").exists(),
+        "b.md should have been moved"
+    );
+    assert!(
+        tmp.path().join("vault/renamed.md").exists(),
+        "renamed.md should exist"
+    );
+}
+
 #[test]
 fn move_format_json_emits_envelope() {
     let tmp = synth();

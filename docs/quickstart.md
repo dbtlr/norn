@@ -84,7 +84,7 @@ Inspect the plan. The `operations` array is what apply will write; `skipped` is 
 
 ```bash
 norn -C /path/to/vault apply plan.json --dry-run --format json
-norn -C /path/to/vault apply plan.json --format json
+norn -C /path/to/vault apply plan.json --format json --yes
 ```
 
 Run `norn -C /path/to/vault validate --summary` afterward as the post-hoc check across the whole vault.

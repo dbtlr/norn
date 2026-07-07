@@ -45,14 +45,15 @@ pub fn run(
     // ------------------------------------------------------------------
     // 0. Acquire mutation lock before cache load.
     // ------------------------------------------------------------------
+    // NRN-212: `--format json` is output-shape-only — it does NOT imply
+    // consent to apply, matching every other mutation command (set/delete/
+    // new/edit/move). A non-TTY json caller without --yes is an implicit
+    // dry-run, not an apply.
     let (_, state_dir) =
         state_dir_for(cwd).map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
     sweep_pending(&state_dir);
     let _mutation_lock = {
-        let is_apply = !args.dry_run
-            && (args.yes
-                || matches!(args.format, RewriteWikilinkFormat::Json)
-                || std::io::stdin().is_terminal());
+        let is_apply = !args.dry_run && (args.yes || std::io::stdin().is_terminal());
         match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
             Ok(guard) => guard,
             Err(CacheError::MutationLockTimeout) => {
@@ -95,14 +96,21 @@ pub fn run(
     // ------------------------------------------------------------------
     // 3. Determine dry_run mode
     //    - --dry-run: never apply
-    //    - --yes or --format json: skip TTY confirmation, apply
+    //    - --yes: skip TTY confirmation, apply
+    //    - --format json (without --yes): non-interactive (no prompt — you
+    //      can't prompt when emitting machine JSON), but NOT consent to
+    //      apply → implicit dry-run (NRN-212; json is output-shape-only,
+    //      matching every other mutation command)
     //    - TTY without --yes: prompt
     //    - Non-TTY without --yes: implicit dry-run
     // ------------------------------------------------------------------
     let dry_run = if args.dry_run {
         true
-    } else if args.yes || matches!(args.format, RewriteWikilinkFormat::Json) {
+    } else if args.yes {
         false
+    } else if matches!(args.format, RewriteWikilinkFormat::Json) {
+        // Non-interactive, no --yes → implicit dry-run.
+        true
     } else if std::io::stdin().is_terminal() {
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();

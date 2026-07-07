@@ -241,7 +241,7 @@ The JSON `ApplyReport` (`--format json`, or `--out <PATH>`) carries top-level co
 norn validate --summary --format json
 norn repair --plan --out plan.json
 norn apply plan.json --dry-run --format json
-norn apply plan.json --format json
+norn apply plan.json --format json --yes
 norn validate --summary --format json
 ```
 
@@ -252,7 +252,7 @@ git status --short
 git tag snapshot/vault-repair-$(date +%Y%m%d-%H%M%S)
 norn repair --plan --out plan.json
 norn apply plan.json --dry-run --format json
-norn apply plan.json --format json
+norn apply plan.json --format json --yes
 git diff --check
 git diff
 norn validate --summary --format json
