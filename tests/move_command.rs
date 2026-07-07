@@ -745,27 +745,35 @@ fn move_with_unwritable_backlinker_warns_but_exits_zero() {
 
     // target.md is the doc being moved.
     std::fs::write(root.join("target.md"), "---\ntype: note\n---\n# Target\n").unwrap();
-    // linker.md contains a wikilink [[target]] — the stem form the move cascade
-    // rewrites (same shape as a.md → [[b]] in the existing synth() tests).
+    // linker.md lives in its own subdirectory so its containing directory's
+    // permissions can be locked down without also blocking the primary move
+    // (target.md -> renamed.md), which needs to create/remove entries in
+    // `root` itself. It contains a wikilink [[target]] — the stem form the
+    // move cascade rewrites (same shape as a.md → [[b]] in the existing
+    // synth() tests); stem-link matching is directory-agnostic.
+    let sub = root.join("sub");
+    std::fs::create_dir(&sub).unwrap();
     std::fs::write(
-        root.join("linker.md"),
+        sub.join("linker.md"),
         "---\ntype: note\n---\n# Linker\n[[target]]\n",
     )
     .unwrap();
 
-    // Make linker.md read-only so the cascade write fails (EACCES).
-    let linker_path = root.join("linker.md");
-    std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    // (NRN-146) The cascade write now goes through `atomic_write` (temp file +
+    // rename), so a read-only linker.md file no longer fails the write —
+    // `rename(2)` doesn't consult the replaced file's permission bits, only
+    // the containing directory's. Lock down `sub` itself instead, which still
+    // blocks creation of the sibling temp file.
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    // Probe: if we can still open linker.md for write, we're running as root
+    // Probe: if we can still create a file in `sub`, we're running as root
     // (or some other context where unix perms are not enforced). Skip in that case.
-    if std::fs::OpenOptions::new()
-        .write(true)
-        .open(&linker_path)
-        .is_ok()
-    {
+    let probe_path = sub.join(".rowb-perm-probe");
+    let probe_writable = std::fs::write(&probe_path, "x").is_ok();
+    let _ = std::fs::remove_file(&probe_path);
+    if probe_writable {
         // Restore permissions before returning so tempdir cleanup works.
-        std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
         return;
     }
 
@@ -784,7 +792,7 @@ fn move_with_unwritable_backlinker_warns_but_exits_zero() {
         .unwrap();
 
     // Restore perms before any assertions so tempdir cleanup always works.
-    std::fs::set_permissions(&linker_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     // Primary move succeeded → exit 0.
     assert_eq!(

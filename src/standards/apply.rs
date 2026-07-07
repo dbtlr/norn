@@ -1116,6 +1116,32 @@ pub fn apply_delete(cwd: &Utf8Path, change: &PlannedChange) -> Result<DeleteResu
     })
 }
 
+/// Crash-atomic write: serialize `contents` to a sibling temp file
+/// (`.{stem}.tmp`) then `fs::rename` it into place (atomic on POSIX). A SIGKILL /
+/// power loss / `ENOSPC` mid-write truncates only the throwaway temp, never the
+/// live document — which is exactly the half-mutation NRN-139 exists to prevent.
+/// Best-effort temp cleanup on rename failure. Shared by the Phase A2 content
+/// write, the `create_document` pass, and (NRN-146) backlink-cascade rewrites
+/// in `rewrite_one_backlink` so there is a single implementation for every
+/// document write path. A side effect for cascade callers: renaming into place
+/// REPLACES a symlink at `full` rather than writing through it, closing the
+/// symlink-file cascade class NRN-145 could otherwise only gate at preflight.
+pub(crate) fn atomic_write(full: &Utf8Path, contents: &str) -> std::io::Result<()> {
+    let tmp_path = {
+        let mut p = full.to_path_buf();
+        let stem = p.file_name().unwrap_or("doc").to_string();
+        p.set_file_name(format!(".{stem}.tmp"));
+        p
+    };
+    fs::write(tmp_path.as_std_path(), contents)?;
+    if let Err(e) = fs::rename(tmp_path.as_std_path(), full.as_std_path()) {
+        // Best-effort cleanup on rename failure.
+        let _ = fs::remove_file(tmp_path.as_std_path());
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Outcome of attempting one backlink rewrite. The caller sorts these into
 /// the `LinkRewriteOutcome` buckets and the retry pass re-runs this on failures.
 pub(crate) enum LinkAttempt {
@@ -1126,7 +1152,9 @@ pub(crate) enum LinkAttempt {
 }
 
 /// Read `source_path`, replace the first occurrence of `raw` with `rewritten`,
-/// write it back. Categorizes outcomes; never panics, never aborts.
+/// write it back via `atomic_write` (NRN-146: temp file + rename, the same
+/// crash-atomic guarantee as every other document write). Categorizes
+/// outcomes; never panics, never aborts.
 /// - NotFound (read or write) -> Skipped(SourceMissing): the file moved on.
 /// - other io error on read   -> Failed(ReadFailed, detail)
 /// - other io error on write  -> Failed(WriteFailed, detail)
@@ -1160,7 +1188,7 @@ pub(crate) fn rewrite_one_backlink(
     if verify_frontmatter_not_degraded(source_path, &original, &updated).is_err() {
         return LinkAttempt::Skipped(LinkSkipReason::WouldCorruptFrontmatter);
     }
-    match fs::write(abs.as_std_path(), &updated) {
+    match atomic_write(&abs, &updated) {
         Ok(()) => LinkAttempt::Rewritten,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             LinkAttempt::Skipped(LinkSkipReason::SourceMissing)
@@ -2816,9 +2844,57 @@ mod tests {
         );
     }
 
+    /// (NRN-146) The backlink-cascade write is crash-atomic (temp + rename,
+    /// mirroring the Phase A2 content write and `create_document`): the
+    /// rewritten content lands correctly AND no `.tmp` sibling is left behind
+    /// after a successful rewrite — the observable that distinguishes
+    /// `atomic_write` from a bare `fs::write`.
+    #[test]
+    fn rewrite_one_backlink_is_atomic_and_leaves_no_temp() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-rowb-atomic-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let rel = camino::Utf8Path::new("b.md");
+        std::fs::write(root.join(rel), "see [[old]] here\n").unwrap();
+
+        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        assert!(
+            matches!(result, LinkAttempt::Rewritten),
+            "expected Rewritten, got something else"
+        );
+
+        // Content landed via the atomic rename.
+        let content = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert!(
+            content.contains("[[new]]") && !content.contains("[[old]]"),
+            "rewrite should be fully applied: {content}"
+        );
+
+        // No sibling temp left behind: the temp+rename mechanism cleaned up.
+        let leftovers: Vec<String> = std::fs::read_dir(root.as_std_path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with('.') && n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no .tmp sibling should remain after a successful atomic write; found: {leftovers:?}"
+        );
+    }
+
+    // (NRN-146) `rewrite_one_backlink` now writes via `atomic_write`: a sibling
+    // temp file is created and renamed over the destination, so a read-only
+    // *destination file* no longer blocks the write — `rename(2)` doesn't
+    // consult the replaced file's permission bits, only the containing
+    // directory's. The failure surface this test exercises moved with it: a
+    // read-only *directory* still blocks the write, because no new directory
+    // entry (the temp file) can be created in it.
     #[test]
     #[cfg(unix)]
-    fn rewrite_one_backlink_write_failed_on_readonly_file() {
+    fn rewrite_one_backlink_write_failed_on_readonly_dir() {
         use std::fs::Permissions;
         use std::os::unix::fs::PermissionsExt;
 
@@ -2830,24 +2906,27 @@ mod tests {
         let rel = camino::Utf8Path::new("b.md");
         std::fs::write(root.join(rel), "see [[old]] here\n").unwrap();
 
-        // Make the file read-only.
-        std::fs::set_permissions(root.join(rel), Permissions::from_mode(0o444)).unwrap();
+        // Make the containing directory read-only (no new entries creatable).
+        std::fs::set_permissions(root.as_std_path(), Permissions::from_mode(0o555)).unwrap();
 
-        // Probe: if we can still open the file for writing, we're root or perms
-        // aren't enforced — skip the assertion rather than false-failing.
-        if std::fs::OpenOptions::new()
-            .write(true)
-            .open(root.join(rel))
-            .is_ok()
-        {
-            // Running as root or filesystem doesn't enforce permissions; skip.
+        // Probe: if we can still create a file in the directory, we're root or
+        // perms aren't enforced — skip the assertion rather than false-failing.
+        let probe_path = root.join(".rowb-perm-probe");
+        let probe_writable = std::fs::write(probe_path.as_std_path(), "x").is_ok();
+        let _ = std::fs::remove_file(probe_path.as_std_path());
+        if probe_writable {
+            std::fs::set_permissions(root.as_std_path(), Permissions::from_mode(0o755)).unwrap();
             return;
         }
 
         let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+
+        // Restore permissions so the tempdir's own cleanup can remove it.
+        std::fs::set_permissions(root.as_std_path(), Permissions::from_mode(0o755)).unwrap();
+
         assert!(
             matches!(result, LinkAttempt::Failed(LinkFailReason::WriteFailed, _)),
-            "expected Failed(WriteFailed, _) for read-only file"
+            "expected Failed(WriteFailed, _) for a read-only directory"
         );
     }
 

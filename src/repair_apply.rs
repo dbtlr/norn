@@ -4,9 +4,9 @@ use std::time::Duration;
 use crate::core::GraphIndex;
 use crate::standards::apply::{
     apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
-    changes_by_path, ensure_within_vault, validate_plan_for_apply, ApplyError, CascadeRecord,
-    CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult, LinkRewriteResult,
-    LinkSkipResult, MoveResult, RepairApplyWarning,
+    atomic_write, changes_by_path, ensure_within_vault, validate_plan_for_apply, ApplyError,
+    CascadeRecord, CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult,
+    LinkRewriteResult, LinkSkipResult, MoveResult, RepairApplyWarning,
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
@@ -224,29 +224,6 @@ fn reject_content_op_after_vacate(plan: &RepairPlan) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-/// Crash-atomic write: serialize `contents` to a sibling temp file
-/// (`.{stem}.tmp`) then `fs::rename` it into place (atomic on POSIX). A SIGKILL /
-/// power loss / `ENOSPC` mid-write truncates only the throwaway temp, never the
-/// live document — which is exactly the half-mutation NRN-139 exists to prevent.
-/// Best-effort temp cleanup on rename failure. Shared by the Phase A2 content
-/// write and the `create_document` pass so there is a single implementation.
-fn atomic_write(full: &Utf8Path, contents: &str) -> Result<()> {
-    let tmp_path = {
-        let mut p = full.to_path_buf();
-        let stem = p.file_name().unwrap_or("doc").to_string();
-        p.set_file_name(format!(".{stem}.tmp"));
-        p
-    };
-    fs::write(tmp_path.as_std_path(), contents)
-        .with_context(|| format!("write temp file {tmp_path}"))?;
-    fs::rename(tmp_path.as_std_path(), full.as_std_path()).with_context(|| {
-        // Best-effort cleanup on rename failure.
-        let _ = fs::remove_file(tmp_path.as_std_path());
-        format!("rename temp to {full}")
-    })?;
     Ok(())
 }
 
