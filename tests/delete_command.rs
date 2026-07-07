@@ -326,3 +326,108 @@ fn delete_format_json_emits_envelope() {
         "b.md should not be deleted when using --format json without --yes"
     );
 }
+
+// ---------------------------------------------------------------------------
+// NRN-57 — `norn delete <stem>` must resolve a bare stem the same way
+// `norn move <stem>` does, instead of building the migration plan from the
+// raw unresolved CLI arg (which previously produced a misleading
+// "repair plan targets a document not in the index" exit-2 error).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delete_stem_dry_run_resolves_target() {
+    // c.md has no incoming links, so this exercises pure stem resolution
+    // without tripping the incoming-links refusal path.
+    let tmp = synth();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["delete", "c", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stem-addressed delete --dry-run should resolve, not error; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        tmp.path().join("vault/c.md").exists(),
+        "c.md should not be deleted on dry-run"
+    );
+}
+
+#[test]
+fn delete_stem_yes_removes_resolved_file() {
+    let tmp = synth();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["delete", "c", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stem-addressed delete --yes should resolve and delete; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.path().join("vault/c.md").exists(),
+        "c.md should have been deleted via stem addressing"
+    );
+}
+
+#[test]
+fn delete_stem_yes_format_json_plans_resolved_path() {
+    // The JSON operation summary/path must reflect the RESOLVED vault-relative
+    // path (c.md), not the raw stem arg ("c") that was passed on the CLI.
+    let tmp = synth();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["delete", "c", "--yes", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+    assert_eq!(v["operations"][0]["kind"], "delete_document");
+    assert!(
+        v["operations"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("c.md"),
+        "summary should mention the resolved path c.md, not the raw stem: {:?}",
+        v["operations"][0]["summary"]
+    );
+    assert!(
+        !tmp.path().join("vault/c.md").exists(),
+        "c.md should have been deleted"
+    );
+}
+
+#[test]
+fn delete_full_path_still_works_after_stem_fix() {
+    // Regression guard: full vault-relative path addressing must keep working
+    // once stem resolution feeds the migration plan.
+    let tmp = synth();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args(["delete", "c.md", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.path().join("vault/c.md").exists(),
+        "c.md should have been deleted via full-path addressing"
+    );
+}
