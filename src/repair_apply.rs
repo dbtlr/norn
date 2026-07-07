@@ -1578,6 +1578,46 @@ mod tests {
         assert!(written.contains("Hello\n"), "got: {written}");
     }
 
+    /// (NRN-146) `atomic_write`'s destination-mode preservation only applies
+    /// when the destination already exists. A brand-new `create_document`
+    /// target has no prior mode to preserve, so it must land with ordinary
+    /// umask-based permissions — the same as any other fresh file written in
+    /// this process — not some leftover/default mode from the mode-copy path.
+    #[test]
+    #[cfg(unix)]
+    fn apply_create_document_new_file_gets_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_tmp, root, index) = make_empty_vault("vault-apply-create-mode-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "foo.md", fm, "Hello\n", false);
+
+        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+
+        // A plain fresh write in the same process, for comparison against
+        // whatever the ambient umask makes "default" here.
+        let reference_path = root.join("reference.md");
+        std::fs::write(reference_path.as_std_path(), "x").unwrap();
+        let reference_mode = std::fs::metadata(reference_path.as_std_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        let created_mode = std::fs::metadata(root.join("foo.md").as_std_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(
+            created_mode, reference_mode,
+            "a brand-new create_document target must get ordinary umask-based \
+             permissions, not a mode inherited from a nonexistent destination"
+        );
+    }
+
     #[test]
     fn apply_create_document_refuses_unparseable_serialized_frontmatter() {
         // NRN-142: render_key's terminal fallback returns an UNVERIFIED double-

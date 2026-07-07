@@ -1126,6 +1126,21 @@ pub fn apply_delete(cwd: &Utf8Path, change: &PlannedChange) -> Result<DeleteResu
 /// document write path. A side effect for cascade callers: renaming into place
 /// REPLACES a symlink at `full` rather than writing through it, closing the
 /// symlink-file cascade class NRN-145 could otherwise only gate at preflight.
+///
+/// Mode preservation: renaming a temp file over `full` replaces its inode, so
+/// the replacement would otherwise pick up fresh umask-based permissions
+/// rather than inheriting whatever mode the file it replaces had — silently
+/// downgrading a permission-hardened document (e.g. `chmod 600`, see
+/// docs/cache.md) on every incidental content rewrite or cascade touch. When
+/// `full` already exists, stat it first and carry its mode over to the temp
+/// file before the rename so the replacement's mode matches the original.
+/// When `full` does not exist (a fresh `create_document`), there is nothing to
+/// preserve — the temp file's default (umask-based) permissions are correct.
+/// Best-effort only: a metadata-read or chmod failure falls back to the
+/// unmodified temp permissions rather than failing the write — preserving
+/// mode is hardening, not a new way for a rewrite to fail. Ownership/ACLs are
+/// out of scope: unlike mode bits, they cannot be portably preserved without
+/// root, so this covers the meaningful, portable subset.
 pub(crate) fn atomic_write(full: &Utf8Path, contents: &str) -> std::io::Result<()> {
     let tmp_path = {
         let mut p = full.to_path_buf();
@@ -1134,6 +1149,10 @@ pub(crate) fn atomic_write(full: &Utf8Path, contents: &str) -> std::io::Result<(
         p
     };
     fs::write(tmp_path.as_std_path(), contents)?;
+    #[cfg(unix)]
+    if let Ok(existing) = fs::metadata(full.as_std_path()) {
+        let _ = fs::set_permissions(tmp_path.as_std_path(), existing.permissions());
+    }
     if let Err(e) = fs::rename(tmp_path.as_std_path(), full.as_std_path()) {
         // Best-effort cleanup on rename failure.
         let _ = fs::remove_file(tmp_path.as_std_path());
@@ -2882,6 +2901,46 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "no .tmp sibling should remain after a successful atomic write; found: {leftovers:?}"
+        );
+    }
+
+    /// (NRN-146 regression) `atomic_write`'s temp-write-then-rename replaces the
+    /// destination's inode outright, so the replacement previously got fresh
+    /// umask-based permissions rather than inheriting the mode of the file it
+    /// replaced — a confidentiality regression for a permission-hardened
+    /// backlinker (e.g. 0600) run through an incidental move/delete cascade.
+    /// `atomic_write` must stat the existing destination and carry its mode
+    /// over to the replacement before the rename.
+    #[test]
+    #[cfg(unix)]
+    fn rewrite_one_backlink_preserves_destination_mode() {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-rowb-mode-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let rel = camino::Utf8Path::new("b.md");
+        let full = root.join(rel);
+        std::fs::write(&full, "see [[old]] here\n").unwrap();
+        std::fs::set_permissions(&full, Permissions::from_mode(0o600)).unwrap();
+
+        let before = std::fs::metadata(&full).unwrap().permissions().mode() & 0o777;
+        assert_eq!(before, 0o600, "precondition: file must start at 0600");
+
+        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        assert!(
+            matches!(result, LinkAttempt::Rewritten),
+            "expected Rewritten, got something else"
+        );
+
+        let after = std::fs::metadata(&full).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            after, 0o600,
+            "cascade rewrite must preserve the destination's original mode \
+             (before: {before:o}, after: {after:o})"
         );
     }
 
