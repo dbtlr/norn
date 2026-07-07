@@ -730,7 +730,17 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // Pre-flight (single-file only): validate src/dst before building
             // the MigrationPlan so we can exit 2 on refusal. The cascade counts
             // for TTY rendering are read from the report after apply, not here.
-            if !is_folder {
+            //
+            // NRN-216: capture the RESOLVED plan (mirrors the NRN-57 delete fix).
+            // `preflight_and_plan` resolves a bare stem (e.g. "b") to its full
+            // vault-relative path (e.g. "b.md") via `resolve_src`; the raw CLI
+            // args may not match a real filesystem path at all. Building
+            // `MigrationOp.fields` from `args.src`/`args.dst` verbatim (the old
+            // behavior) let `--dry-run` look fine (dry-run never touches the
+            // filesystem) while `--yes` failed with "move source missing in
+            // filesystem: <stem>" as soon as the applier tried to rename a
+            // literal file named after the stem.
+            let move_plan = if !is_folder {
                 let cfg = crate::move_doc::PreflightConfig {
                     src: &args.src,
                     dst: &args.dst,
@@ -739,11 +749,16 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     vault_root: &cwd,
                     index: &index,
                 };
-                if let Err(e) = crate::move_doc::preflight_and_plan(cfg) {
-                    eprintln!("error: {e}");
-                    std::process::exit(2);
+                match crate::move_doc::preflight_and_plan(cfg) {
+                    Ok(plan) => Some(plan),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
                 }
-            }
+            } else {
+                None
+            };
 
             // ----------------------------------------------------------------
             // Resolve dry_run (extracted helper logic, shared across both paths).
@@ -759,9 +774,30 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             } else {
                 "move_document"
             };
+            // NRN-216: use the RESOLVED src/dst from the preflight plan when
+            // available (single-file moves); folder moves have no preflight
+            // plan and use the raw args as before (a folder path isn't
+            // stem-resolved).
+            let (resolved_src, resolved_dst) = if let Some(plan) = &move_plan {
+                let move_change = plan
+                    .changes
+                    .iter()
+                    .find(|c| c.operation == "move_document")
+                    .expect("preflight_and_plan must produce a move_document op");
+                (
+                    move_change.path.to_string(),
+                    move_change
+                        .destination
+                        .as_ref()
+                        .expect("move_document op must carry a destination")
+                        .to_string(),
+                )
+            } else {
+                (args.src.clone(), args.dst.clone())
+            };
             let mut fields = serde_json::json!({
-                "src": args.src.clone(),
-                "dst": args.dst.clone(),
+                "src": resolved_src,
+                "dst": resolved_dst,
                 "parents": args.parents,
             });
             if !is_folder && args.force {
