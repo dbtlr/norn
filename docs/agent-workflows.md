@@ -15,7 +15,7 @@ description: Stable JSON and JSONL contracts, agent loop patterns, and common ha
 | JSONL output | `--format jsonl` on every command | Same. |
 | Paths output | `--format paths` on commands that emit per-row paths | Stable; one unique vault-relative path per row. |
 | Migration plan schema | `repair --plan` JSON artifact (`MigrationPlan`) | Schema-versioned (`schema_version` field). Apply rejects mismatched versions. |
-| Apply report schema | `migrate` JSON output (`ApplyReport`) | Stable across the matching plan schema version. |
+| Apply report schema | `apply` JSON output (`ApplyReport`) | Stable across the matching plan schema version. |
 | Finding codes | `norn validate` output `code` field | Stable; renames are breaking changes called out in CHANGELOG. |
 
 Default human-readable rendering (`records` on most commands, `report` for `repair --plan`) is for humans and may evolve between point releases. Agents should always pass an explicit `--format json` or `--format jsonl`.
@@ -40,8 +40,8 @@ For a typical drift-healing task:
 2. **Triage.** Filter by `--code`, `--field`, `--rule`, `--path` to scope the queue. Re-run `--summary` to confirm the filter's size.
 3. **Plan.** `norn repair --plan --out plan.json` (with the same filters). Read the plan's `changes` and `skipped_findings`.
 4. **Review.** Confirm `changes` are intended; surface `skipped_findings` to the human or follow `next_actions`.
-5. **Dry-run.** `norn migrate plan.json --dry-run --format json` — confirms the plan is applyable without writing. (Or pipe directly: `norn repair --plan --format json | norn migrate - --dry-run --format json`.)
-6. **Apply.** `norn migrate plan.json --format json` — writes. Every frontmatter write is re-parsed and checked against the intended value before apply reports success (the post-image verification gate); there is no separate `--verify` flag.
+5. **Dry-run.** `norn apply plan.json --dry-run --format json` — confirms the plan is applyable without writing. (Or pipe directly: `norn repair --plan --format json | norn apply - --dry-run --format json`.)
+6. **Apply.** `norn apply plan.json --format json` — writes. Every frontmatter write is re-parsed and checked against the intended value before apply reports success (the post-image verification gate); there is no separate `--verify` flag.
 7. **Verify.** Inspect the apply report's `operations` and `warnings`, then run `norn validate --summary --format json` again as the post-hoc check that the vault is now clean.
 
 For a read-only inspection task (no mutation):
@@ -62,7 +62,7 @@ These commands never write to the vault. An agent can run them with confidence:
 - `norn repair --plan` (produces a `MigrationPlan` artifact; does not modify the vault)
 - `norn audit`
 
-`norn new`, `norn set`, `norn move`, `norn delete`, and `norn migrate` are mutation commands; pass `--dry-run` to preview without writing. Only `norn migrate`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The migration plan is provided to `norn migrate` via a positional file path, via `-`, or via stdin (the pipeline form `norn repair --plan --format json | norn migrate -` composes plan generation and apply in one shot).
+`norn new`, `norn set`, `norn move`, `norn delete`, and `norn apply` are mutation commands; pass `--dry-run` to preview without writing. Only `norn apply`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The migration plan is provided to `norn apply` via a positional file path, via `-`, or via stdin (the pipeline form `norn repair --plan --format json | norn apply -` composes plan generation and apply in one shot).
 
 ## Output sketches
 
@@ -137,8 +137,8 @@ norn validate --code frontmatter-invalid-type --field modified --format jsonl
 
 Two rules an agent must follow:
 
-1. **Use the appropriate write surface.** For creating a new document from a schema scaffold, use `norn new`. For operator-driven one-doc mutations on existing docs, `norn set` (frontmatter + body), `norn move`, and `norn delete` are the CRUD surface. For finding-driven batch repairs, `norn migrate` is the only path — it consumes a `MigrationPlan` artifact and applies deterministic changes with precondition checks. Never edit vault files directly; the graph state would diverge from the cache.
-2. **Always pass the plan that matches the current vault state.** Apply checks document hashes; if a file changed since the plan was created, the change is rejected for that file. Re-plan rather than re-apply with `--force` (there is no `--force` for migrate).
+1. **Use the appropriate write surface.** For creating a new document from a schema scaffold, use `norn new`. For operator-driven one-doc mutations on existing docs, `norn set` (frontmatter + body), `norn move`, and `norn delete` are the CRUD surface. For finding-driven batch repairs, `norn apply` is the only path — it consumes a `MigrationPlan` artifact and applies deterministic changes with precondition checks. Never edit vault files directly; the graph state would diverge from the cache.
+2. **Always pass the plan that matches the current vault state.** Apply checks document hashes; if a file changed since the plan was created, the change is rejected for that file. Re-plan rather than re-apply with `--force` (there is no `--force` for apply).
 
 `--dry-run` confirms the plan is applyable without writing. Apply itself verifies every frontmatter write against its intended value before reporting success (no opt-in flag needed); run `norn validate --summary` afterward as the post-hoc check across the whole vault.
 
@@ -159,7 +159,7 @@ norn set notes/task.md --field status=backlog --yes
 norn validate --code frontmatter-disallowed-value --field status --format jsonl
 ```
 
-For batch fixes across many documents, prefer the `repair --plan` → `migrate` loop.
+For batch fixes across many documents, prefer the `repair --plan` → `apply` loop.
 `norn set` is best for targeted one-doc mutations or when the fix does not fit a
 repair rule (e.g. updating body content with `--body-from-stdin`).
 

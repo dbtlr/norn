@@ -1,16 +1,16 @@
-//! Integration round-trip for the `vault.repair_plan` MCP tool (NRN-33, Task 7).
+//! Integration round-trip for the `vault.repair` MCP tool (NRN-33, Task 7).
 //!
 //! Drives the real `norn mcp` binary as a child process against a seeded temp
 //! vault with a FIXABLE broken wikilink. Asserts:
 //!
-//! 1. `tools/list` advertises `vault.repair_plan` with a non-empty `inputSchema`.
-//! 2. `tools/call` for `vault.repair_plan` against the fixable vault returns a plan
+//! 1. `tools/list` advertises `vault.repair` with a non-empty `inputSchema`.
+//! 2. `tools/call` for `vault.repair` against the fixable vault returns a plan
 //!    whose `operations` array has ≥1 entry with `kind = "rewrite_link"`.
 //! 3. The returned `plan` JSON is structurally a `MigrationPlan` — carries
-//!    `schema_version`, `vault_root`, `operations` — so Task 12 (`vault.apply_plan`)
+//!    `schema_version`, `vault_root`, `operations` — so Task 12 (`vault.apply`)
 //!    can consume it unchanged.
 //!
-//! The pure handler is unit-tested inside `src/mcp/tools/repair_plan.rs`; this
+//! The pure handler is unit-tested inside `src/mcp/tools/repair.rs`; this
 //! test covers the rmcp wiring (router registration, schema, call dispatch, envelope
 //! shape).
 //!
@@ -79,7 +79,7 @@ fn line(value: serde_json::Value) -> Vec<u8> {
 }
 
 #[test]
-fn lists_and_calls_vault_repair_plan() {
+fn lists_and_calls_vault_repair() {
     let vault = vault_with_fixable_link();
 
     let mut child = Command::new(norn_bin())
@@ -121,14 +121,14 @@ fn lists_and_calls_vault_repair_plan() {
             })))
             .unwrap();
 
-        // 3. vault.repair_plan — no filters → should return ≥1 operation for the fixable link
+        // 3. vault.repair — no filters → should return ≥1 operation for the fixable link
         stdin
             .write_all(&line(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
                 "params": {
-                    "name": "vault.repair_plan",
+                    "name": "vault.repair",
                     "arguments": {}
                 }
             })))
@@ -153,7 +153,7 @@ fn lists_and_calls_vault_repair_plan() {
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
 
-    // ── tools/list (id=2): vault.repair_plan present with a non-empty inputSchema ──
+    // ── tools/list (id=2): vault.repair present with a non-empty inputSchema ──
     let tools_resp = responses
         .iter()
         .find(|r| r["id"] == 2)
@@ -164,10 +164,10 @@ fn lists_and_calls_vault_repair_plan() {
 
     let repair_tool = tools
         .iter()
-        .find(|t| t["name"] == "vault.repair_plan")
+        .find(|t| t["name"] == "vault.repair")
         .unwrap_or_else(|| {
             panic!(
-                "tools/list must include vault.repair_plan, got: {:?}",
+                "tools/list must include vault.repair, got: {:?}",
                 tools
                     .iter()
                     .map(|t| t["name"].as_str().unwrap_or("?"))
@@ -178,14 +178,14 @@ fn lists_and_calls_vault_repair_plan() {
     let schema = &repair_tool["inputSchema"];
     assert!(
         schema.is_object(),
-        "vault.repair_plan inputSchema must be an object, got: {schema}"
+        "vault.repair inputSchema must be an object, got: {schema}"
     );
     assert!(
         schema["properties"]
             .as_object()
             .map(|p| !p.is_empty())
             .unwrap_or(false),
-        "vault.repair_plan inputSchema must have non-empty properties, got: {schema}"
+        "vault.repair inputSchema must have non-empty properties, got: {schema}"
     );
 
     // ── tools/call (id=3): fixable-link vault → ≥1 rewrite_link operation ──
@@ -195,14 +195,14 @@ fn lists_and_calls_vault_repair_plan() {
 
     assert!(
         repair_resp.get("error").is_none(),
-        "vault.repair_plan call must not error, got: {repair_resp}"
+        "vault.repair call must not error, got: {repair_resp}"
     );
 
     // The plan lives under result.structuredContent.plan
     let plan = &repair_resp["result"]["structuredContent"]["plan"];
     assert!(
         plan.is_object(),
-        "vault.repair_plan result must carry a plan object, got: {repair_resp}"
+        "vault.repair result must carry a plan object, got: {repair_resp}"
     );
 
     // ── Structural MigrationPlan checks (Task 12 readiness) ──

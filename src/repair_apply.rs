@@ -77,7 +77,7 @@ fn count_planned_links(change: &PlannedChange) -> usize {
 /// Re-attempt every failed backlink rewrite across all cascades, up to
 /// `backoff.len()` rounds, sleeping `backoff[round]` BEFORE each round so a
 /// transient condition affecting several files clears in one wait. Recovered
-/// links migrate from `failed` to `rewritten`; survivors stay `failed` with
+/// links move from `failed` to `rewritten`; survivors stay `failed` with
 /// their latest reason. Returns the recovered `LinkRewriteResult`s so the
 /// caller can extend the flat `rewritten_links` list.
 ///
@@ -772,7 +772,7 @@ pub fn apply_repair_plan_with_context(
             // survives (it appeared in a directory component, or more than once),
             // refuse rather than write a path with a literal `{{seq}}` in it. The
             // `new` path already refuses this at generate time; this backstops
-            // hand-authored migrate plans that bypass `generate_path`.
+            // hand-authored MigrationPlans that bypass `generate_path`.
             if crate::seq_alloc::has_seq(&resolved) {
                 return Err(anyhow::anyhow!(
                     "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {}",

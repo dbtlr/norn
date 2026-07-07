@@ -160,7 +160,7 @@ pub fn write_report(plan: &MigrationPlan, args: &RepairArgs) -> Result<()> {
         };
         let cmd = build_command(&apply_args, &["--format", "json"]);
         writeln!(out, "  To apply")?;
-        writeln!(out, "    {cmd} | norn migrate -")?;
+        writeln!(out, "    {cmd} | norn apply -")?;
         writeln!(out)?;
     }
 

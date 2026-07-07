@@ -72,7 +72,7 @@ pub(crate) fn plan_from_findings(
                 obj.remove("operation");
 
                 // `move_document` ops must speak the unified planner vocabulary
-                // (`src`/`dst`) so they apply through `norn migrate`. The repair
+                // (`src`/`dst`) so they apply through `norn apply`. The repair
                 // PlannedChange uses `path`/`destination` (Plan Task 16 renamed
                 // the intent-source path); remap here so the findings-source and
                 // intent-source converge on the same on-disk op shape. The
@@ -111,7 +111,7 @@ pub(crate) fn plan_from_findings(
         .map(|sf| SkippedFinding {
             finding_code: sf.code,
             path: sf.path.to_string(),
-            reason: sf.reason_code,
+            reason: sf.skip_reason.code().to_string(),
             footnote: None,
         })
         .collect();

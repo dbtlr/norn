@@ -82,7 +82,7 @@ For a deeper walkthrough including scoped rules and a first repair plan, see [do
 | Walk unresolved links | `norn validate --code 'link-*'` | [validate](docs/commands/validate.md) |
 | Validate against rules | `norn validate --summary` | [validate](docs/commands/validate.md) |
 | Plan a repair | `norn repair --plan --out plan.json` | [repair](docs/commands/repair.md) |
-| Apply a repair | `norn migrate plan.json` | [migrate](docs/commands/migrate.md) |
+| Apply a repair | `norn apply plan.json` | [apply](docs/commands/apply.md) |
 | Create a document | `norn new <path>` | [new](docs/commands/new.md) |
 | Update frontmatter | `norn set <doc> --field k=v` | [set](docs/commands/set.md) |
 | Move a document | `norn move <src> <dst>` | [move](docs/commands/move.md) |
@@ -109,7 +109,7 @@ For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-wor
 norn mcp --cwd /path/to/vault
 ```
 
-It serves 14 tools: seven read (`vault.find`, `vault.count`, `vault.get`, `vault.validate`, `vault.repair_plan`, `vault.describe`, `vault.audit`) and seven mutation (`vault.new`, `vault.set`, `vault.edit`, `vault.move`, `vault.delete`, `vault.rewrite_wikilink`, `vault.apply_plan`). Every mutation tool is **dry-run by default** — it returns the planned change and writes nothing until you pass `confirm: true`, at which point the change is applied under the per-vault mutation lock and audited to the same append-only event stream as the CLI. Pass `--read-only` to drop the seven mutation tools entirely for a query-only server.
+It serves 14 tools: seven read (`vault.find`, `vault.count`, `vault.get`, `vault.validate`, `vault.repair`, `vault.describe`, `vault.audit`) and seven mutation (`vault.new`, `vault.set`, `vault.edit`, `vault.move`, `vault.delete`, `vault.rewrite_wikilink`, `vault.apply`). Every mutation tool is **dry-run by default** — it returns the planned change and writes nothing until you pass `confirm: true`, at which point the change is applied under the per-vault mutation lock and audited to the same append-only event stream as the CLI. Pass `--read-only` to drop the seven mutation tools entirely for a query-only server.
 
 Register it with an MCP client by pointing the client's server config at the binary. For a Claude Code / generic `mcpServers` entry:
 

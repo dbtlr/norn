@@ -56,7 +56,7 @@ fn gather_findings(
 
 /// Translate the CLI triage + skip-reason + confidence flags into the
 /// planner's `RepairPlanFilters`.
-fn repair_plan_filters(args: &RepairArgs) -> RepairPlanFilters {
+fn plan_filters(args: &RepairArgs) -> RepairPlanFilters {
     RepairPlanFilters {
         code: normalized_filter_values(&args.triage.code),
         severity: normalized_filter_values(&args.triage.severity),
@@ -89,7 +89,7 @@ pub fn run_plan(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32> {
 
     let mut plan = plan_from_findings(
         ctx.cwd.clone(),
-        repair_plan_filters(args),
+        plan_filters(args),
         findings,
         &loaded_config.repair,
         &index,
@@ -157,7 +157,7 @@ pub fn run_summary(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32>
     // Of those, how many would the planner turn into operations?
     let plan = plan_from_findings(
         ctx.cwd.clone(),
-        repair_plan_filters(args),
+        plan_filters(args),
         findings.clone(),
         &loaded_config.repair,
         &index,
@@ -186,7 +186,7 @@ pub fn run_summary(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32>
     if !plan.operations.is_empty() || !plan.skipped.is_empty() {
         writeln!(out)?;
         writeln!(out, "Run `norn repair --plan` to generate a MigrationPlan.")?;
-        writeln!(out, "Pipe it into `norn migrate -` to apply.")?;
+        writeln!(out, "Pipe it into `norn apply -` to apply.")?;
     }
 
     Ok(crate::exit_code_for(&index))

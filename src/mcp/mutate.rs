@@ -1,7 +1,7 @@
 //! Shared mutation plumbing for the MCP mutation tools.
 //!
 //! The MCP mutation contract (`vault.set` today; `vault.new` / `vault.move` /
-//! `vault.delete` / `vault.apply_plan` next) must produce the SAME append-only
+//! `vault.delete` / `vault.apply` next) must produce the SAME append-only
 //! event-stream records a CLI mutation does — that audit trail is how an
 //! off-filesystem MCP client gets "audited for free." This module owns the one
 //! seam that guarantees it: [`open_mutation_event_sink`], the MCP analogue of

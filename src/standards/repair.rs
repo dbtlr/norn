@@ -36,7 +36,9 @@ pub struct RepairPlanFilters {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+// NRN-190: the `skip_reason` enum VALUE is canonically kebab, identical to
+// `SkipReason::code()` — no snake/kebab split for the same concept.
+#[serde(rename_all = "kebab-case")]
 pub enum SkipReason {
     /// Frontmatter field is missing and the configured repair rule has no deterministic default.
     MissingDefault,
@@ -80,10 +82,10 @@ pub(crate) struct SkippedFinding {
     pub code: String,
     pub severity: Severity,
     pub message: String,
+    /// Stable kebab-case skip-reason identifier. Serializes identically to
+    /// `SkipReason::code()`; the redundant precomputed `reason_code` string was
+    /// collapsed into this single canonical field (NRN-190).
     pub skip_reason: SkipReason,
-    /// Kebab-case stable identifier for `skip_reason`. Always present in JSON;
-    /// derived from `SkipReason::code()` at construction time.
-    pub reason_code: String,
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
@@ -775,7 +777,6 @@ fn skipped_finding(
         severity: finding.severity.clone(),
         message: finding.message.clone(),
         skip_reason,
-        reason_code: skip_reason.code().to_string(),
         reason,
         rule: finding_rule(finding),
         field: finding_field(finding),
@@ -1668,10 +1669,11 @@ mod tests {
     }
 
     #[test]
-    fn skip_reason_round_trips_through_serde_with_snake_case_variants() {
+    fn skip_reason_round_trips_through_serde_with_kebab_case_variants() {
+        // NRN-190: the enum VALUE is kebab, identical to `SkipReason::code()`.
         let json = serde_json::to_string(&SkipReason::MissingDefault).unwrap();
-        assert_eq!(json, r#""missing_default""#);
-        let back: SkipReason = serde_json::from_str(r#""link_decision_needed""#).unwrap();
+        assert_eq!(json, r#""missing-default""#);
+        let back: SkipReason = serde_json::from_str(r#""link-decision-needed""#).unwrap();
         assert!(matches!(back, SkipReason::LinkDecisionNeeded));
     }
 
@@ -1777,7 +1779,6 @@ mod tests {
                 severity: Severity::Warning,
                 message: "no default value".to_string(),
                 skip_reason: SkipReason::MissingDefault,
-                reason_code: SkipReason::MissingDefault.code().to_string(),
                 reason: "rule has no default".to_string(),
                 rule: None,
                 field: None,
@@ -1791,7 +1792,6 @@ mod tests {
                 severity: Severity::Warning,
                 message: "no default value".to_string(),
                 skip_reason: SkipReason::MissingDefault,
-                reason_code: SkipReason::MissingDefault.code().to_string(),
                 reason: "rule has no default".to_string(),
                 rule: None,
                 field: None,
@@ -1805,7 +1805,6 @@ mod tests {
                 severity: Severity::Warning,
                 message: "multiple candidates".to_string(),
                 skip_reason: SkipReason::AmbiguousTarget,
-                reason_code: SkipReason::AmbiguousTarget.code().to_string(),
                 reason: "ambiguous link target".to_string(),
                 rule: None,
                 field: None,
@@ -1833,14 +1832,16 @@ mod tests {
     }
 
     #[test]
-    fn skipped_finding_json_has_reason_code() {
+    fn skipped_finding_skip_reason_serializes_kebab_matching_code() {
+        // NRN-190: the redundant `reason_code` field was collapsed away; the
+        // typed `skip_reason` field now serializes as the canonical kebab code
+        // (identical to `SkipReason::code()`), and the human `reason` prose stays.
         let f = SkippedFinding {
             path: "foo.md".into(),
             code: "frontmatter-required-field-missing".into(),
             severity: crate::core::Severity::Warning,
             message: "missing field".into(),
             skip_reason: SkipReason::MissingDefault,
-            reason_code: SkipReason::MissingDefault.code().to_string(),
             reason: "missing field has no configured deterministic default".into(),
             rule: None,
             field: None,
@@ -1849,12 +1850,16 @@ mod tests {
             next_actions: vec![],
         };
         let json = serde_json::to_value(&f).unwrap();
-        assert_eq!(json["reason_code"], "missing-default");
+        assert_eq!(json["skip_reason"], "missing-default");
+        assert_eq!(json["skip_reason"], SkipReason::MissingDefault.code());
+        assert!(
+            json.get("reason_code").is_none(),
+            "redundant reason_code field must be gone"
+        );
         assert_eq!(
             json["reason"],
             "missing field has no configured deterministic default"
         );
-        // Both fields present — reason kept for backwards-compat
     }
 
     #[test]

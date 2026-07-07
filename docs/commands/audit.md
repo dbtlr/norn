@@ -5,7 +5,7 @@ description: Read the per-vault mutation audit trail — the append-only event s
 
 # norn audit
 
-Read the per-vault mutation audit trail. Every confirmed mutation (`set`, `edit`, `move`, `delete`, `migrate`, and their `vault.*` MCP equivalents) is appended to an append-only JSONL event stream under the state directory. `audit` is the native reader — so off-filesystem and MCP-only clients don't have to `cat` raw JSONL.
+Read the per-vault mutation audit trail. Every confirmed mutation (`set`, `edit`, `move`, `delete`, `apply`, and their `vault.*` MCP equivalents) is appended to an append-only JSONL event stream under the state directory. `audit` is the native reader — so off-filesystem and MCP-only clients don't have to `cat` raw JSONL.
 
 ## Examples
 

@@ -1,7 +1,7 @@
-//! `vault.apply_plan` — apply a `MigrationPlan` inline (as JSON) to the vault.
+//! `vault.apply` — apply a `MigrationPlan` inline (as JSON) to the vault.
 //!
-//! This tool is the MCP counterpart of `norn migrate`: it accepts the same
-//! `MigrationPlan` structure that `vault.repair_plan` (Task 7) emits, and is
+//! This tool is the MCP counterpart of `norn apply`: it accepts the same
+//! `MigrationPlan` structure that `vault.repair` (Task 7) emits, and is
 //! the natural second step in the repair-plan → apply-plan composition.
 //!
 //! The mutation-safety contract mirrors every other MCP mutation tool:
@@ -14,12 +14,12 @@
 //!   mutation lock, opens a real file-backed event sink (audited exactly like the
 //!   CLI), and calls `apply_migration_plan` with `dry_run = false`.
 //!
-//! ## How it mirrors `norn migrate` (non-TTY / `--format json` path)
+//! ## How it mirrors `norn apply` (non-TTY / `--format json` path)
 //!
-//! `migrate_cmd::run`:
+//! `apply_cmd::run`:
 //! 1. Reads + parses the plan from a file.
 //! 2. Validates `plan.schema_version == MIGRATION_PLAN_SCHEMA_VERSION` → exit 2
-//!    on mismatch. (No hash check — migrate doesn't check the plan hash.)
+//!    on mismatch. (No hash check — apply doesn't check the plan hash.)
 //! 3. Acquires the per-vault mutation lock (apply only).
 //! 4. Loads config + graph index.
 //! 5. Calls `apply_migration_plan`, emitting `invocation_started` /
@@ -31,10 +31,10 @@
 //!
 //! ## Plan source: inline JSON
 //!
-//! Unlike `norn migrate` (which reads from a file), the MCP tool accepts the
+//! Unlike `norn apply` (which reads from a file), the MCP tool accepts the
 //! plan as an inline `serde_json::Value` field.  This is the natural shape for
-//! an MCP caller that received the plan from `vault.repair_plan` — it can pass
-//! `result.structuredContent.plan` directly into `vault.apply_plan` without
+//! an MCP caller that received the plan from `vault.repair` — it can pass
+//! `result.structuredContent.plan` directly into `vault.apply` without
 //! writing it to a temporary file.
 
 use anyhow::Result;
@@ -43,15 +43,15 @@ use serde::{Deserialize, Serialize};
 use crate::mcp::context::VaultContext;
 use crate::migration_plan::MIGRATION_PLAN_SCHEMA_VERSION;
 
-/// Parameters for `vault.apply_plan`.
+/// Parameters for `vault.apply`.
 ///
 /// `plan` is the `MigrationPlan` as a JSON object — exactly the value returned
-/// in `vault.repair_plan`'s `result.structuredContent.plan`. Pass it through
+/// in `vault.repair`'s `result.structuredContent.plan`. Pass it through
 /// unchanged (or supply any hand-crafted valid `MigrationPlan`).
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct ApplyPlanParams {
+pub struct ApplyParams {
     /// The `MigrationPlan` JSON object to apply.  Must have
-    /// `schema_version: 1`.  The plan emitted by `vault.repair_plan` satisfies
+    /// `schema_version: 1`.  The plan emitted by `vault.repair` satisfies
     /// this structure and can be fed here directly.
     pub plan: serde_json::Value,
 
@@ -65,26 +65,26 @@ pub struct ApplyPlanParams {
     /// (`mkdir -p` style). Defaults to `false` (the prior behavior: an op whose
     /// destination directory does not exist refuses). Directories are created
     /// inside the apply and only for ops that proceed — the same discipline
-    /// `vault.move`/`vault.new` follow. Mirrors `norn migrate --parents`.
+    /// `vault.move`/`vault.new` follow. Mirrors `norn apply --parents`.
     #[serde(default)]
     pub parents: bool,
 }
 
-/// Structured output for `vault.apply_plan`.
+/// Structured output for `vault.apply`.
 ///
 /// Wraps the [`crate::apply_report::ApplyReport`] as a generic
 /// `serde_json::Value` inside this typed root struct (the same
 /// `MoveOutput` / `DeleteOutput` pattern). The JSON is byte-for-byte identical
-/// to what `norn migrate --format json` emits.
+/// to what `norn apply --format json` emits.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ApplyPlanOutput {
+pub struct ApplyOutput {
     /// The `ApplyReport` JSON: `dry_run`, the applied/skipped/failed tallies,
     /// per-op records, and (on confirm) the trace id.  Byte-for-byte the shape
-    /// `norn migrate --format json` emits.
+    /// `norn apply --format json` emits.
     pub report: serde_json::Value,
 }
 
-impl ApplyPlanOutput {
+impl ApplyOutput {
     fn from_report(report: &crate::apply_report::ApplyReport) -> Result<Self> {
         Ok(Self {
             report: serde_json::to_value(report)?,
@@ -92,17 +92,17 @@ impl ApplyPlanOutput {
     }
 }
 
-/// Build the MCP output envelope for `vault.apply_plan`.
-pub fn handle_output(ctx: &VaultContext, p: ApplyPlanParams) -> Result<ApplyPlanOutput> {
+/// Build the MCP output envelope for `vault.apply`.
+pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<ApplyOutput> {
     let report = handle(ctx, p)?;
-    ApplyPlanOutput::from_report(&report)
+    ApplyOutput::from_report(&report)
 }
 
-/// Pure handler for `vault.apply_plan`.
+/// Pure handler for `vault.apply`.
 ///
-/// Returns the `ApplyReport` (same as `norn migrate --format json`).
+/// Returns the `ApplyReport` (same as `norn apply --format json`).
 ///
-/// **Validation (mirrors migrate exactly):** deserialize `p.plan` into a
+/// **Validation (mirrors apply exactly):** deserialize `p.plan` into a
 /// `MigrationPlan`; if deserialization fails or `schema_version !=
 /// MIGRATION_PLAN_SCHEMA_VERSION`, return an `Err` — the plan is rejected
 /// before any lock is acquired or any file is touched.
@@ -111,8 +111,8 @@ pub fn handle_output(ctx: &VaultContext, p: ApplyPlanParams) -> Result<ApplyPlan
 /// mode — forecasts the apply (expansion + preflight) without writing.
 ///
 /// **CONFIRM (`confirm`):** acquire mutation lock, open real event sink, apply
-/// with `dry_run = false` — the same path `norn migrate --yes` takes.
-pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_report::ApplyReport> {
+/// with `dry_run = false` — the same path `norn apply --yes` takes.
+pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report::ApplyReport> {
     use crate::applier::{apply_migration_plan, ApplyContext};
     use crate::migration_plan::MigrationPlan;
 
@@ -120,13 +120,13 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
 
     // ── Step 1: deserialize the inline plan value → MigrationPlan ──────────────
     // A `serde_json::Error` here means the caller sent a structurally invalid
-    // plan (missing required fields, wrong types, etc.).  Mirror migrate's parse
+    // plan (missing required fields, wrong types, etc.).  Mirror apply's parse
     // failure: return an Err (caller sees an MCP error), apply nothing.
     let plan: MigrationPlan = serde_json::from_value(p.plan.clone())
         .map_err(|e| anyhow::anyhow!("failed to parse MigrationPlan: {e}"))?;
 
-    // ── Step 2: validate schema_version — mirror migrate's exit-2 check ────────
-    // `norn migrate` rejects any plan whose schema_version != MIGRATION_PLAN_SCHEMA_VERSION.
+    // ── Step 2: validate schema_version — mirror apply's exit-2 check ────────
+    // `norn apply` rejects any plan whose schema_version != MIGRATION_PLAN_SCHEMA_VERSION.
     // The MCP tool does the same: return Err, apply nothing.
     if plan.schema_version != MIGRATION_PLAN_SCHEMA_VERSION {
         anyhow::bail!(
@@ -136,7 +136,7 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
         );
     }
 
-    // ── Step 3: load graph index (same entry point migrate uses) ────────────────
+    // ── Step 3: load graph index (same entry point apply uses) ────────────────
     let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config().index_options, false)?;
 
     let dry_run = !p.confirm;
@@ -165,24 +165,24 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
     // ── CONFIRM: acquire mutation lock, open real sink, apply ──────────────────
     let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
 
-    // Open a real, file-backed event sink — the same audit trail `norn migrate`
+    // Open a real, file-backed event sink — the same audit trail `norn apply`
     // writes. `apply_migration_plan` emits the per-op spans and action events
     // itself; we frame them with `invocation_started` / `invocation_finished`.
     let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
     crate::emit_invocation_started(
         &mut sink,
-        "migrate",
+        "apply",
         &cwd,
         &plan.vault_root,
         /*dry_run=*/ false,
-        &["apply_plan".to_string()],
+        &["vault.apply".to_string()],
     );
 
     // Propagate the original error (see the dry-run branch) so the structured
     // envelope survives to `to_mcp_error`.
     let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
 
-    crate::emit_invocation_finished(&mut sink, "migrate", report.exit_code(), &report);
+    crate::emit_invocation_finished(&mut sink, "apply", report.exit_code(), &report);
 
     Ok(report)
 }
@@ -197,7 +197,7 @@ mod tests {
     /// - `target-note.md` exists (stem: `target-note`)
     /// - `source.md` links to `[[target-not]]` (one-char edit → closest-match proposal)
     ///
-    /// Mirrors the `repair_plan` test vault exactly so the two tools compose.
+    /// Mirrors the `repair` test vault exactly so the two tools compose.
     fn vault_with_fixable_link() -> (TempDir, Utf8PathBuf) {
         let tmp = tempfile::Builder::new()
             .prefix("norn-mcp-apply-plan-")
@@ -219,20 +219,20 @@ mod tests {
         (tmp, root)
     }
 
-    /// Compose repair_plan → apply_plan (dry-run): get a real plan from the
-    /// repair_plan handler, pass it to apply_plan with confirm:false, verify
+    /// Compose repair → apply (dry-run): get a real plan from the
+    /// repair handler, pass it to apply with confirm:false, verify
     /// the report is dry_run=true and disk is unchanged.
     #[test]
-    fn compose_repair_plan_dry_run_applies_nothing() {
+    fn compose_repair_dry_run_applies_nothing() {
         let (_tmp, root) = vault_with_fixable_link();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        // Produce a real MigrationPlan via the repair_plan handler.
+        // Produce a real MigrationPlan via the repair handler.
         let repair_out =
-            crate::mcp::tools::repair_plan::handle(&ctx, Default::default()).expect("repair_plan");
+            crate::mcp::tools::repair::handle(&ctx, Default::default()).expect("repair");
         let plan_value = repair_out.plan;
 
-        // The plan must have ≥1 operation (sanity check — mirrors repair_plan's tests).
+        // The plan must have ≥1 operation (sanity check — mirrors repair's tests).
         assert!(
             plan_value["operations"]
                 .as_array()
@@ -246,13 +246,13 @@ mod tests {
         // Apply with confirm:false → dry-run.
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan: plan_value,
                 confirm: false,
                 parents: false,
             },
         )
-        .expect("apply_plan (dry-run) should succeed");
+        .expect("apply (dry-run) should succeed");
 
         assert!(
             report.dry_run,
@@ -276,28 +276,28 @@ mod tests {
         );
     }
 
-    /// Compose repair_plan → apply_plan (confirm:true): the rewrite is applied
+    /// Compose repair → apply (confirm:true): the rewrite is applied
     /// on disk.
     #[test]
-    fn compose_repair_plan_confirm_applies_fix() {
+    fn compose_repair_confirm_applies_fix() {
         let (_tmp, root) = vault_with_fixable_link();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
         // Produce the plan.
         let repair_out =
-            crate::mcp::tools::repair_plan::handle(&ctx, Default::default()).expect("repair_plan");
+            crate::mcp::tools::repair::handle(&ctx, Default::default()).expect("repair");
         let plan_value = repair_out.plan;
 
         // Apply with confirm:true → the rewrite is executed.
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan: plan_value,
                 confirm: true,
                 parents: false,
             },
         )
-        .expect("apply_plan (confirm) should succeed");
+        .expect("apply (confirm) should succeed");
 
         assert!(
             !report.dry_run,
@@ -321,10 +321,10 @@ mod tests {
         );
     }
 
-    /// NRN-98 parity: an `append_to_section` edit op applies via `vault.apply_plan`
-    /// exactly as it does via `norn migrate` (same applier path).
+    /// NRN-98 parity: an `append_to_section` edit op applies via `vault.apply`
+    /// exactly as it does via `norn apply` (same applier path).
     #[test]
-    fn edit_op_applies_via_apply_plan() {
+    fn edit_op_applies_via_apply() {
         let tmp = tempfile::Builder::new()
             .prefix("norn-mcp-edit-")
             .tempdir()
@@ -350,13 +350,13 @@ mod tests {
 
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan,
                 confirm: true,
                 parents: false,
             },
         )
-        .expect("apply_plan (confirm) should succeed");
+        .expect("apply (confirm) should succeed");
         assert!(!report.dry_run);
         assert!(report.applied >= 1, "expected >= 1 applied: {report:?}");
 
@@ -368,11 +368,11 @@ mod tests {
     }
 
     /// NRN-100 (H2): a `create_document` + `replace_body` composed into ONE plan
-    /// applies as a single batch via `vault.apply_plan` — the MCP counterpart of
-    /// the `migrate` CLI composition test. Confirms the composed write path is
+    /// applies as a single batch via `vault.apply` — the MCP counterpart of
+    /// the `apply` CLI composition test. Confirms the composed write path is
     /// reachable off-filesystem (MCP-only client parity).
     #[test]
-    fn composed_create_and_replace_body_applies_via_apply_plan() {
+    fn composed_create_and_replace_body_applies_via_apply() {
         let tmp = tempfile::Builder::new()
             .prefix("norn-mcp-compose-")
             .tempdir()
@@ -411,13 +411,13 @@ mod tests {
 
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan,
                 confirm: true,
                 parents: false,
             },
         )
-        .expect("apply_plan (confirm) should succeed");
+        .expect("apply (confirm) should succeed");
         assert!(!report.dry_run);
         assert!(report.applied >= 2, "expected >= 2 applied: {report:?}");
 
@@ -474,7 +474,7 @@ mod tests {
         // never a bare Err, so an MCP client sees structuredContent not isError.
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan,
                 confirm: true,
                 parents: false,
@@ -537,7 +537,7 @@ mod tests {
 
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan,
                 confirm: true,
                 parents: false,
@@ -576,7 +576,7 @@ mod tests {
 
         let result = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan: garbage,
                 confirm: false,
                 parents: false,
@@ -593,7 +593,7 @@ mod tests {
         );
     }
 
-    /// A plan with wrong schema_version must be rejected (mirrors migrate's exit-2).
+    /// A plan with wrong schema_version must be rejected (mirrors apply's exit-2).
     #[test]
     fn wrong_schema_version_is_rejected() {
         let (_tmp, root) = vault_with_fixable_link();
@@ -608,7 +608,7 @@ mod tests {
 
         let result = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan: bad_version,
                 confirm: false,
                 parents: false,
@@ -638,7 +638,7 @@ mod tests {
 
         let result = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan: serde_json::json!({}),
                 confirm: false,
                 parents: false,
@@ -682,7 +682,7 @@ mod tests {
         // parents omitted → the missing parent dir is a refusal (Err), nothing written.
         let refused = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan: plan(),
                 confirm: true,
                 parents: false,
@@ -700,7 +700,7 @@ mod tests {
         // parents: true → intermediate dirs created, the doc written.
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan: plan(),
                 confirm: true,
                 parents: true,
@@ -743,7 +743,7 @@ mod tests {
 
         let report = handle(
             &ctx,
-            ApplyPlanParams {
+            ApplyParams {
                 plan,
                 confirm: true,
                 parents: false,

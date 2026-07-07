@@ -809,7 +809,7 @@ fn move_with_unwritable_backlinker_warns_but_exits_zero() {
         "stderr should warn about dangling backlinks; got: {stderr}"
     );
 
-    // JSON output: cascade.failed == 1 and failures[0].reason == "write_failed".
+    // JSON output: cascade.failed == 1 and failures[0].reason == "write-failed".
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}\ngot: {}", stdout.trim()));
@@ -836,7 +836,7 @@ fn move_with_unwritable_backlinker_warns_but_exits_zero() {
         .expect("failures must be an array");
     assert_eq!(failures.len(), 1, "exactly one failure expected");
     assert_eq!(
-        failures[0]["reason"], "write_failed",
+        failures[0]["reason"], "write-failed",
         "failure reason should be write_failed"
     );
     let detail = failures[0]["detail"]

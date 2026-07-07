@@ -1,4 +1,4 @@
-//! `norn migrate <plan>` — apply a MigrationPlan from a JSON or YAML file.
+//! `norn apply <plan>` — apply a MigrationPlan from a JSON or YAML file.
 //!
 //! # Format detection
 //! - `.yaml` / `.yml` extensions → YAML
@@ -13,7 +13,7 @@
 use crate::applier::{apply_migration_plan, ApplyContext};
 use crate::apply_report::ApplyReport;
 use crate::cache::state_dir_for;
-use crate::cli::{InputFormat, MigrateFormat};
+use crate::cli::{ApplyFormat, InputFormat};
 use crate::migration_plan::{MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use crate::mutation_lock::pending::{delete_pending_plan, save_pending_plan, sweep_pending};
 use crate::mutation_lock::MutationLock;
@@ -21,11 +21,11 @@ use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use std::io::{self, Read, Write};
 
-pub struct MigrateRunArgs {
+pub struct ApplyRunArgs {
     pub plan_path: String,
     pub dry_run: bool,
     pub yes: bool,
-    pub format: MigrateFormat,
+    pub format: ApplyFormat,
     pub input_format: Option<InputFormat>,
     /// Auto-create missing parent directories for create_document ops that
     /// proceed (mkdir -p style). Threaded into `ApplyContext.parents`.
@@ -41,7 +41,7 @@ pub const EXIT_PREFLIGHT: i32 = 2;
 pub const EXIT_OK: i32 = 0;
 
 pub fn run(
-    args: MigrateRunArgs,
+    args: ApplyRunArgs,
     cwd: &Utf8PathBuf,
     no_cache_refresh: bool,
     config_path: Option<&Utf8PathBuf>,
@@ -89,7 +89,7 @@ pub fn run(
         use std::io::IsTerminal;
         let is_apply = !args.dry_run
             && (args.yes
-                || matches!(args.format, MigrateFormat::Json)
+                || matches!(args.format, ApplyFormat::Json)
                 || std::io::stdin().is_terminal());
         match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
             Ok(guard) => guard,
@@ -98,7 +98,7 @@ pub fn run(
                     match save_pending_plan(&state_dir, &raw) {
                         Ok(pending_path) => {
                             eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
-                            eprintln!("retry with: norn migrate {pending_path}");
+                            eprintln!("retry with: norn apply {pending_path}");
                         }
                         Err(save_err) => {
                             eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
@@ -136,7 +136,7 @@ pub fn run(
 
     let dry_run = if args.dry_run {
         true
-    } else if args.yes || matches!(args.format, MigrateFormat::Json) {
+    } else if args.yes || matches!(args.format, ApplyFormat::Json) {
         false
     } else if std::io::stdin().is_terminal() {
         // TTY interactive: prompt
@@ -170,7 +170,7 @@ pub fn run(
         loaded_config.vault_config.telemetry.as_ref(),
         &argv,
     );
-    crate::emit_invocation_started(&mut sink, "migrate", cwd, &plan.vault_root, dry_run, &argv);
+    crate::emit_invocation_started(&mut sink, "apply", cwd, &plan.vault_root, dry_run, &argv);
 
     let report = match apply_migration_plan(&plan, &index, ctx, &mut sink) {
         Ok(r) => r,
@@ -179,8 +179,8 @@ pub fn run(
             // `{ code, message, path? }` envelope on stdout; a records/TTY caller
             // gets the prose on stderr. Either way this is a preflight refusal.
             match args.format {
-                MigrateFormat::Json => crate::render_json_error_envelope(&e)?,
-                MigrateFormat::Records => eprintln!("error: {e:#}"),
+                ApplyFormat::Json => crate::render_json_error_envelope(&e)?,
+                ApplyFormat::Records => eprintln!("error: {e:#}"),
             }
             return Ok(EXIT_PREFLIGHT);
         }
@@ -196,7 +196,7 @@ pub fn run(
     // Success → 0.
     let exit = report.exit_code();
 
-    crate::emit_invocation_finished(&mut sink, "migrate", exit, &report);
+    crate::emit_invocation_finished(&mut sink, "apply", exit, &report);
 
     crate::emit_cascade_failure_warnings(&report);
 
@@ -263,7 +263,7 @@ fn parse_plan(raw: &str, fmt: InputFormat, source: &str) -> Result<MigrationPlan
 /// `--out` is mutually exclusive with stdout output: when set, the report
 /// (always JSON) is written to the file and stdout is silent. This matches
 /// repair-apply's convention — if you wanted both file + stdout, run twice.
-fn render_report(report: &ApplyReport, format: MigrateFormat, out: Option<&str>) -> Result<()> {
+fn render_report(report: &ApplyReport, format: ApplyFormat, out: Option<&str>) -> Result<()> {
     if let Some(out_path) = out {
         let json = serde_json::to_string_pretty(report)?;
         std::fs::write(out_path, format!("{json}\n"))
@@ -274,12 +274,12 @@ fn render_report(report: &ApplyReport, format: MigrateFormat, out: Option<&str>)
     let stdout = io::stdout();
     let mut out_lock = stdout.lock();
     match format {
-        MigrateFormat::Json => {
+        ApplyFormat::Json => {
             let json = serde_json::to_string_pretty(report)?;
             out_lock.write_all(json.as_bytes())?;
             out_lock.write_all(b"\n")?;
         }
-        MigrateFormat::Records => {
+        ApplyFormat::Records => {
             render_records(report, &mut out_lock)?;
             // TTY `trace:` footer on real apply (Records only; JSON carries
             // trace_id as a field).
@@ -294,7 +294,7 @@ fn render_report(report: &ApplyReport, format: MigrateFormat, out: Option<&str>)
 /// Human-readable records rendering for the apply report.
 fn render_records(report: &ApplyReport, out: &mut dyn Write) -> Result<()> {
     let status_label = if report.dry_run { "dry-run" } else { "applied" };
-    writeln!(out, "migrate {status_label}")?;
+    writeln!(out, "apply {status_label}")?;
     writeln!(
         out,
         "  applied: {}  skipped: {}  failed: {}  remaining: {}",

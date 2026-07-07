@@ -1,4 +1,5 @@
 pub mod applier;
+mod apply_cmd;
 pub mod apply_report;
 mod audit;
 mod cache;
@@ -23,7 +24,6 @@ mod init;
 mod init_scan;
 mod links;
 mod mcp;
-mod migrate_cmd;
 pub mod migration_plan;
 pub mod move_doc;
 mod mutation_lock;
@@ -49,11 +49,11 @@ mod validate_filter;
 
 use std::process;
 
+use crate::apply_cmd::ApplyRunArgs;
 use crate::cli::{CacheSubcommand, Cli, Command, ConfigSubcommand};
 use crate::config_loader::{effective_cwd, load_config};
 use crate::core::GraphIndex;
 use crate::graph::{concise_diagnostics, has_errors};
-use crate::migrate_cmd::MigrateRunArgs;
 use crate::output::primitives::is_broken_pipe;
 use crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs;
 use crate::standards::validate_with_compiled;
@@ -361,8 +361,8 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     }
 
     let outcome = match command {
-        Command::Migrate(args) => {
-            let run_args = MigrateRunArgs {
+        Command::Apply(args) => {
+            let run_args = ApplyRunArgs {
                 plan_path: args.plan_path,
                 dry_run: args.dry_run,
                 yes: args.yes,
@@ -371,7 +371,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 parents: args.parents,
                 out: args.out,
             };
-            migrate_cmd::run(
+            apply_cmd::run(
                 run_args,
                 &cwd,
                 no_cache_refresh,
@@ -657,7 +657,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use std::io::Write;
 
             // Acquire mutation lock before cache load.
-            // Note: for move, --format json is an implicit DRY-RUN (unlike migrate),
+            // Note: for move, --format json is an implicit DRY-RUN (unlike apply),
             // so JSON format alone does NOT force is_apply here.
             let (_, state_dir) = crate::cache::state_dir_for(&cwd)
                 .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;

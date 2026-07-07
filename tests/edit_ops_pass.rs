@@ -42,8 +42,8 @@ fn edit_plan(vault_root: &str, ops: Vec<serde_json::Value>) -> String {
     .unwrap()
 }
 
-fn run_migrate(vault_root: &str, plan: &str, extra: &[&str]) -> std::process::Output {
-    let mut args: Vec<&str> = vec!["--cwd", vault_root, "migrate", "-"];
+fn run_apply(vault_root: &str, plan: &str, extra: &[&str]) -> std::process::Output {
+    let mut args: Vec<&str> = vec!["--cwd", vault_root, "apply", "-"];
     args.extend_from_slice(extra);
     let xdg_root = std::path::Path::new(vault_root);
     let mut cmd = Command::new(norn_bin())
@@ -83,7 +83,7 @@ fn append_to_section_applies_at_apply_time() {
         })],
     );
 
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "expected success; stderr={}",
@@ -115,7 +115,7 @@ fn str_replace_applies_at_apply_time() {
             "fields": { "path": "note.md", "document_hash": hash, "old": "world", "new": "norn" }
         })],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "stderr={}",
@@ -150,7 +150,7 @@ fn multi_doc_edit_batch_is_atomic_on_transform_failure() {
             }),
         ],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         !output.status.success(),
         "a failing anchor must abort the batch"
@@ -175,7 +175,7 @@ fn dry_run_fails_when_transform_would_fail() {
             "fields": { "path": "note.md", "document_hash": hash, "old": "ABSENT", "new": "x" }
         })],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--dry-run"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--dry-run"]);
     assert!(
         !output.status.success(),
         "dry-run must fail when the edit anchor is absent, not preview a phantom change"
@@ -194,7 +194,7 @@ fn edit_op_without_hash_is_hydrated_and_applies() {
             "fields": { "path": "note.md", "heading": "Notes", "content": "line two" }
         })],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "an omitted hash must hydrate and apply; stderr={}",
@@ -222,7 +222,7 @@ fn same_path_divergent_hash_is_rejected() {
             }),
         ],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         !output.status.success(),
         "a divergent same-path hash must abort"
@@ -247,7 +247,7 @@ fn no_op_edit_leaves_file_untouched() {
             "fields": { "path": "note.md", "document_hash": hash, "old": "world", "new": "world" }
         })],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "stderr={}",
@@ -279,7 +279,7 @@ fn two_same_kind_edits_on_one_doc_both_apply() {
             }),
         ],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "stderr={}",
@@ -309,7 +309,7 @@ fn edit_op_with_stale_hash_aborts_without_writing() {
         })],
     );
 
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(!output.status.success(), "stale hash must fail the apply");
     assert_eq!(
         fs::read_to_string(&note_path).unwrap(),
@@ -330,7 +330,7 @@ fn dry_run_does_not_mutate() {
             "fields": { "path": "note.md", "document_hash": hash, "heading": "Notes", "content": "x" }
         })],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--dry-run"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--dry-run"]);
     assert!(
         output.status.success(),
         "stderr={}",
@@ -363,7 +363,7 @@ fn multiple_same_path_edits_apply_in_order() {
             }),
         ],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "stderr={}",
@@ -402,7 +402,7 @@ fn edit_composes_with_frontmatter_change_in_one_plan() {
             }),
         ],
     );
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "stderr={}",

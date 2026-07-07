@@ -7,7 +7,7 @@ use crate::standards::predicates::frontmatter_predicates_match;
 
 // Superseded by validate_with_compiled (hot path); retained for the in-file
 // test mod which exercises the default-CompiledConfig path. Safe to delete in
-// a cleanup pass once those tests migrate.
+// a cleanup pass once those tests move over.
 #[allow(dead_code)]
 pub fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
     validate_with_alias_field(index, config, None)

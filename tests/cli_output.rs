@@ -416,7 +416,7 @@ fn broad_repair_plan_with_skipped_findings_still_applies_changes() {
     assert_eq!(skipped[0]["finding_code"], "link-target-missing");
     assert_eq!(skipped[0]["reason"], "link-decision-needed");
 
-    // The plan applies cleanly through `norn migrate` (dry-run preview).
+    // The plan applies cleanly through `norn apply` (dry-run preview).
     let plan_path = root.join("repair.json");
     fs::write(&plan_path, plan).expect("plan should write");
     let output = vault(&[
@@ -424,7 +424,7 @@ fn broad_repair_plan_with_skipped_findings_still_applies_changes() {
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--dry-run",
         "--format",
@@ -435,7 +435,7 @@ fn broad_repair_plan_with_skipped_findings_still_applies_changes() {
     assert_eq!(report["dry_run"], true);
     // Dry-run: the one frontmatter op is recognized but not applied (status not_run).
     assert_eq!(report["operations"][0]["kind"], "set_frontmatter");
-    assert_eq!(report["operations"][0]["status"], "not_run");
+    assert_eq!(report["operations"][0]["status"], "not-run");
 
     fs::remove_dir_all(root).ok();
     fs::remove_file(config_path).ok();
@@ -475,13 +475,13 @@ fn repair_apply_writes_frontmatter_plan_and_verifies() {
     let plan_path = root.join("repair.json");
     fs::write(&plan_path, plan).expect("plan should write");
 
-    // Apply through the unified migrate pipeline (--yes skips the prompt).
+    // Apply through the unified apply pipeline (--yes skips the prompt).
     let output = vault(&[
         "-C",
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",
@@ -552,7 +552,7 @@ fn repair_apply_dry_run_does_not_write() {
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--dry-run",
         "--format",
@@ -610,7 +610,7 @@ fn repair_apply_rejects_stale_plan() {
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",
@@ -666,7 +666,7 @@ fn repair_apply_preserves_double_quoted_workspace_field() {
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",
@@ -2314,7 +2314,7 @@ fn repair_apply_adds_missing_required_field() {
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",
@@ -2564,7 +2564,7 @@ repair:
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",
@@ -2602,14 +2602,14 @@ repair:
     fs::remove_file(&config_path).ok();
 }
 
-/// NRN-150/183: a MULTI-op migrate that partially applies — op0 renames a→b
+/// NRN-150/183: a MULTI-op apply that partially applies — op0 renames a→b
 /// (a real write), then op1's move refuses because its destination exists — now
 /// exits `1` (a partial-apply runtime failure), NOT `2` (a byte-identical
 /// preflight refusal). The old CLI arm mapped every apply `Err` to exit 2, so a
 /// partial folder-style move reported "refused, nothing written" while files had
 /// already moved. The exit is now the report's own outcome mapping.
 #[test]
-fn migrate_partial_apply_exits_1_not_2_when_a_move_already_landed() {
+fn apply_partial_apply_exits_1_not_2_when_a_move_already_landed() {
     let root = temp_cache_dir();
     let config_path = root.with_extension("yaml");
     fs::write(&config_path, "validate: {}\n").expect("config should write");
@@ -2636,14 +2636,14 @@ fn migrate_partial_apply_exits_1_not_2_when_a_move_already_landed() {
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",
         "json",
     ]);
     let _cache = isolate_cache(&mut command);
-    let output = command.output().expect("migrate should run");
+    let output = command.output().expect("apply should run");
 
     assert_eq!(
         output.status.code(),
@@ -2736,7 +2736,7 @@ repair:
         root.to_str().unwrap(),
         "--config",
         config_path.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",
@@ -3069,7 +3069,7 @@ fn repair_apply_rewrites_link_in_source_doc() {
     let output = vault(&[
         "-C",
         root.to_str().unwrap(),
-        "migrate",
+        "apply",
         plan_path.to_str().unwrap(),
         "--yes",
         "--format",

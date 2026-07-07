@@ -1,11 +1,11 @@
-//! Integration test for `norn migrate <plan.yaml> --dry-run --format json`.
+//! Integration test for `norn apply <plan.yaml> --dry-run --format json`.
 
 use std::process::Command;
 use tempfile::TempDir;
 
 fn synth() -> TempDir {
     let tmp = tempfile::Builder::new()
-        .prefix("norn-migrate-int-")
+        .prefix("norn-apply-int-")
         .tempdir()
         .unwrap();
     let root = tmp.path().join("vault");
@@ -34,7 +34,7 @@ fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
 }
 
 #[test]
-fn migrate_dry_run_returns_apply_report() {
+fn apply_dry_run_returns_apply_report() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = format!(
@@ -54,7 +54,7 @@ operations:
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run", "--format", "json"])
         .output()
@@ -76,7 +76,7 @@ operations:
 }
 
 #[test]
-fn migrate_rejects_wrong_schema_version() {
+fn apply_rejects_wrong_schema_version() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = format!(
@@ -92,7 +92,7 @@ operations: []
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run"])
         .output()
@@ -110,7 +110,7 @@ operations: []
 /// with the stable kebab code an agent branches on. Here a bogus `document_hash`
 /// forces a `stale-document-hash` CAS refusal; exit is the preflight code 2.
 #[test]
-fn migrate_json_failure_emits_structured_envelope_on_stdout() {
+fn apply_json_failure_emits_structured_envelope_on_stdout() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = serde_json::json!({
@@ -134,7 +134,7 @@ fn migrate_json_failure_emits_structured_envelope_on_stdout() {
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--format", "json"])
         .output()
@@ -164,7 +164,7 @@ fn migrate_json_failure_emits_structured_envelope_on_stdout() {
 }
 
 #[test]
-fn migrate_reads_plan_from_stdin() {
+fn apply_reads_plan_from_stdin() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan_json = serde_json::json!({
@@ -183,7 +183,7 @@ fn migrate_reads_plan_from_stdin() {
     let mut child = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate", "-", "--dry-run", "--format", "json"])
+        .args(["apply", "-", "--dry-run", "--format", "json"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -215,7 +215,7 @@ fn migrate_reads_plan_from_stdin() {
 /// ids on dry-run — earlier plan-local allocations are folded in, so the preview
 /// matches what apply would actually write (MMR-1, MMR-2), not a duplicated id.
 #[test]
-fn migrate_dry_run_multiple_seq_creates_predict_distinct_ids() {
+fn apply_dry_run_multiple_seq_creates_predict_distinct_ids() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let mk = |p: &str| {
@@ -239,7 +239,7 @@ fn migrate_dry_run_multiple_seq_creates_predict_distinct_ids() {
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run", "--format", "json"])
         .output()
@@ -273,7 +273,7 @@ fn migrate_dry_run_multiple_seq_creates_predict_distinct_ids() {
 /// Ported from the deleted `repair_apply_out_orthogonality` suite: `--out`
 /// writes the JSON ApplyReport to a file and keeps stdout silent.
 #[test]
-fn migrate_out_alone_writes_file_and_keeps_stdout_silent() {
+fn apply_out_alone_writes_file_and_keeps_stdout_silent() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = format!(
@@ -290,7 +290,7 @@ operations: []
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run", "--out"])
         .arg(&out_path)
@@ -317,7 +317,7 @@ operations: []
 /// Ported from the deleted `repair_apply_stdin` suite: malformed stdin is a
 /// pre-flight refusal (non-zero exit) with a parse error on stderr.
 #[test]
-fn migrate_malformed_stdin_exits_non_zero() {
+fn apply_malformed_stdin_exits_non_zero() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
 
@@ -325,7 +325,7 @@ fn migrate_malformed_stdin_exits_non_zero() {
     let mut child = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate", "-", "--dry-run", "--format", "json"])
+        .args(["apply", "-", "--dry-run", "--format", "json"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -352,13 +352,13 @@ fn migrate_malformed_stdin_exits_non_zero() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn migrate_per_op_cascade_attribution_multi_move() {
+fn apply_per_op_cascade_attribution_multi_move() {
     // Two docs (p.md and q.md), each with a DISTINCT set of backlinkers.
     // p.md is referenced by 1 file; q.md is referenced by 2 files.
-    // After a dry-run migrate, each move_document op must carry its OWN
+    // After a dry-run apply, each move_document op must carry its OWN
     // cascade.planned — not a shared aggregate.
     let tmp = tempfile::Builder::new()
-        .prefix("norn-migrate-cascade-t5-")
+        .prefix("norn-apply-cascade-t5-")
         .tempdir()
         .unwrap();
     let vault = tmp.path().join("vault");
@@ -406,7 +406,7 @@ operations:
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run", "--format", "json"])
         .output()
@@ -479,7 +479,7 @@ operations:
 }
 
 #[test]
-fn migrate_stdin_with_input_format_yaml_works() {
+fn apply_stdin_with_input_format_yaml_works() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan_yaml = format!(
@@ -499,7 +499,7 @@ operations:
         .args(["--cwd"])
         .arg(&vault)
         .args([
-            "migrate",
+            "apply",
             "-",
             "--input-format",
             "yaml",
@@ -547,7 +547,7 @@ fn blake3_of_file(path: &std::path::Path) -> String {
 }
 
 #[test]
-fn migrate_composes_create_document_and_replace_body() {
+fn apply_composes_create_document_and_replace_body() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     // a.md exists ("---\ntype: note\n---\n# A\n"); c.md does not yet.
@@ -581,7 +581,7 @@ fn migrate_composes_create_document_and_replace_body() {
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--yes"])
         .output()
@@ -609,7 +609,7 @@ fn migrate_composes_create_document_and_replace_body() {
 }
 
 #[test]
-fn migrate_composed_create_and_replace_body_dry_run_does_not_mutate() {
+fn apply_composed_create_and_replace_body_dry_run_does_not_mutate() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let a_path = vault.join("a.md");
@@ -643,7 +643,7 @@ fn migrate_composed_create_and_replace_body_dry_run_does_not_mutate() {
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run", "--format", "json"])
         .output()
@@ -677,7 +677,7 @@ fn migrate_composed_create_and_replace_body_dry_run_does_not_mutate() {
 /// plan alongside a `create_document`: a stale hash aborts the whole apply and
 /// the sibling create must NOT have landed (compute-all-validate-then-write).
 #[test]
-fn migrate_composed_stale_replace_body_hash_aborts_and_create_does_not_land() {
+fn apply_composed_stale_replace_body_hash_aborts_and_create_does_not_land() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
 
@@ -708,7 +708,7 @@ fn migrate_composed_stale_replace_body_hash_aborts_and_create_does_not_land() {
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--yes"])
         .output()

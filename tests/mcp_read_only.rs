@@ -26,7 +26,7 @@ const READ_TOOLS: &[&str] = &[
     "vault.count",
     "vault.get",
     "vault.validate",
-    "vault.repair_plan",
+    "vault.repair",
     "vault.describe",
 ];
 
@@ -38,7 +38,7 @@ const MUTATION_TOOLS: &[&str] = &[
     "vault.move",
     "vault.delete",
     "vault.rewrite_wikilink",
-    "vault.apply_plan",
+    "vault.apply",
 ];
 
 fn norn_bin() -> std::path::PathBuf {
