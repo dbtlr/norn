@@ -63,6 +63,29 @@ pub enum Warning {
         field: String,
         variable: String,
     },
+    /// An `--field`/`--field-json` key the schema declares nowhere (no
+    /// matching rule's `field_types`, `allowed_values`, or
+    /// `required_frontmatter` names it). Parity with `set`'s
+    /// `SetWarning::UnknownField` (NRN-37b) — informational only, the field is
+    /// still written.
+    UnknownField {
+        field: String,
+    },
+    /// A post-create `validate` finding whose code has no dedicated `Warning`
+    /// variant. Carries the finding's own `code`/`message` verbatim (the same
+    /// seam `norn validate` renders through) so every finding surfaces as a
+    /// report warning, not just `RequiredFrontmatterMissing` (NRN-37a).
+    ValidationFinding {
+        code: String,
+        message: String,
+    },
+    /// `--title` was supplied alongside an explicit path (Mode A). The
+    /// `{{title}}` substitution context always derives from the path stem in
+    /// that mode, and Mode A has no body scaffold to render a title into
+    /// either — the flag is silently inert without this warning (NRN-37c).
+    TitleIgnored {
+        title: String,
+    },
 }
 
 /// Hard errors that prevent plan synthesis.
@@ -177,8 +200,24 @@ pub fn build_plan(
 
     let mut operator_overrides: BTreeMap<String, Value> = BTreeMap::new();
     let mut operator_sources: Vec<(String, Value, FieldSourceKind)> = Vec::new();
+    // NRN-37b: unknown-field warning parity with `set`. Collected in a set
+    // (rather than pushed straight to `Warning`) because `warnings` isn't
+    // declared until Step 5 below; deduped so a repeated typo'd key across
+    // --field/--field-json doesn't double-warn.
+    let mut unknown_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for (key, value, kind) in raw_overrides {
+        // Fires regardless of `--force`: force only bypasses type/allowed-values
+        // *enforcement*, not the "is this field declared anywhere in the
+        // schema" signal — mirrors `set`'s `coerce_kv_slice`, where the
+        // unknown-field check is independent of the force branch.
+        if !crate::set::validate::field_known_in_rules(
+            path_only_rules.iter().map(|(rule, _)| *rule),
+            &key,
+        ) {
+            unknown_fields.insert(key.clone());
+        }
+
         let coerced = if kind == FieldSourceKind::OperatorFlag && !args.force {
             // String input — try schema-aware coercion.
             let raw_str = value.as_str().unwrap_or("");
@@ -277,6 +316,11 @@ pub fn build_plan(
     // ── Step 5: wikilink resolution warnings ──────────────────────────────────
     // Only fired when an index is available.
     let mut warnings: Vec<Warning> = Vec::new();
+
+    // NRN-37b: surface the unknown-field keys collected during Step 3.
+    for field in unknown_fields {
+        warnings.push(Warning::UnknownField { field });
+    }
 
     if let Some(idx) = index {
         for (field, value) in &resolved_fm {

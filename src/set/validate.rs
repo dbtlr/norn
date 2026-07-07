@@ -171,8 +171,8 @@ pub fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool
     false
 }
 
-/// Is `field` known to the schema for this document? True when any matching rule
-/// declares it via `field_types`, `allowed_values`, or `required_frontmatter`.
+/// Is `field` declared by any rule in `rules` via `field_types`,
+/// `allowed_values`, or `required_frontmatter`?
 ///
 /// This is deliberately separate from [`lookup_field_type`]: that answers "what
 /// coercion type does the field have?" and returns `None` for a field governed
@@ -180,11 +180,18 @@ pub fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool
 /// type lookup as the "is this field known?" oracle is what produced the
 /// spurious `unknown field` warning — a field can be fully schema-declared yet
 /// have no special coercion type.
-pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
-    for rule in &cfg.validate.rules {
-        if !crate::standards::engine::rule_matches(doc, rule) {
-            continue;
-        }
+///
+/// Takes an already rule-matched slice rather than a `Document` so it can be
+/// shared by callers that match rules differently: `is_known_field` below
+/// matches against a real `Document` (via `rule_matches`); `norn new`
+/// (`new::synth::build_plan`, no document exists yet) matches by path +
+/// in-progress frontmatter (via `applicable_rules`). Both feed the same
+/// "declared anywhere?" check (NRN-37).
+pub fn field_known_in_rules<'a>(
+    rules: impl IntoIterator<Item = &'a crate::standards::ValidateRule>,
+    field: &str,
+) -> bool {
+    for rule in rules {
         // A type-less extended entry (`{ indexed: bool }`) contributes only to
         // the index vote — it must not make the field "known" to the schema.
         let has_typed_field_type = rule
@@ -199,6 +206,17 @@ pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
         }
     }
     false
+}
+
+/// Is `field` known to the schema for this document? True when any matching rule
+/// declares it via `field_types`, `allowed_values`, or `required_frontmatter`.
+pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
+    let matching = cfg
+        .validate
+        .rules
+        .iter()
+        .filter(|rule| crate::standards::engine::rule_matches(doc, rule));
+    field_known_in_rules(matching, field)
 }
 
 /// The allowed-value set for `field` from the first matching rule that declares

@@ -94,6 +94,21 @@ fn warning_to_json(w: &Warning) -> Value {
             "field": field,
             "variable": variable,
         }),
+        Warning::UnknownField { field } => json!({
+            "kind": "unknown-field",
+            "field": field,
+        }),
+        // NRN-37a: the finding's own code becomes `kind` verbatim — the same
+        // code `norn validate` reports for the identical finding, so an
+        // operator (or agent) correlating the two sees one vocabulary.
+        Warning::ValidationFinding { code, message } => json!({
+            "kind": code,
+            "message": message,
+        }),
+        Warning::TitleIgnored { title } => json!({
+            "kind": "title-ignored",
+            "title": title,
+        }),
     }
 }
 
@@ -229,6 +244,11 @@ fn warning_label(w: &Warning) -> String {
         }
         Warning::PathVariableUnresolved { field, variable } => {
             format!("path-variable-unresolved: {} (var: {})", field, variable)
+        }
+        Warning::UnknownField { field } => format!("unknown field: {field}"),
+        Warning::ValidationFinding { code, message } => format!("{code}: {message}"),
+        Warning::TitleIgnored { title } => {
+            format!("title-ignored: --title '{title}' has no effect with an explicit path")
         }
     }
 }
