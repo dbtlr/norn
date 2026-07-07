@@ -901,6 +901,60 @@ validate:
         assert!(root.path().join("foo.md").exists());
     }
 
+    // ── NRN-37 F2(b): forbidden field is one finding, not two ────────────────
+
+    #[test]
+    fn forbidden_field_emits_single_finding_not_double_warned() {
+        let root = vault();
+        write_config(
+            root.path(),
+            r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      forbidden_frontmatter: [legacy_field]
+"#,
+        );
+        let cwd = camino::Utf8Path::from_path(root.path()).unwrap();
+        let mut args = args_for("foo.md");
+        args.dry_run = false;
+        args.yes = true;
+        args.format = crate::cli::NewFormat::Json;
+        args.field = vec!["legacy_field=oldvalue".to_string()];
+        let bundle = preflight_and_plan(&args, cwd).unwrap();
+        assert_eq!(bundle.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(&bundle.rendered).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(true));
+
+        let warnings = v["warnings"].as_array().unwrap();
+
+        // Before the fix: `legacy_field` is declared nowhere in `field_types`/
+        // `allowed_values`/`required_frontmatter`, so it was ALSO flagged
+        // `unknown-field` on top of the correct `frontmatter-forbidden-field`
+        // finding — a forbidden field is known to the schema (just
+        // disallowed), so only the forbidden finding should surface.
+        let unknown_count = warnings
+            .iter()
+            .filter(|w| w["kind"] == "unknown-field" && w["field"] == "legacy_field")
+            .count();
+        assert_eq!(
+            unknown_count, 0,
+            "expected no unknown-field warning for forbidden-but-declared `legacy_field`, \
+             warnings: {warnings:?}"
+        );
+
+        let forbidden_count = warnings
+            .iter()
+            .filter(|w| w["kind"] == "frontmatter-forbidden-field")
+            .count();
+        assert_eq!(
+            forbidden_count, 1,
+            "expected exactly one frontmatter-forbidden-field finding, warnings: {warnings:?}"
+        );
+    }
+
     // ── NRN-37: --title is inert (and unwarned) in Mode A (explicit path) ─────
 
     #[test]

@@ -200,24 +200,8 @@ pub fn build_plan(
 
     let mut operator_overrides: BTreeMap<String, Value> = BTreeMap::new();
     let mut operator_sources: Vec<(String, Value, FieldSourceKind)> = Vec::new();
-    // NRN-37b: unknown-field warning parity with `set`. Collected in a set
-    // (rather than pushed straight to `Warning`) because `warnings` isn't
-    // declared until Step 5 below; deduped so a repeated typo'd key across
-    // --field/--field-json doesn't double-warn.
-    let mut unknown_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for (key, value, kind) in raw_overrides {
-        // Fires regardless of `--force`: force only bypasses type/allowed-values
-        // *enforcement*, not the "is this field declared anywhere in the
-        // schema" signal — mirrors `set`'s `coerce_kv_slice`, where the
-        // unknown-field check is independent of the force branch.
-        if !crate::set::validate::field_known_in_rules(
-            path_only_rules.iter().map(|(rule, _)| *rule),
-            &key,
-        ) {
-            unknown_fields.insert(key.clone());
-        }
-
         let coerced = if kind == FieldSourceKind::OperatorFlag && !args.force {
             // String input — try schema-aware coercion.
             let raw_str = value.as_str().unwrap_or("");
@@ -289,6 +273,33 @@ pub fn build_plan(
         Some(&resolved_fm_value),
     );
 
+    // NRN-37b/F1: "is this operator-supplied field declared anywhere in the
+    // schema?" must be judged against the frontmatter this document is
+    // ACTUALLY being created with — `matched_rules` above, already computed
+    // from the fully fixpoint-resolved frontmatter (operator overrides +
+    // schema defaults). Checking this here (post Step 4) rather than during
+    // Step 3's coercion loop is deliberate: at Step 3 time no frontmatter
+    // exists yet, so a rule keyed on `match.frontmatter` (e.g. `type: index`)
+    // whose discriminator is itself being set in this same `--field` batch
+    // would be invisible under a path-only (frontmatter=None) match — a false
+    // "unknown field" warning for every field that rule declares. Using the
+    // post-merge frontmatter avoids that chicken-and-egg: it's the same map
+    // already destined for the write, so there's nothing left to resolve.
+    // Fires regardless of `--force`: force only bypasses type/allowed-values
+    // *enforcement*, not the "is this field declared anywhere in the schema"
+    // signal — mirrors `set`'s `coerce_kv_slice`, where the unknown-field
+    // check is independent of the force branch.
+    let unknown_fields: std::collections::BTreeSet<String> = operator_overrides
+        .keys()
+        .filter(|key| {
+            !crate::set::validate::field_known_in_rules(
+                matched_rules.iter().map(|(rule, _)| *rule),
+                key,
+            )
+        })
+        .cloned()
+        .collect();
+
     let mut field_sources: Vec<FieldSource> = Vec::new();
     for (field, value) in &resolved_fm {
         if let Some((op_val, op_kind)) = operator_keys.get(field) {
@@ -317,7 +328,7 @@ pub fn build_plan(
     // Only fired when an index is available.
     let mut warnings: Vec<Warning> = Vec::new();
 
-    // NRN-37b: surface the unknown-field keys collected during Step 3.
+    // NRN-37b: surface the unknown-field keys collected above (post Step 4).
     for field in unknown_fields {
         warnings.push(Warning::UnknownField { field });
     }
@@ -526,6 +537,112 @@ validate:
 
         // No warnings expected when all required fields are filled.
         assert!(plan.warnings.is_empty(), "warnings: {:?}", plan.warnings);
+    }
+
+    /// NRN-37 F1: a `match.frontmatter`-predicated rule (`type: index`) must be
+    /// consulted for the unknown-field check when its discriminator (`type`)
+    /// is itself being set via `--field` in this same call. Before the fix,
+    /// the unknown-field pass used `applicable_rules(.., None)` — which skips
+    /// every frontmatter-predicated rule outright — so `created`/`workspace`
+    /// (declared only under the `type: index` rule) were false-flagged as
+    /// unknown even though the schema declares them for this exact document.
+    #[test]
+    fn synth_no_false_unknown_field_for_frontmatter_scoped_rule() {
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: base
+      match:
+        path: "**/*.md"
+      allowed_values:
+        type: [index, note, task]
+    - name: index-scoped
+      match:
+        path: "**/*.md"
+        frontmatter:
+          type: index
+      field_types:
+        created: datetime
+        workspace: wikilink
+"#,
+        );
+        let (a, p) = args(
+            "foo.md",
+            vec!["type=index", "created=2026-01-01T00:00", "workspace=X"],
+        );
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
+
+        let unknown: Vec<&String> = plan
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                Warning::UnknownField { field } => Some(field),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "expected no unknown-field warnings for `created`/`workspace` \
+             (declared under the `type: index` rule being set in this same call), got: {unknown:?}"
+        );
+    }
+
+    /// NRN-37 F2(a): `field_references` is a documented field-declaring
+    /// construct (`docs/rule-shape.md`'s own example uses
+    /// `field_references: { parent: { target_type: [...] } }`), but the
+    /// shared `field_known_in_rules` seam checked only `field_types`,
+    /// `allowed_values`, and `required_frontmatter` — so a `--field parent=X`
+    /// where `parent` is declared *only* via `field_references` was
+    /// false-flagged as unknown.
+    #[test]
+    fn synth_no_false_unknown_field_for_field_references_only_field() {
+        let (cfg, compiled) = build(
+            r#"
+validate:
+  rules:
+    - name: task
+      match:
+        path: "**/*.md"
+      field_references:
+        parent:
+          target_type: [phase]
+"#,
+        );
+        let (a, p) = args("foo.md", vec!["parent=X"]);
+        let plan = build_plan(
+            &a,
+            &p,
+            &BTreeMap::new(),
+            &cfg,
+            &compiled,
+            None,
+            String::new(),
+        )
+        .unwrap();
+
+        let unknown: Vec<&String> = plan
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                Warning::UnknownField { field } => Some(field),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "expected no unknown-field warning for `parent` (declared via \
+             field_references), got: {unknown:?}"
+        );
     }
 
     #[test]
