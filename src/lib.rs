@@ -1183,22 +1183,40 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use crate::mutation_lock::MutationLock;
             use std::io::{IsTerminal, Read, Write};
 
-            // Parse the edits array first (from --edits-json or stdin), so a
-            // malformed array fails fast before any lock/cache work.
-            let raw = match &args.edits_json {
-                Some(s) => s.clone(),
-                None => {
-                    let mut buf = String::new();
-                    std::io::stdin()
-                        .read_to_string(&mut buf)
-                        .map_err(|e| anyhow::anyhow!("failed to read edits from stdin: {e}"))?;
-                    buf
+            // Single-op sugar (ADR 0010, NRN-210) desugars 1:1 into a one-element
+            // ops array; when absent, fall back to the canonical JSON source
+            // (--edits-json / --ops-file / stdin). Resolve this first so a
+            // malformed input fails fast before any lock/cache work.
+            let ops: Vec<crate::edit::ops::EditOp> = match crate::edit::sugar::desugar(&args) {
+                Ok(Some(ops)) => ops,
+                Ok(None) => {
+                    let raw = match (&args.edits_json, &args.ops_file) {
+                        (Some(s), _) => s.clone(),
+                        (None, Some(path)) => match std::fs::read_to_string(path) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("error: failed to read ops file {path}: {e}");
+                                return Ok(2);
+                            }
+                        },
+                        (None, None) => {
+                            let mut buf = String::new();
+                            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                                anyhow::anyhow!("failed to read edits from stdin: {e}")
+                            })?;
+                            buf
+                        }
+                    };
+                    match serde_json::from_str(&raw) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            eprintln!("error: invalid edits JSON: {e}");
+                            return Ok(2);
+                        }
+                    }
                 }
-            };
-            let ops: Vec<crate::edit::ops::EditOp> = match serde_json::from_str(&raw) {
-                Ok(o) => o,
                 Err(e) => {
-                    eprintln!("error: invalid edits JSON: {e}");
+                    eprintln!("error: {e}");
                     return Ok(2);
                 }
             };
