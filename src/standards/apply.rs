@@ -98,6 +98,98 @@ pub enum ApplyError {
         earlier_op: String,
         earlier_change_id: String,
     },
+
+    #[error(transparent)]
+    Containment(#[from] ContainmentError),
+}
+
+/// (NRN-145) Refusal from the shared vault-root containment gate. A vault is
+/// self-contained: an op target that resolves outside the vault root — via an
+/// absolute path, `..` parent-traversal, or a directory symlinked out of the
+/// vault — is unsupported and refused before any write.
+#[derive(Debug, Error)]
+pub enum ContainmentError {
+    #[error("refusing to operate on '{target}': absolute paths are not vault-relative; the vault root is self-contained and paths outside it are unsupported")]
+    AbsolutePath { target: Utf8PathBuf },
+
+    #[error("refusing to operate on '{target}': a '..' component escapes the vault root; the vault is self-contained and paths outside it are unsupported")]
+    ParentTraversal { target: Utf8PathBuf },
+
+    #[error("refusing to operate on '{target}': path resolves outside the vault root; the vault is self-contained and symlinks out of the vault are unsupported")]
+    EscapesVault { target: Utf8PathBuf },
+
+    #[error("refusing to operate on '{target}': cannot verify vault-root containment ({detail})")]
+    Unresolvable { target: Utf8PathBuf, detail: String },
+}
+
+/// (NRN-145) Refuse an op target that would resolve outside the vault root. The
+/// shared containment gate for the mutation stack (create / move / delete / edit
+/// / backlink-cascade targets) and `norn new`'s path validation — one
+/// implementation, no parallel logic.
+///
+/// The check is lexical first (cheap): an absolute path or any `..` component is
+/// refused up front. Then the op target's PARENT directory is resolved and its
+/// nearest EXISTING ancestor is canonicalized and confirmed prefix-contained in
+/// `canonical_root`. Canonicalizing the parent (not the target, which for a
+/// create/move destination does not yet exist) resolves a directory symlinked
+/// out of the vault — the case the lexical check alone bypasses. Canonicalizing
+/// the nearest existing ancestor means `-p`/`--parents` creation of a
+/// not-yet-existing subtree cannot be used to sidestep the gate.
+///
+/// `canonical_root` is the caller's canonicalization of the vault root; it is
+/// canonicalized ONCE per apply (not per op) and never on a read path.
+pub fn ensure_within_vault(
+    vault_root: &Utf8Path,
+    canonical_root: &std::path::Path,
+    target: &Utf8Path,
+) -> Result<(), ContainmentError> {
+    if target.is_absolute() {
+        return Err(ContainmentError::AbsolutePath {
+            target: target.to_owned(),
+        });
+    }
+    if target
+        .components()
+        .any(|c| matches!(c, camino::Utf8Component::ParentDir))
+    {
+        return Err(ContainmentError::ParentTraversal {
+            target: target.to_owned(),
+        });
+    }
+
+    let joined = vault_root.join(target);
+    let parent = joined.parent().unwrap_or(vault_root);
+    let existing = nearest_existing_ancestor(parent);
+    let canonical_parent =
+        existing
+            .as_std_path()
+            .canonicalize()
+            .map_err(|e| ContainmentError::Unresolvable {
+                target: target.to_owned(),
+                detail: e.to_string(),
+            })?;
+    if !canonical_parent.starts_with(canonical_root) {
+        return Err(ContainmentError::EscapesVault {
+            target: target.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The nearest ancestor of `path` (inclusive) that exists on disk, following
+/// symlinks. Terminates because the vault root — an ancestor of every
+/// lexically-contained target — always exists.
+fn nearest_existing_ancestor(path: &Utf8Path) -> &Utf8Path {
+    let mut cur = path;
+    loop {
+        if cur.as_std_path().exists() {
+            return cur;
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return cur,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

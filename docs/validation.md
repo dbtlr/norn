@@ -203,6 +203,10 @@ Apply rejects:
 
 The orchestrator is atomic-at-batch-level: any precondition failure aborts the whole apply before any partial writes (stderr error, exit 1, no report rendered).
 
+### Vaults are self-contained
+
+Every mutation target must resolve inside the vault root. A vault is self-contained: `norn` refuses — as a preflight, before writing a single byte — any create, move, delete, or edit whose target is an absolute path, contains a `..` parent-traversal component, or reaches outside the vault through a directory symlinked out of it. Outbound symlinks are unsupported; a directory inside the vault that points elsewhere is not a valid mutation target. The refusal names the offending path and exits with the preflight code (2). This guarantee holds for `norn new` as well as plan apply — the same containment gate backs both.
+
 Frontmatter apply preserves Markdown body content byte-for-byte. YAML lines untouched by a repair are preserved exactly (comments, quote style, key ordering). YAML lines touched by a repair preserve the original quote style when the new value is representable in that style; otherwise apply upgrades to the minimum sufficient style and never downgrades.
 
 A `set_frontmatter` change targeting a block-style value (block sequence, block mapping, block literal, block folded, or flow sequence/mapping) returns `cannot minimal-edit` rather than silently rewriting the structure.

@@ -6,13 +6,14 @@
 
 use camino::Utf8Path;
 
+use crate::standards::apply::{ensure_within_vault, ContainmentError};
+
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)] // wired in Task 7.4
 pub enum PreflightError {
     #[error("path must end in .md: {0}")]
     NotMarkdown(String),
-    #[error("path escapes vault root: {0}")]
-    OutsideVault(String),
+    #[error(transparent)]
+    OutsideVault(#[from] ContainmentError),
     #[error("dotfile paths are excluded from vaults: {0}")]
     Dotfile(String),
     #[error("destination already exists (use --force to overwrite): {0}")]
@@ -21,7 +22,6 @@ pub enum PreflightError {
     ParentMissing(String),
 }
 
-#[allow(dead_code)] // wired in Task 7.4
 pub fn preflight(
     vault_root: &str,
     relative_path: &str,
@@ -31,10 +31,23 @@ pub fn preflight(
     if !relative_path.ends_with(".md") {
         return Err(PreflightError::NotMarkdown(relative_path.into()));
     }
-    // Reject absolute paths and parent-traversal.
-    if relative_path.starts_with('/') || relative_path.contains("..") {
-        return Err(PreflightError::OutsideVault(relative_path.into()));
-    }
+    // NRN-145: reject absolute paths, `..` traversal, AND directories symlinked
+    // out of the vault via the shared containment gate — one implementation with
+    // the mutation stack, no parallel lexical logic. `norn new` creates one
+    // document, so canonicalizing the vault root here (off any read path) is
+    // cheap.
+    let canonical_root = Utf8Path::new(vault_root)
+        .as_std_path()
+        .canonicalize()
+        .map_err(|e| ContainmentError::Unresolvable {
+            target: Utf8Path::new(relative_path).to_owned(),
+            detail: e.to_string(),
+        })?;
+    ensure_within_vault(
+        Utf8Path::new(vault_root),
+        &canonical_root,
+        Utf8Path::new(relative_path),
+    )?;
     // Dotfile = any segment beginning with `.`.
     if relative_path.split('/').any(|seg| seg.starts_with('.')) {
         return Err(PreflightError::Dotfile(relative_path.into()));
@@ -101,6 +114,28 @@ mod tests {
             err.to_string().contains("vault root") || err.to_string().contains("escape"),
             "got: {err}"
         );
+    }
+
+    /// NRN-145: a symlinked directory inside the vault pointing outside bypasses
+    /// the lexical check (no `..`, not absolute), so the shared containment gate
+    /// must refuse it here too — the vault is self-contained.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_dir_escape() {
+        let root = vault();
+        let outside = Builder::new()
+            .prefix("vault-new-validate-target-")
+            .tempdir()
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("outlink")).unwrap();
+        let err = preflight(
+            root.path().to_str().unwrap(),
+            "outlink/escape.md",
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("vault"), "got: {err}");
     }
 
     #[test]

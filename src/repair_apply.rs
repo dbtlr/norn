@@ -4,9 +4,9 @@ use std::time::Duration;
 use crate::core::GraphIndex;
 use crate::standards::apply::{
     apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
-    changes_by_path, validate_plan_for_apply, ApplyError, CascadeRecord, CreateDocumentResult,
-    DeleteResult, LinkAttempt, LinkFailResult, LinkRewriteResult, LinkSkipResult, MoveResult,
-    RepairApplyWarning,
+    changes_by_path, ensure_within_vault, validate_plan_for_apply, ApplyError, CascadeRecord,
+    CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult, LinkRewriteResult,
+    LinkSkipResult, MoveResult, RepairApplyWarning,
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
@@ -484,6 +484,33 @@ pub fn apply_repair_plan_with_context(
     // below re-buckets the content ops itself so all four content classes compose
     // into ONE read + ONE write per document.
     changes_by_path(plan)?;
+
+    // NRN-145 containment gate: every mutation op target must resolve inside the
+    // vault root. Refuse absolute paths, `..` traversal, and directories
+    // symlinked out of the vault BEFORE any write — the vault is self-contained.
+    // The vault root is canonicalized ONCE here (not per op, never on a read
+    // path); each op target's parent is then contained against it. Runs on
+    // dry-run too, so a preview refuses exactly where the real apply would.
+    let canonical_root = cwd
+        .as_std_path()
+        .canonicalize()
+        .with_context(|| format!("cannot canonicalize vault root {cwd}"))?;
+    for change in &plan.changes {
+        ensure_within_vault(cwd, &canonical_root, &change.path)?;
+        if let Some(dest) = &change.destination {
+            ensure_within_vault(cwd, &canonical_root, dest)?;
+        }
+        if let Some(risk) = &change.link_risk {
+            for affected in risk
+                .stem_links
+                .iter()
+                .chain(risk.path_qualified_wikilinks.iter())
+                .chain(risk.markdown_links.iter())
+            {
+                ensure_within_vault(cwd, &canonical_root, &affected.source_path)?;
+            }
+        }
+    }
 
     let mut report = RepairApplyReport::new(plan, dry_run);
 
@@ -1118,6 +1145,43 @@ mod tests {
                 expected_old_value: None,
                 new_value: None,
                 destination: None,
+                link_risk: None,
+                warnings: Vec::new(),
+                force: false,
+                parents: false,
+            }],
+            skipped_findings: Vec::new(),
+            footnotes: Vec::new(),
+        }
+    }
+
+    fn move_plan(
+        vault_root: &camino::Utf8PathBuf,
+        from_rel: &str,
+        to_rel: &str,
+        hash: &str,
+    ) -> RepairPlan {
+        RepairPlan {
+            schema_version: REPAIR_PLAN_SCHEMA_VERSION,
+            vault_root: vault_root.clone(),
+            source_filters: RepairPlanFilters::default(),
+            summary: RepairPlanSummary {
+                findings: 0,
+                planned_changes: 1,
+                skipped: SkippedSummary::default(),
+            },
+            changes: vec![PlannedChange {
+                change_id: "move-test".into(),
+                path: from_rel.into(),
+                document_hash: hash.to_string(),
+                finding_code: "operator-request".into(),
+                finding_rule: None,
+                repair_rule: "operator-request".into(),
+                operation: "move_document".into(),
+                field: None,
+                expected_old_value: None,
+                new_value: None,
+                destination: Some(to_rel.into()),
                 link_risk: None,
                 warnings: Vec::new(),
                 force: false,
@@ -2349,5 +2413,141 @@ mod tests {
             ],
         );
         reject_content_op_after_vacate(&plan).unwrap();
+    }
+
+    // ── NRN-145: vault-root containment gate ──────────────────────────────────
+    // The mutation stack must refuse any op target that resolves outside the
+    // vault root — via relative `../` traversal, an absolute path, or a
+    // symlinked directory inside the vault pointing outside. Vaults are
+    // self-contained; outbound symlinks are unsupported. Each escape is refused
+    // as a preflight, before any byte is written outside the vault.
+
+    /// A vault nested inside an outer temp dir, so a `../` escape target lands in
+    /// a directory this test OWNS (and which is cleaned up), rather than polluting
+    /// the shared system temp root. Returns (outer tempdir, vault root, index).
+    fn make_nested_vault(prefix: &str) -> (tempfile::TempDir, camino::Utf8PathBuf, GraphIndex) {
+        let outer = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(outer.path())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
+        std::fs::write(
+            root.join(".norn/config.yaml").as_std_path(),
+            "validate: {}\n",
+        )
+        .unwrap();
+        let index = crate::graph::build_index(&root).unwrap();
+        (outer, root, index)
+    }
+
+    /// Class 1: a relative `../` traversal target is refused before any write.
+    #[test]
+    fn containment_refuses_relative_traversal_create() {
+        let (outer, root, index) = make_nested_vault("vault-containment-traversal-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "../escape-traversal.md", fm, "x\n", false);
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("vault"),
+            "expected containment refusal, got: {msg}"
+        );
+        let outside = camino::Utf8Path::from_path(outer.path())
+            .unwrap()
+            .join("escape-traversal.md");
+        assert!(
+            !outside.as_std_path().exists(),
+            "traversal wrote outside the vault: {outside}"
+        );
+    }
+
+    /// Class 2: an absolute-path target is refused before any write.
+    #[test]
+    fn containment_refuses_absolute_path_create() {
+        let (_tmp, root, index) = make_empty_vault("vault-containment-abs-");
+        let outside_dir = tempfile::Builder::new()
+            .prefix("vault-containment-abs-target-")
+            .tempdir()
+            .unwrap();
+        let abs_target = camino::Utf8Path::from_path(outside_dir.path())
+            .unwrap()
+            .join("escape-abs.md");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, abs_target.as_str(), fm, "x\n", false);
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vault"), "got: {msg}");
+        assert!(
+            !abs_target.as_std_path().exists(),
+            "absolute path wrote outside the vault: {abs_target}"
+        );
+    }
+
+    /// Class 3: a symlinked directory inside the vault pointing outside is
+    /// refused — the lexical check (no `..`, not absolute) passes it, so this is
+    /// the case the canonicalized-parent containment must catch.
+    #[cfg(unix)]
+    #[test]
+    fn containment_refuses_symlinked_dir_escape_create() {
+        let (_tmp, root, index) = make_empty_vault("vault-containment-symlink-");
+        let outside_dir = tempfile::Builder::new()
+            .prefix("vault-containment-symlink-target-")
+            .tempdir()
+            .unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), root.join("outlink").as_std_path()).unwrap();
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "outlink/escape-symlink.md", fm, "x\n", false);
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("vault") || msg.contains("symlink"),
+            "got: {msg}"
+        );
+        let outside = camino::Utf8Path::from_path(outside_dir.path())
+            .unwrap()
+            .join("escape-symlink.md");
+        assert!(
+            !outside.as_std_path().exists(),
+            "symlinked-dir escape wrote outside the vault: {outside}"
+        );
+    }
+
+    /// Class 4 (whole mutation stack): the same containment covers `move`'s
+    /// destination target, not just create — a `../` destination is refused and
+    /// the source is left untouched.
+    #[test]
+    fn containment_refuses_move_destination_traversal() {
+        let (outer, root, _index) = make_nested_vault("vault-containment-move-");
+        std::fs::write(
+            root.join("doc.md").as_std_path(),
+            "---\ntype: note\n---\n# Doc\n",
+        )
+        .unwrap();
+        let index = crate::graph::build_index(&root).unwrap();
+        let hash = index
+            .documents
+            .iter()
+            .find(|d| d.path == "doc.md")
+            .unwrap()
+            .hash
+            .clone();
+        let plan = move_plan(&root, "doc.md", "../escape-move.md", &hash);
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vault"), "got: {msg}");
+        let outside = camino::Utf8Path::from_path(outer.path())
+            .unwrap()
+            .join("escape-move.md");
+        assert!(
+            !outside.as_std_path().exists(),
+            "move wrote outside the vault: {outside}"
+        );
+        assert!(
+            root.join("doc.md").as_std_path().exists(),
+            "move source should be untouched after a refused destination"
+        );
     }
 }
