@@ -30,12 +30,10 @@ pub struct RewriteWikilinkRunArgs {
     pub out: Option<String>,
 }
 
-/// Pre-flight error exit code.
+/// Pre-flight / byte-identical-refusal exit code. Runtime and success exits now
+/// come from [`crate::apply_report::ApplyReport::exit_code`] (1 = partial-apply
+/// failure, 0 = success), the single outcome→exit mapping shared across surfaces.
 pub const EXIT_PREFLIGHT: i32 = 2;
-/// Runtime failure exit code.
-pub const EXIT_RUNTIME: i32 = 1;
-/// Success exit code.
-pub const EXIT_OK: i32 = 0;
 
 pub fn run(
     args: RewriteWikilinkRunArgs,
@@ -166,11 +164,12 @@ pub fn run(
     // ------------------------------------------------------------------
     // 5. Exit code
     // ------------------------------------------------------------------
-    let exit = if report.failed > 0 {
-        EXIT_RUNTIME
-    } else {
-        EXIT_OK
-    };
+    // NRN-150/183: exit on the report's own outcome mapping. A partial-apply
+    // failure (a write landed, then an op failed) is now returned as
+    // `Ok(report)` with `outcome = failed` → exit 1, not the EXIT_PREFLIGHT (2)
+    // of a byte-identical refusal (which still arrives on the `Err` arm above).
+    // Success → 0.
+    let exit = report.exit_code();
 
     crate::emit_invocation_finished(&mut sink, "rewrite-wikilink", exit, &report);
 

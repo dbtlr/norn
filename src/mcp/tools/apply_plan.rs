@@ -502,6 +502,67 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), doc);
     }
 
+    /// NRN-150/183 byte-identity-lie fix, MCP surface. A 2-op plan where op0
+    /// (`set_frontmatter`) WRITES on disk in Phase A2, then op1
+    /// (`delete_document` of an untracked path) fails a Phase-B precondition
+    /// AFTER that write. The prior contract returned `outcome: refused` /
+    /// `applied: 0` (documented "vault byte-identical, nothing written") while op0
+    /// had already mutated the vault — the lie. It now returns `outcome: failed`
+    /// (exit 1): op0 `applied`, op1 `failed` + `error.code`, and the mutated doc
+    /// is visibly changed on disk, so a consumer knows to re-read.
+    #[test]
+    fn partial_apply_after_write_returns_failed_report_not_refused() {
+        use crate::apply_report::{ApplyOutcome, OpStatus};
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-partial-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [
+                { "kind": "set_frontmatter", "fields": {
+                    "path": "a.md", "field": "type",
+                    "expected_old_value": "note", "new_value": "task" } },
+                { "kind": "delete_document", "fields": { "path": "ghost.md" } }
+            ]
+        });
+
+        let report = handle(
+            &ctx,
+            ApplyPlanParams {
+                plan,
+                confirm: true,
+                parents: false,
+            },
+        )
+        .expect("a partial apply must return a report, not Err");
+
+        assert_eq!(
+            report.outcome,
+            ApplyOutcome::Failed,
+            "op0 wrote a.md before op1 failed — outcome is failed, NOT refused: {report:?}"
+        );
+        assert_eq!(report.exit_code(), 1, "partial apply maps to exit 1");
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.operations[0].status, OpStatus::Applied);
+        assert_eq!(report.operations[1].status, OpStatus::Failed);
+        assert_eq!(
+            report.operations[1].error.as_ref().map(|e| e.code.as_str()),
+            Some("unknown-path")
+        );
+        // Ground truth: the vault WAS mutated — the report cannot claim otherwise.
+        let a = std::fs::read_to_string(root.join("a.md")).unwrap();
+        assert!(a.contains("type: task"), "op0 mutated a.md; got:\n{a}");
+    }
+
     /// A malformed plan (garbage JSON) must return Err, applying nothing.
     #[test]
     fn malformed_plan_is_rejected() {

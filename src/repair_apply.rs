@@ -159,6 +159,7 @@ pub fn apply_repair_plan(
         &CreateApplyContext::default(),
         &mut sink,
         &spans,
+        None,
     )
 }
 
@@ -439,6 +440,20 @@ fn compose_content_ops<'a>(
 /// Like `apply_repair_plan` but with additional context for `create_document`
 /// operations (e.g., the `-p` / `--parents` flag) and a telemetry sink + a
 /// `change_id -> op span id` map for emitting per-action events.
+///
+/// `wrote_any` (NRN-150/183) is the runtime write-state fact: it is flipped to
+/// `true` the instant the FIRST filesystem write of this apply lands (an
+/// `atomic_write`, a `rename`, a `remove`, a `create_dir_all`, or a backlink
+/// rewrite). It persists across the `Err` boundary — the caller reads it to
+/// decide whether a failure is a byte-identical **refusal** (nothing written
+/// yet) or a partial **failure** (disk already mutated). This is the correct
+/// gate; the per-variant `ApplyError::is_precondition()` flag structurally
+/// cannot be, because the SAME variant (e.g. `stale-document-hash` /
+/// `unknown-path`) is raised from both a pre-write site (Phase A1 content CAS)
+/// and a post-write-possible site (the Phase B delete pass, after Phase A2 has
+/// already written other ops). Pass `None` when the caller does not need the
+/// fact (single-op set/new/edit paths, tests).
+#[allow(clippy::too_many_arguments)]
 pub fn apply_repair_plan_with_context(
     cwd: &Utf8PathBuf,
     index: &GraphIndex,
@@ -447,9 +462,19 @@ pub fn apply_repair_plan_with_context(
     ctx: &CreateApplyContext,
     sink: &mut crate::telemetry::EventSink,
     spans: &std::collections::HashMap<String, String>,
+    mut wrote_any: Option<&mut bool>,
 ) -> Result<RepairApplyReport> {
     use crate::telemetry::event;
     use crate::telemetry::Severity;
+    // Flip the runtime write-state fact the moment a write lands. Reborrows the
+    // `Option<&mut bool>` each call, so it can be marked at every write site.
+    macro_rules! mark_wrote {
+        () => {
+            if let Some(w) = wrote_any.as_deref_mut() {
+                *w = true;
+            }
+        };
+    }
     validate_plan_for_apply(cwd, plan)?;
     // Guard incoherent plans BEFORE any write: a content op cannot target a path
     // that an earlier delete/move in the same plan already vacated (NRN-139).
@@ -617,6 +642,7 @@ pub fn apply_repair_plan_with_context(
         let absolute_path = cwd.join(path);
         atomic_write(&absolute_path, &file.content)
             .with_context(|| format!("write {absolute_path}"))?;
+        mark_wrote!();
         // One action per contributing change_id: a unit that was a byte-identical
         // no-op emits nothing.
         for unit in &file.units {
@@ -676,6 +702,9 @@ pub fn apply_repair_plan_with_context(
                 });
             } else {
                 let outcome = apply_link_rewrites(cwd, change)?;
+                if !outcome.rewritten.is_empty() {
+                    mark_wrote!();
+                }
                 report.rewritten_links.extend(outcome.rewritten.clone());
                 report.cascades.push(CascadeRecord {
                     source_path: change.path.clone(),
@@ -690,6 +719,7 @@ pub fn apply_repair_plan_with_context(
         // The actual file removal.
         if !dry_run {
             let result = apply_delete(cwd, change)?;
+            mark_wrote!();
             report.deleted_documents.push(result);
             emit_op_action(sink, spans, change, Severity::Info, Vec::new());
         } else {
@@ -836,11 +866,13 @@ pub fn apply_repair_plan_with_context(
             fs::create_dir_all(parent.as_std_path()).with_context(|| {
                 format!("create_document: create parent dirs for {}", resolved_path)
             })?;
+            mark_wrote!();
         }
 
         // Atomic write: write to a sibling temp file, then rename into place.
         atomic_write(&full, &contents)
             .with_context(|| format!("create_document: write {resolved_path}"))?;
+        mark_wrote!();
 
         report.created_documents.push(CreateDocumentResult {
             path: resolved_path.clone(),
@@ -876,6 +908,7 @@ pub fn apply_repair_plan_with_context(
             }
         } else {
             moves.push(apply_move(cwd, change)?);
+            mark_wrote!();
             let extra = change
                 .destination
                 .as_ref()
@@ -917,6 +950,9 @@ pub fn apply_repair_plan_with_context(
             });
         } else {
             let outcome = apply_link_rewrites(cwd, change)?;
+            if !outcome.rewritten.is_empty() {
+                mark_wrote!();
+            }
             rewrites.extend(outcome.rewritten.clone());
             report.cascades.push(CascadeRecord {
                 source_path: change.path.clone(),
@@ -943,6 +979,9 @@ pub fn apply_repair_plan_with_context(
         let recovered = retry_failed_cascades(&mut report.cascades, &backoff, |f| {
             crate::standards::apply::rewrite_one_backlink(cwd.as_path(), &f.file, &f.from, &f.to)
         });
+        if !recovered.is_empty() {
+            mark_wrote!();
+        }
         report.rewritten_links.extend(recovered);
 
         if failed_before > 0 {
@@ -1682,7 +1721,7 @@ mod tests {
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let err = apply_repair_plan_with_context(
-            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("parse"), "got: {err}");
@@ -1791,7 +1830,7 @@ mod tests {
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let err = apply_repair_plan_with_context(
-            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap_err();
 
@@ -1826,7 +1865,7 @@ mod tests {
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let report = apply_repair_plan_with_context(
-            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap();
 
@@ -1861,7 +1900,7 @@ mod tests {
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let report = apply_repair_plan_with_context(
-            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap();
 
@@ -1911,6 +1950,7 @@ mod tests {
             &create_ctx,
             &mut sink,
             &spans,
+            None,
         )
         .unwrap();
 
@@ -1943,7 +1983,7 @@ mod tests {
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
         let err = apply_repair_plan_with_context(
-            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans,
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap_err();
         let msg = err.to_string();

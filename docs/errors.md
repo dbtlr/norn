@@ -26,8 +26,15 @@ Mutation commands use a three-value process exit:
 | Exit | Meaning | When |
 |---|---|---|
 | `0` | success | every op applied (or a dry-run forecast) |
-| `1` | runtime op-failure | the apply began and at least one op failed |
-| `2` | preflight / precondition refusal | a validation-phase check refused before any write; the vault is byte-identical |
+| `1` | partial-apply failure | at least one filesystem write had already landed when a later op failed — the vault is **partially mutated** |
+| `2` | preflight / precondition refusal | a check refused before **any** write; the vault is byte-identical |
+
+The `1`-vs-`2` split is decided by a single runtime fact: **did any filesystem
+write land before the failure?** It is *not* decided by the error variant. The
+same code (e.g. `stale-document-hash`, `unknown-path`) can surface as a byte-
+identical refusal (exit 2) when it fires before the first write, or as a partial
+failure (exit 1) when it fires after an earlier op in the same plan already wrote.
+Branch on `outcome` / the report, not on the code alone.
 
 Per-command exit meanings historically differed (a bad `--filter` on one command,
 a schema refusal on another). The `outcome` field and the error-code taxonomy
@@ -42,31 +49,40 @@ Every `ApplyReport` carries a single `outcome` field:
 | `outcome` | Exit | `ApplyReport` shape |
 |---|---|---|
 | `applied` | 0 | ops `applied` / `skipped`; `failed == 0` |
-| `failed` | 1 | at least one op `failed` after the apply began |
-| `refused` | 2 | the offending op is `failed` with an `error`, the rest `not_run`; nothing written |
+| `failed` | 1 | a write already landed, then an op failed — already-applied ops `applied`, the failing op `failed` with an `error`, the rest `not_run`; the vault is **partially mutated** |
+| `refused` | 2 | the offending op is `failed` with an `error`, the rest `not_run`; **nothing written**, vault byte-identical |
 | `rebased` | 0 | **reserved** for a future auto-rebase-on-drift (NRN-152); not produced today |
 
-`outcome` is the cross-surface signal. A consumer that ported "nonzero exit =
-failure" logic should key on `outcome` instead: over MCP a **refused** apply is
-returned as a normal `structuredContent` report (with `outcome: "refused"` and the
-offending op `failed`), not as a transport error — so inspecting only a transport
-`isError` flag would miss it.
+`outcome` is the cross-surface signal, and the `failed`-vs-`refused` distinction is
+load-bearing: `refused` promises a byte-identical vault (safe to retry or ignore),
+while `failed` means **the vault was partially mutated** — a consumer must re-read
+before retrying. A consumer that ported "nonzero exit = failure" logic should key
+on `outcome` instead: over MCP both a `refused` and a `failed` apply are returned as
+a normal `structuredContent` report (not a transport error), so inspecting only a
+transport `isError` flag would miss both.
 
-### Return-report-on-refusal (MCP)
+### Return-report on the MCP surface
 
-A **validation-phase precondition refusal** (see the taxonomy below) is returned to
-an MCP caller as the `ApplyReport`:
+A **clean refusal** (nothing written) is returned to an MCP caller as the
+`ApplyReport`:
 
 - the offending op has `status: "failed"` and an `error` envelope,
 - every other op is `not_run`,
 - `outcome` is `refused`,
 - the vault is byte-identical (nothing was written).
 
-This lets a client distinguish **retryable CAS drift** (`stale-document-hash`,
+A **partial apply** (a write landed, then a later op failed) is *also* returned as
+the `ApplyReport`, but with the truthful partial state:
+
+- every op that completed has `status: "applied"`,
+- the failing op has `status: "failed"` with its `error` envelope,
+- ops that never ran are `not_run`,
+- `outcome` is `failed` — the vault is **partially mutated**, so re-read before retrying.
+
+Either way a client distinguishes **retryable CAS drift** (`stale-document-hash`,
 `expected-old-value-mismatch` — re-read and re-plan) from a **terminal refusal** by
-comparing `error.code`, never the message text. Post-write failures (which cannot
-guarantee a byte-identical vault) still surface as a transport error carrying the
-same structured `data` envelope.
+comparing `error.code`, never the message text — and reads `outcome` to learn
+whether the vault was touched.
 
 ## The error envelope
 
@@ -85,9 +101,11 @@ goes to stderr for `records`/TTY output):
 - `message` — human-readable prose. Do not parse it.
 - `path` — the offending vault-relative path, when the failure is about one document.
 
-Over MCP the same `{ code, message, path? }` envelope is carried in the JSON-RPC
-error's `data` field (for post-write / non-refusal failures), and as a refused op's
-`error` (for precondition refusals).
+Over MCP the same `{ code, message, path? }` envelope is carried as the failing
+op's `error` inside the returned `ApplyReport` — for both a `refused` apply
+(nothing written) and a `failed` apply (partial mutation). A structurally invalid
+request (an unparseable plan, a bad `schema_version`) still surfaces as a transport
+error carrying the envelope in the JSON-RPC error's `data` field.
 
 ## Error-code taxonomy
 

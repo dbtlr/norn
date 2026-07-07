@@ -166,16 +166,17 @@ impl ApplyError {
         }
     }
 
-    /// True when this failure is a VALIDATION-PHASE (pre-write) refusal: it is
-    /// raised before any byte is written, so the vault is byte-identical to its
-    /// pre-apply state (NRN-139's two-phase apply). Only these are safe to
-    /// surface as a return-report-on-refusal (offending op `failed`, the rest
-    /// `not_run`) — a caller can retry or re-read without first checking disk.
-    ///
-    /// The Phase-B lifecycle variants (move/delete source checks, create's
-    /// `missing-new-value`) can fire AFTER the content phase has already written
-    /// other ops in a mixed plan, so they are NOT precondition-safe: they
-    /// propagate as a hard error rather than a byte-identical refusal report.
+    /// A per-variant HINT that this failure *class* is typically raised at a
+    /// pre-write validation site. **It is NOT the refused-vs-failed gate** — that
+    /// gate is the runtime write-state fact threaded through the applier
+    /// (`apply_repair_plan_with_context`'s `wrote_any`), because a single variant
+    /// is structurally ambiguous: `stale-document-hash` / `unknown-path` are
+    /// raised from BOTH the pre-write Phase-A1 content CAS AND the Phase-B delete
+    /// pass (which runs AFTER Phase A2 has already written other ops in a mixed
+    /// plan). Keying the byte-identical-refusal decision off this flag produced
+    /// the NRN-150/183 byte-identity lie (a `refused` report over a mutated
+    /// vault); the applier now decides on whether a write actually landed, so this
+    /// method remains only as a coarse taxonomy hint and no longer gates output.
     pub fn is_precondition(&self) -> bool {
         match self {
             ApplyError::UnsupportedSchemaVersion { .. }

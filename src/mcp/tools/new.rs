@@ -343,6 +343,7 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         &apply_ctx,
         &mut sink,
         &spans,
+        None,
     );
 
     let trace_id = sink.trace_id().to_string();

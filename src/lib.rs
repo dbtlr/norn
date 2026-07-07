@@ -822,7 +822,12 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 }
             };
 
-            let exit = if report.failed > 0 { 1 } else { 0 };
+            // NRN-150/183: the exit code is the report's own outcome mapping — a
+            // partial-apply failure (a write landed, then an op failed) is now
+            // returned as `Ok(report)` with `outcome = failed` → exit 1, not the
+            // hardcoded exit 2 of a preflight refusal. A byte-identical refusal
+            // still arrives on the `Err` arm above (exit 2); success → exit 0.
+            let exit = report.exit_code();
 
             emit_invocation_finished(&mut sink, "move", exit, &report);
 
@@ -1027,7 +1032,12 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 }
             };
 
-            let exit = if report.failed > 0 { 1 } else { 0 };
+            // NRN-150/183: the exit code is the report's own outcome mapping — a
+            // partial-apply failure (a write landed, then an op failed) is now
+            // returned as `Ok(report)` with `outcome = failed` → exit 1, not the
+            // hardcoded exit 2 of a preflight refusal. A byte-identical refusal
+            // still arrives on the `Err` arm above (exit 2); success → exit 0.
+            let exit = report.exit_code();
 
             emit_invocation_finished(&mut sink, "delete", exit, &report);
 
@@ -1203,6 +1213,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     &crate::repair_apply::CreateApplyContext::default(),
                     &mut sink,
                     &spans,
+                    None,
                 );
 
                 let trace_id = sink.trace_id().to_string();
@@ -1398,6 +1409,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     &crate::repair_apply::CreateApplyContext::default(),
                     &mut sink,
                     &spans,
+                    None,
                 );
                 let trace_id = sink.trace_id().to_string();
                 let exit = if apply_outcome.is_ok() { 0 } else { 2 };

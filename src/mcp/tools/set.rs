@@ -306,6 +306,7 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         &crate::repair_apply::CreateApplyContext::default(),
         &mut sink,
         &spans,
+        None,
     );
     let trace_id = sink.trace_id().to_string();
     let exit = if apply_outcome.is_ok() { 0 } else { 2 };
