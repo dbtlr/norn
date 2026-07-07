@@ -53,14 +53,16 @@
 //!
 //! # Seeded field-level gaps (ship green; each tagged with its burndown task)
 //!
-//! Enumerated empirically from the code, not assumed:
-//! * `vault.get` lacks `sort`/`desc`/`limit`/`no_limit`/`starts_at`/`section` and
-//!   `all_cols` (get's column-projection + paging surface) — all NRN-173.
+//! There are currently no seeded field-presence gaps — the surface is at parity.
 //!
-//! Closed (kept here as burndown history): `vault.set`'s coercing `--field` /
-//! `--push` / `--pop` (NRN-181), `vault.move`'s `--force` / `--no-link-rewrite`
-//! (NRN-180), and `vault.validate`'s `--summary` (NRN-182) all now have MCP
-//! twins, so their allowlist entries were removed.
+//! Closed (kept here as burndown history): `vault.get`'s sort/paging + section
+//! surface (`sort` / `desc` / `limit` / `no_limit` / `starts_at` / `section` /
+//! `all_cols`, all NRN-173), `vault.set`'s coercing `--field` / `--push` /
+//! `--pop` (NRN-181), `vault.move`'s `--force` / `--no-link-rewrite` (NRN-180),
+//! and `vault.validate`'s `--summary` (NRN-182) all now have MCP twins, so their
+//! allowlist entries were removed. (`vault.apply_plan` gained `parents` in
+//! lockstep with a new `migrate --parents` under NRN-174, an identity pair that
+//! never needed an allowlist entry.)
 //!
 //! # Out of scope for this *field-presence* gate (tracked separately)
 //!
@@ -94,8 +96,9 @@
 //! * **This is a *presence* gate, not a *semantics* gate.** Two surfaces can share
 //!   a field name yet diverge in meaning (e.g. `get --col` narrows the projection
 //!   on the CLI but only opts-in extra facets on MCP). A presence test cannot
-//!   express that; such divergences are tracked per-field out of band (col:
-//!   NRN-173), not papered over by the name match.
+//!   express that; such divergences are tracked per-field out of band (the `col`
+//!   semantics break is deferred to the NRN-185/190 window), not papered over by
+//!   the name match.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -186,20 +189,16 @@ fn specs() -> Vec<Spec> {
                 presentation: &["format"],
                 shape: &[],
                 naming: &[],
-                gaps: &[
-                    // NRN-173: vault.get lacks the sort/paging + section surface.
-                    ("sort", "NRN-173"),
-                    ("desc", "NRN-173"),
-                    ("limit", "NRN-173"),
-                    ("no_limit", "NRN-173"),
-                    ("starts_at", "NRN-173"),
-                    ("section", "NRN-173"),
-                    // NRN-173 (get column-projection parity): vault.get always
-                    // returns the full structured record (dump-everything), so
-                    // `--all-cols` has no MCP field. Folded into NRN-173, which now
-                    // owns get's projection + paging surface.
-                    ("all_cols", "NRN-173"),
-                ],
+                // NRN-173 CLOSED: vault.get now serves `sort`/`desc`/`limit`/
+                // `no_limit`/`starts_at`/`section`/`all_cols` as identity-mapped
+                // fields, so their seeded gap entries were removed. The `col`
+                // SEMANTICS divergence (CLI narrows the projection; MCP only opts
+                // facets in) remains — but `col` is *present* on both surfaces, so
+                // it is not a presence gap and carries no entry here. That
+                // semantics break is deferred to the NRN-185/190 window (see the
+                // `col` doc on `GetParams` and this module's "presence gate, not a
+                // semantics gate" note).
+                gaps: &[],
             },
         },
         Spec {

@@ -582,12 +582,44 @@ fn build_report_ops(
                 }
             };
 
-            let create_display = if change.operation == "create_document" {
+            // Lockstep invariant (NRN-175 / F6): `created_documents` holds one
+            // entry per create_document that actually PRODUCED a file — every
+            // applied create in a real apply, and every predicted create in a
+            // dry-run. Consume the iterator ONLY for such ops. If a create ever
+            // reached here Skipped/Failed (not constructible today — the apply
+            // loop aborts with `Err` on any create failure before build_report_ops
+            // runs — but guarded defensively), consuming would misattribute a
+            // sibling's created path to it. Not consuming leaves path/stem ABSENT
+            // (absent-not-stale) instead.
+            let create_realized = dry_run || status == OpStatus::Applied;
+            let create_display = if change.operation == "create_document" && create_realized {
                 created_iter.next().map(|c| c.path.as_path())
             } else {
                 None
             };
             let summary = build_summary(change, dry_run, create_display);
+
+            // NRN-175: structured, apply-time-resolved target path — the value a
+            // consumer would otherwise regex out of `summary`. Populated where a
+            // single natural target exists: a `create_document`'s `{{seq}}`-resolved
+            // destination, a `move_document`'s destination, and body/section edit
+            // targets. Left `None` for ops with no single natural path (link
+            // rewrites, deletes, frontmatter field ops).
+            let resolved_path: Option<&camino::Utf8Path> = match change.operation.as_str() {
+                "create_document" => create_display,
+                "move_document" => change.destination.as_deref(),
+                "replace_body"
+                | "replace_section"
+                | "append_to_section"
+                | "delete_section"
+                | "insert_before_heading"
+                | "insert_after_heading" => Some(change.path.as_path()),
+                _ => None,
+            };
+            let path = resolved_path.map(|p| p.to_string());
+            let stem = resolved_path
+                .and_then(|p| p.file_stem())
+                .map(str::to_string);
 
             let cascade = match change.operation.as_str() {
                 "move_document" | "delete_document" => Some(if dry_run {
@@ -608,6 +640,8 @@ fn build_report_ops(
                 kind: change.operation.clone(),
                 status,
                 from,
+                path,
+                stem,
                 summary,
                 error: None, // see note below
                 footnote: parent_op.footnote.clone(),
@@ -719,6 +753,116 @@ mod tests {
         // Apply: file moved
         assert!(!tmp.path().join("a.md").exists());
         assert!(tmp.path().join("renamed.md").exists());
+    }
+
+    /// F6: the `created_documents` iterator is walked in lockstep ONLY with
+    /// create ops that actually realized (applied, or predicted in dry-run). A
+    /// synthetic create op that reached `build_report_ops` NOT applied (Skipped)
+    /// must leave `path`/`stem` ABSENT — never consume, and never misattribute, a
+    /// sibling applied create's resolved path. This pins the absent-not-stale
+    /// invariant that the defensive `create_realized` guard enforces.
+    #[test]
+    fn build_report_ops_skipped_create_gets_absent_not_stale_path() {
+        // OpStatus, RepairApplyReport, SkippedSummary, PlannedChange,
+        // MigrationOp, Event, action_event_name, ATTR_STATUS, Utf8PathBuf are all
+        // already in scope via `super::*`; import only what is not.
+        use crate::standards::apply::{CreateDocumentResult, RepairApplyPlanContext};
+        use crate::telemetry::Severity;
+
+        // Minimal create_document PlannedChange (path/stem for a create come from
+        // `created_documents`, not from the change itself, so `path` is a filler).
+        fn create_change(change_id: &str) -> PlannedChange {
+            PlannedChange {
+                change_id: change_id.into(),
+                path: Utf8PathBuf::from("filler.md"),
+                document_hash: String::new(),
+                finding_code: String::new(),
+                finding_rule: None,
+                repair_rule: String::new(),
+                operation: "create_document".into(),
+                field: None,
+                expected_old_value: None,
+                new_value: None,
+                destination: None,
+                link_risk: None,
+                warnings: vec![],
+                force: false,
+                parents: false,
+            }
+        }
+        fn create_op() -> MigrationOp {
+            MigrationOp {
+                kind: "create_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({}),
+                footnote: None,
+            }
+        }
+
+        // Two create ops. Only op1 realized: `created_documents` holds exactly
+        // ONE entry (op1's resolved path), and only span "s1" has an applied
+        // op-action event, so op0 computes to Skipped, op1 to Applied.
+        let changes = vec![create_change("c0"), create_change("c1")];
+        let provenance = vec![0usize, 1usize];
+        let plan_ops = vec![create_op(), create_op()];
+        let span_ids = vec!["s0".to_string(), "s1".to_string()];
+        let events = vec![Event {
+            trace_id: String::new(),
+            span_id: Some("s1".into()),
+            severity: Severity::Info,
+            name: action_event_name("create_document"),
+            body: String::new(),
+            attributes: vec![(ATTR_STATUS, "applied".into())],
+            timestamp: String::new(),
+        }];
+        let apply_result = RepairApplyReport {
+            schema_version: 1,
+            dry_run: false,
+            changed_files: vec![],
+            applied_changes: 1,
+            moved_files: vec![],
+            deleted_documents: vec![],
+            created_documents: vec![CreateDocumentResult {
+                path: Utf8PathBuf::from("tasks/created-b.md"),
+            }],
+            rewritten_links: vec![],
+            cascades: vec![],
+            replaced_bodies: vec![],
+            warnings: vec![],
+            plan_context: RepairApplyPlanContext {
+                skipped: SkippedSummary {
+                    by_reason: Default::default(),
+                    total: 0,
+                },
+            },
+            verification: None,
+        };
+
+        let ops = build_report_ops(
+            &changes,
+            &provenance,
+            &plan_ops,
+            &apply_result,
+            false, // not dry-run
+            false, // not verbose
+            &span_ids,
+            &events,
+        );
+
+        assert_eq!(ops.len(), 2);
+        // op0 Skipped → absent-not-stale: it must NOT have consumed op1's entry.
+        assert_eq!(ops[0].status, OpStatus::Skipped);
+        assert!(
+            ops[0].path.is_none(),
+            "a skipped create must leave path absent, not stale: {:?}",
+            ops[0].path
+        );
+        assert!(ops[0].stem.is_none(), "skipped create: stem absent too");
+        // op1 Applied → consumes the single created_documents entry.
+        assert_eq!(ops[1].status, OpStatus::Applied);
+        assert_eq!(ops[1].path.as_deref(), Some("tasks/created-b.md"));
+        assert_eq!(ops[1].stem.as_deref(), Some("created-b"));
     }
 
     #[test]

@@ -60,6 +60,14 @@ pub struct ApplyPlanParams {
     /// acquire the vault mutation lock and execute every operation in the plan.
     #[serde(default)]
     pub confirm: bool,
+
+    /// Auto-create missing parent directories for `create_document` ops
+    /// (`mkdir -p` style). Defaults to `false` (the prior behavior: an op whose
+    /// destination directory does not exist refuses). Directories are created
+    /// inside the apply and only for ops that proceed — the same discipline
+    /// `vault.move`/`vault.new` follow. Mirrors `norn migrate --parents`.
+    #[serde(default)]
+    pub parents: bool,
 }
 
 /// Structured output for `vault.apply_plan`.
@@ -135,7 +143,7 @@ pub fn handle(ctx: &VaultContext, p: ApplyPlanParams) -> Result<crate::apply_rep
 
     let apply_ctx = ApplyContext {
         dry_run,
-        parents: false,
+        parents: p.parents,
         verbose: false,
     };
 
@@ -237,6 +245,7 @@ mod tests {
             ApplyPlanParams {
                 plan: plan_value,
                 confirm: false,
+                parents: false,
             },
         )
         .expect("apply_plan (dry-run) should succeed");
@@ -281,6 +290,7 @@ mod tests {
             ApplyPlanParams {
                 plan: plan_value,
                 confirm: true,
+                parents: false,
             },
         )
         .expect("apply_plan (confirm) should succeed");
@@ -339,6 +349,7 @@ mod tests {
             ApplyPlanParams {
                 plan,
                 confirm: true,
+                parents: false,
             },
         )
         .expect("apply_plan (confirm) should succeed");
@@ -399,6 +410,7 @@ mod tests {
             ApplyPlanParams {
                 plan,
                 confirm: true,
+                parents: false,
             },
         )
         .expect("apply_plan (confirm) should succeed");
@@ -433,6 +445,7 @@ mod tests {
             ApplyPlanParams {
                 plan: garbage,
                 confirm: false,
+                parents: false,
             },
         );
         assert!(
@@ -464,6 +477,7 @@ mod tests {
             ApplyPlanParams {
                 plan: bad_version,
                 confirm: false,
+                parents: false,
             },
         );
         assert!(
@@ -493,11 +507,125 @@ mod tests {
             ApplyPlanParams {
                 plan: serde_json::json!({}),
                 confirm: false,
+                parents: false,
             },
         );
         assert!(
             result.is_err(),
             "empty JSON plan must return Err (missing required fields)"
         );
+    }
+
+    /// NRN-174: a create_document into a missing subdirectory refuses when
+    /// `parents` is omitted (the prior behavior) and succeeds — creating the
+    /// intermediate dirs — when `parents: true`. Directory creation happens
+    /// inside apply, only for the op that proceeds.
+    #[test]
+    fn parents_true_creates_missing_dirs_for_create_op() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-parents-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = || {
+            serde_json::json!({
+                "schema_version": 1,
+                "vault_root": root.to_string(),
+                "operations": [{
+                    "kind": "create_document",
+                    "fields": {
+                        "path": "sub/dir/new.md",
+                        "new_value": { "frontmatter": {"type": "note"}, "body": "# New\n" }
+                    }
+                }]
+            })
+        };
+
+        // parents omitted → the missing parent dir is a refusal (Err), nothing written.
+        let refused = handle(
+            &ctx,
+            ApplyPlanParams {
+                plan: plan(),
+                confirm: true,
+                parents: false,
+            },
+        );
+        assert!(
+            refused.is_err(),
+            "create into a missing dir must refuse without parents, got {refused:?}"
+        );
+        assert!(
+            !root.join("sub/dir/new.md").as_std_path().exists(),
+            "refusal must leave nothing on disk"
+        );
+
+        // parents: true → intermediate dirs created, the doc written.
+        let report = handle(
+            &ctx,
+            ApplyPlanParams {
+                plan: plan(),
+                confirm: true,
+                parents: true,
+            },
+        )
+        .expect("apply with parents:true should succeed");
+        assert!(!report.dry_run);
+        assert!(report.applied >= 1, "expected >= 1 applied: {report:?}");
+        let created = std::fs::read_to_string(root.join("sub/dir/new.md"))
+            .expect("create_document wrote the doc into the auto-created dir");
+        assert!(created.contains("# New"), "created body present: {created}");
+    }
+
+    /// NRN-175: a create_document with a `{{seq}}` template surfaces the
+    /// apply-time-resolved path (and its stem) as structured fields on the op —
+    /// the value a consumer would otherwise regex out of `summary`. Serialization
+    /// carries both.
+    #[test]
+    fn create_with_seq_carries_resolved_path_and_stem_on_op() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-seq-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [{
+                "kind": "create_document",
+                "fields": {
+                    "path": "task-{{seq}}.md",
+                    "new_value": { "frontmatter": {"type": "note"}, "body": "# T\n" }
+                }
+            }]
+        });
+
+        let report = handle(
+            &ctx,
+            ApplyPlanParams {
+                plan,
+                confirm: true,
+                parents: false,
+            },
+        )
+        .expect("apply should succeed");
+        assert!(report.applied >= 1, "expected >= 1 applied: {report:?}");
+
+        // No sibling task-*.md → the empty-prefix counter starts at 1.
+        let op = &report.operations[0];
+        assert_eq!(op.path.as_deref(), Some("task-1.md"), "resolved path on op");
+        assert_eq!(op.stem.as_deref(), Some("task-1"), "resolved stem on op");
+
+        // Serialization carries the resolved fields.
+        let json = serde_json::to_value(op).unwrap();
+        assert_eq!(json["path"], "task-1.md");
+        assert_eq!(json["stem"], "task-1");
     }
 }
