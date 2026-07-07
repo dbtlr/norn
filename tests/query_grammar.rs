@@ -205,3 +205,95 @@ fn set_eq_teaches_field() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--field key=value"), "{err}");
 }
+
+// ── R1a: a reserved value flag followed by a flag never silent-empties ──────
+#[test]
+fn reserved_value_flag_followed_by_flag_is_not_silent_empty() {
+    // `--path` is a value flag; the next token `--all` is flag-shaped, so it is
+    // NOT consumed as the path value. clap then errors (exit 2, "a value is
+    // required") instead of filtering path="--all" and returning an empty set.
+    let tmp = synth_vault();
+    let out = run(&tmp, &["find", "--path", "--all"]);
+    assert!(
+        !out.status.success(),
+        "must error, not silent-empty (exit 0)"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "no query output: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("a value is required"), "{err}");
+}
+
+// ── R3: a repeated dynamic key with a comma-containing value is refused ─────
+#[test]
+fn repeated_dynamic_key_with_comma_value_is_refused() {
+    // `--tag a,b --tag c` cannot losslessly become any-of `--in tag:a,b,c`
+    // (three values, not the intended two) — refuse rather than corrupt.
+    let tmp = synth_vault();
+    let out = run(&tmp, &["find", "--tag", "a,b", "--tag", "c"]);
+    assert!(
+        !out.status.success(),
+        "ambiguous comma case must be refused"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("comma"), "{err}");
+    assert!(out.stdout.is_empty());
+}
+
+// ── R2: a field declared ONLY via a match-selector / alias_field is accepted ─
+fn vault_with_selector_only_field() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-grammar-sel-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    // A document that carries NEITHER `kind` nor `aliases` in its frontmatter,
+    // so those fields are known only through config, never observed.
+    std::fs::write(root.join("a.md"), "---\ntype: note\n---\nbody\n").unwrap();
+    let norn_dir = root.join(".norn");
+    std::fs::create_dir(&norn_dir).unwrap();
+    // `kind` appears ONLY in a rule's match-selector; `aliases` ONLY as the
+    // configured link alias field. Neither is a managed field otherwise.
+    std::fs::write(
+        norn_dir.join("config.yaml"),
+        "links:\n  alias_field: aliases\nvalidate:\n  rules:\n    - match:\n        frontmatter:\n          kind: reference\n",
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn match_selector_only_field_is_accepted() {
+    let tmp = vault_with_selector_only_field();
+    let out = run(&tmp, &["find", "--kind", "reference", "--format", "paths"]);
+    assert!(
+        out.status.success(),
+        "a match-selector-declared field must desugar, not hard-reject; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn alias_field_is_accepted() {
+    let tmp = vault_with_selector_only_field();
+    let out = run(&tmp, &["find", "--aliases", "foo", "--format", "paths"]);
+    assert!(
+        out.status.success(),
+        "the configured alias_field must be a known field; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ── Control: an undeclared, unobserved field still hard-rejects ─────────────
+#[test]
+fn undeclared_field_still_rejects() {
+    let tmp = vault_with_selector_only_field();
+    let out = run(&tmp, &["find", "--zzqqxx", "v"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown field"), "{err}");
+}
