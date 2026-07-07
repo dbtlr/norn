@@ -279,7 +279,11 @@ fn edit_ops_file_reads_from_file() {
     let doc = tmp.path().join("note.md");
     fs::write(&doc, SUGAR_SEED).unwrap();
     let ops_path = tmp.path().join("ops.json");
-    fs::write(&ops_path, r#"[{"op":"str_replace","old":"world","new":"norn"}]"#).unwrap();
+    fs::write(
+        &ops_path,
+        r#"[{"op":"str_replace","old":"world","new":"norn"}]"#,
+    )
+    .unwrap();
 
     let out = run_edit_args(
         &tmp,
