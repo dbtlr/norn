@@ -4,7 +4,7 @@
 //! `tools/list` answers with an empty array. Later tasks add `#[tool]` methods.
 //!
 //! Task 13 splits the tools into two `#[tool_router]` blocks — `read_router`
-//! (the 6 read tools) and `mutate_router` (the 6 mutation tools) — so
+//! (the 7 read tools) and `mutate_router` (the 7 mutation tools) — so
 //! `McpServer::new` can build a read-only server by merging in `mutate_router`
 //! only when `!read_only`. See `new` and `run_mutation` for the two-layer gate.
 //!
@@ -63,7 +63,7 @@ pub struct McpServer {
     /// exactly "one vault operation at a time". (`spawn_blocking` is a possible
     /// v2 optimization, deliberately out of scope here.)
     call_lock: Arc<tokio::sync::Mutex<()>>,
-    /// When true the server is read-only: the 6 mutation tools are absent from
+    /// When true the server is read-only: the 7 mutation tools are absent from
     /// `tools/list` (the `mutate_router` is never merged in — see `new`) AND any
     /// mutation handler refuses at runtime via `run_mutation` (defense in depth).
     read_only: bool,
@@ -74,8 +74,8 @@ impl McpServer {
     /// Build the server. `read_only` gates the mutation surface two ways:
     ///
     /// 1. **Drop from `tools/list` (structural).** The `#[tool]` methods are split
-    ///    into two routers — `read_router()` (6 read tools) and `mutate_router()`
-    ///    (6 mutation tools). We always build `read_router()`; we `merge` in
+    ///    into two routers — `read_router()` (7 read tools) and `mutate_router()`
+    ///    (7 mutation tools). We always build `read_router()`; we `merge` in
     ///    `mutate_router()` only when `!read_only`. So under read-only the mutation
     ///    tools are genuinely never registered — the generated `ServerHandler`'s
     ///    `list_tools` can only return what the stored router holds.
@@ -84,9 +84,13 @@ impl McpServer {
     ///    the lock or the vault — so even a client that calls a tool absent from
     ///    the list mutates nothing.
     pub fn new(ctx: Arc<VaultContext>, read_only: bool) -> Self {
-        let mut router = Self::read_router();
-        if !read_only {
-            router.merge(Self::mutate_router());
+        let mut routers = Self::routers(read_only).into_iter();
+        // `routers` always yields at least the read router; merge the rest in.
+        let mut router = routers
+            .next()
+            .expect("routers() always yields the read router");
+        for extra in routers {
+            router.merge(extra);
         }
         Self {
             ctx,
@@ -94,6 +98,24 @@ impl McpServer {
             read_only,
             tool_router: router,
         }
+    }
+
+    /// The tool routers that compose the served surface, in merge order.
+    ///
+    /// Single source of truth for *which* routers exist. Both [`new`](Self::new)
+    /// (which merges them into the stored router) and the CLI↔MCP parity gate
+    /// (`super::parity_gate`, which enumerates the full surface via
+    /// `routers(false)`) consume this seam, so adding a third `#[tool_router]`
+    /// block here lands it in both the server and the gate automatically — no
+    /// hardcoded `read_router()`+`mutate_router()` list to fall out of sync.
+    /// `read_only` gates the mutation router exactly as the server does: when
+    /// true only the read router is returned.
+    pub(crate) fn routers(read_only: bool) -> Vec<ToolRouter<Self>> {
+        let mut routers = vec![Self::read_router()];
+        if !read_only {
+            routers.push(Self::mutate_router());
+        }
+        routers
     }
 
     /// Run a tool handler under the in-process serialization lock (NRN-55).
@@ -196,9 +218,14 @@ impl McpServer {
     }
 }
 
-/// The 6 READ tools — always registered, even under `--read-only`. The macro
+/// The 7 READ tools — always registered, even under `--read-only`. The macro
 /// generates `fn read_router() -> ToolRouter<Self>` holding exactly these.
-#[tool_router(router = read_router)]
+///
+/// `vis = "pub(crate)"` exposes the generated constructor to the crate so the
+/// CLI↔MCP parity gate (`super::parity_gate`) can enumerate the exact tool
+/// schemas the server serves via `ToolRouter::list_all()` — the same seam
+/// `tools/list` uses, so the parity test cannot drift from the live surface.
+#[tool_router(router = read_router, vis = "pub(crate)")]
 impl McpServer {
     /// `vault.get` — fetch one or more documents with full connection context.
     ///
@@ -350,7 +377,10 @@ impl McpServer {
 /// into the stored router only when `!read_only`, so under `--read-only` these are
 /// absent from `tools/list`. Each handler also funnels through `run_mutation`,
 /// which refuses at runtime when read-only (defense in depth).
-#[tool_router(router = mutate_router)]
+///
+/// `vis = "pub(crate)"` — see `read_router` above — lets the parity gate
+/// enumerate the mutation-tool schemas too.
+#[tool_router(router = mutate_router, vis = "pub(crate)")]
 impl McpServer {
     /// `vault.new` — create a new document with schema-scaffolded frontmatter.
     ///
