@@ -1,7 +1,7 @@
 ---
 name: norn
 description: Use when inspecting, querying, validating, or mutating Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, query, and validation/repair workflows.
-version: 1.3.1
+version: 1.3.2
 author: Drew Butler <hi@dbtlr.com>
 license: MIT
 ---
@@ -66,7 +66,7 @@ norn get notes/my-note.md --section "Task Description" --section "Annotations" -
 
 A target is a path, a unique stem, or a wikilink-shaped string. `get` returns every named target (no default limit), unlike `find`.
 
-`--section` reads named sections of the body — a distinct flag, not a `--col` facet, so it combines freely with `--col`/`--all-cols`. It is **repeatable**: pass it once per heading (`--section "A" --section "B"`), and each occurrence is one whole string, so a heading containing a comma (`--section "Risks, Open Questions"`) is addressable verbatim. Each heading resolves with the same boundary semantics `edit --append-to-section`/`--replace-section` use (heading line through the next same-or-higher heading, or EOF): a section read mirrors a section write, and the section content is byte-identical across formats. `--format json`/`jsonl` add a `sections` object keyed by heading text (unordered/alphabetical lookup); `records` prints one block per requested section in request order; `paths`/`markdown` ignore it entirely (no resolution, still exits 0), like `--col`. A heading missing or ambiguous in a given document warns and is omitted from that document's `sections` without affecting siblings or other targets.
+`--section` reads named sections of the body — a distinct flag, not a `--col` facet, so it combines freely with `--col`/`--all-cols`. It is **repeatable**: pass it once per heading (`--section "A" --section "B"`), and each occurrence is one whole string, so a heading containing a comma (`--section "Risks, Open Questions"`) is addressable verbatim. Each heading resolves with the same boundary semantics `edit --append-to-section`/`--replace-section` use (heading line through the next same-or-higher heading, or EOF): a section read mirrors a section write, and the section content is byte-identical across formats. `--format json`/`jsonl` add a `sections` object keyed by heading text (unordered/alphabetical lookup); `records` prints one block per requested section in request order; `paths`/`markdown` ignore it entirely (no resolution, still exits 0), like `--col`. A heading missing or ambiguous in a given document warns and is omitted from that document's `sections` without affecting siblings or other targets — unless **none** of the requested headings resolve for that document, in which case the target hard-fails (nonzero exit) instead of returning an empty `sections` object.
 
 ### Selecting fields — `--col`, facets, `--all-cols`
 
@@ -119,10 +119,10 @@ One asymmetry to know: `rewrite-wikilink` retargets wikilinks only. Relative Mar
 | `edit` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `EditReport` |
 | `move` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
 | `delete` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
-| `migrate` | confirm | applies (consumes a plan) | apply | preview | `ApplyReport` |
-| `rewrite-wikilink` | confirm | applies | apply | preview | `ApplyReport` |
+| `migrate` | confirm | dry-run (no write) | apply | preview | `ApplyReport` |
+| `rewrite-wikilink` | confirm | dry-run (no write) | apply | preview | `ApplyReport` |
 
-**Footgun:** for `new`/`set`/`move`/`delete`, running without `--yes` in a non-TTY context (i.e. from an agent) **writes nothing** — it dry-runs. Always pass `--yes` from an agent when you intend to apply.
+**Footgun:** for every command in this table, running without `--yes` in a non-TTY context (i.e. from an agent) **writes nothing** — it dry-runs, same as `--dry-run`, even though the exit code is 0. Always pass `--yes` from an agent when you intend to apply.
 
 ### set
 
@@ -199,7 +199,7 @@ norn -C /path/to/vault validate --code 'link-*' --format jsonl
 norn -C /path/to/vault validate --severity error --path 'notes/**' --format json
 ```
 
-`--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (pipe default — a finding has no path), `json` (`{ total, findings[] }`), `paths` (unique source paths). Exit code is `1` when any finding is an error, else `0` — gate pipelines on it.
+`--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (pipe default — a finding has no path), `json` (`{ total, findings[] }`), `paths` (unique source paths). Exit code reflects **whole-vault** error-severity diagnostics — it does not change with `--code`/`--severity`/`--path`, and most finding codes default to `warning` severity. Don't gate a pipeline on exit code alone; check `--summary` totals or the returned findings instead.
 
 Stable finding codes: `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-disallowed-value`, `frontmatter-invalid-type`, `frontmatter-forbidden-field`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`, `frontmatter-alias-malformed`, `frontmatter-reference-type`, `document-misrouted`. Renames are CHANGELOG breaking changes.
 

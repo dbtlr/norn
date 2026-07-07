@@ -20,17 +20,7 @@ Copy `SKILL.md` into one of:
 - **Personal:** `~/.claude/skills/norn/SKILL.md`
 - **Plugin or project:** `<project>/.claude/skills/norn/SKILL.md`
 
-Claude Code reads the frontmatter `name` and `description` fields to decide when to trigger the skill. The bundled frontmatter is already shaped correctly:
-
-```yaml
----
-name: norn
-description: Use when inspecting, validating, or auditing Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, and validation workflows.
-version: 1.0.0
-author: Drew Butler <hi@dbtlr.com>
-license: MIT
----
-```
+Claude Code reads the frontmatter `name` and `description` fields to decide when to trigger the skill. The bundled frontmatter is already shaped correctly — see the top of [SKILL.md](SKILL.md) for the current `name`, `description`, and `version` rather than duplicating them here, where they'd drift out of sync.
 
 Optional Claude-specific extension: add an `allowed-tools` field to the frontmatter to pre-permit the `Bash` tool for `norn *` invocations. Example:
 
