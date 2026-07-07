@@ -21,14 +21,18 @@ norn validate --rule typed-note --path "notes/**/*.md" --format jsonl
 
 ## Finding codes
 
+This is the complete, authoritative list of finding codes norn emits (also referenced from [`validate`](commands/validate.md#finding-codes)).
+
 | Code | Severity | Source |
 |---|---|---|
+| `read-failed` | error | The document could not be read from disk. Carries `diagnostic`. |
+| `frontmatter-unclosed` | warning | Frontmatter `---` opener has no closing `---`. Carries `diagnostic`. |
+| `frontmatter-parse-failed` | warning | YAML frontmatter could not be parsed. Carries `diagnostic`. |
+| `frontmatter-json-conversion-failed` | warning | Parsed YAML frontmatter could not be converted to JSON. Carries `diagnostic`. |
 | `link-target-missing` | warning | Body or frontmatter link target not found in the vault. |
 | `link-anchor-missing` | warning | Link target document exists, but the referenced heading anchor is not found. |
 | `link-block-missing` | warning | Link target document exists, but the referenced block ID is not found. |
 | `link-ambiguous` | warning | Stem lookup matched more than one document. Carries `candidates`. |
-| `frontmatter-parse-failed` | error | YAML frontmatter could not be parsed. Carries `diagnostic`. |
-| `frontmatter-unclosed` | error | Frontmatter `---` opener with no closing `---`. |
 | `frontmatter-required-field-missing` | warning | `required_frontmatter` field is absent or null. Carries `field`, `rule`. |
 | `frontmatter-forbidden-field` | warning | `forbidden_frontmatter` field is present. Carries `field`, `rule`. |
 | `frontmatter-invalid-type` | warning | Present field doesn't match declared `field_types` shape. Carries `field`, `expected_type`, `rule`. |
@@ -36,6 +40,9 @@ norn validate --rule typed-note --path "notes/**/*.md" --format jsonl
 | `frontmatter-disallowed-value` | warning | Present scalar field value isn't in `allowed_values`. Carries `field`, `actual_value`, `allowed_values`, `rule`. |
 | `document-misrouted` | warning | Document path matches no `allowed_paths` glob. Carries `allowed_paths`, `rule`. |
 | `frontmatter-reference-type` | warning | A frontmatter wikilink resolves to a document whose `type` is outside the field's `field_references.target_type` set. Carries `field`, `reference`, `target`, `actual_type`, `allowed_types`, `rule`. |
+| `frontmatter-alias-malformed` | warning | The alias field holds one or more non-scalar entries; those entries are skipped from alias resolution. Carries `field`, `invalid_entries`. |
+| `frontmatter-alias-shadowed-by-stem` | warning | An alias matches another document's stem, so it's dead — stem resolution wins. Carries `alias_value`, `shadowing_doc_path`. |
+| `frontmatter-alias-duplicate-across-docs` | warning | Two or more documents claim the same alias, so resolution is ambiguous. Carries `alias_value`, `peer_doc_paths`. |
 
 For the selector + constraint model that produces these codes, see [rule-shape.md](rule-shape.md).
 
@@ -180,11 +187,11 @@ The positional is optional: omit it (or pass `-`) to read the plan from stdin. T
 ```bash
 norn migrate plan.json --dry-run
 norn repair --plan --format json | norn migrate - --dry-run
-norn migrate plan.json --verify
+norn migrate plan.json
 norn migrate plan.json --out report.json
 ```
 
-Output formats: `--format records` (TTY default; human summary), `--format json` (pipe default; full `ApplyReport` envelope), `--format paths` (sorted dedup of changed files). `--out <PATH>` writes the JSON report to file independently of `--format`.
+Output formats: `--format records` (the default; human summary) or `--format json` (the full `ApplyReport` envelope). `--out <PATH>` writes the JSON report to file independently of `--format`. There is no `--format paths` for `migrate` and no TTY/pipe auto-detection — `records` is always the default unless overridden.
 
 Apply rejects:
 
@@ -200,22 +207,29 @@ Frontmatter apply preserves Markdown body content byte-for-byte. YAML lines unto
 
 A `set_frontmatter` change targeting a block-style value (block sequence, block mapping, block literal, block folded, or flow sequence/mapping) returns `cannot minimal-edit` rather than silently rewriting the structure.
 
-When a plan contains `move_document` changes, apply writes to multiple files: the moved file itself plus every backlinking file that contains a rewritable link. The apply output's `moved_files` and `rewritten_links` enumerate everything that was touched.
+When a plan contains `move_document` changes, apply writes to multiple files: the moved file itself plus every backlinking file that contains a rewritable link. The `move_document` operation's `cascade` object (`planned`, `applied`, `skipped`, `failed`, `files`) summarizes everything the cascade touched; pass `--verbose` for the per-link `rewrites`/`skips` detail.
 
 ### Apply report
 
-Apply output includes `plan_context` so broad plans remain explainable after applying deterministic changes:
+The JSON `ApplyReport` (`--format json`, or `--out <PATH>`) carries top-level counts plus a per-operation list — there is no separate plan-context envelope:
 
 ```json
 {
-  "plan_context": {
-    "skipped": {
-      "by_reason": { "no-rule-matched": 1 },
-      "total": 1
-    }
-  }
+  "schema_version": 2,
+  "trace_id": "…",
+  "plan_hash": "…",
+  "vault_root": "/abs/path/to/vault",
+  "dry_run": false,
+  "applied": 3,
+  "skipped": 1,
+  "failed": 0,
+  "remaining": 0,
+  "operations": [ { "op_id": "…", "kind": "set_frontmatter", "status": "applied", "summary": "…" } ],
+  "warnings": []
 }
 ```
+
+`skipped`/`failed`/`remaining` are apply-time counts (operations the batch didn't apply because an earlier precondition aborted the run, or that failed outright) — they are not the plan's `skipped_findings` roster. To see why a finding never made it into the plan at all, read the `MigrationPlan`'s own `skipped_findings` (see above), not the apply report.
 
 ## Stable repair loop
 
@@ -223,7 +237,8 @@ Apply output includes `plan_context` so broad plans remain explainable after app
 norn validate --summary --format json
 norn repair --plan --out plan.json
 norn migrate plan.json --dry-run --format json
-norn migrate plan.json --verify --format json
+norn migrate plan.json --format json
+norn validate --summary --format json
 ```
 
 For live maintenance with a snapshot tag:
@@ -233,9 +248,10 @@ git status --short
 git tag snapshot/vault-repair-$(date +%Y%m%d-%H%M%S)
 norn repair --plan --out plan.json
 norn migrate plan.json --dry-run --format json
-norn migrate plan.json --verify --format json
+norn migrate plan.json --format json
 git diff --check
 git diff
+norn validate --summary --format json
 ```
 
 See [examples/repair-recipe.sh](../examples/repair-recipe.sh) for a runnable version.

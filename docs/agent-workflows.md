@@ -18,7 +18,7 @@ description: Stable JSON and JSONL contracts, agent loop patterns, and common ha
 | Apply report schema | `migrate` JSON output (`ApplyReport`) | Stable across the matching plan schema version. |
 | Finding codes | `norn validate` output `code` field | Stable; renames are breaking changes called out in CHANGELOG. |
 
-Table output is for humans and may evolve between point releases. Agents should always pass an explicit `--format json` or `--format jsonl`.
+Default human-readable rendering (`records` on most commands, `report` for `repair --plan`) is for humans and may evolve between point releases. Agents should always pass an explicit `--format json` or `--format jsonl`.
 
 ## Vault targeting
 
@@ -41,8 +41,8 @@ For a typical drift-healing task:
 3. **Plan.** `norn repair --plan --out plan.json` (with the same filters). Read the plan's `changes` and `skipped_findings`.
 4. **Review.** Confirm `changes` are intended; surface `skipped_findings` to the human or follow `next_actions`.
 5. **Dry-run.** `norn migrate plan.json --dry-run --format json` — confirms the plan is applyable without writing. (Or pipe directly: `norn repair --plan --format json | norn migrate - --dry-run --format json`.)
-6. **Apply.** `norn migrate plan.json --verify --format json` — writes and re-validates.
-7. **Verify.** Inspect the apply report's `plan_context` and the post-apply validation summary.
+6. **Apply.** `norn migrate plan.json --format json` — writes. Every frontmatter write is re-parsed and checked against the intended value before apply reports success (the post-image verification gate); there is no separate `--verify` flag.
+7. **Verify.** Inspect the apply report's `operations` and `warnings`, then run `norn validate --summary --format json` again as the post-hoc check that the vault is now clean.
 
 For a read-only inspection task (no mutation):
 
@@ -104,14 +104,21 @@ These commands never write to the vault. An agent can run them with confidence:
 
 ```json
 {
+  "schema_version": 2,
+  "trace_id": "…",
+  "plan_hash": "…",
+  "vault_root": "/abs/path/to/vault",
+  "dry_run": false,
   "applied": 3,
-  "files_changed": 3,
-  "verify": { "total": 0 },
-  "plan_context": {
-    "skipped": { "by_reason": { "no-rule-matched": 1 }, "total": 1 }
-  }
+  "skipped": 0,
+  "failed": 0,
+  "remaining": 0,
+  "operations": [ { "op_id": "…", "kind": "set_frontmatter", "status": "applied", "summary": "…" } ],
+  "warnings": []
 }
 ```
+
+Every frontmatter write in `operations` passes a post-image verification gate before the apply reports it as `applied` — there is no separate opt-in verify step to request. Re-run `norn validate --summary --format json` afterward as the post-hoc check for drift the plan didn't cover.
 
 ## Filter-based triage
 
@@ -131,7 +138,7 @@ Two rules an agent must follow:
 1. **Use the appropriate write surface.** For creating a new document from a schema scaffold, use `norn new`. For operator-driven one-doc mutations on existing docs, `norn set` (frontmatter + body), `norn move`, and `norn delete` are the CRUD surface. For finding-driven batch repairs, `norn migrate` is the only path — it consumes a `MigrationPlan` artifact and applies deterministic changes with precondition checks. Never edit vault files directly; the graph state would diverge from the cache.
 2. **Always pass the plan that matches the current vault state.** Apply checks document hashes; if a file changed since the plan was created, the change is rejected for that file. Re-plan rather than re-apply with `--force` (there is no `--force` for migrate).
 
-`--dry-run` confirms the plan is applyable without writing. `--verify` runs validation after apply and includes the result in the report.
+`--dry-run` confirms the plan is applyable without writing. Apply itself verifies every frontmatter write against its intended value before reporting success (no opt-in flag needed); run `norn validate --summary` afterward as the post-hoc check across the whole vault.
 
 ## Using norn set for targeted frontmatter updates
 
@@ -166,7 +173,7 @@ repair rule (e.g. updating body content with `--body-from-stdin`).
 
 Beyond the CLI, norn can expose the vault to an MCP client as a set of tools via `norn mcp` — the same deterministic primitives (find, count, get, validate, repair-plan, plus the full mutation surface) reachable over stdio by an agent whose vault may be remote or off-filesystem. The mutation tools are dry-run by default and apply (under the per-vault mutation lock, audited to the event stream) only on `confirm: true` — the MCP analog of the CLI's `--dry-run` / apply split. Pass `--read-only` for a query-only server.
 
-See [MCP server](mcp-server.md) for the 12-tool catalog, the document-placement workflow (`vault.describe` → construct path → `vault.new`), and the warm-cache and call-ordering notes.
+See [MCP server](mcp-server.md) for the 14-tool catalog, the document-placement workflow (`vault.describe` → construct path → `vault.new`), and the warm-cache and call-ordering notes.
 
 ## Skill installation
 

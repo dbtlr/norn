@@ -34,24 +34,30 @@ norn -C "$VAULT_DIR" validate --summary --format json
 echo
 
 # 3. Plan: write a repair plan artifact for review.
-echo "step 2: repair plan --out $PLAN_FILE"
-norn -C "$VAULT_DIR" repair plan --out "$PLAN_FILE"
+echo "step 2: repair --plan --out $PLAN_FILE"
+norn -C "$VAULT_DIR" repair --plan --out "$PLAN_FILE"
 echo "plan written"
 echo
 
 # 4. Dry-run: confirm the plan applies cleanly without writing.
-echo "step 3: repair apply $PLAN_FILE --dry-run"
-norn -C "$VAULT_DIR" repair apply "$PLAN_FILE" --dry-run --format json
+echo "step 3: migrate $PLAN_FILE --dry-run"
+norn -C "$VAULT_DIR" migrate "$PLAN_FILE" --dry-run --format json
 echo
 
-# 5. Apply with verification.
-echo "step 4: repair apply $PLAN_FILE --verify"
-norn -C "$VAULT_DIR" repair apply "$PLAN_FILE" --verify --format json
+# 5. Apply. Every frontmatter write is checked against its intended value
+#    before apply reports success (no separate verify flag to pass).
+echo "step 4: migrate $PLAN_FILE"
+norn -C "$VAULT_DIR" migrate "$PLAN_FILE" --format json
 echo
 
-# 6. Show what changed in git, if applicable.
+# 6. Verify: re-run validate as the post-hoc check across the whole vault.
+echo "step 5: validate --summary"
+norn -C "$VAULT_DIR" validate --summary --format json
+echo
+
+# 7. Show what changed in git, if applicable.
 if git -C "$VAULT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "step 5: git diff summary"
+  echo "step 6: git diff summary"
   git -C "$VAULT_DIR" diff --stat
   echo
   echo "to roll back: git -C $VAULT_DIR reset --hard $SNAPSHOT_TAG"

@@ -5,13 +5,13 @@ description: Create a document in three modes — explicit path, rule-targeted (
 
 # norn new
 
-Create a new Markdown document with frontmatter pre-filled from the schema rules. `new` operates in three modes, applies the substitution language over field values (`{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`, `{{var.X}}`, and pipe transforms), and writes the document atomically. Operator `--field` overrides always win over schema defaults.
+Create a new Markdown document with frontmatter pre-filled from the schema rules. `new` operates in three modes, applies the substitution language (`{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`, `{{var.X}}`, and pipe transforms) over the rule's `target`, `body`, and `frontmatter_defaults` templates, and writes the document atomically. Operator `--field`/`--field-json` overrides always win over schema defaults — but they are literal values, not templates: they are parsed and schema-coerced, never run through the substitution engine.
 
 ## Three creation modes
 
 ### Mode A — explicit path
 
-Supply the vault-relative path directly. norn matches the path against configured rules and fills `frontmatter_defaults` from the matching rule.
+Supply the vault-relative path directly. norn matches the path against configured rules and fills `frontmatter_defaults` from the matching rule. `{{title}}` in those defaults derives from the path's own file stem — `--title` has no effect in this mode; pass it and it is silently ignored.
 
 ```bash
 norn new notes/my-note.md --yes
@@ -27,7 +27,7 @@ norn new --as task --title "Audit the cache" --var workspace=norn --yes
 norn new --as task --title "Audit the cache" --var workspace=norn --dry-run
 ```
 
-The `--title` value is available as `{{title}}` (and `{{title|slugify}}`) in the template. Template variables declared in the `target` template as `{{var.KEY}}` must be supplied via `--var KEY=VALUE`.
+The `--title` value is available as `{{title}}` (and `{{title|slugify}}`) when generating the `target` path and rendering the `body` scaffold. `frontmatter_defaults`' own `{{title}}` substitution is resolved separately, from the final generated path's file stem — the two normally agree (since the path is usually built from `{{title|slugify}}`), but a `target` template that doesn't derive the filename from `{{title}}` will diverge. Template variables declared in the `target` template as `{{var.KEY}}` must be supplied via `--var KEY=VALUE`.
 
 ### Mode C — inbox fallback
 
@@ -103,10 +103,10 @@ inbox:
 | Flag | Effect |
 |---|---|
 | `--as RULE` | Create into a named creatable rule; derives the path from its `target` template. |
-| `--title TEXT` | Document title — fills `{{title}}` in templates; required for Mode B (when the template needs it) and Mode C (inbox). |
+| `--title TEXT` | Document title — fills `{{title}}` in the `target` and `body` templates; required for Mode B (when the template needs it) and Mode C (inbox). Inert in Mode A (explicit path). |
 | `--var KEY=VALUE` | Template variable, repeatable. Fills `{{var.KEY}}` in the `target` and `body` templates. |
-| `--field KEY=VALUE` | Override or add a frontmatter field. Repeatable. |
-| `--field-json KEY=JSON` | Override a field with a raw JSON value. |
+| `--field KEY=VALUE` | Override or add a frontmatter field. Repeatable. The value is literal — parsed and schema-coerced, never substituted (no `{{...}}` expansion). |
+| `--field-json KEY=JSON` | Override a field with a raw JSON value. Also literal; no substitution. |
 | `--body-from-stdin` | Read the document body from stdin (takes precedence over the rule's `body` scaffold). |
 | `-p`, `--parents` | Create missing ancestor directories. |
 | `--force` | Overwrite an existing destination and skip schema-aware coercion. |
@@ -131,7 +131,7 @@ Same safe-by-default model as `set`, `move`, and `delete`:
 - **`--dry-run`:** preview and exit.
 - **`--format json`:** non-interactive; emits the JSON report (`operation`, `path`, `applied`, `frontmatter_created`, `body_bytes`, `warnings`, `trace_id`).
 
-After writing, `norn validate` runs against the new document; findings surface as report warnings.
+After writing, `norn validate` runs against the new document. As of this writing, only `frontmatter-required-field-missing` findings are mapped onto the report's `warnings` — other finding codes the new document might trigger are not yet surfaced there; run `norn validate` on the path directly to see the full finding set. All warnings `new` reports are Warning severity; severity is not configurable per creation.
 
 ## Output
 

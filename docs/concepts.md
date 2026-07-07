@@ -72,7 +72,7 @@ The product loop is four stages:
 1. **Detect** drift with graph facts and configured `validate.rules`. Output: findings.
 2. **Plan** supported repairs as a JSON artifact. Output: `plan.json`.
 3. **Apply** the plan explicitly via `norn migrate`. Output: modified files + an apply report.
-4. **Verify** the vault after changes (`--verify`, or another `validate --summary` run).
+4. **Verify** the vault after changes. Apply already re-parses and checks every frontmatter write against its intended value before reporting success (no opt-in flag); run `norn validate --summary` again as the post-hoc check across the whole vault.
 
 Validation is read-only and does not guess repairs. Repair planning is read-only and produces only inspectable artifacts. There is no hidden write path.
 
@@ -96,14 +96,14 @@ Globs are matched against vault-relative paths with forward-slash separators.
 
 ## Output formats
 
-Every command accepts `--format`:
+Most commands accept `--format`, drawing from a command-specific set of formats — there is no single universal set. Common members:
 
 - `json` — single JSON document. Best for one-shot agent dispatch.
 - `jsonl` — one JSON object per line. Best for streaming and large result sets.
-- `table` — human-readable columns. The schema is not stable across point releases.
-- `paths` — one vault-relative path per line. Best for piping into `xargs`, `fzf`, etc.
+- `records` — human-readable, per-item blocks. The schema is not stable across point releases.
+- `paths` — one vault-relative path per line, where the command has a natural per-row path (best for piping into `xargs`, `fzf`, etc.).
 
-When `--format` is omitted, commands with a human renderer default to `table` on a terminal and `json` when stdout is piped or captured. Pass an explicit `--format` for stable contracts.
+The default when `--format` is omitted varies by command: `find` and `validate` auto-detect (a human default on a terminal, a machine-readable default when piped); `count`, `migrate`, and `config show`/`config validate` default to a fixed human-readable format regardless of TTY; `repair --plan` defaults to `report` on a terminal and `json` when piped. Pass an explicit `--format` for stable contracts — see each command's page for its exact set and default.
 
 ## Next
 

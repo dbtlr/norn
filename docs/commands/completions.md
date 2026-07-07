@@ -14,7 +14,7 @@ Install tab-completions into the user's shell, or emit a completion script to st
 | `norn completions install [SHELL]` | Install completions into the shell config. Auto-detects `$SHELL` if omitted. |
 | `norn completions init <SHELL>` | Emit a completion script to stdout. |
 
-Supported shells: bash, zsh, fish.
+Supported shells: bash, zsh, fish, powershell, elvish, nushell.
 
 ## Examples
 

@@ -22,7 +22,7 @@ A worked config showing the full shape of `validate.rules` and `repair.rules`:
 ```bash
 cp examples/config-typed-notes.yaml /path/to/vault/.norn/config.yaml
 norn -C /path/to/vault validate --summary
-norn -C /path/to/vault repair plan --out repair.json
+norn -C /path/to/vault repair --plan --out repair.json
 ```
 
 ## repair-recipe.sh
