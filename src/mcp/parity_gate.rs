@@ -641,6 +641,60 @@ fn every_tool_advertises_an_output_schema() {
     );
 }
 
+/// The four cascade mutation tools publish their `outputSchema` via an explicit
+/// `output_schema = output_schema_for::<T>()` attribute, because rmcp cannot
+/// auto-derive it for the non-`Json` `MutationResult<T>` return type (NRN-219).
+/// That hand-written `T` is DECOUPLED from the return type, so a wrong or stale
+/// `T` (a copy-paste, or a `T` left behind after an output-struct rename) would
+/// advertise a schema describing the wrong payload while
+/// `every_tool_advertises_an_output_schema` — a presence-only check — stays green.
+///
+/// This pins each tool's advertised schema to the schema of the `Output` it
+/// actually returns, restoring the schema↔payload coupling that auto-derivation
+/// gives the `Json<T>` read tools for free. A wrong/stale `T` whose schema
+/// differs from the real payload fails here (a same-shaped swap is harmless — the
+/// advertised schema still matches the payload — and correctly passes).
+#[test]
+fn cascade_tools_advertise_their_payload_schema() {
+    use crate::mcp::mutation_result::output_schema_for;
+    use crate::mcp::tools::apply::ApplyOutput;
+    use crate::mcp::tools::delete::DeleteOutput;
+    use crate::mcp::tools::move_doc::MoveOutput;
+    use crate::mcp::tools::rewrite_wikilink::RewriteWikilinkOutput;
+
+    // The contract: tool name → the schema of the payload type it returns.
+    let expected = [
+        ("vault.apply", output_schema_for::<ApplyOutput>()),
+        ("vault.move", output_schema_for::<MoveOutput>()),
+        ("vault.delete", output_schema_for::<DeleteOutput>()),
+        (
+            "vault.rewrite_wikilink",
+            output_schema_for::<RewriteWikilinkOutput>(),
+        ),
+    ];
+
+    let mut advertised = BTreeMap::new();
+    for router in McpServer::routers(false) {
+        for tool in router.list_all() {
+            advertised.insert(tool.name.to_string(), tool.output_schema.clone());
+        }
+    }
+
+    for (name, want) in expected {
+        let got = advertised
+            .get(name)
+            .cloned()
+            .flatten()
+            .unwrap_or_else(|| panic!("{name}: no outputSchema advertised"));
+        assert_eq!(
+            *got, *want,
+            "{name} advertises an outputSchema that does not match the Output type it \
+             returns — a wrong or stale `T` in its `output_schema = output_schema_for::<T>()` \
+             attribute (see NRN-219)"
+        );
+    }
+}
+
 #[test]
 fn cli_mcp_surface_parity() {
     let ignore = global_ignore();
