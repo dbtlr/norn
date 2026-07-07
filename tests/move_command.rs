@@ -449,6 +449,55 @@ fn move_with_parents_creates_missing_dst_dirs() {
     assert!(vault.join("deep/nested/new.md").exists());
 }
 
+/// F2 (NRN-145 follow-up): `--parents` creates missing destination parent
+/// directories BEFORE the containment gate runs (the gate lives inside the
+/// apply orchestrator, invoked well after this pre-create). A traversal
+/// destination must be refused before anything is created outside the vault.
+#[test]
+fn move_with_parents_refuses_destination_escape_and_creates_nothing_outside() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["move", "--parents", "b.md", "../mEvil/x.md", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.path().join("mEvil").exists(),
+        "--parents pre-create must not create a directory outside the vault"
+    );
+}
+
+/// Same escape, but on `--dry-run`: a preview must create nothing, anywhere.
+#[test]
+fn move_with_parents_dry_run_refuses_destination_escape_and_creates_nothing() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["move", "--parents", "--dry-run", "b.md", "../mEvilDry/x.md"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.path().join("mEvilDry").exists(),
+        "--parents --dry-run must not create a directory outside the vault"
+    );
+}
+
 #[test]
 fn move_without_parents_refuses_when_dst_parent_missing() {
     let tmp = synth();

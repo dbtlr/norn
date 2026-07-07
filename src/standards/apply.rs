@@ -98,6 +98,127 @@ pub enum ApplyError {
         earlier_op: String,
         earlier_change_id: String,
     },
+
+    #[error(transparent)]
+    Containment(#[from] ContainmentError),
+}
+
+/// (NRN-145) Refusal from the shared vault-root containment gate. A vault is
+/// self-contained: an op target that resolves outside the vault root — via an
+/// absolute path, `..` parent-traversal, or a directory symlinked out of the
+/// vault — is unsupported and refused before any write.
+#[derive(Debug, Error)]
+pub enum ContainmentError {
+    #[error("refusing to operate on '{target}': absolute paths are not vault-relative; the vault root is self-contained and paths outside it are unsupported")]
+    AbsolutePath { target: Utf8PathBuf },
+
+    #[error("refusing to operate on '{target}': a '..' component escapes the vault root; the vault is self-contained and paths outside it are unsupported")]
+    ParentTraversal { target: Utf8PathBuf },
+
+    #[error("refusing to operate on '{target}': path resolves outside the vault root; the vault is self-contained and symlinks out of the vault are unsupported")]
+    EscapesVault { target: Utf8PathBuf },
+
+    #[error("refusing to operate on '{target}': cannot verify vault-root containment ({detail})")]
+    Unresolvable { target: Utf8PathBuf, detail: String },
+}
+
+/// (NRN-145) Refuse an op target that would resolve outside the vault root. The
+/// shared containment gate for the mutation stack (create / move / delete / edit
+/// / backlink-cascade targets) and `norn new`'s path validation — one
+/// implementation, no parallel logic.
+///
+/// The check is lexical first (cheap): an absolute path or any `..` component is
+/// refused up front. Then:
+///
+/// - If the target ALREADY EXISTS (a backlink-cascade rewrite source, a
+///   move/delete source — these always exist), the target ITSELF is
+///   canonicalized and confirmed prefix-contained in `canonical_root`. This is
+///   the F1 fix (NRN-145 follow-up): a symlink FILE inside the vault whose
+///   PARENT is legitimately in-vault but which itself resolves outside would
+///   pass a parent-only check, then a bare `fs::write`/`fs::read_to_string`
+///   would follow it straight through to the outside file. Canonicalizing the
+///   target closes that.
+/// - Otherwise (a create/move destination that does not yet exist, so there is
+///   nothing to canonicalize at the target itself), the op target's PARENT
+///   directory is resolved and its nearest EXISTING ancestor is canonicalized
+///   and confirmed prefix-contained in `canonical_root`. Canonicalizing the
+///   parent resolves a directory symlinked out of the vault — the case the
+///   lexical check alone bypasses. Canonicalizing the nearest existing
+///   ancestor means `-p`/`--parents` creation of a not-yet-existing subtree
+///   cannot be used to sidestep the gate.
+///
+/// `canonical_root` is the caller's canonicalization of the vault root; it is
+/// canonicalized ONCE per apply (not per op) and never on a read path.
+pub fn ensure_within_vault(
+    vault_root: &Utf8Path,
+    canonical_root: &std::path::Path,
+    target: &Utf8Path,
+) -> Result<(), ContainmentError> {
+    if target.is_absolute() {
+        return Err(ContainmentError::AbsolutePath {
+            target: target.to_owned(),
+        });
+    }
+    if target
+        .components()
+        .any(|c| matches!(c, camino::Utf8Component::ParentDir))
+    {
+        return Err(ContainmentError::ParentTraversal {
+            target: target.to_owned(),
+        });
+    }
+
+    let joined = vault_root.join(target);
+
+    if joined.as_std_path().exists() {
+        let canonical_target =
+            joined
+                .as_std_path()
+                .canonicalize()
+                .map_err(|e| ContainmentError::Unresolvable {
+                    target: target.to_owned(),
+                    detail: e.to_string(),
+                })?;
+        if !canonical_target.starts_with(canonical_root) {
+            return Err(ContainmentError::EscapesVault {
+                target: target.to_owned(),
+            });
+        }
+        return Ok(());
+    }
+
+    let parent = joined.parent().unwrap_or(vault_root);
+    let existing = nearest_existing_ancestor(parent);
+    let canonical_parent =
+        existing
+            .as_std_path()
+            .canonicalize()
+            .map_err(|e| ContainmentError::Unresolvable {
+                target: target.to_owned(),
+                detail: e.to_string(),
+            })?;
+    if !canonical_parent.starts_with(canonical_root) {
+        return Err(ContainmentError::EscapesVault {
+            target: target.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The nearest ancestor of `path` (inclusive) that exists on disk, following
+/// symlinks. Terminates because the vault root — an ancestor of every
+/// lexically-contained target — always exists.
+fn nearest_existing_ancestor(path: &Utf8Path) -> &Utf8Path {
+    let mut cur = path;
+    loop {
+        if cur.as_std_path().exists() {
+            return cur;
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return cur,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
