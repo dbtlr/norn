@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.45.0 - 2026-07-07
+
+**MCP becomes a true peer of the CLI.** This release closes the CLI↔MCP parity gap (enforced now by a CI ratchet), routes `norn count` through the warm daemon byte-identically, hardens the mutation stack (vault-root containment, crash-atomic cascades, a machine-branchable error/outcome taxonomy), teaches the query and mutate grammars to forgive the spellings agents actually type (ADR 0010), and converges the CLI verb / MCP tool vocabulary onto one set of names with canonical kebab wire values. Pre-1.0, the breaking changes below land without shims — coordinate the MCP-wire breaks with any live consumer.
+
 ### Breaking changes
 
 - **CLI verbs and MCP tools now converge on one vocabulary, and code/enum VALUES on the wire are canonically kebab-case — one coordinated wire break so a consumer updates once (NRN-185, NRN-190).** No back-compat aliases (pre-1.0). Full wire-delta, old → new:
