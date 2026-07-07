@@ -27,6 +27,9 @@ pub struct MigrateRunArgs {
     pub yes: bool,
     pub format: MigrateFormat,
     pub input_format: Option<InputFormat>,
+    /// Auto-create missing parent directories for create_document ops that
+    /// proceed (mkdir -p style). Threaded into `ApplyContext.parents`.
+    pub parents: bool,
     pub out: Option<String>,
 }
 
@@ -155,7 +158,7 @@ pub fn run(
 
     let ctx = ApplyContext {
         dry_run,
-        parents: false,
+        parents: args.parents,
         verbose,
     };
 

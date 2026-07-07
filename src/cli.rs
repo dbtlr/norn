@@ -1165,6 +1165,11 @@ pub struct MigrateArgs {
     #[arg(long, value_enum)]
     pub input_format: Option<InputFormat>,
 
+    /// Auto-create missing parent directories for create_document ops
+    /// (mkdir -p style). Directories are created only for ops that proceed.
+    #[arg(short = 'p', long = "parents")]
+    pub parents: bool,
+
     /// Write the JSON apply report to this file instead of stdout.
     #[arg(long)]
     pub out: Option<String>,

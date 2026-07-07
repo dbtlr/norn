@@ -302,6 +302,7 @@ fn run(cli: Cli) -> Result<i32> {
                 yes: args.yes,
                 format: args.format,
                 input_format: args.input_format,
+                parents: args.parents,
                 out: args.out,
             };
             migrate_cmd::run(
