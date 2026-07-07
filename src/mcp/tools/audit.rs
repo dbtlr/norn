@@ -5,14 +5,42 @@ use crate::telemetry::read::{self, Filter};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Schema-carrying mirror of the CLI's `AuditStatus` (NRN-184). `cli::AuditStatus`
+/// cannot derive `serde`/`schemars` — `cli.rs` is `#[path]`-included by `build.rs`,
+/// whose build-script crate has neither dependency — so the MCP surface types its
+/// `status` filter with this local enum instead. It lowers through
+/// `cli::AuditStatus::as_str` (via [`AuditStatusFilter::to_cli`]), so the on-wire
+/// status strings can never drift from the CLI's canonical mapping. The closed
+/// variant set is what makes the published schema advertise `applied`/`skipped`/
+/// `failed` and reject a typo as a params error.
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditStatusFilter {
+    Applied,
+    Skipped,
+    Failed,
+}
+
+impl AuditStatusFilter {
+    fn to_cli(self) -> crate::cli::AuditStatus {
+        match self {
+            Self::Applied => crate::cli::AuditStatus::Applied,
+            Self::Skipped => crate::cli::AuditStatus::Skipped,
+            Self::Failed => crate::cli::AuditStatus::Failed,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct AuditParams {
     /// Only events from this invocation trace id.
     #[serde(default)]
     pub trace: Option<String>,
-    /// Only per-action events with this status (`applied`/`skipped`/`failed`).
+    /// Only per-action events with this status. One of `applied`, `skipped`,
+    /// `failed` — the same closed set `norn audit --status` enforces, so the
+    /// published schema advertises the valid values and rejects typos.
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<AuditStatusFilter>,
     /// Only events touching this vault-relative path (move source or dest).
     #[serde(default)]
     pub target: Option<String>,
@@ -48,7 +76,10 @@ pub fn handle_output(ctx: &VaultContext, p: AuditParams) -> Result<AuditOutput> 
     };
     let filter = Filter {
         trace: p.trace,
-        status: p.status,
+        // Lower the closed enum to the wire string the event stream stores
+        // (`applied`/`skipped`/`failed`) via the CLI's canonical mapping — the
+        // same lowering `norn audit` does.
+        status: p.status.map(|s| s.to_cli().as_str().to_string()),
         target: p.target,
         since,
         until,

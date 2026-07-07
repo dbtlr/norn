@@ -53,6 +53,25 @@ pub struct SetParams {
     #[serde(default)]
     pub set: BTreeMap<String, serde_json::Value>,
 
+    /// Frontmatter field overrides in `KEY=VALUE` format, repeatable. The value
+    /// is string-coerced against the schema (dates, numbers, enums) exactly like
+    /// `norn set --field KEY=VALUE` — the coercing counterpart to the typed `set`
+    /// map. Use `set` when you need to pass a structured JSON value verbatim.
+    #[serde(default)]
+    pub field: Vec<String>,
+
+    /// Append a value to a list-typed frontmatter field: `field -> value`.
+    /// Creates a single-element array if the key does not exist. Values are
+    /// string-coerced like `norn set --push KEY=VALUE`.
+    #[serde(default)]
+    pub push: BTreeMap<String, serde_json::Value>,
+
+    /// Remove a value from a list-typed frontmatter field: `field -> value`.
+    /// Silent no-op if the value is not present. String-coerced like
+    /// `norn set --pop KEY=VALUE`.
+    #[serde(default)]
+    pub pop: BTreeMap<String, serde_json::Value>,
+
     /// Frontmatter keys to remove entirely. Silent no-op for missing keys, like
     /// `norn set --remove key`.
     #[serde(default)]
@@ -101,6 +120,17 @@ impl SetOutput {
     }
 }
 
+/// Render a JSON scalar as the bare `VALUE` half of a `KEY=VALUE` argument for
+/// the coercing `--push` / `--pop` seam. A JSON string yields its unquoted
+/// contents (`"done"` -> `done`); any other scalar yields its compact JSON form
+/// (`5`, `true`), which `infer_scalar` then coerces exactly as the CLI does.
+fn cli_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Build the MCP output envelope for `vault.set`: run the pure handler, then
 /// project the report into the typed [`SetOutput`]. The single function the
 /// `#[tool]` wrapper calls.
@@ -142,12 +172,28 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         .map(|(k, v)| Ok(format!("{k}={}", serde_json::to_string(v)?)))
         .collect::<Result<Vec<_>>>()?;
 
+    // `push` / `pop` maps route through the CLI's string-coercing --push/--pop
+    // seam (infer_scalar), so each value renders as a bare KEY=VALUE string (not
+    // JSON-quoted) — matching `norn set --push status=done`.
+    let push: Vec<String> = p
+        .push
+        .iter()
+        .map(|(k, v)| format!("{k}={}", cli_scalar(v)))
+        .collect();
+    let pop: Vec<String> = p
+        .pop
+        .iter()
+        .map(|(k, v)| format!("{k}={}", cli_scalar(v)))
+        .collect();
+
     let args = SetArgs {
         target: p.target.clone(),
-        fields: Vec::new(),
+        // `field` is the coercing --field path (string coercion); `set` is the
+        // typed --field-json path routed above.
+        fields: p.field.clone(),
         field_json,
-        push: Vec::new(),
-        pop: Vec::new(),
+        push,
+        pop,
         remove: p.remove.clone(),
         body_from_stdin: false,
         force: p.force,
@@ -268,6 +314,7 @@ mod tests {
                 body: None,
                 force: false,
                 confirm: false,
+                ..Default::default()
             },
         )
         .expect("handle (dry-run) should succeed");
@@ -299,6 +346,7 @@ mod tests {
                 body: None,
                 force: false,
                 confirm: true,
+                ..Default::default()
             },
         )
         .expect("handle (confirm) should succeed");
@@ -327,6 +375,7 @@ mod tests {
                 body: Some("Replaced body\n".into()),
                 force: false,
                 confirm: true,
+                ..Default::default()
             },
         )
         .expect("handle (confirm body) should succeed");
@@ -359,6 +408,7 @@ mod tests {
                 body: Some("Replaced body\n".into()),
                 force: false,
                 confirm: false,
+                ..Default::default()
             },
         )
         .expect("handle (dry-run body) should succeed");
@@ -376,6 +426,112 @@ mod tests {
         assert!(
             !content.contains("Replaced body"),
             "dry-run must NOT write the new body:\n{content}"
+        );
+    }
+
+    /// Seed a temp vault with a `task.md` carrying a list-typed `tags` field.
+    fn seeded_vault_with_tags() -> (TempDir, Utf8PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-set-tags-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            root.join("task.md"),
+            "---\ntype: task\nstatus: backlog\ntags:\n  - alpha\n  - beta\n---\nTask body\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    /// NRN-181: the coercing `field` param (KEY=VALUE) writes the frontmatter
+    /// value via the `--field` seam, distinct from the JSON-typed `set` map.
+    #[test]
+    fn confirm_field_coerces_and_writes() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                field: vec!["status=active".to_string()],
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (field) should succeed");
+
+        assert!(report.applied, "field mutation must apply");
+        assert_eq!(
+            disk_status(&root),
+            "active",
+            "coercing field param must write status=active to disk"
+        );
+    }
+
+    /// NRN-181: the `push` map appends a value to a list-typed field.
+    #[test]
+    fn confirm_push_appends_to_list() {
+        let (_tmp, root) = seeded_vault_with_tags();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut push = BTreeMap::new();
+        push.insert("tags".to_string(), serde_json::json!("gamma"));
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                push,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (push) should succeed");
+
+        assert!(report.applied, "push mutation must apply");
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        assert!(
+            content.contains("gamma"),
+            "push must append gamma to the tags list:\n{content}"
+        );
+        // The existing members survive the append.
+        assert!(
+            content.contains("alpha") && content.contains("beta"),
+            "push must preserve existing list members:\n{content}"
+        );
+    }
+
+    /// NRN-181: the `pop` map removes a value from a list-typed field.
+    #[test]
+    fn confirm_pop_removes_from_list() {
+        let (_tmp, root) = seeded_vault_with_tags();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut pop = BTreeMap::new();
+        pop.insert("tags".to_string(), serde_json::json!("alpha"));
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                pop,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (pop) should succeed");
+
+        assert!(report.applied, "pop mutation must apply");
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        assert!(
+            !content.contains("alpha"),
+            "pop must remove alpha from the tags list:\n{content}"
+        );
+        assert!(
+            content.contains("beta"),
+            "pop must leave the other list members:\n{content}"
         );
     }
 }

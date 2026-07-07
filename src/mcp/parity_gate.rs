@@ -56,18 +56,26 @@
 //! Enumerated empirically from the code, not assumed:
 //! * `vault.get` lacks `sort`/`desc`/`limit`/`no_limit`/`starts_at`/`section` and
 //!   `all_cols` (get's column-projection + paging surface) — all NRN-173.
-//! * `vault.set` lacks the coercing `--field`, `--push`, `--pop` — NRN-181.
-//! * `vault.move` lacks `--force` and `--no-link-rewrite` — NRN-180.
-//! * `vault.validate` lacks `--summary` — NRN-182.
+//!
+//! Closed (kept here as burndown history): `vault.set`'s coercing `--field` /
+//! `--push` / `--pop` (NRN-181), `vault.move`'s `--force` / `--no-link-rewrite`
+//! (NRN-180), and `vault.validate`'s `--summary` (NRN-182) all now have MCP
+//! twins, so their allowlist entries were removed.
 //!
 //! # Out of scope for this *field-presence* gate (tracked separately)
 //!
 //! * **Exit-signal asymmetry** — NRN-183.
-//! * **`vault.audit` `status` stringly-typed** — NRN-184. The `status` field is
-//!   *present* on both surfaces; the gap is that MCP types it as a free `String`
-//!   where the CLI uses a closed enum. A presence test cannot express a
-//!   type-refinement gap, and an allowlist entry for it would be flagged STALE
-//!   (the field maps). Left as a documented type-level debt.
+//! * **`vault.audit` `status` type refinement** — NRN-184, CLOSED. `status` was
+//!   already *present* on both surfaces (so it never had a presence-gap allowlist
+//!   entry), but MCP typed it as a free `String` where the CLI uses a closed
+//!   enum. It now deserializes into a schema-carrying enum
+//!   (`tools::audit::AuditStatusFilter`) that lowers through
+//!   `cli::AuditStatus::as_str`, so the published `input_schema` advertises the
+//!   `applied`/`skipped`/`failed` set and rejects typos. (A local mirror, not the
+//!   CLI enum directly: `cli.rs` is `#[path]`-included by `build.rs`, whose
+//!   build-script crate depends on neither `serde` nor `schemars`.) A presence
+//!   test cannot express this refinement; it is verified by the `vault.audit`
+//!   schema/behavior tests in `tests/mcp_audit.rs`.
 //!
 //! # Ratchet
 //!
@@ -202,8 +210,9 @@ fn specs() -> Vec<Spec> {
                 presentation: &["format"],
                 shape: &[],
                 naming: &[],
-                // NRN-182: vault.validate lacks the grouped-summary projection.
-                gaps: &[("summary", "NRN-182")],
+                // NRN-182 CLOSED: vault.validate now serves the `summary` rollup
+                // projection as an identity-mapped field.
+                gaps: &[],
             },
         },
         Spec {
@@ -260,16 +269,17 @@ fn specs() -> Vec<Spec> {
                 shape: &[],
                 naming: &[
                     // MCP `set` is the typed (field-json) frontmatter map; MCP
-                    // `body` is the wholesale-replacement analogue of stdin.
+                    // `body` is the wholesale-replacement analogue of stdin. The
+                    // CLI's coercing `--field` (clap id `fields`) is the MCP
+                    // `field` param (NRN-181) — a plural→singular rename mirroring
+                    // vault.new's `field`.
                     ("field_json", "set"),
                     ("body_from_stdin", "body"),
+                    ("fields", "field"),
                 ],
-                gaps: &[
-                    // NRN-181: vault.set lacks the coercing --field, --push, --pop.
-                    ("fields", "NRN-181"),
-                    ("push", "NRN-181"),
-                    ("pop", "NRN-181"),
-                ],
+                // NRN-181 CLOSED: `push` / `pop` are now identity-mapped MCP
+                // fields; the coercing `--field` maps via the naming entry above.
+                gaps: &[],
             },
         },
         Spec {
@@ -293,11 +303,9 @@ fn specs() -> Vec<Spec> {
                 presentation: &["format"],
                 shape: &[],
                 naming: &[("src", "from"), ("dst", "to")],
-                gaps: &[
-                    // NRN-180: vault.move lacks --force and --no-link-rewrite.
-                    ("force", "NRN-180"),
-                    ("no_link_rewrite", "NRN-180"),
-                ],
+                // NRN-180 CLOSED: vault.move now serves `force` + `no_link_rewrite`
+                // as identity-mapped fields.
+                gaps: &[],
             },
         },
         Spec {

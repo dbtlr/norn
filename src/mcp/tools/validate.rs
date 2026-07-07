@@ -70,6 +70,13 @@ pub struct ValidateParams {
     /// Filter link findings by unresolved reason. Comma-separated.
     #[serde(default)]
     pub reason: Vec<String>,
+
+    /// Return the grouped finding-count rollup (by code / severity / rule /
+    /// field / path-prefix) instead of the raw findings list — the structured
+    /// analogue of `norn validate --summary`. When set, `findings` is empty and
+    /// `summary` carries the rollup. Triage filters still apply first.
+    #[serde(default)]
+    pub summary: bool,
 }
 
 /// Structured output for `vault.validate`.
@@ -83,8 +90,16 @@ pub struct ValidateOutput {
     /// Validation findings, filtered by any supplied triage predicates.
     /// Each entry is the JSON form of a `Finding`: `{code, severity, path,
     /// message, …}` with the finding-specific body flattened in. Empty array
-    /// means the vault is clean (or all findings were filtered out).
+    /// means the vault is clean (or all findings were filtered out) — or that
+    /// `summary` was requested (findings are rolled up into `summary` instead).
     pub findings: Vec<serde_json::Value>,
+
+    /// The grouped finding-count rollup, present only when `summary: true` was
+    /// requested. Byte-for-byte the same shape `norn validate --summary --format
+    /// json` emits: `{findings, codes, severities, rules, fields,
+    /// disallowed_values, invalid_types, path_prefixes}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<serde_json::Value>,
 }
 
 /// Pure handler for `vault.validate`.
@@ -123,13 +138,28 @@ pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
     };
     let filtered = filter_findings(findings, &filter_opts)?;
 
+    // `--summary` projection: roll the (post-filter) findings up into grouped
+    // counts and return that instead of the raw list. Reuses the CLI's
+    // `standards::summarize` — the same function `norn validate --summary`'s JSON
+    // renderer calls — so the two rollups cannot drift.
+    if p.summary {
+        let rollup = crate::standards::summarize(&filtered);
+        return Ok(ValidateOutput {
+            findings: Vec::new(),
+            summary: Some(serde_json::to_value(&rollup)?),
+        });
+    }
+
     // Serialize each Finding to a serde_json::Value.
     let findings = filtered
         .into_iter()
         .map(|f| serde_json::to_value(&f))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ValidateOutput { findings })
+    Ok(ValidateOutput {
+        findings,
+        summary: None,
+    })
 }
 
 #[cfg(test)]
@@ -255,6 +285,67 @@ mod tests {
                 "code filter should only return link-target-missing findings, got: {f}"
             );
         }
+    }
+
+    /// NRN-182: `summary: true` returns the grouped rollup (not the raw list).
+    /// `findings` is empty and `summary` carries per-code / per-severity counts
+    /// for the same post-filter finding set.
+    #[test]
+    fn handle_summary_returns_grouped_rollup() {
+        let (_tmp, root) = vault_with_broken_link();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            ValidateParams {
+                summary: true,
+                ..ValidateParams::default()
+            },
+        )
+        .expect("handle with summary should succeed");
+
+        // Summary mode returns the rollup in `summary`, not the raw findings list.
+        assert!(
+            out.findings.is_empty(),
+            "summary mode must leave findings empty, got: {:?}",
+            out.findings
+        );
+        let summary = out
+            .summary
+            .as_ref()
+            .expect("summary mode must populate the summary rollup");
+
+        // Total count is present and non-zero (there is one broken link).
+        assert!(
+            summary["findings"].as_u64().unwrap_or(0) >= 1,
+            "summary.findings must count the broken link: {summary}"
+        );
+        // The by-code group carries the link-target-missing bucket.
+        assert!(
+            summary["codes"]["link-target-missing"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1,
+            "summary.codes must tally link-target-missing: {summary}"
+        );
+    }
+
+    /// Companion: without `summary`, the raw findings list is returned and the
+    /// summary rollup is absent — the default projection is unchanged.
+    #[test]
+    fn handle_without_summary_omits_rollup() {
+        let (_tmp, root) = vault_with_broken_link();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
+        assert!(
+            !out.findings.is_empty(),
+            "default mode must return the raw findings list"
+        );
+        assert!(
+            out.summary.is_none(),
+            "default mode must not populate the summary rollup"
+        );
     }
 
     #[test]
