@@ -60,15 +60,21 @@ pub struct SetParams {
     #[serde(default)]
     pub field: Vec<String>,
 
-    /// Append a value to a list-typed frontmatter field: `field -> value`.
-    /// Creates a single-element array if the key does not exist. Values are
-    /// string-coerced like `norn set --push KEY=VALUE`.
+    /// Append to a list-typed frontmatter field: `field -> value`. A scalar
+    /// value appends one element; an **array** value appends each element in
+    /// order (equivalent to repeating `norn set --push KEY=VALUE` once per
+    /// element). Creates a single-element array if the key does not exist.
+    /// Values are string-coerced like `norn set --push KEY=VALUE`. An object
+    /// value, or an array containing a nested array/object, is refused — never
+    /// stringified.
     #[serde(default)]
     pub push: BTreeMap<String, serde_json::Value>,
 
-    /// Remove a value from a list-typed frontmatter field: `field -> value`.
-    /// Silent no-op if the value is not present. String-coerced like
-    /// `norn set --pop KEY=VALUE`.
+    /// Remove from a list-typed frontmatter field: `field -> value`. A scalar
+    /// value removes one member; an **array** value removes each named member in
+    /// order. Silent no-op for a member that is not present. String-coerced like
+    /// `norn set --pop KEY=VALUE`. An object value, or an array containing a
+    /// nested array/object, is refused — never stringified.
     #[serde(default)]
     pub pop: BTreeMap<String, serde_json::Value>,
 
@@ -120,15 +126,63 @@ impl SetOutput {
     }
 }
 
-/// Render a JSON scalar as the bare `VALUE` half of a `KEY=VALUE` argument for
-/// the coercing `--push` / `--pop` seam. A JSON string yields its unquoted
-/// contents (`"done"` -> `done`); any other scalar yields its compact JSON form
-/// (`5`, `true`), which `infer_scalar` then coerces exactly as the CLI does.
-fn cli_scalar(v: &serde_json::Value) -> String {
+/// Render a JSON **scalar** as the bare `VALUE` half of a `KEY=VALUE` argument
+/// for the coercing `--push` / `--pop` seam. A JSON string yields its unquoted
+/// contents (`"done"` -> `done`); a number/bool/null yields its compact JSON
+/// form (`5`, `true`, `null`), which `infer_scalar` then coerces exactly as the
+/// CLI does. An array or object is **not** a scalar and yields `None` — the
+/// caller refuses it rather than stringifying a structured value into a single
+/// literal list element.
+fn scalar_arg(v: &serde_json::Value) -> Option<String> {
     match v {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            Some(v.to_string())
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
+}
+
+/// Expand a `push` / `pop` map into the flat `KEY=VALUE` vector the CLI
+/// `--push` / `--pop` seam consumes.
+///
+/// A scalar value produces one `KEY=VALUE` entry. An **array** value explodes
+/// into N sequential entries (order preserved), byte-for-byte equivalent to
+/// repeating the CLI flag once per element — so `push {tags: [a, b]}` appends
+/// two real members, not one literal `["a","b"]` element.
+///
+/// An **object** value, or an array element that is itself an array/object, is
+/// refused with a params error: these have no scalar `KEY=VALUE` form, and
+/// stringifying one would silently append a literal `{...}`/`[...]` element (a
+/// silent-corruption bug). `flag` names the offending param (`push`/`pop`) in
+/// the error.
+fn expand_list_ops(map: &BTreeMap<String, serde_json::Value>, flag: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for (key, value) in map {
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    let scalar = scalar_arg(item).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{flag} value for '{key}' must be a scalar or a flat array of \
+                             scalars; a nested array/object list element is not allowed"
+                        )
+                    })?;
+                    out.push(format!("{key}={scalar}"));
+                }
+            }
+            scalar_or_object => {
+                let scalar = scalar_arg(scalar_or_object).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{flag} value for '{key}' must be a scalar or a flat array of \
+                         scalars, not an object"
+                    )
+                })?;
+                out.push(format!("{key}={scalar}"));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Build the MCP output envelope for `vault.set`: run the pure handler, then
@@ -174,17 +228,12 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
 
     // `push` / `pop` maps route through the CLI's string-coercing --push/--pop
     // seam (infer_scalar), so each value renders as a bare KEY=VALUE string (not
-    // JSON-quoted) — matching `norn set --push status=done`.
-    let push: Vec<String> = p
-        .push
-        .iter()
-        .map(|(k, v)| format!("{k}={}", cli_scalar(v)))
-        .collect();
-    let pop: Vec<String> = p
-        .pop
-        .iter()
-        .map(|(k, v)| format!("{k}={}", cli_scalar(v)))
-        .collect();
+    // JSON-quoted) — matching `norn set --push status=done`. An array value
+    // explodes into N sequential entries (matching repeated CLI flags); an
+    // object, or a nested array/object element, is refused rather than
+    // stringified into a literal list element.
+    let push = expand_list_ops(&p.push, "push")?;
+    let pop = expand_list_ops(&p.pop, "pop")?;
 
     let args = SetArgs {
         target: p.target.clone(),
@@ -444,18 +493,60 @@ mod tests {
         (tmp, root)
     }
 
-    /// NRN-181: the coercing `field` param (KEY=VALUE) writes the frontmatter
-    /// value via the `--field` seam, distinct from the JSON-typed `set` map.
+    /// Seed a temp vault with a `task.md` and a schema declaring a `wikilink`-typed
+    /// `up` field, so the coercing `--field` path and the typed `--field-json`
+    /// (`set`) path diverge on the same input.
+    fn seeded_vault_with_wikilink_schema() -> (TempDir, Utf8PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-set-wikischema-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let config_dir = root.join(".norn");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.yaml"),
+            "validate:\n  rules:\n    - name: task-fields\n      match:\n        \
+             frontmatter:\n          type: task\n      field_types:\n        up: wikilink\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("task.md"),
+            "---\ntype: task\nstatus: backlog\n---\nTask body\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    fn disk_field<'a>(content: &'a str, field: &str) -> Option<&'a str> {
+        let prefix = format!("{field}:");
+        content
+            .lines()
+            .find_map(|l| l.strip_prefix(&prefix))
+            .map(str::trim)
+    }
+
+    /// NRN-181: the coercing `field` param (KEY=VALUE) routes through the CLI's
+    /// `--field` seam (string coercion against the schema), which is a *distinct*
+    /// path from the JSON-typed `set` map (`--field-json`).
+    ///
+    /// The blind-spot fix (F4): a schemaless string value made both paths emit an
+    /// identical `Value::String`, so a mis-wire (routing `field` through the typed
+    /// seam) would go undetected. Here `up` is `wikilink`-typed, so the coercing
+    /// path *wraps* a bare stem (`norn` -> `[[norn]]`) while the same bare string
+    /// through the typed `set` path is refused (a bare string is not a shape-valid
+    /// wikilink). The two paths therefore provably differ.
     #[test]
     fn confirm_field_coerces_and_writes() {
-        let (_tmp, root) = seeded_vault();
+        let (_tmp, root) = seeded_vault_with_wikilink_schema();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
+        // Coercing --field path: bare stem is wrapped into a wikilink and written.
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                field: vec!["status=active".to_string()],
+                field: vec!["up=norn".to_string()],
                 confirm: true,
                 ..Default::default()
             },
@@ -463,10 +554,32 @@ mod tests {
         .expect("handle (field) should succeed");
 
         assert!(report.applied, "field mutation must apply");
-        assert_eq!(
-            disk_status(&root),
-            "active",
-            "coercing field param must write status=active to disk"
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        let up = disk_field(&content, "up")
+            .unwrap_or_else(|| panic!("up field must be written:\n{content}"));
+        assert!(
+            up.contains("[[norn]]"),
+            "coercing field param must wrap the bare stem into a wikilink on disk, got: {up}\n{content}"
+        );
+
+        // The SAME bare string through the typed `set` (--field-json) path is
+        // refused — a bare `"norn"` is not a shape-valid wikilink — proving the
+        // coercing and typed paths are distinct, not two names for one seam.
+        let mut set = BTreeMap::new();
+        set.insert("up".to_string(), serde_json::json!("norn"));
+        let typed = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                set,
+                confirm: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            typed.is_err(),
+            "the same bare string through the typed `set` path must be refused (not a valid wikilink), \
+             proving the coercing --field path is a distinct seam"
         );
     }
 
@@ -532,6 +645,215 @@ mod tests {
         assert!(
             content.contains("beta"),
             "pop must leave the other list members:\n{content}"
+        );
+    }
+
+    /// F1: an **array** `push` value explodes into N real members (order
+    /// preserved), matching repeated `norn set --push` flags — not one literal
+    /// `["gamma","delta"]` element.
+    #[test]
+    fn confirm_push_array_appends_all_members() {
+        let (_tmp, root) = seeded_vault_with_tags();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut push = BTreeMap::new();
+        push.insert("tags".to_string(), serde_json::json!(["gamma", "delta"]));
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                push,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (array push) should succeed");
+
+        assert!(report.applied, "array push must apply");
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        // Both new members land as real list elements alongside the originals.
+        for member in ["alpha", "beta", "gamma", "delta"] {
+            assert!(
+                content.contains(member),
+                "array push must append each member as a real element ({member} missing):\n{content}"
+            );
+        }
+        // Never stringify the array into one literal element.
+        assert!(
+            !content.contains("[[") && !content.contains("[\""),
+            "array push must NOT append a literal array element:\n{content}"
+        );
+    }
+
+    /// F1: an **array** `pop` value removes each named member; the untouched
+    /// members survive.
+    #[test]
+    fn confirm_pop_array_removes_named_members() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-set-poparr-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            root.join("task.md"),
+            "---\ntype: task\nstatus: backlog\ntags:\n  - alpha\n  - beta\n  - gamma\n---\nTask body\n",
+        )
+        .unwrap();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut pop = BTreeMap::new();
+        pop.insert("tags".to_string(), serde_json::json!(["alpha", "gamma"]));
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                pop,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (array pop) should succeed");
+
+        assert!(report.applied, "array pop must apply");
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        assert!(
+            !content.contains("alpha") && !content.contains("gamma"),
+            "array pop must remove every named member:\n{content}"
+        );
+        assert!(
+            content.contains("beta"),
+            "array pop must leave the untouched members:\n{content}"
+        );
+    }
+
+    /// F1: an **object** `push` value has no scalar KEY=VALUE form and is refused
+    /// with a params error — never stringified into a literal `{...}` element.
+    #[test]
+    fn push_object_value_is_refused() {
+        let (_tmp, root) = seeded_vault_with_tags();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut push = BTreeMap::new();
+        push.insert("tags".to_string(), serde_json::json!({"nested": "object"}));
+
+        let result = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                push,
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            result.is_err(),
+            "an object push value must be refused, not stringified"
+        );
+        // Disk is untouched: the refusal happens before any lock or write.
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        assert!(
+            !content.contains("nested"),
+            "a refused object push must write nothing:\n{content}"
+        );
+    }
+
+    /// F1: an array `pop` value containing a nested array/object element is
+    /// refused — the nested element has no scalar form.
+    #[test]
+    fn pop_nested_array_element_is_refused() {
+        let (_tmp, root) = seeded_vault_with_tags();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut pop = BTreeMap::new();
+        pop.insert("tags".to_string(), serde_json::json!(["alpha", ["nested"]]));
+
+        let result = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                pop,
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            result.is_err(),
+            "a nested-array pop element must be refused, not stringified"
+        );
+    }
+
+    /// F5: `push` on an ABSENT key creates a single-element array (add_frontmatter).
+    #[test]
+    fn confirm_push_absent_key_creates_single_element_array() {
+        // seeded_vault has no `tags` field at all.
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut push = BTreeMap::new();
+        push.insert("tags".to_string(), serde_json::json!("solo"));
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                push,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (push absent key) should succeed");
+
+        assert!(report.applied, "push on an absent key must apply");
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        // The field is created carrying exactly the one pushed element.
+        assert!(
+            content.contains("tags:") && content.contains("solo"),
+            "push on an absent key must create a single-element tags array:\n{content}"
+        );
+    }
+
+    /// F5: `pop` of an ABSENT value is a silent success no-op — the call applies,
+    /// emits no error, and leaves the list untouched.
+    #[test]
+    fn confirm_pop_absent_value_is_silent_noop() {
+        let (_tmp, root) = seeded_vault_with_tags();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut pop = BTreeMap::new();
+        // `zeta` is not a member of [alpha, beta].
+        pop.insert("tags".to_string(), serde_json::json!("zeta"));
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                pop,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (pop absent value) should succeed");
+
+        // Silent success: the call applies with no error and no body change,
+        // matching `norn set --pop tags=zeta` on a value that is not present.
+        assert!(
+            report.applied,
+            "pop of an absent value must still apply cleanly"
+        );
+        assert!(
+            !report.body_changed,
+            "pop of an absent value must not touch the body"
+        );
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        assert!(
+            content.contains("alpha") && content.contains("beta"),
+            "pop of an absent value must leave every existing member:\n{content}"
+        );
+        assert!(
+            !content.contains("zeta"),
+            "pop of an absent value must not introduce it:\n{content}"
         );
     }
 }

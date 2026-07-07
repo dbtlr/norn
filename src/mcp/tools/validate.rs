@@ -87,12 +87,17 @@ pub struct ValidateParams {
 /// see module docs).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ValidateOutput {
-    /// Validation findings, filtered by any supplied triage predicates.
-    /// Each entry is the JSON form of a `Finding`: `{code, severity, path,
-    /// message, …}` with the finding-specific body flattened in. Empty array
-    /// means the vault is clean (or all findings were filtered out) — or that
-    /// `summary` was requested (findings are rolled up into `summary` instead).
-    pub findings: Vec<serde_json::Value>,
+    /// Validation findings, filtered by any supplied triage predicates. Each
+    /// entry is the JSON form of a `Finding`: `{code, severity, path, message,
+    /// …}` with the finding-specific body flattened in. An **empty array** means
+    /// the vault is clean (or all findings were filtered out).
+    ///
+    /// **Absent** (F3) in `summary` mode: the findings are rolled up into
+    /// `summary` instead, and this field is omitted from the JSON entirely — so
+    /// `findings: []` unambiguously means CLEAN, never "a dirty vault under
+    /// summary". Present (possibly empty) in the default projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<serde_json::Value>>,
 
     /// The grouped finding-count rollup, present only when `summary: true` was
     /// requested. Byte-for-byte the same shape `norn validate --summary --format
@@ -145,7 +150,10 @@ pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
     if p.summary {
         let rollup = crate::standards::summarize(&filtered);
         return Ok(ValidateOutput {
-            findings: Vec::new(),
+            // F3: omit `findings` entirely in summary mode. Emitting `[]` here
+            // would be indistinguishable from a CLEAN vault; a dirty vault under
+            // `--summary` must not present an empty findings array.
+            findings: None,
             summary: Some(serde_json::to_value(&rollup)?),
         });
     }
@@ -157,7 +165,7 @@ pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(ValidateOutput {
-        findings,
+        findings: Some(findings),
         summary: None,
     })
 }
@@ -192,13 +200,16 @@ mod tests {
 
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert!(
-            !out.findings.is_empty(),
+            !findings.is_empty(),
             "expected at least one finding for a broken wikilink, got 0"
         );
 
-        let link_finding = out
-            .findings
+        let link_finding = findings
             .iter()
             .find(|f| {
                 f["code"]
@@ -209,7 +220,7 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!(
                     "expected a link-* finding, got: {:?}",
-                    out.findings
+                    findings
                         .iter()
                         .map(|f| f["code"].as_str().unwrap_or("?"))
                         .collect::<Vec<_>>()
@@ -252,11 +263,14 @@ mod tests {
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert_eq!(
-            out.findings.len(),
+            findings.len(),
             0,
-            "clean vault with no broken links should yield 0 findings, got: {:?}",
-            out.findings
+            "clean vault with no broken links should yield 0 findings, got: {findings:?}"
         );
     }
 
@@ -275,11 +289,15 @@ mod tests {
         )
         .expect("handle with code filter should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert!(
-            !out.findings.is_empty(),
+            !findings.is_empty(),
             "code filter link-target-missing should still return findings for a broken link"
         );
-        for f in &out.findings {
+        for f in findings {
             assert_eq!(
                 f["code"], "link-target-missing",
                 "code filter should only return link-target-missing findings, got: {f}"
@@ -304,10 +322,11 @@ mod tests {
         )
         .expect("handle with summary should succeed");
 
-        // Summary mode returns the rollup in `summary`, not the raw findings list.
+        // F3: summary mode OMITS the findings field entirely (None), so the raw
+        // list is never present as an empty `[]` that would read as CLEAN.
         assert!(
-            out.findings.is_empty(),
-            "summary mode must leave findings empty, got: {:?}",
+            out.findings.is_none(),
+            "summary mode must omit the findings field, got: {:?}",
             out.findings
         );
         let summary = out
@@ -315,18 +334,58 @@ mod tests {
             .as_ref()
             .expect("summary mode must populate the summary rollup");
 
-        // Total count is present and non-zero (there is one broken link).
-        assert!(
-            summary["findings"].as_u64().unwrap_or(0) >= 1,
-            "summary.findings must count the broken link: {summary}"
+        // F6: the fixture has exactly ONE broken link and no schema rules, so the
+        // rollup totals are exact — not merely `>= 1`.
+        assert_eq!(
+            summary["findings"].as_u64().unwrap_or(0),
+            1,
+            "summary.findings must count exactly the one broken link: {summary}"
         );
-        // The by-code group carries the link-target-missing bucket.
-        assert!(
+        assert_eq!(
             summary["codes"]["link-target-missing"]
                 .as_u64()
-                .unwrap_or(0)
-                >= 1,
-            "summary.codes must tally link-target-missing: {summary}"
+                .unwrap_or(0),
+            1,
+            "summary.codes must tally exactly one link-target-missing: {summary}"
+        );
+    }
+
+    /// F3 serialization contract: the `findings` key is ABSENT from the serialized
+    /// output in summary mode, and PRESENT (as an array) in the default mode — so
+    /// a client cannot confuse a summarized dirty vault with a clean one.
+    #[test]
+    fn summary_mode_omits_findings_key_in_serialized_output() {
+        let (_tmp, root) = vault_with_broken_link();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let summary_out = handle(
+            &ctx,
+            ValidateParams {
+                summary: true,
+                ..ValidateParams::default()
+            },
+        )
+        .expect("summary handle should succeed");
+        let summary_json = serde_json::to_value(&summary_out).expect("serialize summary output");
+        assert!(
+            summary_json.get("findings").is_none(),
+            "summary mode must omit the `findings` key from serialized output, got: {summary_json}"
+        );
+        assert!(
+            summary_json.get("summary").is_some(),
+            "summary mode must carry the `summary` key: {summary_json}"
+        );
+
+        let default_out =
+            handle(&ctx, ValidateParams::default()).expect("default handle should succeed");
+        let default_json = serde_json::to_value(&default_out).expect("serialize default output");
+        assert!(
+            default_json.get("findings").is_some(),
+            "default mode must carry the `findings` key: {default_json}"
+        );
+        assert!(
+            default_json.get("summary").is_none(),
+            "default mode must omit the `summary` key: {default_json}"
         );
     }
 
@@ -339,7 +398,7 @@ mod tests {
 
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
         assert!(
-            !out.findings.is_empty(),
+            out.findings.as_ref().is_some_and(|f| !f.is_empty()),
             "default mode must return the raw findings list"
         );
         assert!(
@@ -363,8 +422,12 @@ mod tests {
         )
         .expect("handle with non-matching filter should succeed");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert_eq!(
-            out.findings.len(),
+            findings.len(),
             0,
             "filter for frontmatter-required-field-missing should return 0 findings in a link-only vault"
         );
@@ -416,13 +479,17 @@ mod tests {
         let out = handle(&ctx, ValidateParams::default())
             .expect("handle should succeed on ignored vault");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert_eq!(
-            out.findings.len(),
+            findings.len(),
             0,
             "broken wikilink in files.ignore-d directory must produce 0 findings; \
              got {} finding(s): {:?}",
-            out.findings.len(),
-            out.findings
+            findings.len(),
+            findings
                 .iter()
                 .map(|f| f["code"].as_str().unwrap_or("?"))
                 .collect::<Vec<_>>()
@@ -463,13 +530,17 @@ mod tests {
         let out = handle(&ctx, ValidateParams::default())
             .expect("handle should succeed on vault with non-ignored broken link");
 
+        let findings = out
+            .findings
+            .as_ref()
+            .expect("default mode must return a findings list");
         assert!(
-            !out.findings.is_empty(),
+            !findings.is_empty(),
             "broken wikilink in non-ignored doc must still produce findings when files.ignore \
              is configured; got 0 findings"
         );
 
-        let has_link_finding = out.findings.iter().any(|f| {
+        let has_link_finding = findings.iter().any(|f| {
             f["code"]
                 .as_str()
                 .map(|c| c.starts_with("link-"))
@@ -479,7 +550,7 @@ mod tests {
             has_link_finding,
             "expected a link-* finding for the broken wikilink outside the ignored directory, \
              got: {:?}",
-            out.findings
+            findings
                 .iter()
                 .map(|f| f["code"].as_str().unwrap_or("?"))
                 .collect::<Vec<_>>()

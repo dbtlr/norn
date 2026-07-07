@@ -683,7 +683,7 @@ mod tests {
             .await
             .expect("first validate");
         assert!(
-            !out1.0.findings.is_empty(),
+            out1.0.findings.as_ref().is_some_and(|f| !f.is_empty()),
             "baseline: broken wikilink must produce a finding"
         );
 
@@ -703,7 +703,7 @@ mod tests {
             .await
             .expect("second validate");
         assert!(
-            out2.0.findings.is_empty(),
+            out2.0.findings.as_ref().is_some_and(|f| f.is_empty()),
             "config change (files.ignore) must be visible to the next warm request; got {:?}",
             out2.0.findings
         );
