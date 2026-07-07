@@ -166,7 +166,7 @@ fn groups_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
 }
 
 impl CountEnvelope {
-    fn from_output(output: CountOutput) -> Self {
+    pub(crate) fn from_output(output: CountOutput) -> Self {
         match output {
             CountOutput::Total { total } => Self {
                 total,

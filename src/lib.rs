@@ -86,40 +86,122 @@ pub fn cli_main() {
     }
 }
 
-/// Commands whose work a warm `norn-service` daemon could serve from its warm
-/// cache. Kept to reads (`find` / `get` / `count`) for phase 1 — they prove the
-/// routing spine without the write-serialization concerns of mutations.
-fn is_routable_read(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Find(_) | Command::Get(_) | Command::Count(_)
-    )
-}
-
-/// The CLI→service routing seam (NRN-92).
+/// The CLI→service routing seam (NRN-92/94).
 ///
-/// For a routable read command, probe for a live warm host service.
-/// Returns `Some(result)` if the request was served by routing to the service,
-/// or `None` to fall through to the direct, integrity-verified dispatch.
+/// For a routable read, probe for a live warm host daemon; if one answers,
+/// translate the parsed args to the MCP tool contract, delegate to the warm
+/// cache, and render the structured response in CLI format. Returns
+/// `Some(result)` when the request was served by routing, or `None` to fall
+/// through to the direct, integrity-verified dispatch (today's behavior).
 ///
-/// NRN-94 will implement the `Route` arm: translate the CLI args to the MCP
-/// tool contract, delegate to the warm cache, and render the routed response.
-/// Until then this always returns `None` — a live service is a safe
-/// fall-through, because the direct dispatch re-establishes trust locally and
-/// so preserves the invariant unconditionally (ADR 0005).
-fn try_route_read(command: &Command) -> Option<Result<i32>> {
-    if !is_routable_read(command) {
+/// **Routing coverage (NRN-94).** Only `count` routes today. Its `vault.count`
+/// tool returns a `CountEnvelope` that losslessly re-encodes `CountOutput`, so
+/// the client rebuilds the exact value and renders it through the SAME
+/// `count::render` functions the direct path uses — routed and direct output are
+/// byte-identical (the load-bearing isomorphism, ADR 0005). `find` and `get`
+/// deliberately stay on the direct path: their MCP tools drop render-critical
+/// state (see the per-arm comments), and **byte-identical output outranks
+/// routing coverage** — routing a read whose output would differ is worse than
+/// not routing it. Any daemon-side failure falls back to Direct silently; a
+/// daemon can never fail a read that direct execution could serve.
+fn try_route_read(
+    command: &Command,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    // An explicit `--config` forces Direct: the wire speaks canonical vault
+    // roots only, never config paths, so a warm context (which loads each
+    // vault's own default config) could silently ignore the flag. The verified
+    // direct open honors `--config` exactly (ADR 0005 config-freshness note).
+    if explicit_config {
         return None;
     }
-    // FIX-11: the probe is GATED OFF until NRN-94 fills the `Route` arm.
-    //
-    // With a live daemon, every routable read would otherwise pay connect + ping
-    // and then discard the result (the `Route` arm is a stub that falls through
-    // to Direct), plus possibly print a version-skew stderr note — pure tax on
-    // daemon adopters with no actionable benefit until routing is real. The probe
-    // machinery is complete and unit-tested in `src/service.rs`; NRN-94 activates
-    // it by replacing this early return with the `service::probe(...)` match and
-    // handling `Route`. Until then a live daemon must cost CLI reads nothing.
+    match command {
+        Command::Count(args) => route_count(args, cwd, verbose),
+        // `find` stays Direct: `vault.find`'s `FindOutput { documents }` drops
+        // the `total`/`returned`/`truncated`/`starts_at` envelope that EVERY find
+        // renderer needs (json's envelope, records' count line, the paths/jsonl
+        // truncation note), so a routed result cannot be rebuilt byte-identically
+        // from the current contract. Routing find needs `vault.find` to carry the
+        // find envelope — a follow-up on the read-routing initiative.
+        Command::Find(_) => None,
+        // `get` stays Direct: `vault.get`'s `GetOutput { records }` drops
+        // `ShowReport.notes` (ambiguous-stem / missing-target diagnostics, which
+        // drive stderr and the exit-1 signal), and its `--col` semantics diverge
+        // from the CLI (NRN-173: MCP opts facets in, the CLI narrows; `--section`
+        // / `--all-cols` / paging / `markdown` have no MCP field). Not
+        // byte-identically routable from the current contract.
+        Command::Get(_) => None,
+        _ => None,
+    }
+}
+
+/// Route a `count` to the warm daemon, or return `None` to run Direct.
+///
+/// Computes the canonical vault root once (threaded into the preamble — NRN-92
+/// review F5), probes the well-known socket, delegates `vault.count`, then
+/// reconstructs `CountOutput` and renders it exactly like the direct path. Every
+/// failure mode — un-canonicalizable root, no/stale daemon, preamble mismatch,
+/// transport error, tool error, or an unreadable envelope — returns `None`, so
+/// the direct dispatch serves the read (and re-produces any error canonically).
+#[cfg(unix)]
+fn route_count(
+    args: &crate::cli::CountArgs,
+    cwd: &camino::Utf8Path,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    // Canonical vault root, computed ONCE for the preamble. A root that cannot
+    // canonicalize cannot be served warm either — fall back to Direct, which
+    // reports the failure canonically.
+    let (canonical, _hash) = crate::cache::vault_identity(cwd).ok()?;
+
+    // Probe the well-known control socket. No daemon => a cheap stat => Direct,
+    // with zero added latency (the common case pays nothing beyond the stat).
+    let client = match crate::service::probe(crate::service::DEFAULT_HANDSHAKE_TIMEOUT) {
+        crate::service::RouteDecision::Route(client) => client,
+        crate::service::RouteDecision::Direct => return None,
+    };
+
+    let arguments = crate::count::route::to_mcp_arguments(args);
+    let structured = match client.call_tool_structured(&canonical, "vault.count", arguments) {
+        Ok(structured) => structured,
+        Err(error) => {
+            if verbose {
+                eprintln!("norn: routed count failed ({error}); using direct execution");
+            }
+            return None;
+        }
+    };
+    let out = match crate::count::route::reconstruct(&structured) {
+        Ok(out) => out,
+        Err(error) => {
+            if verbose {
+                eprintln!(
+                    "norn: routed count envelope unreadable ({error}); using direct execution"
+                );
+            }
+            return None;
+        }
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    match crate::count::emit(&out, args.format, &mut stdout) {
+        Ok(()) => Some(Ok(0)),
+        // A write failure (e.g. a closed pipe) is surfaced as an error the top
+        // level maps like any other — broken pipe becomes a clean exit.
+        Err(error) => Some(Err(error.into())),
+    }
+}
+
+/// Non-Unix stub: the warm daemon rides Unix-domain sockets, so a `count` never
+/// routes — it always runs Direct.
+#[cfg(not(unix))]
+fn route_count(
+    _args: &crate::cli::CountArgs,
+    _cwd: &camino::Utf8Path,
+    _verbose: bool,
+) -> Option<Result<i32>> {
     None
 }
 
@@ -183,7 +265,7 @@ fn run(cli: Cli) -> Result<i32> {
     // from an already-verified cache. When it returns `Some`, the request was
     // served by routing; otherwise we fall through to the direct, integrity-
     // verified dispatch below (today's behavior). No daemon => only a `stat`.
-    if let Some(result) = try_route_read(&command) {
+    if let Some(result) = try_route_read(&command, &cwd, config_path.is_some(), verbose) {
         return result;
     }
 
@@ -423,14 +505,10 @@ fn run(cli: Cli) -> Result<i32> {
                 no_cache_refresh,
             )?;
             let out = count::run(&cache, &args)?;
-            let text = match args.format {
-                cli::CountFormat::Json => count::render::render_json(&out),
-                cli::CountFormat::Text => count::render::render_text(&out),
-            };
-            print!("{}", text);
-            if !text.ends_with('\n') {
-                println!();
-            }
+            // Shared with the NRN-94 routed path (`route_count`) so routed and
+            // direct `count` cannot drift on rendering or trailing-newline framing.
+            let mut stdout = std::io::stdout().lock();
+            count::emit(&out, args.format, &mut stdout)?;
             Ok(0)
         }
         Command::Describe(args) => {
