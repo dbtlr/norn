@@ -198,7 +198,12 @@ impl McpServer {
 
 /// The 6 READ tools — always registered, even under `--read-only`. The macro
 /// generates `fn read_router() -> ToolRouter<Self>` holding exactly these.
-#[tool_router(router = read_router)]
+///
+/// `vis = "pub(crate)"` exposes the generated constructor to the crate so the
+/// CLI↔MCP parity gate (`super::parity_gate`) can enumerate the exact tool
+/// schemas the server serves via `ToolRouter::list_all()` — the same seam
+/// `tools/list` uses, so the parity test cannot drift from the live surface.
+#[tool_router(router = read_router, vis = "pub(crate)")]
 impl McpServer {
     /// `vault.get` — fetch one or more documents with full connection context.
     ///
@@ -350,7 +355,10 @@ impl McpServer {
 /// into the stored router only when `!read_only`, so under `--read-only` these are
 /// absent from `tools/list`. Each handler also funnels through `run_mutation`,
 /// which refuses at runtime when read-only (defense in depth).
-#[tool_router(router = mutate_router)]
+///
+/// `vis = "pub(crate)"` — see `read_router` above — lets the parity gate
+/// enumerate the mutation-tool schemas too.
+#[tool_router(router = mutate_router, vis = "pub(crate)")]
 impl McpServer {
     /// `vault.new` — create a new document with schema-scaffolded frontmatter.
     ///

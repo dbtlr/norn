@@ -16,6 +16,13 @@ pub mod mutate;
 pub mod server;
 pub mod tools;
 
+/// CLI↔MCP surface-parity forcing function (NRN-178). A `#[cfg(test)]` gate that
+/// fails the build when a CLI flag has no MCP twin (or vice versa) without a
+/// justified carve-out. Lives here (in-crate) so it can read the exact tool
+/// schemas the server serves via the crate-visible `server::McpServer` routers.
+#[cfg(test)]
+mod parity_gate;
+
 use std::sync::Arc;
 
 use anyhow::Context as _;
