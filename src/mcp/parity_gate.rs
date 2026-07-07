@@ -265,7 +265,11 @@ fn specs() -> Vec<Spec> {
                 tool: "vault.set",
                 safety: &["yes", "dry_run"],
                 presentation: &["format"],
-                shape: &[],
+                // NRN-208 (ADR 0010): trailing `key=value` positionals are pure
+                // CLI-side input sugar that desugars to `--field` (the `fields`
+                // id, which maps to MCP `field` below) before any plan is built.
+                // No MCP twin needed — the canonical surface already has parity.
+                shape: &["field_pos"],
                 naming: &[
                     // MCP `set` is the typed (field-json) frontmatter map; MCP
                     // `body` is the wholesale-replacement analogue of stdin. The
@@ -287,7 +291,23 @@ fn specs() -> Vec<Spec> {
                 tool: "vault.edit",
                 safety: &["yes", "dry_run"],
                 presentation: &["format"],
-                shape: &[],
+                // NRN-210 (ADR 0010): single-op sugar + `--ops-file` are pure
+                // CLI-side input surfaces that desugar 1:1 into the canonical ops
+                // array (`edits_json` → MCP `edits`) before any plan is built. An
+                // MCP client already sends the structured array directly, so
+                // these need no MCP twin.
+                shape: &[
+                    "str_replace",
+                    "replace_section",
+                    "append_to_section",
+                    "delete_section",
+                    "insert_before_heading",
+                    "insert_after_heading",
+                    "new",
+                    "content",
+                    "replace_all",
+                    "ops_file",
+                ],
                 // CLI takes the ops as a JSON string / stdin; MCP takes a
                 // structured array under `edits`.
                 naming: &[("edits_json", "edits")],

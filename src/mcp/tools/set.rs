@@ -240,6 +240,8 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         // `field` is the coercing --field path (string coercion); `set` is the
         // typed --field-json path routed above.
         fields: p.field.clone(),
+        // MCP passes fields via `field`; no CLI positional surface exists here.
+        field_pos: Vec::new(),
         field_json,
         push,
         pop,

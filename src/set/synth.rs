@@ -18,7 +18,20 @@ use serde_json::Value;
 pub fn resolve_target(cache: &Cache, raw: &str) -> Result<Utf8PathBuf> {
     let resolved = crate::show::target::resolve_target(cache, raw)?;
     match resolved.paths.len() {
-        0 => bail!("doc not found: {raw}"),
+        0 => {
+            // F4: a DOC token that is itself shaped like a field assignment
+            // (`status=done`) and fails to resolve almost always means the
+            // document argument was forgotten. Keep the binding (a doc literally
+            // named that is still addressable) but add a hint to the not-found
+            // message for the separator-shaped case.
+            if crate::grammar::split_field_value(raw).is_some() {
+                bail!(
+                    "doc not found: {raw}\n  hint: '{raw}' looks like a field assignment — \
+                     did you forget the document argument? Usage: norn set <doc> [key=value ...]"
+                );
+            }
+            bail!("doc not found: {raw}")
+        }
         1 => Ok(resolved.paths.into_iter().next().unwrap()),
         n => {
             let candidates: Vec<String> = resolved.paths.iter().map(|p| p.to_string()).collect();
@@ -42,6 +55,27 @@ pub fn parse_kv(raw: &str) -> Result<(String, String)> {
         bail!("KEY cannot be empty in: {raw}");
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+/// Fold trailing `KEY=VALUE` positionals (ADR 0010, NRN-208) into the explicit
+/// `--field` list so a positional `k=v` and a `--field k=v` are indistinguishable
+/// downstream (same coercion, same accumulation). Each positional MUST carry a
+/// `:` or `=` separator — inheriting batch A's [`split_field_value`] forgiveness
+/// (first separator wins) — or it is a hard error. The combined order is
+/// deterministic but NOT argv-interleaved (clap collects each flag/positional
+/// group separately): explicit `--field` values come first, then the positionals
+/// in their own left-to-right order. A key present in both groups therefore
+/// accumulates into an array with the `--field` value(s) ahead of the
+/// positional value(s).
+pub fn desugar_positional_fields(positionals: &[String], fields: &[String]) -> Result<Vec<String>> {
+    let mut combined = fields.to_vec();
+    for token in positionals {
+        if crate::grammar::split_field_value(token).is_none() {
+            bail!("expected key=value, got '{token}'");
+        }
+        combined.push(token.clone());
+    }
+    Ok(combined)
 }
 
 /// Refuse with a clear error if any key appears across multiple mutation
@@ -472,12 +506,15 @@ pub fn preflight_and_plan(
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("doc not in index: {target_path}"))?;
 
-    // 6. Schema-aware synth.
+    // 6. Schema-aware synth. Trailing `KEY=VALUE` positionals desugar into the
+    // `--field` list (ADR 0010, NRN-208) so they flow through the identical
+    // coercing path — a positional `k=v` is indistinguishable from `--field k=v`.
+    let combined_fields = desugar_positional_fields(&args.field_pos, &args.fields)?;
     let synth_result = crate::set::validate::synth_with_schema(
         cfg,
         &doc,
         &current_fm,
-        &args.fields,
+        &combined_fields,
         &args.field_json,
         &args.push,
         &args.pop,
@@ -752,6 +789,37 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found") || err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn resolve_target_separator_shaped_not_found_adds_forgot_doc_hint() {
+        // F4: `norn set status=done` (DOC forgotten) binds `status=done` as DOC.
+        // When it fails to resolve, the not-found error hints that the token
+        // looks like a field assignment.
+        let (_tmp, cache) = fixture_cache();
+        let err = resolve_target(&cache, "status=done")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("doc not found"), "got: {err}");
+        assert!(
+            err.contains("looks like a field assignment"),
+            "expected forgot-doc hint, got: {err}"
+        );
+        assert!(err.contains("norn set <doc>"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_target_plain_not_found_has_no_hint() {
+        // A non-separator token keeps the terse not-found message.
+        let (_tmp, cache) = fixture_cache();
+        let err = resolve_target(&cache, "nonexistent")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("doc not found"), "got: {err}");
+        assert!(
+            !err.contains("field assignment"),
+            "plain not-found should carry no hint, got: {err}"
+        );
     }
 
     #[test]

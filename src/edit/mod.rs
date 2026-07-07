@@ -3,5 +3,6 @@
 
 pub mod ops;
 pub mod report;
+pub mod sugar;
 pub mod synth;
 pub mod transform;

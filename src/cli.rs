@@ -959,6 +959,14 @@ pub struct SetArgs {
     #[arg(long = "field", value_name = "KEY=VALUE")]
     pub fields: Vec<String>,
 
+    /// Trailing `KEY=VALUE` positionals — sugar for `--field KEY=VALUE` (ADR
+    /// 0010). Identical semantics: same schema coercion, same
+    /// repeat-accumulates-to-array. Every positional AFTER DOC must contain a
+    /// `:` or `=` separator or it is a hard error; the first positional is
+    /// always DOC (a doc literally named `a=b.md` is still addressed as DOC).
+    #[arg(value_name = "KEY=VALUE")]
+    pub field_pos: Vec<String>,
+
     /// Set a frontmatter field with a JSON-parsed value. Escape hatch for
     /// structured values (arrays, nested objects, explicit null). KEY=JSON.
     #[arg(long = "field-json", value_name = "KEY=JSON")]
@@ -1022,6 +1030,52 @@ pub struct EditArgs {
     /// stdin; if omitted, the array is read from stdin.
     #[arg(long = "edits-json", value_name = "JSON")]
     pub edits_json: Option<String>,
+
+    /// Read the ops JSON array from a file (hidden alias for stdin redirection).
+    #[arg(long = "ops-file", value_name = "PATH", hide = true)]
+    pub ops_file: Option<String>,
+
+    // ── Single-op sugar (ADR 0010, NRN-210). The op flag IS the op; its value
+    //    is the op's anchor; companion flags carry the payload named exactly as
+    //    the JSON fields. Exactly ONE op flag per invocation; an op flag with
+    //    `--edits-json`/`--ops-file`/stdin is a hard error. Desugars 1:1 into a
+    //    one-element ops array through the identical apply path. ──
+    /// Sugar: `str_replace` — the OLD anchor. Payload: `--new` (alias `--content`).
+    #[arg(long = "str-replace", value_name = "OLD")]
+    pub str_replace: Option<String>,
+
+    /// Sugar: `replace_section` — the HEADING anchor. Payload: `--content`.
+    #[arg(long = "replace-section", value_name = "HEADING")]
+    pub replace_section: Option<String>,
+
+    /// Sugar: `append_to_section` — the HEADING anchor. Payload: `--content`.
+    #[arg(long = "append-to-section", value_name = "HEADING")]
+    pub append_to_section: Option<String>,
+
+    /// Sugar: `delete_section` — the HEADING anchor. No payload.
+    #[arg(long = "delete-section", value_name = "HEADING")]
+    pub delete_section: Option<String>,
+
+    /// Sugar: `insert_before_heading` — the HEADING anchor. Payload: `--content`.
+    #[arg(long = "insert-before-heading", value_name = "HEADING")]
+    pub insert_before_heading: Option<String>,
+
+    /// Sugar: `insert_after_heading` — the HEADING anchor. Payload: `--content`.
+    #[arg(long = "insert-after-heading", value_name = "HEADING")]
+    pub insert_after_heading: Option<String>,
+
+    /// Payload for `--str-replace` (the replacement text; JSON field `new`).
+    #[arg(long = "new", value_name = "NEW")]
+    pub new: Option<String>,
+
+    /// Payload for the section ops (JSON field `content`); also an alias for
+    /// `--new` on `--str-replace`.
+    #[arg(long = "content", value_name = "BODY")]
+    pub content: Option<String>,
+
+    /// Replace all matches for `--str-replace` (JSON field `replace_all`).
+    #[arg(long = "replace-all")]
+    pub replace_all: bool,
 
     /// Refuse the edit unless the document's current content hash equals HASH
     /// (blake3 hex of the full file — the `document_hash` plan ops carry).

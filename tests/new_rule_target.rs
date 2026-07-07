@@ -681,3 +681,94 @@ validate:
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ── NRN-211: unknown bare {{key}} placeholder suggests {{var.key}} ──
+
+#[test]
+fn new_unknown_bare_var_suggests_namespaced_form() {
+    // A rule target references the bare `{{workspace}}` (missing the `var.`
+    // namespace). The operator passed `--var workspace=norn`, so the render
+    // error should suggest the namespaced `{{var.workspace}}` spelling.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: ws
+      target: "Workspaces/{{workspace}}/{{title|slugify}}.md"
+      frontmatter_defaults:
+        type: note
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args([
+            "new",
+            "--as",
+            "ws",
+            "--title",
+            "Design Note",
+            "--var",
+            "workspace=norn",
+            "--yes",
+            "-p",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unknown bare var should refuse: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("{{var.workspace}}"),
+        "error should suggest the namespaced form: {stderr}"
+    );
+}
+
+#[test]
+fn new_unknown_bare_var_in_body_scaffold_suggests_namespaced_form() {
+    // F7: the NRN-211 hint must surface on the `body:` scaffold render path too,
+    // not just the path-target render. The target is valid so path generation
+    // succeeds and we reach body render; the body references bare `{{workspace}}`.
+    let vault = build_vault(
+        r#"
+validate:
+  rules:
+    - name: ws
+      target: "Workspaces/{{var.workspace}}/{{title|slugify}}.md"
+      body: "notes for {{workspace}}\n"
+      frontmatter_defaults:
+        type: note
+"#,
+    );
+
+    let output = norn_cmd(&vault)
+        .args([
+            "new",
+            "--as",
+            "ws",
+            "--title",
+            "Design Note",
+            "--var",
+            "workspace=norn",
+            "--yes",
+            "-p",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unknown bare var in body scaffold should refuse: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("{{var.workspace}}"),
+        "body-scaffold render error should suggest the namespaced form: {stderr}"
+    );
+}

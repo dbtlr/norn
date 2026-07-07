@@ -126,6 +126,43 @@ fn routing_forced_direct(explicit_config: bool, no_cache_refresh: bool) -> bool 
     explicit_config || no_cache_refresh
 }
 
+/// Whether stdin carries a redirected/piped payload — a FIFO pipe (`echo … |`)
+/// or a regular file (`< ops.json`) — as opposed to a terminal or an empty
+/// source such as `/dev/null`. Used to refuse `norn edit` op-flag sugar combined
+/// with an ops array on stdin (F1): a pipe/file there would be silently ignored
+/// by the sugar path. A TTY and `/dev/null` (a character device) carry no ops
+/// and must stay allowed so interactive use and scripted `… --yes </dev/null`
+/// both work.
+#[cfg(unix)]
+fn stdin_carries_redirected_payload() -> bool {
+    use std::io::IsTerminal as _;
+    use std::os::unix::fs::FileTypeExt as _;
+    use std::os::unix::io::FromRawFd as _;
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return false;
+    }
+    // SAFETY: fd 0 is a valid open descriptor for the process lifetime; the File
+    // is wrapped in ManuallyDrop so it is never closed and ownership of fd 0 is
+    // not taken.
+    let file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+    match file.metadata() {
+        Ok(md) => {
+            let ft = md.file_type();
+            ft.is_fifo() || ft.is_file()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Non-unix fallback: without a portable way to distinguish a pipe from an empty
+/// source, stay conservative and never refuse (preserves existing behavior).
+#[cfg(not(unix))]
+fn stdin_carries_redirected_payload() -> bool {
+    false
+}
+
 /// The CLI→service routing seam (NRN-92/94).
 ///
 /// For a routable read, probe for a live warm host daemon; if one answers,
@@ -1028,6 +1065,17 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use crate::mutation_lock::MutationLock;
             use std::io::{IsTerminal, Write};
 
+            // F5: validate the trailing `KEY=VALUE` positional shape BEFORE the
+            // mutation lock + cache load. A pure argv error (`set doc.md badtoken`
+            // with no separator) must fail fast without side effects, matching the
+            // edit path which validates arg shape before the lock.
+            if let Err(e) =
+                crate::set::synth::desugar_positional_fields(&args.field_pos, &args.fields)
+            {
+                eprintln!("error: {e}");
+                return Ok(2);
+            }
+
             // Acquire mutation lock before cache load.
             // Set: --format json without --yes is implicit dry-run (early-return preview),
             // so JSON alone does NOT force is_apply here.
@@ -1183,22 +1231,53 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use crate::mutation_lock::MutationLock;
             use std::io::{IsTerminal, Read, Write};
 
-            // Parse the edits array first (from --edits-json or stdin), so a
-            // malformed array fails fast before any lock/cache work.
-            let raw = match &args.edits_json {
-                Some(s) => s.clone(),
-                None => {
-                    let mut buf = String::new();
-                    std::io::stdin()
-                        .read_to_string(&mut buf)
-                        .map_err(|e| anyhow::anyhow!("failed to read edits from stdin: {e}"))?;
-                    buf
+            // Single-op sugar (ADR 0010, NRN-210) desugars 1:1 into a one-element
+            // ops array; when absent, fall back to the canonical JSON source
+            // (--edits-json / --ops-file / stdin). Resolve this first so a
+            // malformed input fails fast before any lock/cache work.
+            let ops: Vec<crate::edit::ops::EditOp> = match crate::edit::sugar::desugar(&args) {
+                Ok(Some(ops)) => {
+                    // F1: op-flag sugar and an ops array on stdin are mutually
+                    // exclusive. When stdin is a redirected pipe/file it carries
+                    // an ops array the sugar path would silently ignore — refuse
+                    // before any lock/write. A TTY or an empty source
+                    // (`</dev/null`) carries no ops, so both remain allowed.
+                    if stdin_carries_redirected_payload() {
+                        eprintln!(
+                            "error: op-flag sugar conflicts with an ops array on stdin; use one or the other"
+                        );
+                        return Ok(2);
+                    }
+                    ops
                 }
-            };
-            let ops: Vec<crate::edit::ops::EditOp> = match serde_json::from_str(&raw) {
-                Ok(o) => o,
+                Ok(None) => {
+                    let raw = match (&args.edits_json, &args.ops_file) {
+                        (Some(s), _) => s.clone(),
+                        (None, Some(path)) => match std::fs::read_to_string(path) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("error: failed to read ops file {path}: {e}");
+                                return Ok(2);
+                            }
+                        },
+                        (None, None) => {
+                            let mut buf = String::new();
+                            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                                anyhow::anyhow!("failed to read edits from stdin: {e}")
+                            })?;
+                            buf
+                        }
+                    };
+                    match serde_json::from_str(&raw) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            eprintln!("error: invalid edits JSON: {e}");
+                            return Ok(2);
+                        }
+                    }
+                }
                 Err(e) => {
-                    eprintln!("error: invalid edits JSON: {e}");
+                    eprintln!("error: {e}");
                     return Ok(2);
                 }
             };

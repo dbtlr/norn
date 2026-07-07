@@ -99,6 +99,35 @@ fn set_refuses_when_doc_not_found() {
 }
 
 #[test]
+fn set_forgot_doc_field_shaped_target_hints() {
+    // F4: `norn set status=done` (DOC forgotten) binds `status=done` as DOC and
+    // fails to resolve. The not-found error should hint that the token looks
+    // like a field assignment.
+    let tmp = fixture_tempdir();
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "status=done",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "field-shaped DOC that fails to resolve should refuse: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("looks like a field assignment") && stderr.contains("norn set <doc>"),
+        "expected forgot-doc hint, got: {stderr}"
+    );
+}
+
+#[test]
 fn set_refuses_cross_class_conflict() {
     let tmp = fixture_tempdir();
     let doc = tmp.path().join("note.md");
@@ -523,4 +552,210 @@ fn set_dry_run_does_not_mutate_file() {
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["applied"], false);
+}
+
+// === NRN-208: trailing KEY=VALUE positionals (ADR 0010 mutate sugar) ===
+
+#[test]
+fn set_positional_kv_desugars_to_field_write() {
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "note.md",
+            "status=active",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "set with positional k=v failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let final_content = fs::read_to_string(&doc).unwrap();
+    assert!(
+        final_content.contains("status: active"),
+        "positional k=v should write the field: {final_content}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let changes = json["frontmatter_changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["field"], "status");
+    assert_eq!(changes[0]["new"], "active");
+}
+
+#[test]
+fn set_positional_kv_accepts_colon_separator_forgiveness() {
+    // Batch A's split_field_value forgiveness: `:` works as a separator too.
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "note.md",
+            "status:active",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "positional with colon separator failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let final_content = fs::read_to_string(&doc).unwrap();
+    assert!(
+        final_content.contains("status: active"),
+        "colon-separated positional should write the field: {final_content}"
+    );
+}
+
+#[test]
+fn set_positional_without_separator_hard_errors() {
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "note.md",
+            "nosep",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "separator-less positional should hard-error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected key=value") && stderr.contains("nosep"),
+        "error should name the offending token: {stderr}"
+    );
+    // No mutation on refusal.
+    let final_content = fs::read_to_string(&doc).unwrap();
+    assert!(final_content.contains("status: draft"), "{final_content}");
+}
+
+#[test]
+fn set_bad_positional_fails_fast_without_lock_or_cache() {
+    // F5: a pure argv error (separator-less positional) must be rejected BEFORE
+    // the mutation lock is acquired and the cache is loaded — no side effects.
+    // The cache DB lives under XDG_CACHE_HOME; if the fast path fired, that tree
+    // is never created.
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "note.md",
+            "badtoken",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "separator-less positional should fail fast: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected key=value") && stderr.contains("badtoken"),
+        "error should name the offending token: {stderr}"
+    );
+    // No cache tree built => cache load never ran => the lock was never acquired.
+    assert!(
+        !tmp.path().join(".xdg-cache").exists(),
+        "bad positional must not load the cache (no lock acquired)"
+    );
+    // File untouched.
+    assert!(fs::read_to_string(&doc).unwrap().contains("status: draft"));
+}
+
+#[test]
+fn set_positional_and_field_flag_both_accumulate() {
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "note.md",
+            "status=active",
+            "--field",
+            "priority=high",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mixing positional + --field failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let final_content = fs::read_to_string(&doc).unwrap();
+    assert!(
+        final_content.contains("status: active") && final_content.contains("priority: high"),
+        "both the positional and the --field should be written: {final_content}"
+    );
+}
+
+#[test]
+fn set_first_positional_is_doc_even_when_kv_shaped() {
+    // Edge: a doc literally named `a=b.md` — the FIRST positional is always DOC,
+    // the separator requirement applies only to positionals AFTER the first.
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("a=b.md");
+    fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "a=b.md",
+            "status=active",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "kv-shaped DOC name should resolve as the first positional: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let final_content = fs::read_to_string(&doc).unwrap();
+    assert!(
+        final_content.contains("status: active"),
+        "the second positional writes the field, DOC is `a=b.md`: {final_content}"
+    );
 }
