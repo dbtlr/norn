@@ -128,13 +128,24 @@ pub enum ContainmentError {
 /// implementation, no parallel logic.
 ///
 /// The check is lexical first (cheap): an absolute path or any `..` component is
-/// refused up front. Then the op target's PARENT directory is resolved and its
-/// nearest EXISTING ancestor is canonicalized and confirmed prefix-contained in
-/// `canonical_root`. Canonicalizing the parent (not the target, which for a
-/// create/move destination does not yet exist) resolves a directory symlinked
-/// out of the vault — the case the lexical check alone bypasses. Canonicalizing
-/// the nearest existing ancestor means `-p`/`--parents` creation of a
-/// not-yet-existing subtree cannot be used to sidestep the gate.
+/// refused up front. Then:
+///
+/// - If the target ALREADY EXISTS (a backlink-cascade rewrite source, a
+///   move/delete source — these always exist), the target ITSELF is
+///   canonicalized and confirmed prefix-contained in `canonical_root`. This is
+///   the F1 fix (NRN-145 follow-up): a symlink FILE inside the vault whose
+///   PARENT is legitimately in-vault but which itself resolves outside would
+///   pass a parent-only check, then a bare `fs::write`/`fs::read_to_string`
+///   would follow it straight through to the outside file. Canonicalizing the
+///   target closes that.
+/// - Otherwise (a create/move destination that does not yet exist, so there is
+///   nothing to canonicalize at the target itself), the op target's PARENT
+///   directory is resolved and its nearest EXISTING ancestor is canonicalized
+///   and confirmed prefix-contained in `canonical_root`. Canonicalizing the
+///   parent resolves a directory symlinked out of the vault — the case the
+///   lexical check alone bypasses. Canonicalizing the nearest existing
+///   ancestor means `-p`/`--parents` creation of a not-yet-existing subtree
+///   cannot be used to sidestep the gate.
 ///
 /// `canonical_root` is the caller's canonicalization of the vault root; it is
 /// canonicalized ONCE per apply (not per op) and never on a read path.
@@ -158,6 +169,24 @@ pub fn ensure_within_vault(
     }
 
     let joined = vault_root.join(target);
+
+    if joined.as_std_path().exists() {
+        let canonical_target =
+            joined
+                .as_std_path()
+                .canonicalize()
+                .map_err(|e| ContainmentError::Unresolvable {
+                    target: target.to_owned(),
+                    detail: e.to_string(),
+                })?;
+        if !canonical_target.starts_with(canonical_root) {
+            return Err(ContainmentError::EscapesVault {
+                target: target.to_owned(),
+            });
+        }
+        return Ok(());
+    }
+
     let parent = joined.parent().unwrap_or(vault_root);
     let existing = nearest_existing_ancestor(parent);
     let canonical_parent =

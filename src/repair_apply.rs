@@ -2550,4 +2550,160 @@ mod tests {
             "move source should be untouched after a refused destination"
         );
     }
+
+    /// Class 5 (F1, NRN-145 follow-up): a backlink-cascade rewrite SOURCE is a
+    /// symlink FILE inside the vault whose parent (the vault root) is
+    /// legitimately in-vault, but the file itself resolves outside. The
+    /// parent-only containment check passes this (the parent is in-vault), so
+    /// without the fix `rewrite_one_backlink`'s bare `fs::write` writes THROUGH
+    /// the symlink to the outside file. The gate must canonicalize the target
+    /// itself (not just its parent) whenever the target already exists —
+    /// cascade sources always exist.
+    #[cfg(unix)]
+    #[test]
+    fn containment_refuses_symlink_file_cascade_target() {
+        let outer = tempfile::Builder::new()
+            .prefix("vault-containment-cascade-")
+            .tempdir()
+            .unwrap();
+        let outside_dir = outer.path().join("outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_file = outside_dir.join("linker.md");
+        std::fs::write(&outside_file, "see [[old]] here\n").unwrap();
+
+        let root = camino::Utf8Path::from_path(outer.path())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
+        std::fs::write(
+            root.join(".norn/config.yaml").as_std_path(),
+            "validate: {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("old.md").as_std_path(),
+            "---\ntype: note\n---\n# Old\n",
+        )
+        .unwrap();
+        // A symlink FILE inside the vault whose parent (the vault root) is
+        // legitimately in-vault, but which itself resolves outside.
+        std::os::unix::fs::symlink(&outside_file, root.join("linker.md").as_std_path()).unwrap();
+
+        let index = crate::graph::build_index(&root).unwrap();
+        let hash = index
+            .documents
+            .iter()
+            .find(|d| d.path == "old.md")
+            .unwrap()
+            .hash
+            .clone();
+
+        // Recorded as a backlink-cascade source for the move below.
+        let risk = crate::standards::LinkRisk {
+            stem_changed: true,
+            directory_changed: false,
+            stem_links: vec![crate::standards::AffectedLink {
+                source_path: "linker.md".into(),
+                raw: "[[old]]".into(),
+                kind: crate::core::LinkKind::Wikilink,
+                source_span: None,
+                rewritten: "[[new]]".into(),
+            }],
+            path_qualified_wikilinks: vec![],
+            markdown_links: vec![],
+        };
+
+        let plan = RepairPlan {
+            schema_version: REPAIR_PLAN_SCHEMA_VERSION,
+            vault_root: root.clone(),
+            source_filters: RepairPlanFilters::default(),
+            summary: RepairPlanSummary {
+                findings: 0,
+                planned_changes: 1,
+                skipped: SkippedSummary::default(),
+            },
+            changes: vec![PlannedChange {
+                change_id: "move-old".into(),
+                path: "old.md".into(),
+                document_hash: hash,
+                finding_code: "operator-request".into(),
+                finding_rule: None,
+                repair_rule: "operator-request".into(),
+                operation: "move_document".into(),
+                field: None,
+                expected_old_value: None,
+                new_value: None,
+                destination: Some("new.md".into()),
+                link_risk: Some(risk),
+                warnings: Vec::new(),
+                force: false,
+                parents: false,
+            }],
+            skipped_findings: Vec::new(),
+            footnotes: Vec::new(),
+        };
+
+        let before = std::fs::read_to_string(&outside_file).unwrap();
+        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("vault") || msg.contains("symlink"),
+            "got: {msg}"
+        );
+        let after = std::fs::read_to_string(&outside_file).unwrap();
+        assert_eq!(
+            before, after,
+            "symlink-file cascade target must be byte-unchanged after a refused move"
+        );
+    }
+
+    /// F3 (test gap, no correctness change): the vault ROOT itself reached via
+    /// a symlink. A normal in-vault create and move must still succeed —
+    /// guards against the root-canonicalize (`canonical_root`, computed once
+    /// from `cwd`) and the op-parent/op-target-canonicalize diverging, which
+    /// would make every op on a symlinked-root vault wrongly refuse.
+    #[cfg(unix)]
+    #[test]
+    fn containment_allows_normal_ops_when_vault_root_is_symlinked() {
+        let real = tempfile::Builder::new()
+            .prefix("vault-containment-root-real-")
+            .tempdir()
+            .unwrap();
+        std::fs::create_dir_all(real.path().join(".norn")).unwrap();
+        std::fs::write(real.path().join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::write(real.path().join("doc.md"), "---\ntype: note\n---\n# Doc\n").unwrap();
+
+        let link_parent = tempfile::Builder::new()
+            .prefix("vault-containment-root-link-")
+            .tempdir()
+            .unwrap();
+        let symlinked_root_std = link_parent.path().join("vault-link");
+        std::os::unix::fs::symlink(real.path(), &symlinked_root_std).unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(symlinked_root_std).unwrap();
+
+        let index = crate::graph::build_index(&root).unwrap();
+
+        // Create: a normal in-vault create must still succeed.
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let create = create_plan(&root, "new.md", fm, "x\n", false);
+        apply_repair_plan(&root, &index, &create, /*dry_run=*/ false)
+            .expect("in-vault create on a symlinked-root vault must succeed");
+        assert!(root.join("new.md").as_std_path().exists());
+
+        // Move: a normal in-vault move must still succeed.
+        let index2 = crate::graph::build_index(&root).unwrap();
+        let hash = index2
+            .documents
+            .iter()
+            .find(|d| d.path == "doc.md")
+            .unwrap()
+            .hash
+            .clone();
+        let mv = move_plan(&root, "doc.md", "moved.md", &hash);
+        apply_repair_plan(&root, &index2, &mv, /*dry_run=*/ false)
+            .expect("in-vault move on a symlinked-root vault must succeed");
+        assert!(root.join("moved.md").as_std_path().exists());
+        assert!(!root.join("doc.md").as_std_path().exists());
+    }
 }
