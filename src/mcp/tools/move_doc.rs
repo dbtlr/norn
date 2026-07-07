@@ -111,12 +111,11 @@ impl MoveOutput {
 /// Build the MCP output envelope for `vault.move`.
 pub fn handle_output(ctx: &VaultContext, p: MoveParams) -> Result<MutationResult<MoveOutput>> {
     let report = handle(ctx, p)?;
-    // BUG-3 / NRN-219: a not-applied outcome (`exit_code() != 0`) renders
-    // `isError: true`, structured report preserved. See `apply::handle_output`.
-    let is_error = report.exit_code() != 0;
-    Ok(MutationResult::new(
+    // BUG-3 / NRN-219: `isError` derived from the report's outcome. See
+    // `apply::handle_output` and `MutationResult::from_apply_report`.
+    Ok(MutationResult::from_apply_report(
         MoveOutput::from_report(&report)?,
-        is_error,
+        &report,
     ))
 }
 

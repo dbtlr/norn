@@ -613,6 +613,34 @@ fn global_ignore() -> BTreeSet<String> {
 const POINTER: &str =
     "see the parity allowlist in src/mcp/parity_gate.rs and ADR 0009 (CLI and MCP are peer surfaces)";
 
+/// Every served MCP tool must advertise an `outputSchema` in `tools/list`
+/// (NRN-219). rmcp's `#[tool]` macro auto-derives `outputSchema` ONLY for the
+/// literal `Json<T>` return type (it name-matches the `Json` identifier, it does
+/// not inspect the `JsonSchema` trait), so a tool returning a custom wrapper —
+/// e.g. `MutationResult<T>`, which exists to set `isError` on a not-applied
+/// mutation — silently drops its schema unless it passes an explicit
+/// `output_schema = …` attribute. `cli_mcp_surface_parity` reads only
+/// `input_schema`, so that regression would ship green. This guard fails the
+/// build, naming the offending tool.
+#[test]
+fn every_tool_advertises_an_output_schema() {
+    let mut missing: Vec<String> = Vec::new();
+    for router in McpServer::routers(false) {
+        for tool in router.list_all() {
+            if tool.output_schema.is_none() {
+                missing.push(tool.name.to_string());
+            }
+        }
+    }
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "these MCP tools advertise no outputSchema in tools/list — a custom-wrapper \
+         return type (e.g. MutationResult<T>) without an explicit `output_schema = …` \
+         attribute drops it; see NRN-219: {missing:?}"
+    );
+}
+
 #[test]
 fn cli_mcp_surface_parity() {
     let ignore = global_ignore();

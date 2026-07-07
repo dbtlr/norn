@@ -98,12 +98,11 @@ impl DeleteOutput {
 /// Build the MCP output envelope for `vault.delete`.
 pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<MutationResult<DeleteOutput>> {
     let report = handle(ctx, p)?;
-    // BUG-3 / NRN-219: a not-applied outcome (`exit_code() != 0`) renders
-    // `isError: true`, structured report preserved. See `apply::handle_output`.
-    let is_error = report.exit_code() != 0;
-    Ok(MutationResult::new(
+    // BUG-3 / NRN-219: `isError` derived from the report's outcome. See
+    // `apply::handle_output` and `MutationResult::from_apply_report`.
+    Ok(MutationResult::from_apply_report(
         DeleteOutput::from_report(&report)?,
-        is_error,
+        &report,
     ))
 }
 

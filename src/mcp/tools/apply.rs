@@ -96,14 +96,13 @@ impl ApplyOutput {
 /// Build the MCP output envelope for `vault.apply`.
 pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<MutationResult<ApplyOutput>> {
     let report = handle(ctx, p)?;
-    // BUG-3 / NRN-219: `isError` must agree with the report's outcome. A refused
-    // (byte-identical) or partially-failed apply is `exit_code() != 0` and renders
-    // `isError: true`, while the structured report is still preserved so a
-    // consumer branches on `operations[].error.code`.
-    let is_error = report.exit_code() != 0;
-    Ok(MutationResult::new(
+    // BUG-3 / NRN-219: `isError` is derived from the report's outcome by
+    // `from_apply_report` (a not-applied confirm → true; a dry-run forecast →
+    // false), while the structured report is preserved so a consumer branches on
+    // `operations[].error.code`.
+    Ok(MutationResult::from_apply_report(
         ApplyOutput::from_report(&report)?,
-        is_error,
+        &report,
     ))
 }
 
@@ -713,6 +712,63 @@ mod tests {
             result.structured_content.expect("structured content")["report"]["outcome"],
             "failed"
         );
+    }
+
+    /// NRN-219 dry-run carve-out: a `confirm:false` PREVIEW that forecasts a
+    /// refusal is `isError:false`, not true — a dry-run attempts no write, so it
+    /// cannot misreport one, and an SDK that raises on `isError` must not throw on
+    /// a preview. The forecasted refusal is carried in the (preserved) structured
+    /// report as `outcome:refused` / `dry_run:true` instead. This is the seam the
+    /// code review flagged; without the `!report.dry_run` guard this returns true.
+    #[test]
+    fn dryrun_forecast_of_refusal_maps_to_iserror_false() {
+        use rmcp::handler::server::tool::IntoCallToolResult;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-dryrun-refusal-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [{
+                "kind": "add_frontmatter",
+                "fields": {
+                    "path": "a.md", "field": "status", "new_value": "done",
+                    "document_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }]
+        });
+
+        let mr = handle_output(
+            &ctx,
+            ApplyParams {
+                plan,
+                confirm: false, // PREVIEW — no write attempted
+                parents: false,
+            },
+        )
+        .expect("a dry-run forecast returns a MutationResult");
+        assert!(
+            !mr.is_error(),
+            "a dry-run forecast (even of a refusal) must be isError:false — it wrote nothing"
+        );
+
+        let result = mr.into_call_tool_result().expect("render CallToolResult");
+        assert_eq!(result.is_error, Some(false));
+        // The forecast is still fully visible in the structured report.
+        let report = &result.structured_content.expect("structured content")["report"];
+        assert_eq!(
+            report["outcome"], "refused",
+            "the forecast still says refused"
+        );
+        assert_eq!(report["dry_run"], true, "and flags it as a dry-run");
     }
 
     /// A malformed plan (garbage JSON) must return Err, applying nothing.
