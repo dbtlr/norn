@@ -34,6 +34,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.rewrite_wikilink`.
 ///
@@ -84,9 +85,15 @@ impl RewriteWikilinkOutput {
 pub fn handle_output(
     ctx: &VaultContext,
     p: RewriteWikilinkParams,
-) -> Result<RewriteWikilinkOutput> {
+) -> Result<MutationResult<RewriteWikilinkOutput>> {
     let report = handle(ctx, p)?;
-    RewriteWikilinkOutput::from_report(&report)
+    // BUG-3 / NRN-219: a not-applied outcome (`exit_code() != 0`) renders
+    // `isError: true`, structured report preserved. See `apply::handle_output`.
+    let is_error = report.exit_code() != 0;
+    Ok(MutationResult::new(
+        RewriteWikilinkOutput::from_report(&report)?,
+        is_error,
+    ))
 }
 
 /// Pure handler for `vault.rewrite_wikilink`.

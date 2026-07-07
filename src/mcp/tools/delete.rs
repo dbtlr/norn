@@ -34,6 +34,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.delete`.
 ///
@@ -95,9 +96,15 @@ impl DeleteOutput {
 }
 
 /// Build the MCP output envelope for `vault.delete`.
-pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<DeleteOutput> {
+pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<MutationResult<DeleteOutput>> {
     let report = handle(ctx, p)?;
-    DeleteOutput::from_report(&report)
+    // BUG-3 / NRN-219: a not-applied outcome (`exit_code() != 0`) renders
+    // `isError: true`, structured report preserved. See `apply::handle_output`.
+    let is_error = report.exit_code() != 0;
+    Ok(MutationResult::new(
+        DeleteOutput::from_report(&report)?,
+        is_error,
+    ))
 }
 
 /// Pure handler for `vault.delete`.

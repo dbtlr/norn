@@ -41,6 +41,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 use crate::migration_plan::MIGRATION_PLAN_SCHEMA_VERSION;
 
 /// Parameters for `vault.apply`.
@@ -93,9 +94,17 @@ impl ApplyOutput {
 }
 
 /// Build the MCP output envelope for `vault.apply`.
-pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<ApplyOutput> {
+pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<MutationResult<ApplyOutput>> {
     let report = handle(ctx, p)?;
-    ApplyOutput::from_report(&report)
+    // BUG-3 / NRN-219: `isError` must agree with the report's outcome. A refused
+    // (byte-identical) or partially-failed apply is `exit_code() != 0` and renders
+    // `isError: true`, while the structured report is still preserved so a
+    // consumer branches on `operations[].error.code`.
+    let is_error = report.exit_code() != 0;
+    Ok(MutationResult::new(
+        ApplyOutput::from_report(&report)?,
+        is_error,
+    ))
 }
 
 /// Pure handler for `vault.apply`.
@@ -561,6 +570,149 @@ mod tests {
         // Ground truth: the vault WAS mutated — the report cannot claim otherwise.
         let a = std::fs::read_to_string(root.join("a.md")).unwrap();
         assert!(a.contains("type: task"), "op0 mutated a.md; got:\n{a}");
+    }
+
+    /// BUG-3 / NRN-219: the MCP result's `isError` bit MUST agree with the
+    /// report's outcome, while the structured report is preserved on BOTH paths.
+    /// A validation-phase refusal (byte-identical, nothing written) is `isError:
+    /// true` — a consumer trusting the protocol-native bit no longer reads a
+    /// no-write as success — yet `structuredContent.report` still carries
+    /// `outcome: refused` and the op's `error.code` for retry classification.
+    #[test]
+    fn refusal_maps_to_iserror_true_preserving_report() {
+        use rmcp::handler::server::tool::IntoCallToolResult;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-refusal-iserror-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [{
+                "kind": "add_frontmatter",
+                "fields": {
+                    "path": "a.md", "field": "status", "new_value": "done",
+                    "document_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }]
+        });
+
+        let mr = handle_output(
+            &ctx,
+            ApplyParams {
+                plan,
+                confirm: true,
+                parents: false,
+            },
+        )
+        .expect("a refusal returns a MutationResult, not Err");
+        assert!(mr.is_error(), "a refused apply must map to isError:true");
+
+        let result = mr.into_call_tool_result().expect("render CallToolResult");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "protocol-native isError reflects the no-write"
+        );
+        let sc = result
+            .structured_content
+            .expect("structured report must survive on the error path");
+        assert_eq!(
+            sc["report"]["outcome"], "refused",
+            "consumer still reads the outcome"
+        );
+        assert_eq!(
+            sc["report"]["operations"][0]["error"]["code"], "stale-document-hash",
+            "the machine-readable code is NOT laundered back to prose"
+        );
+    }
+
+    /// The complement: a clean apply is `isError: false` (unchanged from before),
+    /// so success is not spuriously flagged. Guards against over-erroring.
+    #[test]
+    fn clean_apply_maps_to_iserror_false() {
+        use rmcp::handler::server::tool::IntoCallToolResult;
+
+        let (_tmp, root) = vault_with_fixable_link();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan_value = crate::mcp::tools::repair::handle(&ctx, Default::default())
+            .expect("repair")
+            .plan;
+
+        let mr = handle_output(
+            &ctx,
+            ApplyParams {
+                plan: plan_value,
+                confirm: true,
+                parents: false,
+            },
+        )
+        .expect("a clean apply returns a MutationResult");
+        assert!(!mr.is_error(), "a clean apply must map to isError:false");
+
+        let result = mr.into_call_tool_result().expect("render CallToolResult");
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.structured_content.expect("structured content")["report"]["outcome"],
+            "applied"
+        );
+    }
+
+    /// A partial-apply failure (a write landed, then an op failed) is the sharp
+    /// case: NOT byte-identical, yet must still surface `isError: true` so a naive
+    /// consumer does not double-apply the ops that already succeeded.
+    #[test]
+    fn partial_failure_maps_to_iserror_true() {
+        use rmcp::handler::server::tool::IntoCallToolResult;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-partial-iserror-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+        std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 1,
+            "vault_root": root.to_string(),
+            "operations": [
+                { "kind": "set_frontmatter", "fields": {
+                    "path": "a.md", "field": "type",
+                    "expected_old_value": "note", "new_value": "task" } },
+                { "kind": "delete_document", "fields": { "path": "ghost.md" } }
+            ]
+        });
+
+        let mr = handle_output(
+            &ctx,
+            ApplyParams {
+                plan,
+                confirm: true,
+                parents: false,
+            },
+        )
+        .expect("a partial apply returns a MutationResult, not Err");
+        assert!(
+            mr.is_error(),
+            "a partial-apply failure must map to isError:true (not byte-identical)"
+        );
+
+        let result = mr.into_call_tool_result().expect("render CallToolResult");
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.expect("structured content")["report"]["outcome"],
+            "failed"
+        );
     }
 
     /// A malformed plan (garbage JSON) must return Err, applying nothing.

@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
+
+use super::mutation_result::MutationResult;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
@@ -176,19 +178,25 @@ impl McpServer {
     ///
     /// The read-only check runs FIRST, before acquiring `call_lock` or touching
     /// the vault: a refused mutation must observe nothing and mutate nothing. When
-    /// not read-only, the body is identical to `run_tool` — it acquires the
-    /// NRN-55 serialization lock and maps the result. The 6 mutation tools call
-    /// this; the 6 read tools keep calling `run_tool`. This split also documents
-    /// the read/mutate boundary in code (mirroring the two `#[tool_router]`
-    /// blocks).
+    /// not read-only, the body mirrors `run_tool` — it acquires the NRN-55
+    /// serialization lock and maps the result. The 7 mutation tools call this; the
+    /// 7 read tools keep calling `run_tool`. This split also documents the
+    /// read/mutate boundary in code (mirroring the two `#[tool_router]` blocks).
+    ///
+    /// Unlike `run_tool`, the handler returns a [`MutationResult<T>`] rather than
+    /// a bare `T`: a mutation whose `report.outcome` is not fully applied
+    /// (`refused` / `failed`) must render `isError: true` at the protocol layer
+    /// while still preserving the structured report (BUG-3 / NRN-219). The wrapper
+    /// carries that bit and delegates `outputSchema` to `T`, so each tool's schema
+    /// is unchanged.
     ///
     /// Under `--read-only` the mutation tools are also absent from `tools/list`
     /// (see [`new`](Self::new)), so this runtime guard is defense in depth for a
     /// client that calls a tool it was never advertised.
-    async fn run_mutation<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
+    async fn run_mutation<T, F>(&self, f: F) -> Result<MutationResult<T>, rmcp::ErrorData>
     where
         T: serde::Serialize + schemars::JsonSchema + Send + 'static,
-        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<MutationResult<T>> + Send + 'static,
     {
         if self.read_only {
             return Err(rmcp::ErrorData::invalid_request(
@@ -205,7 +213,7 @@ impl McpServer {
         })
         .await;
         match joined {
-            Ok(Ok(value)) => Ok(Json(value)),
+            Ok(Ok(value)) => Ok(value),
             Ok(Err(err)) => {
                 self.ctx.note_tool_error(&err);
                 Err(to_mcp_error(err))
@@ -399,9 +407,13 @@ impl McpServer {
     async fn new_document(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::new::NewParams>,
-    ) -> Result<Json<NewOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::new::handle_output(ctx, p))
-            .await
+    ) -> Result<MutationResult<NewOutput>, rmcp::ErrorData> {
+        // `new` has no in-band not-applied outcome — an apply failure propagates
+        // as `Err` (mapped to a bare MCP error), so an `Ok` is always applied.
+        self.run_mutation(|ctx| {
+            crate::mcp::tools::new::handle_output(ctx, p).map(MutationResult::ok)
+        })
+        .await
     }
 
     /// `vault.set` — the first MCP mutation tool; establishes the
@@ -425,9 +437,14 @@ impl McpServer {
     async fn set(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
-    ) -> Result<Json<SetOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
-            .await
+    ) -> Result<MutationResult<SetOutput>, rmcp::ErrorData> {
+        // Like `new`: a failed/refused apply propagates as `Err`, so `Ok` is
+        // always applied. (Structured refusal codes for the single-op mutators
+        // are a separate follow-up, NRN-220.)
+        self.run_mutation(|ctx| {
+            crate::mcp::tools::set::handle_output(ctx, p).map(MutationResult::ok)
+        })
+        .await
     }
 
     /// `vault.edit` — sub-document partial edits (str_replace + structural
@@ -446,9 +463,13 @@ impl McpServer {
     async fn edit(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::edit::EditParams>,
-    ) -> Result<Json<EditOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::edit::handle_output(ctx, p))
-            .await
+    ) -> Result<MutationResult<EditOutput>, rmcp::ErrorData> {
+        // Like `new`/`set`: an apply failure propagates as `Err`, so `Ok` is
+        // always applied.
+        self.run_mutation(|ctx| {
+            crate::mcp::tools::edit::handle_output(ctx, p).map(MutationResult::ok)
+        })
+        .await
     }
 
     /// `vault.move` — move/rename a document, cascading backlink rewrites.
@@ -466,7 +487,7 @@ impl McpServer {
     async fn move_doc(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::move_doc::MoveParams>,
-    ) -> Result<Json<MoveOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<MoveOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::move_doc::handle_output(ctx, p))
             .await
     }
@@ -487,7 +508,7 @@ impl McpServer {
     async fn delete(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::delete::DeleteParams>,
-    ) -> Result<Json<DeleteOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<DeleteOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::delete::handle_output(ctx, p))
             .await
     }
@@ -508,7 +529,7 @@ impl McpServer {
     async fn rewrite_wikilink(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams>,
-    ) -> Result<Json<RewriteWikilinkOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<RewriteWikilinkOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p))
             .await
     }
@@ -530,7 +551,7 @@ impl McpServer {
     async fn apply(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::apply::ApplyParams>,
-    ) -> Result<Json<ApplyOutput>, rmcp::ErrorData> {
+    ) -> Result<MutationResult<ApplyOutput>, rmcp::ErrorData> {
         self.run_mutation(|ctx| crate::mcp::tools::apply::handle_output(ctx, p))
             .await
     }
