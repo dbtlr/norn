@@ -2,7 +2,7 @@
 //!
 //! Used by every intent-verb's args struct so the CLI ⇄ plan parity is
 //! visible at the point of consumption. Same renderer can be reused for
-//! future `norn migrate explain` or plan-visualization surfaces.
+//! future `norn apply explain` or plan-visualization surfaces.
 
 /// Render a YAML block showing the same invocation as a MigrationPlan op.
 ///

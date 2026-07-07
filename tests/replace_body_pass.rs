@@ -1,4 +1,4 @@
-//! Integration tests for `replace_body` applied through `norn migrate`.
+//! Integration tests for `replace_body` applied through `norn apply`.
 //!
 //! Ported from the retired `norn repair apply` surface (Plan Task 19): the
 //! `replace_body` op is applied via the unified MigrationPlan applier.
@@ -53,12 +53,12 @@ fn plan_json(vault_root: &str, note_rel: &str, document_hash: &str, new_body: &s
     .unwrap()
 }
 
-/// Run `norn migrate -` feeding `plan` on stdin, with the given extra args.
+/// Run `norn apply -` feeding `plan` on stdin, with the given extra args.
 /// `XDG_CACHE_HOME`/`XDG_STATE_HOME` are isolated to hidden subdirs of the
 /// vault root so the binary never reads or sweeps the developer's real
 /// cache/state trees.
-fn run_migrate(vault_root: &str, plan: &str, extra: &[&str]) -> std::process::Output {
-    let mut args: Vec<&str> = vec!["--cwd", vault_root, "migrate", "-"];
+fn run_apply(vault_root: &str, plan: &str, extra: &[&str]) -> std::process::Output {
+    let mut args: Vec<&str> = vec!["--cwd", vault_root, "apply", "-"];
     args.extend_from_slice(extra);
     let xdg_root = std::path::Path::new(vault_root);
     let mut cmd = Command::new(norn_bin())
@@ -93,7 +93,7 @@ fn pass_1d_applies_replace_body_via_orchestrator() {
     );
 
     // --yes applies immediately (non-interactive).
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         output.status.success(),
         "expected success; stderr={}",
@@ -119,7 +119,7 @@ fn pass_1d_dry_run_does_not_mutate_file() {
         "replaced body\n",
     );
 
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--dry-run"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--dry-run"]);
     assert!(
         output.status.success(),
         "dry-run should succeed; stderr={}",
@@ -140,7 +140,7 @@ fn pass_1d_rejects_stale_hash() {
         "new body\n",
     );
 
-    let output = run_migrate(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
+    let output = run_apply(tmp.path().to_str().unwrap(), &plan, &["--yes"]);
     assert!(
         !output.status.success(),
         "stale hash should cause a non-zero exit"

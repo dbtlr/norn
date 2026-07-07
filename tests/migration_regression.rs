@@ -213,7 +213,7 @@ operations:
     dry1_cmd
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan1_path)
         .args(["--dry-run", "--format", "json"]);
     let _cache1a = isolate_cache(&mut dry1_cmd);
@@ -250,7 +250,7 @@ operations:
 
     for op in dry1_ops {
         assert_eq!(
-            op["status"], "not_run",
+            op["status"], "not-run",
             "all dry-run ops must be not_run; got: {}",
             op
         );
@@ -272,7 +272,7 @@ operations:
     apply1_cmd
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan1_path)
         .args(["--yes"]);
     let _cache1b = isolate_cache(&mut apply1_cmd);
@@ -373,7 +373,7 @@ operations:
     dry2_cmd
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan2_path)
         .args(["--dry-run", "--format", "json"]);
     let _cache2a = isolate_cache(&mut dry2_cmd);
@@ -420,7 +420,7 @@ operations:
 
     for op in dry2_ops {
         assert_eq!(
-            op["status"], "not_run",
+            op["status"], "not-run",
             "all dry-run ops must be not_run; got: {}",
             op
         );
@@ -442,7 +442,7 @@ operations:
     apply2_cmd
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan2_path)
         .args(["--yes"]);
     let _cache2b = isolate_cache(&mut apply2_cmd);
@@ -593,7 +593,7 @@ operations:
     let mut cmd = Command::new(norn_bin());
     cmd.args(["--cwd"])
         .arg(atlas_vault)
-        .args(["migrate"])
+        .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run", "--format", "json"]);
     let _cache = isolate_cache(&mut cmd);
@@ -640,7 +640,7 @@ operations:
     // All ops must be not_run (dry-run only — NEVER mutate real atlas)
     for op in ops {
         assert_eq!(
-            op["status"], "not_run",
+            op["status"], "not-run",
             "dry-run must not apply any ops; got status {:?} for op: {}",
             op["status"], op
         );

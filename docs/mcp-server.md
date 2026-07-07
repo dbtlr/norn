@@ -48,7 +48,7 @@ Fourteen tools, split into seven read and seven mutation.
 | `vault.count` | Count documents, total or grouped by a frontmatter field. |
 | `vault.get` | Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally the body. |
 | `vault.validate` | Validate graph facts and configured frontmatter/link rules; returns structured findings. |
-| `vault.repair_plan` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply_plan`. |
+| `vault.repair` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply`. |
 | `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, creatable rules, inbox, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
 | `vault.audit` | Read the per-vault mutation audit trail (append-only event stream). Filters: `trace`, `status`, `target`, `since`, `until`, `limit`. Returns flattened event records or raw OTEL objects. Available under `--read-only`. |
 
@@ -62,7 +62,7 @@ Fourteen tools, split into seven read and seven mutation.
 | `vault.move` | Move/rename a document, cascading backlink rewrites across the vault. |
 | `vault.delete` | Delete a document, optionally redirecting incoming links to an alternate target. |
 | `vault.rewrite_wikilink` | Retarget every occurrence of a wikilink across the vault (body + frontmatter), without moving any file. |
-| `vault.apply_plan` | Apply a `MigrationPlan` (e.g. one returned by `vault.repair_plan`) inline — moves, deletes, link rewrites, frontmatter ops. |
+| `vault.apply` | Apply a `MigrationPlan` (e.g. one returned by `vault.repair`) inline — moves, deletes, link rewrites, frontmatter ops. |
 
 Every mutation tool follows the same safety contract below.
 
@@ -72,7 +72,7 @@ Every mutation tool follows the same safety contract below.
 
 - A confirmed mutation acquires the **per-vault mutation lock** (the same advisory lock the CLI takes), so an MCP write and a concurrent `norn set` from a shell can't interleave.
 - It applies through the **same shared applier** as the CLI — the MCP path and the CLI path can't drift on the mutation semantics.
-- It is **audited to the append-only event stream** — the same records `norn set` / `norn migrate` write, carrying a `trace_id` in the tool's response.
+- It is **audited to the append-only event stream** — the same records `norn set` / `norn apply` write, carrying a `trace_id` in the tool's response.
 
 This mirrors the CLI's `--dry-run` / apply split: the dry-run is a reviewable forecast, the confirm is the apply step. An agent should inspect the dry-run result before re-issuing with `confirm: true`.
 
@@ -151,5 +151,5 @@ These are intentional v1 boundaries, tracked under the ongoing MCP initiative:
 
 - [Warm host daemon](service.md) — `norn serve`, the persistent multi-vault alternative to this stdio server.
 - [Agent workflows](agent-workflows.md) — the CLI-side agent contract and loop patterns the MCP tools mirror.
-- [Validation and repair](validation.md) — the `MigrationPlan` schema behind `vault.repair_plan` / `vault.apply_plan`.
+- [Validation and repair](validation.md) — the `MigrationPlan` schema behind `vault.repair` / `vault.apply`.
 - [Configuration](configuration.md) — the `.norn/config.yaml` keys `vault.describe` projects.

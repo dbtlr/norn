@@ -36,15 +36,16 @@
 //!    shown, never *what* is computed.
 //! 3. **SHAPE** — CLI-only *ergonomic/surface-shape* fields with no MCP field:
 //!    guards (`find --all`), aliases (`describe --stats`), mode selectors
-//!    (`repair --plan`), and input file-format selection (`migrate
+//!    (`repair --plan`), and input file-format selection (`apply
 //!    --input-format`) that MCP replaces by taking inline structured JSON. Like
 //!    PRESENTATION, none compute data the other surface cannot return. (ADR 0009
 //!    folds these under the presentation/naming carve-outs.)
-//! 4. **NAMING MAP** — sanctioned renames (temporary until NRN-185): CLI
-//!    `from`/`to`-style positionals and `field_json`/`edits_json`/`as_rule`/… vs
-//!    the MCP param names, plus the tool renames `migrate ↔ vault.apply_plan` and
-//!    `repair ↔ vault.repair_plan`. Encoded as an exact rename map, not a blanket
-//!    exemption.
+//! 4. **NAMING MAP** — sanctioned FIELD renames: CLI `src`/`dst` positionals and
+//!    `field_json`/`edits_json`/`as_rule`/… vs the MCP param names. Encoded as an
+//!    exact rename map, not a blanket exemption. (NRN-185 converged the verb/tool
+//!    NAMES themselves — CLI `apply`/`repair` now share their MCP tool names
+//!    `vault.apply`/`vault.repair`, so no tool-name rename carve-out remains; only
+//!    per-surface field-shape renames stay.)
 //! 5. **LOCAL-ONLY** — commands with no MCP tool at all: `completions`, `manpage`,
 //!    `self-update`, `mcp`, `serve`, `cache`, `config edit`.
 //! 6. **TRACKED GAP** — commands that *should* have an MCP twin but do not yet
@@ -60,8 +61,8 @@
 //! `all_cols`, all NRN-173), `vault.set`'s coercing `--field` / `--push` /
 //! `--pop` (NRN-181), `vault.move`'s `--force` / `--no-link-rewrite` (NRN-180),
 //! and `vault.validate`'s `--summary` (NRN-182) all now have MCP twins, so their
-//! allowlist entries were removed. (`vault.apply_plan` gained `parents` in
-//! lockstep with a new `migrate --parents` under NRN-174, an identity pair that
+//! allowlist entries were removed. (`vault.apply` gained `parents` in
+//! lockstep with a new `apply --parents` under NRN-174, an identity pair that
 //! never needed an allowlist entry.)
 //!
 //! # Out of scope for this *field-presence* gate (tracked separately)
@@ -217,12 +218,16 @@ fn specs() -> Vec<Spec> {
         Spec {
             cli: "repair",
             parity: Mcp {
-                // NAMING MAP (class 4): repair ↔ vault.repair_plan.
-                tool: "vault.repair_plan",
+                // NRN-185: converged — the CLI verb and the MCP tool share the
+                // `repair` name (no rename carve-out). The tool drops its former
+                // `_plan` suffix and leans on the invariant that nothing writes
+                // except `apply`, so a bare `vault.repair` is unambiguously the
+                // read-only plan-producing surface.
+                tool: "vault.repair",
                 safety: &[],
                 // `--out` writes the plan artifact to a file vs stdout.
                 presentation: &["format", "out"],
-                // `--plan` selects plan-generation mode; vault.repair_plan *is*
+                // `--plan` selects plan-generation mode; vault.repair *is*
                 // that mode (the bare findings-summary mode has no MCP surface).
                 shape: &["plan"],
                 naming: &[],
@@ -350,10 +355,12 @@ fn specs() -> Vec<Spec> {
             },
         },
         Spec {
-            cli: "migrate",
+            cli: "apply",
             parity: Mcp {
-                // NAMING MAP (class 4): migrate ↔ vault.apply_plan.
-                tool: "vault.apply_plan",
+                // NRN-185: converged — CLI `apply` ↔ MCP `vault.apply` share the
+                // `apply` name (no rename carve-out). Both execute a MigrationPlan;
+                // `apply` is the plan-then-apply doctrine's execute verb.
+                tool: "vault.apply",
                 safety: &["yes", "dry_run"],
                 // `--out` = report destination (stdout vs file).
                 presentation: &["format", "out"],

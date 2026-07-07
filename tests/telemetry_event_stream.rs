@@ -305,7 +305,7 @@ fn move_with_unwritable_backlinker_emits_failed_action_and_retry() {
         .expect("failed rewrite_link action");
     assert_eq!(failed["SeverityNumber"], 17);
     assert_eq!(failed["Attributes"]["norn.target"], "sub/linker.md");
-    assert_eq!(failed["Attributes"]["norn.reason.code"], "write_failed");
+    assert_eq!(failed["Attributes"]["norn.reason.code"], "write-failed");
     assert!(
         failed["Attributes"]["norn.reason.message"].is_string(),
         "failed action must carry a reason message"
@@ -670,7 +670,7 @@ fn dry_run_move_report_keeps_forecast_cascade_and_not_run_status() {
         .iter()
         .find(|o| o["kind"] == "move_document")
         .unwrap();
-    assert_eq!(op["status"], "not_run", "dry-run op status must be not_run");
+    assert_eq!(op["status"], "not-run", "dry-run op status must be not_run");
     assert!(
         op["cascade"]["planned"].as_u64().unwrap() >= 1,
         "dry-run must still forecast the backlink cascade"

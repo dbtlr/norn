@@ -48,7 +48,7 @@ Set `NORN_ROOT` to a vault path to make that the default root for every invocati
 |---|---|
 | [`validate`](commands/validate.md) | Validate the vault against configured rules and graph facts. |
 | [`repair`](commands/repair.md) | Turn findings into an inspectable MigrationPlan. |
-| [`migrate`](commands/migrate.md) | Apply a MigrationPlan with precondition checks. |
+| [`apply`](commands/apply.md) | Apply a MigrationPlan with precondition checks. |
 
 ## Setup and maintenance
 

@@ -81,10 +81,10 @@ fn minimal_plan_json(vault_root: &std::path::Path) -> String {
     )
 }
 
-// ─── migrate ──────────────────────────────────────────────────────────────────
+// ─── apply ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn migrate_file_blocked_by_held_lock_exits_2() {
+fn apply_file_blocked_by_held_lock_exits_2() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
     let plan_json = minimal_plan_json(&vault);
@@ -96,7 +96,7 @@ fn migrate_file_blocked_by_held_lock_exits_2() {
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate", "--yes"])
+        .args(["apply", "--yes"])
         .arg(&plan_path)
         .output()
         .unwrap();
@@ -114,7 +114,7 @@ fn migrate_file_blocked_by_held_lock_exits_2() {
 }
 
 #[test]
-fn migrate_stdin_blocked_saves_pending_and_prints_retry() {
+fn apply_stdin_blocked_saves_pending_and_prints_retry() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
     let plan_json = minimal_plan_json(&vault);
@@ -124,7 +124,7 @@ fn migrate_stdin_blocked_saves_pending_and_prints_retry() {
     let mut child = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate", "-", "--yes"])
+        .args(["apply", "-", "--yes"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -148,7 +148,7 @@ fn migrate_stdin_blocked_saves_pending_and_prints_retry() {
         "contention message missing; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("retry with: norn migrate "),
+        stderr.contains("retry with: norn apply "),
         "retry message missing; stderr: {stderr}"
     );
 
@@ -170,7 +170,7 @@ fn migrate_stdin_blocked_saves_pending_and_prints_retry() {
 // ─── dry-run and readers must not be blocked ──────────────────────────────────
 
 #[test]
-fn migrate_dry_run_not_blocked_by_held_lock() {
+fn apply_dry_run_not_blocked_by_held_lock() {
     let tmp = TempDir::new().unwrap();
     let vault = synth_vault(&tmp);
     let plan_json = minimal_plan_json(&vault);
@@ -182,7 +182,7 @@ fn migrate_dry_run_not_blocked_by_held_lock() {
     let out = norn_cmd(&tmp)
         .args(["--cwd"])
         .arg(&vault)
-        .args(["migrate", "--dry-run"])
+        .args(["apply", "--dry-run"])
         .arg(&plan_path)
         .output()
         .unwrap();

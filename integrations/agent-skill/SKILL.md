@@ -129,7 +129,7 @@ One asymmetry to know: `rewrite-wikilink` retargets wikilinks only. Relative Mar
 
 ## Mutation — safe by default
 
-`new`, `set`, `edit`, `move`, `delete` are single-document, schema-aware writes. `migrate` applies a batch plan. All are safe-by-default, but the exact trigger differs — read the table before scripting them.
+`new`, `set`, `edit`, `move`, `delete` are single-document, schema-aware writes. `apply` applies a batch plan. All are safe-by-default, but the exact trigger differs — read the table before scripting them.
 
 ### The apply-model table
 
@@ -140,10 +140,10 @@ One asymmetry to know: `rewrite-wikilink` retargets wikilinks only. Relative Mar
 | `edit` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `EditReport` |
 | `move` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
 | `delete` | preview + confirm | dry-run (no write) | apply | preview | non-interactive, `ApplyReport` |
-| `migrate` | confirm | dry-run (no write) | apply | preview | **applies without `--yes`**, `ApplyReport` |
+| `apply` | confirm | dry-run (no write) | apply | preview | **applies without `--yes`**, `ApplyReport` |
 | `rewrite-wikilink` | confirm | dry-run (no write) | apply | preview | **applies without `--yes`**, `ApplyReport` |
 
-**Footgun:** for every command in this table, running without `--yes` in a non-TTY context (i.e. from an agent) **writes nothing** — it dry-runs, same as `--dry-run`, even though the exit code is 0. Always pass `--yes` from an agent when you intend to apply. **One exception:** `migrate` and `rewrite-wikilink` treat `--format json` as consent to apply — with `--format json` and no `--yes` they **write**, even in a non-TTY context (`set`/`delete` and the rest do not; JSON output there is still an implicit dry-run). Don't lean on that divergence: pass `--yes` when you mean to apply and `--dry-run` when you don't.
+**Footgun:** for every command in this table, running without `--yes` in a non-TTY context (i.e. from an agent) **writes nothing** — it dry-runs, same as `--dry-run`, even though the exit code is 0. Always pass `--yes` from an agent when you intend to apply. **One exception:** `apply` and `rewrite-wikilink` treat `--format json` as consent to apply — with `--format json` and no `--yes` they **write**, even in a non-TTY context (`set`/`delete` and the rest do not; JSON output there is still an implicit dry-run). Don't lean on that divergence: pass `--yes` when you mean to apply and `--dry-run` when you don't.
 
 ### set
 
@@ -231,7 +231,7 @@ norn delete notes/old.md --allow-broken-links --yes      # delete; let backlinks
 
 `move` rewrites every incoming link (relative + wikilink). `delete` refuses (exit 2) when the doc has incoming links unless `--rewrite-to <ALT>` or `--allow-broken-links` is given.
 
-## Validate first, then repair, then migrate
+## Validate first, then repair, then apply
 
 ### validate (read-only)
 
@@ -257,22 +257,22 @@ norn -C /vault repair --plan --code frontmatter-disallowed-value --field status 
 # 3. review plan.json — read summary.planned_changes and the skipped section
 
 # 4. dry-run the apply (checks preconditions, writes nothing)
-norn -C /vault migrate plan.json --dry-run --format json
+norn -C /vault apply plan.json --dry-run --format json
 
 # 5. apply
-norn -C /vault migrate plan.json --yes --format json
+norn -C /vault apply plan.json --yes --format json
 
 # 6. re-validate as a follow-up step
 norn -C /vault validate --summary --format json
 ```
 
-Single-line pipeline (skips the artifact file): `norn -C /vault repair --plan --format json | norn -C /vault migrate - --yes`. `norn migrate -` and bare `norn migrate` both read the plan from stdin.
+Single-line pipeline (skips the artifact file): `norn -C /vault repair --plan --format json | norn -C /vault apply - --yes`. `norn apply -` and bare `norn apply` both read the plan from stdin.
 
-`migrate` is the batch write surface. It verifies the plan's vault root, re-reads each source doc and checks its recorded hash, and verifies each `expected_old_value` before writing — any precondition failure aborts the whole batch before any partial write. Re-plan rather than retrying; there is no `--force`. (There is no `--verify` flag — re-validate with a separate `norn validate` call as in step 6.)
+`apply` is the batch write surface. It verifies the plan's vault root, re-reads each source doc and checks its recorded hash, and verifies each `expected_old_value` before writing — any precondition failure aborts the whole batch before any partial write. Re-plan rather than retrying; there is no `--force`. (There is no `--verify` flag — re-validate with a separate `norn validate` call as in step 6.)
 
 ### Repair plan shape
 
-`repair --plan` formats: `report` (human, TTY default), `json` (full `MigrationPlan`, the only format `migrate` consumes; pipe default), `paths` (affected paths). Supported findings become `PlannedChange`s (path, field, new value, document hash). Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter with `--skip-reason <PATTERN>` (globs).
+`repair --plan` formats: `report` (human, TTY default), `json` (full `MigrationPlan`, the only format `apply` consumes; pipe default), `paths` (affected paths). Supported findings become `PlannedChange`s (path, field, new value, document hash). Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter with `--skip-reason <PATTERN>` (globs).
 
 Repair-action kinds in a plan: `set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, `move_document`, `rewrite_link`, `replace_body` (emitted only by `set --body-from-stdin`), `create_document` (emitted only by `new`). Closest-match `rewrite_link` proposals are confidence-banded (`high` = slug-identity, safe; `medium` = small edit distance, review). Use `--confidence high` to keep only high-confidence proposals. Ties skip with `ambiguous-target`; never auto-pick them.
 

@@ -1,31 +1,31 @@
 ---
-title: migrate
-description: Apply a MigrationPlan — move, delete, rewrite, and frontmatter ops from a plan file.
+title: apply
+description: Apply a MigrationPlan — execute move, delete, rewrite, and frontmatter ops from a plan file.
 ---
 
-# norn migrate
+# norn apply
 
-Apply a `MigrationPlan` — the artifact `norn repair --plan` produces, or a hand-authored one. `migrate` is the command that writes a batch of planned changes; it checks every precondition before touching a file and aborts the whole batch if any check fails.
+Apply a `MigrationPlan` — the artifact `norn repair --plan` produces, or a hand-authored one. `apply` is the command that writes a batch of planned changes; it checks every precondition before touching a file and aborts the whole batch if any check fails. It is the execute half of norn's plan-then-apply doctrine — the one command that writes from a plan.
 
 ## Examples
 
 ```bash
-norn migrate plan.json --dry-run
+norn apply plan.json --dry-run
 # walk the plan and check preconditions; no write
 
-norn migrate plan.json --yes
+norn apply plan.json --yes
 # apply the plan
 
-norn repair --plan --format json | norn migrate -
+norn repair --plan --format json | norn apply -
 # generate and apply in one pipeline (- reads the plan from stdin)
 
-norn migrate plan.json --out report.json
+norn apply plan.json --out report.json
 # write the JSON ApplyReport to a file
 ```
 
 ## How apply writes
 
-`migrate` walks the plan in order:
+`apply` walks the plan in order:
 
 1. Load the plan and verify its schema version.
 2. Confirm the plan's recorded vault root matches the current vault.
@@ -60,6 +60,6 @@ Their `fields` are the edit anchor (`heading` + `content`, or `old` + `new`) plu
 
 ## See also
 
-- [`repair`](repair.md) — produce the plan `migrate` applies.
+- [`repair`](repair.md) — produce the plan `apply` applies.
 - [`validate`](validate.md) — re-check the vault after applying.
-- Run `norn migrate --help` for the full flag reference.
+- Run `norn apply --help` for the full flag reference.

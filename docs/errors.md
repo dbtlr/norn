@@ -5,7 +5,7 @@ description: The exit-code contract, the machine-readable error-code taxonomy, a
 
 # Error and outcome contract
 
-Mutation commands (`migrate`, `move`, `delete`, `rewrite-wikilink`) and their MCP
+Mutation commands (`apply`, `move`, `delete`, `rewrite-wikilink`) and their MCP
 twins fail in structured, machine-branchable ways. This page is the contract an
 agent or pipeline uses to decide **retry vs. re-read vs. give up** without
 string-matching human prose.
@@ -49,8 +49,8 @@ Every `ApplyReport` carries a single `outcome` field:
 | `outcome` | Exit | `ApplyReport` shape |
 |---|---|---|
 | `applied` | 0 | ops `applied` / `skipped`; `failed == 0` |
-| `failed` | 1 | a write already landed, then an op failed — already-applied ops `applied`, the failing op `failed` with an `error`, the rest `not_run`; the vault is **partially mutated** |
-| `refused` | 2 | the offending op is `failed` with an `error`, the rest `not_run`; **nothing written**, vault byte-identical |
+| `failed` | 1 | a write already landed, then an op failed — already-applied ops `applied`, the failing op `failed` with an `error`, the rest `not-run`; the vault is **partially mutated** |
+| `refused` | 2 | the offending op is `failed` with an `error`, the rest `not-run`; **nothing written**, vault byte-identical |
 | `rebased` | 0 | **reserved** for a future auto-rebase-on-drift (NRN-152); not produced today |
 
 `outcome` is the cross-surface signal, and the `failed`-vs-`refused` distinction is
@@ -67,7 +67,7 @@ A **clean refusal** (nothing written) is returned to an MCP caller as the
 `ApplyReport`:
 
 - the offending op has `status: "failed"` and an `error` envelope,
-- every other op is `not_run`,
+- every other op is `not-run`,
 - `outcome` is `refused`,
 - the vault is byte-identical (nothing was written).
 
@@ -76,7 +76,7 @@ the `ApplyReport`, but with the truthful partial state:
 
 - every op that completed has `status: "applied"`,
 - the failing op has `status: "failed"` with its `error` envelope,
-- ops that never ran are `not_run`,
+- ops that never ran are `not-run`,
 - `outcome` is `failed` — the vault is **partially mutated**, so re-read before retrying.
 
 Either way a client distinguishes **retryable CAS drift** (`stale-document-hash`,
@@ -180,4 +180,4 @@ refused.
 
 - [Command reference](commands.md)
 - [Agent workflows](agent-workflows.md) — the stable JSON/JSONL contracts.
-- [migrate](commands/migrate.md) — apply a MigrationPlan with precondition checks.
+- [apply](commands/apply.md) — apply a MigrationPlan with precondition checks.

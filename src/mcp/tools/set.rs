@@ -2,7 +2,7 @@
 //!
 //! This is the FIRST MCP mutation tool, and it establishes the **mutation-safety
 //! contract** every later mutation tool (`vault.new`, `vault.move`,
-//! `vault.delete`, `vault.apply_plan`) copies:
+//! `vault.delete`, `vault.apply`) copies:
 //!
 //! - **Default DRY-RUN.** A call WITHOUT `confirm: true` runs the full
 //!   preflight/plan and returns the report with `applied = false`, acquiring NO

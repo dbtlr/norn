@@ -1,4 +1,4 @@
-//! MigrationPlan — the unified on-disk artifact for migrate + repair.
+//! MigrationPlan — the unified on-disk artifact for apply + repair.
 //!
 //! Replaces `RepairPlan`. Schema starts at v1.
 

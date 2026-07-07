@@ -469,10 +469,10 @@ fn apply_guidance_unfiltered_suggests_high_confidence_narrowing() {
         stdout.contains("To apply"),
         "expected To apply block; full stdout:\n{stdout}"
     );
-    // Apply guidance pipes the plan into `norn migrate -`.
+    // Apply guidance pipes the plan into `norn apply -`.
     assert!(
-        stdout.contains("| norn migrate -"),
-        "expected migrate apply suggestion; full stdout:\n{stdout}"
+        stdout.contains("| norn apply -"),
+        "expected apply suggestion; full stdout:\n{stdout}"
     );
 
     // Cleanup

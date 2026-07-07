@@ -28,7 +28,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use super::context::VaultContext;
 use super::to_mcp_error;
 use crate::describe::DescribeOutput;
-use crate::mcp::tools::apply_plan::ApplyPlanOutput;
+use crate::mcp::tools::apply::ApplyOutput;
 use crate::mcp::tools::audit::AuditOutput;
 use crate::mcp::tools::count::CountEnvelope;
 use crate::mcp::tools::delete::DeleteOutput;
@@ -37,7 +37,7 @@ use crate::mcp::tools::find::FindOutput;
 use crate::mcp::tools::get::GetOutput;
 use crate::mcp::tools::move_doc::MoveOutput;
 use crate::mcp::tools::new::NewOutput;
-use crate::mcp::tools::repair_plan::RepairPlanOutput;
+use crate::mcp::tools::repair::RepairOutput;
 use crate::mcp::tools::rewrite_wikilink::RewriteWikilinkOutput;
 use crate::mcp::tools::set::SetOutput;
 use crate::mcp::tools::validate::ValidateOutput;
@@ -326,25 +326,25 @@ impl McpServer {
             .await
     }
 
-    /// `vault.repair_plan` — produce a deterministic MigrationPlan without applying it.
+    /// `vault.repair` — produce a deterministic MigrationPlan without applying it.
     ///
     /// Thin wrapper: deserialize params, call the pure handler, map the result.
-    /// All logic lives in `tools::repair_plan`, which drives the same pipeline as
+    /// All logic lives in `tools::repair`, which drives the same pipeline as
     /// `norn repair --plan` (cache → graph index → findings → `plan_from_findings`)
     /// and returns the in-memory `MigrationPlan` serialized as `serde_json::Value`
-    /// in the [`RepairPlanOutput`] envelope. The plan JSON is identical to what
-    /// `norn repair --plan --format json` emits — `vault.apply_plan` (Task 12)
+    /// in the [`RepairOutput`] envelope. The plan JSON is identical to what
+    /// `norn repair --plan --format json` emits — `vault.apply` (Task 12)
     /// can consume it unchanged. The tool is READ-ONLY: it never writes files,
     /// never calls the applier, and never mutates the vault.
     #[tool(
-        name = "vault.repair_plan",
-        description = "Produce a deterministic repair MigrationPlan (closest-match link rewrites, frontmatter fixes) without applying it. Feed the plan to vault.apply_plan to execute."
+        name = "vault.repair",
+        description = "Produce a deterministic repair MigrationPlan (closest-match link rewrites, frontmatter fixes) without applying it. Feed the plan to vault.apply to execute."
     )]
-    async fn repair_plan(
+    async fn repair(
         &self,
-        Parameters(p): Parameters<crate::mcp::tools::repair_plan::RepairPlanParams>,
-    ) -> Result<Json<RepairPlanOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::repair_plan::handle(ctx, p))
+        Parameters(p): Parameters<crate::mcp::tools::repair::RepairParams>,
+    ) -> Result<Json<RepairOutput>, rmcp::ErrorData> {
+        self.run_tool(|ctx| crate::mcp::tools::repair::handle(ctx, p))
             .await
     }
 
@@ -513,25 +513,25 @@ impl McpServer {
             .await
     }
 
-    /// `vault.apply_plan` — apply a `MigrationPlan` (e.g. from `vault.repair_plan`).
+    /// `vault.apply` — apply a `MigrationPlan` (e.g. from `vault.repair`).
     ///
     /// Thin wrapper: deserialize params, call the pure handler, map the result.
-    /// All logic lives in `tools::apply_plan`, which mirrors `norn migrate`'s
+    /// All logic lives in `tools::apply`, which mirrors `norn apply`'s
     /// non-TTY path: validate `schema_version` → DRY-RUN unless `confirm` → on
     /// confirm acquire the per-vault mutation lock, open the event sink, and apply
     /// via the shared `applier::apply_migration_plan`. The plan is accepted inline
-    /// (as a `serde_json::Value`), so callers can pipe `vault.repair_plan`'s
+    /// (as a `serde_json::Value`), so callers can pipe `vault.repair`'s
     /// `result.structuredContent.plan` directly here without writing to a file.
     /// Same mutation-safety + audit contract as `vault.move` / `vault.delete`.
     #[tool(
-        name = "vault.apply_plan",
-        description = "Apply a MigrationPlan (e.g. from vault.repair_plan) to the vault — moves, deletes, link rewrites, frontmatter ops. DRY-RUN by default (forecasts the apply); pass confirm:true to execute."
+        name = "vault.apply",
+        description = "Apply a MigrationPlan (e.g. from vault.repair) to the vault — moves, deletes, link rewrites, frontmatter ops. DRY-RUN by default (forecasts the apply); pass confirm:true to execute."
     )]
-    async fn apply_plan(
+    async fn apply(
         &self,
-        Parameters(p): Parameters<crate::mcp::tools::apply_plan::ApplyPlanParams>,
-    ) -> Result<Json<ApplyPlanOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::apply_plan::handle_output(ctx, p))
+        Parameters(p): Parameters<crate::mcp::tools::apply::ApplyParams>,
+    ) -> Result<Json<ApplyOutput>, rmcp::ErrorData> {
+        self.run_mutation(|ctx| crate::mcp::tools::apply::handle_output(ctx, p))
             .await
     }
 }

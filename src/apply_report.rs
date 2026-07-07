@@ -1,4 +1,4 @@
-//! ApplyReport — the unified output envelope for migrate, move, delete,
+//! ApplyReport — the unified output envelope for apply, move, delete,
 //! rewrite-wikilink, and future new/set conversions.
 //!
 //! Replaces MoveReport, DeleteReport, RepairApplyReport.
@@ -136,7 +136,7 @@ pub struct CascadeFailure {
     pub file: String,
     pub from: String,
     pub to: String,
-    /// Reason code: `read_failed` | `write_failed`.
+    /// Reason code: `read-failed` | `write-failed`.
     pub reason: String,
     /// The underlying io error string (e.g. "Permission denied (os error 13)").
     /// Present when known; the actionable "why" behind the reason code.
@@ -161,7 +161,7 @@ pub struct CascadeSkip {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum OpStatus {
     Applied,
     Skipped,
@@ -334,9 +334,11 @@ mod tests {
     }
 
     #[test]
-    fn op_status_serializes_as_snake_case() {
+    fn op_status_serializes_as_kebab_case() {
+        // NRN-190: op-status VALUES are canonically kebab on the wire, matching
+        // the sibling `ApplyOutcome` and the kebab skip-reason codes.
         let json = serde_json::to_string(&OpStatus::NotRun).unwrap();
-        assert_eq!(json, "\"not_run\"");
+        assert_eq!(json, "\"not-run\"");
         let parsed: OpStatus = serde_json::from_str("\"failed\"").unwrap();
         assert_eq!(parsed, OpStatus::Failed);
     }
@@ -448,13 +450,13 @@ mod tests {
                 file: "d.md".into(),
                 from: "[[a]]".into(),
                 to: "[[b]]".into(),
-                reason: "write_failed".into(),
+                reason: "write-failed".into(),
                 detail: Some("Permission denied (os error 13)".into()),
             }],
         };
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["failed"], 1);
-        assert_eq!(json["failures"][0]["reason"], "write_failed");
+        assert_eq!(json["failures"][0]["reason"], "write-failed");
         assert_eq!(json["failures"][0]["file"], "d.md");
         assert_eq!(
             json["failures"][0]["detail"],

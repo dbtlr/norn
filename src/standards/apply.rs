@@ -380,8 +380,8 @@ impl LinkSkipReason {
     pub fn code(self) -> &'static str {
         match self {
             LinkSkipReason::Drifted => "drifted",
-            LinkSkipReason::SourceMissing => "source_missing",
-            LinkSkipReason::WouldCorruptFrontmatter => "would_corrupt_frontmatter",
+            LinkSkipReason::SourceMissing => "source-missing",
+            LinkSkipReason::WouldCorruptFrontmatter => "would-corrupt-frontmatter",
         }
     }
 }
@@ -407,8 +407,8 @@ pub enum LinkFailReason {
 impl LinkFailReason {
     pub fn code(self) -> &'static str {
         match self {
-            LinkFailReason::ReadFailed => "read_failed",
-            LinkFailReason::WriteFailed => "write_failed",
+            LinkFailReason::ReadFailed => "read-failed",
+            LinkFailReason::WriteFailed => "write-failed",
         }
     }
 }
@@ -2972,13 +2972,13 @@ mod tests {
 
     #[test]
     fn link_fail_and_skip_reason_codes_are_stable() {
-        assert_eq!(LinkFailReason::ReadFailed.code(), "read_failed");
-        assert_eq!(LinkFailReason::WriteFailed.code(), "write_failed");
+        assert_eq!(LinkFailReason::ReadFailed.code(), "read-failed");
+        assert_eq!(LinkFailReason::WriteFailed.code(), "write-failed");
         assert_eq!(LinkSkipReason::Drifted.code(), "drifted");
-        assert_eq!(LinkSkipReason::SourceMissing.code(), "source_missing");
+        assert_eq!(LinkSkipReason::SourceMissing.code(), "source-missing");
         assert_eq!(
             LinkSkipReason::WouldCorruptFrontmatter.code(),
-            "would_corrupt_frontmatter"
+            "would-corrupt-frontmatter"
         );
     }
 
@@ -3050,7 +3050,7 @@ mod tests {
         assert_eq!(outcome.skipped[0].file.as_str(), "b.md");
         assert_eq!(
             outcome.skipped[0].reason.code(),
-            "would_corrupt_frontmatter"
+            "would-corrupt-frontmatter"
         );
         assert_eq!(
             std::fs::read_to_string(root.join("b.md")).unwrap(),
@@ -3160,7 +3160,7 @@ mod tests {
             "absent backlinker must be recorded as skipped"
         );
         assert_eq!(outcome.skipped[0].file.as_str(), "ghost.md");
-        assert_eq!(outcome.skipped[0].reason.code(), "source_missing");
+        assert_eq!(outcome.skipped[0].reason.code(), "source-missing");
     }
 
     #[test]
@@ -3388,7 +3388,7 @@ mod tests {
             "directory-at-path must be recorded as a failure"
         );
         assert_eq!(outcome.failed[0].file.as_str(), "dir-backlinker.md");
-        assert_eq!(outcome.failed[0].reason.code(), "read_failed");
+        assert_eq!(outcome.failed[0].reason.code(), "read-failed");
         assert_eq!(
             outcome.rewritten.len(),
             1,

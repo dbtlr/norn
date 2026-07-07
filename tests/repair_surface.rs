@@ -168,6 +168,6 @@ fn old_repair_apply_subcommand_is_gone() {
         .unwrap();
     assert!(
         !out.status.success(),
-        "`repair apply` subcommand must be removed (use `norn migrate` instead)"
+        "`repair apply` subcommand must be removed (use `norn apply` instead)"
     );
 }

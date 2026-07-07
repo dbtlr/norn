@@ -1,4 +1,4 @@
-//! `vault.repair_plan` — produce a deterministic `MigrationPlan` without applying it.
+//! `vault.repair` — produce a deterministic `MigrationPlan` without applying it.
 //!
 //! The pure handler drives the same pipeline as `norn repair --plan`:
 //!
@@ -8,7 +8,7 @@
 //! 3. Apply triage filters via `filter_findings`.
 //! 4. Call `plan_from_findings` to build the in-memory `MigrationPlan`.
 //! 5. Apply `--skip-reason` narrowing to the skipped set.
-//! 6. Serialize the plan as `serde_json::Value` into `RepairPlanOutput`.
+//! 6. Serialize the plan as `serde_json::Value` into `RepairOutput`.
 //!
 //! **Read-only guarantee:** this tool calls `repair::run_plan` logic up to the
 //! point where it returns the `MigrationPlan` in memory.  It never calls
@@ -22,7 +22,7 @@
 //!
 //! The returned `plan` JSON is byte-for-byte identical to what
 //! `norn repair --plan --format json` emits: `serde_json::to_value(&plan)`.
-//! `vault.apply_plan` (Task 12) can consume it directly.
+//! `vault.apply` (Task 12) can consume it directly.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ use crate::repair::skip_reasons::code_matches_any;
 use crate::standards::{validate_with_compiled, ConfidenceFilter, RepairPlanFilters};
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 
-/// Parameters for `vault.repair_plan`.
+/// Parameters for `vault.repair`.
 ///
 /// Mirrors the agent-relevant knobs from `norn repair --plan`:
 /// triage filters narrow which findings are fed to the planner, and
@@ -44,7 +44,7 @@ use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 /// All fields are optional; omitting them matches `norn repair --plan`
 /// bare defaults (all bands, no triage filters, no skip-reason filter).
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-pub struct RepairPlanParams {
+pub struct RepairParams {
     /// Filter findings by code before planning. Comma-separated.
     #[serde(default)]
     pub code: Vec<String>,
@@ -94,21 +94,21 @@ pub enum ConfidenceBand {
     High,
 }
 
-/// Structured output for `vault.repair_plan`.
+/// Structured output for `vault.repair`.
 ///
 /// `plan` is the `MigrationPlan` serialized to `serde_json::Value`.  It is
 /// structurally identical to the JSON written by `norn repair --plan --out plan.json`
-/// and can be fed to `vault.apply_plan` (Task 12) unchanged.
+/// and can be fed to `vault.apply` (Task 12) unchanged.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct RepairPlanOutput {
+pub struct RepairOutput {
     /// The full `MigrationPlan` as a JSON object.  Fields:
     /// `schema_version` (u32), `vault_root` (string), `operations` (array),
     /// `skipped` (array, omitted when empty).
-    /// Feed this value to `vault.apply_plan` to execute the rewrites.
+    /// Feed this value to `vault.apply` to execute the rewrites.
     pub plan: serde_json::Value,
 }
 
-/// Pure handler for `vault.repair_plan`.
+/// Pure handler for `vault.repair`.
 ///
 /// Mirrors `repair::run_plan` exactly up to the `MigrationPlan` in-memory
 /// construction — with NO filesystem writes (no `fs::write`, no apply).
@@ -116,7 +116,7 @@ pub struct RepairPlanOutput {
 /// Uses `cache_cmd::load_graph_index` (not the cache reader's version) so
 /// that `files.ignore` patterns are honoured at index-load time, matching the
 /// CLI's `norn repair` behaviour.
-pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutput> {
+pub fn handle(ctx: &VaultContext, p: RepairParams) -> Result<RepairOutput> {
     // Load the graph index via the same entry point the CLI uses.
     // `false` means "allow cache refresh if stale" (mirrors `no_cache_refresh = false`).
     // Use the context's current config (`ctx.config()`; hot-swapped in warm mode) —
@@ -135,7 +135,7 @@ pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutpu
 
     // Build a RepairArgs equivalent from the MCP params for the shared filter helpers.
     // We construct it inline — only the triage and confidence fields are used by
-    // `repair_plan_filters` and `filter_findings`; `plan`, `format`, `out` are
+    // `plan_filters` and `filter_findings`; `plan`, `format`, `out` are
     // irrelevant to the in-memory plan path.
     let fake_args = RepairArgs {
         plan: true,
@@ -168,7 +168,7 @@ pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutpu
     };
     let filtered_findings = filter_findings(findings, &filter_opts)?;
 
-    // Build the RepairPlanFilters from the triage args (mirrors `repair::repair_plan_filters`).
+    // Build the RepairPlanFilters from the triage args (mirrors `repair::plan_filters`).
     let plan_filters = RepairPlanFilters {
         code: normalized_filter_values(&fake_args.triage.code),
         severity: normalized_filter_values(&fake_args.triage.severity),
@@ -205,7 +205,7 @@ pub fn handle(ctx: &VaultContext, p: RepairPlanParams) -> Result<RepairPlanOutpu
     // same bytes `norn repair --plan --format json` writes.
     let plan_value = serde_json::to_value(&plan)?;
 
-    Ok(RepairPlanOutput { plan: plan_value })
+    Ok(RepairOutput { plan: plan_value })
 }
 
 fn normalized_filter_values(values: &[String]) -> Vec<String> {
@@ -259,7 +259,7 @@ mod tests {
         let (_tmp, root) = vault_with_fixable_link();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let out = handle(&ctx, RepairPlanParams::default()).expect("handle should succeed");
+        let out = handle(&ctx, RepairParams::default()).expect("handle should succeed");
 
         // The plan must be a JSON object (MigrationPlan shape).
         assert!(
@@ -344,7 +344,7 @@ mod tests {
         .unwrap();
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
-        let out = handle(&ctx, RepairPlanParams::default()).expect("handle should succeed");
+        let out = handle(&ctx, RepairParams::default()).expect("handle should succeed");
 
         assert!(
             out.plan.is_object(),
@@ -369,13 +369,13 @@ mod tests {
             std::fs::read_to_string(root.join("source.md")).expect("read source.md before");
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
-        handle(&ctx, RepairPlanParams::default()).expect("handle should succeed");
+        handle(&ctx, RepairParams::default()).expect("handle should succeed");
 
         let source_after =
             std::fs::read_to_string(root.join("source.md")).expect("read source.md after");
         assert_eq!(
             source_before, source_after,
-            "source.md must be unmodified after repair_plan (read-only tool)"
+            "source.md must be unmodified after repair (read-only tool)"
         );
     }
 }

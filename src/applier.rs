@@ -4,7 +4,7 @@
 //! This module is the integration point that wires the MigrationPlan →
 //! PlannedChange expansion to the existing pass-based apply orchestrator
 //! (repair_apply.rs). Every document-mutation command (move, delete,
-//! rewrite-wikilink, migrate) builds a MigrationPlan and applies it here,
+//! rewrite-wikilink, apply) builds a MigrationPlan and applies it here,
 //! emitting a single ApplyReport envelope.
 //!
 //! # Provenance tracking
@@ -1265,7 +1265,7 @@ mod tests {
     ///   `applied` (X was written), op1 is `failed` carrying `error.code`, and the
     ///   report never implies a byte-identical vault.
     ///
-    /// (A hydrated migrate `delete` cannot carry a *stale* hash — hydration fills
+    /// (A hydrated apply `delete` cannot carry a *stale* hash — hydration fills
     /// its empty hash from the index, and Phase B checks against that same index
     /// snapshot — so `unknown-path` is the reachable Phase-B `is_precondition`
     /// failure that reproduces the exact re-raise-after-write shape.)
@@ -1400,7 +1400,7 @@ mod tests {
     fn migrate_add_frontmatter_on_ambiguous_key_doc_is_refused_not_duplicated() {
         // V1 (NRN-141): `"\x61"` decodes to serde key `a` but the scanner reads
         // `x61`, so the span locator refuses the whole document (empty spans). A
-        // migrate-plan `add_frontmatter` for the ALREADY-present `title` then
+        // MigrationPlan `add_frontmatter` for the ALREADY-present `title` then
         // slips past the `FieldAlreadyPresent` refusal (which keys off span
         // presence) and would splice a duplicate `title:` line — unparseable YAML
         // that drops every field while the run reports success. The post-image
@@ -1457,7 +1457,7 @@ mod tests {
         // plan can never reach it: `changes_by_path` — the validation gate every
         // apply path runs before Phase A — refuses duplicate (path, field) ops
         // with ConflictingFieldChange. This pins that refusal for the claimed
-        // vector, a hand-authored migrate plan; the file must stay untouched.
+        // vector, a hand-authored MigrationPlan; the file must stay untouched.
         let tmp = tempfile::Builder::new()
             .prefix("applier-dup-field-")
             .tempdir()

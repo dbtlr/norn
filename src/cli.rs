@@ -202,13 +202,14 @@ Exit codes: 0 success or dry-run, 1 user-cancelled or runtime failure, 2 pre-fli
     Delete(DeleteArgs),
     #[command(
         disable_help_flag = true,
-        about = "Apply a MigrationPlan — move, delete, rewrite, and frontmatter ops from a plan file"
+        about = "Apply a MigrationPlan — execute move, delete, rewrite, and frontmatter ops from a plan file",
+        long_about = "Apply a MigrationPlan: execute the move, delete, rewrite, and frontmatter operations recorded in a plan file (or stdin `-`).\n\n`apply` is the execute half of norn's plan-then-apply doctrine — it consumes ANY MigrationPlan (the artifact `norn repair --plan` emits, or a hand-authored one) and writes the changes, checking every precondition before touching a file. It is the one command that writes from a plan; nothing else does.\n\nExit codes: 0 success or dry-run, 1 partial-apply failure, 2 pre-flight refusal."
     )]
-    Migrate(MigrateArgs),
+    Apply(ApplyArgs),
     #[command(
         disable_help_flag = true,
         about = "Surface deterministic-repair findings; --plan emits a MigrationPlan",
-        long_about = "Surface deterministic-repair findings for the vault.\n\nBare `norn repair` prints a read-only findings summary (placeholder for a future interactive workflow).\n\n`norn repair --plan` generates a MigrationPlan from the configured deterministic repair rules and emits it as `report` (human summary, TTY default), `json` (full MigrationPlan envelope, pipe default), or `paths` (one affected path per line). Pipe the JSON into `norn migrate -` to apply it. Use `--skip-reason <PATTERN>` to filter skipped findings by reason code; glob patterns accepted."
+        long_about = "Surface deterministic-repair findings for the vault.\n\nBare `norn repair` prints a read-only findings summary (placeholder for a future interactive workflow).\n\n`norn repair --plan` generates a MigrationPlan from the configured deterministic repair rules and emits it as `report` (human summary, TTY default), `json` (full MigrationPlan envelope, pipe default), or `paths` (one affected path per line). Pipe the JSON into `norn apply -` to apply it. Use `--skip-reason <PATTERN>` to filter skipped findings by reason code; glob patterns accepted."
     )]
     Repair(RepairArgs),
     #[command(
@@ -1156,9 +1157,11 @@ pub enum NewFormat {
 #[derive(Debug, clap::Args)]
 pub struct MoveArgs {
     /// Source: vault-relative path or unique stem.
+    #[arg(value_name = "FROM")]
     pub src: String,
 
     /// Destination: vault-relative path.
+    #[arg(value_name = "TO")]
     pub dst: String,
 
     /// Skip interactive confirm and apply.
@@ -1181,7 +1184,7 @@ pub struct MoveArgs {
     #[arg(long, short = 'p')]
     pub parents: bool,
 
-    /// When SRC and DST are directories, recursively move all .md files
+    /// When FROM and TO are directories, recursively move all .md files
     /// preserving structure (one cascade pass for all backlinks).
     #[arg(long, short = 'r')]
     pub recursive: bool,
@@ -1198,7 +1201,7 @@ pub enum MoveFormat {
 }
 
 #[derive(Debug, clap::Args)]
-pub struct MigrateArgs {
+pub struct ApplyArgs {
     /// Path to MigrationPlan file (YAML or JSON). Use `-` for stdin.
     #[arg(value_name = "PLAN")]
     pub plan_path: String,
@@ -1212,8 +1215,8 @@ pub struct MigrateArgs {
     pub yes: bool,
 
     /// Output format.
-    #[arg(long, value_enum, default_value_t = MigrateFormat::Records)]
-    pub format: MigrateFormat,
+    #[arg(long, value_enum, default_value_t = ApplyFormat::Records)]
+    pub format: ApplyFormat,
 
     /// Input plan format. Auto-detected by extension (.yaml/.yml → YAML, else JSON).
     /// Required for stdin (`-`) when the plan is YAML.
@@ -1231,7 +1234,7 @@ pub struct MigrateArgs {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum MigrateFormat {
+pub enum ApplyFormat {
     Records,
     Json,
 }
@@ -1423,7 +1426,7 @@ pub enum OutputFormat {
 pub enum RepairPlanFormat {
     /// Decision-support report for human review. Default for TTY.
     Report,
-    /// Full JSON envelope. Default when piped. Feed to `norn migrate -` to apply.
+    /// Full JSON envelope. Default when piped. Feed to `norn apply -` to apply.
     Json,
     /// Affected document paths, one per line, sorted and deduplicated.
     Paths,

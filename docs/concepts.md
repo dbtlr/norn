@@ -71,12 +71,12 @@ The product loop is four stages:
 
 1. **Detect** drift with graph facts and configured `validate.rules`. Output: findings.
 2. **Plan** supported repairs as a JSON artifact. Output: `plan.json`.
-3. **Apply** the plan explicitly via `norn migrate`. Output: modified files + an apply report.
+3. **Apply** the plan explicitly via `norn apply`. Output: modified files + an apply report.
 4. **Verify** the vault after changes. Apply already re-parses and checks every frontmatter write against its intended value before reporting success (no opt-in flag); run `norn validate --summary` again as the post-hoc check across the whole vault.
 
 Validation is read-only and does not guess repairs. Repair planning is read-only and produces only inspectable artifacts. There is no hidden write path.
 
-Two explicit write surfaces exist: `norn migrate` is the finding-driven batch write path — it consumes a `MigrationPlan` artifact. `norn new`, `norn set`, `norn move`, and `norn delete` are the operator-driven CRUD surface for direct one-document mutations. Both paths are safe-by-default (dry-run previews, `--yes` to apply) and both go through the same underlying apply machinery.
+Two explicit write surfaces exist: `norn apply` is the finding-driven batch write path — it consumes a `MigrationPlan` artifact. `norn new`, `norn set`, `norn move`, and `norn delete` are the operator-driven CRUD surface for direct one-document mutations. Both paths are safe-by-default (dry-run previews, `--yes` to apply) and both go through the same underlying apply machinery.
 
 Migration plans are schema-versioned (`schema_version: 1` as of v0.33). Apply rejects unsupported schema versions, plans for a different vault root, stale document hashes, conflicting field changes, and expected-old-value mismatches.
 
@@ -103,7 +103,7 @@ Most commands accept `--format`, drawing from a command-specific set of formats 
 - `records` — human-readable, per-item blocks. The schema is not stable across point releases.
 - `paths` — one vault-relative path per line, where the command has a natural per-row path (best for piping into `xargs`, `fzf`, etc.).
 
-The default when `--format` is omitted varies by command: `find` and `validate` auto-detect (a human default on a terminal, a machine-readable default when piped); `count`, `migrate`, and `config show`/`config validate` default to a fixed human-readable format regardless of TTY; `repair --plan` defaults to `report` on a terminal and `json` when piped. Pass an explicit `--format` for stable contracts — see each command's page for its exact set and default.
+The default when `--format` is omitted varies by command: `find` and `validate` auto-detect (a human default on a terminal, a machine-readable default when piped); `count`, `apply`, and `config show`/`config validate` default to a fixed human-readable format regardless of TTY; `repair --plan` defaults to `report` on a terminal and `json` when piped. Pass an explicit `--format` for stable contracts — see each command's page for its exact set and default.
 
 ## Next
 

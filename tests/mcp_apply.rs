@@ -1,19 +1,19 @@
-//! Integration round-trip for the `vault.apply_plan` MCP tool (NRN-33, Task 12).
+//! Integration round-trip for the `vault.apply` MCP tool (NRN-33, Task 12).
 //!
 //! Drives the real `norn mcp` binary as a child process against a seeded temp
-//! vault with a FIXABLE broken wikilink. Exercises the full repair_plan →
-//! apply_plan composition over the wire, plus mutation-safety and audit invariants.
+//! vault with a FIXABLE broken wikilink. Exercises the full repair →
+//! apply composition over the wire, plus mutation-safety and audit invariants.
 //!
 //! Tests:
-//! 1. `tools/list` advertises `vault.apply_plan` with a non-empty `inputSchema`
+//! 1. `tools/list` advertises `vault.apply` with a non-empty `inputSchema`
 //!    and a `confirm` property.
-//! 2. **Dry-run:** `vault.apply_plan` with `confirm: false` (the default) returns
+//! 2. **Dry-run:** `vault.apply` with `confirm: false` (the default) returns
 //!    `dry_run: true` AND the broken link is STILL broken on disk (disk unchanged).
-//! 3. **Confirm:** `vault.apply_plan` with `confirm: true` applies the fix on disk
+//! 3. **Confirm:** `vault.apply` with `confirm: true` applies the fix on disk
 //!    (the broken link is rewritten) AND the report has `dry_run: false` +
 //!    `applied >= 1`.
-//! 4. **Compose:** call `vault.repair_plan` then feed its `plan` value directly
-//!    into `vault.apply_plan confirm:true` — proves end-to-end composition over
+//! 4. **Compose:** call `vault.repair` then feed its `plan` value directly
+//!    into `vault.apply confirm:true` — proves end-to-end composition over
 //!    the wire. Uses two separate processes (non-idempotent mutation cannot share a
 //!    connection with a follow-up call in a test).
 //! 5. **Malformed plan:** a plan with wrong/missing `schema_version` returns an
@@ -178,9 +178,9 @@ fn initialize_msg(id: u64, client_name: &str) -> serde_json::Value {
     })
 }
 
-/// Build a plan value by calling `vault.repair_plan` in one MCP session.
+/// Build a plan value by calling `vault.repair` in one MCP session.
 /// Returns the plan `serde_json::Value` from `result.structuredContent.plan`.
-fn get_repair_plan(vault: &TempDir) -> serde_json::Value {
+fn get_repair_output(vault: &TempDir) -> serde_json::Value {
     let responses = run_mcp_sequence(
         vault,
         vec![
@@ -189,17 +189,17 @@ fn get_repair_plan(vault: &TempDir) -> serde_json::Value {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": { "name": "vault.repair_plan", "arguments": {} }
+                "params": { "name": "vault.repair", "arguments": {} }
             }),
         ],
     );
     let resp = responses
         .iter()
         .find(|r| r["id"] == 2)
-        .expect("no repair_plan response");
+        .expect("no vault.repair response");
     assert!(
         resp.get("error").is_none(),
-        "vault.repair_plan must not error: {resp}"
+        "vault.repair must not error: {resp}"
     );
     resp["result"]["structuredContent"]["plan"].clone()
 }
@@ -207,7 +207,7 @@ fn get_repair_plan(vault: &TempDir) -> serde_json::Value {
 // ── Test 1: tools/list + schema check ───────────────────────────────────────────
 
 #[test]
-fn lists_vault_apply_plan_with_confirm_property() {
+fn lists_vault_apply_with_confirm_property() {
     let vault = vault_with_fixable_link();
 
     let responses = run_mcp_sequence(
@@ -233,10 +233,10 @@ fn lists_vault_apply_plan_with_confirm_property() {
 
     let tool = tools
         .iter()
-        .find(|t| t["name"] == "vault.apply_plan")
+        .find(|t| t["name"] == "vault.apply")
         .unwrap_or_else(|| {
             panic!(
-                "tools/list must include vault.apply_plan, got: {:?}",
+                "tools/list must include vault.apply, got: {:?}",
                 tools
                     .iter()
                     .map(|t| t["name"].as_str().unwrap_or("?"))
@@ -247,22 +247,22 @@ fn lists_vault_apply_plan_with_confirm_property() {
     let schema = &tool["inputSchema"];
     assert!(
         schema.is_object(),
-        "vault.apply_plan inputSchema must be an object, got: {schema}"
+        "vault.apply inputSchema must be an object, got: {schema}"
     );
     assert!(
         schema["properties"]
             .as_object()
             .map(|p| !p.is_empty())
             .unwrap_or(false),
-        "vault.apply_plan inputSchema must have non-empty properties, got: {schema}"
+        "vault.apply inputSchema must have non-empty properties, got: {schema}"
     );
     assert!(
         schema["properties"].get("confirm").is_some(),
-        "vault.apply_plan inputSchema must expose a `confirm` property, got: {schema}"
+        "vault.apply inputSchema must expose a `confirm` property, got: {schema}"
     );
     assert!(
         schema["properties"].get("plan").is_some(),
-        "vault.apply_plan inputSchema must expose a `plan` property, got: {schema}"
+        "vault.apply inputSchema must expose a `plan` property, got: {schema}"
     );
 }
 
@@ -276,12 +276,12 @@ fn dry_run_then_confirm_roundtrip() {
     let vault = vault_with_fixable_link();
 
     // ── Step 1: get the repair plan ──────────────────────────────────────────────
-    let plan = get_repair_plan(&vault);
+    let plan = get_repair_output(&vault);
     assert!(
         plan["operations"]
             .as_array()
             .is_some_and(|ops| !ops.is_empty()),
-        "repair_plan must return ≥1 operation for the fixable vault: {plan}"
+        "vault.repair must return ≥1 operation for the fixable vault: {plan}"
     );
 
     // ── Step 2: dry-run apply (confirm:false, the default) ───────────────────────
@@ -296,7 +296,7 @@ fn dry_run_then_confirm_roundtrip() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "vault.apply_plan",
+                    "name": "vault.apply",
                     "arguments": { "plan": plan.clone() }
                     // confirm absent → false → dry-run
                 }
@@ -310,7 +310,7 @@ fn dry_run_then_confirm_roundtrip() {
         .expect("no dry-run response");
     assert!(
         dry_resp.get("error").is_none(),
-        "dry-run vault.apply_plan must not error, got: {dry_resp}"
+        "dry-run vault.apply must not error, got: {dry_resp}"
     );
     let dry_report = &dry_resp["result"]["structuredContent"]["report"];
     assert_eq!(
@@ -347,7 +347,7 @@ fn dry_run_then_confirm_roundtrip() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "vault.apply_plan",
+                    "name": "vault.apply",
                     "arguments": { "plan": plan, "confirm": true }
                 }
             }),
@@ -360,7 +360,7 @@ fn dry_run_then_confirm_roundtrip() {
         .expect("no confirm response");
     assert!(
         confirm_resp.get("error").is_none(),
-        "confirm vault.apply_plan must not error, got: {confirm_resp}"
+        "confirm vault.apply must not error, got: {confirm_resp}"
     );
     let confirm_report = &confirm_resp["result"]["structuredContent"]["report"];
     assert_eq!(
@@ -409,7 +409,7 @@ fn malformed_plan_returns_mcp_error() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "vault.apply_plan",
+                    "name": "vault.apply",
                     "arguments": { "plan": bad_plan, "confirm": false }
                 }
             }),
@@ -478,7 +478,7 @@ fn read_all_event_lines(state_root: &Path) -> Vec<serde_json::Value> {
 #[test]
 fn confirm_writes_audit_event_stream_dry_run_does_not() {
     let vault = vault_with_fixable_link();
-    let plan = get_repair_plan(&vault);
+    let plan = get_repair_output(&vault);
 
     // ── Dry-run: no events ────────────────────────────────────────────────────
     let state_dry = vault.path().join(".xdg-state-dryrun");
@@ -492,7 +492,7 @@ fn confirm_writes_audit_event_stream_dry_run_does_not() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "vault.apply_plan",
+                    "name": "vault.apply",
                     "arguments": { "plan": plan.clone() }
                     // confirm absent → false → dry-run
                 }
@@ -518,7 +518,7 @@ fn confirm_writes_audit_event_stream_dry_run_does_not() {
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "vault.apply_plan",
+                    "name": "vault.apply",
                     "arguments": { "plan": plan, "confirm": true }
                 }
             }),
