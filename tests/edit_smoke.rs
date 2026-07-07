@@ -274,6 +274,77 @@ fn edit_sugar_op_flag_with_edits_json_error() {
 }
 
 #[test]
+fn edit_sugar_str_replace_new_content_conflict_refuses() {
+    // F2: --new and --content are aliases on str_replace; both present with
+    // DIFFERENT values is ambiguous. --new used to silently win, dropping
+    // --content. Now it must refuse (exit 2).
+    let tmp = fixture();
+    let doc = tmp.path().join("note.md");
+    let seed = "---\ntype: note\n---\nhello world\n";
+    fs::write(&doc, seed).unwrap();
+
+    let out = run_edit_args(
+        &tmp,
+        &[
+            "note.md",
+            "--str-replace",
+            "world",
+            "--new",
+            "AAA",
+            "--content",
+            "BBB",
+            "--yes",
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "conflicting --new/--content should hard-error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("conflicting payload") && stderr.contains("differ"),
+        "expected F2 conflict message, got: {stderr}"
+    );
+    assert_eq!(fs::read_to_string(&doc).unwrap(), seed);
+}
+
+#[test]
+fn edit_sugar_delete_section_with_content_refuses() {
+    // F3: --content does not apply to delete_section; supplying it would be a
+    // silent drop. Refuse (exit 2) with a message naming the offending flag.
+    let tmp = fixture();
+    let doc = tmp.path().join("note.md");
+    let seed = "---\ntype: note\n---\nbody\n\n## Notes\nkeep\n";
+    fs::write(&doc, seed).unwrap();
+
+    let out = run_edit_args(
+        &tmp,
+        &[
+            "note.md",
+            "--delete-section",
+            "Notes",
+            "--content",
+            "X",
+            "--yes",
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "delete-section + --content should hard-error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--content") && stderr.contains("delete_section"),
+        "expected F3 message naming --content and delete_section, got: {stderr}"
+    );
+    assert_eq!(fs::read_to_string(&doc).unwrap(), seed);
+}
+
+#[test]
 fn edit_ops_file_reads_from_file() {
     let tmp = fixture();
     let doc = tmp.path().join("note.md");
@@ -295,4 +366,37 @@ fn edit_ops_file_reads_from_file() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(fs::read_to_string(&doc).unwrap().contains("hello norn"));
+}
+
+#[test]
+fn edit_sugar_with_piped_stdin_ops_array_refuses() {
+    // F1: op-flag sugar + an ops array piped on stdin is a conflict. The sugar
+    // path used to silently swallow the piped ops (reading stdin only in the
+    // no-sugar branch); now it must refuse (exit 2) before any lock/write, and
+    // neither mutation may apply.
+    let tmp = fixture();
+    let doc = tmp.path().join("note.md");
+    let seed = "---\ntype: note\n---\nhello world\n\n## Notes\nkeep\n";
+    fs::write(&doc, seed).unwrap();
+
+    let out = run_edit(
+        &tmp,
+        "note.md",
+        r#"[{"op":"str_replace","old":"world","new":"PIPED"}]"#,
+        &["--delete-section", "Notes", "--yes"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "op flag + piped stdin should hard-error: stdout {} stderr {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("op-flag sugar conflicts with an ops array on stdin"),
+        "expected F1 conflict message, got: {stderr}"
+    );
+    // Neither the piped str_replace nor the sugar delete-section applied.
+    assert_eq!(fs::read_to_string(&doc).unwrap(), seed);
 }

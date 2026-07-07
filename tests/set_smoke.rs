@@ -99,6 +99,35 @@ fn set_refuses_when_doc_not_found() {
 }
 
 #[test]
+fn set_forgot_doc_field_shaped_target_hints() {
+    // F4: `norn set status=done` (DOC forgotten) binds `status=done` as DOC and
+    // fails to resolve. The not-found error should hint that the token looks
+    // like a field assignment.
+    let tmp = fixture_tempdir();
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "status=done",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "field-shaped DOC that fails to resolve should refuse: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("looks like a field assignment") && stderr.contains("norn set <doc>"),
+        "expected forgot-doc hint, got: {stderr}"
+    );
+}
+
+#[test]
 fn set_refuses_cross_class_conflict() {
     let tmp = fixture_tempdir();
     let doc = tmp.path().join("note.md");
@@ -624,6 +653,47 @@ fn set_positional_without_separator_hard_errors() {
     // No mutation on refusal.
     let final_content = fs::read_to_string(&doc).unwrap();
     assert!(final_content.contains("status: draft"), "{final_content}");
+}
+
+#[test]
+fn set_bad_positional_fails_fast_without_lock_or_cache() {
+    // F5: a pure argv error (separator-less positional) must be rejected BEFORE
+    // the mutation lock is acquired and the cache is loaded — no side effects.
+    // The cache DB lives under XDG_CACHE_HOME; if the fast path fired, that tree
+    // is never created.
+    let tmp = fixture_tempdir();
+    let doc = tmp.path().join("note.md");
+    fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "note.md",
+            "badtoken",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "separator-less positional should fail fast: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected key=value") && stderr.contains("badtoken"),
+        "error should name the offending token: {stderr}"
+    );
+    // No cache tree built => cache load never ran => the lock was never acquired.
+    assert!(
+        !tmp.path().join(".xdg-cache").exists(),
+        "bad positional must not load the cache (no lock acquired)"
+    );
+    // File untouched.
+    assert!(fs::read_to_string(&doc).unwrap().contains("status: draft"));
 }
 
 #[test]

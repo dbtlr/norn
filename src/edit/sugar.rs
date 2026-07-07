@@ -47,6 +47,11 @@ pub fn desugar(args: &EditArgs) -> Result<Option<Vec<EditOp>>> {
     }
 
     if present.is_empty() {
+        // No op-flag sugar: the canonical `--edits-json` / `--ops-file` / stdin
+        // path carries the ops. The payload flags (`--new` / `--content` /
+        // `--replace-all`) belong to a sugar op; supplying one here would be
+        // silently dropped, so refuse it (F3).
+        reject_unconsumed_payloads(args, None, &[])?;
         return Ok(None);
     }
     if present.len() > 1 {
@@ -63,37 +68,57 @@ pub fn desugar(args: &EditArgs) -> Result<Option<Vec<EditOp>>> {
     }
 
     let op = if let Some(old) = &args.str_replace {
-        // `--content` is an accepted alias for `--new` on str_replace.
-        let new = args
-            .new
-            .as_ref()
-            .or(args.content.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("--str-replace requires --new (or --content)"))?;
+        // str_replace consumes every payload flag: `--content` is an accepted
+        // alias for `--new`, and `--replace-all` applies.
+        reject_unconsumed_payloads(
+            args,
+            Some("str_replace"),
+            &[Payload::New, Payload::Content, Payload::ReplaceAll],
+        )?;
+        // `--content` is an accepted alias for `--new` on str_replace. Supplying
+        // BOTH with DIFFERENT values is ambiguous — refuse rather than silently
+        // letting one win (F2). Both present with the SAME value is fine.
+        let new = match (args.new.as_ref(), args.content.as_ref()) {
+            (Some(n), Some(c)) if n != c => {
+                bail!("conflicting payload: --new and --content differ");
+            }
+            (Some(n), _) => n,
+            (None, Some(c)) => c,
+            (None, None) => {
+                bail!("--str-replace requires --new (or --content)")
+            }
+        };
         EditOp::StrReplace {
             old: old.clone(),
             new: new.clone(),
             replace_all: args.replace_all,
         }
     } else if let Some(heading) = &args.replace_section {
+        reject_unconsumed_payloads(args, Some("replace_section"), &[Payload::Content])?;
         EditOp::ReplaceSection {
             heading: heading.clone(),
             content: require_content(args, "--replace-section")?,
         }
     } else if let Some(heading) = &args.append_to_section {
+        reject_unconsumed_payloads(args, Some("append_to_section"), &[Payload::Content])?;
         EditOp::AppendToSection {
             heading: heading.clone(),
             content: require_content(args, "--append-to-section")?,
         }
     } else if let Some(heading) = &args.delete_section {
+        // delete_section takes no payload at all.
+        reject_unconsumed_payloads(args, Some("delete_section"), &[])?;
         EditOp::DeleteSection {
             heading: heading.clone(),
         }
     } else if let Some(heading) = &args.insert_before_heading {
+        reject_unconsumed_payloads(args, Some("insert_before_heading"), &[Payload::Content])?;
         EditOp::InsertBeforeHeading {
             heading: heading.clone(),
             content: require_content(args, "--insert-before-heading")?,
         }
     } else if let Some(heading) = &args.insert_after_heading {
+        reject_unconsumed_payloads(args, Some("insert_after_heading"), &[Payload::Content])?;
         EditOp::InsertAfterHeading {
             heading: heading.clone(),
             content: require_content(args, "--insert-after-heading")?,
@@ -103,6 +128,33 @@ pub fn desugar(args: &EditArgs) -> Result<Option<Vec<EditOp>>> {
     };
 
     Ok(Some(vec![op]))
+}
+
+/// The three payload flags a sugar op may carry.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Payload {
+    New,
+    Content,
+    ReplaceAll,
+}
+
+/// Refuse any payload flag (`--new` / `--content` / `--replace-all`) that the
+/// selected op does not consume (F3). `op` names the selected op for the error
+/// (None = no op-flag sugar, i.e. the canonical `--edits-json`/`--ops-file`/
+/// stdin path); `valid` enumerates the payloads the op accepts. Any payload set
+/// but absent from `valid` is a hard error — never a silent drop.
+fn reject_unconsumed_payloads(args: &EditArgs, op: Option<&str>, valid: &[Payload]) -> Result<()> {
+    let target = op.unwrap_or("this invocation");
+    if args.new.is_some() && !valid.contains(&Payload::New) {
+        bail!("flag --new does not apply to {target}");
+    }
+    if args.content.is_some() && !valid.contains(&Payload::Content) {
+        bail!("flag --content does not apply to {target}");
+    }
+    if args.replace_all && !valid.contains(&Payload::ReplaceAll) {
+        bail!("flag --replace-all does not apply to {target}");
+    }
+    Ok(())
 }
 
 fn require_content(args: &EditArgs, flag: &str) -> Result<String> {
@@ -254,5 +306,119 @@ mod tests {
         a.delete_section = Some("Tasks".into());
         a.ops_file = Some("ops.json".into());
         assert!(desugar(&a).is_err());
+    }
+
+    // ── F2: --new / --content conflict on str_replace ────────────────────────
+
+    #[test]
+    fn str_replace_new_and_content_differ_errors() {
+        let mut a = base_args();
+        a.str_replace = Some("old".into());
+        a.new = Some("AAA".into());
+        a.content = Some("BBB".into());
+        let err = desugar(&a).unwrap_err().to_string();
+        assert!(
+            err.contains("--new") && err.contains("--content") && err.contains("differ"),
+            "expected conflicting-payload error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn str_replace_new_and_content_same_value_ok() {
+        let mut a = base_args();
+        a.str_replace = Some("old".into());
+        a.new = Some("AAA".into());
+        a.content = Some("AAA".into());
+        let ops = desugar(&a).unwrap().unwrap();
+        assert_eq!(
+            ops,
+            vec![EditOp::StrReplace {
+                old: "old".into(),
+                new: "AAA".into(),
+                replace_all: false
+            }]
+        );
+    }
+
+    // ── F3: unconsumed payload flags are a hard error, never silently dropped ─
+
+    #[test]
+    fn delete_section_with_content_errors() {
+        let mut a = base_args();
+        a.delete_section = Some("H".into());
+        a.content = Some("X".into());
+        let err = desugar(&a).unwrap_err().to_string();
+        assert!(
+            err.contains("--content") && err.contains("delete_section"),
+            "expected unconsumed-payload error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn delete_section_with_new_errors() {
+        let mut a = base_args();
+        a.delete_section = Some("H".into());
+        a.new = Some("X".into());
+        assert!(desugar(&a).is_err());
+    }
+
+    #[test]
+    fn delete_section_with_replace_all_errors() {
+        let mut a = base_args();
+        a.delete_section = Some("H".into());
+        a.replace_all = true;
+        assert!(desugar(&a).is_err());
+    }
+
+    #[test]
+    fn replace_section_with_replace_all_errors() {
+        let mut a = base_args();
+        a.replace_section = Some("H".into());
+        a.content = Some("C".into());
+        a.replace_all = true;
+        let err = desugar(&a).unwrap_err().to_string();
+        assert!(
+            err.contains("--replace-all") && err.contains("replace_section"),
+            "expected unconsumed-payload error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn section_op_with_new_errors() {
+        let mut a = base_args();
+        a.append_to_section = Some("H".into());
+        a.content = Some("C".into());
+        a.new = Some("X".into());
+        assert!(desugar(&a).is_err());
+    }
+
+    #[test]
+    fn payload_without_op_flag_errors() {
+        // --new / --content / --replace-all supplied with NO op flag (the
+        // canonical --edits-json/--ops-file/stdin path) would be silently
+        // dropped; refuse each.
+        let mut a = base_args();
+        a.new = Some("X".into());
+        assert!(desugar(&a).is_err());
+
+        let mut b = base_args();
+        b.content = Some("X".into());
+        assert!(desugar(&b).is_err());
+
+        let mut c = base_args();
+        c.replace_all = true;
+        assert!(desugar(&c).is_err());
+    }
+
+    #[test]
+    fn payload_with_edits_json_and_no_op_flag_errors() {
+        let mut a = base_args();
+        a.edits_json = Some("[]".into());
+        a.content = Some("X".into());
+        let err = desugar(&a).unwrap_err().to_string();
+        assert!(
+            err.contains("--content") && err.contains("this invocation"),
+            "expected unconsumed-payload error, got: {err}"
+        );
     }
 }
