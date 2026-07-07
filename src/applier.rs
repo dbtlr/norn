@@ -589,6 +589,28 @@ fn build_report_ops(
             };
             let summary = build_summary(change, dry_run, create_display);
 
+            // NRN-175: structured, apply-time-resolved target path — the value a
+            // consumer would otherwise regex out of `summary`. Populated where a
+            // single natural target exists: a `create_document`'s `{{seq}}`-resolved
+            // destination, a `move_document`'s destination, and body/section edit
+            // targets. Left `None` for ops with no single natural path (link
+            // rewrites, deletes, frontmatter field ops).
+            let resolved_path: Option<&camino::Utf8Path> = match change.operation.as_str() {
+                "create_document" => create_display,
+                "move_document" => change.destination.as_deref(),
+                "replace_body"
+                | "replace_section"
+                | "append_to_section"
+                | "delete_section"
+                | "insert_before_heading"
+                | "insert_after_heading" => Some(change.path.as_path()),
+                _ => None,
+            };
+            let path = resolved_path.map(|p| p.to_string());
+            let stem = resolved_path
+                .and_then(|p| p.file_stem())
+                .map(str::to_string);
+
             let cascade = match change.operation.as_str() {
                 "move_document" | "delete_document" => Some(if dry_run {
                     // Keep today's forecast cascade from the RepairApplyReport.
@@ -608,6 +630,8 @@ fn build_report_ops(
                 kind: change.operation.clone(),
                 status,
                 from,
+                path,
+                stem,
                 summary,
                 error: None, // see note below
                 footnote: parent_op.footnote.clone(),

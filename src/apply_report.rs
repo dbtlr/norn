@@ -31,6 +31,20 @@ pub struct ApplyReportOp {
     pub status: OpStatus,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub from: Option<String>,
+    /// Structured, apply-time-resolved target path for this op — the value a
+    /// consumer would otherwise have to parse out of `summary` prose. Populated
+    /// where a single target path is naturally at hand: the `{{seq}}`-resolved
+    /// destination of a `create_document`, the destination of a `move_document`,
+    /// and the target of a body/section edit. `None` for ops with no single
+    /// natural path (e.g. link rewrites, deletes). `summary` stays free prose;
+    /// correlate structured data by `op_id`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub path: Option<String>,
+    /// Filename stem of [`ApplyReportOp::path`] (its final path component minus
+    /// the extension), populated whenever `path` is. Lets a consumer key on the
+    /// created/edited document's stem without re-deriving it from `path`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stem: Option<String>,
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error: Option<ApplyError>,
@@ -143,6 +157,8 @@ mod tests {
                 kind: "move_document".into(),
                 status: OpStatus::Applied,
                 from: None,
+                path: None,
+                stem: None,
                 summary: "moved a.md → b.md".into(),
                 error: None,
                 footnote: None,
@@ -171,6 +187,8 @@ mod tests {
             kind: "move_document".into(),
             status: OpStatus::Applied,
             from: None,
+            path: None,
+            stem: None,
             summary: "moved a.md → b.md".into(),
             error: None,
             footnote: None,
@@ -206,6 +224,8 @@ mod tests {
             kind: "set_frontmatter".into(),
             status: OpStatus::Applied,
             from: None,
+            path: None,
+            stem: None,
             summary: "set type".into(),
             error: None,
             footnote: None,
@@ -213,6 +233,44 @@ mod tests {
         };
         let bare_json = serde_json::to_value(&bare).unwrap();
         assert!(bare_json.get("cascade").is_none());
+    }
+
+    /// NRN-175: the additive `path` / `stem` fields serialize only when
+    /// populated (`skip_serializing_if = Option::is_none`), so an op with no
+    /// natural resolved path stays byte-identical to the pre-NRN-175 shape.
+    #[test]
+    fn path_and_stem_skip_serialize_when_none_present_when_some() {
+        let bare = ApplyReportOp {
+            op_id: "0".into(),
+            kind: "rewrite_link".into(),
+            status: OpStatus::Applied,
+            from: None,
+            path: None,
+            stem: None,
+            summary: "rewrite link".into(),
+            error: None,
+            footnote: None,
+            cascade: None,
+        };
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        assert!(bare_json.get("path").is_none(), "path omitted when None");
+        assert!(bare_json.get("stem").is_none(), "stem omitted when None");
+
+        let populated = ApplyReportOp {
+            op_id: "1".into(),
+            kind: "create_document".into(),
+            status: OpStatus::Applied,
+            from: None,
+            path: Some("tasks/task-7.md".into()),
+            stem: Some("task-7".into()),
+            summary: "create tasks/task-7.md".into(),
+            error: None,
+            footnote: None,
+            cascade: None,
+        };
+        let pop_json = serde_json::to_value(&populated).unwrap();
+        assert_eq!(pop_json["path"], "tasks/task-7.md");
+        assert_eq!(pop_json["stem"], "task-7");
     }
 
     #[test]
