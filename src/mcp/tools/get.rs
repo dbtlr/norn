@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{GetArgs, GetFormat, SortPaginateArgs};
 use crate::mcp::context::VaultContext;
-use crate::show::ShowReport;
+use crate::show::{SectionFailure, ShowReport};
 
 /// Default for [`GetParams::starts_at`] — the CLI's `--starts-at` default (1).
 /// serde's numeric default is 0; get's paging is 1-indexed, so the absent-field
@@ -58,7 +58,13 @@ pub struct GetParams {
     /// default; unlike `find`'s 10). Mirrors `--limit`.
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Return all records, ignoring `limit`. Mirrors `--no-limit`.
+    /// Mirrors `--no-limit`. NOTE: on the get path `limit` already defaults to
+    /// `None` (return every named target — get's default, unlike `find`'s 10),
+    /// so `no_limit` alone is ALREADY the default behavior and is effectively a
+    /// no-op; the get paging path does not read it. It is mutually exclusive
+    /// with `limit`: setting both is a params error (mirroring the CLI's clap
+    /// `conflicts_with`), refused before any work rather than silently
+    /// truncating.
     #[serde(default)]
     pub no_limit: bool,
     /// 1-indexed starting offset for paging. Defaults to 1. Mirrors `--starts-at`.
@@ -72,8 +78,11 @@ pub struct GetParams {
     /// object (`{heading: content}`), byte-identical to `norn get --format json`.
     /// A heading missing or ambiguous in a document is warn-and-omitted for that
     /// document (siblings and other targets are unaffected); if NONE of the
-    /// requested headings resolve for a target, that target hard-fails and the
-    /// whole call returns an error, mirroring the CLI's nonzero-exit contract.
+    /// requested headings resolve for a target, that target is reported in the
+    /// output's `section_failures` list (the additive structured mapping of the
+    /// CLI's nonzero-exit contract) — the call does NOT fail as a whole, so every
+    /// good target's records (and the all-missing target's own record, with an
+    /// empty `sections`) are still returned.
     #[serde(default)]
     pub section: Vec<String>,
 
@@ -106,6 +115,16 @@ pub struct GetOutput {
     /// link sets, and (when the matching col was requested) `body` / `raw` /
     /// `document_hash`.
     pub records: Vec<serde_json::Value>,
+    /// Targets for which `--section` was requested but NONE of the requested
+    /// headings resolved (all missing/ambiguous). This is the additive
+    /// structured MCP mapping of the CLI's section exit-1: rather than failing
+    /// the whole call (which would discard every good target's records), each
+    /// all-missing target is reported here (with its requested headings) while
+    /// its own record — carrying an empty `sections` — and every sibling
+    /// target's records still ship in `records`. Empty when no target
+    /// all-missed. Never parsed from note text; sourced from
+    /// [`ShowReport::section_failures`].
+    pub section_failures: Vec<SectionFailure>,
 }
 
 impl GetOutput {
@@ -119,7 +138,10 @@ impl GetOutput {
             .iter()
             .map(serde_json::to_value)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Self { records })
+        Ok(Self {
+            records,
+            section_failures: report.section_failures.clone(),
+        })
     }
 }
 
@@ -134,6 +156,15 @@ pub fn handle_output(ctx: &VaultContext, p: GetParams) -> Result<GetOutput> {
 /// Pure handler for `vault.get`. Opens a fresh query cache (per-call freshness),
 /// constructs [`GetArgs`] with `norn get`'s defaults, and runs the show path.
 pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
+    // Mirror the CLI's `--limit` / `--no-limit` clap `conflicts_with` (F3): the
+    // two are mutually exclusive. On the get path `limit` defaults to None, so
+    // `no_limit` alone is already the default (return every target) and the
+    // paging path never reads it — but accepting BOTH would silently truncate
+    // where the CLI hard-errors, so refuse up front, before any work.
+    if p.limit.is_some() && p.no_limit {
+        anyhow::bail!("--limit and --no-limit are mutually exclusive");
+    }
+
     let cache = ctx.query_cache()?;
 
     // Mirror `norn get --col`'s parsing: the CLI uses `value_delimiter = ','`, so
@@ -176,29 +207,18 @@ pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
         format: GetFormat::Records,
     };
 
-    let report = crate::show::run(&cache, &args)?;
-
-    // Section hard-fail signal (NRN-173, mirroring the CLI's exit-1 contract):
-    // when `--section` is requested and NONE of the requested headings resolved
-    // for a target, `show::run` pushes an `error:` note naming that target (and
-    // the CLI exits 1). The MCP surface has no per-record status field, so the
-    // faithful analogue is a call-level error carrying those notes. Only the
-    // section-specific error is escalated — a plain missing target (no sections)
+    // Section hard-fail signal (F1/F2, mirroring the CLI's exit-1 contract):
+    // when `--section` is requested and NONE of the requested headings resolve
+    // for a target, `show::run` records it in `ShowReport::section_failures`
+    // (the structured twin of the CLI's `error:` note). The MCP surface maps
+    // that list to `GetOutput::section_failures` — an ADDITIVE field — rather
+    // than bailing the whole call: a batch keeps every good target's records
+    // even when one sibling all-misses, and there is no note-string parsing
+    // anywhere (which previously false-positived on a plain unresolved target
+    // whose name contained `--section`). A plain missing target (no sections)
     // still yields zero records without erroring (NRN-183 exit-signal asymmetry
     // is tracked separately and unchanged here).
-    if !args.section.is_empty() {
-        let hard_fails: Vec<&str> = report
-            .notes
-            .iter()
-            .filter(|n| n.starts_with("error:") && n.contains("--section"))
-            .map(String::as_str)
-            .collect();
-        if !hard_fails.is_empty() {
-            anyhow::bail!("{}", hard_fails.join("; "));
-        }
-    }
-
-    Ok(report)
+    crate::show::run(&cache, &args)
 }
 
 #[cfg(test)]
@@ -465,30 +485,213 @@ mod tests {
         );
     }
 
-    /// When NONE of the requested headings resolve for a target, the call hard-
-    /// fails (mirrors the CLI exit-1 contract), surfaced as an MCP error.
+    /// When NONE of the requested headings resolve for a target, the target is
+    /// reported in the additive `section_failures` list (the structured MCP
+    /// mapping of the CLI's exit-1) — the call does NOT fail as a whole, and the
+    /// all-missing target's own record still ships with an empty `sections`.
     #[test]
-    fn section_all_missing_hard_fails() {
+    fn section_all_missing_reported_structurally_not_bailed() {
         let (_tmp, root) = sectioned_vault();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let result = handle(
+        let out = handle_output(
             &ctx,
             GetParams {
                 targets: vec!["doc".into()],
                 section: vec!["Nope".into()],
                 ..Default::default()
             },
+        )
+        .expect("all-missing sections are reported structurally, not bailed");
+
+        // The all-missing target is reported in section_failures with its headings.
+        assert_eq!(out.section_failures.len(), 1, "one all-missing target");
+        assert!(
+            out.section_failures[0].path.ends_with("doc.md"),
+            "section failure names the target path: {:?}",
+            out.section_failures[0]
+        );
+        assert_eq!(
+            out.section_failures[0].requested_headings,
+            vec!["Nope".to_string()]
+        );
+        // Its record still ships, with an empty sections object.
+        assert_eq!(out.records.len(), 1, "the record is still returned");
+        assert_eq!(
+            out.records[0]["sections"],
+            serde_json::json!({}),
+            "all-missing target carries an empty sections object"
+        );
+    }
+
+    /// F4: a multi-target batch where one target resolves a heading and a
+    /// sibling all-misses — the good target's sections survive intact, the
+    /// all-missing target is isolated into `section_failures`, and the call
+    /// succeeds structurally (no whole-call bail losing the good target's data).
+    #[test]
+    fn section_multi_target_isolates_failure_keeps_good_target() {
+        let (_tmp, root) = sectioned_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        // doc.md has "## Task Description"; a.md has no such heading.
+        let out = handle_output(
+            &ctx,
+            GetParams {
+                targets: vec!["doc".into(), "a".into()],
+                section: vec!["Task Description".into()],
+                ..Default::default()
+            },
+        )
+        .expect("a multi-target section batch must succeed structurally");
+
+        // Both records ship (good target + all-missing target).
+        assert_eq!(out.records.len(), 2, "both targets return a record");
+        let doc_rec = out
+            .records
+            .iter()
+            .find(|r| r["path"].as_str().unwrap().ends_with("doc.md"))
+            .expect("good target present");
+        assert_eq!(
+            doc_rec["sections"]["Task Description"].as_str().unwrap(),
+            "## Task Description\ndo the thing\n",
+            "the good target keeps its resolved section intact"
+        );
+
+        // The all-missing sibling is isolated into section_failures.
+        assert_eq!(out.section_failures.len(), 1, "only the sibling all-missed");
+        assert!(
+            out.section_failures[0].path.ends_with("a.md"),
+            "the section failure names the all-missing sibling: {:?}",
+            out.section_failures[0]
+        );
+        assert_eq!(
+            out.section_failures[0].requested_headings,
+            vec!["Task Description".to_string()]
+        );
+    }
+
+    /// F4: false-positive guard — a target whose STEM contains the substring
+    /// `--section` but does NOT resolve to any doc must be treated as a plain
+    /// missing target, NOT a section failure. The old note-substring guard
+    /// (`contains("--section")`) false-positived here and bailed the whole call.
+    #[test]
+    fn section_missing_target_named_like_section_is_not_a_section_failure() {
+        let (_tmp, root) = sectioned_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle_output(
+            &ctx,
+            GetParams {
+                // Stem embeds "--section"; does not resolve to any doc.
+                targets: vec!["my--section-doc".into()],
+                section: vec!["Whatever".into()],
+                ..Default::default()
+            },
+        )
+        .expect("a non-resolving target must not be treated as a section failure");
+
+        assert!(
+            out.records.is_empty(),
+            "a missing target yields no records: {:?}",
+            out.records
+        );
+        assert!(
+            out.section_failures.is_empty(),
+            "a missing target is not a section failure: {:?}",
+            out.section_failures
+        );
+    }
+
+    /// F5: an ambiguous heading (duplicate identical headings in one doc) is
+    /// warn-and-omitted at the MCP layer — no error, no section failure (a
+    /// resolvable sibling heading still resolved), and the sibling is returned.
+    #[test]
+    fn section_ambiguous_heading_warns_omits_siblings_return() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-get-ambig-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            root.join("d.md"),
+            "---\ntype: note\n---\n## Dup\nfirst\n## Dup\nsecond\n## Other\nkeep\n",
+        )
+        .unwrap();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle_output(
+            &ctx,
+            GetParams {
+                targets: vec!["d".into()],
+                section: vec!["Dup".into(), "Other".into()],
+                ..Default::default()
+            },
+        )
+        .expect("an ambiguous heading is warn-and-omit, not an error");
+
+        assert_eq!(out.records.len(), 1);
+        let rec = &out.records[0];
+        assert_eq!(
+            rec["sections"]["Other"].as_str().unwrap(),
+            "## Other\nkeep\n",
+            "the sibling heading still resolves"
+        );
+        assert!(
+            rec["sections"].get("Dup").is_none(),
+            "the ambiguous heading is omitted: {}",
+            rec["sections"]
+        );
+        assert!(
+            out.section_failures.is_empty(),
+            "a resolvable sibling means the target did not all-miss: {:?}",
+            out.section_failures
+        );
+    }
+
+    /// F3: `{limit, no_limit}` together is a params error (mirroring the CLI's
+    /// clap conflict), refused before any work — not a silent truncation.
+    #[test]
+    fn limit_and_no_limit_together_is_params_error() {
+        let (_tmp, root) = sectioned_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle(
+            &ctx,
+            GetParams {
+                targets: vec!["a".into(), "b".into(), "c".into()],
+                limit: Some(5),
+                no_limit: true,
+                ..Default::default()
+            },
         );
         assert!(
             result.is_err(),
-            "all-missing sections must hard-fail, got {result:?}"
+            "limit + no_limit must be a params error, got {result:?}"
         );
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("none of the requested") && err.contains("--section"),
-            "error must name the section hard-fail, got: {err}"
+            err.contains("--limit") && err.contains("--no-limit"),
+            "error must name the mutually-exclusive flags, got: {err}"
         );
+    }
+
+    /// F3: `no_limit` alone (its documented default-equivalent behavior) is
+    /// accepted and returns every named target — no truncation, no error.
+    #[test]
+    fn no_limit_alone_returns_all_targets() {
+        let (_tmp, root) = sectioned_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let report = handle(
+            &ctx,
+            GetParams {
+                targets: vec!["a".into(), "b".into(), "c".into()],
+                no_limit: true,
+                ..Default::default()
+            },
+        )
+        .expect("no_limit alone is accepted");
+        assert_eq!(report.records.len(), 3, "every named target is returned");
     }
 
     /// Sort + desc order records; mirrors `norn get --sort order --desc`.

@@ -89,6 +89,25 @@ where
     sections_to_json_object(sections.as_deref().unwrap_or(&[])).serialize(serializer)
 }
 
+/// A target for which `--section` was requested but NONE of the requested
+/// headings resolved (all were missing or ambiguous in the document). This is
+/// the STRUCTURED form of the `error: none of the requested --section headings
+/// resolved for '{path}'` note — hoisted out of note prose so a consumer keys on
+/// it as data instead of substring-matching notes (which false-positives on a
+/// plain missing-target whose name contains `--section`). The CLI still derives
+/// its exit-1 from the presence of an `error:` note (unchanged, byte-identical);
+/// the MCP surface maps this list to its additive `section_failures` output
+/// rather than failing the whole call.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SectionFailure {
+    /// The all-missing target's vault-relative path (same value as the note's
+    /// `'{path}'`).
+    pub path: String,
+    /// The requested headings (deduped, request order) that all failed to
+    /// resolve for this document.
+    pub requested_headings: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ShowReport {
     pub records: Vec<ShowRecord>,
@@ -96,11 +115,20 @@ pub struct ShowReport {
     /// Routed to stderr by the caller. Skipped in JSON output.
     #[serde(skip)]
     pub notes: Vec<String>,
+    /// Targets whose every requested `--section` heading all-missed (F1/F2). The
+    /// structured twin of the corresponding `error:` note in `notes` — the CLI
+    /// renders/exits off the note (unchanged), the MCP surface reads this. Empty
+    /// unless `--section` was requested and a target resolved zero headings.
+    /// Skipped in JSON output (a diagnostic, like `notes`), so CLI `--format
+    /// json` stays byte-identical.
+    #[serde(skip)]
+    pub section_failures: Vec<SectionFailure>,
 }
 
 pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     let mut records: Vec<ShowRecord> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+    let mut section_failures: Vec<SectionFailure> = Vec::new();
 
     // A requested heavy facet must load itself, independent of any flag.
     // `.body` (cache-served) loads when `--all-cols` (full dump) OR `.body`
@@ -174,12 +202,27 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
             let sections = if requested_sections.is_empty() {
                 None
             } else {
-                Some(resolve_requested_sections(
+                let resolved = resolve_requested_sections(
                     deep.body.as_deref().unwrap_or(""),
                     &requested_sections,
                     &deep.path,
                     &mut notes,
-                ))
+                );
+                // All-requested-headings-missing, hoisted from the `error:` note
+                // into structure (F1/F2): when zero requested headings resolve
+                // for this document, record it as a `SectionFailure` so
+                // consumers key on data, not note substrings. The `error:` note
+                // is still pushed inside `resolve_requested_sections`, so the
+                // CLI's note-driven exit-1 and stderr text stay byte-identical;
+                // this list is the additive structured twin the MCP surface
+                // reads. Every good target's record is still returned.
+                if resolved.is_empty() {
+                    section_failures.push(SectionFailure {
+                        path: deep.path.to_string(),
+                        requested_headings: requested_sections.clone(),
+                    });
+                }
+                Some(resolved)
             };
             // Only surface the whole-body field when it was independently
             // requested (`--all-cols`/`--col .body`) — a body loaded solely
@@ -217,7 +260,11 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
         apply_paging(&mut records, args.paging.starts_at, args.paging.limit);
     }
 
-    Ok(ShowReport { records, notes })
+    Ok(ShowReport {
+        records,
+        notes,
+        section_failures,
+    })
 }
 
 /// Resolve every `--section` heading against one document's `body`, reusing
