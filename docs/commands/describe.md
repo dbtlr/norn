@@ -67,7 +67,7 @@ Each returned field distribution carries a `more` count — the number of additi
 | Format | Shape | Stable contract |
 |---|---|---|
 | `text` | Human-legible key-value lines: structure counts, then (with `--data`) total, distributions, dates, and skipped fields. Default. | No — never parse it. |
-| `json` | A single `DescribeOutput` object: `folders`, `path_rules`, `creatable_rules`, `inbox`, `schema`, and (when requested) `data: { total, fields[], dates[], skipped[] }`. | Yes, versioned. |
+| `json` | A single `DescribeOutput` object: `folders`, `path_rules`, `creatable_rules`, `inbox`, `schema`, and (when requested) `data: { total, fields[], dates[], skipped[] }`. | Yes. |
 
 `describe` has no `paths`/`jsonl` format — it describes the vault as a whole, not a per-document row set.
 
