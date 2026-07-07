@@ -10,6 +10,11 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Added
+
+- **`norn describe` gets a full reference page (`docs/commands/describe.md`).** The command that lets an agent discover a vault's folder tree, path/creatable rules, inbox, and frontmatter schema before touching it had zero dedicated docs coverage; the new page covers `--data`/`--stats`/`--by`/`--limit`, the shared filter surface, and both output formats. `describe` and `audit` are also now listed in `docs/commands.md`'s index and `docs/agent-workflows.md`'s read-only command list. (NRN-195)
+- **The bundled agent skill gains a "Discover the vault" section** covering `norn describe --format json` as the orient-first move (what a vault expects before creating or mutating anything), plus `norn init` and `config show`/`validate`/`edit`/`migrate` — config authoring was previously absent from the skill entirely. The skill also now documents the `{{seq}}` auto-incrementing template token (a rule `target` like `tasks/NRN-{{seq}}.md` and what `norn new --as <rule>` does with it), so an agent no longer has to hand-roll next-id logic via `find`/count. The skill's finding-code list is synced from 13 to the complete 18-code set. (NRN-195)
+
 ### Changed
 
 - Bumped `clap_complete` 4.6.5 → 4.6.7 (patch). Lockfile-only; no source changes. Pulls a transitive `windows-sys` 0.52 → 0.61 bump (Windows-only build targets; no effect on the macOS/Linux runtime path).
