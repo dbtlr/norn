@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.45.1 - 2026-07-07
+
+A point release hardening the MCP write signal: a mutation tool result now tells the truth about whether the write landed, so a consumer trusting the protocol-native `isError` bit can no longer read a no-write or a half-write as success.
+
 ### Fixed
 
 - **MCP mutations that don't fully apply now report `isError: true` instead of masquerading as success (NRN-219).** Over MCP, `vault.apply` / `vault.move` / `vault.delete` / `vault.rewrite_wikilink` returned `isError: false` for *every* outcome — a completed apply, a byte-identical pre-flight **refusal** (a CAS `expected_old_value` / stale-hash mismatch, nothing written), and a partial-apply **failure** alike — so the only signal distinguishing them was the in-band `structuredContent.report.outcome`. A consumer trusting the protocol-native `isError` bit (the MCP client raises on it) treated a no-write or a half-write as a successful mutation; an optimistic-concurrency retry loop keyed on a thrown error silently swallowed a lost update. A **confirm** call on these four tools now sets `isError: true` whenever the report's `outcome` is not `applied` (i.e. `refused` or `failed`), **while preserving the full `structuredContent.report`** so a consumer still branches on `operations[].error.code` (retryable CAS drift vs terminal refusal) — the machine-readable code is not laundered back into prose. A **dry-run** preview (`confirm: false`) stays `isError: false` even when it forecasts a refusal: it attempts no write, so it cannot misreport one, and an SDK that raises on `isError` must not throw on a preview — the forecast is carried as `outcome: refused` / `dry_run: true` in the (still-preserved) structured report. `vault.set` / `vault.edit` / `vault.new` were unaffected (they already surface an apply failure as an MCP error).
