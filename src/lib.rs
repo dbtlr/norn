@@ -897,7 +897,13 @@ fn run(cli: Cli) -> Result<i32> {
                     id: None,
                     requires: vec![],
                     fields: serde_json::json!({
-                        "path": args.doc,
+                        // NRN-57: use the RESOLVED path (stem or exact path
+                        // both land here via delete_doc::preflight_and_plan),
+                        // not the raw CLI arg — the raw arg may be a bare stem
+                        // that isn't in the index verbatim, which previously
+                        // caused every stem-addressed delete to fail with a
+                        // misleading "not in the index" error.
+                        "path": delete_op.path,
                         "rewrite_to": args.rewrite_to.as_ref(),
                         "allow_broken_links": args.allow_broken_links,
                     }),
