@@ -3,17 +3,19 @@
 //! for grouping.
 
 pub mod render;
+pub mod route;
 
 use crate::cache::Cache;
 use crate::core::DocumentSummary;
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 
-use crate::cli::CountArgs;
+use crate::cli::{CountArgs, CountFormat};
 use crate::filter_args::build_document_query;
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum CountOutput {
     Total {
@@ -38,11 +40,33 @@ pub enum CountOutput {
 
 /// One level of a nested grouping tree: a leaf count, or a branch keyed by
 /// the next `--by` field's rendered values.
-#[derive(Debug, Serialize, PartialEq)]
+///
+/// `Deserialize` is what lets the CLI→service routing seam (NRN-94) rebuild a
+/// `CountOutput` from the daemon's `vault.count` `structuredContent` and render
+/// it through the SAME renderers the direct path uses — the reconstruction is
+/// lossless (this untagged shape round-trips through JSON), which is why routed
+/// and direct `count` output are byte-identical.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum GroupNode {
     Leaf(usize),
     Branch(BTreeMap<String, GroupNode>),
+}
+
+/// Render a [`CountOutput`] in `format` and write it, appending a trailing
+/// newline only when the rendered text lacks one — the exact print contract the
+/// `norn count` dispatch uses. Shared by the direct path and the NRN-94 routed
+/// path so the two cannot drift on framing.
+pub fn emit(out: &CountOutput, format: CountFormat, w: &mut dyn Write) -> std::io::Result<()> {
+    let text = match format {
+        CountFormat::Json => render::render_json(out),
+        CountFormat::Text => render::render_text(out),
+    };
+    write!(w, "{text}")?;
+    if !text.ends_with('\n') {
+        writeln!(w)?;
+    }
+    Ok(())
 }
 
 /// Grouping-depth bound: each field adds one recursion level in grouping,

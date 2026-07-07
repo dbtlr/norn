@@ -94,8 +94,22 @@ pub(crate) fn bind_listener(socket_path: &Utf8Path) -> anyhow::Result<tokio::net
     if socket_path.as_std_path().exists() {
         let _ = std::fs::remove_file(socket_path.as_std_path());
     }
-    tokio::net::UnixListener::bind(socket_path.as_std_path())
-        .with_context(|| format!("failed to bind control socket {socket_path}"))
+    let listener = tokio::net::UnixListener::bind(socket_path.as_std_path())
+        .with_context(|| format!("failed to bind control socket {socket_path}"))?;
+    // Owner-only socket mode. The enclosing run dir is already 0700, but the
+    // routing client also refuses a world-writable socket as an anti-squatter
+    // check (NRN-94 F4), and `bind`'s mode follows the ambient umask — under a
+    // group/other-writable umask the socket would trip that check and the client
+    // would (correctly, but needlessly) refuse to route. Pin it to 0600 so a
+    // legitimate daemon is always trusted regardless of umask.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            socket_path.as_std_path(),
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
+    Ok(listener)
 }
 
 #[cfg(test)]
