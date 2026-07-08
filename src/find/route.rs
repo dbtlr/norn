@@ -34,11 +34,17 @@ use crate::core::DocumentSummary;
 use crate::output::projection::split_cols;
 
 /// The reconstructed find result: the matched documents plus the parallel
-/// deep-fetch / raw-read vectors, in the exact shape `find::emit` consumes.
+/// deep-fetch / raw-read vectors, in the exact shape `find::emit` consumes,
+/// plus the vault-level diagnostics bit the exit code derives from.
+#[derive(Debug)]
 pub struct RoutedFind {
     pub result: FindResult,
     pub deep: Vec<Option<DocumentDeep>>,
     pub raw: Vec<Option<String>>,
+    /// Whether the vault carries any error-severity diagnostic — the daemon-side
+    /// `cache.has_diagnostic_errors()`, crossing the wire so the routed path
+    /// reproduces direct find's exit-2 contract (NRN-222).
+    pub has_diagnostic_errors: bool,
 }
 
 /// Translate parsed `norn find` args into the `vault.find` tool's parameter
@@ -135,6 +141,15 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
         .get("truncated")
         .and_then(Value::as_bool)
         .ok_or_else(|| anyhow::anyhow!("find envelope missing bool `truncated`: {structured}"))?;
+    // Required, not defaulted: the exit code derives from this bit, and guessing
+    // it (e.g. an older daemon that predates the field) would silently break the
+    // routed/direct exit-2 isomorphism — better to fall back to Direct.
+    let has_diagnostic_errors = structured
+        .get("has_diagnostic_errors")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow::anyhow!("find envelope missing bool `has_diagnostic_errors`: {structured}")
+        })?;
     let documents = structured
         .get("documents")
         .and_then(Value::as_array)
@@ -220,6 +235,7 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
         },
         deep,
         raw,
+        has_diagnostic_errors,
     })
 }
 
@@ -327,6 +343,7 @@ mod tests {
             "returned": result.returned,
             "truncated": result.truncated,
             "starts_at": args.paging.starts_at.max(1),
+            "has_diagnostic_errors": false,
             "documents": documents,
         })
     }
@@ -535,5 +552,95 @@ mod tests {
             truncated: false,
         };
         assert_round_trip(result, vec![], vec![], base_args());
+    }
+
+    // ── Exit-code isomorphism: the vault-diagnostics bit (NRN-222) ────────────
+
+    /// The `has_diagnostic_errors` bit crosses the wire faithfully in both
+    /// states — it is what `route_find` derives exit 2 vs 0 from.
+    #[test]
+    fn diagnostics_bit_round_trips() {
+        let args = base_args();
+        for bit in [false, true] {
+            let mut wire = to_wire(&sample_result(), &[], &[], &args);
+            wire["has_diagnostic_errors"] = json!(bit);
+            let routed = reconstruct(&wire, &args).unwrap();
+            assert_eq!(routed.has_diagnostic_errors, bit);
+        }
+    }
+
+    /// A wire missing the diagnostics bit (e.g. an older daemon) must fail
+    /// reconstruction, so the caller falls back to Direct instead of guessing
+    /// the exit code.
+    #[test]
+    fn missing_diagnostics_bit_is_an_error() {
+        let args = base_args();
+        let mut wire = to_wire(&sample_result(), &[], &[], &args);
+        wire.as_object_mut()
+            .unwrap()
+            .remove("has_diagnostic_errors");
+        let err = reconstruct(&wire, &args).unwrap_err();
+        assert!(
+            err.to_string().contains("has_diagnostic_errors"),
+            "got: {err}"
+        );
+    }
+
+    /// End-to-end exit-2 isomorphism against a REAL vault with an error-severity
+    /// diagnostic: the actual `vault.find` tool projection (not the test-local
+    /// `to_wire`) carries the bit, reconstruction surfaces it, and the exit code
+    /// each path derives — direct from `cache.has_diagnostic_errors()`, routed
+    /// from the wire bit — is 2 on both.
+    #[test]
+    fn exit_code_matches_direct_on_diagnostic_error_vault() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-find-route-diag-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            root.join("good.md"),
+            "---\ntype: note\ntitle: Good\n---\nbody\n",
+        )
+        .unwrap();
+        // Invalid UTF-8 with a .md extension trips read_to_string, surfaced as a
+        // Severity::Error diagnostic (code "read-failed").
+        std::fs::write(
+            root.join("bad-utf8.md").as_std_path(),
+            b"\xff\xfe\xfd\xfc invalid utf-8 here",
+        )
+        .unwrap();
+
+        // Daemon side: the REAL tool projection.
+        let ctx = crate::mcp::context::VaultContext::open(&root, None).unwrap();
+        let out = crate::mcp::tools::find::handle(
+            &ctx,
+            serde_json::from_value(json!({ "eq": ["type:note"] })).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            out.has_diagnostic_errors,
+            "tool envelope must carry the vault's error-diagnostic bit"
+        );
+        let wire = serde_json::to_value(&out).unwrap();
+
+        // Client side: reconstruct and derive the exit code like `route_find`.
+        let mut args = base_args();
+        args.filters.eq = vec!["type:note".into()];
+        let routed = reconstruct(&wire, &args).unwrap();
+        let routed_exit = if routed.has_diagnostic_errors { 2 } else { 0 };
+
+        // Direct side: the same signal `find::run` exits on.
+        let cache =
+            crate::cache_cmd::open_for_query(&root, &crate::graph::IndexOptions::default(), false)
+                .unwrap();
+        let direct_exit = if cache.has_diagnostic_errors().unwrap() {
+            2
+        } else {
+            0
+        };
+
+        assert_eq!(direct_exit, 2, "fixture must carry an error diagnostic");
+        assert_eq!(routed_exit, direct_exit, "exit codes must match");
     }
 }

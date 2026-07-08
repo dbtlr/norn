@@ -181,7 +181,8 @@ fn stdin_carries_redirected_payload() -> bool {
 ///
 /// - `count` — `vault.count`'s `CountEnvelope` losslessly re-encodes `CountOutput`.
 /// - `find` — `vault.find` carries the `total`/`returned`/`truncated`/`starts_at`
-///   envelope (NRN-214) and the SAME projected per-document JSON `--format json`
+///   envelope (NRN-214), the vault's `has_diagnostic_errors` bit (the exit-2
+///   signal — NRN-222), and the SAME projected per-document JSON `--format json`
 ///   emits; the client rebuilds a `FindResult` + deep/raw and renders via `find::emit`.
 /// - `get` — `vault.get` ships each full serialized `ShowRecord` plus `notes`
 ///   (NRN-214); the client rebuilds a `ShowReport` and renders via `show::emit`,
@@ -306,7 +307,11 @@ fn route_find(
         |routed| {
             let palette = crate::output::palette::resolve(color);
             crate::find::emit(&routed.result, &routed.deep, &routed.raw, args, &palette)?;
-            Ok(0)
+            // Direct find exits 2 when the vault carries any error-severity
+            // diagnostic (`cache.has_diagnostic_errors()`); the daemon surfaces
+            // the same signal in the envelope, so routed and direct exit codes
+            // cannot drift (NRN-222).
+            Ok(if routed.has_diagnostic_errors { 2 } else { 0 })
         },
     )
 }

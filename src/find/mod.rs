@@ -91,8 +91,9 @@ pub fn run(
 /// used by both the direct dispatch ([`run`]) and the NRN-222 daemon-routed path
 /// (`route_find` in `src/lib.rs`), so the two cannot drift on format resolution,
 /// paging, or the `--col` warnings. Deliberately does NOT decide the exit code:
-/// the direct path derives it from the vault's diagnostics (`has_diagnostic_errors`),
-/// which the routed path — serving from an already-verified warm cache — cannot see.
+/// both callers derive it from the vault's error-diagnostic signal — the direct
+/// path from `cache.has_diagnostic_errors()`, the routed path from the
+/// `has_diagnostic_errors` bit the `vault.find` envelope carries (NRN-222).
 pub fn emit(
     result: &crate::cache::FindResult,
     deep: &[Option<crate::cache::DocumentDeep>],

@@ -164,6 +164,12 @@ pub struct FindOutput {
     /// 1-indexed paging offset of this page (floored at 1), matching the CLI
     /// `--format json` envelope's `starts_at`.
     pub starts_at: usize,
+    /// Whether the vault carries any error-severity diagnostic (e.g. an
+    /// unreadable document) — the signal `norn find` maps to exit 2 (NRN-222).
+    /// Render-critical envelope state in the NRN-214 spirit: without it a routed
+    /// find could not reproduce the direct path's exit code. Scoped to the whole
+    /// vault, not this query's matches.
+    pub has_diagnostic_errors: bool,
     /// Matched documents, in sort order, after limit/paging — the same
     /// per-document JSON `norn find --format json` emits. With no `col`/`all_cols`,
     /// each is `{path, frontmatter}`; projections add/narrow per the `col` syntax.
@@ -225,6 +231,9 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
         returned: envelope.returned,
         truncated: envelope.truncated,
         starts_at: envelope.starts_at,
+        // The CLI's exit-2 signal (any error-severity diagnostic in the vault),
+        // carried so a routed find reproduces the direct exit code (NRN-222).
+        has_diagnostic_errors: cache.has_diagnostic_errors()?,
         documents,
     })
 }
