@@ -69,7 +69,11 @@ pub(crate) mod tool_names {
     pub(crate) const REWRITE_WIKILINK: &str = "vault.rewrite_wikilink";
     pub(crate) const APPLY: &str = "vault.apply";
 
-    /// Every tool name above, for the catalog drift guard.
+    /// Every tool name above, for the catalog drift guard. Test-only by
+    /// design: the drift-guard test is its single consumer (the runtime marker
+    /// path reads the individual consts), so the cfg gate is the honest shape
+    /// rather than an `allow(dead_code)`.
+    #[cfg(test)]
     pub(crate) const ALL: &[&str] = &[
         GET,
         AUDIT,
