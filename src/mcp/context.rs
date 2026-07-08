@@ -1433,6 +1433,115 @@ mod tests {
         );
     }
 
+    /// Verify-once survives a vault-MUTATING request — the property NRN-130
+    /// exists for: a warm `load_graph_index` whose per-request refresh actually
+    /// WRITES rows (a new doc was added) must still run on the held connection,
+    /// not fall back to a fresh open. The two guards above each prove half
+    /// (connection reuse without a write; a writing refresh without a
+    /// connection probe); this one pins both in a single request.
+    ///
+    /// The probe is a TEMP VIEW shadowing `headings` that hides alpha's rows on
+    /// the held connection only — but unlike the read-only shadow above, a
+    /// writing refresh must pass THROUGH it (`drop_document` DELETEs headings
+    /// for the added doc, unconditionally), so the view carries pass-through
+    /// `INSTEAD OF` triggers forwarding DML to the real table: reads stay
+    /// distorted, writes land for real. If the build regressed to a cold open,
+    /// the fresh connection would see alpha's real heading and assertion (b)
+    /// fails — same falsifiable mechanics as the red-proofed guard above.
+    #[test]
+    fn warm_load_graph_index_survives_a_writing_refresh() {
+        let (tmp, root) = make_seeded_vault();
+        // Alpha carries the heading the shadow will hide.
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntype: note\nstatus: active\n---\n# Alpha\n\nAlpha body\n",
+        )
+        .unwrap();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let alpha_headings = |index: &crate::core::GraphIndex| -> usize {
+            index
+                .documents
+                .iter()
+                .find(|d| d.path == "alpha.md")
+                .expect("alpha.md present")
+                .headings
+                .len()
+        };
+
+        // Establish the warm connection.
+        ctx.begin_request().expect("begin_request");
+        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        assert_eq!(idx1.documents.len(), 3, "three seeded docs");
+        assert_eq!(alpha_headings(&idx1), 1, "alpha's heading is indexed");
+
+        // Shadow `headings` on the held connection: reads omit alpha's rows,
+        // writes forward to the real table so the refresh's DML succeeds.
+        {
+            let cache = ctx.query_cache().expect("query_cache to plant shadow");
+            cache
+                .conn()
+                .execute_batch(
+                    "CREATE TEMP VIEW headings AS
+                       SELECT * FROM main.headings WHERE doc_path <> 'alpha.md';
+                     CREATE TEMP TRIGGER headings_shadow_insert
+                       INSTEAD OF INSERT ON headings BEGIN
+                       INSERT OR IGNORE INTO main.headings
+                         (doc_path, level, text, slug,
+                          source_span_line, source_span_column, source_span_byte_offset)
+                       VALUES (NEW.doc_path, NEW.level, NEW.text, NEW.slug,
+                               NEW.source_span_line, NEW.source_span_column,
+                               NEW.source_span_byte_offset);
+                     END;
+                     CREATE TEMP TRIGGER headings_shadow_delete
+                       INSTEAD OF DELETE ON headings BEGIN
+                       DELETE FROM main.headings
+                         WHERE doc_path = OLD.doc_path AND slug = OLD.slug;
+                     END;",
+                )
+                .unwrap();
+        }
+
+        // Add a doc WITH a heading, so the next request's incremental refresh
+        // writes real rows (documents + headings DML) through the pipeline.
+        std::fs::write(
+            tmp.path().join("delta.md"),
+            "---\ntype: note\nstatus: active\n---\n# Delta\n\nDelta body\n",
+        )
+        .unwrap();
+
+        ctx.begin_request().expect("begin_request");
+        let idx2 = ctx
+            .load_graph_index()
+            .expect("warm load_graph_index across a writing refresh");
+        // (a) The refresh happened: the new doc (and its heading) is indexed.
+        assert_eq!(idx2.documents.len(), 4, "the writing refresh indexed delta");
+        let delta = idx2
+            .documents
+            .iter()
+            .find(|d| d.path == "delta.md")
+            .expect("delta.md present");
+        assert_eq!(delta.headings.len(), 1, "delta's heading round-tripped");
+        // (b) The shadow is still in effect: alpha's heading is hidden, so this
+        // build ran on the SAME held connection — no reopen despite the writes.
+        assert_eq!(
+            alpha_headings(&idx2),
+            0,
+            "the shadow must still be in effect ⇒ the writing refresh ran on the \
+             held warm connection (verify-once survives vault-mutating requests)"
+        );
+
+        // Control: a cold open on the same state sees everything for real.
+        let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
+        let cold = crate::cache_cmd::load_graph_index(&root, &cold_config.index_options, false)
+            .expect("cold load_graph_index");
+        assert_eq!(cold.documents.len(), 4);
+        assert_eq!(
+            alpha_headings(&cold),
+            1,
+            "cold open sees alpha's real heading (writes landed in the real table)"
+        );
+    }
+
     /// A `files.ignore` change is index-relevant, so the NEXT warm
     /// `load_graph_index` must reflect it (the newly-ignored doc absent) — the
     /// full self-heal pipeline (config-drop → reopen) flows through the graph
