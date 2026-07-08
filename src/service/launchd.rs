@@ -83,22 +83,20 @@ impl LoadState {
     pub fn running(&self) -> bool {
         matches!(self, LoadState::Loaded { running: true, .. })
     }
-    pub fn pid(&self) -> Option<u32> {
-        match self {
-            LoadState::Loaded { pid, .. } => *pid,
-            LoadState::NotLoaded => None,
-        }
-    }
 }
 
 /// `launchctl print`'s not-found signal, verified empirically (macOS, Darwin
 /// 25.5.0): `launchctl print gui/501/<absent-label>` exits **113** with `Bad
 /// request.` / `Could not find service "<label>" in domain for user gui: 501`
 /// on stderr, while a malformed target (a genuine usage failure) exits 64 with
-/// a usage message. "Definitively not loaded" requires BOTH the code and the
-/// stderr marker — exactly the observed signal — so any deviation (a code
-/// shuffle, a reworded message, some other 113) degrades to a loud probe
-/// error, never to a wrong "not loaded" that a gate acts on irreversibly.
+/// a usage message. "Definitively not loaded" accepts EITHER signal — exit 113
+/// alone, or the stderr marker alone; only a failure showing NEITHER is a
+/// probe error. Rationale for either-not-both: misclassifying a LOADED unit as
+/// not-loaded would require launchctl to emit a not-found signal for a unit it
+/// has (no known failure mode does that), while requiring both signals has a
+/// concrete failure mode — a Darwin release that reshuffles either half would
+/// turn every not-loaded probe into an error and brick the verbs (uninstall
+/// permanently unusable) on that host.
 const PRINT_NOT_FOUND_CODE: i32 = 113;
 const PRINT_NOT_FOUND_MARKER: &str = "Could not find service";
 
@@ -249,10 +247,10 @@ impl<E: Exec> LaunchdSupervisor<E> {
     /// The three-outcome probe over `launchctl print`:
     ///
     /// - exit 0 → `Ok(LoadState::Loaded { .. })` (running/pid parsed from the dump)
-    /// - the verified not-found signal ([`PRINT_NOT_FOUND_CODE`] +
-    ///   [`PRINT_NOT_FOUND_MARKER`]) → `Ok(LoadState::NotLoaded)`
-    /// - anything else (spawn failure, any other nonzero, 113 without the
-    ///   marker) → `Err` — the state is UNKNOWN, and the callers' gates make
+    /// - either half of the verified not-found signal ([`PRINT_NOT_FOUND_CODE`]
+    ///   or [`PRINT_NOT_FOUND_MARKER`]) → `Ok(LoadState::NotLoaded)`
+    /// - anything else (spawn failure, a nonzero showing neither signal) →
+    ///   `Err` — the state is UNKNOWN, and the callers' gates make
     ///   irreversible calls, so unknown must surface, never default.
     pub fn load_state(&self) -> anyhow::Result<LoadState> {
         let result = self
@@ -262,7 +260,7 @@ impl<E: Exec> LaunchdSupervisor<E> {
         if result.code == 0 {
             return Ok(parse_print(&result.stdout));
         }
-        if result.code == PRINT_NOT_FOUND_CODE && result.stderr.contains(PRINT_NOT_FOUND_MARKER) {
+        if result.code == PRINT_NOT_FOUND_CODE || result.stderr.contains(PRINT_NOT_FOUND_MARKER) {
             return Ok(LoadState::NotLoaded);
         }
         anyhow::bail!(
@@ -546,24 +544,35 @@ mod tests {
         );
     }
 
-    /// The not-found signal requires BOTH the code and the marker — exit 113
-    /// without the marker is a probe failure, and the marker at another code
-    /// is too (encode exactly what was verified; deviations degrade loudly).
+    /// The not-found truth table: EITHER signal alone (exit 113, or the
+    /// "Could not find service" marker) classifies definitively-not-loaded —
+    /// a version-drifted launchctl that reshuffles one half must not brick
+    /// the verbs — while a failure showing NEITHER stays a probe error.
     #[test]
-    fn load_state_partial_not_found_signals_are_probe_failures() {
+    fn load_state_not_found_accepts_either_signal_alone() {
         let s = supervisor(FakeExec::new(vec![exec_fail(
             113,
             "something else entirely",
         )]));
-        assert!(s.load_state().is_err(), "113 without the marker is unknown");
+        assert_eq!(
+            s.load_state().unwrap(),
+            LoadState::NotLoaded,
+            "exit 113 alone is the not-found signal"
+        );
         let s = supervisor(FakeExec::new(vec![exec_fail(
             1,
             "Could not find service x",
         )]));
-        assert!(
-            s.load_state().is_err(),
-            "the marker at another code is unknown"
+        assert_eq!(
+            s.load_state().unwrap(),
+            LoadState::NotLoaded,
+            "the stderr marker alone is the not-found signal"
         );
+        let s = supervisor(FakeExec::new(vec![exec_fail(
+            64,
+            "Unrecognized target specifier.",
+        )]));
+        assert!(s.load_state().is_err(), "neither signal stays unknown");
     }
 
     #[test]
@@ -582,8 +591,11 @@ mod tests {
     fn exec_result_streams_are_consumed() {
         let s = supervisor(FakeExec::new(vec![print_running(7)]));
         assert_eq!(
-            s.load_state().unwrap().pid(),
-            Some(7),
+            s.load_state().unwrap(),
+            LoadState::Loaded {
+                running: true,
+                pid: Some(7)
+            },
             "stdout drives load_state()"
         );
         let s = supervisor(FakeExec::new(vec![exec_fail(1, "the reason")]));

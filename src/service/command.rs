@@ -16,20 +16,27 @@
 //! fallback on any other host. norn has exactly ONE unit (serve), so there is
 //! no unit selector — a verb acts on the single serve daemon.
 
-use crate::cli::ServiceCommand;
-#[cfg(unix)]
-use crate::cli::{ServiceFormat, ServiceSubcommand};
+use crate::cli::{ServiceCommand, ServiceFormat, ServiceSubcommand};
 
 #[cfg(unix)]
-use super::launchd::{Exec, LaunchdSupervisor, RealExec};
+use super::launchd::{Exec, LaunchdSupervisor, LoadState, RealExec};
 #[cfg(unix)]
 use super::{plist, status};
+
+/// The non-Verb action names, single-sourced here and shared by [`verb_meta`]
+/// and each verb's success emitter (start/stop/restart come from
+/// [`Verb::name`]) — so a rename cannot ship disagreeing `action` fields.
+const ACTION_INSTALL: &str = "install";
+const ACTION_UNINSTALL: &str = "uninstall";
+const ACTION_STATUS: &str = "status";
 
 /// Refuse on any non-macOS host with Mimir's fallback shape. Non-macOS (which
 /// includes every non-Unix host) has no launchd, so the verbs cannot act; the
 /// message points at the portable path (`norn serve` under the user's own
 /// supervisor). Runs on all platforms, so the crate builds — and reports
-/// honestly — everywhere.
+/// honestly — everywhere. Called INSIDE [`dispatch_verb`], so the refusal
+/// flows through the format boundary like every other failure (`--format
+/// json` gets the structured `{ok:false}` object, not bare stderr text).
 fn require_macos() -> anyhow::Result<()> {
     if std::env::consts::OS != "macos" {
         anyhow::bail!(
@@ -45,45 +52,72 @@ fn require_macos() -> anyhow::Result<()> {
 /// call (acted), or start found it already running; a no-op on a missing unit
 /// is nonzero, so a deploy chain does not proceed on it.
 pub fn run(cmd: &ServiceCommand) -> anyhow::Result<i32> {
-    require_macos()?;
     dispatch(cmd)
 }
 
+/// Marker for a failure writing an already-rendered report to stdout. The
+/// dispatch boundary must NOT route this into another stdout emission — the
+/// stream is broken, and a second `println!` would panic — so it propagates
+/// raw: the top level maps a broken pipe to exit 0 and anything else to
+/// stderr + exit 1, like every other output-write error in the CLI. The
+/// source chain keeps the underlying [`std::io::Error`] so the top level's
+/// broken-pipe detection still sees it.
+#[derive(Debug)]
+struct StdoutWriteError(std::io::Error);
+
+impl std::fmt::Display for StdoutWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed to write the report to stdout")
+    }
+}
+
+impl std::error::Error for StdoutWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// The single format-aware error boundary (see the module docs): resolve the
-/// verb's name + format FIRST, then route EVERY failure — path-derivation
-/// preamble included — through [`report_failure`].
-#[cfg(unix)]
+/// verb's name + format FIRST, then route EVERY failure — the non-macOS
+/// refusal and the path-derivation preamble included — through
+/// [`report_failure`]. The one exception is [`StdoutWriteError`]: stdout is
+/// already broken, so emitting a second object there would panic — it
+/// propagates raw instead.
 fn dispatch(cmd: &ServiceCommand) -> anyhow::Result<i32> {
     let (action, format) = verb_meta(&cmd.command);
     match dispatch_verb(&cmd.command) {
         Ok(code) => Ok(code),
+        Err(error) if error.is::<StdoutWriteError>() => Err(error),
         Err(error) => report_failure(action, error, format),
     }
 }
 
-#[cfg(not(unix))]
-fn dispatch(_cmd: &ServiceCommand) -> anyhow::Result<i32> {
-    // Unreachable: `require_macos` already errored on any non-macOS host (which
-    // is every non-Unix host). Present so the crate compiles on Windows.
-    unreachable!("service is macOS-only; require_macos gates non-macOS hosts")
-}
-
 /// The verb's wire name and requested format — resolved before any fallible
-/// work so a preamble failure can still honor the format contract.
-#[cfg(unix)]
+/// work so a preamble failure can still honor the format contract. Lifecycle
+/// names come from [`Verb::name`] (the same source `Outcome::json` renders),
+/// the rest from the shared `ACTION_*` constants.
 fn verb_meta(sub: &ServiceSubcommand) -> (&'static str, ServiceFormat) {
     match sub {
-        ServiceSubcommand::Install(a) => ("install", a.format),
-        ServiceSubcommand::Uninstall(a) => ("uninstall", a.format),
-        ServiceSubcommand::Start(a) => ("start", a.format),
-        ServiceSubcommand::Stop(a) => ("stop", a.format),
-        ServiceSubcommand::Restart(a) => ("restart", a.format),
-        ServiceSubcommand::Status(a) => ("status", a.format),
+        ServiceSubcommand::Install(a) => (ACTION_INSTALL, a.format),
+        ServiceSubcommand::Uninstall(a) => (ACTION_UNINSTALL, a.format),
+        ServiceSubcommand::Start(a) => (Verb::Start.name(), a.format),
+        ServiceSubcommand::Stop(a) => (Verb::Stop.name(), a.format),
+        ServiceSubcommand::Restart(a) => (Verb::Restart.name(), a.format),
+        ServiceSubcommand::Status(a) => (ACTION_STATUS, a.format),
     }
+}
+
+#[cfg(not(unix))]
+fn dispatch_verb(_sub: &ServiceSubcommand) -> anyhow::Result<i32> {
+    require_macos()?;
+    // Unreachable: `require_macos` refuses every non-macOS host, and every
+    // non-Unix host is non-macOS. Present so the crate compiles on Windows.
+    unreachable!("service is macOS-only; require_macos gates non-macOS hosts")
 }
 
 #[cfg(unix)]
 fn dispatch_verb(sub: &ServiceSubcommand) -> anyhow::Result<i32> {
+    require_macos()?;
     // SAFETY: `getuid(2)` is always successful and takes no arguments.
     let uid = unsafe { libc::getuid() };
     let supervisor = LaunchdSupervisor::new(RealExec, uid, plist::SERVE_LABEL);
@@ -111,7 +145,9 @@ fn dispatch_verb(sub: &ServiceSubcommand) -> anyhow::Result<i32> {
     }
 }
 
-#[cfg(unix)]
+/// The three lifecycle verbs. Cross-platform (its [`Verb::name`] is the ONE
+/// source of the lifecycle action strings, consumed by the cross-platform
+/// [`verb_meta`] as well as the unix `Outcome` renderers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verb {
     Start,
@@ -119,7 +155,6 @@ enum Verb {
     Restart,
 }
 
-#[cfg(unix)]
 impl Verb {
     fn name(self) -> &'static str {
         match self {
@@ -128,6 +163,7 @@ impl Verb {
             Verb::Restart => "restart",
         }
     }
+    #[cfg(unix)]
     fn past(self) -> &'static str {
         match self {
             Verb::Start => "started",
@@ -294,7 +330,6 @@ fn lifecycle(
 
 /// The machine-readable failure object [`report_failure`] emits under `json`.
 /// Pure so the shape is testable.
-#[cfg(unix)]
 fn failure_json(action: &str, error: &anyhow::Error) -> serde_json::Value {
     serde_json::json!({
         "action": action,
@@ -307,7 +342,6 @@ fn failure_json(action: &str, error: &anyhow::Error) -> serde_json::Value {
 /// emit [`failure_json`] (exit 1) — a JSON consumer must never get empty
 /// stdout or a bare stderr string in place of the promised object; under
 /// `text`, propagate so the top level renders it canonically (stderr, exit 1).
-#[cfg(unix)]
 fn report_failure(
     action: &'static str,
     error: anyhow::Error,
@@ -344,7 +378,6 @@ fn stable_bin_path(exe: std::path::PathBuf) -> anyhow::Result<camino::Utf8PathBu
         .map_err(|p| anyhow::anyhow!("binary path is not UTF-8: {}", p.display()))
 }
 
-#[cfg(unix)]
 fn print_json(value: &serde_json::Value) {
     println!(
         "{}",
@@ -377,7 +410,7 @@ fn install(
 
     match format {
         ServiceFormat::Json => print_json(&serde_json::json!({
-            "action": "install",
+            "action": ACTION_INSTALL,
             "ok": true,
             "binary": bin.as_str(),
             "plist": plist_path.as_str(),
@@ -434,7 +467,7 @@ fn uninstall_outcome<E: Exec>(
 fn emit_uninstall(outcome: &UninstallOutcome, format: ServiceFormat) {
     match format {
         ServiceFormat::Json => print_json(&serde_json::json!({
-            "action": "uninstall",
+            "action": ACTION_UNINSTALL,
             "ok": true,
             "was_present": outcome.was_present,
             "removed_plist": outcome.removed_plist,
@@ -449,6 +482,21 @@ fn emit_uninstall(outcome: &UninstallOutcome, format: ServiceFormat) {
     }
 }
 
+/// Render the complete status report to ONE string. Pure (a `Vec` write
+/// cannot fail), so the emission below is a single stdout write — a mid-render
+/// stream failure can never leave a half-written report followed by a second
+/// JSON object from the failure boundary.
+#[cfg(unix)]
+fn render_status(report: &status::ServiceStatus, format: ServiceFormat) -> String {
+    let mut buf = Vec::new();
+    match format {
+        ServiceFormat::Json => status::render_json(report, &mut buf),
+        ServiceFormat::Text => status::render_text(report, &mut buf),
+    }
+    .expect("rendering to a Vec cannot fail");
+    String::from_utf8(buf).expect("the renderers emit UTF-8")
+}
+
 #[cfg(unix)]
 fn status_cmd(
     supervisor: &LaunchdSupervisor<RealExec>,
@@ -457,11 +505,22 @@ fn status_cmd(
     socket_path: &camino::Utf8Path,
     format: ServiceFormat,
 ) -> anyhow::Result<i32> {
-    let state = supervisor.load_state()?;
+    // Status mutates nothing, so it reports what it knows: a launchd probe
+    // failure becomes "unavailable" in the report (carrying the error text)
+    // instead of aborting — the severity split from the acting verbs, whose
+    // gates propagate the same failure because they act on the answer.
+    let launchd = match supervisor.load_state() {
+        Ok(LoadState::Loaded { running, pid }) => status::LaunchdState::Loaded { running, pid },
+        Ok(LoadState::NotLoaded) => status::LaunchdState::NotLoaded,
+        Err(error) => status::LaunchdState::Unavailable {
+            error: format!("{error:#}"),
+        },
+    };
     // Probe the live daemon AT THE SOCKET THE REPORT PRINTS (one derivation,
-    // no re-derive drift), regardless of launchd load state: a `norn serve`
-    // running outside launchd still answers and should surface (running
-    // version / uptime), rather than reading as dead.
+    // no re-derive drift), regardless of the launchd verdict: a `norn serve`
+    // running outside launchd — or behind a failed launchctl probe — still
+    // answers and should surface (running version / uptime), rather than
+    // reading as dead.
     let pong =
         crate::service::probe_status_socket(socket_path, crate::service::handshake_timeout());
     let (running_version, uptime_secs, pong_pid) = match pong {
@@ -471,11 +530,10 @@ fn status_cmd(
 
     let report = status::assemble_status(
         status::ProbedState {
-            loaded: state.loaded(),
-            running: state.running(),
-            pid: state.pid().or(pong_pid),
+            launchd,
             running_version,
             uptime_secs,
+            pong_pid,
         },
         env!("CARGO_PKG_VERSION"),
         status::ServicePaths {
@@ -485,11 +543,17 @@ fn status_cmd(
         },
     );
 
-    let mut out = std::io::stdout().lock();
-    match format {
-        ServiceFormat::Json => status::render_json(&report, &mut out)?,
-        ServiceFormat::Text => status::render_text(&report, &mut out)?,
-    }
+    // ONE write of the complete report. A failure here is a broken output
+    // stream — wrapped so the dispatch boundary propagates it instead of
+    // emitting a second object into the same broken stdout.
+    let rendered = render_status(&report, format);
+    let emit = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        out.write_all(rendered.as_bytes())?;
+        out.flush()
+    };
+    emit().map_err(|e| anyhow::Error::new(StdoutWriteError(e)))?;
     Ok(0)
 }
 
@@ -506,6 +570,46 @@ mod tests {
             assert!(err.contains("requires macOS"), "got {err}");
             assert!(err.contains("systemd support is planned"), "got {err}");
         }
+    }
+
+    /// The non-macOS refusal honors the format contract: it flows through the
+    /// dispatch boundary, so `--format json` gets the structured `{ok:false}`
+    /// object + exit 1 (never bare stderr text with empty stdout), while
+    /// `--format text` propagates the friendly message. Live on Linux CI;
+    /// vacuous on macOS.
+    #[test]
+    fn non_macos_refusal_honors_the_format_contract() {
+        use crate::cli::{ServiceActionArgs, ServiceCommand, ServiceFormat, ServiceSubcommand};
+
+        if std::env::consts::OS == "macos" {
+            return;
+        }
+        let json_cmd = ServiceCommand {
+            command: ServiceSubcommand::Start(ServiceActionArgs {
+                format: ServiceFormat::Json,
+            }),
+        };
+        assert_eq!(
+            run(&json_cmd).unwrap(),
+            1,
+            "json refusal is a reported failure (object on stdout), exit 1"
+        );
+        // The object shape itself: what report_failure emits for this refusal.
+        let value = failure_json("start", &require_macos().unwrap_err());
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["action"], "start");
+        assert!(
+            value["error"].as_str().unwrap().contains("requires macOS"),
+            "{value}"
+        );
+
+        let text_cmd = ServiceCommand {
+            command: ServiceSubcommand::Start(ServiceActionArgs {
+                format: ServiceFormat::Text,
+            }),
+        };
+        let err = run(&text_cmd).unwrap_err().to_string();
+        assert!(err.contains("requires macOS"), "got {err}");
     }
 
     #[cfg(unix)]
@@ -779,6 +883,45 @@ mod tests {
                     .unwrap()
                     .contains("HOME is not set"),
                 "{parsed}"
+            );
+        }
+
+        /// The status report renders to ONE complete string per format — the
+        /// single-write emission that makes a mid-render double-emission
+        /// (half a report + a second failure object on the same broken
+        /// stdout) structurally impossible. The JSON string must be exactly
+        /// one parseable document.
+        #[test]
+        fn render_status_produces_one_complete_document() {
+            let report = status::assemble_status(
+                status::ProbedState {
+                    launchd: status::LaunchdState::Loaded {
+                        running: true,
+                        pid: Some(42),
+                    },
+                    running_version: Some("0.45.1".into()),
+                    uptime_secs: Some(9),
+                    pong_pid: None,
+                },
+                "0.45.1",
+                status::ServicePaths {
+                    plist: "/p".into(),
+                    log: "/l".into(),
+                    socket: "/s".into(),
+                },
+            );
+            let json = render_status(&report, ServiceFormat::Json);
+            let v: serde_json::Value =
+                serde_json::from_str(&json).expect("exactly one parseable JSON document");
+            assert_eq!(v["pid"], 42);
+            let text = render_status(&report, ServiceFormat::Text);
+            assert!(
+                text.starts_with("serve: loaded, running (pid 42)"),
+                "{text}"
+            );
+            assert!(
+                text.ends_with("log    /l\n"),
+                "complete to the last line: {text}"
             );
         }
 
