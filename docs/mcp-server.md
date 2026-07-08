@@ -1,6 +1,6 @@
 ---
 title: MCP server
-description: Run norn as a Model Context Protocol stdio server — the 14-tool catalog, the dry-run/confirm mutation contract, the document-placement workflow, --read-only, and the warm-cache and call-ordering notes.
+description: Run norn as a Model Context Protocol stdio server — the 14-tool catalog, the dry-run/confirm mutation contract, the document-placement workflow, and the warm-cache and call-ordering notes.
 ---
 
 # MCP server
@@ -34,8 +34,6 @@ Register the server with an MCP client by pointing it at the `norn` binary. For 
 }
 ```
 
-Add `"--read-only"` to the `args` array for a query-only server (see [Read-only mode](#read-only-mode)).
-
 ## Tool catalog
 
 Fourteen tools, split into seven read and seven mutation.
@@ -50,7 +48,7 @@ Fourteen tools, split into seven read and seven mutation.
 | `vault.validate` | Validate graph facts and configured frontmatter/link rules; returns structured findings. |
 | `vault.repair` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply`. |
 | `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, creatable rules, inbox, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
-| `vault.audit` | Read the per-vault mutation audit trail (append-only event stream). Filters: `trace`, `status`, `target`, `since`, `until`, `limit`. Returns flattened event records or raw OTEL objects. Available under `--read-only`. |
+| `vault.audit` | Read the per-vault mutation audit trail (append-only event stream). Filters: `trace`, `status`, `target`, `since`, `until`, `limit`. Returns flattened event records or raw OTEL objects. |
 
 ### Mutation tools
 
@@ -83,14 +81,6 @@ This mirrors the CLI's `--dry-run` / apply split: the dry-run is a reviewable fo
 // Apply: writes the change under the mutation lock, audits the event
 { "name": "vault.set", "arguments": { "target": "notes/task.md", "set": { "status": "backlog" }, "confirm": true } }
 ```
-
-## Read-only mode
-
-```sh
-norn mcp --cwd /path/to/vault --read-only
-```
-
-Under `--read-only`, the seven mutation tools are **dropped from `tools/list`** (never registered) and **refused at runtime** if a client calls one anyway (defense in depth). The result is a query-only surface: an agent can find, count, get, validate, plan, and read the audit trail — but cannot write.
 
 ## Placing a new document
 

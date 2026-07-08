@@ -109,7 +109,7 @@ For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-wor
 norn mcp --cwd /path/to/vault
 ```
 
-It serves 14 tools: seven read (`vault.find`, `vault.count`, `vault.get`, `vault.validate`, `vault.repair`, `vault.describe`, `vault.audit`) and seven mutation (`vault.new`, `vault.set`, `vault.edit`, `vault.move`, `vault.delete`, `vault.rewrite_wikilink`, `vault.apply`). Every mutation tool is **dry-run by default** — it returns the planned change and writes nothing until you pass `confirm: true`, at which point the change is applied under the per-vault mutation lock and audited to the same append-only event stream as the CLI. Pass `--read-only` to drop the seven mutation tools entirely for a query-only server.
+It serves 14 tools: seven read (`vault.find`, `vault.count`, `vault.get`, `vault.validate`, `vault.repair`, `vault.describe`, `vault.audit`) and seven mutation (`vault.new`, `vault.set`, `vault.edit`, `vault.move`, `vault.delete`, `vault.rewrite_wikilink`, `vault.apply`). Every mutation tool is **dry-run by default** — it returns the planned change and writes nothing until you pass `confirm: true`, at which point the change is applied under the per-vault mutation lock and audited to the same append-only event stream as the CLI.
 
 Register it with an MCP client by pointing the client's server config at the binary. For a Claude Code / generic `mcpServers` entry:
 

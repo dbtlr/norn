@@ -12,7 +12,7 @@
 //!   `get_subcommands()` / `get_arguments()`. This is the *same* derive-generated
 //!   [`clap::Command`] the binary parses with, so the enumerated flags are exactly
 //!   what the CLI accepts — no hand-maintained flag list to fall out of sync.
-//! * **MCP:** [`McpServer::routers`]`(false)` — the same seam `McpServer::new`
+//! * **MCP:** [`McpServer::routers`] — the same seam `McpServer::new`
 //!   builds the served router from — then
 //!   [`rmcp::handler::server::router::tool::ToolRouter::list_all`]. Each returned
 //!   [`rmcp::model::Tool`] carries the `input_schema` the server publishes in
@@ -527,17 +527,17 @@ fn tool_field_names(tool: &rmcp::model::Tool) -> BTreeSet<String> {
 
 /// Map of `tool name -> advertised param names` over the full served surface.
 ///
-/// Consumes `McpServer::routers(false)` — the same seam `McpServer::new` builds
+/// Consumes `McpServer::routers()` — the same seam `McpServer::new` builds
 /// from — so a future third router lands here automatically without editing this
-/// function. Passing `read_only = false` enumerates every tool, read and
-/// mutation, which is what the parity gate must check.
+/// function. This enumerates every tool, read and mutation, which is what the
+/// parity gate must check.
 ///
 /// Panics on a duplicate tool name across routers: two tools sharing a name would
 /// silently overwrite each other in the map, dropping one from the gate's view
 /// (and it would be a real `tools/list` collision besides).
 fn mcp_tools() -> BTreeMap<String, BTreeSet<String>> {
     let mut tools: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for router in McpServer::routers(false) {
+    for router in McpServer::routers() {
         for tool in router.list_all() {
             let name = tool.name.to_string();
             let fields = tool_field_names(&tool);
@@ -663,7 +663,7 @@ const POINTER: &str =
 #[test]
 fn every_tool_advertises_an_output_schema() {
     let mut missing: Vec<String> = Vec::new();
-    for router in McpServer::routers(false) {
+    for router in McpServer::routers() {
         for tool in router.list_all() {
             if tool.output_schema.is_none() {
                 missing.push(tool.name.to_string());
@@ -724,7 +724,7 @@ fn non_json_tools_advertise_their_payload_schema() {
     ];
 
     let mut advertised = BTreeMap::new();
-    for router in McpServer::routers(false) {
+    for router in McpServer::routers() {
         for tool in router.list_all() {
             advertised.insert(tool.name.to_string(), tool.output_schema.clone());
         }

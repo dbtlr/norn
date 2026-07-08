@@ -173,7 +173,7 @@ repair rule (e.g. updating body content with `--body-from-stdin`).
 
 ## MCP server
 
-Beyond the CLI, norn can expose the vault to an MCP client as a set of tools via `norn mcp` — the same deterministic primitives (find, count, get, validate, repair-plan, plus the full mutation surface) reachable over stdio by an agent whose vault may be remote or off-filesystem. The mutation tools are dry-run by default and apply (under the per-vault mutation lock, audited to the event stream) only on `confirm: true` — the MCP analog of the CLI's `--dry-run` / apply split. Pass `--read-only` for a query-only server.
+Beyond the CLI, norn can expose the vault to an MCP client as a set of tools via `norn mcp` — the same deterministic primitives (find, count, get, validate, repair-plan, plus the full mutation surface) reachable over stdio by an agent whose vault may be remote or off-filesystem. The mutation tools are dry-run by default and apply (under the per-vault mutation lock, audited to the event stream) only on `confirm: true` — the MCP analog of the CLI's `--dry-run` / apply split.
 
 See [MCP server](mcp-server.md) for the 14-tool catalog, the document-placement workflow (`vault.describe` → construct path → `vault.new`), and the warm-cache and call-ordering notes.
 

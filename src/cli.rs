@@ -313,15 +313,11 @@ Exit codes: 0 success or dry-run, 1 runtime failure, 2 pre-flight refusal."
 }
 
 #[derive(Debug, clap::Args)]
-pub struct McpArgs {
-    /// Expose only read tools; drop all mutation tools from tools/list.
-    #[arg(long)]
-    pub read_only: bool,
-}
+pub struct McpArgs {}
 
-/// Arguments for `norn serve`. Phase 1 has no flags: there is no `--detach`,
-/// `--read-only`, or `--socket` — the daemon is a single foreground process at
-/// the well-known socket, serving the full toolset. Supervision is a later
+/// Arguments for `norn serve`. Phase 1 has no flags: there is no `--detach`
+/// or `--socket` — the daemon is a single foreground process at the
+/// well-known socket, serving the full toolset. Supervision is a later
 /// `norn service` layer (NRN-115).
 #[derive(Debug, clap::Args)]
 pub struct ServeArgs {}

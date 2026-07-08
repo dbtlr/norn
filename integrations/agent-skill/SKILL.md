@@ -180,7 +180,7 @@ The edits are an **ordered JSON array** of ops, applied **all-or-nothing**: each
 
 Sections are addressed by **exact heading text**; a duplicated heading refuses as ambiguous (exit 2), and headings inside fenced code blocks are not matched. Exit codes: `0` ok/dry-run, `1` cancelled, `2` refusal. Output: `EditReport` (`schema_version: 1`).
 
-**MCP (`vault.edit`):** the tool carries the identical op array, dry-run by default, `confirm: true` to write (refused under `--read-only`). For a non-idempotent op like `str_replace`, an MCP client must **read the dry-run response before sending `confirm: true`** — the confirm consumes the same anchor, so resending the op blind after it already applied would fail to re-match.
+**MCP (`vault.edit`):** the tool carries the identical op array, dry-run by default, `confirm: true` to write. For a non-idempotent op like `str_replace`, an MCP client must **read the dry-run response before sending `confirm: true`** — the confirm consumes the same anchor, so resending the op blind after it already applied would fail to re-match.
 
 ### new
 
@@ -294,7 +294,7 @@ Filters (all AND-combined): `--trace <ID>` (one invocation), `--status applied|s
 
 Output is a **flattened norn-native projection**: hot fields `trace`, `status`, `target`, and `target_to` promoted to top-level; remaining `norn.*` attributes in a generic `attributes` bag (prefix stripped, dots→underscores). `--raw` returns the stored OTEL Logs objects verbatim.
 
-**MCP (`vault.audit`):** the tool carries the identical filter surface, returns `{ events: [...] }`, and — being read-only — is available even under `norn mcp --read-only`.
+**MCP (`vault.audit`):** the tool carries the identical filter surface and returns `{ events: [...] }`.
 
 ## User vault doctrine lives in .norn/config.yaml
 

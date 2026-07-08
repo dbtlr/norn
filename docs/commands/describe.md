@@ -73,7 +73,7 @@ Each returned field distribution carries a `more` count — the number of additi
 
 ## See also
 
-- [`vault.describe`](../mcp-server.md) — the MCP equivalent, capability-isomorphic with this command. Available under `norn mcp --read-only`.
+- [`vault.describe`](../mcp-server.md) — the MCP equivalent, capability-isomorphic with this command.
 - [`new`](new.md) — `--as <rule>` consumes `creatable_rules`; the inbox fallback mode consumes `inbox`.
 - [`config`](config.md) — `config show` for effective paths/counts; `describe --data` for document-content distributions.
 - [`find`](find.md) / [`count`](count.md) — the same filter surface, returning matching documents or a grouped count instead of a vault-wide summary.

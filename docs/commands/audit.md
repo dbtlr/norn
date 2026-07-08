@@ -89,5 +89,5 @@ Only **confirmed** mutations are recorded — dry-runs, read operations, and can
 
 ## See also
 
-- [`vault.audit`](../mcp-server.md) — the MCP equivalent, capability-isomorphic with this command. Available under `norn mcp --read-only`.
+- [`vault.audit`](../mcp-server.md) — the MCP equivalent, capability-isomorphic with this command.
 - Run `norn audit --help` for the full flag reference.

@@ -57,5 +57,5 @@ The CLI does not yet route its own reads through `norn serve` — that lands sep
 
 ## See also
 
-- [MCP server](mcp-server.md) — the tool catalog, mutation-safety contract, and read-only mode the daemon shares with `norn mcp`.
+- [MCP server](mcp-server.md) — the tool catalog and mutation-safety contract the daemon shares with `norn mcp`.
 - [Cache](cache.md) — the per-vault cache the daemon holds warm.
