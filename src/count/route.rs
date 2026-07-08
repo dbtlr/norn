@@ -17,14 +17,19 @@ use serde_json::{Map, Value};
 
 use crate::cli::CountArgs;
 use crate::count::{CountOutput, GroupNode};
-use crate::route_wire::{get_usize, insert_filter_args, json_type};
+use crate::route_wire::{get_usize, insert_filter_args, insert_list, json_type};
 
 /// Translate parsed `norn count` args into the `vault.count` tool's parameter
 /// object (the `CountParams` shape in `src/mcp/tools/count.rs`).
 ///
 /// The `--format` flag is deliberately absent: it is a CLI-only rendering knob
 /// (the client renders the returned structured data), never a query input.
-pub fn to_mcp_arguments(args: &CountArgs) -> Value {
+///
+/// `dynamic_keys` are the field names the ADR 0010 forgiving-input pass desugared
+/// from `--<field> value` spellings (NRN-218); they ride the private wire channel
+/// so the daemon can run the field-universe gate against its warm cache. Empty
+/// (the canonical spelling) omits the key, keeping the wire byte-identical.
+pub fn to_mcp_arguments(args: &CountArgs, dynamic_keys: &[String]) -> Value {
     let mut map = Map::new();
 
     // `--by` is a repeatable/comma-delimited field list on the CLI (a
@@ -38,6 +43,7 @@ pub fn to_mcp_arguments(args: &CountArgs) -> Value {
     // Filter predicate lists map 1:1 to identically-named tool fields (the `in`
     // field is serde-renamed from `r#in` on the tool side).
     insert_filter_args(&mut map, &args.filters);
+    insert_list(&mut map, "dynamic_keys", dynamic_keys);
 
     Value::Object(map)
 }
@@ -107,7 +113,7 @@ mod tests {
             unresolved_links: true,
             ..FilterArgs::default()
         };
-        let v = to_mcp_arguments(&args(vec!["type", "status"], filters));
+        let v = to_mcp_arguments(&args(vec!["type", "status"], filters), &[]);
 
         assert_eq!(v["by"], "type,status");
         assert_eq!(v["eq"], json!(["type:note"]));
@@ -115,12 +121,26 @@ mod tests {
         assert_eq!(v["unresolved_links"], true);
         // Empty predicate lists are omitted, not sent as empty arrays.
         assert!(v.get("not_eq").is_none());
+        // No dynamic keys → the private channel is omitted (byte-identical wire).
+        assert!(v.get("dynamic_keys").is_none());
     }
 
     #[test]
     fn to_mcp_arguments_total_mode_omits_by() {
-        let v = to_mcp_arguments(&args(vec![], FilterArgs::default()));
+        let v = to_mcp_arguments(&args(vec![], FilterArgs::default()), &[]);
         assert!(v.get("by").is_none(), "no --by must omit the field: {v}");
+    }
+
+    /// NRN-218: the desugared dynamic-field keys ride the private wire channel.
+    #[test]
+    fn to_mcp_arguments_carries_dynamic_keys() {
+        let filters = FilterArgs {
+            eq: vec!["type:note".into()],
+            ..FilterArgs::default()
+        };
+        let v = to_mcp_arguments(&args(vec![], filters), &["type".to_string()]);
+        assert_eq!(v["dynamic_keys"], json!(["type"]));
+        assert_eq!(v["eq"], json!(["type:note"]));
     }
 
     /// The reconstruction is the exact inverse of the daemon's envelope

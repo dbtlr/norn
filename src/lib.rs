@@ -205,6 +205,7 @@ fn try_route_read(
     no_cache_refresh: bool,
     color: crate::cli::ColorWhen,
     verbose: bool,
+    dynamic_keys: &[String],
 ) -> Option<Result<i32>> {
     // The ONE non-Unix stub for the whole routing seam: the warm daemon rides
     // Unix-domain sockets, so every read always runs Direct. Future routed
@@ -218,6 +219,7 @@ fn try_route_read(
             no_cache_refresh,
             color,
             verbose,
+            dynamic_keys,
         );
         None
     }
@@ -227,8 +229,12 @@ fn try_route_read(
             return None;
         }
         match command {
-            Command::Count(args) => route_count(args, cwd, verbose),
-            Command::Find(args) => route_find(args, cwd, color, verbose),
+            // NRN-218: dynamic-field predicates now route too — the desugared keys
+            // ride the wire so the daemon runs the field-universe gate against its
+            // warm cache. `get` takes no filter predicates, so `dynamic_keys` is
+            // always empty there.
+            Command::Count(args) => route_count(args, cwd, verbose, dynamic_keys),
+            Command::Find(args) => route_find(args, cwd, color, verbose, dynamic_keys),
             Command::Get(args) => route_get(args, cwd, verbose),
             _ => None,
         }
@@ -281,6 +287,18 @@ fn route_read<T>(
             return None;
         }
     };
+    // NRN-218: a daemon-side field-universe gate refusal (an unknown dynamic-field
+    // predicate) crosses back in the envelope. Commit to routing — re-emit the
+    // byte-identical error the direct gate would (exit 1 at the top level), NOT a
+    // fall-back to Direct (which would re-execute the read). Forward any operator
+    // notes FIRST so the stderr ordering matches the direct path, where the cache
+    // open prints its contention note before the gate error (NRN-215).
+    if let Some(message) = crate::grammar::dynamic_field_refusal_message(&structured) {
+        for note in crate::mcp::notes::operator_notes_from_structured(&structured) {
+            eprintln!("{note}");
+        }
+        return Some(Err(anyhow::anyhow!("{message}")));
+    }
     let value = match reconstruct(&structured) {
         Ok(value) => value,
         Err(error) => {
@@ -314,11 +332,12 @@ fn route_count(
     args: &crate::cli::CountArgs,
     cwd: &camino::Utf8Path,
     verbose: bool,
+    dynamic_keys: &[String],
 ) -> Option<Result<i32>> {
     route_read(
         cwd,
         "vault.count",
-        crate::count::route::to_mcp_arguments(args),
+        crate::count::route::to_mcp_arguments(args, dynamic_keys),
         crate::service::OnToolError::FallBackDirect,
         verbose,
         crate::count::route::reconstruct,
@@ -337,6 +356,7 @@ fn route_find(
     cwd: &camino::Utf8Path,
     color: crate::cli::ColorWhen,
     verbose: bool,
+    dynamic_keys: &[String],
 ) -> Option<Result<i32>> {
     // The missing-predicate help gate holds on the routed path too: a bare
     // `find` (no predicate, no --all) prints help and exits 2 on the direct
@@ -348,7 +368,7 @@ fn route_find(
     route_read(
         cwd,
         "vault.find",
-        crate::find::route::to_mcp_arguments(args),
+        crate::find::route::to_mcp_arguments(args, dynamic_keys),
         crate::service::OnToolError::FallBackDirect,
         verbose,
         |structured| crate::find::route::reconstruct(structured, args),
@@ -458,20 +478,20 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     // from an already-verified cache. When it returns `Some`, the request was
     // served by routing; otherwise we fall through to the direct, integrity-
     // verified dispatch below (today's behavior). No daemon => only a `stat`.
-    // A dynamic-predicate invocation forces Direct: the field-universe gate
-    // (NRN-207) needs the vault's known fields, which the warm-daemon routed
-    // path doesn't surface — so validate + serve on the direct, cache-open path.
-    if dynamic_keys.is_empty() {
-        if let Some(result) = try_route_read(
-            &command,
-            &cwd,
-            config_path.is_some(),
-            no_cache_refresh,
-            color,
-            verbose,
-        ) {
-            return result;
-        }
+    // NRN-218: a dynamic-predicate invocation now routes too — the desugared
+    // `dynamic_keys` cross the wire so the daemon runs the field-universe gate
+    // (NRN-207) against its warm cache and returns a byte-identical refusal for an
+    // unknown field, instead of the old force-Direct fall-back.
+    if let Some(result) = try_route_read(
+        &command,
+        &cwd,
+        config_path.is_some(),
+        no_cache_refresh,
+        color,
+        verbose,
+        dynamic_keys,
+    ) {
+        return result;
     }
 
     let outcome = match command {

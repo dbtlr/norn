@@ -33,7 +33,7 @@ use crate::cli::FindArgs;
 use crate::core::DocumentSummary;
 use crate::output::projection::split_cols;
 use crate::route_wire::{
-    get_bool, get_usize, insert_filter_args, insert_paging, json_type, take_vec,
+    get_bool, get_usize, insert_filter_args, insert_list, insert_paging, json_type, take_vec,
 };
 
 /// The reconstructed find result: the matched documents plus the parallel
@@ -56,13 +56,19 @@ pub struct RoutedFind {
 /// `--format` / `--no-pager` / `--all` are deliberately absent: they are CLI-only
 /// rendering / gating knobs (the client renders the returned structured data),
 /// never query inputs.
-pub fn to_mcp_arguments(args: &FindArgs) -> Value {
+///
+/// `dynamic_keys` are the field names the ADR 0010 forgiving-input pass desugared
+/// from `--<field> value` spellings (NRN-218); they ride the private wire channel
+/// so the daemon can run the field-universe gate against its warm cache. Empty
+/// (the canonical spelling) omits the key, keeping the wire byte-identical.
+pub fn to_mcp_arguments(args: &FindArgs, dynamic_keys: &[String]) -> Value {
     let mut map = Map::new();
 
     insert_filter_args(&mut map, &args.filters);
     // An omitted `--limit` stays absent so the tool applies find's default of 10
     // (matching the direct path's `build_find_query`).
     insert_paging(&mut map, &args.paging);
+    insert_list(&mut map, "dynamic_keys", dynamic_keys);
 
     // Column projection: the tool applies the SAME `doc_to_json` projection the
     // CLI's `--format json` does, so the returned documents are already projected.
@@ -231,7 +237,7 @@ mod tests {
         args.paging.limit = Some(5);
         args.col = vec!["title".into(), ".body".into()];
 
-        let v = to_mcp_arguments(&args);
+        let v = to_mcp_arguments(&args, &[]);
         assert_eq!(v["eq"], json!(["type:note"]));
         assert_eq!(v["text"], "hello");
         assert_eq!(v["sort"], "created");
@@ -242,6 +248,19 @@ mod tests {
         assert!(v.get("no_limit").is_none());
         assert!(v.get("starts_at").is_none());
         assert!(v.get("all_cols").is_none());
+        // No dynamic keys → the private channel is omitted (byte-identical wire).
+        assert!(v.get("dynamic_keys").is_none());
+    }
+
+    /// NRN-218: the desugared dynamic-field keys ride the private wire channel so
+    /// the daemon can gate them; a canonical invocation omits the key entirely.
+    #[test]
+    fn to_mcp_arguments_carries_dynamic_keys() {
+        let mut args = base_args();
+        args.filters.eq = vec!["type:note".into()];
+        let v = to_mcp_arguments(&args, &["type".to_string()]);
+        assert_eq!(v["dynamic_keys"], json!(["type"]));
+        assert_eq!(v["eq"], json!(["type:note"]));
     }
 
     // ── Round-trip isomorphism (NRN-222, per the count template) ──────────────
