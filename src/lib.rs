@@ -400,6 +400,10 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         Command::Completions(args) => return run_completions_command(args),
         Command::Manpage => return run_manpage_command(),
         Command::SelfUpdate(args) => return run_self_update_command(args, color),
+        // The launchd supervisor targets no vault and opens no cache — like
+        // self-update it is fully self-contained, so handle it before cwd/config
+        // resolution and the cache-opening dispatch.
+        Command::Service(cmd) => return crate::service::command::run(&cmd),
         command => command,
     };
 
@@ -1614,6 +1618,9 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Serve(_) => {
             unreachable!("serve is handled before the cache-opening dispatch")
+        }
+        Command::Service(_) => {
+            unreachable!("service is handled before vault targeting")
         }
     };
     // Per-invocation throttled lazy GC: best-effort, never affects the

@@ -63,6 +63,16 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+// The `norn service` launchd supervisor (NRN-115). Co-located with the routing
+// client because both are the `norn service`/`norn serve` story and the
+// supervisor reuses this module's socket/run-dir derivation. `plist`/`launchd`/
+// `status` are pure and cross-platform (unit-tested in CI); `command` wires the
+// real launchctl edges and gates non-macOS hosts at runtime.
+pub mod command;
+pub mod launchd;
+pub mod plist;
+pub mod status;
+
 /// Control-frame protocol version. Bumped only on a breaking change to the
 /// handshake wire shape; the client refuses to route unless the daemon echoes
 /// the same version, so a version skew falls back to Direct rather than
@@ -305,6 +315,57 @@ pub fn probe(timeout: std::time::Duration) -> RouteDecision {
         return RouteDecision::Direct;
     };
     probe_socket(&socket_path, timeout)
+}
+
+/// The live daemon's pong details, kept for `norn service status` (NRN-115).
+/// Unlike [`probe`] — which discards everything but the routing decision — this
+/// preserves `version`/`pid`/`uptime_secs` so status can render running-vs-on-disk.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct ServicePong {
+    pub version: String,
+    pub pid: Option<u32>,
+    pub uptime_secs: Option<u64>,
+}
+
+/// Best-effort control-ping for `norn service status`: connect, ping, parse the
+/// pong. `None` on any failure (no socket, no daemon, timeout, garbage) — status
+/// then renders "no answer on the control socket". Shares the routing path's
+/// bounded connect + capped, deadline-aware read, but never gates on version
+/// (status reports skew rather than falling back).
+#[cfg(unix)]
+pub fn probe_status(timeout: std::time::Duration) -> Option<ServicePong> {
+    use std::io::BufReader;
+
+    let socket_path = host_socket_path().ok()?;
+    if !socket_path.exists() {
+        return None;
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let stream = connect_control(&socket_path, timeout).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+
+    let ping = ControlFrame::Ping {
+        protocol: CONTROL_PROTOCOL,
+    };
+    write_json_line(&stream, &ping).ok()?;
+
+    let mut reader = BufReader::new(&stream);
+    let line = read_line_capped(&mut reader, MAX_CONTROL_FRAME_BYTES, deadline).ok()??;
+    match serde_json::from_slice::<ControlFrame>(&line).ok()? {
+        ControlFrame::Pong {
+            version,
+            pid,
+            uptime_secs,
+            ..
+        } => Some(ServicePong {
+            version,
+            pid,
+            uptime_secs,
+        }),
+        _ => None,
+    }
 }
 
 /// The ONE operator-actionable routing notice: the daemon's build version does
