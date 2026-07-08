@@ -224,6 +224,27 @@ fn lists_and_calls_vault_count() {
         schema["properties"].get("by").is_some(),
         "vault.count inputSchema must expose a `by` property, got: {schema}"
     );
+    // NRN-218: the dynamic-field gate carriers are a PRIVATE norn-CLI↔norn-daemon
+    // channel and must never leak into the published catalog. Removing a
+    // #[schemars(skip)] on either field fails here instead of shipping silently.
+    assert!(
+        schema["properties"].get("dynamic_keys").is_none(),
+        "vault.count inputSchema must NOT publish the private `dynamic_keys` \
+         channel (NRN-218), got: {schema}"
+    );
+    let output_schema = &count_tool["outputSchema"];
+    assert!(
+        output_schema["properties"].get("total").is_some(),
+        "vault.count outputSchema must expose `total` (vacuity guard for the \
+         negative assertion below), got: {output_schema}"
+    );
+    assert!(
+        output_schema["properties"]
+            .get("dynamic_field_error")
+            .is_none(),
+        "vault.count outputSchema must NOT publish the private \
+         `dynamic_field_error` channel (NRN-218), got: {output_schema}"
+    );
 
     // ── tools/call (id=3): total count — no filter ────────────────────────
     let total_resp = responses.iter().find(|r| r["id"] == 3).unwrap_or_else(|| {

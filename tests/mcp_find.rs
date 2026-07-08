@@ -197,6 +197,27 @@ fn lists_and_calls_vault_find() {
         schema["properties"].get("eq").is_some(),
         "vault.find inputSchema must expose an `eq` property, got: {schema}"
     );
+    // NRN-218: the dynamic-field gate carriers are a PRIVATE norn-CLI↔norn-daemon
+    // channel and must never leak into the published catalog. Removing a
+    // #[schemars(skip)] on either field fails here instead of shipping silently.
+    assert!(
+        schema["properties"].get("dynamic_keys").is_none(),
+        "vault.find inputSchema must NOT publish the private `dynamic_keys` \
+         channel (NRN-218), got: {schema}"
+    );
+    let output_schema = &find_tool["outputSchema"];
+    assert!(
+        output_schema["properties"].get("documents").is_some(),
+        "vault.find outputSchema must expose `documents` (vacuity guard for the \
+         negative assertion below), got: {output_schema}"
+    );
+    assert!(
+        output_schema["properties"]
+            .get("dynamic_field_error")
+            .is_none(),
+        "vault.find outputSchema must NOT publish the private \
+         `dynamic_field_error` channel (NRN-218), got: {output_schema}"
+    );
 
     // ── tools/call (id=3): eq type:note → 2 notes ─────────────────────────
     let find_resp = responses.iter().find(|r| r["id"] == 3).unwrap_or_else(|| {
