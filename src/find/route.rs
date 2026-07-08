@@ -191,7 +191,10 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let frontmatter = obj.get("frontmatter").cloned();
+        // A frontmatter-less document serializes as JSON `null`; normalize back
+        // to `None` (as show/route does) so the renderers see the same absence
+        // the direct path's `DocumentSummary` carries.
+        let frontmatter = obj.get("frontmatter").filter(|v| !v.is_null()).cloned();
         let body_text = obj
             .get("body")
             .and_then(Value::as_str)
@@ -552,6 +555,33 @@ mod tests {
             truncated: false,
         };
         assert_round_trip(result, vec![], vec![], base_args());
+    }
+
+    /// A frontmatter-less document round-trips: the wire serializes its
+    /// frontmatter as JSON `null`, which reconstruction must normalize back to
+    /// `None` (mirroring show/route) — `Some(Value::Null)` would render a bogus
+    /// `frontmatter  null` row under `--col .frontmatter` where the direct path
+    /// prints "(no matching fields)".
+    #[test]
+    fn round_trip_no_frontmatter() {
+        let bare = DocumentSummary {
+            path: Utf8PathBuf::from("bare.md"),
+            stem: "bare".into(),
+            hash: "h".into(),
+            frontmatter: None,
+            body_text: "body\n".into(),
+        };
+        let result = FindResult {
+            matches: vec![bare],
+            total: 1,
+            returned: 1,
+            truncated: false,
+        };
+        // Both the default projection and the explicit `.frontmatter` facet.
+        assert_round_trip(result.clone(), vec![], vec![], base_args());
+        let mut args = base_args();
+        args.col = vec![".frontmatter".into()];
+        assert_round_trip(result, vec![], vec![], args);
     }
 
     // ── Exit-code isomorphism: the vault-diagnostics bit (NRN-222) ────────────
