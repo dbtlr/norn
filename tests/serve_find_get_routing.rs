@@ -12,7 +12,9 @@
 #[path = "serve_util/mod.rs"]
 mod serve_util;
 
-use serve_util::{norn_bin, socket_path_for, wait_for_ready, ChildGuard};
+use serve_util::{
+    count_served, norn_bin, read_to_string, socket_path_for, wait_for_ready, ChildGuard,
+};
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -132,9 +134,11 @@ fn routed_get_not_found_exits_1_without_direct_fallback() {
     // is what proves the isError result was SERVED, not bounced.
     let served = count_served(&stderr_path, "vault.get");
     assert_eq!(
-        served, 1,
+        served,
+        1,
         "the daemon must have served exactly one vault.get for the routed \
-         not-found run, got {served}"
+         not-found run, got {served}; daemon stderr:\n{}",
+        read_to_string(&stderr_path)
     );
 
     // And with --verbose, a fall-back to Direct would print a "using direct
@@ -152,16 +156,12 @@ fn routed_get_not_found_exits_1_without_direct_fallback() {
     );
     let served = count_served(&stderr_path, "vault.get");
     assert_eq!(
-        served, 2,
+        served,
+        2,
         "the verbose routed run must also have been served by the daemon \
-         (expected 2 total vault.get markers, got {served})"
+         (expected 2 total vault.get markers, got {served}); daemon stderr:\n{}",
+        read_to_string(&stderr_path)
     );
-}
-
-/// Count the daemon's per-call "served <tool>" markers in its stderr log.
-fn count_served(stderr_path: &Path, tool: &str) -> usize {
-    let log = std::fs::read_to_string(stderr_path).unwrap_or_default();
-    log.matches(&format!("served {tool}")).count()
 }
 
 /// The missing-predicate help gate must hold on the routed path exactly as on
@@ -221,9 +221,11 @@ fn routed_find_respects_missing_predicate_gate() {
     );
     let served = count_served(&stderr_path, "vault.find");
     assert_eq!(
-        served, 1,
+        served,
+        1,
         "the control predicated find must have been served by the daemon \
-         (expected 1 vault.find marker, got {served})"
+         (expected 1 vault.find marker, got {served}); daemon stderr:\n{}",
+        read_to_string(&stderr_path)
     );
 
     for (shape, (direct_stdout, direct_stderr, direct_code)) in
@@ -250,8 +252,10 @@ fn routed_find_respects_missing_predicate_gate() {
     // stays at the control's 1.
     let served = count_served(&stderr_path, "vault.find");
     assert_eq!(
-        served, 1,
+        served,
+        1,
         "gated shapes must NOT route: expected the vault.find served counter \
-         to stay at 1 (the control), got {served}"
+         to stay at 1 (the control), got {served}; daemon stderr:\n{}",
+        read_to_string(&stderr_path)
     );
 }

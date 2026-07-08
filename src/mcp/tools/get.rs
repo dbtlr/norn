@@ -166,11 +166,7 @@ impl GetOutput {
 /// untouched (it serializes the record directly, conflating as before).
 pub(crate) fn record_to_wire_json(record: &crate::show::ShowRecord) -> Result<serde_json::Value> {
     let mut v = serde_json::to_value(record)?;
-    if record.frontmatter.is_none() {
-        if let Some(obj) = v.as_object_mut() {
-            obj.remove("frontmatter");
-        }
-    }
+    crate::route_wire::strip_absent_frontmatter(&mut v, record.frontmatter.is_none());
     Ok(v)
 }
 

@@ -187,11 +187,7 @@ pub(crate) fn doc_to_wire_json(
     all_cols: bool,
 ) -> serde_json::Value {
     let mut v = crate::find::render::doc_to_json(doc, deep, raw, cols, all_cols);
-    if doc.frontmatter.is_none() {
-        if let Some(obj) = v.as_object_mut() {
-            obj.remove("frontmatter");
-        }
-    }
+    crate::route_wire::strip_absent_frontmatter(&mut v, doc.frontmatter.is_none());
     v
 }
 

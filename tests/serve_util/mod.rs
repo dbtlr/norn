@@ -361,3 +361,13 @@ pub fn paths(docs: &[Value]) -> Vec<String> {
 pub fn read_to_string(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
+
+/// Count the daemon's per-call `norn serve: served <tool>` markers in its
+/// captured stderr log at `stderr_path`. The routing proofs assert EXACT counts
+/// on this — one marker per tools/call the daemon actually served — so a shape
+/// that silently fell back to Direct (or an envelope break that killed routing)
+/// goes red instead of passing vacuously.
+pub fn count_served(stderr_path: &Path, tool: &str) -> usize {
+    let log = std::fs::read_to_string(stderr_path).unwrap_or_default();
+    log.matches(&format!("served {tool}")).count()
+}

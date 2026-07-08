@@ -112,6 +112,22 @@ pub(crate) fn take_vec<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Apply the wire's absent-vs-null frontmatter distinction (NRN-222) to one
+/// serialized document/record: when the SOURCE carries no frontmatter block
+/// (`None`), remove the `frontmatter` key so the wire distinguishes it from an
+/// empty `---`/`---` block (`Some(Value::Null)`, which stays `"frontmatter":
+/// null`). Serde conflates both `Option` states as JSON `null`; the records
+/// renderer distinguishes them, and a routed result re-renders from the wire
+/// value — so key presence must carry the distinction. One helper shared by the
+/// `vault.find` and `vault.get` envelope projections, so they cannot drift.
+pub(crate) fn strip_absent_frontmatter(wire: &mut Value, frontmatter_is_absent: bool) {
+    if frontmatter_is_absent {
+        if let Some(obj) = wire.as_object_mut() {
+            obj.remove("frontmatter");
+        }
+    }
+}
+
 /// Read `envelope[key]` as an unsigned integer, naming the tool, the key, and
 /// the observed shape on failure — one error shape for every routed envelope.
 pub(crate) fn get_usize(envelope: &Value, tool: &str, key: &str) -> Result<usize> {
