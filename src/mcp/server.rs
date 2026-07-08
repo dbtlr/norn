@@ -230,34 +230,28 @@ impl McpServer {
             // returned Ok), so its `isError: true` + structuredContent envelope
             // carries the request's notes exactly like a success.
             Ok(Ok(value)) => Ok(Noted::new(value, self.ctx.take_operator_notes())),
+            // The error arms deliberately do NOT touch the note buffer: a bare
+            // tool error / join failure crosses as a JSON-RPC `error` (rmcp
+            // `ErrorData`), which carries no structuredContent for a note to
+            // ride. The signal is still not lost — the capture point writes
+            // every note to the daemon's own stderr as it is recorded, and a
+            // routed client maps a JSON-RPC error to a verified DIRECT run,
+            // which re-produces the note canonically. Cross-request isolation
+            // is owned by ONE mechanism: `begin_request` clears the buffer at
+            // the start of every request (under `call_lock`), so a note left
+            // by a failed request can never leak into the next envelope.
+            //
             // A corruption-class SQLite failure evicts the warm state so the next
             // request fully reopens (integrity_check → rebuild) — the warm-mode
             // self-heal for in-place corruption (FIX-3). No-op in cold mode.
-            //
-            // Drain the notes here too: a bare tool error crosses as a JSON-RPC
-            // `error` (rmcp `ErrorData`), which carries NO structuredContent to
-            // ride, so the notes cannot be forwarded on this arm. The signal is
-            // not lost — the capture point already wrote each note to the
-            // daemon's own stderr (its operational log), and the routed client
-            // maps a JSON-RPC error to a verified DIRECT run, which re-produces
-            // the note canonically on its own stderr. Draining keeps the buffer
-            // strictly request-scoped (belt-and-suspenders over the
-            // `begin_request` clear).
             Ok(Err(err)) => {
-                self.ctx.take_operator_notes();
                 self.ctx.note_tool_error(&err);
                 Err(to_mcp_error(err))
             }
-            // Same drain rationale as the tool-error arm: no envelope exists for
-            // a join failure, and the capture point already logged the note to
-            // the daemon's stderr.
-            Err(join_err) => {
-                self.ctx.take_operator_notes();
-                Err(rmcp::ErrorData::internal_error(
-                    format!("tool task failed: {join_err}"),
-                    None,
-                ))
-            }
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("tool task failed: {join_err}"),
+                None,
+            )),
         }
     }
 
@@ -874,72 +868,55 @@ mod tests {
         );
     }
 
-    /// The real capture point (NRN-215): when the warm daemon's implicit refresh
-    /// cannot acquire the write lock, `query_cache_warm` records the
-    /// lock-contention note as a per-request operator note; `run_wrapped` drains
-    /// it into the tool envelope, and it serializes as an `operator_notes` sibling
-    /// in `structuredContent` — byte-identical to the note the direct path prints
-    /// to stderr. Contention is staged GENUINELY: the test holds the vault's cache
-    /// write lock (`<cache_dir>/.lock`) while a warm read runs, so the daemon's
-    /// `index_incremental` times out through the real code path (no injected note).
+    /// The `run_wrapped` funnel forwards a request's operator notes in the tool
+    /// envelope (NRN-215): a note recorded on the context while the body runs
+    /// comes back paired with the result and serializes as the `operator_notes`
+    /// sibling in `structuredContent`; a note-free request adds nothing. The
+    /// note is recorded here through the same `push_operator_note` seam the real
+    /// capture point (`query_cache_warm`'s lock-timeout arm) uses; the GENUINE
+    /// end-to-end trigger — a live daemon under real flock contention, note
+    /// re-emitted byte-identically on the routed CLI's stderr — is proven by
+    /// `tests/serve_note_forwarding.rs`, where the daemon child process owns its
+    /// own (short-lock-timeout) environment.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn warm_read_forwards_lock_contention_note() {
+    async fn run_wrapped_forwards_request_notes_in_the_envelope() {
         use rmcp::handler::server::tool::IntoCallToolResult;
 
         let (_tmp, root) = cold_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
         let server = McpServer::new(ctx);
 
-        // First call builds + opens the warm cache (uncontended → no note).
-        let first = server
+        // A note-free request forwards nothing.
+        let quiet = server
             .validate(Parameters(
                 crate::mcp::tools::validate::ValidateParams::default(),
             ))
             .await
-            .expect("first validate");
+            .expect("validate");
         assert!(
-            first.notes().is_empty(),
-            "an uncontended warm read must produce no operator note"
+            quiet.notes().is_empty(),
+            "a note-free request must forward no operator note"
         );
 
-        // Shorten the write-lock timeout for the contended section so the test
-        // does not stall the suite the full 5s production default per contended
-        // acquire. `set_var` is process-global, but this leak is benign: a
-        // shorter timeout only matters to CONTENDED acquires, and no other
-        // in-binary test stages cache write-lock contention (the lock.rs tests
-        // pass explicit durations and never read the env).
-        std::env::set_var("NORN_CACHE_LOCK_TIMEOUT_MS", "150");
-
-        // Hold the vault's cache write lock so the next refresh cannot acquire it.
-        let (_canonical, cache_dir) =
-            crate::cache::cache_dir_for(&root).expect("resolve cache dir");
-        let held = crate::cache::acquire_flock(
-            &cache_dir.join(".lock"),
-            std::time::Duration::from_secs(60),
-        )
-        .expect("hold the cache write lock");
-
-        // Second call: `query_cache_warm`'s `index_incremental` times out on the
-        // held lock and records the note through the REAL capture point (which
-        // ALSO writes the same line to this process's stderr — the daemon's
-        // operational-log surface, asserted end-to-end by the
-        // serve_note_forwarding integration test where the daemon's stderr is a
-        // capturable file).
-        let second = server
-            .validate(Parameters(
-                crate::mcp::tools::validate::ValidateParams::default(),
-            ))
+        // A request that records a note gets it back in the envelope. The body
+        // returns an object payload, like every real tool (`Noted` injects the
+        // sibling only into an object-shaped structuredContent).
+        let noted = server
+            .run_wrapped(
+                "vault.count",
+                |ctx| -> anyhow::Result<Json<serde_json::Value>> {
+                    ctx.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
+                    Ok(Json(serde_json::json!({ "total": 0 })))
+                },
+            )
             .await
-            .expect("second validate");
+            .expect("noted request");
         assert_eq!(
-            second.notes(),
+            noted.notes(),
             [crate::cache::LOCK_CONTENTION_NOTE],
-            "the contended warm read must capture exactly the lock-contention note"
+            "the request's note must ride its own result"
         );
-
-        // And it serializes as the `operator_notes` sibling the routed CLI reads
-        // and re-emits (the wire half of the byte-identity guarantee).
-        let result = second.into_call_tool_result().expect("serialize");
+        let result = noted.into_call_tool_result().expect("serialize");
         let sc = result
             .structured_content
             .expect("structured content present");
@@ -948,38 +925,45 @@ mod tests {
             serde_json::json!([crate::cache::LOCK_CONTENTION_NOTE]),
             "structuredContent.operator_notes must carry the forwarded note"
         );
+    }
 
-        // A contended request whose tool body then FAILS (the bare-Err arm, not
-        // the in-band isError shape): the JSON-RPC error carries no
-        // structuredContent for the note to ride, so `run_wrapped` drains the
-        // buffer — the note must NOT leak into the next request's envelope.
-        // (The note itself is not lost: the capture point wrote it to the
-        // daemon's stderr, and a routed client re-runs Direct on a JSON-RPC
-        // error, re-producing it canonically.)
+    /// Cross-request note isolation is owned by ONE mechanism — `begin_request`
+    /// clears the buffer at the start of every request, under `call_lock` — so a
+    /// note recorded by a request that then FAILED (the bare-Err arm, whose
+    /// JSON-RPC error carries no structuredContent for the note to ride) can
+    /// never leak into the NEXT request's envelope, regardless of how the prior
+    /// request ended. (The failed request's note itself is not lost: the capture
+    /// point writes every note to the daemon's stderr as it is recorded, and a
+    /// routed client maps a JSON-RPC error to a verified Direct run, which
+    /// re-produces the note canonically.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn begin_request_clears_notes_left_by_a_failed_request() {
+        let (_tmp, root) = cold_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let server = McpServer::new(ctx);
+
+        // A request records a note, then its body fails: the buffered note has
+        // no envelope to ride and stays behind in the buffer.
         let failed = server
             .run_wrapped("vault.count", |ctx| -> anyhow::Result<Json<()>> {
-                // Trip the REAL capture point (contended refresh) first…
-                let _cache = ctx.query_cache()?;
-                // …then fail the body.
-                anyhow::bail!("boom after capture")
+                ctx.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
+                anyhow::bail!("boom after the note")
             })
             .await;
         assert!(failed.is_err(), "the failing body must surface as Err");
 
-        // Release the lock; the next request must carry NO stale note.
-        drop(held);
-        std::env::remove_var("NORN_CACHE_LOCK_TIMEOUT_MS");
-        let third = server
+        // The NEXT request's begin_request clears it — no stale note leaks.
+        let next = server
             .validate(Parameters(
                 crate::mcp::tools::validate::ValidateParams::default(),
             ))
             .await
-            .expect("third validate");
+            .expect("next validate");
         assert!(
-            third.notes().is_empty(),
-            "a note captured by a FAILED request must not leak into the next \
+            next.notes().is_empty(),
+            "a note left by a failed request must not leak into the next \
              request's envelope, got {:?}",
-            third.notes()
+            next.notes()
         );
     }
 

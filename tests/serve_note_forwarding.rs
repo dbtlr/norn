@@ -10,6 +10,14 @@
 //! shrinks the 5s production timeout to 200ms so the suite doesn't stall.
 
 #![cfg(unix)]
+// Debug-profile only: `norn_bin()` spawns the binary built alongside this test
+// (`target/<profile>/norn`), and the `NORN_CACHE_LOCK_TIMEOUT_MS` override the
+// spawned processes rely on is compiled out of release builds
+// (`#[cfg(debug_assertions)]` in `src/cache/lock.rs`) — under a release test
+// profile the contended acquires would stall the full 5s production timeout and
+// overrun the routed-read budget. The test crate compiles with the same profile
+// as the binary, so this cfg gate tracks it exactly.
+#![cfg(debug_assertions)]
 
 #[path = "serve_util/mod.rs"]
 mod serve_util;
@@ -111,7 +119,8 @@ fn hold_cache_lock(cache_home: &Path) -> File {
 /// A routed read under genuine daemon-side lock contention produces the SAME
 /// (stdout, stderr, exit) triple as a direct read under the same contention —
 /// the forwarded note included — and the note also lands in the daemon's own
-/// stderr log (both surfaces, NRN-215).
+/// stderr log (both surfaces, NRN-215). Debug-profile only — see the crate-level
+/// `cfg(debug_assertions)` gate above.
 #[test]
 fn routed_contended_read_forwards_the_note_byte_identically() {
     let vault = seed_vault();

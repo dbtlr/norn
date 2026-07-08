@@ -16,26 +16,34 @@ use crate::cache::error::CacheError;
 pub(crate) const DEFAULT_WRITE_LOCK_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
 
-/// Test-only override for the write-lock acquire timeout, in milliseconds
-/// (mirrors the `NORN_SERVICE_HANDSHAKE_TIMEOUT_MS` idiom in `service`). Lets
-/// contention tests hit `CacheError::LockTimeout` in ~100–200ms instead of
-/// stalling the suite the full 5s per contended acquire. NOT an operator knob:
-/// it is undocumented outside this file, and production deployments never set
-/// it — every production path resolves to [`DEFAULT_WRITE_LOCK_TIMEOUT`]
-/// (asserted by `write_lock_timeout_defaults_to_five_seconds` below).
+/// Test-only override for the write-lock acquire timeout, in milliseconds.
+/// Lets contention tests hit `CacheError::LockTimeout` in ~100–200ms instead
+/// of stalling the suite the full 5s per contended acquire. DEBUG BUILDS ONLY:
+/// the env read is compiled out of release builds (see
+/// [`write_lock_timeout`]), so an inherited value in a production environment
+/// (a dev shell, a baked plist env) can never shrink the real 5s budget.
+#[cfg(debug_assertions)]
 const WRITE_LOCK_TIMEOUT_ENV: &str = "NORN_CACHE_LOCK_TIMEOUT_MS";
 
-/// The write-lock acquire timeout: [`DEFAULT_WRITE_LOCK_TIMEOUT`] unless the
-/// test-only [`WRITE_LOCK_TIMEOUT_ENV`] parses to a positive integer. Read at
-/// every acquire (not cached) so a test can scope the override to one section.
+/// The write-lock acquire timeout used by the cache write paths.
+///
+/// **Release builds always return [`DEFAULT_WRITE_LOCK_TIMEOUT`] (5s)** — the
+/// env read below is `#[cfg(debug_assertions)]`, compiled out entirely, so no
+/// environment can alter the production timeout. Debug builds (what
+/// `cargo test` builds and what its integration tests spawn) honor
+/// `NORN_CACHE_LOCK_TIMEOUT_MS` when it parses to a positive integer, read at
+/// every acquire (not cached) so a test child process scopes the override to
+/// its own environment.
 pub(crate) fn write_lock_timeout() -> std::time::Duration {
-    match std::env::var(WRITE_LOCK_TIMEOUT_ENV) {
-        Ok(raw) => match raw.parse::<u64>() {
-            Ok(ms) if ms > 0 => std::time::Duration::from_millis(ms),
-            _ => DEFAULT_WRITE_LOCK_TIMEOUT,
-        },
-        Err(_) => DEFAULT_WRITE_LOCK_TIMEOUT,
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var(WRITE_LOCK_TIMEOUT_ENV) {
+        if let Ok(ms) = raw.parse::<u64>() {
+            if ms > 0 {
+                return std::time::Duration::from_millis(ms);
+            }
+        }
     }
+    DEFAULT_WRITE_LOCK_TIMEOUT
 }
 
 /// Open (creating if absent) the lock file at `lock_path` and acquire an
@@ -106,20 +114,23 @@ mod tests {
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
-    /// The production default is exactly 5s. The env override is test-only; this
-    /// pins the default so the injection cannot silently change production
-    /// behavior. (Env READS are safe under parallel tests; the contention tests
-    /// that SET the var affect only contended acquires, which no other test
-    /// stages concurrently.)
+    /// The production default is exactly 5s, and release builds compile the env
+    /// read out entirely (`#[cfg(debug_assertions)]`), so the test injection
+    /// cannot change production behavior. This pins the default; the env-unset
+    /// guard keeps the assert honest when a debug dev shell happens to export
+    /// the override. (No in-binary test mutates the process env — the env path
+    /// is exercised only by integration tests on their own child processes.)
     #[test]
     fn write_lock_timeout_defaults_to_five_seconds() {
         assert_eq!(
             DEFAULT_WRITE_LOCK_TIMEOUT,
             std::time::Duration::from_secs(5)
         );
-        if std::env::var(WRITE_LOCK_TIMEOUT_ENV).is_err() {
-            assert_eq!(write_lock_timeout(), DEFAULT_WRITE_LOCK_TIMEOUT);
+        #[cfg(debug_assertions)]
+        if std::env::var(WRITE_LOCK_TIMEOUT_ENV).is_ok() {
+            return;
         }
+        assert_eq!(write_lock_timeout(), DEFAULT_WRITE_LOCK_TIMEOUT);
     }
 
     #[test]
