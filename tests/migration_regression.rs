@@ -48,7 +48,7 @@
 //! ## Test 2 — real-atlas-scale (manual, #[ignore]-gated)
 //!
 //! Verifies dry-run op counts against the pre-migration atlas vault. NOT run in
-//! normal CI. Requires `/Volumes/data/vaults/atlas` at the `pre-norn-migration`
+//! normal CI. Requires `~/vaults/atlas` at the `pre-norn-migration`
 //! git tag.
 
 use std::fs;
@@ -535,7 +535,7 @@ operations:
 /// Real-atlas-scale dry-run smoke test.
 ///
 /// This test is gated behind `#[ignore]` because it requires:
-/// 1. The real atlas vault at `/Volumes/data/vaults/atlas`
+/// 1. The real atlas vault at `~/vaults/atlas`
 /// 2. The vault to be at the `pre-norn-migration` git tag (snapshot before the
 ///    real 2026-05-27 migration was applied)
 ///
@@ -550,12 +550,19 @@ operations:
 ///   - rewrite_link: ~200 (body wikilinks to [[vault-cli]])
 ///   - set_frontmatter: ~12 (workspace: "[[vault-cli]]" frontmatter fields)
 #[test]
-#[ignore] // Requires /Volumes/data/vaults/atlas at the `pre-norn-migration` git tag.
+#[ignore] // Requires ~/vaults/atlas at the `pre-norn-migration` git tag.
           // Run manually: cargo test --test migration_regression -- --ignored
 fn atlas_migration_dry_run_expands_to_expected_op_counts() {
-    let atlas_vault = std::path::Path::new("/Volumes/data/vaults/atlas");
+    // `~/vaults/atlas` — expand `$HOME` at runtime; `Path::new("~/…")` never
+    // expands the tilde, and hardcoding an absolute home path would bake a
+    // username into this tracked file.
+    let Some(home) = std::env::var_os("HOME") else {
+        eprintln!("SKIP: $HOME not set; cannot locate ~/vaults/atlas");
+        return;
+    };
+    let atlas_vault = std::path::Path::new(&home).join("vaults/atlas");
     if !atlas_vault.exists() {
-        eprintln!("SKIP: /Volumes/data/vaults/atlas not found");
+        eprintln!("SKIP: ~/vaults/atlas not found");
         return;
     }
 
@@ -592,7 +599,7 @@ operations:
 
     let mut cmd = Command::new(norn_bin());
     cmd.args(["--cwd"])
-        .arg(atlas_vault)
+        .arg(&atlas_vault)
         .args(["apply"])
         .arg(&plan_path)
         .args(["--dry-run", "--format", "json"]);
