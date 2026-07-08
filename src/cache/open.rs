@@ -243,6 +243,17 @@ fn inspect_existing_cache(
     }
 
     // PRAGMA integrity_check
+    //
+    // Acceptance-benchmark trace hook (NRN-83). When `NORN_TRACE_INTEGRITY_CHECK`
+    // is set, emit one stable stderr marker per `integrity_check` execution. This
+    // gives an out-of-process harness a deterministic, cross-process count of how
+    // many times a code path actually pays the O(db-size) check: a live daemon
+    // opens-once/verifies-once, so N routed reads share ONE marker, whereas N
+    // direct invocations each reopen and produce N markers. Gated on the env var
+    // so normal output — and the byte-identical routing proofs — are untouched.
+    if std::env::var_os("NORN_TRACE_INTEGRITY_CHECK").is_some() {
+        eprintln!("norn trace: integrity_check");
+    }
     let integrity: Result<String, _> = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0));
     match integrity {
         Ok(s) if s == "ok" => {}
