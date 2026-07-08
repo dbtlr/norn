@@ -641,12 +641,12 @@ fn every_tool_advertises_an_output_schema() {
     );
 }
 
-/// The four cascade mutation tools publish their `outputSchema` via an explicit
-/// `output_schema = output_schema_for::<T>()` attribute, because rmcp cannot
-/// auto-derive it for the non-`Json` `MutationResult<T>` return type (NRN-219).
-/// That hand-written `T` is DECOUPLED from the return type, so a wrong or stale
-/// `T` (a copy-paste, or a `T` left behind after an output-struct rename) would
-/// advertise a schema describing the wrong payload while
+/// Every tool that returns a non-`Json` wrapper (`MutationResult<T>`) publishes
+/// its `outputSchema` via an explicit `output_schema = output_schema_for::<T>()`
+/// attribute, because rmcp cannot auto-derive it for a non-`Json` return type
+/// (NRN-219). That hand-written `T` is DECOUPLED from the return type, so a wrong
+/// or stale `T` (a copy-paste, or a `T` left behind after an output-struct rename)
+/// would advertise a schema describing the wrong payload while
 /// `every_tool_advertises_an_output_schema` — a presence-only check — stays green.
 ///
 /// This pins each tool's advertised schema to the schema of the `Output` it
@@ -654,13 +654,21 @@ fn every_tool_advertises_an_output_schema() {
 /// gives the `Json<T>` read tools for free. A wrong/stale `T` whose schema
 /// differs from the real payload fails here (a same-shaped swap is harmless — the
 /// advertised schema still matches the payload — and correctly passes).
+///
+/// Covers all eight non-`Json` tools: the four cascade mutators (NRN-219), the
+/// three single-op mutators converted in NRN-220, and the `vault.get` read that
+/// carries `isError` (NRN-214). Add any future `MutationResult<T>` tool here.
 #[test]
-fn cascade_tools_advertise_their_payload_schema() {
+fn non_json_tools_advertise_their_payload_schema() {
     use crate::mcp::mutation_result::output_schema_for;
     use crate::mcp::tools::apply::ApplyOutput;
     use crate::mcp::tools::delete::DeleteOutput;
+    use crate::mcp::tools::edit::EditOutput;
+    use crate::mcp::tools::get::GetOutput;
     use crate::mcp::tools::move_doc::MoveOutput;
+    use crate::mcp::tools::new::NewOutput;
     use crate::mcp::tools::rewrite_wikilink::RewriteWikilinkOutput;
+    use crate::mcp::tools::set::SetOutput;
 
     // The contract: tool name → the schema of the payload type it returns.
     let expected = [
@@ -671,6 +679,10 @@ fn cascade_tools_advertise_their_payload_schema() {
             "vault.rewrite_wikilink",
             output_schema_for::<RewriteWikilinkOutput>(),
         ),
+        ("vault.set", output_schema_for::<SetOutput>()),
+        ("vault.edit", output_schema_for::<EditOutput>()),
+        ("vault.new", output_schema_for::<NewOutput>()),
+        ("vault.get", output_schema_for::<GetOutput>()),
     ];
 
     let mut advertised = BTreeMap::new();

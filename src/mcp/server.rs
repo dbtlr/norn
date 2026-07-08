@@ -120,17 +120,15 @@ impl McpServer {
         routers
     }
 
-    /// Run a tool handler under the in-process serialization lock (NRN-55).
-    ///
-    /// Acquires `call_lock` for the full duration of the handler's vault work,
-    /// then maps the `anyhow::Result` into the rmcp `Json` envelope. Every
-    /// `#[tool]` method funnels through here, so the lock + the
-    /// `.map(Json).map_err(to_mcp_error)` boilerplate live in exactly one place.
-    ///
-    /// `T: Serialize` is what `Json<T>` requires to render the result; the tool
-    /// macro additionally needs `T: JsonSchema` to emit each tool's
-    /// `outputSchema`. Both bounds match what the existing methods already
-    /// required, so the generic does not narrow any tool's contract.
+    /// Shared execution core for EVERY tool handler under the in-process
+    /// serialization lock (NRN-55): acquire `call_lock` for the full duration of
+    /// the handler's vault work, run the sync body on a `spawn_blocking` thread
+    /// after the per-request seam, then map its `anyhow::Result` into the rmcp
+    /// result. The handler produces its OWN `IntoCallToolResult` wrapper `R` —
+    /// `Json<T>` for a plain read, or `MutationResult<T>` for a tool that sets
+    /// `isError` — so this core imposes no envelope. [`run_tool`](Self::run_tool)
+    /// and [`run_mutation`](Self::run_mutation) build on it; `vault.get` calls it
+    /// directly to return its `MutationResult` (NRN-214).
     ///
     /// The lock is acquired FIRST (async), then the sync vault work runs on a
     /// `spawn_blocking` thread rather than inline on the async worker. Under the
@@ -141,10 +139,10 @@ impl McpServer {
     /// workers keeps them free for accepts, pings, and other vaults. The NRN-55
     /// serialization guarantee is unchanged: `call_lock` is still held across the
     /// whole blocking call, so per-vault work stays single-flight.
-    async fn run_tool<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
+    async fn run_wrapped<R, F>(&self, f: F) -> Result<R, rmcp::ErrorData>
     where
-        T: serde::Serialize + schemars::JsonSchema + Send + 'static,
-        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
+        R: Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<R> + Send + 'static,
     {
         let _guard = self.call_lock.lock().await;
         let ctx = Arc::clone(&self.ctx);
@@ -158,7 +156,7 @@ impl McpServer {
         })
         .await;
         match joined {
-            Ok(Ok(value)) => Ok(Json(value)),
+            Ok(Ok(value)) => Ok(value),
             // A corruption-class SQLite failure evicts the warm state so the next
             // request fully reopens (integrity_check → rebuild) — the warm-mode
             // self-heal for in-place corruption (FIX-3). No-op in cold mode.
@@ -171,6 +169,18 @@ impl McpServer {
                 None,
             )),
         }
+    }
+
+    /// Run a plain READ tool handler: the handler returns a bare payload `T`, which
+    /// this wraps in `Json<T>` (rmcp auto-derives its `outputSchema`). Thin wrapper
+    /// over [`run_wrapped`](Self::run_wrapped). `T: JsonSchema` is what the tool
+    /// macro needs to emit the schema; `T: Serialize` is what `Json<T>` renders.
+    async fn run_tool<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
+    where
+        T: serde::Serialize + schemars::JsonSchema + Send + 'static,
+        F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
+    {
+        self.run_wrapped(move |ctx| f(ctx).map(Json)).await
     }
 
     /// Run a *mutation* tool handler — like [`run_tool`](Self::run_tool), but
@@ -207,25 +217,9 @@ impl McpServer {
                 None,
             ));
         }
-        let _guard = self.call_lock.lock().await;
-        let ctx = Arc::clone(&self.ctx);
-        // Same per-request seam + corruption-eviction path as `run_tool`.
-        let joined = tokio::task::spawn_blocking(move || {
-            ctx.begin_request()?;
-            f(&ctx)
-        })
-        .await;
-        match joined {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(err)) => {
-                self.ctx.note_tool_error(&err);
-                Err(to_mcp_error(err))
-            }
-            Err(join_err) => Err(rmcp::ErrorData::internal_error(
-                format!("tool task failed: {join_err}"),
-                None,
-            )),
-        }
+        // Read-only guard passed; the lock + spawn_blocking + per-request seam are
+        // the shared core.
+        self.run_wrapped(f).await
     }
 }
 
@@ -245,16 +239,24 @@ impl McpServer {
     /// returned [`GetOutput`] is a typed envelope whose root schema is `object`
     /// (rmcp rejects a non-object `outputSchema`); see `tools::get` for why the
     /// per-record payload stays generic JSON rather than a full `JsonSchema`
-    /// derive across the core types. Later read tools copy this thin shape.
+    /// derive across the core types.
+    ///
+    /// Unlike the other read tools, `get` returns a [`MutationResult<GetOutput>`]
+    /// (via `run_wrapped`, not `run_tool`) so it can set `isError: true` when a
+    /// requested target does not resolve — the same signal the CLI exits 1 on
+    /// (NRN-214). It therefore publishes an explicit `output_schema` (rmcp only
+    /// auto-derives for the literal `Json`).
     #[tool(
         name = "vault.get",
-        description = "Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally body."
+        description = "Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally body.",
+        // MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219/214).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<GetOutput>()
     )]
     async fn get(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::get::GetParams>,
-    ) -> Result<Json<GetOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::get::handle_output(ctx, p))
+    ) -> Result<crate::mcp::mutation_result::MutationResult<GetOutput>, rmcp::ErrorData> {
+        self.run_wrapped(|ctx| crate::mcp::tools::get::handle_output(ctx, p))
             .await
     }
 
@@ -680,7 +682,7 @@ mod tests {
         for r in &results {
             let out = r.as_ref().expect("call should be Ok");
             assert_eq!(
-                out.0.records.len(),
+                out.value().records.len(),
                 1,
                 "vault.get for `alpha` should return exactly one record"
             );

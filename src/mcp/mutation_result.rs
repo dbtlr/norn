@@ -106,11 +106,32 @@ impl<T> MutationResult<T> {
         }
     }
 
+    /// Build from a tool's own already-derived error flag (NRN-214).
+    ///
+    /// Despite this type's historical name, the mechanism (a structured value
+    /// paired with the MCP `isError` bit) is surface-agnostic: the `vault.get`
+    /// READ tool uses it to map its not-found / all-missed-section signal to
+    /// `isError: true` while still returning its records + diagnostics. `is_error`
+    /// must be derived at the single call site from the tool's own report
+    /// ([`ShowReport::has_error`](crate::show::ShowReport::has_error) for get) —
+    /// the same predicate the CLI derives its exit code from, so the two surfaces
+    /// cannot disagree.
+    pub fn from_flag(value: T, is_error: bool) -> Self {
+        Self { value, is_error }
+    }
+
     /// The MCP `isError` bit this result will render with. Test-only: production
     /// consumes the wrapper through [`IntoCallToolResult`].
     #[cfg(test)]
     pub fn is_error(&self) -> bool {
         self.is_error
+    }
+
+    /// The wrapped structured value. Test-only: production consumes the wrapper
+    /// through [`IntoCallToolResult`], which serializes it into `structuredContent`.
+    #[cfg(test)]
+    pub fn value(&self) -> &T {
+        &self.value
     }
 }
 

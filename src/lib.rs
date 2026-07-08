@@ -567,14 +567,13 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             )?;
             show::render::warn_unknown_cols(&args.col, &report, &mut stderr_lock)?;
 
-            let mut any_error = false;
             for note in &report.notes {
                 eprintln!("{}", note);
-                if note.starts_with("error:") {
-                    any_error = true;
-                }
             }
-            if any_error {
+            // Exit 1 on an `error:` note (unresolved target / all-missed section) —
+            // the same signal `vault.get` maps to `isError` (ShowReport::has_error,
+            // NRN-214), so CLI exit and MCP isError cannot drift.
+            if report.has_error() {
                 std::process::exit(1);
             }
             Ok(0)
