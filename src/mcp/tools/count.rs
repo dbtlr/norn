@@ -105,6 +105,18 @@ pub struct CountParams {
     /// Include only documents with at least one unresolved link.
     #[serde(default)]
     pub unresolved_links: bool,
+
+    /// PRIVATE norn-CLI↔norn-daemon channel (NRN-218), NOT public MCP surface —
+    /// `#[schemars(skip)]` keeps it out of the published input schema and
+    /// `tools/list`. Carries the field names the CLI's ADR 0010 forgiving-input
+    /// pass desugared from `--<field> value` spellings into the `eq`/`in`
+    /// predicates above, so the daemon can run the field-universe gate against its
+    /// warm cache and refuse an unknown field byte-identically to the direct path.
+    /// An off-filesystem MCP client filters with canonical predicates and leaves
+    /// this empty (the gate is then a no-op).
+    #[serde(default)]
+    #[schemars(skip)]
+    pub dynamic_keys: Vec<String>,
 }
 
 /// Flat output envelope for `vault.count`.
@@ -129,6 +141,16 @@ pub struct CountEnvelope {
     /// nested for several (set when `by` was requested).
     #[schemars(schema_with = "groups_schema")]
     pub groups: Option<serde_json::Value>,
+
+    /// PRIVATE norn-CLI↔norn-daemon channel (NRN-218), NOT public MCP surface.
+    /// Set only when the daemon's field-universe gate refuses a `dynamic_keys`
+    /// entry; the routed CLI re-emits `message` and exits 1, exactly as the direct
+    /// gate would. `#[serde(skip_serializing_if)]` keeps the success envelope
+    /// byte-identical (the key is simply absent), and `#[schemars(skip)]` keeps it
+    /// out of the published output schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub dynamic_field_error: Option<crate::grammar::DynamicFieldRefusal>,
 }
 
 /// Typed schema for `by`: string (one key) | string array (several) | null.
@@ -172,17 +194,31 @@ impl CountEnvelope {
                 total,
                 by: None,
                 groups: None,
+                dynamic_field_error: None,
             },
             CountOutput::Grouped { by, total, groups } => Self {
                 total,
                 by: Some(serde_json::Value::String(by)),
                 groups: Some(serde_json::to_value(groups).expect("count groups serialize")),
+                dynamic_field_error: None,
             },
             CountOutput::GroupedMulti { by, total, groups } => Self {
                 total,
                 by: Some(serde_json::to_value(by).expect("count by serialize")),
                 groups: Some(serde_json::to_value(groups).expect("count groups serialize")),
+                dynamic_field_error: None,
             },
+        }
+    }
+
+    /// A NRN-218 field-universe gate refusal envelope: no counts, just the
+    /// structured refusal the routed CLI re-emits byte-identically (exit 1).
+    pub(crate) fn refused(refusal: crate::grammar::DynamicFieldRefusal) -> Self {
+        Self {
+            total: 0,
+            by: None,
+            groups: None,
+            dynamic_field_error: Some(refusal),
         }
     }
 }
@@ -194,6 +230,19 @@ pub fn handle(ctx: &VaultContext, p: CountParams) -> Result<CountEnvelope> {
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
     let cache = ctx.query_cache()?;
+
+    // NRN-218: run the ADR 0010 field-universe gate against the warm cache BEFORE
+    // counting, exactly where the direct path gates (`run`'s Count arm). A refused
+    // dynamic key crosses back as a `dynamic_field_error` the routed CLI re-emits
+    // byte-identically; a no-op when the CLI sent no `dynamic_keys`.
+    if let Some(refusal) = crate::grammar::gate_dynamic_refusal(
+        &cache,
+        &ctx.config(),
+        &p.dynamic_keys,
+        crate::grammar::QueryCmd::Count,
+    )? {
+        return Ok(CountEnvelope::refused(refusal));
+    }
 
     let args = CountArgs {
         // Same comma token as the CLI flag; empty segments are rejected by
@@ -372,6 +421,57 @@ mod tests {
         )
         .expect_err("empty --by segment should error");
         assert!(err.to_string().contains("empty field name"), "{err}");
+    }
+
+    /// NRN-218: a KNOWN dynamic field passes the daemon-side gate and counts.
+    #[test]
+    fn handle_known_dynamic_field_passes_gate() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let envelope = handle(
+            &ctx,
+            CountParams {
+                eq: vec!["type:note".into()],
+                dynamic_keys: vec!["type".into()],
+                ..CountParams::default()
+            },
+        )
+        .expect("handle should succeed");
+
+        assert!(
+            envelope.dynamic_field_error.is_none(),
+            "a known dynamic field must not be refused"
+        );
+        assert_eq!(envelope.total, 2, "known --type note counts 2 notes");
+    }
+
+    /// NRN-218: an UNKNOWN dynamic field is refused daemon-side with the exact
+    /// gate message; no count is produced.
+    #[test]
+    fn handle_unknown_dynamic_field_is_refused() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let envelope = handle(
+            &ctx,
+            CountParams {
+                eq: vec!["nonexistentfield:x".into()],
+                dynamic_keys: vec!["nonexistentfield".into()],
+                ..CountParams::default()
+            },
+        )
+        .expect("a refusal is a structured envelope, not a handler Err");
+
+        let refusal = envelope
+            .dynamic_field_error
+            .expect("an unknown dynamic field must be refused");
+        assert_eq!(refusal.code, "unknown-field");
+        assert!(
+            refusal.message.contains("unknown field `nonexistentfield`"),
+            "message: {}",
+            refusal.message
+        );
     }
 
     /// Filter with `eq` reduces the counted set.

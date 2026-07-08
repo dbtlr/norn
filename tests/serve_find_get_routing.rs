@@ -164,6 +164,109 @@ fn routed_get_not_found_exits_1_without_direct_fallback() {
     );
 }
 
+/// NRN-218: a dynamic-field predicate (`find --type note`) must ROUTE warm now,
+/// byte-identically to direct, instead of forcing Direct — and an UNKNOWN dynamic
+/// field (`find --nonexistentfield x`) must be REFUSED daemon-side with the exact
+/// stderr + exit code the direct field-universe gate produces, served (not
+/// bounced to a second direct execution).
+#[test]
+fn routed_dynamic_field_predicate_matches_direct() {
+    let vault = seed_vault();
+
+    // Direct baselines (no daemon socket in this cache home).
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+
+    // A KNOWN dynamic field: `--type note` desugars to `--eq type:note` and,
+    // once the daemon gate passes, must return the two notes just like direct.
+    let known = &["find", "--type", "note", "--format", "json"][..];
+    let d_known = run_norn(
+        direct_cache.path(),
+        direct_state.path(),
+        vault.path(),
+        known,
+    );
+    assert_eq!(d_known.2, 0, "direct known dynamic field exits 0");
+
+    // An UNKNOWN dynamic field: the field-universe gate refuses it (exit 1) with
+    // a "unknown field" message on stderr, on both paths.
+    let unknown = &["find", "--nonexistentfield", "x"][..];
+    let d_unknown = run_norn(
+        direct_cache.path(),
+        direct_state.path(),
+        vault.path(),
+        unknown,
+    );
+    assert_eq!(d_unknown.2, 1, "direct unknown dynamic field exits 1");
+    assert!(
+        String::from_utf8_lossy(&d_unknown.1).contains("unknown field `nonexistentfield`"),
+        "direct unknown field carries the gate message on stderr, got: {:?}",
+        String::from_utf8_lossy(&d_unknown.1)
+    );
+
+    // Routed: byte-identical triples against a live daemon.
+    let (_guard, cache_home, state_home, stderr_path, _root) = spawn_daemon_logged();
+
+    let r_known = run_norn(&cache_home, &state_home, vault.path(), known);
+    assert_eq!(
+        r_known, d_known,
+        "routed KNOWN dynamic field must match direct on (stdout, stderr, code)"
+    );
+
+    let r_unknown = run_norn(&cache_home, &state_home, vault.path(), unknown);
+    assert_eq!(
+        r_unknown.2, d_unknown.2,
+        "routed UNKNOWN dynamic field must exit 1 like direct"
+    );
+    assert_eq!(
+        r_unknown.0, d_unknown.0,
+        "routed UNKNOWN dynamic field stdout must match direct"
+    );
+    assert_eq!(
+        r_unknown.1, d_unknown.1,
+        "routed UNKNOWN dynamic field stderr must be byte-identical to direct\nrouted: {:?}\ndirect: {:?}",
+        String::from_utf8_lossy(&r_unknown.1),
+        String::from_utf8_lossy(&d_unknown.1),
+    );
+
+    // Both dynamic-predicate runs must have been SERVED by the daemon (the whole
+    // point of NRN-218), including the refusal — a served marker fires once per
+    // tools/call the daemon handles, so a refusal that fell back to Direct would
+    // leave this at 1, not 2.
+    let served = count_served(&stderr_path, "vault.find");
+    assert_eq!(
+        served,
+        2,
+        "the daemon must have served BOTH dynamic-field finds (known + unknown), got {served}; \
+         daemon stderr:\n{}",
+        read_to_string(&stderr_path)
+    );
+
+    // And with --verbose, the refused dynamic field must not fall back to Direct:
+    // a fallback would print "using direct execution" and re-execute the gate.
+    let verbose_unknown = &["--verbose", "find", "--nonexistentfield", "x"][..];
+    let (_v_stdout, v_stderr, v_code) =
+        run_norn(&cache_home, &state_home, vault.path(), verbose_unknown);
+    assert_eq!(
+        v_code, 1,
+        "verbose routed unknown dynamic field still exits 1"
+    );
+    assert!(
+        !String::from_utf8_lossy(&v_stderr).contains("using direct execution"),
+        "a refused dynamic field must be served daemon-side, not re-executed directly; \
+         verbose stderr:\n{}",
+        String::from_utf8_lossy(&v_stderr)
+    );
+    let served = count_served(&stderr_path, "vault.find");
+    assert_eq!(
+        served,
+        3,
+        "the verbose refused run must also have been served (expected 3 total), got {served}; \
+         daemon stderr:\n{}",
+        read_to_string(&stderr_path)
+    );
+}
+
 /// The missing-predicate help gate must hold on the routed path exactly as on
 /// the direct path: a bare `norn find` (no predicates, no --all) — and its
 /// `--text ""` twin, which `has_predicate` treats as no predicate — prints the
