@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.46.0 - 2026-07-08
+
+**The daemon-reads-complete release.** Phase 1 of the norn-service initiative exits: every read command (`count`/`find`/`get`, canonical and dynamic-predicate spellings alike) routes through the warm `norn serve` daemon when one is live, the nine graph-index tools build from the daemon's verified-once connection, daemon-side operator notes reach the routed caller, and the new `norn service` verbs adopt the daemon under launchd so it is always warm. The initiative's founding bug — `PRAGMA integrity_check` paid per invocation, O(db-size) — is closed on committed structural evidence at 50k-doc scale (one check per daemon lifetime vs one per call direct; trust never weakened, per ADR 0005).
+
 ### Breaking changes
 
 - **`norn mcp --read-only` is removed (NRN-116).** The flag, its `McpArgs.read_only` field, and the server-side gating (dropping the 7 mutation tools from `tools/list` and refusing them at runtime) are gone; `norn mcp` now always serves the full 14-tool catalog, exactly like `norn serve` always has. No migration shim — a client invoking `norn mcp --read-only` gets clap's unknown-argument error. Read-only was deliverable-phasing scaffolding from the original MCP build-out (NRN-33); no external consumer depends on it, and keeping it risked the stdio and socket MCP surfaces drifting in capability. Per-connection capability scoping, if ever wanted, belongs to the future phase-4 authn/authz surface, not this flag.
