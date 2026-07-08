@@ -810,6 +810,23 @@ impl ServiceClient {
             Some("ready") => {}
             _ => anyhow::bail!("daemon did not answer hello with ready: {ready}"),
         }
+        // Version gate on the REQUEST connection too (NRN-222 review): the
+        // probe's ping is version-gated, but this is a separate connection — a
+        // daemon swapped between probe and request could serve a stale wire
+        // shape. Require the ready frame's exact build version; on skew, emit
+        // the SAME operator-actionable one-liner the probe path uses, then
+        // `Err` so the caller falls back to a verified direct open.
+        let client_version = env!("CARGO_PKG_VERSION");
+        match ready.get("version").and_then(|v| v.as_str()) {
+            Some(version) if version == client_version => {}
+            Some(server) => {
+                eprintln!(
+                    "norn: service is v{server}, client is v{client_version} — restart the norn serve daemon"
+                );
+                anyhow::bail!("service/client version skew on the request connection");
+            }
+            None => anyhow::bail!("ready frame carries no version; refusing to route"),
+        }
 
         // 2. MCP handshake. The daemon serves rmcp over the remainder of the
         //    stream; `initialize` must succeed before any `tools/call`.
@@ -1147,6 +1164,50 @@ mod tests {
         );
         assert!(result.is_err(), "an error preamble must be Err (→ Direct)");
         server.join().unwrap();
+    }
+
+    /// NRN-222 review: the REQUEST connection is version-gated like the probe.
+    /// A daemon swapped between probe and request answers `ready` with a
+    /// different build version — the client must refuse (→ Direct) instead of
+    /// riding a stale wire shape. A ready frame with NO version is refused too.
+    #[test]
+    fn call_tool_structured_version_skew_on_ready_is_err() {
+        for stale_ready in [
+            serde_json::json!({
+                "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                "version": "0.0.0-stale",
+            }),
+            serde_json::json!({ "norn_control": "ready", "protocol": CONTROL_PROTOCOL }),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+            let listener = bind_trusted(&path);
+
+            let server = thread::spawn(move || {
+                let (conn, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut w = conn;
+                let mut hello_line = String::new();
+                reader.read_line(&mut hello_line).unwrap();
+                writeln!(w, "{stale_ready}").unwrap();
+                w.flush().unwrap();
+            });
+
+            let client = ServiceClient {
+                socket_path: path.clone(),
+            };
+            let result = client.call_tool_structured(
+                &Utf8PathBuf::from("/vaults/atlas"),
+                "vault.count",
+                serde_json::json!({}),
+                OnToolError::FallBackDirect,
+            );
+            assert!(
+                result.is_err(),
+                "a ready frame with a mismatched/missing version must be Err (→ Direct)"
+            );
+            server.join().unwrap();
+        }
     }
 
     /// F5: a tools/call whose JSON-RPC envelope is a success (no `error` member)
