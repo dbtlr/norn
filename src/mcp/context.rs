@@ -32,10 +32,11 @@
 //! body — see `mcp::server`); [`VaultContext::query_cache`] runs steps 2–4 when a
 //! tool actually opens the cache. Tools that reconstruct a graph index instead of
 //! running a `query_cache` filter (validate, repair, set, edit, delete, move,
-//! rewrite, apply) go through [`VaultContext::load_graph_index`], which in warm
-//! mode routes the SAME steps 2–4 (`query_cache_warm`) against the held-open
-//! connection — so those tools are served verify-once too, not cold-opened per
-//! request (NRN-130). Putting root-liveness + config-freshness in `begin_request`
+//! rewrite, apply, new) go through [`VaultContext::load_graph_index`], a thin
+//! composition over `query_cache` plus the cache reader — so in warm mode those
+//! tools run the SAME steps 2–4 against the held-open connection and are served
+//! verify-once too, not cold-opened per request (NRN-130). Putting
+//! root-liveness + config-freshness in `begin_request`
 //! means *every* tool — query-cache and graph-index alike — gets them, and config
 //! stays STABLE for the whole request (no mid-request swap, so one request can
 //! never mix an old-config graph index with a new-config cache).
@@ -368,43 +369,50 @@ impl VaultContext {
     /// Build the [`GraphIndex`](crate::core::GraphIndex) for one tool call,
     /// reusing the warm connection when the daemon serves the request.
     ///
-    /// Several MCP tools (validate, repair, set, edit, delete, move, rewrite,
-    /// apply) reconstruct a graph index rather than run a `query_cache` filter.
-    /// This is their entry point, mirroring how reads go through `query_cache`:
+    /// The MCP tools that reconstruct a graph index rather than run a
+    /// `query_cache` filter (validate, repair, set, edit, delete, move, rewrite,
+    /// apply, new) call this. It is a thin composition over
+    /// [`query_cache`](Self::query_cache) — ONE dispatch site, ONE pipeline run —
+    /// followed by the cache reader's `load_graph_index`:
     ///
-    /// - **Cold:** delegates to [`cache_cmd::load_graph_index`](crate::cache_cmd::load_graph_index),
-    ///   opening a fresh [`Cache`] and paying `integrity_check` every call —
-    ///   byte-for-byte the behavior of a direct `norn` CLI invocation.
-    /// - **Warm:** runs the SAME per-request self-heal pipeline `query_cache`
-    ///   uses (`query_cache_warm`: ground-shift → reopen-if-absent → incremental
-    ///   freshness) against the held-open connection, then reconstructs the index
-    ///   from those rows. The verify-once `integrity_check` is paid only on the
-    ///   first open (or a self-heal reopen), never per request. `files.ignore` is
-    ///   applied at cache-build time (`Cache::open_with_index`) in BOTH modes, so
-    ///   ignored docs are absent from the rows here just as in the cold fresh
-    ///   open — the resulting `GraphIndex` is identical to the cold path on the
-    ///   same vault state (NRN-130).
+    /// - **Cold:** `query_cache` opens a fresh [`Cache`] via `open_for_query`
+    ///   (integrity_check + incremental refresh), and the reader reconstructs the
+    ///   index from it — the exact sequence `cache_cmd::load_graph_index` runs
+    ///   for a direct `norn` CLI invocation, byte-for-byte.
+    /// - **Warm:** `query_cache` runs the per-request self-heal pipeline
+    ///   (ground-shift → reopen-if-absent → incremental freshness) against the
+    ///   held-open connection, and the reader reconstructs the index from those
+    ///   rows. `files.ignore` is applied at cache-build time
+    ///   (`Cache::open_with_index`) in BOTH modes, so ignored docs are absent
+    ///   from the rows just as in a cold fresh open — the resulting `GraphIndex`
+    ///   is identical to the cold path on the same vault state (NRN-130).
+    ///
+    /// A tool that needs the cache handle AND the index must NOT call this plus
+    /// `query_cache` separately — that runs the pipeline twice on two snapshots.
+    /// Call `query_cache` once and build the index from that handle
+    /// (`cache.load_graph_index()?`), as `vault.set` / `vault.edit` do.
+    ///
+    /// # Trust posture (ADR 0005)
+    ///
+    /// Warm mode extends the daemon's verify-once trade-off — previously only
+    /// carried by the `query_cache` reads — to graph-index construction, which
+    /// feeds mutation *planning*: `integrity_check` is paid at open (and on
+    /// every self-heal reopen), not per call, so in-place same-inode corruption
+    /// of `cache.db` is detected by open-time verification plus error-time
+    /// eviction ([`note_tool_error`](Self::note_tool_error) drops the warm state
+    /// on any SQLite corruption-class error, and the next request fully reopens
+    /// and re-verifies), NOT by a per-call recheck the way a cold open would.
+    /// The source of truth remains the Markdown files: a plan built from a
+    /// corrupt index is caught by the apply-time snapshot checks or surfaces as
+    /// an error that triggers the eviction path. Direct (non-daemon) invocations
+    /// keep the full per-call verification.
     ///
     /// Config freshness / root-liveness (steps 0–1) already ran in
     /// [`begin_request`](Self::begin_request) at the per-request seam, exactly as
     /// for `query_cache`, so config is stable for the whole request.
     pub(crate) fn load_graph_index(&self) -> Result<crate::core::GraphIndex> {
-        match &self.mode {
-            Mode::Cold => {
-                let config = self.config();
-                crate::cache_cmd::load_graph_index(&self.vault_root, &config.index_options, false)
-            }
-            Mode::Warm(slot) => {
-                // Reuse the held-open warm connection: query_cache_warm runs the
-                // ground-shift / reopen / incremental-freshness pipeline and hands
-                // out a guard into the warm cache; load_graph_index reconstructs
-                // the in-memory index from those rows. The guard is released when
-                // this method returns, so mutating tools acquire their write lock
-                // and apply exactly as before (connection-reuse only, NRN-130).
-                let cache = self.query_cache_warm(slot)?;
-                Ok(cache.load_graph_index()?)
-            }
-        }
+        let cache = self.query_cache()?;
+        Ok(cache.load_graph_index()?)
     }
 
     /// The warm per-request pipeline. See the module-level docs for the ordered
@@ -1247,9 +1255,11 @@ mod tests {
     // ---- Warm graph-index build (NRN-130) -----------------------------------
 
     /// Serialize a `GraphIndex` to a canonical JSON value for structural
-    /// comparison. `GraphIndex` derives `Serialize` but not `PartialEq`, and its
-    /// document rows come back `ORDER BY path`, so the serialized form is a
-    /// deterministic, order-stable structural fingerprint.
+    /// comparison. `GraphIndex` derives `Serialize` but not `PartialEq`, and
+    /// every section the reader loads is deterministically ordered (documents
+    /// `ORDER BY path`; links and diagnostics `ORDER BY rowid`; headings by
+    /// source position; block_ids lexicographic), so the serialized form is an
+    /// order-stable structural fingerprint.
     fn index_json(index: &crate::core::GraphIndex) -> serde_json::Value {
         serde_json::to_value(index).expect("GraphIndex serializes")
     }
@@ -1259,14 +1269,23 @@ mod tests {
     /// structurally identical `GraphIndex` to the COLD fresh-open path
     /// (`cache_cmd::load_graph_index`, integrity_check every call) on the same
     /// vault state.
+    ///
+    /// The fingerprint comparison alone cannot catch a reader that silently
+    /// skips a whole section (both sides run the SAME reader), so the cold
+    /// build is first pinned against explicit fixture expectations: document
+    /// count, the resolved wikilink edges, a non-empty headings section, and
+    /// the block id — a silently-dropped table fails here regardless of
+    /// warm/cold parity.
     #[test]
     fn warm_load_graph_index_matches_cold() {
+        use crate::core::LinkStatus;
+
         let (_tmp, root) = make_seeded_vault();
-        // Give the graph some links so the comparison covers resolved edges, not
-        // just bare document rows.
+        // Give alpha a heading, two resolvable wikilinks, and a block id so the
+        // comparison covers every section the reader reconstructs.
         std::fs::write(
             root.join("alpha.md"),
-            "---\ntype: note\nstatus: active\n---\nAlpha links to [[beta]] and [[gamma]].\n",
+            "---\ntype: note\nstatus: active\n---\n# Alpha\n\nAlpha links to [[beta]] and [[gamma]]. ^b1\n",
         )
         .unwrap();
 
@@ -1274,6 +1293,32 @@ mod tests {
         let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
         let cold = crate::cache_cmd::load_graph_index(&root, &cold_config.index_options, false)
             .expect("cold load_graph_index");
+
+        // Pin the cold build against the fixture (reader-omission guard).
+        assert_eq!(cold.documents.len(), 3, "three seeded docs");
+        let alpha = cold
+            .documents
+            .iter()
+            .find(|d| d.path == "alpha.md")
+            .expect("alpha.md present");
+        let resolved: Vec<&str> = alpha
+            .links
+            .iter()
+            .filter(|l| l.status == LinkStatus::Resolved)
+            .filter_map(|l| l.resolved_path.as_deref().map(|p| p.as_str()))
+            .collect();
+        assert_eq!(
+            resolved,
+            vec!["beta.md", "gamma.md"],
+            "alpha's wikilink edges must resolve to beta.md and gamma.md"
+        );
+        assert_eq!(alpha.headings.len(), 1, "alpha has exactly one heading");
+        assert_eq!(alpha.headings[0].text, "Alpha");
+        assert_eq!(
+            alpha.block_ids,
+            vec!["b1".to_string()],
+            "alpha's block id must round-trip through the cache"
+        );
 
         // Warm: through the daemon context, reusing the held connection.
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
@@ -1287,26 +1332,90 @@ mod tests {
         );
     }
 
-    /// The warm `load_graph_index` path reuses the ONE held connection across
-    /// calls (verify-once): a TEMP table planted through the warm cache survives
-    /// a subsequent `load_graph_index`, proving it did not cold-reopen. Also
-    /// confirms freshness still flows (a doc added between calls appears).
+    /// Falsifiable connection-reuse proof: TEMP objects are per-connection AND
+    /// shadow permanent names, so an empty TEMP VIEW named `headings` is visible
+    /// ONLY through the held warm connection. A warm `load_graph_index` that
+    /// reuses that connection sees zero headings for a doc that really has one;
+    /// a build that cold-opened a fresh connection would see the real heading
+    /// and FAIL the assertion — unlike a marker probed via `query_cache`, this
+    /// guard cannot pass if the graph build regresses to a fresh open.
+    /// (`headings` is the right shadow target: change detection reads only
+    /// `documents`, so a no-change refresh never prepares DML against the view;
+    /// shadowing `documents` itself would make the refresh see phantom-new files
+    /// and error trying to write through the view.)
+    /// (Red-proofed: pointing the warm arm back at `cache_cmd::load_graph_index`
+    /// makes this test fail.)
     #[test]
-    fn warm_load_graph_index_reuses_connection_and_refreshes() {
+    fn warm_load_graph_index_uses_the_held_connection() {
+        let (_tmp, root) = make_seeded_vault();
+        // A doc with a real heading, indexed on first touch.
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntype: note\nstatus: active\n---\n# Alpha\n\nAlpha body\n",
+        )
+        .unwrap();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let alpha_headings = |index: &crate::core::GraphIndex| -> usize {
+            index
+                .documents
+                .iter()
+                .find(|d| d.path == "alpha.md")
+                .expect("alpha.md present")
+                .headings
+                .len()
+        };
+
+        // Establish the warm connection.
+        ctx.begin_request().expect("begin_request");
+        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        assert_eq!(alpha_headings(&idx1), 1, "alpha's heading is indexed");
+
+        // Shadow the real `headings` table with an empty view on the held
+        // connection only. The vault is not touched afterwards, so the next
+        // request's incremental refresh detects no changes and writes nothing.
+        {
+            let cache = ctx.query_cache().expect("query_cache to plant shadow");
+            cache
+                .conn()
+                .execute_batch("CREATE TEMP VIEW headings AS SELECT * FROM main.headings WHERE 0")
+                .unwrap();
+        }
+
+        ctx.begin_request().expect("begin_request");
+        let idx2 = ctx
+            .load_graph_index()
+            .expect("second warm load_graph_index");
+        assert_eq!(
+            alpha_headings(&idx2),
+            0,
+            "the empty shadow must be visible ⇒ the graph build ran on the held \
+             warm connection, not a fresh cold open"
+        );
+
+        // Control: a genuinely cold open on the same vault state does not see
+        // the per-connection shadow.
+        let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
+        let cold = crate::cache_cmd::load_graph_index(&root, &cold_config.index_options, false)
+            .expect("cold load_graph_index");
+        assert_eq!(
+            alpha_headings(&cold),
+            1,
+            "cold open sees the real headings table"
+        );
+    }
+
+    /// Warm freshness through the graph build: a doc added between calls appears
+    /// in the next warm `load_graph_index` (the per-request incremental refresh
+    /// runs on the graph-index path, not just on `query_cache` reads).
+    #[test]
+    fn warm_load_graph_index_refreshes_between_calls() {
         let (tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        // First call establishes warm state; plant a per-connection marker.
         ctx.begin_request().expect("begin_request");
         let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
         assert_eq!(idx1.documents.len(), 3, "three seeded docs");
-        {
-            let cache = ctx.query_cache().expect("query_cache to plant marker");
-            create_marker(&cache);
-        }
 
-        // Add a doc, then a second load_graph_index: marker must survive (same
-        // connection ⇒ verify-once) and the new doc must appear (freshness).
         std::fs::write(
             tmp.path().join("delta.md"),
             "---\ntype: note\nstatus: active\n---\nDelta body\n",
@@ -1321,11 +1430,6 @@ mod tests {
             idx2.documents.len(),
             4,
             "warm load_graph_index must reflect the doc added between calls"
-        );
-        let cache = ctx.query_cache().expect("query_cache to inspect marker");
-        assert!(
-            marker_present(&cache),
-            "TEMP marker must survive ⇒ warm load_graph_index reused the connection (verify-once)"
         );
     }
 

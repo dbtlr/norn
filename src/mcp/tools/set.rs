@@ -236,13 +236,14 @@ pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<
 pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
-    // Load the graph index honoring files.ignore, exactly like the CLI set path.
-    // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
+    // ONE query_cache call serves both needs: the graph index (honoring
+    // files.ignore, applied at cache-build time) and the cache handle for target
+    // resolution come from the same snapshot — the pipeline (ground-shift,
+    // freshness refresh) runs once per request. Warm-connection reuse under the
+    // daemon; fresh open in cold mode (NRN-130).
     let config = ctx.config();
-    let index = ctx.load_graph_index()?;
-
-    // Cache for target resolution (needs document query, not just the index).
     let cache = ctx.query_cache()?;
+    let index = cache.load_graph_index()?;
 
     let vault_cfg = &config.vault_config;
 
