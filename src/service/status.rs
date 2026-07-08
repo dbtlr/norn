@@ -10,6 +10,12 @@
 //! launchd probe failure — they make irreversible calls on the answer), a
 //! failed probe here becomes [`LaunchdState::Unavailable`] and the report
 //! still renders, carrying whatever the live socket pong said.
+//!
+//! **Exit-code rule:** degradation must not silence health gates. A report
+//! whose launchd state is unknown ([`ServiceStatus::launchd_error`] present)
+//! exits NONZERO ([`exit_code`]) even though it rendered — a
+//! `norn service status || alert` gate fires when supervision state cannot be
+//! determined. Every KNOWN state (running, stopped, not installed) exits 0.
 
 use std::io::Write;
 
@@ -104,12 +110,36 @@ pub fn assemble_status(
     }
 }
 
+/// The `norn service status` process exit code for a report (the module-doc
+/// exit-code rule): 0 for every KNOWN launchd state, 1 when the launchd probe
+/// failed — the report rendered, but a health gate must still fire on unknown
+/// supervision state.
+pub fn exit_code(status: &ServiceStatus) -> i32 {
+    if status.launchd_error.is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Collapse a possibly multi-line error (launchctl's usage dumps span several
+/// lines) into one `"; "`-joined line, so the headline it is embedded in stays
+/// a single line. The JSON report carries the raw text untouched.
+fn one_line(error: &str) -> String {
+    error
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Human status block. First line is the launchd state (or why it is
 /// unknown); the second reconciles the running vs on-disk build (with a
 /// restart-pending cue); the rest are the paths.
 pub fn render_text(status: &ServiceStatus, out: &mut impl Write) -> std::io::Result<()> {
     let state = match (&status.launchd_error, status.loaded, status.running) {
-        (Some(error), _, _) => format!("launchd state unavailable — {error}"),
+        (Some(error), _, _) => format!("launchd state unavailable — {}", one_line(error)),
         (None, Some(false), _) => "not loaded".to_string(),
         (None, Some(true), Some(true)) => match status.pid {
             Some(pid) => format!("loaded, running (pid {pid})"),
@@ -298,6 +328,91 @@ mod tests {
             .contains("launchctl print failed"));
         assert_eq!(v["running_version"], "0.44.0");
         assert_eq!(v["pid"], 777);
+    }
+
+    /// The exit-code rule: a degraded report still renders, but exits 1 so a
+    /// `status || alert` health gate fires on unknown supervision state; every
+    /// KNOWN state (running / stopped / not loaded) exits 0. The rule is
+    /// format-independent — the same report drives both renderers.
+    #[test]
+    fn probe_failed_report_renders_but_exits_nonzero() {
+        let degraded = assemble_status(
+            ProbedState {
+                launchd: LaunchdState::Unavailable {
+                    error: "could not determine the service's state".into(),
+                },
+                running_version: None,
+                uptime_secs: None,
+                pong_pid: None,
+            },
+            "0.45.1",
+            paths(),
+        );
+        assert_eq!(exit_code(&degraded), 1, "unknown supervision state gates");
+        // Both formats still render the degraded report.
+        assert!(text_of(&degraded).contains("launchd state unavailable"));
+        let mut buf = Vec::new();
+        render_json(&degraded, &mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v["launchd_error"].is_string());
+
+        // Known states — healthy, stopped, and not-installed — exit 0.
+        assert_eq!(exit_code(&base(Some("0.45.1"))), 0, "running is healthy");
+        let not_loaded = assemble_status(
+            ProbedState {
+                launchd: LaunchdState::NotLoaded,
+                running_version: None,
+                uptime_secs: None,
+                pong_pid: None,
+            },
+            "0.45.1",
+            paths(),
+        );
+        assert_eq!(
+            exit_code(&not_loaded),
+            0,
+            "a known stopped state is not a gate"
+        );
+    }
+
+    /// A multi-line launchctl stderr (the exit-64 usage dump) must not garble
+    /// the one-line headline: interior newlines collapse to '; ' in text,
+    /// while the JSON report keeps the raw text.
+    #[test]
+    fn multi_line_probe_error_stays_one_headline_line() {
+        let usage_dump = "launchctl print failed (64): could not determine the service's state — \
+                          Unrecognized target specifier.\nUsage: launchctl print <domain-target> | <service-target>\n\
+                          Please refer to `man launchctl`.";
+        let s = assemble_status(
+            ProbedState {
+                launchd: LaunchdState::Unavailable {
+                    error: usage_dump.into(),
+                },
+                running_version: None,
+                uptime_secs: None,
+                pong_pid: None,
+            },
+            "0.45.1",
+            paths(),
+        );
+        let text = text_of(&s);
+        let headline = text.lines().next().unwrap();
+        assert!(
+            headline.contains("Unrecognized target specifier.; Usage: launchctl print"),
+            "newlines collapse to '; ': {headline}"
+        );
+        assert!(
+            headline.contains("man launchctl"),
+            "no content dropped: {headline}"
+        );
+        // The second line of the report is still the version line, untouched.
+        assert!(
+            text.lines().nth(1).unwrap().contains("on-disk v0.45.1"),
+            "{text}"
+        );
+        // JSON keeps the raw, multi-line error.
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v["launchd_error"].as_str().unwrap().contains('\n'));
     }
 
     /// A failed launchd probe with NO socket answer still renders a report —

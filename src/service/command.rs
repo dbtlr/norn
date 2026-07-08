@@ -482,19 +482,19 @@ fn emit_uninstall(outcome: &UninstallOutcome, format: ServiceFormat) {
     }
 }
 
-/// Render the complete status report to ONE string. Pure (a `Vec` write
+/// Render the complete status report to ONE byte buffer. Pure (a `Vec` write
 /// cannot fail), so the emission below is a single stdout write — a mid-render
 /// stream failure can never leave a half-written report followed by a second
 /// JSON object from the failure boundary.
 #[cfg(unix)]
-fn render_status(report: &status::ServiceStatus, format: ServiceFormat) -> String {
+fn render_status(report: &status::ServiceStatus, format: ServiceFormat) -> Vec<u8> {
     let mut buf = Vec::new();
     match format {
         ServiceFormat::Json => status::render_json(report, &mut buf),
         ServiceFormat::Text => status::render_text(report, &mut buf),
     }
     .expect("rendering to a Vec cannot fail");
-    String::from_utf8(buf).expect("the renderers emit UTF-8")
+    buf
 }
 
 #[cfg(unix)]
@@ -550,11 +550,13 @@ fn status_cmd(
     let emit = || -> std::io::Result<()> {
         use std::io::Write as _;
         let mut out = std::io::stdout().lock();
-        out.write_all(rendered.as_bytes())?;
+        out.write_all(&rendered)?;
         out.flush()
     };
     emit().map_err(|e| anyhow::Error::new(StdoutWriteError(e)))?;
-    Ok(0)
+    // The report rendered either way, but unknown supervision state exits
+    // nonzero (status::exit_code) so a `status || alert` health gate fires.
+    Ok(status::exit_code(&report))
 }
 
 #[cfg(test)]
@@ -910,11 +912,11 @@ mod tests {
                     socket: "/s".into(),
                 },
             );
-            let json = render_status(&report, ServiceFormat::Json);
+            let json = String::from_utf8(render_status(&report, ServiceFormat::Json)).unwrap();
             let v: serde_json::Value =
                 serde_json::from_str(&json).expect("exactly one parseable JSON document");
             assert_eq!(v["pid"], 42);
-            let text = render_status(&report, ServiceFormat::Text);
+            let text = String::from_utf8(render_status(&report, ServiceFormat::Text)).unwrap();
             assert!(
                 text.starts_with("serve: loaded, running (pid 42)"),
                 "{text}"
