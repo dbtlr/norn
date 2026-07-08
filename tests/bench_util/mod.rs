@@ -10,8 +10,6 @@
 //! `title`), real inter-doc `[[wikilinks]]`, and headings + body.
 //!
 //! Cargo compiles this into each test binary that declares `mod bench_util;`.
-//! Only the benchmark uses it today; silence the per-binary dead-code lint.
-#![allow(dead_code)]
 
 use std::fmt::Write as _;
 use std::path::Path;

@@ -3,6 +3,11 @@ mod apply_cmd;
 pub mod apply_report;
 mod audit;
 mod cache;
+// The vault-root → cache-dir identity mapping, re-exported for test harnesses
+// (the NRN-83 acceptance benchmark) that must locate a vault's cache.db under
+// a private XDG_CACHE_HOME exactly the way production does. `#[doc(hidden)]`
+// seam, not stable public API — see `cache::resolve_cache_dir`.
+pub use cache::resolve_cache_dir;
 mod cache_cmd;
 mod cli;
 mod completions;

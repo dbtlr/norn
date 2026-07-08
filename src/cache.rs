@@ -43,6 +43,20 @@ pub(crate) use identity::{
     cache_dir_for, cache_tree_root, events_dir_for, hex_lower, state_dir_for, state_tree_root,
     vault_identity, vault_identity_hash, xdg_cache_home_env,
 };
+
+/// Resolve a vault's on-disk cache directory with the SAME identity mapping
+/// production opens use (`identity::cache_dir_for`), returning just the cache
+/// dir. Cross-crate test-harness seam: the NRN-83 acceptance benchmark locates
+/// `cache.db` under a private `XDG_CACHE_HOME` through it instead of walking
+/// the cache tree. The error is stringified so the crate-private `CacheError`
+/// type does not leak into public visibility. Not part of the stable public
+/// API — same posture as `Cache::conn`.
+#[doc(hidden)]
+pub fn resolve_cache_dir(vault_root: &camino::Utf8Path) -> Result<camino::Utf8PathBuf, String> {
+    cache_dir_for(vault_root)
+        .map(|(_canonical, dir)| dir)
+        .map_err(|e| e.to_string())
+}
 pub(crate) use lock::acquire_flock;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 

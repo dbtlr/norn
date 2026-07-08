@@ -249,8 +249,23 @@ fn inspect_existing_cache(
     // gives an out-of-process harness a deterministic, cross-process count of how
     // many times a code path actually pays the O(db-size) check: a live daemon
     // opens-once/verifies-once, so N routed reads share ONE marker, whereas N
-    // direct invocations each reopen and produce N markers. Gated on the env var
-    // so normal output — and the byte-identical routing proofs — are untouched.
+    // direct invocations each reopen and produce N markers.
+    //
+    // Contract:
+    // - Opt-in diagnostic, OFF by default: with the env var unset (every normal
+    //   environment) this emits nothing and changes no behavior.
+    // - When enabled, routed and direct stderr INTENTIONALLY diverge — revealing
+    //   where the check runs is the hook's entire purpose, so the byte-identical
+    //   routing guarantee does not hold under trace.
+    // - Never enable it in an environment that asserts on norn's stderr (the
+    //   routing byte-identity proofs, log-diffing pipelines).
+    //
+    // Deliberately available in RELEASE builds, unlike the debug-gated
+    // `NORN_CACHE_LOCK_TIMEOUT_MS` (src/cache/lock.rs): that override CHANGES
+    // timing behavior, so an inherited value in a production environment must
+    // be impossible; this hook is pure observability — it alters no timing, no
+    // outcome, no output when unset — and the `--release` acceptance benchmark
+    // needs it in the optimized binary it measures.
     if std::env::var_os("NORN_TRACE_INTEGRITY_CHECK").is_some() {
         eprintln!("norn trace: integrity_check");
     }
