@@ -32,6 +32,7 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
 use clap::CommandFactory;
+use serde::{Deserialize, Serialize};
 
 /// Split an assignment/predicate token into `(key, value)` at the FIRST `:` or
 /// `=`, whichever comes first (ADR 0010 separator forgiveness, T1). Returns
@@ -570,6 +571,77 @@ pub fn gate_dynamic_fields(
     Ok(())
 }
 
+/// A dynamic-predicate field-universe gate refusal, computed daemon-side against
+/// the warm cache so a ROUTED dynamic-predicate read (`find --type x`) can
+/// reproduce the exact error the direct path emits (NRN-218).
+///
+/// This is a PRIVATE norn-CLI↔norn-daemon channel, not public MCP surface: it
+/// rides `vault.find`/`vault.count`'s `structuredContent` as a `dynamic_field_error`
+/// sibling but is `#[schemars(skip)]` on both tools, so it never enters the
+/// published input/output schemas or `tools/list`. An off-filesystem MCP client
+/// filters with canonical `eq`/`in` predicates and never triggers this path; only
+/// the CLI's ADR 0010 forgiving-input desugaring produces the `dynamic_keys` that
+/// arm the gate. NRN-222's request-connection version gate guarantees the daemon
+/// and client are the exact same build, so [`message`](Self::message) — produced
+/// by the SAME [`gate_dynamic_fields`] the direct path runs — is byte-identical to
+/// what the CLI would have printed directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DynamicFieldRefusal {
+    /// Stable machine code (NRN-220 refusal shape). Always `unknown-field` today;
+    /// carried for structured-consumer hygiene — the CLI re-emits `message` only.
+    pub code: String,
+    /// The exact stderr line the direct gate would emit, `{error:#}`-formatted so
+    /// the routed CLI re-emission is byte-identical.
+    pub message: String,
+}
+
+impl DynamicFieldRefusal {
+    /// Build from a [`gate_dynamic_fields`] error, capturing the `{error:#}`
+    /// rendering the CLI's top-level handler prints, so a routed re-emission
+    /// matches the direct path byte-for-byte.
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        Self {
+            code: "unknown-field".to_string(),
+            message: format!("{error:#}"),
+        }
+    }
+}
+
+/// Run the dynamic-field gate daemon-side and return a structured refusal instead
+/// of an `Err` when it fails (NRN-218) — the daemon variant of
+/// [`crate::gate_dynamic_query`]. Both compose the SAME [`field_universe`] +
+/// [`gate_dynamic_fields`], so the routed gate cannot drift from the direct one.
+/// A no-op (returns `Ok(None)`) when no dynamic predicate was desugared, so the
+/// canonical routed path pays nothing.
+pub fn gate_dynamic_refusal(
+    cache: &crate::cache::Cache,
+    config: &crate::config_loader::LoadedConfig,
+    dynamic_keys: &[String],
+    cmd: QueryCmd,
+) -> Result<Option<DynamicFieldRefusal>> {
+    if dynamic_keys.is_empty() {
+        return Ok(None);
+    }
+    let universe = field_universe(cache, config)?;
+    let known_flags = query_known_flags(cmd);
+    Ok(gate_dynamic_fields(dynamic_keys, &universe, &known_flags)
+        .err()
+        .map(|error| DynamicFieldRefusal::from_error(&error)))
+}
+
+/// Read a daemon-computed dynamic-field gate refusal message out of a routed
+/// tool's `structuredContent` (NRN-218). `None` on the success path (the key is
+/// absent) — so a canonical or KNOWN-field routed read stays byte-identical to
+/// direct. The routed CLI seam re-emits the returned message on stderr and exits
+/// 1, exactly as the direct gate would, committing to routing (no direct re-run).
+pub fn dynamic_field_refusal_message(structured: &serde_json::Value) -> Option<String> {
+    structured
+        .get("dynamic_field_error")
+        .and_then(|refusal| refusal.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 /// Union of schema-declared fields (config) and observed frontmatter keys
 /// (cache) — the vault-specific field universe the dynamic-predicate gate
 /// resolves against.
@@ -885,6 +957,39 @@ mod tests {
         let flags = query_known_flags(QueryCmd::Find);
         let err = gate_dynamic_fields(&["zzqqxx".to_string()], &u, &flags).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    // ── NRN-218: daemon-side refusal carrier ───────────────────────────────
+    #[test]
+    fn refusal_from_error_captures_alternate_rendering() {
+        let err = anyhow!("unknown field `zzqqxx`: not a known vault field or flag");
+        let refusal = DynamicFieldRefusal::from_error(&err);
+        assert_eq!(refusal.code, "unknown-field");
+        assert_eq!(refusal.message, format!("{err:#}"));
+    }
+
+    #[test]
+    fn refusal_message_reader_round_trips_via_structured() {
+        let refusal = DynamicFieldRefusal {
+            code: "unknown-field".into(),
+            message: "unknown field `zzqqxx`".into(),
+        };
+        let structured = serde_json::json!({
+            "total": 0,
+            "dynamic_field_error": serde_json::to_value(&refusal).unwrap(),
+            "documents": [],
+        });
+        assert_eq!(
+            dynamic_field_refusal_message(&structured).as_deref(),
+            Some("unknown field `zzqqxx`")
+        );
+    }
+
+    #[test]
+    fn refusal_message_reader_is_none_on_success_envelope() {
+        // The happy-path envelope carries no `dynamic_field_error` key.
+        let structured = serde_json::json!({ "total": 3, "documents": [] });
+        assert!(dynamic_field_refusal_message(&structured).is_none());
     }
 
     #[test]

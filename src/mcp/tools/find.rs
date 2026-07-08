@@ -139,6 +139,18 @@ pub struct FindParams {
     /// `.raw`. Mutually exclusive with `col`.
     #[serde(default)]
     pub all_cols: bool,
+
+    /// PRIVATE norn-CLI↔norn-daemon channel (NRN-218), NOT public MCP surface —
+    /// `#[schemars(skip)]` keeps it out of the published input schema and
+    /// `tools/list`. Carries the field names the CLI's ADR 0010 forgiving-input
+    /// pass desugared from `--<field> value` spellings into the `eq`/`in`
+    /// predicates above, so the daemon can run the field-universe gate against
+    /// its warm cache and refuse an unknown field byte-identically to the direct
+    /// path. An off-filesystem MCP client filters with canonical predicates and
+    /// leaves this empty (the gate is then a no-op).
+    #[serde(default)]
+    #[schemars(skip)]
+    pub dynamic_keys: Vec<String>,
 }
 
 /// Structured output for `vault.find`.
@@ -174,6 +186,16 @@ pub struct FindOutput {
     /// per-document JSON `norn find --format json` emits. With no `col`/`all_cols`,
     /// each is `{path, frontmatter}`; projections add/narrow per the `col` syntax.
     pub documents: Vec<serde_json::Value>,
+
+    /// PRIVATE norn-CLI↔norn-daemon channel (NRN-218), NOT public MCP surface.
+    /// Set only when the daemon's field-universe gate refuses a `dynamic_keys`
+    /// entry; the routed CLI re-emits `message` and exits 1, exactly as the direct
+    /// gate would. `#[serde(skip_serializing_if)]` keeps the success envelope
+    /// byte-identical (the key is simply absent), and `#[schemars(skip)]` keeps it
+    /// out of the published output schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub dynamic_field_error: Option<crate::grammar::DynamicFieldRefusal>,
 }
 
 /// Pure handler for `vault.find`. Opens a fresh query cache (per-call freshness),
@@ -184,6 +206,28 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
     let cache = ctx.query_cache()?;
+
+    // NRN-218: run the ADR 0010 field-universe gate against the warm cache BEFORE
+    // querying, exactly where the direct path gates (`find::run`). A refused
+    // dynamic key crosses back as a `dynamic_field_error` the routed CLI re-emits
+    // byte-identically; the gate is a no-op when the CLI sent no `dynamic_keys`
+    // (the canonical / off-filesystem case), so it costs the happy path nothing.
+    if let Some(refusal) = crate::grammar::gate_dynamic_refusal(
+        &cache,
+        &ctx.config(),
+        &p.dynamic_keys,
+        crate::grammar::QueryCmd::Find,
+    )? {
+        return Ok(FindOutput {
+            total: 0,
+            returned: 0,
+            truncated: false,
+            starts_at: p.starts_at.unwrap_or(1).max(1),
+            has_diagnostic_errors: false,
+            documents: Vec::new(),
+            dynamic_field_error: Some(refusal),
+        });
+    }
 
     let args = FindArgs {
         filters: FilterArgs {
@@ -242,6 +286,8 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
         // carried so a routed find reproduces the direct exit code (NRN-222).
         has_diagnostic_errors: cache.has_diagnostic_errors()?,
         documents,
+        // No gate refusal on the success path (handled by the early return above).
+        dynamic_field_error: None,
     })
 }
 
@@ -304,6 +350,59 @@ mod tests {
                 "every returned doc is type:note: {doc}"
             );
         }
+    }
+
+    /// NRN-218: a KNOWN dynamic field passes the daemon-side gate — no refusal,
+    /// and the query runs exactly as the canonical `eq` form would.
+    #[test]
+    fn handle_known_dynamic_field_passes_gate() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            FindParams {
+                eq: vec!["type:note".into()],
+                dynamic_keys: vec!["type".into()],
+                ..FindParams::default()
+            },
+        )
+        .expect("handle should succeed");
+
+        assert!(
+            out.dynamic_field_error.is_none(),
+            "a known dynamic field must not be refused"
+        );
+        assert_eq!(out.documents.len(), 2, "known --type note returns 2 notes");
+    }
+
+    /// NRN-218: an UNKNOWN dynamic field is refused daemon-side with the exact
+    /// gate message the direct path would emit, and no documents are returned.
+    #[test]
+    fn handle_unknown_dynamic_field_is_refused() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            FindParams {
+                eq: vec!["nonexistentfield:x".into()],
+                dynamic_keys: vec!["nonexistentfield".into()],
+                ..FindParams::default()
+            },
+        )
+        .expect("a refusal is a structured envelope, not a handler Err");
+
+        let refusal = out
+            .dynamic_field_error
+            .expect("an unknown dynamic field must be refused");
+        assert_eq!(refusal.code, "unknown-field");
+        assert!(
+            refusal.message.contains("unknown field `nonexistentfield`"),
+            "message: {}",
+            refusal.message
+        );
+        assert!(out.documents.is_empty(), "a refusal returns no documents");
     }
 
     #[test]
