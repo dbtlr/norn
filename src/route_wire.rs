@@ -112,6 +112,28 @@ pub(crate) fn take_vec<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Read `envelope[key]` as an unsigned integer, naming the tool, the key, and
+/// the observed shape on failure — one error shape for every routed envelope.
+pub(crate) fn get_usize(envelope: &Value, tool: &str, key: &str) -> Result<usize> {
+    Ok(envelope.get(key).and_then(Value::as_u64).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{tool} envelope: `{key}` must be an unsigned integer, got {}",
+            json_type(envelope.get(key))
+        )
+    })? as usize)
+}
+
+/// Read `envelope[key]` as a bool, naming the tool, the key, and the observed
+/// shape on failure.
+pub(crate) fn get_bool(envelope: &Value, tool: &str, key: &str) -> Result<bool> {
+    envelope.get(key).and_then(Value::as_bool).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{tool} envelope: `{key}` must be a bool, got {}",
+            json_type(envelope.get(key))
+        )
+    })
+}
+
 /// The observed JSON shape of an (optional) value, for envelope-shape error
 /// messages that name what was found WITHOUT embedding the payload.
 pub(crate) fn json_type(v: Option<&Value>) -> &'static str {

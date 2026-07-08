@@ -19,17 +19,23 @@ use crate::cli::FindArgs;
 /// fields, so a filter flag added to `FilterArgs` can never be silently
 /// missing here. The one normalization: `--text ""` is documented as a
 /// no-op, not a predicate.
-///
-/// `pub(crate)` because the daemon-routed path (`route_get`'s sibling
-/// `route_find` in `src/lib.rs`) must apply the SAME missing-predicate gate
-/// before routing — a bare `find` prints help and exits 2, never dumps the
-/// vault through the daemon (NRN-222).
-pub(crate) fn has_predicate(args: &FindArgs) -> bool {
+fn has_predicate(args: &FindArgs) -> bool {
     let mut filters = args.filters.clone();
     if filters.text.as_deref().is_some_and(str::is_empty) {
         filters.text = None;
     }
     filters != crate::cli::FilterArgs::default()
+}
+
+/// The missing-predicate help gate, whole: true when this invocation should
+/// print the find help page (exit 2) instead of querying — no predicate
+/// constrains the result set and `--all` (the full-dump escape hatch) was not
+/// passed. The ONE definition shared by the direct dispatch ([`run`]) and the
+/// daemon-routed path (`route_find` in `src/lib.rs`, which forces Direct so
+/// the gate fires there) — a bare `find` must never dump the vault through
+/// the daemon (NRN-222).
+pub(crate) fn wants_help_instead(args: &FindArgs) -> bool {
+    !args.all && !has_predicate(args)
 }
 
 /// Print `norn find --help` to stderr. Used as the "missing predicate" gate.
@@ -65,7 +71,7 @@ pub fn run(
     color: crate::cli::ColorWhen,
     dynamic_keys: &[String],
 ) -> Result<i32> {
-    if !args.all && !has_predicate(&args) {
+    if wants_help_instead(&args) {
         print_find_help()?;
         return Ok(2);
     }

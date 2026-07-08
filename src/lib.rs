@@ -247,19 +247,16 @@ fn try_route_read(
 /// The `reconstruct`-then-`emit` split keeps stdout untouched until
 /// reconstruction succeeds, so a fall-back to Direct never double-writes.
 ///
-/// `accept_tool_error`: whether a result flagged `isError: true` that still
-/// carries `structuredContent` is served from that payload instead of falling
-/// back to Direct. `vault.get` opts in — its `isError` is the semantic
-/// not-found signal (the MCP twin of the CLI's exit 1) riding a complete,
-/// renderable payload, so falling back would execute the failing read twice.
-/// `count`/`find` keep the strict default (their tools flag no semantic
-/// errors; a flagged result there is a failure to re-produce directly).
+/// `on_tool_error` decides what a result flagged `isError: true` means for
+/// this tool (see [`crate::service::OnToolError`]): `vault.get` accepts the
+/// payload (its `isError` is the semantic not-found signal — falling back
+/// would execute the failing read twice); `count`/`find` fall back to Direct.
 #[cfg(unix)]
 fn route_read<T>(
     cwd: &camino::Utf8Path,
     tool: &str,
     arguments: serde_json::Value,
-    accept_tool_error: bool,
+    on_tool_error: crate::service::OnToolError,
     verbose: bool,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
@@ -275,12 +272,7 @@ fn route_read<T>(
         crate::service::RouteDecision::Direct => return None,
     };
 
-    let call_result = if accept_tool_error {
-        client.call_tool_structured_accepting_error(&canonical, tool, arguments)
-    } else {
-        client.call_tool_structured(&canonical, tool, arguments)
-    };
-    let structured = match call_result {
+    let structured = match client.call_tool_structured(&canonical, tool, arguments, on_tool_error) {
         Ok(structured) => structured,
         Err(error) => {
             if verbose {
@@ -317,7 +309,7 @@ fn route_count(
         cwd,
         "vault.count",
         crate::count::route::to_mcp_arguments(args),
-        false,
+        crate::service::OnToolError::FallBackDirect,
         verbose,
         crate::count::route::reconstruct,
         |out| {
@@ -339,15 +331,15 @@ fn route_find(
     // The missing-predicate help gate holds on the routed path too: a bare
     // `find` (no predicate, no --all) prints help and exits 2 on the direct
     // path (`find::run`), so it must never dump the vault through the daemon.
-    // Reuses the exact predicate the direct gate uses, so the two cannot drift.
-    if !args.all && !crate::find::has_predicate(args) {
+    // The SAME whole-gate predicate as the direct path, so the two cannot drift.
+    if crate::find::wants_help_instead(args) {
         return None;
     }
     route_read(
         cwd,
         "vault.find",
         crate::find::route::to_mcp_arguments(args),
-        false,
+        crate::service::OnToolError::FallBackDirect,
         verbose,
         |structured| crate::find::route::reconstruct(structured, args),
         |routed| {
@@ -385,7 +377,7 @@ fn route_get(
         // shipping the full structuredContent (NRN-214); accept it so the
         // routed client derives the CLI's exit-1 from the wire notes instead
         // of re-executing the failing read directly.
-        true,
+        crate::service::OnToolError::AcceptWithPayload,
         verbose,
         |structured| crate::show::route::reconstruct(structured, args),
         |report| crate::show::emit(&report, args),

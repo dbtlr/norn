@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::cli::CountArgs;
 use crate::count::{CountOutput, GroupNode};
-use crate::route_wire::{insert_filter_args, json_type};
+use crate::route_wire::{get_usize, insert_filter_args, json_type};
 
 /// Translate parsed `norn count` args into the `vault.count` tool's parameter
 /// object (the `CountParams` shape in `src/mcp/tools/count.rs`).
@@ -51,15 +51,7 @@ pub fn to_mcp_arguments(args: &CountArgs) -> Value {
 /// `norn count`. Any shape mismatch is an `Err`, which the caller maps to a
 /// verified direct open.
 pub fn reconstruct(structured: &Value) -> Result<CountOutput> {
-    let total = structured
-        .get("total")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "vault.count envelope: `total` must be an unsigned integer, got {}",
-                json_type(structured.get("total"))
-            )
-        })? as usize;
+    let total = get_usize(structured, "vault.count", "total")?;
 
     match structured.get("by") {
         None | Some(Value::Null) => Ok(CountOutput::Total { total }),

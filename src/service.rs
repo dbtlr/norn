@@ -747,8 +747,7 @@ fn read_line_capped<R: std::io::BufRead>(
 /// re-produced identically by the direct path, so error output and exit codes
 /// stay byte-identical too.
 ///
-/// The one carve-out is [`call_tool_structured_accepting_error`]
-/// (`ServiceClient::call_tool_structured_accepting_error`): a tool like
+/// The one carve-out is [`OnToolError::AcceptWithPayload`]: a tool like
 /// `vault.get` uses `isError: true` as a *semantic* signal (a requested target
 /// did not resolve — the MCP twin of the CLI's exit 1, NRN-214) while still
 /// returning the full `structuredContent`. For such a tool, the routed client
@@ -761,38 +760,14 @@ impl ServiceClient {
     /// `structuredContent` JSON. `vault_root` is the canonical vault root the
     /// caller computed once (the wire speaks canonical paths only — ADR 0005);
     /// `tool` is the MCP tool name (e.g. `"vault.count"`); `arguments` is the
-    /// tool's parameter object. A result flagged `isError` is an `Err` (the
-    /// caller falls back to Direct, which re-produces the error canonically).
+    /// tool's parameter object; `on_tool_error` decides what a result flagged
+    /// `isError: true` means (see [`OnToolError`]).
     pub fn call_tool_structured(
         &self,
         vault_root: &Utf8Path,
         tool: &str,
         arguments: serde_json::Value,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.call_tool_structured_inner(vault_root, tool, arguments, false)
-    }
-
-    /// Like [`Self::call_tool_structured`], but ACCEPTS a result flagged
-    /// `isError: true` as long as it carries a `structuredContent` payload —
-    /// for tools (e.g. `vault.get`, NRN-222) whose `isError` is a semantic
-    /// failure signal riding a complete, renderable payload rather than a
-    /// broken call. A flagged result WITHOUT `structuredContent` is still an
-    /// `Err` (nothing to render — fall back to Direct).
-    pub fn call_tool_structured_accepting_error(
-        &self,
-        vault_root: &Utf8Path,
-        tool: &str,
-        arguments: serde_json::Value,
-    ) -> anyhow::Result<serde_json::Value> {
-        self.call_tool_structured_inner(vault_root, tool, arguments, true)
-    }
-
-    fn call_tool_structured_inner(
-        &self,
-        vault_root: &Utf8Path,
-        tool: &str,
-        arguments: serde_json::Value,
-        accept_tool_error: bool,
+        on_tool_error: OnToolError,
     ) -> anyhow::Result<serde_json::Value> {
         use std::io::BufReader;
 
@@ -870,13 +845,13 @@ impl ServiceClient {
             .get("result")
             .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no result"))?;
         // F5: a successful JSON-RPC envelope can still carry a tool-level failure
-        // via `isError: true` (an MCP CallToolResult convention). By default,
-        // treat it as a failure so we do not render a forged/error payload as a
-        // real result; a caller that opted in (`accept_tool_error`) instead
-        // takes the payload — the flag is that tool's semantic failure signal
-        // (e.g. vault.get's not-found → CLI exit 1) and the structuredContent
-        // check below still guards against an empty flagged result.
-        if !accept_tool_error
+        // via `isError: true` (an MCP CallToolResult convention). Under
+        // `FallBackDirect`, treat it as a failure so we do not render a
+        // forged/error payload as a real result; under `AcceptWithPayload` the
+        // flag is that tool's semantic failure signal (e.g. vault.get's
+        // not-found → CLI exit 1) and the structuredContent check below still
+        // guards against an empty flagged result.
+        if on_tool_error == OnToolError::FallBackDirect
             && result.get("isError").and_then(serde_json::Value::as_bool) == Some(true)
         {
             anyhow::bail!("tool '{tool}' reported isError; using direct execution");
@@ -888,6 +863,24 @@ impl ServiceClient {
             .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no structuredContent"))?;
         Ok(structured)
     }
+}
+
+/// What a routed read does with a `tools/call` result flagged `isError: true`
+/// (NRN-222).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnToolError {
+    /// Treat the flagged result as a routing failure: `Err`, so the caller
+    /// falls back to a verified direct open, which re-produces the error (and
+    /// its output/exit code) canonically. The right default for tools whose
+    /// results never flag semantic errors (`vault.count`, `vault.find`).
+    FallBackDirect,
+    /// Accept the flagged result as long as it carries `structuredContent` —
+    /// for tools (`vault.get`) whose `isError` is a semantic failure signal
+    /// riding a complete, renderable payload (the MCP twin of a CLI nonzero
+    /// exit). A flagged result WITHOUT `structuredContent` is still an `Err`
+    /// (nothing to render — fall back to Direct).
+    AcceptWithPayload,
 }
 
 /// Whether the socket at `path` is trustworthy to route through (NRN-94 F4):
@@ -1107,6 +1100,7 @@ mod tests {
                 &vault_root,
                 "vault.count",
                 serde_json::json!({"by": "type"}),
+                OnToolError::FallBackDirect,
             )
             .expect("routed tool call should succeed");
 
@@ -1149,6 +1143,7 @@ mod tests {
             &Utf8PathBuf::from("/vaults/atlas"),
             "vault.count",
             serde_json::json!({}),
+            OnToolError::FallBackDirect,
         );
         assert!(result.is_err(), "an error preamble must be Err (→ Direct)");
         server.join().unwrap();
@@ -1218,10 +1213,82 @@ mod tests {
             &Utf8PathBuf::from("/vaults/atlas"),
             "vault.count",
             serde_json::json!({}),
+            OnToolError::FallBackDirect,
         );
         assert!(
             result.is_err(),
             "isError:true must be Err (→ Direct), even with structuredContent present"
+        );
+        server.join().unwrap();
+    }
+
+    /// NRN-222: under `AcceptWithPayload`, the SAME flagged exchange returns the
+    /// structuredContent — the semantic-failure carve-out `vault.get` rides
+    /// (its `isError` is the not-found signal, and the payload carries the
+    /// notes the CLI's exit-1 derives from).
+    #[test]
+    fn call_tool_structured_is_error_accepted_with_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+            let mut hello_line = String::new();
+            reader.read_line(&mut hello_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+            let mut init_line = String::new();
+            reader.read_line(&mut init_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+            )
+            .unwrap();
+            w.flush().unwrap();
+            let mut call_line = String::new();
+            reader.read_line(&mut call_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2,
+                    "result": {
+                        "content": [{"type": "text", "text": "not found"}],
+                        "structuredContent": {"records": [], "notes": ["error: nope"]},
+                        "isError": true,
+                    }
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let structured = client
+            .call_tool_structured(
+                &Utf8PathBuf::from("/vaults/atlas"),
+                "vault.get",
+                serde_json::json!({"targets": ["nope"]}),
+                OnToolError::AcceptWithPayload,
+            )
+            .expect("AcceptWithPayload must take the flagged payload");
+        assert_eq!(
+            structured,
+            serde_json::json!({"records": [], "notes": ["error: nope"]})
         );
         server.join().unwrap();
     }

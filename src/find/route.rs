@@ -32,7 +32,9 @@ use crate::cache::{DocumentDeep, FindResult};
 use crate::cli::FindArgs;
 use crate::core::DocumentSummary;
 use crate::output::projection::split_cols;
-use crate::route_wire::{insert_filter_args, insert_paging, json_type, take_vec};
+use crate::route_wire::{
+    get_bool, get_usize, insert_filter_args, insert_paging, json_type, take_vec,
+};
 
 /// The reconstructed find result: the matched documents plus the parallel
 /// deep-fetch / raw-read vectors, in the exact shape `find::emit` consumes,
@@ -87,13 +89,13 @@ pub fn to_mcp_arguments(args: &FindArgs) -> Value {
 /// byte-identically to the direct path. Any shape mismatch is an `Err`, which the
 /// caller maps to a verified direct open.
 pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
-    let total = get_usize(structured, "total")?;
-    let returned = get_usize(structured, "returned")?;
-    let truncated = get_bool(structured, "truncated")?;
+    let total = get_usize(structured, "vault.find", "total")?;
+    let returned = get_usize(structured, "vault.find", "returned")?;
+    let truncated = get_bool(structured, "vault.find", "truncated")?;
     // Required, not defaulted: the exit code derives from this bit, and guessing
     // it (e.g. an older daemon that predates the field) would silently break the
     // routed/direct exit-2 isomorphism — better to fall back to Direct.
-    let has_diagnostic_errors = get_bool(structured, "has_diagnostic_errors")?;
+    let has_diagnostic_errors = get_bool(structured, "vault.find", "has_diagnostic_errors")?;
     let documents = structured
         .get("documents")
         .and_then(Value::as_array)
@@ -189,24 +191,6 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
         deep,
         raw,
         has_diagnostic_errors,
-    })
-}
-
-fn get_usize(structured: &Value, key: &str) -> Result<usize> {
-    Ok(structured.get(key).and_then(Value::as_u64).ok_or_else(|| {
-        anyhow::anyhow!(
-            "vault.find envelope: `{key}` must be an unsigned integer, got {}",
-            json_type(structured.get(key))
-        )
-    })? as usize)
-}
-
-fn get_bool(structured: &Value, key: &str) -> Result<bool> {
-    structured.get(key).and_then(Value::as_bool).ok_or_else(|| {
-        anyhow::anyhow!(
-            "vault.find envelope: `{key}` must be a bool, got {}",
-            json_type(structured.get(key))
-        )
     })
 }
 
