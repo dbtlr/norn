@@ -4,8 +4,13 @@
 //! the current-binary path, and the on-disk plist — to the pure layers
 //! ([`plist`], [`launchd`], [`status`]). The verb cores are generic over the
 //! [`Exec`] seam and return typed outcomes, so the lifecycle policy (act only
-//! on an installed unit; structured no-ops; exit 0 iff acted-or-already-there)
-//! is regression-tested with a fake without touching launchctl.
+//! on an installed unit; structured no-ops; probe failures surface, never
+//! default) is regression-tested with a fake without touching launchctl.
+//!
+//! **Format contract:** [`dispatch`] is the ONE error boundary. Every failure
+//! anywhere in a verb — including the path-derivation preamble — flows through
+//! [`report_failure`], so `--format json` always emits a machine-readable
+//! `{ok:false}` object (never empty stdout), and text renders canonically.
 //!
 //! macOS-only: [`require_macos`] gates every verb, printing Mimir's friendly
 //! fallback on any other host. norn has exactly ONE unit (serve), so there is
@@ -13,7 +18,7 @@
 
 use crate::cli::ServiceCommand;
 #[cfg(unix)]
-use crate::cli::ServiceFormat;
+use crate::cli::{ServiceFormat, ServiceSubcommand};
 
 #[cfg(unix)]
 use super::launchd::{Exec, LaunchdSupervisor, RealExec};
@@ -35,39 +40,24 @@ fn require_macos() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dispatch a `norn service` verb. Returns the process exit code: lifecycle
-/// verbs exit 0 iff the unit ended in the requested state through this call
-/// (acted, or start on an already-running unit); a no-op on a missing unit is
-/// nonzero, so a deploy chain does not proceed on it.
+/// Dispatch a `norn service` verb. Returns the process exit code. Lifecycle
+/// contract: exit 0 iff the unit ended in the requested state through this
+/// call (acted), or start found it already running; a no-op on a missing unit
+/// is nonzero, so a deploy chain does not proceed on it.
 pub fn run(cmd: &ServiceCommand) -> anyhow::Result<i32> {
     require_macos()?;
     dispatch(cmd)
 }
 
+/// The single format-aware error boundary (see the module docs): resolve the
+/// verb's name + format FIRST, then route EVERY failure — path-derivation
+/// preamble included — through [`report_failure`].
 #[cfg(unix)]
 fn dispatch(cmd: &ServiceCommand) -> anyhow::Result<i32> {
-    use crate::cli::ServiceSubcommand as Sub;
-
-    // SAFETY: `getuid(2)` is always successful and takes no arguments.
-    let uid = unsafe { libc::getuid() };
-    let supervisor = LaunchdSupervisor::new(RealExec, uid, plist::SERVE_LABEL);
-    let plist_path = plist::plist_path()?;
-    let log_path = plist::log_path()?;
-    let socket_path = crate::service::host_socket_path()?;
-
-    match &cmd.command {
-        Sub::Install(a) => install(&supervisor, &plist_path, &log_path, &socket_path, a.format),
-        Sub::Uninstall(a) => match uninstall_outcome(&supervisor, &plist_path) {
-            Ok(outcome) => {
-                emit_uninstall(&outcome, a.format);
-                Ok(0)
-            }
-            Err(error) => report_failure("uninstall", error, a.format),
-        },
-        Sub::Start(a) => lifecycle(&supervisor, &plist_path, Verb::Start, a.format),
-        Sub::Stop(a) => lifecycle(&supervisor, &plist_path, Verb::Stop, a.format),
-        Sub::Restart(a) => lifecycle(&supervisor, &plist_path, Verb::Restart, a.format),
-        Sub::Status(a) => status_cmd(&supervisor, &plist_path, &log_path, &socket_path, a.format),
+    let (action, format) = verb_meta(&cmd.command);
+    match dispatch_verb(&cmd.command) {
+        Ok(code) => Ok(code),
+        Err(error) => report_failure(action, error, format),
     }
 }
 
@@ -76,6 +66,49 @@ fn dispatch(_cmd: &ServiceCommand) -> anyhow::Result<i32> {
     // Unreachable: `require_macos` already errored on any non-macOS host (which
     // is every non-Unix host). Present so the crate compiles on Windows.
     unreachable!("service is macOS-only; require_macos gates non-macOS hosts")
+}
+
+/// The verb's wire name and requested format — resolved before any fallible
+/// work so a preamble failure can still honor the format contract.
+#[cfg(unix)]
+fn verb_meta(sub: &ServiceSubcommand) -> (&'static str, ServiceFormat) {
+    match sub {
+        ServiceSubcommand::Install(a) => ("install", a.format),
+        ServiceSubcommand::Uninstall(a) => ("uninstall", a.format),
+        ServiceSubcommand::Start(a) => ("start", a.format),
+        ServiceSubcommand::Stop(a) => ("stop", a.format),
+        ServiceSubcommand::Restart(a) => ("restart", a.format),
+        ServiceSubcommand::Status(a) => ("status", a.format),
+    }
+}
+
+#[cfg(unix)]
+fn dispatch_verb(sub: &ServiceSubcommand) -> anyhow::Result<i32> {
+    // SAFETY: `getuid(2)` is always successful and takes no arguments.
+    let uid = unsafe { libc::getuid() };
+    let supervisor = LaunchdSupervisor::new(RealExec, uid, plist::SERVE_LABEL);
+    let plist_path = plist::plist_path()?;
+    let log_path = plist::log_path()?;
+    let socket_path = crate::service::host_socket_path()?;
+
+    match sub {
+        ServiceSubcommand::Install(a) => {
+            install(&supervisor, &plist_path, &log_path, &socket_path, a.format)
+        }
+        ServiceSubcommand::Uninstall(a) => {
+            let outcome = uninstall_outcome(&supervisor, &plist_path)?;
+            emit_uninstall(&outcome, a.format);
+            Ok(0)
+        }
+        ServiceSubcommand::Start(a) => lifecycle(&supervisor, &plist_path, Verb::Start, a.format),
+        ServiceSubcommand::Stop(a) => lifecycle(&supervisor, &plist_path, Verb::Stop, a.format),
+        ServiceSubcommand::Restart(a) => {
+            lifecycle(&supervisor, &plist_path, Verb::Restart, a.format)
+        }
+        ServiceSubcommand::Status(a) => {
+            status_cmd(&supervisor, &plist_path, &log_path, &socket_path, a.format)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -112,11 +145,12 @@ impl Verb {
 enum Outcome {
     /// The verb ran its launchctl action.
     Acted(Verb),
-    /// `start` on a unit that launchd already has loaded: the desired state
-    /// holds, nothing to do. Success (exit 0) — an idempotent start must not
-    /// fail a deploy chain whose daemon is already up. (Without the pre-check,
-    /// launchctl reports this case with the same exit 5 as the bootstrap race
-    /// and the retry loop would spin, then fail.)
+    /// `start` on a unit that is already RUNNING: the desired state holds,
+    /// nothing to do. Success (exit 0) — an idempotent start must not fail a
+    /// deploy chain whose daemon is already up. Keyed on running, not loaded:
+    /// a loaded-but-not-running unit (crash-throttled) is NOT "already
+    /// running" — start kickstarts it instead (that IS the requested state
+    /// transition).
     AlreadyRunning,
     /// `stop`/`restart` on an installed unit that is not loaded: a reported
     /// no-op (exit 1) — the unit was not acted on.
@@ -178,11 +212,18 @@ impl Outcome {
 
 /// The lifecycle policy, over the seam (testable with a fake):
 ///
+/// - **The probe is trusted only when it answers.** [`super::launchd::LoadState`] carries
+///   loaded/not-loaded definitively; a probe FAILURE propagates as `Err` — a
+///   "not running" no-op or "not installed" verdict must mean the daemon
+///   really was in that state, never that a `launchctl print` hiccuped.
 /// - **Installedness** = plist on disk OR unit still loaded — a loaded unit
 ///   whose plist vanished must remain stoppable/restartable, and `status`
 ///   already reports it as running.
-/// - `start` on a loaded unit is [`Outcome::AlreadyRunning`] (never the
-///   bootstrap-retry, whose race code launchctl shares with "already loaded").
+/// - `start` is idempotent on RUNNING ([`Outcome::AlreadyRunning`]); a
+///   loaded-but-NOT-running unit is kickstarted (plain `kickstart`, nothing to
+///   kill) so exit 0 means "the unit ended running through this call or
+///   already was". A not-loaded unit bootstraps (never the retry's race code —
+///   see `launchd`).
 /// - `stop`/`restart` on an installed-but-unloaded unit is the structured
 ///   [`Outcome::NotLoaded`] no-op, never a raw launchctl error.
 #[cfg(unix)]
@@ -191,25 +232,31 @@ fn lifecycle_outcome<E: Exec>(
     plist_path: &camino::Utf8Path,
     verb: Verb,
 ) -> anyhow::Result<Outcome> {
-    let loaded = supervisor.info()?.loaded;
-    if !plist_path.exists() && !loaded {
+    let state = supervisor.load_state()?;
+    if !plist_path.exists() && !state.loaded() {
         return Ok(Outcome::NotInstalled(verb));
     }
     match verb {
         Verb::Start => {
-            if loaded {
+            if state.running() {
                 return Ok(Outcome::AlreadyRunning);
             }
-            supervisor.start(plist_path.as_str())?;
+            if state.loaded() {
+                // Loaded but not running (e.g. crash-throttled between
+                // KeepAlive respawns): spawn it now.
+                supervisor.kickstart()?;
+            } else {
+                supervisor.start(plist_path.as_str())?;
+            }
         }
         Verb::Stop => {
-            if !loaded {
+            if !state.loaded() {
                 return Ok(Outcome::NotLoaded(verb));
             }
             supervisor.stop()?;
         }
         Verb::Restart => {
-            if !loaded {
+            if !state.loaded() {
                 return Ok(Outcome::NotLoaded(verb));
             }
             supervisor.restart()?;
@@ -240,18 +287,25 @@ fn lifecycle(
     verb: Verb,
     format: ServiceFormat,
 ) -> anyhow::Result<i32> {
-    match lifecycle_outcome(supervisor, plist_path, verb) {
-        Ok(outcome) => {
-            emit_lifecycle(&outcome, format);
-            Ok(outcome.exit_code())
-        }
-        Err(error) => report_failure(verb.name(), error, format),
-    }
+    let outcome = lifecycle_outcome(supervisor, plist_path, verb)?;
+    emit_lifecycle(&outcome, format);
+    Ok(outcome.exit_code())
+}
+
+/// The machine-readable failure object [`report_failure`] emits under `json`.
+/// Pure so the shape is testable.
+#[cfg(unix)]
+fn failure_json(action: &str, error: &anyhow::Error) -> serde_json::Value {
+    serde_json::json!({
+        "action": action,
+        "ok": false,
+        "error": format!("{error:#}"),
+    })
 }
 
 /// Render a genuine verb failure through the format contract: under `json`,
-/// emit a machine-readable failure object (exit 1) — a JSON consumer must
-/// never get a bare stderr string in place of the promised object; under
+/// emit [`failure_json`] (exit 1) — a JSON consumer must never get empty
+/// stdout or a bare stderr string in place of the promised object; under
 /// `text`, propagate so the top level renders it canonically (stderr, exit 1).
 #[cfg(unix)]
 fn report_failure(
@@ -261,11 +315,7 @@ fn report_failure(
 ) -> anyhow::Result<i32> {
     match format {
         ServiceFormat::Json => {
-            print_json(&serde_json::json!({
-                "action": action,
-                "ok": false,
-                "error": format!("{error:#}"),
-            }));
+            print_json(&failure_json(action, &error));
             Ok(1)
         }
         ServiceFormat::Text => Err(error),
@@ -304,20 +354,6 @@ fn print_json(value: &serde_json::Value) {
 
 #[cfg(unix)]
 fn install(
-    supervisor: &LaunchdSupervisor<RealExec>,
-    plist_path: &camino::Utf8Path,
-    log_path: &camino::Utf8Path,
-    socket_path: &camino::Utf8Path,
-    format: ServiceFormat,
-) -> anyhow::Result<i32> {
-    match install_inner(supervisor, plist_path, log_path, socket_path, format) {
-        Ok(code) => Ok(code),
-        Err(error) => report_failure("install", error, format),
-    }
-}
-
-#[cfg(unix)]
-fn install_inner(
     supervisor: &LaunchdSupervisor<RealExec>,
     plist_path: &camino::Utf8Path,
     log_path: &camino::Utf8Path,
@@ -368,19 +404,20 @@ struct UninstallOutcome {
     removed_plist: bool,
 }
 
-/// Tear down the unit. The bootout runs ONLY when launchd reports the unit
-/// loaded, and it is NOT tolerated: a genuine unload failure propagates BEFORE
-/// the plist is removed, so a still-loaded KeepAlive daemon is never orphaned
-/// from its on-disk unit (the failure mode of blanket-tolerating bootout).
-/// A not-loaded unit skips the bootout entirely — that is the one case the old
-/// tolerance existed for.
+/// Tear down the unit. The load-state probe must ANSWER before anything is
+/// touched — a probe failure propagates with the plist intact, so the
+/// orphaned-daemon state (plist deleted under a possibly-still-loaded
+/// KeepAlive unit) is impossible by construction, not by probe luck. The
+/// bootout runs ONLY when the unit is definitively loaded, and it is NOT
+/// tolerated: a genuine unload failure also propagates BEFORE the plist is
+/// removed. A definitively-not-loaded unit skips the bootout entirely.
 #[cfg(unix)]
 fn uninstall_outcome<E: Exec>(
     supervisor: &LaunchdSupervisor<E>,
     plist_path: &camino::Utf8Path,
 ) -> anyhow::Result<UninstallOutcome> {
     let on_disk = plist_path.exists();
-    let loaded = supervisor.info()?.loaded;
+    let loaded = supervisor.load_state()?.loaded();
     if loaded {
         supervisor.stop()?;
     }
@@ -420,11 +457,13 @@ fn status_cmd(
     socket_path: &camino::Utf8Path,
     format: ServiceFormat,
 ) -> anyhow::Result<i32> {
-    let info = supervisor.info()?;
-    // Probe the live daemon regardless of launchd load state: a `norn serve`
-    // running outside launchd still answers and should surface (running version
-    // / uptime), rather than reading as dead.
-    let pong = crate::service::probe_status(crate::service::handshake_timeout());
+    let state = supervisor.load_state()?;
+    // Probe the live daemon AT THE SOCKET THE REPORT PRINTS (one derivation,
+    // no re-derive drift), regardless of launchd load state: a `norn serve`
+    // running outside launchd still answers and should surface (running
+    // version / uptime), rather than reading as dead.
+    let pong =
+        crate::service::probe_status_socket(socket_path, crate::service::handshake_timeout());
     let (running_version, uptime_secs, pong_pid) = match pong {
         Some(p) => (Some(p.version), p.uptime_secs, p.pid),
         None => (None, None, None),
@@ -432,9 +471,9 @@ fn status_cmd(
 
     let report = status::assemble_status(
         status::ProbedState {
-            loaded: info.loaded,
-            running: info.running,
-            pid: info.pid.or(pong_pid),
+            loaded: state.loaded(),
+            running: state.running(),
+            pid: state.pid().or(pong_pid),
             running_version,
             uptime_secs,
         },
@@ -473,7 +512,8 @@ mod tests {
     mod unix {
         use super::super::*;
         use crate::service::launchd::testing::{
-            exec_fail, exec_ok, print_not_loaded, print_running, supervisor, FakeExec,
+            exec_fail, exec_ok, print_loaded_not_running, print_not_loaded, print_probe_failed,
+            print_running, supervisor, FakeExec,
         };
         use camino::Utf8PathBuf;
 
@@ -506,7 +546,7 @@ mod tests {
             let (line, warn) = outcome.text();
             assert!(line.contains("nothing to stop"), "{line}");
             assert!(warn, "the no-op line is a warning (stderr)");
-            // Only the info() probe ran — no bootout was attempted.
+            // Only the load-state probe ran — no bootout was attempted.
             assert_eq!(s.exec().calls().len(), 1);
         }
 
@@ -523,7 +563,31 @@ mod tests {
             assert_eq!(s.exec().calls().len(), 1, "no kickstart was attempted");
         }
 
-        /// start on an already-loaded unit reports "already running" and exits
+        /// A PROBE FAILURE (launchctl print neither succeeded nor gave the
+        /// not-found signal) must propagate for every lifecycle verb — the
+        /// operator must be able to trust that "not running"/"not installed"
+        /// means the daemon actually was in that state, not that the probe
+        /// hiccuped. (Pre-fix: any nonzero print read as not-loaded, so stop
+        /// reported a false "not running" no-op.)
+        #[test]
+        fn lifecycle_probe_failure_propagates_never_a_no_op() {
+            let (_dir, plist_path) = plist_fixture(true);
+            for verb in [Verb::Start, Verb::Stop, Verb::Restart] {
+                let s = supervisor(FakeExec::new(vec![print_probe_failed()]));
+                let err = lifecycle_outcome(&s, &plist_path, verb).unwrap_err();
+                assert!(
+                    err.to_string().contains("could not determine"),
+                    "{verb:?}: the probe failure surfaces, got {err}"
+                );
+                assert_eq!(
+                    s.exec().calls().len(),
+                    1,
+                    "{verb:?}: no action after a failed probe"
+                );
+            }
+        }
+
+        /// start on an already-RUNNING unit reports "already running" and exits
         /// 0 (idempotent start) — and never enters the bootstrap retry, whose
         /// race code launchctl shares with "already loaded".
         #[test]
@@ -537,10 +601,26 @@ mod tests {
             assert_eq!(json["ok"], true);
             assert_eq!(json["reason"], "already running");
             let calls = s.exec().calls();
-            assert_eq!(calls.len(), 1, "info only");
-            assert!(
-                calls.iter().all(|c| c[1] != "bootstrap"),
-                "no bootstrap on an already-loaded unit"
+            assert_eq!(calls.len(), 1, "load-state probe only");
+        }
+
+        /// start on a LOADED-but-NOT-running unit (crash-throttled) must NOT
+        /// report "already running" — it kickstarts the loaded unit (plain
+        /// kickstart, nothing to kill) and reports Acted, so exit 0 means the
+        /// unit ended running through this call. (Pre-fix: the gate keyed on
+        /// loaded and reported a false "already running".)
+        #[test]
+        fn start_on_loaded_not_running_kickstarts() {
+            let (_dir, plist_path) = plist_fixture(true);
+            let s = supervisor(FakeExec::new(vec![print_loaded_not_running(), exec_ok()]));
+            let outcome = lifecycle_outcome(&s, &plist_path, Verb::Start).unwrap();
+            assert_eq!(outcome, Outcome::Acted(Verb::Start), "not AlreadyRunning");
+            assert_eq!(outcome.exit_code(), 0);
+            let calls = s.exec().calls();
+            assert_eq!(
+                calls[1],
+                vec!["launchctl", "kickstart", "gui/501/com.dbtlr.norn.serve"],
+                "a plain kickstart brings the loaded unit up"
             );
         }
 
@@ -569,8 +649,8 @@ mod tests {
             assert_eq!(calls[1][1], "bootout", "the stop actually ran");
         }
 
-        /// Nothing on disk and nothing loaded: the structured not-installed
-        /// no-op, exit 1.
+        /// Nothing on disk and DEFINITIVELY nothing loaded: the structured
+        /// not-installed no-op, exit 1.
         #[test]
         fn lifecycle_with_nothing_installed_is_not_installed_exit_one() {
             let (_dir, plist_path) = plist_fixture(false);
@@ -583,6 +663,26 @@ mod tests {
             }
         }
 
+        /// A PROBE FAILURE during uninstall must propagate WITHOUT touching the
+        /// plist — the orphaned-daemon state (plist gone, unit possibly still
+        /// loaded) is impossible by construction. (Pre-fix: a failed probe read
+        /// as not-loaded, skipped the bootout, and deleted the plist anyway.)
+        #[test]
+        fn uninstall_probe_failure_propagates_and_keeps_the_plist() {
+            let (_dir, plist_path) = plist_fixture(true);
+            let s = supervisor(FakeExec::new(vec![print_probe_failed()]));
+            let err = uninstall_outcome(&s, &plist_path).unwrap_err();
+            assert!(
+                err.to_string().contains("could not determine"),
+                "the probe failure surfaces: {err}"
+            );
+            assert!(
+                plist_path.exists(),
+                "the plist must survive an unanswerable probe"
+            );
+            assert_eq!(s.exec().calls().len(), 1, "no bootout after a failed probe");
+        }
+
         /// A genuine bootout failure during uninstall must PROPAGATE and leave
         /// the plist on disk — deleting it would orphan a still-loaded
         /// KeepAlive daemon with no unit file left to manage it by.
@@ -590,7 +690,7 @@ mod tests {
         fn uninstall_keeps_the_plist_when_bootout_fails() {
             let (_dir, plist_path) = plist_fixture(true);
             let s = supervisor(FakeExec::new(vec![
-                print_running(7),                          // info: loaded
+                print_running(7),                          // probe: loaded
                 exec_fail(1, "Operation now in progress"), // bootout fails
             ]));
             let err = uninstall_outcome(&s, &plist_path).unwrap_err();
@@ -604,8 +704,8 @@ mod tests {
             );
         }
 
-        /// uninstall of a not-loaded unit skips the bootout entirely (the one
-        /// case the old blanket tolerance existed for) and removes the plist.
+        /// uninstall of a definitively-not-loaded unit skips the bootout
+        /// entirely and removes the plist.
         #[test]
         fn uninstall_not_loaded_skips_bootout_and_removes_plist() {
             let (_dir, plist_path) = plist_fixture(true);
@@ -623,7 +723,7 @@ mod tests {
             assert_eq!(
                 calls.len(),
                 1,
-                "info only — no bootout for an unloaded unit"
+                "probe only — no bootout for an unloaded unit"
             );
         }
 
@@ -659,6 +759,27 @@ mod tests {
             );
             assert!(!plist_path.exists());
             assert_eq!(s.exec().calls()[1][1], "bootout");
+        }
+
+        /// The JSON failure object every verb (preamble included) emits through
+        /// the [`report_failure`] boundary: parseable, ok:false, named action,
+        /// error text carried.
+        #[test]
+        fn failure_json_is_a_parseable_ok_false_object() {
+            let error = anyhow::anyhow!("HOME is not set");
+            let value = failure_json("status", &error);
+            // Round-trip through a string to prove it is parseable JSON.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&value.to_string()).expect("parseable");
+            assert_eq!(parsed["ok"], false);
+            assert_eq!(parsed["action"], "status");
+            assert!(
+                parsed["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("HOME is not set"),
+                "{parsed}"
+            );
         }
 
         /// The plist's binary path preserves symlinks: absolute-ized, NOT

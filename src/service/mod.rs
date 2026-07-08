@@ -333,14 +333,6 @@ pub struct ServicePong {
     pub uptime_secs: Option<u64>,
 }
 
-/// Best-effort control-ping for `norn service status` at the well-known socket.
-/// See [`probe_status_socket`].
-#[cfg(unix)]
-pub fn probe_status(timeout: std::time::Duration) -> Option<ServicePong> {
-    let socket_path = host_socket_path().ok()?;
-    probe_status_socket(&socket_path, timeout)
-}
-
 /// Control-ping a specific socket for `norn service status`: connect and run
 /// the ONE ping/pong exchange ([`handshake_pong`] — shared with the routing
 /// probe so the wire exchange cannot drift). `None` on any failure (no socket,
@@ -354,7 +346,8 @@ pub fn probe_status(timeout: std::time::Duration) -> Option<ServicePong> {
 /// report a version skew as restart-pending, so a stale-but-protocol-compatible
 /// daemon's pong must come through.
 ///
-/// Split from [`probe_status`] so tests can point it at a stub listener.
+/// The caller supplies the socket path (the command layer probes the SAME path
+/// its report prints), which also lets tests point this at a stub listener.
 #[cfg(unix)]
 pub fn probe_status_socket(
     socket_path: &Utf8Path,

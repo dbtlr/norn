@@ -17,8 +17,12 @@
 //!   is a just-finished `stop` still settling, never "already loaded").
 //! - **Honest stop** — a `KeepAlive` daemon is resurrected if merely killed, so
 //!   stop is a `bootout` (the plist stays on disk).
-//! - **restart** is `kickstart -k`; a nonzero `print` means the unit is not
-//!   loaded.
+//! - **restart** is `kickstart -k`.
+//! - **Three-outcome probe** — `launchctl print` distinguishes loaded (exit 0),
+//!   definitively not loaded (its not-found signal), and a genuine probe
+//!   failure (anything else). The gates built on the probe make irreversible
+//!   calls (delete a plist, report "not running"), so a transient print
+//!   failure must surface as an error, never read as "not loaded".
 
 use std::time::Duration;
 
@@ -56,13 +60,47 @@ impl Exec for RealExec {
     }
 }
 
-/// What a `launchctl print` says about the unit.
+/// What a successful probe says about the unit. The third outcome — a probe
+/// that could not determine the state at all — is the `Err` of
+/// [`LaunchdSupervisor::load_state`], deliberately NOT a variant here: every
+/// gate consuming this type makes an irreversible call (delete a plist, report
+/// "not running"), so "unknown" must not be representable as an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceInfo {
-    pub loaded: bool,
-    pub running: bool,
-    pub pid: Option<u32>,
+pub enum LoadState {
+    /// launchd has the unit (`print` exit 0). `running`/`pid` parsed from the
+    /// dump; a loaded unit can be not-running (crash-throttled, or between
+    /// KeepAlive respawns).
+    Loaded { running: bool, pid: Option<u32> },
+    /// launchd definitively does not have the unit — `print`'s not-found
+    /// signal, and only that signal.
+    NotLoaded,
 }
+
+impl LoadState {
+    pub fn loaded(&self) -> bool {
+        matches!(self, LoadState::Loaded { .. })
+    }
+    pub fn running(&self) -> bool {
+        matches!(self, LoadState::Loaded { running: true, .. })
+    }
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            LoadState::Loaded { pid, .. } => *pid,
+            LoadState::NotLoaded => None,
+        }
+    }
+}
+
+/// `launchctl print`'s not-found signal, verified empirically (macOS, Darwin
+/// 25.5.0): `launchctl print gui/501/<absent-label>` exits **113** with `Bad
+/// request.` / `Could not find service "<label>" in domain for user gui: 501`
+/// on stderr, while a malformed target (a genuine usage failure) exits 64 with
+/// a usage message. "Definitively not loaded" requires BOTH the code and the
+/// stderr marker — exactly the observed signal — so any deviation (a code
+/// shuffle, a reworded message, some other 113) degrades to a loud probe
+/// error, never to a wrong "not loaded" that a gate acts on irreversibly.
+const PRINT_NOT_FOUND_CODE: i32 = 113;
+const PRINT_NOT_FOUND_MARKER: &str = "Could not find service";
 
 /// `bootout` is asynchronous: it can return before launchd finishes tearing the
 /// old unit down, so an immediate `bootstrap` races and fails with error 5
@@ -197,21 +235,45 @@ impl<E: Exec> LaunchdSupervisor<E> {
         )
     }
 
-    /// Probe load/run state via `launchctl print`. A nonzero exit means the unit
-    /// is not loaded.
-    pub fn info(&self) -> anyhow::Result<ServiceInfo> {
+    /// Spawn a loaded-but-not-running unit now (plain `kickstart`, no `-k` —
+    /// there is nothing to kill). Used by `start` on a loaded unit that is not
+    /// running (e.g. crash-throttled between KeepAlive respawns).
+    pub fn kickstart(&self) -> anyhow::Result<()> {
+        self.run(
+            &["kickstart", &self.service],
+            "could not start the loaded unit",
+            false,
+        )
+    }
+
+    /// The three-outcome probe over `launchctl print`:
+    ///
+    /// - exit 0 → `Ok(LoadState::Loaded { .. })` (running/pid parsed from the dump)
+    /// - the verified not-found signal ([`PRINT_NOT_FOUND_CODE`] +
+    ///   [`PRINT_NOT_FOUND_MARKER`]) → `Ok(LoadState::NotLoaded)`
+    /// - anything else (spawn failure, any other nonzero, 113 without the
+    ///   marker) → `Err` — the state is UNKNOWN, and the callers' gates make
+    ///   irreversible calls, so unknown must surface, never default.
+    pub fn load_state(&self) -> anyhow::Result<LoadState> {
         let result = self
             .exec
             .run(&["launchctl", "print", &self.service])
             .map_err(|e| anyhow::anyhow!("failed to run launchctl: {e}"))?;
-        if result.code != 0 {
-            return Ok(ServiceInfo {
-                loaded: false,
-                running: false,
-                pid: None,
-            });
+        if result.code == 0 {
+            return Ok(parse_print(&result.stdout));
         }
-        Ok(parse_print(&result.stdout))
+        if result.code == PRINT_NOT_FOUND_CODE && result.stderr.contains(PRINT_NOT_FOUND_MARKER) {
+            return Ok(LoadState::NotLoaded);
+        }
+        anyhow::bail!(
+            "{}",
+            launchctl_error(
+                "print",
+                result.code,
+                "could not determine the service's state",
+                &result.stderr
+            )
+        );
     }
 }
 
@@ -231,17 +293,13 @@ fn launchctl_error(verb: &str, code: i32, failure: &str, stderr: &str) -> String
     }
 }
 
-/// Parse a `launchctl print gui/<uid>/<label>` dump into load/run state. A `pid
-/// = N` line (or an explicit `state = running`) means running; the pid is read
-/// when present.
-fn parse_print(stdout: &str) -> ServiceInfo {
+/// Parse a successful `launchctl print gui/<uid>/<label>` dump. A `pid = N`
+/// line (or an explicit `state = running`) means running; the pid is read when
+/// present.
+fn parse_print(stdout: &str) -> LoadState {
     let pid = extract_pid(stdout);
     let running = pid.is_some() || stdout.contains("state = running");
-    ServiceInfo {
-        loaded: true,
-        running,
-        pid,
-    }
+    LoadState::Loaded { running, pid }
 }
 
 /// Read the integer after the first `pid = ` in a launchctl print dump.
@@ -317,9 +375,30 @@ pub(crate) mod testing {
         }
     }
 
-    /// A `launchctl print` result for a not-loaded unit.
+    /// A `launchctl print` result for a loaded unit that is NOT running
+    /// (crash-throttled / between KeepAlive respawns): exit 0, no pid.
+    pub(crate) fn print_loaded_not_running() -> ExecResult {
+        ExecResult {
+            code: 0,
+            stdout: "com.dbtlr.norn.serve = {\n\tstate = not running\n}".into(),
+            stderr: String::new(),
+        }
+    }
+
+    /// The verified not-found signal: exit 113 + the "Could not find service"
+    /// stderr marker (see `PRINT_NOT_FOUND_*`).
     pub(crate) fn print_not_loaded() -> ExecResult {
-        exec_fail(113, "Could not find service")
+        exec_fail(
+            113,
+            "Bad request.\nCould not find service \"com.dbtlr.norn.serve\" in domain for user gui: 501",
+        )
+    }
+
+    /// A genuine `launchctl print` failure — nonzero WITHOUT the not-found
+    /// signal (here launchctl's usage error, exit 64). The probe must surface
+    /// this as an error, never read it as "not loaded".
+    pub(crate) fn print_probe_failed() -> ExecResult {
+        exec_fail(64, "Unrecognized target specifier.")
     }
 
     /// A supervisor over a [`FakeExec`] with a zero retry settle (so the
@@ -334,7 +413,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::testing::{
-        exec_fail, exec_ok, print_not_loaded, print_running, supervisor, FakeExec,
+        exec_fail, exec_ok, print_loaded_not_running, print_not_loaded, print_probe_failed,
+        print_running, supervisor, FakeExec,
     };
     use super::*;
 
@@ -417,26 +497,20 @@ mod tests {
         );
     }
 
+    /// The verified not-found signal (113 + marker) is the ONLY nonzero print
+    /// that reads as definitively-not-loaded.
     #[test]
-    fn info_reports_not_loaded_on_nonzero_print() {
+    fn load_state_not_found_signal_is_not_loaded() {
         let s = supervisor(FakeExec::new(vec![print_not_loaded()]));
-        assert_eq!(
-            s.info().unwrap(),
-            ServiceInfo {
-                loaded: false,
-                running: false,
-                pid: None
-            }
-        );
+        assert_eq!(s.load_state().unwrap(), LoadState::NotLoaded);
     }
 
     #[test]
-    fn info_parses_pid_and_running_state() {
+    fn load_state_parses_pid_and_running_state() {
         let s = supervisor(FakeExec::new(vec![print_running(4242)]));
         assert_eq!(
-            s.info().unwrap(),
-            ServiceInfo {
-                loaded: true,
+            s.load_state().unwrap(),
+            LoadState::Loaded {
                 running: true,
                 pid: Some(4242)
             }
@@ -444,20 +518,61 @@ mod tests {
     }
 
     #[test]
-    fn info_loaded_but_not_running_has_no_pid() {
-        let dump = "com.dbtlr.norn.serve = {\n\tstate = not running\n}";
-        let s = supervisor(FakeExec::new(vec![ExecResult {
-            code: 0,
-            stdout: dump.into(),
-            stderr: String::new(),
-        }]));
+    fn load_state_loaded_but_not_running_has_no_pid() {
+        let s = supervisor(FakeExec::new(vec![print_loaded_not_running()]));
         assert_eq!(
-            s.info().unwrap(),
-            ServiceInfo {
-                loaded: true,
+            s.load_state().unwrap(),
+            LoadState::Loaded {
                 running: false,
                 pid: None
             }
+        );
+    }
+
+    /// A genuine print failure (nonzero without the not-found signal) is an
+    /// ERROR — the pre-fix probe read every nonzero as "not loaded", so a
+    /// transient failure fed the gates a wrong, irreversible answer.
+    #[test]
+    fn load_state_probe_failure_is_an_error_not_not_loaded() {
+        let s = supervisor(FakeExec::new(vec![print_probe_failed()]));
+        let err = s.load_state().unwrap_err().to_string();
+        assert!(
+            err.contains("could not determine the service's state"),
+            "got {err}"
+        );
+        assert!(
+            err.contains("Unrecognized target"),
+            "stderr surfaced: {err}"
+        );
+    }
+
+    /// The not-found signal requires BOTH the code and the marker — exit 113
+    /// without the marker is a probe failure, and the marker at another code
+    /// is too (encode exactly what was verified; deviations degrade loudly).
+    #[test]
+    fn load_state_partial_not_found_signals_are_probe_failures() {
+        let s = supervisor(FakeExec::new(vec![exec_fail(
+            113,
+            "something else entirely",
+        )]));
+        assert!(s.load_state().is_err(), "113 without the marker is unknown");
+        let s = supervisor(FakeExec::new(vec![exec_fail(
+            1,
+            "Could not find service x",
+        )]));
+        assert!(
+            s.load_state().is_err(),
+            "the marker at another code is unknown"
+        );
+    }
+
+    #[test]
+    fn kickstart_is_plain_kickstart_without_kill() {
+        let s = supervisor(FakeExec::new(vec![exec_ok()]));
+        s.kickstart().unwrap();
+        assert_eq!(
+            s.exec().calls()[0],
+            vec!["launchctl", "kickstart", "gui/501/com.dbtlr.norn.serve"]
         );
     }
 
@@ -466,7 +581,11 @@ mod tests {
     #[test]
     fn exec_result_streams_are_consumed() {
         let s = supervisor(FakeExec::new(vec![print_running(7)]));
-        assert_eq!(s.info().unwrap().pid, Some(7), "stdout drives info()");
+        assert_eq!(
+            s.load_state().unwrap().pid(),
+            Some(7),
+            "stdout drives load_state()"
+        );
         let s = supervisor(FakeExec::new(vec![exec_fail(1, "the reason")]));
         let err = s.stop().unwrap_err().to_string();
         assert!(err.contains("the reason"), "stderr drives the error: {err}");

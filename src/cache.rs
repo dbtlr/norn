@@ -41,7 +41,7 @@ mod writer;
 pub(crate) use change_detection::ChangeDetectOptions;
 pub(crate) use identity::{
     cache_dir_for, cache_tree_root, events_dir_for, hex_lower, state_dir_for, state_tree_root,
-    vault_identity, vault_identity_hash,
+    vault_identity, vault_identity_hash, xdg_cache_home_env,
 };
 pub(crate) use lock::acquire_flock;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};

@@ -40,13 +40,13 @@ pub fn log_path() -> anyhow::Result<Utf8PathBuf> {
         .join("serve.log"))
 }
 
-/// The install-time `XDG_CACHE_HOME`, when set and non-empty — the ONE
-/// environment variable the daemon's socket/log derivation depends on. Empty
-/// counts as unset, matching the cache tree's own derivation.
+/// The install-time `XDG_CACHE_HOME` to bake — the ONE environment variable
+/// the daemon's socket/log derivation depends on. Delegates to the cache
+/// tree's own derivation (`cache::identity::xdg_cache_home_env`, where
+/// empty-counts-as-unset lives), so the plist can never bake an override the
+/// cache derivation wouldn't use.
 pub fn install_env_xdg_cache_home() -> Option<String> {
-    std::env::var("XDG_CACHE_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
+    crate::cache::xdg_cache_home_env().map(Utf8PathBuf::into_string)
 }
 
 /// Escape XML element-content specials (ampersand first). launchctl rejects a
