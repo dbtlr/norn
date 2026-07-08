@@ -163,6 +163,31 @@ mod tests {
         );
     }
 
+    /// The in-band tool-failure envelope (NRN-219/220: `MutationResult` with
+    /// `isError: true`, which crosses as `structured_error` PRESERVING the
+    /// structured report) carries the notes exactly like a success — it flows
+    /// through `run_wrapped`'s Ok arm, so a contended request that ends in a
+    /// coded refusal / not-found still forwards its operator note.
+    #[test]
+    fn injects_notes_into_is_error_envelope() {
+        use crate::mcp::mutation_result::MutationResult;
+        let noted = Noted::new(
+            MutationResult::from_flag(json!({ "report": { "outcome": "refused" } }), true),
+            vec!["note one".to_string()],
+        );
+        let result = noted.into_call_tool_result().expect("serialize");
+        assert_eq!(result.is_error, Some(true), "the error bit survives Noted");
+        let sc = result
+            .structured_content
+            .expect("structured report preserved on the error path");
+        assert_eq!(sc["report"]["outcome"], "refused");
+        assert_eq!(
+            sc[OPERATOR_NOTES_KEY],
+            json!(["note one"]),
+            "operator_notes must ride the isError envelope too"
+        );
+    }
+
     /// The reader inverts the injection: notes injected server-side are recovered
     /// verbatim from the serialized `structuredContent`.
     #[cfg(unix)]

@@ -499,11 +499,14 @@ impl VaultContext {
             {
                 Ok(_) => {}
                 Err(CacheError::LockTimeout) => {
-                    // The DAEMON path: the direct read prints this note to the
-                    // CLI's stderr, but here it would land on the daemon's own
-                    // stderr — invisible to the routed caller. Capture it as an
-                    // operator note instead; `run_wrapped` forwards it in the
-                    // tool envelope and the routed CLI re-emits it (NRN-215).
+                    // BOTH surfaces (NRN-215): the daemon's own stderr is its
+                    // operational log — an operator tailing `norn serve` (or a
+                    // log pipeline) keeps the contention signal, alongside the
+                    // served markers — AND the per-request note buffer carries
+                    // it to the caller: `run_wrapped` forwards it in the tool
+                    // envelope and the routed CLI re-emits it on ITS stderr,
+                    // byte-identical to a direct run.
+                    eprintln!("{}", crate::cache::LOCK_CONTENTION_NOTE);
                     self.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
                 }
                 Err(error) => return Err(error.into()),

@@ -44,7 +44,7 @@ impl crate::cache::Cache {
     pub fn rebuild(&mut self, vault_root: &Utf8Path) -> Result<IndexReport, CacheError> {
         let _lock = crate::cache::lock::WriteLock::acquire(
             &self.cache_dir,
-            std::time::Duration::from_secs(5),
+            crate::cache::lock::write_lock_timeout(),
         )?;
         let start = std::time::Instant::now();
         let options = crate::graph::IndexOptions {
@@ -106,7 +106,7 @@ impl crate::cache::Cache {
         }
         let _lock = crate::cache::lock::WriteLock::acquire(
             &self.cache_dir,
-            std::time::Duration::from_secs(5),
+            crate::cache::lock::write_lock_timeout(),
         )?;
         let start = std::time::Instant::now();
         let changes = detect(vault_root, self, options)?;

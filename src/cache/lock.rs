@@ -10,6 +10,34 @@ use fs2::FileExt;
 
 use crate::cache::error::CacheError;
 
+/// The production write-lock acquire timeout for the cache write paths
+/// (`Cache::rebuild` / `Cache::index_incremental`): 5 seconds, always, unless
+/// the test-only env override below is set.
+pub(crate) const DEFAULT_WRITE_LOCK_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// Test-only override for the write-lock acquire timeout, in milliseconds
+/// (mirrors the `NORN_SERVICE_HANDSHAKE_TIMEOUT_MS` idiom in `service`). Lets
+/// contention tests hit `CacheError::LockTimeout` in ~100–200ms instead of
+/// stalling the suite the full 5s per contended acquire. NOT an operator knob:
+/// it is undocumented outside this file, and production deployments never set
+/// it — every production path resolves to [`DEFAULT_WRITE_LOCK_TIMEOUT`]
+/// (asserted by `write_lock_timeout_defaults_to_five_seconds` below).
+const WRITE_LOCK_TIMEOUT_ENV: &str = "NORN_CACHE_LOCK_TIMEOUT_MS";
+
+/// The write-lock acquire timeout: [`DEFAULT_WRITE_LOCK_TIMEOUT`] unless the
+/// test-only [`WRITE_LOCK_TIMEOUT_ENV`] parses to a positive integer. Read at
+/// every acquire (not cached) so a test can scope the override to one section.
+pub(crate) fn write_lock_timeout() -> std::time::Duration {
+    match std::env::var(WRITE_LOCK_TIMEOUT_ENV) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ms) if ms > 0 => std::time::Duration::from_millis(ms),
+            _ => DEFAULT_WRITE_LOCK_TIMEOUT,
+        },
+        Err(_) => DEFAULT_WRITE_LOCK_TIMEOUT,
+    }
+}
+
 /// Open (creating if absent) the lock file at `lock_path` and acquire an
 /// exclusive advisory flock, polling until `timeout`. Returns the open
 /// `File` (caller keeps it alive to hold the lock) or an `Io` error on
@@ -77,6 +105,22 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
+
+    /// The production default is exactly 5s. The env override is test-only; this
+    /// pins the default so the injection cannot silently change production
+    /// behavior. (Env READS are safe under parallel tests; the contention tests
+    /// that SET the var affect only contended acquires, which no other test
+    /// stages concurrently.)
+    #[test]
+    fn write_lock_timeout_defaults_to_five_seconds() {
+        assert_eq!(
+            DEFAULT_WRITE_LOCK_TIMEOUT,
+            std::time::Duration::from_secs(5)
+        );
+        if std::env::var(WRITE_LOCK_TIMEOUT_ENV).is_err() {
+            assert_eq!(write_lock_timeout(), DEFAULT_WRITE_LOCK_TIMEOUT);
+        }
+    }
 
     #[test]
     fn lock_acquires_when_free() {

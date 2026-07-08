@@ -224,18 +224,40 @@ impl McpServer {
             // runs after the lock is released — is what keeps a note bound to the
             // request that produced it, with no leakage into a concurrent
             // connection's serialized request (NRN-215).
+            // Note that a tool-level FAILURE flagged in-band — the NRN-219/220
+            // refusal shape, `MutationResult { is_error: true }`, and vault.get's
+            // semantic not-found — flows through THIS arm too (the handler
+            // returned Ok), so its `isError: true` + structuredContent envelope
+            // carries the request's notes exactly like a success.
             Ok(Ok(value)) => Ok(Noted::new(value, self.ctx.take_operator_notes())),
             // A corruption-class SQLite failure evicts the warm state so the next
             // request fully reopens (integrity_check → rebuild) — the warm-mode
             // self-heal for in-place corruption (FIX-3). No-op in cold mode.
+            //
+            // Drain the notes here too: a bare tool error crosses as a JSON-RPC
+            // `error` (rmcp `ErrorData`), which carries NO structuredContent to
+            // ride, so the notes cannot be forwarded on this arm. The signal is
+            // not lost — the capture point already wrote each note to the
+            // daemon's own stderr (its operational log), and the routed client
+            // maps a JSON-RPC error to a verified DIRECT run, which re-produces
+            // the note canonically on its own stderr. Draining keeps the buffer
+            // strictly request-scoped (belt-and-suspenders over the
+            // `begin_request` clear).
             Ok(Err(err)) => {
+                self.ctx.take_operator_notes();
                 self.ctx.note_tool_error(&err);
                 Err(to_mcp_error(err))
             }
-            Err(join_err) => Err(rmcp::ErrorData::internal_error(
-                format!("tool task failed: {join_err}"),
-                None,
-            )),
+            // Same drain rationale as the tool-error arm: no envelope exists for
+            // a join failure, and the capture point already logged the note to
+            // the daemon's stderr.
+            Err(join_err) => {
+                self.ctx.take_operator_notes();
+                Err(rmcp::ErrorData::internal_error(
+                    format!("tool task failed: {join_err}"),
+                    None,
+                ))
+            }
         }
     }
 
@@ -880,17 +902,29 @@ mod tests {
             "an uncontended warm read must produce no operator note"
         );
 
+        // Shorten the write-lock timeout for the contended section so the test
+        // does not stall the suite the full 5s production default per contended
+        // acquire. `set_var` is process-global, but this leak is benign: a
+        // shorter timeout only matters to CONTENDED acquires, and no other
+        // in-binary test stages cache write-lock contention (the lock.rs tests
+        // pass explicit durations and never read the env).
+        std::env::set_var("NORN_CACHE_LOCK_TIMEOUT_MS", "150");
+
         // Hold the vault's cache write lock so the next refresh cannot acquire it.
         let (_canonical, cache_dir) =
             crate::cache::cache_dir_for(&root).expect("resolve cache dir");
-        let _held = crate::cache::acquire_flock(
+        let held = crate::cache::acquire_flock(
             &cache_dir.join(".lock"),
             std::time::Duration::from_secs(60),
         )
         .expect("hold the cache write lock");
 
         // Second call: `query_cache_warm`'s `index_incremental` times out on the
-        // held lock and records the note through the REAL capture point.
+        // held lock and records the note through the REAL capture point (which
+        // ALSO writes the same line to this process's stderr — the daemon's
+        // operational-log surface, asserted end-to-end by the
+        // serve_note_forwarding integration test where the daemon's stderr is a
+        // capturable file).
         let second = server
             .validate(Parameters(
                 crate::mcp::tools::validate::ValidateParams::default(),
@@ -913,6 +947,39 @@ mod tests {
             sc[crate::mcp::notes::OPERATOR_NOTES_KEY],
             serde_json::json!([crate::cache::LOCK_CONTENTION_NOTE]),
             "structuredContent.operator_notes must carry the forwarded note"
+        );
+
+        // A contended request whose tool body then FAILS (the bare-Err arm, not
+        // the in-band isError shape): the JSON-RPC error carries no
+        // structuredContent for the note to ride, so `run_wrapped` drains the
+        // buffer — the note must NOT leak into the next request's envelope.
+        // (The note itself is not lost: the capture point wrote it to the
+        // daemon's stderr, and a routed client re-runs Direct on a JSON-RPC
+        // error, re-producing it canonically.)
+        let failed = server
+            .run_wrapped("vault.count", |ctx| -> anyhow::Result<Json<()>> {
+                // Trip the REAL capture point (contended refresh) first…
+                let _cache = ctx.query_cache()?;
+                // …then fail the body.
+                anyhow::bail!("boom after capture")
+            })
+            .await;
+        assert!(failed.is_err(), "the failing body must surface as Err");
+
+        // Release the lock; the next request must carry NO stale note.
+        drop(held);
+        std::env::remove_var("NORN_CACHE_LOCK_TIMEOUT_MS");
+        let third = server
+            .validate(Parameters(
+                crate::mcp::tools::validate::ValidateParams::default(),
+            ))
+            .await
+            .expect("third validate");
+        assert!(
+            third.notes().is_empty(),
+            "a note captured by a FAILED request must not leak into the next \
+             request's envelope, got {:?}",
+            third.notes()
         );
     }
 

@@ -387,6 +387,35 @@ mod tests {
         assert_round_trip(result, vec![], vec![], base_args());
     }
 
+    /// A forwarded-note envelope (NRN-215): the daemon injects an
+    /// `operator_notes` sibling into `structuredContent` under lock contention.
+    /// `reconstruct` must ignore that extra key and rebuild the same result —
+    /// routed stdout stays byte-identical while the note rides alongside for the
+    /// routing seam (`route_read`) to re-emit on stderr.
+    #[test]
+    fn reconstruct_ignores_operator_notes_sibling() {
+        let result = sample_result();
+        let mut args = base_args();
+        args.format = Some(FindFormat::Json);
+        let mut wire = to_wire(&result, &[], &[], &args);
+        wire.as_object_mut().unwrap().insert(
+            "operator_notes".into(),
+            json!(["vault: another cache operation is in progress; using current cache state"]),
+        );
+        let routed = reconstruct(&wire, &args).unwrap();
+        let (direct_out, direct_err) = render_bytes(&result, &[], &[], &args);
+        let (routed_out, routed_err) =
+            render_bytes(&routed.result, &routed.deep, &routed.raw, &args);
+        assert_eq!(
+            direct_out, routed_out,
+            "stdout must ignore the notes sibling"
+        );
+        assert_eq!(
+            direct_err, routed_err,
+            "stderr must ignore the notes sibling"
+        );
+    }
+
     #[test]
     fn round_trip_bare_field_col() {
         let result = sample_result();
