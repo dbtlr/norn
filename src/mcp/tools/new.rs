@@ -202,10 +202,12 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     // ── Step 1: Load config + graph index ─────────────────────────────────────
     // `preflight_and_plan` does this internally; we replicate it so we can
     // short-circuit at preflight without a real sink and without touching stdin.
-    let loaded_config = crate::config_loader::load_config(&cwd, None)
-        .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
-
-    let index = crate::cache_cmd::load_graph_index(&cwd, &loaded_config.index_options, false)?;
+    // Config comes from the context (`ctx.config()`; refreshed per request by
+    // `begin_request` in warm mode) — NOT re-read from disk, so the whole request
+    // sees one config generation. The graph index goes through the context too:
+    // warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
+    let loaded_config = ctx.config();
+    let index = ctx.load_graph_index()?;
 
     // ── Step 2: Three-mode path resolution via the shared `resolve_target` fn ─
     // Mirrors the CLI's `preflight_and_plan` mode resolution (NRN-56).

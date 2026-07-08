@@ -2,8 +2,10 @@
 //!
 //! The pure handler drives the same pipeline as `norn repair --plan`:
 //!
-//! 1. Load the `GraphIndex` via `cache_cmd::load_graph_index` (respects
-//!    `files.ignore`, incremental refresh) — the same entry point as the CLI.
+//! 1. Load the `GraphIndex` via `VaultContext::load_graph_index` (warm-connection
+//!    reuse under the daemon, fresh open in cold mode; incremental refresh either
+//!    way). `files.ignore` is enforced at cache-build time, so the index arrives
+//!    already filtered — same result as the CLI's load path.
 //! 2. Run `validate_with_compiled` to collect findings.
 //! 3. Apply triage filters via `filter_findings`.
 //! 4. Call `plan_from_findings` to build the in-memory `MigrationPlan`.
@@ -27,7 +29,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::cache_cmd::load_graph_index;
 use crate::cli::{ConfidenceArg, RepairArgs, ValidateTriageArgs};
 use crate::mcp::context::VaultContext;
 use crate::planner::findings::plan_from_findings;
@@ -113,17 +114,17 @@ pub struct RepairOutput {
 /// Mirrors `repair::run_plan` exactly up to the `MigrationPlan` in-memory
 /// construction — with NO filesystem writes (no `fs::write`, no apply).
 ///
-/// Uses `cache_cmd::load_graph_index` (not the cache reader's version) so
-/// that `files.ignore` patterns are honoured at index-load time, matching the
-/// CLI's `norn repair` behaviour.
+/// Loads the graph index via `VaultContext::load_graph_index` (warm-connection
+/// reuse under the daemon, fresh open in cold mode). `files.ignore` is enforced
+/// at cache-build time (`Cache::open_with_index`, NRN-117), so the index is
+/// already filtered, matching the CLI's `norn repair` behaviour.
 pub fn handle(ctx: &VaultContext, p: RepairParams) -> Result<RepairOutput> {
-    // Load the graph index via the same entry point the CLI uses.
-    // `false` means "allow cache refresh if stale" (mirrors `no_cache_refresh = false`).
-    // Use the context's current config (`ctx.config()`; hot-swapped in warm mode) —
-    // consistent with `validate.rs` and matching `norn repair`'s approach where
-    // config is loaded once per invocation.
+    // Load the graph index via the daemon-served entry point: warm-connection
+    // reuse (verify-once) under the daemon, fresh open in cold mode, with
+    // `files.ignore` applied identically — matching `norn repair` (NRN-130).
+    // Use the context's current config (`ctx.config()`; hot-swapped in warm mode).
     let config = ctx.config();
-    let index = load_graph_index(&ctx.vault_root, &config.index_options, false)?;
+    let index = ctx.load_graph_index()?;
 
     // Collect all validation findings using the context's current config.
     let findings = validate_with_compiled(

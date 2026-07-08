@@ -145,7 +145,8 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
     }
 
     // ── Step 3: load graph index (same entry point apply uses) ────────────────
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config().index_options, false)?;
+    // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
+    let index = ctx.load_graph_index()?;
 
     let dry_run = !p.confirm;
 

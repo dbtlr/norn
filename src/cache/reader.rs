@@ -82,9 +82,15 @@ pub(crate) fn load_headings(
     conn: &rusqlite::Connection,
     doc_path: &str,
 ) -> Result<Vec<Heading>, CacheError> {
+    // Deterministic document order: by source position (the order the parser
+    // emitted them), with slug — unique per doc via the (doc_path, slug) PK — as
+    // a total-order tiebreak for rows without a span. Without an explicit ORDER
+    // BY the row order is whatever the query plan yields (in practice the PK
+    // index's slug order), which is both non-contractual and NOT document order.
     let mut stmt = conn.prepare(
         "SELECT level, text, slug, source_span_line, source_span_column, source_span_byte_offset
-         FROM headings WHERE doc_path = ?",
+         FROM headings WHERE doc_path = ?
+         ORDER BY source_span_line, source_span_byte_offset, slug",
     )?;
     let rows = stmt.query_map([doc_path], |r| {
         let level: i64 = r.get(0)?;
@@ -149,7 +155,12 @@ pub(crate) fn load_block_ids(
     conn: &rusqlite::Connection,
     doc_path: &str,
 ) -> Result<Vec<String>, CacheError> {
-    let mut stmt = conn.prepare("SELECT block_id FROM block_ids WHERE doc_path = ?")?;
+    // Deterministic order: block_id is unique per doc via the (doc_path,
+    // block_id) PK, so lexicographic order is total. The writer's INSERT OR
+    // IGNORE dedupe means insertion (document) order is not recoverable here;
+    // this codifies the order the PK index scan already yielded in practice.
+    let mut stmt =
+        conn.prepare("SELECT block_id FROM block_ids WHERE doc_path = ? ORDER BY block_id")?;
     let rows = stmt.query_map([doc_path], |r| r.get::<_, String>(0))?;
     let mut block_ids = Vec::new();
     for r in rows {

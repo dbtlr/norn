@@ -135,9 +135,13 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
         None
     };
 
+    // ONE query_cache call serves both needs: the graph index is built from the
+    // same handle used for target resolution, so the pipeline (ground-shift,
+    // freshness refresh) runs once and index + cache are one consistent snapshot.
+    // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
     let config = ctx.config();
-    let index = crate::cache_cmd::load_graph_index(&cwd, &config.index_options, false)?;
     let cache = ctx.query_cache()?;
+    let index = cache.load_graph_index()?;
     let vault_cfg = &config.vault_config;
 
     let pre = crate::edit::synth::preflight_and_plan(

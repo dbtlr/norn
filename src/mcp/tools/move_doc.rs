@@ -137,7 +137,8 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     let cwd = ctx.vault_root.clone();
 
     // Load the graph index honoring files.ignore, exactly like the CLI move path.
-    let index = crate::cache_cmd::load_graph_index(&cwd, &ctx.config().index_options, false)?;
+    // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
+    let index = ctx.load_graph_index()?;
 
     // Folder vs single-file detection, matching the CLI: explicit `-r` OR `from`
     // is a directory on disk routes through `move_folder`.

@@ -2,8 +2,10 @@
 //!
 //! The pure handler drives the same pipeline as `norn validate`:
 //!
-//! 1. Reconstruct the `GraphIndex` via `cache_cmd::load_graph_index`, applying
-//!    `files.ignore` patterns and an implicit incremental cache refresh.
+//! 1. Reconstruct the `GraphIndex` via `VaultContext::load_graph_index` (warm-
+//!    connection reuse under the daemon, fresh open in cold mode) with an
+//!    implicit incremental cache refresh. `files.ignore` is enforced at
+//!    cache-build time, so the index arrives already filtered.
 //! 2. Call `validate_with_compiled` with the context's current config
 //!    (`ctx.config()`; hot-swapped in warm mode).
 //! 3. Filter findings via `filter_findings` (triage filters from params).
@@ -29,7 +31,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::cache_cmd::load_graph_index;
 use crate::mcp::context::VaultContext;
 use crate::standards::engine::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
@@ -109,18 +110,20 @@ pub struct ValidateOutput {
 
 /// Pure handler for `vault.validate`.
 ///
-/// Reconstructs the graph index via the same entry point the CLI validate uses
-/// (`cache_cmd::load_graph_index`), which applies `files.ignore` patterns at
-/// read time and handles lock-timeout-tolerant cache refresh. This keeps the
-/// MCP tool consistent with `norn validate` on vaults that configure
-/// `files.ignore`.
+/// Reconstructs the graph index via `VaultContext::load_graph_index` — warm-
+/// connection reuse under the daemon, a fresh open in cold mode, with the same
+/// lock-timeout-tolerant cache refresh either way. `files.ignore` is enforced
+/// at cache-build time (`Cache::open_with_index`, NRN-117), so the loaded index
+/// is already filtered — consistent with `norn validate` on vaults that
+/// configure `files.ignore`.
 pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
-    // Route through cache_cmd::load_graph_index — the same entry point the CLI
-    // validate uses — so that `files.ignore` patterns are applied via
-    // `apply_ignore_filter`. The old `ctx.query_cache()? + cache.load_graph_index()`
-    // path hardcoded `ignored_files: Vec::new()` and silently skipped the filter.
+    // Route through VaultContext::load_graph_index — the graph-index entry point
+    // for daemon-served tools. It reuses the warm connection when served by the
+    // daemon (verify-once) and opens fresh in cold mode, but applies `files.ignore`
+    // via `Cache::open_with_index` in both, so the index is filtered identically
+    // to `norn validate` (NRN-130).
     let config = ctx.config();
-    let index = load_graph_index(&ctx.vault_root, &config.index_options, false)?;
+    let index = ctx.load_graph_index()?;
 
     // Run validation using the context's current config (`ctx.config()`;
     // hot-swapped in warm mode) — same config path as `norn validate`.
@@ -436,16 +439,16 @@ mod tests {
     /// Regression test: `files.ignore` must be applied by the handler so that
     /// broken wikilinks inside ignored directories do NOT appear in findings.
     ///
-    /// Before the fix, `handle` loaded the graph index via
-    /// `cache.load_graph_index()` (the cache reader), which hardcodes
-    /// `ignored_files: Vec::new()` and never calls `apply_ignore_filter`.
-    /// Result: a broken link under `templates/` would surface as a
-    /// `link-target-missing` finding even when the vault config declares
-    /// `files.ignore: ["templates/**"]`.
+    /// Historically, `handle` opened the cache without threading the config's
+    /// ignore patterns into `Cache::open_with_index`, so a broken link under
+    /// `templates/` surfaced as a `link-target-missing` finding even when the
+    /// vault config declared `files.ignore: ["templates/**"]`.
     ///
-    /// After the fix the handler routes through
-    /// `cache_cmd::load_graph_index(…)` — the same entry point as
-    /// `norn validate` — which calls `apply_ignore_filter` at read time.
+    /// Today the handler routes through `VaultContext::load_graph_index`, which
+    /// opens the cache with the config's ignore patterns; `files.ignore` is
+    /// enforced at cache-BUILD time (the scan gate, NRN-117), so ignored docs
+    /// never enter the rows the index is reconstructed from — same behavior as
+    /// `norn validate`.
     #[test]
     fn handle_files_ignore_suppresses_findings_from_ignored_directory() {
         // Build a vault with:
