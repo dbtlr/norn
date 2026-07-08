@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{GetArgs, GetFormat, SortPaginateArgs};
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 use crate::show::{SectionFailure, ShowReport};
 
 /// Default for [`GetParams::starts_at`] — the CLI's `--starts-at` default (1).
@@ -125,13 +126,21 @@ pub struct GetOutput {
     /// all-missed. Never parsed from note text; sourced from
     /// [`ShowReport::section_failures`].
     pub section_failures: Vec<SectionFailure>,
+    /// Non-fatal diagnostics from the get run: ambiguous-stem warnings and
+    /// `error:`-prefixed missing-target / all-missed-section messages (NRN-214).
+    /// These are the CLI's stderr notes — an off-filesystem MCP consumer could
+    /// not otherwise see them, and an `error:` note is exactly the CLI's exit-1
+    /// signal (which this tool also maps to `isError: true`). A consumer keys on
+    /// the `error:` prefix, or on the structured `section_failures` for the
+    /// section case.
+    pub notes: Vec<String>,
 }
 
 impl GetOutput {
-    /// Convert a [`ShowReport`] into the MCP output envelope. The report's
-    /// `notes` (ambiguous-stem / missing-target diagnostics) are CLI-stderr
-    /// concerns and `#[serde(skip)]` on the report, so they are not surfaced
-    /// here; a missing target simply yields zero records.
+    /// Convert a [`ShowReport`] into the MCP output envelope. Carries the report's
+    /// `notes` (which are `#[serde(skip)]` on the report so CLI `--format json`
+    /// stays byte-identical) so an MCP consumer sees the same diagnostics the CLI
+    /// writes to stderr, including the `error:`-prefixed not-found signal.
     fn from_report(report: &ShowReport) -> Result<Self> {
         let records = report
             .records
@@ -141,16 +150,22 @@ impl GetOutput {
         Ok(Self {
             records,
             section_failures: report.section_failures.clone(),
+            notes: report.notes.clone(),
         })
     }
 }
 
-/// Build the MCP output envelope for `vault.get`: run the pure handler, then
-/// project the report into the typed [`GetOutput`]. This is the single function
-/// the `#[tool]` wrapper calls.
-pub fn handle_output(ctx: &VaultContext, p: GetParams) -> Result<GetOutput> {
+/// Build the MCP output envelope for `vault.get`: run the pure handler, project
+/// the report into the typed [`GetOutput`], and wrap it with the `isError` bit
+/// derived from the report's `error:` notes (NRN-214) — a requested target that
+/// did not resolve (or an all-missed `--section`) maps to `isError: true` while
+/// still returning every good target's records + the diagnostics. This is the
+/// single function the `#[tool]` wrapper calls.
+pub fn handle_output(ctx: &VaultContext, p: GetParams) -> Result<MutationResult<GetOutput>> {
     let report = handle(ctx, p)?;
-    GetOutput::from_report(&report)
+    let is_error = report.has_error();
+    let output = GetOutput::from_report(&report)?;
+    Ok(MutationResult::from_flag(output, is_error))
 }
 
 /// Pure handler for `vault.get`. Opens a fresh query cache (per-call freshness),
@@ -503,6 +518,7 @@ mod tests {
             },
         )
         .expect("all-missing sections are reported structurally, not bailed");
+        let out = out.value();
 
         // The all-missing target is reported in section_failures with its headings.
         assert_eq!(out.section_failures.len(), 1, "one all-missing target");
@@ -543,6 +559,7 @@ mod tests {
             },
         )
         .expect("a multi-target section batch must succeed structurally");
+        let out = out.value();
 
         // Both records ship (good target + all-missing target).
         assert_eq!(out.records.len(), 2, "both targets return a record");
@@ -589,6 +606,7 @@ mod tests {
             },
         )
         .expect("a non-resolving target must not be treated as a section failure");
+        let out = out.value();
 
         assert!(
             out.records.is_empty(),
@@ -628,6 +646,7 @@ mod tests {
             },
         )
         .expect("an ambiguous heading is warn-and-omit, not an error");
+        let out = out.value();
 
         assert_eq!(out.records.len(), 1);
         let rec = &out.records[0];
@@ -780,5 +799,61 @@ mod tests {
         }))
         .expect("deserialize");
         assert_eq!(p.starts_at, 1, "absent starts_at must default to 1");
+    }
+
+    /// NRN-214: a get whose target does not resolve maps to `isError: true` and
+    /// surfaces the `error:` diagnostic in `notes` — the MCP twin of the CLI's
+    /// exit-1. The (empty) records still ship, so a batch's good targets survive.
+    #[test]
+    fn missing_target_maps_to_iserror_with_notes() {
+        let (_tmp, root) = sectioned_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            GetParams {
+                targets: vec!["does-not-exist".into()],
+                ..Default::default()
+            },
+        )
+        .expect("a missing target returns Ok(MutationResult), not Err");
+
+        assert!(
+            result.is_error(),
+            "an unresolved target maps to isError:true"
+        );
+        let out = result.value();
+        assert!(out.records.is_empty(), "no records for a missing target");
+        assert!(
+            out.notes.iter().any(|n| n.starts_with("error:")),
+            "notes carry the error: diagnostic: {:?}",
+            out.notes
+        );
+    }
+
+    /// NRN-214: a get that resolves every target is `isError: false` with no
+    /// `error:` notes — the success path is unchanged.
+    #[test]
+    fn resolved_target_is_not_error() {
+        let (_tmp, root) = sectioned_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            GetParams {
+                targets: vec!["doc".into()],
+                ..Default::default()
+            },
+        )
+        .expect("a resolved get succeeds");
+
+        assert!(!result.is_error(), "a resolved get is isError:false");
+        let out = result.value();
+        assert_eq!(out.records.len(), 1, "the resolved record ships");
+        assert!(
+            out.notes.iter().all(|n| !n.starts_with("error:")),
+            "no error notes on a clean get: {:?}",
+            out.notes
+        );
     }
 }

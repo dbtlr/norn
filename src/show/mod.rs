@@ -125,6 +125,17 @@ pub struct ShowReport {
     pub section_failures: Vec<SectionFailure>,
 }
 
+impl ShowReport {
+    /// Whether any note is an `error:`-prefixed diagnostic — a target that did
+    /// not resolve, or a `--section` request that matched no headings. This is the
+    /// single definition of the get "failure" signal: the CLI derives its exit-1
+    /// from it, and the MCP `vault.get` tool derives `isError: true` from it
+    /// (NRN-214), so the two surfaces cannot drift on what counts as a failure.
+    pub fn has_error(&self) -> bool {
+        self.notes.iter().any(|n| n.starts_with("error:"))
+    }
+}
+
 pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     let mut records: Vec<ShowRecord> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
