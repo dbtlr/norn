@@ -195,18 +195,15 @@ fn remove_if_same_arc(
     }
 }
 
-/// Build one warm [`McpServer`] for `canonical` with the FULL toolset (no
-/// read-only mode — write safety remains the existing WriteLock flock + WAL, per
-/// the decided design). Logs one stderr line on first-touch open.
+/// Build one warm [`McpServer`] for `canonical` with the FULL toolset — write
+/// safety remains the existing WriteLock flock + WAL. Logs one stderr line on
+/// first-touch open.
 fn open_server(canonical: &Utf8Path) -> anyhow::Result<McpServer> {
     let ctx = VaultContext::open_warm(canonical)?;
     eprintln!("norn serve: opened vault {canonical}");
     // `new_daemon`: the daemon path emits the per-call served markers the
     // routing proofs count; a stdio `norn mcp` (plain `new`) never does.
-    Ok(McpServer::new_daemon(
-        Arc::new(ctx),
-        /*read_only=*/ false,
-    ))
+    Ok(McpServer::new_daemon(Arc::new(ctx)))
 }
 
 #[cfg(test)]

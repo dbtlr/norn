@@ -3,7 +3,7 @@
 //! Drives the real `norn mcp` binary as a child process against a seeded temp
 //! vault (same process-level shape as mcp_get.rs and mcp_set.rs). Asserts:
 //!
-//! 1. `tools/list` under `--read-only` advertises `vault.audit`.
+//! 1. `tools/list` advertises `vault.audit`.
 //! 2. A confirmed `vault.set` mutation written in one server session is surfaced
 //!    by `vault.audit` in a subsequent session.
 //!
@@ -50,14 +50,13 @@ fn prebuild_cache(vault: &TempDir) {
 }
 
 #[test]
-fn vault_audit_listed_under_read_only() {
+fn vault_audit_listed_in_tools_list() {
     let vault = tempfile::tempdir().unwrap();
 
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
         .arg("mcp")
-        .arg("--read-only")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -111,7 +110,7 @@ fn vault_audit_listed_under_read_only() {
 
     assert!(
         names.contains(&"vault.audit"),
-        "vault.audit must be available read-only; got {names:?}"
+        "vault.audit must be advertised in tools/list; got {names:?}"
     );
 }
 
@@ -126,7 +125,6 @@ fn vault_audit_status_schema_advertises_enum() {
         .arg("--cwd")
         .arg(vault.path())
         .arg("mcp")
-        .arg("--read-only")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
