@@ -29,6 +29,11 @@ pub fn render_json(
         "operation": "new",
         "path": path,
         "applied": applied,
+        // NRN-220: the success/dry-run outcome. `"applied"`/`"refused"` are the
+        // canonical kebab `ApplyOutcome` values; a refusal is rendered by
+        // `render_refusal_json`. Literal here to match this envelope's hand-built
+        // JSON style (schema_version, operation, …).
+        "outcome": "applied",
         "trace_id": trace_id,
         "frontmatter_created": plan.field_sources.iter().map(|fs| {
             let mut entry = serde_json::Map::new();
@@ -49,6 +54,41 @@ pub fn render_json(
     if let Some(pred) = predicted_path {
         if let Some(obj) = envelope.as_object_mut() {
             obj.insert("predicted_path".into(), Value::String(pred.to_string()));
+        }
+    }
+    serde_json::to_string_pretty(&envelope)
+}
+
+/// Render a `vault.new` REFUSAL envelope (NRN-220): a coded preflight refusal
+/// (`destination-exists`, `not-markdown`, containment, …) captured on the MCP
+/// path. `applied:false`, `outcome:"refused"`, and the structured `error` a
+/// consumer branches on. Nothing was created, so no `frontmatter_created` /
+/// `body_bytes` detail is present.
+pub fn render_refusal_json(
+    error: &crate::apply_report::ApplyError,
+) -> Result<String, serde_json::Error> {
+    let error_val = serde_json::to_value(error)?;
+    // Keep shape parity with the success envelope (`render_json`) and with the
+    // `set`/`edit` refusal reports, which retain every field (empty): a consumer
+    // with one generic refusal handler across the mutators reads `trace_id`,
+    // `frontmatter_created`, `body_bytes`, `warnings` on every outcome. Nothing was
+    // created, so those are empty/zero. `path` is present when the coded error
+    // names one (every `new` preflight refusal does), else omitted rather than an
+    // ambiguous empty string.
+    let mut envelope = json!({
+        "schema_version": 2,
+        "operation": "new",
+        "applied": false,
+        "outcome": "refused",
+        "trace_id": "",
+        "frontmatter_created": [],
+        "body_bytes": 0,
+        "warnings": [],
+        "error": error_val,
+    });
+    if let Some(obj) = envelope.as_object_mut() {
+        if let Some(path) = error.path.as_deref() {
+            obj.insert("path".into(), Value::String(path.to_string()));
         }
     }
     serde_json::to_string_pretty(&envelope)

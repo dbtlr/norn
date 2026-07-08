@@ -27,8 +27,41 @@ pub struct SetReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_bytes_old: Option<usize>,
     pub applied: bool,
+    /// Machine-branchable apply outcome (NRN-220): `applied` on success and
+    /// dry-run; `refused` when a coded precondition/validation refusal was
+    /// captured (the code lives in `error`). Reuses the shared `ApplyOutcome`
+    /// vocabulary so a consumer branches identically to the cascade tools.
+    pub outcome: crate::apply_report::ApplyOutcome,
+    /// Structured refusal envelope (kebab `code` + `message` + optional `path`)
+    /// when `outcome` is `refused`; `None` otherwise. A consumer branches on
+    /// `error.code` (`stale-document-hash`, …) rather than the prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::apply_report::ApplyError>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<SetWarning>,
+}
+
+impl SetReport {
+    /// Build a minimal refusal report (NRN-220): a coded precondition/validation
+    /// refusal captured on the MCP path. Nothing applied, so the rich success
+    /// detail (frontmatter changes, body sizing) is empty; `error` carries the
+    /// stable machine code a consumer branches on.
+    pub fn refused(target: Utf8PathBuf, error: crate::apply_report::ApplyError) -> Self {
+        SetReport {
+            schema_version: SET_REPORT_SCHEMA_VERSION,
+            trace_id: String::new(),
+            operation: "set".to_string(),
+            target,
+            frontmatter_changes: Vec::new(),
+            body_changed: false,
+            body_bytes_new: None,
+            body_bytes_old: None,
+            applied: false,
+            outcome: crate::apply_report::ApplyOutcome::Refused,
+            error: Some(error),
+            warnings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +125,8 @@ pub fn build_report(
             None
         },
         applied,
+        outcome: crate::apply_report::ApplyOutcome::Applied,
+        error: None,
         warnings: outcome.warnings.clone(),
     }
 }
@@ -226,6 +261,8 @@ mod tests {
             body_bytes_new: Some(4821),
             body_bytes_old: Some(4520),
             applied: true,
+            outcome: crate::apply_report::ApplyOutcome::Applied,
+            error: None,
             warnings: vec![],
         };
         let json_str = serde_json::to_string(&report).unwrap();
@@ -262,6 +299,8 @@ mod tests {
             body_bytes_new: None,
             body_bytes_old: None,
             applied: false,
+            outcome: crate::apply_report::ApplyOutcome::Applied,
+            error: None,
             warnings: vec![],
         };
         let mut out = Vec::new();
@@ -285,6 +324,8 @@ mod tests {
             body_bytes_new: Some(100),
             body_bytes_old: Some(80),
             applied: true,
+            outcome: crate::apply_report::ApplyOutcome::Applied,
+            error: None,
             warnings: vec![],
         };
         let mut out = Vec::new();
@@ -310,6 +351,8 @@ mod tests {
             body_bytes_new: None,
             body_bytes_old: None,
             applied: false,
+            outcome: crate::apply_report::ApplyOutcome::Applied,
+            error: None,
             warnings: vec![
                 SetWarning::UnknownField {
                     field: "a".into(),

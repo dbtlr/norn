@@ -81,6 +81,31 @@ impl<T> MutationResult<T> {
         }
     }
 
+    /// Build from a single-op mutator's outcome (`set` / `edit` / `new`, NRN-220).
+    ///
+    /// The single-op mutators carry their own bespoke report (`SetReport` /
+    /// `EditReport` / the `new` envelope), not an [`ApplyReport`], so they can't
+    /// use [`from_apply_report`](Self::from_apply_report). This constructor derives
+    /// `isError` from the same outcome→exit vocabulary
+    /// ([`ApplyOutcome::exit_code`]) — so the two constructors agree, and no call
+    /// site passes a raw bit that could disagree with the report:
+    ///
+    /// - A **confirm** apply whose outcome is not clean (`exit_code() != 0`, i.e.
+    ///   `refused` / `failed`) → `isError: true`.
+    /// - A **dry-run** forecast → always `isError: false`, even when the report
+    ///   carries `outcome: refused` (a forecasted refusal is not a failed tool
+    ///   call — an SDK that raises on `isError` must not throw on a preview).
+    pub fn from_outcome(
+        value: T,
+        dry_run: bool,
+        outcome: crate::apply_report::ApplyOutcome,
+    ) -> Self {
+        Self {
+            value,
+            is_error: !dry_run && outcome.exit_code() != 0,
+        }
+    }
+
     /// The MCP `isError` bit this result will render with. Test-only: production
     /// consumes the wrapper through [`IntoCallToolResult`].
     #[cfg(test)]
@@ -148,6 +173,58 @@ mod tests {
             .structured_content
             .expect("structured report must survive on the error path");
         assert_eq!(sc["report"]["outcome"], "refused");
+    }
+
+    /// `from_outcome` (NRN-220): a CONFIRM refusal (`dry_run = false`,
+    /// `outcome = refused`) sets `isError: true`; a CONFIRM apply sets it false.
+    /// This is the single-op-mutator counterpart to `from_apply_report`, deriving
+    /// the bit from the same outcome→exit vocabulary.
+    #[test]
+    fn from_outcome_confirm_refusal_is_error() {
+        use crate::apply_report::ApplyOutcome;
+        let refused = MutationResult::from_outcome(
+            sample("refused"),
+            /*dry_run=*/ false,
+            ApplyOutcome::Refused,
+        );
+        assert!(
+            refused.is_error(),
+            "a confirmed refusal maps to isError:true"
+        );
+
+        let failed = MutationResult::from_outcome(
+            sample("failed"),
+            /*dry_run=*/ false,
+            ApplyOutcome::Failed,
+        );
+        assert!(
+            failed.is_error(),
+            "a confirmed failure maps to isError:true"
+        );
+
+        let applied = MutationResult::from_outcome(
+            sample("applied"),
+            /*dry_run=*/ false,
+            ApplyOutcome::Applied,
+        );
+        assert!(!applied.is_error(), "a clean apply maps to isError:false");
+    }
+
+    /// `from_outcome`: a DRY-RUN forecast is NEVER `isError`, even when it
+    /// forecasts a refusal — a `confirm:false` preview must not throw in an SDK
+    /// that raises on `isError`. The report still carries `outcome: refused`.
+    #[test]
+    fn from_outcome_dry_run_refusal_is_not_error() {
+        use crate::apply_report::ApplyOutcome;
+        let preview = MutationResult::from_outcome(
+            sample("refused"),
+            /*dry_run=*/ true,
+            ApplyOutcome::Refused,
+        );
+        assert!(
+            !preview.is_error(),
+            "a dry-run forecasted refusal must stay isError:false"
+        );
     }
 
     /// The success bit renders exactly what `Json<T>` produced before:

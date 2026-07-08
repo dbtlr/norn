@@ -57,17 +57,26 @@ pub enum ApplyOutcome {
     Rebased,
 }
 
-impl ApplyReport {
+impl ApplyOutcome {
     /// The process exit code this outcome maps to: `applied` → 0, `failed` → 1
     /// (runtime op-failure), `refused` → 2 (preflight refusal). `rebased` is
     /// reserved (NRN-152) and maps to 0 until implemented. This is the one place
-    /// the outcome→exit mapping is defined, shared by every CLI mutation arm.
-    pub fn exit_code(&self) -> i32 {
-        match self.outcome {
+    /// the outcome→exit mapping is defined, shared by every CLI mutation arm and
+    /// the MCP `isError` derivation ([`MutationResult`](crate::mcp::mutation_result::MutationResult)).
+    pub fn exit_code(self) -> i32 {
+        match self {
             ApplyOutcome::Applied | ApplyOutcome::Rebased => 0,
             ApplyOutcome::Failed => 1,
             ApplyOutcome::Refused => 2,
         }
+    }
+}
+
+impl ApplyReport {
+    /// The process exit code for this report's outcome — delegates to
+    /// [`ApplyOutcome::exit_code`], the single outcome→exit mapping.
+    pub fn exit_code(&self) -> i32 {
+        self.outcome.exit_code()
     }
 }
 
@@ -196,6 +205,18 @@ impl ApplyError {
         }
     }
 
+    /// Build the envelope from a containment error (path escaped the vault root).
+    /// Shared by [`from_anyhow`](Self::from_anyhow) and the MCP single-op refusal
+    /// seam (`mcp::mutate::refusal_from_error`) so both surface the identical
+    /// `{code, message, path}` for a containment refusal.
+    pub fn from_containment(e: &crate::standards::apply::ContainmentError) -> Self {
+        Self {
+            code: e.code().to_string(),
+            message: e.to_string(),
+            path: Some(e.target().to_string()),
+        }
+    }
+
     /// Build the envelope from an opaque `anyhow::Error`, recovering structure by
     /// downcasting through the known failure types. Falls back to a generic
     /// `internal-error` code for anything unrecognized so a JSON consumer ALWAYS
@@ -206,11 +227,7 @@ impl ApplyError {
             return Self::from_rich(rich);
         }
         if let Some(c) = e.downcast_ref::<crate::standards::apply::ContainmentError>() {
-            return Self {
-                code: c.code().to_string(),
-                message: c.to_string(),
-                path: Some(c.target().to_string()),
-            };
+            return Self::from_containment(c);
         }
         if let Some(cache) = e.downcast_ref::<crate::cache::CacheError>() {
             if matches!(cache, crate::cache::CacheError::MutationLockTimeout) {

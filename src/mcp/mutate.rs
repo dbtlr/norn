@@ -41,6 +41,52 @@ pub(crate) fn acquire_mutation_lock(cwd: &Utf8Path) -> anyhow::Result<Option<Mut
     }
 }
 
+/// Extract a structured refusal envelope (NRN-220) from a single-op mutation
+/// error, IF it is a recognized precondition/refusal carrying a stable machine
+/// `code`.
+///
+/// Returns `Some` for the coded refusal types the single-op mutators
+/// (`set`/`edit`/`new`) can raise — the rich apply-time
+/// [`ApplyError`](crate::standards::apply::ApplyError) (CAS / precondition), a
+/// [`ContainmentError`](crate::standards::apply::ContainmentError), the `edit`
+/// anchor/CAS family ([`EditError`](crate::edit::transform::EditError)), and
+/// `vault.new`'s [`PreflightError`](crate::new::validate::PreflightError). Returns
+/// `None` for everything else — plain-prose validation errors, IO, internal
+/// failures — so those still propagate as a bare MCP `Err` rather than being
+/// laundered into a misleading `internal-error` structured refusal.
+///
+/// This is the deliberate counterpart to
+/// [`ApplyError::from_anyhow`](crate::apply_report::ApplyError::from_anyhow),
+/// which ALWAYS produces an envelope (falling back to `internal-error`): here a
+/// non-refusal must stay a non-refusal. `set`'s schema-validation prose is
+/// intentionally in the `None` bucket until it is coded (NRN-221).
+pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_report::ApplyError> {
+    use crate::apply_report::ApplyError as Envelope;
+    use crate::standards::apply::{ApplyError as RichApplyError, ContainmentError};
+
+    if let Some(rich) = e.downcast_ref::<RichApplyError>() {
+        return Some(Envelope::from_rich(rich));
+    }
+    if let Some(c) = e.downcast_ref::<ContainmentError>() {
+        return Some(Envelope::from_containment(c));
+    }
+    if let Some(ed) = e.downcast_ref::<crate::edit::transform::EditError>() {
+        return Some(Envelope {
+            code: ed.code().to_string(),
+            message: ed.to_string(),
+            path: ed.path().map(str::to_string),
+        });
+    }
+    if let Some(pf) = e.downcast_ref::<crate::new::validate::PreflightError>() {
+        return Some(Envelope {
+            code: pf.code().to_string(),
+            message: pf.to_string(),
+            path: pf.path(),
+        });
+    }
+    None
+}
+
 /// Open a real, file-backed event sink for an MCP mutation's CONFIRM/apply path,
 /// mirroring `main.rs::open_event_sink`'s real-apply branch exactly:
 ///
@@ -90,5 +136,62 @@ pub(crate) fn open_mutation_event_sink(ctx: &VaultContext) -> EventSink {
             .unwrap_or_else(|_| EventSink::discard(IdGen::new(), Clock::System))
     } else {
         EventSink::discard(ids, clock)
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::refusal_from_error;
+
+    /// A rich apply-time `ApplyError` (the TOCTOU CAS path) is recognized and
+    /// keeps its stable kebab code — the machine-branchable value survives.
+    #[test]
+    fn rich_apply_error_yields_its_code() {
+        let e = anyhow::anyhow!(crate::standards::apply::ApplyError::StaleDocumentHash {
+            path: "a.md".into(),
+            expected: "aaaa".into(),
+            actual: "bbbb".into(),
+        });
+        let env = refusal_from_error(&e).expect("a rich ApplyError is a recognized refusal");
+        assert_eq!(env.code, "stale-document-hash");
+        assert_eq!(env.path.as_deref(), Some("a.md"));
+    }
+
+    /// The `edit` anchor family (`EditError`) is recognized with its code.
+    #[test]
+    fn edit_error_yields_its_code() {
+        let e: anyhow::Error = crate::edit::transform::EditError::StrNotFound {
+            index: 0,
+            kind: "str_replace",
+            anchor: "nope".into(),
+        }
+        .into();
+        assert_eq!(
+            refusal_from_error(&e).expect("recognized").code,
+            "anchor-not-found"
+        );
+    }
+
+    /// `vault.new`'s `PreflightError` is recognized with its code + path.
+    #[test]
+    fn preflight_error_yields_its_code() {
+        let e: anyhow::Error =
+            crate::new::validate::PreflightError::DestinationExists("x.md".into()).into();
+        let env = refusal_from_error(&e).expect("recognized");
+        assert_eq!(env.code, "destination-exists");
+        assert_eq!(env.path.as_deref(), Some("x.md"));
+    }
+
+    /// THE load-bearing invariant (NRN-220/221): an UNRECOGNIZED error — e.g.
+    /// `set`'s still-uncoded schema-validation prose — returns `None`, so it stays
+    /// a bare MCP `Err` and is NOT laundered into a misleading `internal-error`
+    /// structured refusal. This is what keeps the deferred `set` scope honest.
+    #[test]
+    fn unrecognized_prose_error_is_not_a_refusal() {
+        let e = anyhow::anyhow!("field 'status' is not one of the allowed values");
+        assert!(
+            refusal_from_error(&e).is_none(),
+            "uncoded prose must propagate as a bare Err, not a laundered refusal"
+        );
     }
 }

@@ -45,6 +45,7 @@ use serde_json::Value;
 
 use crate::cli::{NewArgs, NewFormat};
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.new`.
 ///
@@ -151,9 +152,27 @@ impl NewOutput {
 }
 
 /// Build the MCP output envelope for `vault.new`.
-pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<NewOutput> {
-    let json = handle(ctx, p)?;
-    NewOutput::from_json(json)
+pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<NewOutput>> {
+    use crate::apply_report::ApplyOutcome;
+    let dry_run = !p.confirm;
+    // Capture a coded refusal (NRN-220): a recognized preflight refusal
+    // (`destination-exists`, containment, …) becomes a structured `refused`
+    // envelope + `isError:true` instead of a bare MCP `Err`. Others propagate.
+    let (json, outcome) = match handle(ctx, p) {
+        Ok(json) => (json, ApplyOutcome::Applied),
+        Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
+            Some(err) => (
+                crate::new::report::render_refusal_json(&err)?,
+                ApplyOutcome::Refused,
+            ),
+            None => return Err(e),
+        },
+    };
+    Ok(MutationResult::from_outcome(
+        NewOutput::from_json(json)?,
+        dry_run,
+        outcome,
+    ))
 }
 
 /// Pure handler for `vault.new`.
@@ -203,8 +222,10 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     let doc_path = resolved.path;
 
     // ── Step 3: Preflight ──────────────────────────────────────────────────────
-    crate::new::validate::preflight(cwd.as_str(), doc_path.as_str(), p.force, p.parents)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Preserve the typed `PreflightError` (do NOT stringify it) so the MCP refusal
+    // seam can downcast it to a structured `error.code` (NRN-220). thiserror gives
+    // the `Into<anyhow::Error>` conversion, keeping the concrete type recoverable.
+    crate::new::validate::preflight(cwd.as_str(), doc_path.as_str(), p.force, p.parents)?;
 
     // ── Step 4: Build the plan ─────────────────────────────────────────────────
     // Construct NewArgs inline from NewParams — the same pattern set.rs uses for
@@ -753,6 +774,54 @@ validate:
         assert!(
             content.contains("type: task"),
             "frontmatter must include type: task from rule default:\n{content}"
+        );
+    }
+
+    /// NRN-220: creating a document whose path already exists is a STRUCTURED
+    /// refusal — `isError:true`, `outcome:"refused"`, and a machine-branchable
+    /// `error.code = destination-exists` — not a bare MCP `Err` with the code
+    /// laundered to prose.
+    #[test]
+    fn confirm_destination_exists_is_structured_refusal() {
+        use rmcp::handler::server::tool::IntoCallToolResult;
+        let (_tmp, root) = seeded_vault();
+        // Pre-create the target so preflight refuses.
+        std::fs::write(root.join("exists.md"), "---\ntype: note\n---\nbody\n").unwrap();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mr = handle_output(
+            &ctx,
+            NewParams {
+                path: Some("exists.md".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("a coded refusal returns Ok(MutationResult), not Err");
+
+        assert!(
+            mr.is_error(),
+            "a confirmed destination-exists refusal maps to isError:true"
+        );
+        let ctr = mr.into_call_tool_result().expect("serialize");
+        let report = ctr.structured_content.expect("structured content present")["report"].clone();
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["error"]["code"], "destination-exists");
+        assert_eq!(report["applied"], serde_json::json!(false));
+        assert_eq!(report["path"], "exists.md");
+        assert_eq!(report["error"]["path"], "exists.md");
+        // Shape parity with the success envelope + the set/edit refusal reports:
+        // a generic consumer reads these always-present fields on every outcome.
+        for field in ["trace_id", "frontmatter_created", "body_bytes", "warnings"] {
+            assert!(
+                report.get(field).is_some(),
+                "refusal envelope must carry always-present field `{field}`: {report}"
+            );
+        }
+        // The pre-existing file is untouched.
+        assert_eq!(
+            std::fs::read_to_string(root.join("exists.md")).unwrap(),
+            "---\ntype: note\n---\nbody\n"
         );
     }
 }

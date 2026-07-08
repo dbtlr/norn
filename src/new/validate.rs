@@ -22,6 +22,36 @@ pub enum PreflightError {
     ParentMissing(String),
 }
 
+impl PreflightError {
+    /// The stable, machine-branchable kebab code for this refusal (NRN-220), so
+    /// an MCP `vault.new` consumer branches on the code — `destination-exists`,
+    /// `not-markdown`, … — rather than the prose. `OutsideVault` delegates to the
+    /// inner [`ContainmentError`]'s own code so containment refusals keep their
+    /// existing vocabulary.
+    pub fn code(&self) -> &'static str {
+        match self {
+            PreflightError::NotMarkdown(_) => "not-markdown",
+            PreflightError::OutsideVault(c) => c.code(),
+            PreflightError::Dotfile(_) => "dotfile-path",
+            PreflightError::DestinationExists(_) => "destination-exists",
+            PreflightError::ParentMissing(_) => "parent-missing",
+        }
+    }
+
+    /// The offending relative path when this refusal names one — the value for the
+    /// structured error envelope's `path`. `OutsideVault` defers to the
+    /// containment error's own target.
+    pub fn path(&self) -> Option<String> {
+        match self {
+            PreflightError::NotMarkdown(p)
+            | PreflightError::Dotfile(p)
+            | PreflightError::DestinationExists(p)
+            | PreflightError::ParentMissing(p) => Some(p.clone()),
+            PreflightError::OutsideVault(c) => Some(c.target().to_string()),
+        }
+    }
+}
+
 pub fn preflight(
     vault_root: &str,
     relative_path: &str,

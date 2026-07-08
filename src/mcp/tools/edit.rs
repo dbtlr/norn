@@ -14,7 +14,9 @@
 use crate::edit::ops::EditOp;
 use crate::edit::report::EditReport;
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 use anyhow::Result;
+use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Parameters for `vault.edit`.
@@ -73,9 +75,35 @@ impl EditOutput {
 /// Build the MCP output envelope for `vault.edit`: run the pure handler, then
 /// project the report into the typed [`EditOutput`]. The single function the
 /// `#[tool]` wrapper calls.
-pub fn handle_output(ctx: &VaultContext, p: EditParams) -> Result<EditOutput> {
-    let report = handle(ctx, p)?;
-    EditOutput::from_report(&report)
+pub fn handle_output(ctx: &VaultContext, p: EditParams) -> Result<MutationResult<EditOutput>> {
+    let dry_run = !p.confirm;
+    let target = p.target.clone();
+    // Capture a coded refusal (NRN-220): the `expected_hash` CAS drift and the
+    // anchor family (`anchor-not-found`, …) become a structured `refused` report
+    // + `isError:true` instead of a bare MCP `Err`. Others still propagate.
+    let report = match handle(ctx, p) {
+        Ok(report) => report,
+        Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
+            // Prefer the error's resolved path (present for a `stale-document-hash`
+            // CAS drift) so `report.target` matches the success path; fall back to
+            // the raw target for an anchor miss, which carries no path.
+            Some(err) => {
+                let report_target = err
+                    .path
+                    .clone()
+                    .map(Utf8PathBuf::from)
+                    .unwrap_or_else(|| Utf8PathBuf::from(target));
+                EditReport::refused(report_target, err)
+            }
+            None => return Err(e),
+        },
+    };
+    let outcome = report.outcome;
+    Ok(MutationResult::from_outcome(
+        EditOutput::from_report(&report)?,
+        dry_run,
+        outcome,
+    ))
 }
 
 /// Pure handler for `vault.edit`.
@@ -166,4 +194,136 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
         true,
         &trace_id,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edit::ops::EditOp;
+    use rmcp::handler::server::tool::IntoCallToolResult;
+    use tempfile::TempDir;
+
+    fn seeded_vault() -> (TempDir, Utf8PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-edit-refusal-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(root.join("doc.md"), "---\ntype: note\n---\nHello world\n").unwrap();
+        (tmp, root)
+    }
+
+    /// Extract the `report` object out of a `MutationResult<EditOutput>` the way an
+    /// MCP client sees it (through `structuredContent`).
+    fn report_of(mr: MutationResult<EditOutput>) -> serde_json::Value {
+        let ctr = mr.into_call_tool_result().expect("serialize");
+        ctr.structured_content
+            .expect("structured content present")
+            .get("report")
+            .cloned()
+            .expect("report present")
+    }
+
+    fn str_replace(old: &str, new: &str) -> EditOp {
+        EditOp::StrReplace {
+            old: old.to_string(),
+            new: new.to_string(),
+            replace_all: false,
+        }
+    }
+
+    /// NRN-220: a CONFIRM edit whose anchor is not found is a STRUCTURED refusal —
+    /// `isError:true`, `outcome:"refused"`, and a machine-branchable
+    /// `error.code = anchor-not-found` — not a bare MCP `Err` with the code
+    /// laundered to prose.
+    #[test]
+    fn confirm_anchor_not_found_is_structured_refusal() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let mr = handle_output(
+            &ctx,
+            EditParams {
+                target: "doc".into(),
+                edits: vec![str_replace("NONEXISTENT ANCHOR", "x")],
+                expected_hash: None,
+                confirm: true,
+            },
+        )
+        .expect("a coded refusal returns Ok(MutationResult), not Err");
+
+        assert!(mr.is_error(), "a confirmed refusal maps to isError:true");
+        let report = report_of(mr);
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["error"]["code"], "anchor-not-found");
+        assert_eq!(report["applied"], serde_json::json!(false));
+        // The document on disk is untouched — the refusal wrote nothing.
+        assert_eq!(
+            std::fs::read_to_string(root.join("doc.md")).unwrap(),
+            "---\ntype: note\n---\nHello world\n"
+        );
+    }
+
+    /// NRN-220 (review fix): an `expected_hash` CAS drift refusal reports the
+    /// RESOLVED vault-relative path in BOTH `report.target` and `error.path` — so
+    /// the field means the same thing as on the success path, and a consumer can
+    /// re-read the drifted document for a retry. The code is `stale-document-hash`.
+    #[test]
+    fn expected_hash_drift_reports_resolved_path() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let mr = handle_output(
+            &ctx,
+            EditParams {
+                // stem input; resolves to `doc.md` on disk.
+                target: "doc".into(),
+                edits: vec![str_replace("Hello world", "Goodbye")],
+                expected_hash: Some("deadbeefdeadbeefdeadbeefdeadbeef".into()),
+                confirm: true,
+            },
+        )
+        .expect("a CAS refusal returns Ok(MutationResult), not Err");
+
+        assert!(mr.is_error());
+        let report = report_of(mr);
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["error"]["code"], "stale-document-hash");
+        // Resolved path in both places (was the raw stem before the review fix).
+        assert_eq!(report["target"], "doc.md");
+        assert_eq!(report["error"]["path"], "doc.md");
+        // The Display message (what the CLI prints) still names the document.
+        assert!(
+            report["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("doc.md"),
+            "drift message must name the document: {report}"
+        );
+    }
+
+    /// NRN-220: a DRY-RUN edit that forecasts a refusal carries `outcome:"refused"`
+    /// and `error.code` in the report, but is `isError:false` — a `confirm:false`
+    /// preview must not throw in an SDK that raises on `isError`.
+    #[test]
+    fn dry_run_anchor_refusal_is_not_error() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let mr = handle_output(
+            &ctx,
+            EditParams {
+                target: "doc".into(),
+                edits: vec![str_replace("NONEXISTENT ANCHOR", "x")],
+                expected_hash: None,
+                confirm: false,
+            },
+        )
+        .expect("a dry-run refusal returns Ok(MutationResult)");
+
+        assert!(
+            !mr.is_error(),
+            "a dry-run forecasted refusal must stay isError:false"
+        );
+        let report = report_of(mr);
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["error"]["code"], "anchor-not-found");
+    }
 }
