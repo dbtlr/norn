@@ -288,6 +288,25 @@ Exit codes: 0 success or dry-run, 1 runtime failure, 2 pre-flight refusal."
     Serve(ServeArgs),
     #[command(
         disable_help_flag = true,
+        about = "Supervise the warm `norn serve` daemon under launchd (macOS): install/uninstall/start/stop/restart/status",
+        long_about = "Supervise the warm `norn serve` daemon under launchd (macOS only).\n\n\
+            `norn serve` is a plain foreground process; `norn service` installs and \
+            controls it as a launchd user agent so it is always warm (KeepAlive + \
+            RunAtLoad). One managed unit — the serve daemon.\n\n\
+            install    Render the launchd plist and load it (idempotent; bootout-first).\n\
+            uninstall  Unload and remove the plist. Config and logs are kept.\n\
+            start      Load an installed-but-stopped unit.\n\
+            stop       Unload the unit (an honest stop — KeepAlive would resurrect a killed pid).\n\
+            restart    Kill and rerun the loaded unit (kickstart -k).\n\
+            status     launchd load/run state + a live control-ping (running vs on-disk version).\n\n\
+            Lifecycle verbs act only on an installed unit and exit nonzero if there \
+            was nothing to act on, so a deploy chain does not proceed on a no-op. On \
+            non-macOS hosts these verbs are unavailable — run `norn serve` under your \
+            own supervisor (systemd support is planned)."
+    )]
+    Service(ServiceCommand),
+    #[command(
+        disable_help_flag = true,
         about = "Read the vault mutation audit trail (the append-only event stream): recent mutations with status / target / trace, filterable"
     )]
     Audit(AuditArgs),
@@ -306,6 +325,62 @@ pub struct McpArgs {
 /// `norn service` layer (NRN-115).
 #[derive(Debug, clap::Args)]
 pub struct ServeArgs {}
+
+/// `norn service <verb>` — the launchd supervisor over `norn serve` (NRN-115).
+#[derive(Debug, Parser)]
+#[command(disable_help_flag = true)]
+pub struct ServiceCommand {
+    #[command(subcommand)]
+    pub command: ServiceSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceSubcommand {
+    #[command(
+        disable_help_flag = true,
+        about = "Render the launchd plist and load the serve daemon (idempotent)"
+    )]
+    Install(ServiceActionArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Unload and remove the plist; config and logs are kept"
+    )]
+    Uninstall(ServiceActionArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Load an installed-but-stopped serve daemon"
+    )]
+    Start(ServiceActionArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Unload the serve daemon (honest stop; KeepAlive would resurrect a killed pid)"
+    )]
+    Stop(ServiceActionArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Kill and rerun the loaded serve daemon (kickstart -k)"
+    )]
+    Restart(ServiceActionArgs),
+    #[command(
+        disable_help_flag = true,
+        about = "Show launchd load/run state plus a live control-ping (running vs on-disk version)"
+    )]
+    Status(ServiceActionArgs),
+}
+
+/// Flags shared by every `service` verb. One knob today: the output format.
+#[derive(Debug, clap::Args)]
+pub struct ServiceActionArgs {
+    /// Output format. Default text; `json` emits a machine-readable object.
+    #[arg(long, value_enum, default_value_t = ServiceFormat::Text, help_heading = "Output")]
+    pub format: ServiceFormat,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceFormat {
+    Text,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(disable_help_flag = true)]

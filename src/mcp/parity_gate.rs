@@ -445,6 +445,44 @@ fn specs() -> Vec<Spec> {
                 why: "the warm-host daemon launcher has no in-vault twin",
             },
         },
+        // The launchd supervisor over `norn serve`: host-side process lifecycle,
+        // not a vault capability — nothing for an in-vault MCP tool to twin.
+        Spec {
+            cli: "service install",
+            parity: LocalOnly {
+                why: "launchd supervision of the serve daemon has no in-vault twin",
+            },
+        },
+        Spec {
+            cli: "service uninstall",
+            parity: LocalOnly {
+                why: "launchd supervision of the serve daemon has no in-vault twin",
+            },
+        },
+        Spec {
+            cli: "service start",
+            parity: LocalOnly {
+                why: "launchd supervision of the serve daemon has no in-vault twin",
+            },
+        },
+        Spec {
+            cli: "service stop",
+            parity: LocalOnly {
+                why: "launchd supervision of the serve daemon has no in-vault twin",
+            },
+        },
+        Spec {
+            cli: "service restart",
+            parity: LocalOnly {
+                why: "launchd supervision of the serve daemon has no in-vault twin",
+            },
+        },
+        Spec {
+            cli: "service status",
+            parity: LocalOnly {
+                why: "launchd supervision of the serve daemon has no in-vault twin",
+            },
+        },
         // ── Tracked gaps (class 6) ──────────────────────────────────────────
         Spec {
             cli: "init",

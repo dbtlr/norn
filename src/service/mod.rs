@@ -63,6 +63,21 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+// The `norn service` launchd supervisor (NRN-115). Co-located with the routing
+// client because both are the `norn service`/`norn serve` story and the
+// supervisor reuses this module's socket/run-dir derivation. `command` is
+// cross-platform (its `run` gates non-macOS hosts at runtime with the friendly
+// fallback); the layers it wires — `plist`/`launchd`/`status` — are unix-only
+// so a non-unix build carries no unused supervisor code (nothing on that
+// target could ever call it, and `-D warnings` would flag every item).
+pub mod command;
+#[cfg(unix)]
+pub mod launchd;
+#[cfg(unix)]
+pub mod plist;
+#[cfg(unix)]
+pub mod status;
+
 /// Control-frame protocol version. Bumped only on a breaking change to the
 /// handshake wire shape; the client refuses to route unless the daemon echoes
 /// the same version, so a version skew falls back to Direct rather than
@@ -305,6 +320,51 @@ pub fn probe(timeout: std::time::Duration) -> RouteDecision {
         return RouteDecision::Direct;
     };
     probe_socket(&socket_path, timeout)
+}
+
+/// The live daemon's pong details, kept for `norn service status` (NRN-115).
+/// Unlike [`probe`] — which discards everything but the routing decision — this
+/// preserves `version`/`pid`/`uptime_secs` so status can render running-vs-on-disk.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct ServicePong {
+    pub version: String,
+    pub pid: Option<u32>,
+    pub uptime_secs: Option<u64>,
+}
+
+/// Control-ping a specific socket for `norn service status`: connect and run
+/// the ONE ping/pong exchange ([`handshake_pong`] — shared with the routing
+/// probe so the wire exchange cannot drift). `None` on any failure (no socket,
+/// no daemon, timeout, garbage) — status then renders "no answer on the
+/// control socket".
+///
+/// Gates: a pong at a foreign [`CONTROL_PROTOCOL`] is `None` — a daemon
+/// speaking a different control wire is not a healthy daemon, and rendering
+/// its self-reported fields as healthy state would mislead. The VERSION is
+/// deliberately NOT gated (unlike the routing probe): status's whole job is to
+/// report a version skew as restart-pending, so a stale-but-protocol-compatible
+/// daemon's pong must come through.
+///
+/// The caller supplies the socket path (the command layer probes the SAME path
+/// its report prints), which also lets tests point this at a stub listener.
+#[cfg(unix)]
+pub fn probe_status_socket(
+    socket_path: &Utf8Path,
+    timeout: std::time::Duration,
+) -> Option<ServicePong> {
+    if !socket_path.exists() {
+        return None;
+    }
+    // Connect and handshake share one wall-clock budget, like `probe_socket`.
+    let deadline = std::time::Instant::now() + timeout;
+    let stream = connect_control(socket_path, timeout).ok()?;
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let (protocol, pong) = handshake_pong(&stream, remaining).ok()?;
+    if protocol != CONTROL_PROTOCOL {
+        return None;
+    }
+    Some(pong)
 }
 
 /// The ONE operator-actionable routing notice: the daemon's build version does
@@ -580,7 +640,7 @@ fn handshake(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
 ) -> Result<(), HandshakeError> {
-    let (protocol, version) = handshake_pong(stream, timeout).map_err(HandshakeError::Other)?;
+    let (protocol, pong) = handshake_pong(stream, timeout).map_err(HandshakeError::Other)?;
     let client_version = env!("CARGO_PKG_VERSION");
 
     // FIX-8: compare the VERSION first. A well-formed pong at a *different*
@@ -588,9 +648,9 @@ fn handshake(
     // `CONTROL_PROTOCOL` bump would short-circuit on the protocol check and
     // silently map an old daemon to Direct, hiding exactly the skew the stderr
     // note exists to report. Routing still requires BOTH to match.
-    if version != client_version {
+    if pong.version != client_version {
         return Err(HandshakeError::VersionSkew {
-            server: version,
+            server: pong.version,
             client: client_version.to_string(),
         });
     }
@@ -607,17 +667,20 @@ fn handshake(
     Ok(())
 }
 
-/// Write the ping, read the reply, and return the pong's `(protocol, version)` —
-/// the two pieces [`handshake`] compares to decide routing vs. version skew vs.
-/// protocol mismatch. Every failure short of a well-formed pong (I/O, timeout,
-/// wrong frame kind, missing `version`) is a plain `anyhow::Error`; [`handshake`]
-/// owns the version-then-protocol ordering that distinguishes skew from a silent
-/// protocol mismatch (FIX-8).
+/// Write the ping, read the reply, and return the pong's protocol plus its
+/// payload ([`ServicePong`]). The ONE ping/pong implementation: the routing
+/// probe ([`handshake`]) compares protocol+version to decide routing vs.
+/// version skew vs. protocol mismatch; `norn service status`
+/// ([`probe_status_socket`]) keeps the payload (version/pid/uptime) for the
+/// operator report. Every failure short of a well-formed pong (I/O, timeout,
+/// wrong frame kind, missing `version`) is a plain `anyhow::Error`;
+/// [`handshake`] owns the version-then-protocol ordering that distinguishes
+/// skew from a silent protocol mismatch (FIX-8).
 #[cfg(unix)]
 fn handshake_pong(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
-) -> anyhow::Result<(u32, String)> {
+) -> anyhow::Result<(u32, ServicePong)> {
     use std::io::BufReader;
 
     let deadline = std::time::Instant::now() + timeout;
@@ -651,11 +714,22 @@ fn handshake_pong(
     // not a version skew.
     let frame: ControlFrame = serde_json::from_slice(&line)?;
     match frame {
-        // Return both fields raw; `handshake` applies the version-first,
-        // protocol-second ordering (FIX-8).
+        // Return the fields raw; `handshake` applies the version-first,
+        // protocol-second ordering (FIX-8), `probe_status_socket` the
+        // protocol-only gate.
         ControlFrame::Pong {
-            protocol, version, ..
-        } => Ok((protocol, version)),
+            protocol,
+            version,
+            pid,
+            uptime_secs,
+        } => Ok((
+            protocol,
+            ServicePong {
+                version,
+                pid,
+                uptime_secs,
+            },
+        )),
         other => anyhow::bail!("unexpected control frame: {other:?}"),
     }
 }
@@ -2008,5 +2082,81 @@ mod tests {
         // the probe; drop explicitly to make that lifetime intent clear.
         drop(fillers);
         drop(listener);
+    }
+
+    /// Spawn a stub listener that answers the first line with `pong_json`.
+    /// Returns the socket path (in `dir`) and the server join handle.
+    fn pong_stub(
+        dir: &tempfile::TempDir,
+        pong_json: serde_json::Value,
+    ) -> (Utf8PathBuf, thread::JoinHandle<()>) {
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut w = conn;
+            writeln!(w, "{pong_json}").unwrap();
+            w.flush().unwrap();
+        });
+        (path, server)
+    }
+
+    /// NRN-115 status probe: a healthy pong's version/pid/uptime come through —
+    /// including a pong at a DIFFERENT build version, because status's job is
+    /// to report that skew as restart-pending rather than hide the daemon.
+    #[test]
+    fn probe_status_keeps_pong_fields_and_ignores_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, server) = pong_stub(
+            &dir,
+            serde_json::json!({
+                "norn_control": "pong",
+                "protocol": CONTROL_PROTOCOL,
+                "version": "0.0.1-stale",
+                "pid": 777,
+                "uptime_secs": 42,
+            }),
+        );
+        let pong = probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT)
+            .expect("a protocol-matching pong must come through regardless of version");
+        assert_eq!(pong.version, "0.0.1-stale");
+        assert_eq!(pong.pid, Some(777));
+        assert_eq!(pong.uptime_secs, Some(42));
+        server.join().unwrap();
+    }
+
+    /// NRN-115 review: the status probe must respect the PROTOCOL gate. A pong
+    /// at a foreign control protocol — even at the SAME build version — is not
+    /// a healthy daemon and must render as no-answer (None), never as healthy
+    /// running state assembled from a wire we don't speak.
+    #[test]
+    fn probe_status_rejects_a_protocol_mismatched_pong() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, server) = pong_stub(
+            &dir,
+            serde_json::json!({
+                "norn_control": "pong",
+                "protocol": CONTROL_PROTOCOL + 999,
+                "version": env!("CARGO_PKG_VERSION"),
+                "pid": 777,
+                "uptime_secs": 42,
+            }),
+        );
+        assert!(
+            probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT).is_none(),
+            "a same-version pong at a foreign protocol must be None (unhealthy)"
+        );
+        server.join().unwrap();
+    }
+
+    /// No socket file: the status probe is None without connecting.
+    #[test]
+    fn probe_status_no_socket_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("absent.sock")).unwrap();
+        assert!(probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT).is_none());
     }
 }

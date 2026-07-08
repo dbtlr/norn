@@ -103,11 +103,21 @@ pub fn events_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf
     Ok((canonical, state.join("events")))
 }
 
+/// The `XDG_CACHE_HOME` override when set and non-empty — empty counts as
+/// unset. The ONE place that rule lives: [`xdg_cache_home`] resolves the cache
+/// base through it, and `norn service install` bakes the same answer into the
+/// daemon's launchd environment, so the plist can never bake an override this
+/// derivation wouldn't use.
+pub(crate) fn xdg_cache_home_env() -> Option<Utf8PathBuf> {
+    match std::env::var("XDG_CACHE_HOME") {
+        Ok(xdg) if !xdg.is_empty() => Some(Utf8PathBuf::from(xdg)),
+        _ => None,
+    }
+}
+
 fn xdg_cache_home() -> Result<Utf8PathBuf, CacheError> {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        if !xdg.is_empty() {
-            return Ok(Utf8PathBuf::from(xdg));
-        }
+    if let Some(xdg) = xdg_cache_home_env() {
+        return Ok(xdg);
     }
     let home = std::env::var("HOME").map_err(|_| CacheError::Io {
         path: Utf8PathBuf::from("$HOME"),
