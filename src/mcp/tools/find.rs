@@ -180,12 +180,9 @@ pub struct FindOutput {
 /// constructs [`FindArgs`] with `norn find`'s exact defaults (notably `limit`
 /// → 10 when omitted), and runs the shared `find::query` seam.
 pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
-    // Per-CALL served marker (NRN-94 review F6 pattern; NRN-222). Fires on every
-    // actually-served `vault.find`, so the routing proof
-    // (`serve_find_get_routing`) can assert a routed shape reached the daemon —
-    // and that a gated shape did NOT — instead of passing vacuously when the
-    // probe silently decides Direct.
-    eprintln!("norn serve: served vault.find");
+    // The per-call served marker (routing proofs) is emitted by the server
+    // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
+    // so a stdio `norn mcp` process writes no marker.
     let cache = ctx.query_cache()?;
 
     let args = FindArgs {

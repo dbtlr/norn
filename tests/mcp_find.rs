@@ -145,6 +145,15 @@ fn lists_and_calls_vault_find() {
         stderr
     );
 
+    // The per-call served marker is a DAEMON-only observability channel
+    // (`McpServer::new_daemon`, NRN-222 review): a stdio `norn mcp` process
+    // must never write one — it would be mislabeled "norn serve" and pollute
+    // the stdio client's stderr channel on every tools/call.
+    assert!(
+        !stderr.contains("served vault."),
+        "stdio `norn mcp` must emit no served markers, got stderr:\n{stderr}"
+    );
+
     let responses: Vec<serde_json::Value> = stdout
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())

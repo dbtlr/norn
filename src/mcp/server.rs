@@ -69,6 +69,14 @@ pub struct McpServer {
     /// `tools/list` (the `mutate_router` is never merged in — see `new`) AND any
     /// mutation handler refuses at runtime via `run_mutation` (defense in depth).
     read_only: bool,
+    /// When true, every served tool call emits a per-call
+    /// `norn serve: served <tool>` marker on stderr (NRN-94 review F6 — the
+    /// routing proofs count these). Set ONLY by the warm host daemon
+    /// ([`new_daemon`](Self::new_daemon)); a stdio `norn mcp` process must
+    /// never write markers (they'd be mislabeled and pollute a client's stderr
+    /// channel). Living in the shared `run_wrapped` funnel, the gate covers
+    /// every current and future tool — a handler cannot reintroduce the leak.
+    emit_serve_markers: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -98,7 +106,20 @@ impl McpServer {
             ctx,
             call_lock: Arc::new(tokio::sync::Mutex::new(())),
             read_only,
+            // Off for the stdio `norn mcp` transport: served markers are a
+            // daemon-only observability channel (see `emit_serve_markers`).
+            emit_serve_markers: false,
             tool_router: router,
+        }
+    }
+
+    /// Build the server for the warm host daemon (`norn serve`): identical
+    /// surface to [`new`](Self::new), plus the per-call served markers on
+    /// stderr that the routing proofs count (see `emit_serve_markers`).
+    pub fn new_daemon(ctx: Arc<VaultContext>, read_only: bool) -> Self {
+        Self {
+            emit_serve_markers: true,
+            ..Self::new(ctx, read_only)
         }
     }
 
@@ -139,11 +160,18 @@ impl McpServer {
     /// workers keeps them free for accepts, pings, and other vaults. The NRN-55
     /// serialization guarantee is unchanged: `call_lock` is still held across the
     /// whole blocking call, so per-vault work stays single-flight.
-    async fn run_wrapped<R, F>(&self, f: F) -> Result<R, rmcp::ErrorData>
+    async fn run_wrapped<R, F>(&self, tool: &str, f: F) -> Result<R, rmcp::ErrorData>
     where
         R: Send + 'static,
         F: FnOnce(&VaultContext) -> anyhow::Result<R> + Send + 'static,
     {
+        // Per-call served marker (NRN-94 review F6; NRN-222 review): daemon-only
+        // (`new_daemon` sets the flag), so a stdio `norn mcp` process writes
+        // nothing. Emitted at entry, before the handler runs, matching the
+        // original count marker's "this tools/call reached the daemon" meaning.
+        if self.emit_serve_markers {
+            eprintln!("norn serve: served {tool}");
+        }
         let _guard = self.call_lock.lock().await;
         let ctx = Arc::clone(&self.ctx);
         // The per-request seam (`begin_request`) runs under `call_lock`, off the
@@ -175,12 +203,12 @@ impl McpServer {
     /// this wraps in `Json<T>` (rmcp auto-derives its `outputSchema`). Thin wrapper
     /// over [`run_wrapped`](Self::run_wrapped). `T: JsonSchema` is what the tool
     /// macro needs to emit the schema; `T: Serialize` is what `Json<T>` renders.
-    async fn run_tool<T, F>(&self, f: F) -> Result<Json<T>, rmcp::ErrorData>
+    async fn run_tool<T, F>(&self, tool: &str, f: F) -> Result<Json<T>, rmcp::ErrorData>
     where
         T: serde::Serialize + schemars::JsonSchema + Send + 'static,
         F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
     {
-        self.run_wrapped(move |ctx| f(ctx).map(Json)).await
+        self.run_wrapped(tool, move |ctx| f(ctx).map(Json)).await
     }
 
     /// Run a *mutation* tool handler — like [`run_tool`](Self::run_tool), but
@@ -206,7 +234,7 @@ impl McpServer {
     /// Under `--read-only` the mutation tools are also absent from `tools/list`
     /// (see [`new`](Self::new)), so this runtime guard is defense in depth for a
     /// client that calls a tool it was never advertised.
-    async fn run_mutation<R, F>(&self, f: F) -> Result<R, rmcp::ErrorData>
+    async fn run_mutation<R, F>(&self, tool: &str, f: F) -> Result<R, rmcp::ErrorData>
     where
         R: Send + 'static,
         F: FnOnce(&VaultContext) -> anyhow::Result<R> + Send + 'static,
@@ -219,7 +247,7 @@ impl McpServer {
         }
         // Read-only guard passed; the lock + spawn_blocking + per-request seam are
         // the shared core.
-        self.run_wrapped(f).await
+        self.run_wrapped(tool, f).await
     }
 }
 
@@ -256,8 +284,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::get::GetParams>,
     ) -> Result<crate::mcp::mutation_result::MutationResult<GetOutput>, rmcp::ErrorData> {
-        self.run_wrapped(|ctx| crate::mcp::tools::get::handle_output(ctx, p))
-            .await
+        self.run_wrapped("vault.get", |ctx| {
+            crate::mcp::tools::get::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.audit` — read the mutation audit trail (event stream).
@@ -274,8 +304,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::audit::AuditParams>,
     ) -> Result<Json<AuditOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::audit::handle_output(ctx, p))
-            .await
+        self.run_tool("vault.audit", |ctx| {
+            crate::mcp::tools::audit::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.count` — count documents in the vault, total or grouped.
@@ -293,8 +325,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::count::CountParams>,
     ) -> Result<Json<CountEnvelope>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::count::handle(ctx, p))
-            .await
+        self.run_tool("vault.count", |ctx| {
+            crate::mcp::tools::count::handle(ctx, p)
+        })
+        .await
     }
 
     /// `vault.find` — full-text + metadata document search.
@@ -314,7 +348,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::find::FindParams>,
     ) -> Result<Json<FindOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::find::handle(ctx, p))
+        self.run_tool("vault.find", |ctx| crate::mcp::tools::find::handle(ctx, p))
             .await
     }
 
@@ -335,8 +369,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::validate::ValidateParams>,
     ) -> Result<Json<ValidateOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::validate::handle(ctx, p))
-            .await
+        self.run_tool("vault.validate", |ctx| {
+            crate::mcp::tools::validate::handle(ctx, p)
+        })
+        .await
     }
 
     /// `vault.repair` — produce a deterministic MigrationPlan without applying it.
@@ -357,8 +393,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::repair::RepairParams>,
     ) -> Result<Json<RepairOutput>, rmcp::ErrorData> {
-        self.run_tool(|ctx| crate::mcp::tools::repair::handle(ctx, p))
-            .await
+        self.run_tool("vault.repair", |ctx| {
+            crate::mcp::tools::repair::handle(ctx, p)
+        })
+        .await
     }
 
     /// `vault.describe` — describe this vault for an off-filesystem client.
@@ -380,8 +418,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::describe::DescribeParams>,
     ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
-        self.run_tool(move |ctx| crate::mcp::tools::describe::handle(ctx, &p))
-            .await
+        self.run_tool("vault.describe", move |ctx| {
+            crate::mcp::tools::describe::handle(ctx, &p)
+        })
+        .await
     }
 }
 
@@ -418,8 +458,10 @@ impl McpServer {
         // A coded preflight refusal (`destination-exists`, containment, …) crosses
         // as a structured `refused` report + `isError:true` (NRN-220); other
         // failures still propagate as a bare MCP `Err`.
-        self.run_mutation(|ctx| crate::mcp::tools::new::handle_output(ctx, p))
-            .await
+        self.run_mutation("vault.new", |ctx| {
+            crate::mcp::tools::new::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.set` — the first MCP mutation tool; establishes the
@@ -449,8 +491,10 @@ impl McpServer {
         // A coded precondition/CAS refusal crosses as a structured `refused` report
         // + `isError:true` (NRN-220); uncoded errors (set's schema-validation prose,
         // NRN-221) still propagate as a bare MCP `Err`.
-        self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
-            .await
+        self.run_mutation("vault.set", |ctx| {
+            crate::mcp::tools::set::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.edit` — sub-document partial edits (str_replace + structural
@@ -475,8 +519,10 @@ impl McpServer {
         // A coded refusal — `expected_hash` CAS drift or an anchor miss
         // (`anchor-not-found`, …) — crosses as a structured `refused` report +
         // `isError:true` (NRN-220); other errors still propagate as a bare `Err`.
-        self.run_mutation(|ctx| crate::mcp::tools::edit::handle_output(ctx, p))
-            .await
+        self.run_mutation("vault.edit", |ctx| {
+            crate::mcp::tools::edit::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.move` — move/rename a document, cascading backlink rewrites.
@@ -498,8 +544,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::move_doc::MoveParams>,
     ) -> Result<MutationResult<MoveOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::move_doc::handle_output(ctx, p))
-            .await
+        self.run_mutation("vault.move", |ctx| {
+            crate::mcp::tools::move_doc::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.delete` — delete a document, optionally redirecting incoming links.
@@ -521,8 +569,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::delete::DeleteParams>,
     ) -> Result<MutationResult<DeleteOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::delete::handle_output(ctx, p))
-            .await
+        self.run_mutation("vault.delete", |ctx| {
+            crate::mcp::tools::delete::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.rewrite_wikilink` — retarget a wikilink across the vault, no move.
@@ -544,8 +594,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams>,
     ) -> Result<MutationResult<RewriteWikilinkOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p))
-            .await
+        self.run_mutation("vault.rewrite_wikilink", |ctx| {
+            crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p)
+        })
+        .await
     }
 
     /// `vault.apply` — apply a `MigrationPlan` (e.g. from `vault.repair`).
@@ -568,8 +620,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::apply::ApplyParams>,
     ) -> Result<MutationResult<ApplyOutput>, rmcp::ErrorData> {
-        self.run_mutation(|ctx| crate::mcp::tools::apply::handle_output(ctx, p))
-            .await
+        self.run_mutation("vault.apply", |ctx| {
+            crate::mcp::tools::apply::handle_output(ctx, p)
+        })
+        .await
     }
 }
 
