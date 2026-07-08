@@ -188,13 +188,6 @@ fn integrity_check_acceptance_50k() {
     std::fs::create_dir_all(&cache_home).unwrap();
     std::fs::create_dir_all(&state_home).unwrap();
 
-    // Point THIS process's cache home at the private tempdir too, so the
-    // in-process `cache_dir_for` call below resolves the same cache dir the
-    // spawned `norn` children use (they receive it via explicit `.env()`).
-    // Safe: this is the only test running under `--ignored`, and the
-    // bench_util unit tests never read XDG_CACHE_HOME.
-    std::env::set_var("XDG_CACHE_HOME", &cache_home);
-
     // ---- Build the cache once (Fresh open: no integrity_check yet) -------
     let build_start = Instant::now();
     let build = run_norn(&cache_home, &state_home, vault, &["count"]);
@@ -205,11 +198,16 @@ fn integrity_check_acceptance_50k() {
         "the Fresh-open build must NOT run integrity_check (no db existed yet)"
     );
     // Resolve the vault's cache.db with the SAME identity mapping production
-    // uses (the cache dir is vault-hash-derived under the home). A missing db
-    // here means the build above did not do what this harness thinks it did —
-    // fail loudly rather than reporting a 0-byte size.
+    // uses (the cache dir is vault-hash-derived under the home), passing the
+    // private cache home EXPLICITLY — a pure function of the same value the
+    // spawned children receive via `.env()`, with zero process-env mutation in
+    // this test binary. A missing db here means the build above did not do
+    // what this harness thinks it did — fail loudly rather than reporting a
+    // 0-byte size.
     let vault_utf8 = camino::Utf8Path::from_path(vault).expect("utf8 vault path");
-    let cache_dir = norn_run::resolve_cache_dir(vault_utf8).expect("resolve cache dir for vault");
+    let cache_home_utf8 = camino::Utf8Path::from_path(&cache_home).expect("utf8 cache home");
+    let cache_dir = norn_run::resolve_cache_dir_in(cache_home_utf8, vault_utf8)
+        .expect("resolve cache dir for vault");
     let cache_db = cache_dir.join("cache.db");
     let cache_db_bytes = std::fs::metadata(cache_db.as_std_path())
         .unwrap_or_else(|e| panic!("cache.db must exist at {cache_db} after the build: {e}"))

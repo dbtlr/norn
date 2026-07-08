@@ -51,9 +51,21 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 /// Format: `<XDG_CACHE_HOME>/norn/<sha256-of-canonical-root>/`, defaulting
 /// to `~/.cache/norn/<hash>/` when `XDG_CACHE_HOME` is unset.
 pub fn cache_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
-    let (canonical, hash) = vault_identity(vault_root)?;
     let base = xdg_cache_home()?;
-    let dir = base.join("norn").join(hash);
+    cache_dir_in(&base, vault_root)
+}
+
+/// The same identity mapping as [`cache_dir_for`] with the cache-home base
+/// passed explicitly instead of read from the environment — a pure function of
+/// its arguments (plus the vault-root canonicalization). Test harnesses that
+/// manage a private cache home resolve through this without any process-env
+/// mutation.
+pub(crate) fn cache_dir_in(
+    cache_home: &Utf8Path,
+    vault_root: &Utf8Path,
+) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
+    let (canonical, hash) = vault_identity(vault_root)?;
+    let dir = cache_home.join("norn").join(hash);
     Ok((canonical, dir))
 }
 
