@@ -48,6 +48,16 @@ pub(crate) use query_show::{DocumentDeep, IncomingLink};
 
 pub(crate) const SCHEMA_VERSION: u32 = 4;
 
+/// The single operator note emitted when the implicit incremental refresh cannot
+/// acquire the write lock in time (`CacheError::LockTimeout`) and the query
+/// proceeds against the current cache state. Shared by the direct read path
+/// (`cache_cmd::load_graph_index` / `open_for_query`) and the warm daemon
+/// (`mcp::context::query_cache_warm`) so the two surfaces cannot drift on the
+/// wording, and so a routed read can forward this exact text to the CLI's stderr
+/// byte-identically to a direct run (NRN-215).
+pub(crate) const LOCK_CONTENTION_NOTE: &str =
+    "vault: another cache operation is in progress; using current cache state";
+
 /// Handle to an opened cache. Holds a rusqlite Connection plus the resolved
 /// vault root and cache directory path. `alias_field` is the value passed
 /// in via `Cache::open_with_config`; it gets written to the `links_alias_field`

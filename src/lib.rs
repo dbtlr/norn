@@ -281,6 +281,14 @@ fn route_read<T>(
             return None;
         }
     };
+    // Re-emit any daemon-side operator notes on THIS process's stderr, byte-for-
+    // byte, so a routed read reproduces the note the direct path would have
+    // printed (e.g. the write-lock contention note). Emitted before `reconstruct`/
+    // `emit` (which write stdout) — matching the direct path, where the note is
+    // printed during the cache open, ahead of any rendered output (NRN-215).
+    for note in crate::mcp::notes::operator_notes_from_structured(&structured) {
+        eprintln!("{note}");
+    }
     let value = match reconstruct(&structured) {
         Ok(value) => value,
         Err(error) => {

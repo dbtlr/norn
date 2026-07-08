@@ -12,6 +12,7 @@
 pub mod context;
 pub mod mutate;
 pub mod mutation_result;
+pub mod notes;
 pub mod server;
 pub mod tools;
 
