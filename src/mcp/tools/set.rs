@@ -237,8 +237,9 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
     // Load the graph index honoring files.ignore, exactly like the CLI set path.
+    // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
     let config = ctx.config();
-    let index = crate::cache_cmd::load_graph_index(&cwd, &config.index_options, false)?;
+    let index = ctx.load_graph_index()?;
 
     // Cache for target resolution (needs document query, not just the index).
     let cache = ctx.query_cache()?;

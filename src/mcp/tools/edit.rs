@@ -135,8 +135,9 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
         None
     };
 
+    // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
     let config = ctx.config();
-    let index = crate::cache_cmd::load_graph_index(&cwd, &config.index_options, false)?;
+    let index = ctx.load_graph_index()?;
     let cache = ctx.query_cache()?;
     let vault_cfg = &config.vault_config;
 

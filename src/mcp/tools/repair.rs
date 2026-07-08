@@ -27,7 +27,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::cache_cmd::load_graph_index;
 use crate::cli::{ConfidenceArg, RepairArgs, ValidateTriageArgs};
 use crate::mcp::context::VaultContext;
 use crate::planner::findings::plan_from_findings;
@@ -117,13 +116,12 @@ pub struct RepairOutput {
 /// that `files.ignore` patterns are honoured at index-load time, matching the
 /// CLI's `norn repair` behaviour.
 pub fn handle(ctx: &VaultContext, p: RepairParams) -> Result<RepairOutput> {
-    // Load the graph index via the same entry point the CLI uses.
-    // `false` means "allow cache refresh if stale" (mirrors `no_cache_refresh = false`).
-    // Use the context's current config (`ctx.config()`; hot-swapped in warm mode) —
-    // consistent with `validate.rs` and matching `norn repair`'s approach where
-    // config is loaded once per invocation.
+    // Load the graph index via the daemon-served entry point: warm-connection
+    // reuse (verify-once) under the daemon, fresh open in cold mode, with
+    // `files.ignore` applied identically — matching `norn repair` (NRN-130).
+    // Use the context's current config (`ctx.config()`; hot-swapped in warm mode).
     let config = ctx.config();
-    let index = load_graph_index(&ctx.vault_root, &config.index_options, false)?;
+    let index = ctx.load_graph_index()?;
 
     // Collect all validation findings using the context's current config.
     let findings = validate_with_compiled(

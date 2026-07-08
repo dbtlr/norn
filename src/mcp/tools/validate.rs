@@ -29,7 +29,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::cache_cmd::load_graph_index;
 use crate::mcp::context::VaultContext;
 use crate::standards::engine::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
@@ -115,12 +114,13 @@ pub struct ValidateOutput {
 /// MCP tool consistent with `norn validate` on vaults that configure
 /// `files.ignore`.
 pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
-    // Route through cache_cmd::load_graph_index — the same entry point the CLI
-    // validate uses — so that `files.ignore` patterns are applied via
-    // `apply_ignore_filter`. The old `ctx.query_cache()? + cache.load_graph_index()`
-    // path hardcoded `ignored_files: Vec::new()` and silently skipped the filter.
+    // Route through VaultContext::load_graph_index — the graph-index entry point
+    // for daemon-served tools. It reuses the warm connection when served by the
+    // daemon (verify-once) and opens fresh in cold mode, but applies `files.ignore`
+    // via `Cache::open_with_index` in both, so the index is filtered identically
+    // to `norn validate` (NRN-130).
     let config = ctx.config();
-    let index = load_graph_index(&ctx.vault_root, &config.index_options, false)?;
+    let index = ctx.load_graph_index()?;
 
     // Run validation using the context's current config (`ctx.config()`;
     // hot-swapped in warm mode) — same config path as `norn validate`.
