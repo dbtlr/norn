@@ -307,6 +307,16 @@ pub fn probe(timeout: std::time::Duration) -> RouteDecision {
     probe_socket(&socket_path, timeout)
 }
 
+/// The ONE operator-actionable routing notice: the daemon's build version does
+/// not match this client's. Shared by the probe path and the request-connection
+/// gate (NRN-222 review) so operators and log scrapers see one exact line
+/// format. Version skew is worth a line — it's actionable and otherwise
+/// invisible (the CLI would quietly run Direct forever after a client upgrade).
+#[cfg(unix)]
+fn warn_version_skew(server: &str, client: &str) {
+    eprintln!("norn: service is v{server}, client is v{client} — restart the norn serve daemon");
+}
+
 /// Upper bound on the control-frame response size. The pong is a few dozen
 /// bytes; this cap turns a peer that streams bytes without a newline into a
 /// bounded `Err` (→ Direct) instead of an unbounded buffer growth.
@@ -350,9 +360,7 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
         // just quietly run Direct forever after a client upgrade). Exactly
         // one line, then fall back like every other failure.
         Err(HandshakeError::VersionSkew { server, client }) => {
-            eprintln!(
-                "norn: service is v{server}, client is v{client} — restart the norn serve daemon"
-            );
+            warn_version_skew(&server, &client);
             RouteDecision::Direct
         }
         // Hung (timeout), refused mid-handshake, protocol mismatch, or
@@ -820,9 +828,7 @@ impl ServiceClient {
         match ready.get("version").and_then(|v| v.as_str()) {
             Some(version) if version == client_version => {}
             Some(server) => {
-                eprintln!(
-                    "norn: service is v{server}, client is v{client_version} — restart the norn serve daemon"
-                );
+                warn_version_skew(server, client_version);
                 anyhow::bail!("service/client version skew on the request connection");
             }
             None => anyhow::bail!("ready frame carries no version; refusing to route"),
@@ -1170,14 +1176,25 @@ mod tests {
     /// A daemon swapped between probe and request answers `ready` with a
     /// different build version — the client must refuse (→ Direct) instead of
     /// riding a stale wire shape. A ready frame with NO version is refused too.
+    ///
+    /// The assertions require the GATE's distinctive error text, not just
+    /// `is_err()`: the stub closes the socket after `ready`, so with the gate
+    /// deleted the call still errors (a transport failure on `initialize`) —
+    /// a bare `is_err()` would pass vacuously.
     #[test]
     fn call_tool_structured_version_skew_on_ready_is_err() {
-        for stale_ready in [
-            serde_json::json!({
-                "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
-                "version": "0.0.0-stale",
-            }),
-            serde_json::json!({ "norn_control": "ready", "protocol": CONTROL_PROTOCOL }),
+        for (stale_ready, expected_in_error) in [
+            (
+                serde_json::json!({
+                    "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                    "version": "0.0.0-stale",
+                }),
+                "version skew",
+            ),
+            (
+                serde_json::json!({ "norn_control": "ready", "protocol": CONTROL_PROTOCOL }),
+                "carries no version",
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
@@ -1196,15 +1213,18 @@ mod tests {
             let client = ServiceClient {
                 socket_path: path.clone(),
             };
-            let result = client.call_tool_structured(
-                &Utf8PathBuf::from("/vaults/atlas"),
-                "vault.count",
-                serde_json::json!({}),
-                OnToolError::FallBackDirect,
-            );
+            let error = client
+                .call_tool_structured(
+                    &Utf8PathBuf::from("/vaults/atlas"),
+                    "vault.count",
+                    serde_json::json!({}),
+                    OnToolError::FallBackDirect,
+                )
+                .expect_err("a mismatched/missing version must be Err (→ Direct)");
             assert!(
-                result.is_err(),
-                "a ready frame with a mismatched/missing version must be Err (→ Direct)"
+                error.to_string().contains(expected_in_error),
+                "the error must come from the version GATE (expected {expected_in_error:?}), \
+                 not a downstream transport failure; got: {error}"
             );
             server.join().unwrap();
         }
