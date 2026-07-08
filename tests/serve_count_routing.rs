@@ -110,6 +110,94 @@ fn no_daemon_runs_direct() {
     }
 }
 
+/// NRN-218: a dynamic-field predicate (`count --type note`) must ROUTE warm now,
+/// byte-identically to direct, and an UNKNOWN dynamic field (`count
+/// --nonexistentfield x`) must be REFUSED daemon-side with the exact stderr +
+/// exit code the direct field-universe gate produces (served, not bounced).
+#[test]
+fn routed_dynamic_field_count_matches_direct() {
+    let vault = seed_vault();
+
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+
+    // KNOWN dynamic field: `--type note` desugars to `--eq type:note`.
+    let known = &["--type", "note"][..];
+    let d_known = run_count(
+        direct_cache.path(),
+        direct_state.path(),
+        vault.path(),
+        known,
+    );
+    assert_eq!(d_known.2, 0, "direct known dynamic-field count exits 0");
+
+    // UNKNOWN dynamic field: refused by the gate (exit 1).
+    let unknown = &["--nonexistentfield", "x"][..];
+    let d_unknown = run_count(
+        direct_cache.path(),
+        direct_state.path(),
+        vault.path(),
+        unknown,
+    );
+    assert_eq!(d_unknown.2, 1, "direct unknown dynamic-field count exits 1");
+    assert!(
+        String::from_utf8_lossy(&d_unknown.1).contains("unknown field `nonexistentfield`"),
+        "direct unknown field carries the gate message, got: {:?}",
+        String::from_utf8_lossy(&d_unknown.1)
+    );
+
+    // Spawn a daemon on its own cache home, capturing stderr.
+    let daemon_root = tempfile::Builder::new().prefix("nc-").tempdir().unwrap();
+    let cache_home = daemon_root.path().join("c");
+    let state_home = daemon_root.path().join("s");
+    let stderr_path = daemon_root.path().join("err");
+    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+    let child = Command::new(norn_bin())
+        .arg("serve")
+        .env("XDG_CACHE_HOME", &cache_home)
+        .env("XDG_STATE_HOME", &state_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn norn serve");
+    let _guard = ChildGuard(child);
+    let socket = socket_path_for(&cache_home);
+    wait_for_ready(&socket, Duration::from_secs(10));
+
+    let r_known = run_count(&cache_home, &state_home, vault.path(), known);
+    assert_eq!(
+        r_known, d_known,
+        "routed KNOWN dynamic-field count must match direct on (stdout, stderr, code)"
+    );
+
+    let r_unknown = run_count(&cache_home, &state_home, vault.path(), unknown);
+    assert_eq!(
+        r_unknown, d_unknown,
+        "routed UNKNOWN dynamic-field count must be byte-identical to direct\nrouted: {:?}\ndirect: {:?}",
+        (
+            String::from_utf8_lossy(&r_unknown.0),
+            String::from_utf8_lossy(&r_unknown.1),
+            r_unknown.2
+        ),
+        (
+            String::from_utf8_lossy(&d_unknown.0),
+            String::from_utf8_lossy(&d_unknown.1),
+            d_unknown.2
+        ),
+    );
+
+    // Both dynamic-predicate counts (known + the refusal) must have been SERVED.
+    let served = count_served(&stderr_path, "vault.count");
+    assert_eq!(
+        served,
+        2,
+        "the daemon must have served BOTH dynamic-field counts (known + unknown), got {served}; \
+         daemon stderr:\n{}",
+        std::fs::read_to_string(&stderr_path).unwrap_or_default()
+    );
+}
+
 /// Routed output is byte-identical to direct output for every shape, and the
 /// daemon actually served the request (proven via its stderr log).
 #[test]
