@@ -298,6 +298,13 @@ fn route_find(
     color: crate::cli::ColorWhen,
     verbose: bool,
 ) -> Option<Result<i32>> {
+    // The missing-predicate help gate holds on the routed path too: a bare
+    // `find` (no predicate, no --all) prints help and exits 2 on the direct
+    // path (`find::run`), so it must never dump the vault through the daemon.
+    // Reuses the exact predicate the direct gate uses, so the two cannot drift.
+    if !args.all && !crate::find::has_predicate(args) {
+        return None;
+    }
     route_read(
         cwd,
         "vault.find",

@@ -19,7 +19,12 @@ use crate::cli::FindArgs;
 /// fields, so a filter flag added to `FilterArgs` can never be silently
 /// missing here. The one normalization: `--text ""` is documented as a
 /// no-op, not a predicate.
-fn has_predicate(args: &FindArgs) -> bool {
+///
+/// `pub(crate)` because the daemon-routed path (`route_get`'s sibling
+/// `route_find` in `src/lib.rs`) must apply the SAME missing-predicate gate
+/// before routing — a bare `find` prints help and exits 2, never dumps the
+/// vault through the daemon (NRN-222).
+pub(crate) fn has_predicate(args: &FindArgs) -> bool {
     let mut filters = args.filters.clone();
     if filters.text.as_deref().is_some_and(str::is_empty) {
         filters.text = None;
