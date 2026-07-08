@@ -148,6 +148,19 @@ pub struct FindParams {
 /// the JSON form of a `norn find --format json` document). See module docs.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FindOutput {
+    /// Total documents matching the predicates BEFORE limit/paging. Lets a
+    /// consumer know how many matches exist beyond the returned page (NRN-214).
+    pub total: usize,
+    /// Number of documents actually returned (after limit/paging/path-glob) —
+    /// equals `documents.len()`.
+    pub returned: usize,
+    /// `returned < total`: the result was capped by `limit`/paging. An MCP
+    /// consumer branches on this to know the page is incomplete — the CLI signals
+    /// it via a stderr note, which an off-filesystem client cannot see (NRN-214).
+    pub truncated: bool,
+    /// 1-indexed paging offset of this page (floored at 1), matching the CLI
+    /// `--format json` envelope's `starts_at`.
+    pub starts_at: usize,
     /// Matched documents, in sort order, after limit/paging — the same
     /// per-document JSON `norn find --format json` emits. With no `col`/`all_cols`,
     /// each is `{path, frontmatter}`; projections add/narrow per the `col` syntax.
@@ -203,8 +216,14 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
         no_pager: false,
     };
 
-    let documents = crate::find::query::query(&cache, &args, None)?;
-    Ok(FindOutput { documents })
+    let (documents, envelope) = crate::find::query::query_with_envelope(&cache, &args, None)?;
+    Ok(FindOutput {
+        total: envelope.total,
+        returned: envelope.returned,
+        truncated: envelope.truncated,
+        starts_at: envelope.starts_at,
+        documents,
+    })
 }
 
 #[cfg(test)]
@@ -324,5 +343,53 @@ mod tests {
             "limit:1 should cap to a single doc, got {}",
             out.documents.len()
         );
+        // NRN-214: the envelope tells a consumer the page is incomplete.
+        assert_eq!(out.total, 3, "total counts all matches before the limit");
+        assert_eq!(out.returned, 1, "returned equals the page length");
+        assert!(out.truncated, "returned(1) < total(3) => truncated");
+        assert_eq!(out.starts_at, 1, "default paging offset is 1");
+    }
+
+    /// NRN-214: a full result (no limit, no offset) reports `truncated: false`,
+    /// `returned == total`, and the default `starts_at: 1`.
+    #[test]
+    fn handle_envelope_full_result_is_untruncated() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            FindParams {
+                no_limit: true,
+                ..FindParams::default()
+            },
+        )
+        .expect("handle should succeed");
+        assert_eq!(out.total, 3, "3 docs match");
+        assert_eq!(out.returned, 3, "no_limit returns every match");
+        assert!(!out.truncated, "returned == total => not truncated");
+        assert_eq!(out.starts_at, 1, "default paging offset is 1");
+    }
+
+    /// NRN-214: a paging offset is echoed in `starts_at`, and dropping the leading
+    /// page makes `returned < total` (so `truncated` is true) even without a limit.
+    #[test]
+    fn handle_envelope_echoes_paging_offset() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            FindParams {
+                no_limit: true,
+                starts_at: Some(2),
+                ..FindParams::default()
+            },
+        )
+        .expect("handle should succeed");
+        assert_eq!(out.starts_at, 2, "explicit paging offset is echoed");
+        assert_eq!(out.total, 3, "total is all matches, pre-offset");
+        assert_eq!(out.returned, 2, "offset 2 drops the first of 3 docs");
+        assert!(out.truncated, "returned(2) < total(3) => truncated");
     }
 }

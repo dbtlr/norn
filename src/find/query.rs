@@ -82,20 +82,37 @@ pub fn select(cache: &Cache, args: &FindArgs) -> Result<Selection> {
     Ok(Selection { result, deep, raw })
 }
 
+/// The result-count envelope around a find query — the totals the CLI renderers
+/// compute and emit (`render_json`, the truncation stderr note) that an MCP
+/// `vault.find` consumer otherwise could not know (NRN-214). `truncated` is
+/// carried explicitly (the CLI JSON omits it as `returned < total`-derivable, but
+/// the MCP surface exposes it so a consumer branches on it without re-deriving).
+#[derive(Debug, Clone, Copy)]
+pub struct FindEnvelope {
+    /// Total docs matching the predicates, BEFORE limit/offset.
+    pub total: usize,
+    /// Actual number returned, after limit/offset/path-glob.
+    pub returned: usize,
+    /// `returned < total`.
+    pub truncated: bool,
+    /// 1-indexed paging offset (floored at 1), as the CLI JSON envelope reports.
+    pub starts_at: usize,
+}
+
 /// The JSON/MCP query seam: run the find query and map each matched document to
 /// its JSON value, identical to what `find --format json` emits per document
 /// (same `doc_to_json` mapping, same `--col` / `--all-cols` projection).
 ///
-/// Returns just the per-document JSON values (not the `total`/`returned`/
-/// `starts_at` envelope `render_json` wraps them in) so callers can wrap them in
-/// whatever envelope they need. `alias_field` is accepted for signature
-/// symmetry with the other open paths; the link resolution it would inform is
-/// already baked into the passed-in `cache`.
-pub fn query(
+/// Returns the per-document JSON values PLUS the count envelope, so a caller can
+/// surface the same `total`/`returned`/`truncated`/`starts_at` the CLI renderers
+/// compute. `alias_field` is accepted for signature symmetry with the other open
+/// paths; the link resolution it would inform is already baked into the passed-in
+/// `cache`.
+pub fn query_with_envelope(
     cache: &Cache,
     args: &FindArgs,
     _alias_field: Option<&str>,
-) -> Result<Vec<serde_json::Value>> {
+) -> Result<(Vec<serde_json::Value>, FindEnvelope)> {
     let selection = select(cache, args)?;
     let documents = selection
         .result
@@ -112,7 +129,23 @@ pub fn query(
             )
         })
         .collect();
-    Ok(documents)
+    let envelope = FindEnvelope {
+        total: selection.result.total,
+        returned: selection.result.returned,
+        truncated: selection.result.truncated,
+        starts_at: args.paging.starts_at.max(1),
+    };
+    Ok((documents, envelope))
+}
+
+/// The per-document JSON values without the envelope — a thin wrapper over
+/// [`query_with_envelope`] for callers (e.g. `describe`) that only need the docs.
+pub fn query(
+    cache: &Cache,
+    args: &FindArgs,
+    alias_field: Option<&str>,
+) -> Result<Vec<serde_json::Value>> {
+    Ok(query_with_envelope(cache, args, alias_field)?.0)
 }
 
 /// Convert clap-parsed FindArgs into the cache-layer FindQuery.
