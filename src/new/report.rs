@@ -68,14 +68,29 @@ pub fn render_refusal_json(
     error: &crate::apply_report::ApplyError,
 ) -> Result<String, serde_json::Error> {
     let error_val = serde_json::to_value(error)?;
-    let envelope = json!({
+    // Keep shape parity with the success envelope (`render_json`) and with the
+    // `set`/`edit` refusal reports, which retain every field (empty): a consumer
+    // with one generic refusal handler across the mutators reads `trace_id`,
+    // `frontmatter_created`, `body_bytes`, `warnings` on every outcome. Nothing was
+    // created, so those are empty/zero. `path` is present when the coded error
+    // names one (every `new` preflight refusal does), else omitted rather than an
+    // ambiguous empty string.
+    let mut envelope = json!({
         "schema_version": 2,
         "operation": "new",
-        "path": error.path.clone().unwrap_or_default(),
         "applied": false,
         "outcome": "refused",
+        "trace_id": "",
+        "frontmatter_created": [],
+        "body_bytes": 0,
+        "warnings": [],
         "error": error_val,
     });
+    if let Some(obj) = envelope.as_object_mut() {
+        if let Some(path) = error.path.as_deref() {
+            obj.insert("path".into(), Value::String(path.to_string()));
+        }
+    }
     serde_json::to_string_pretty(&envelope)
 }
 

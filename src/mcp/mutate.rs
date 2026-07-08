@@ -68,17 +68,13 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
         return Some(Envelope::from_rich(rich));
     }
     if let Some(c) = e.downcast_ref::<ContainmentError>() {
-        return Some(Envelope {
-            code: c.code().to_string(),
-            message: c.to_string(),
-            path: Some(c.target().to_string()),
-        });
+        return Some(Envelope::from_containment(c));
     }
     if let Some(ed) = e.downcast_ref::<crate::edit::transform::EditError>() {
         return Some(Envelope {
             code: ed.code().to_string(),
             message: ed.to_string(),
-            path: None,
+            path: ed.path().map(str::to_string),
         });
     }
     if let Some(pf) = e.downcast_ref::<crate::new::validate::PreflightError>() {

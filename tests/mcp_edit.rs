@@ -164,6 +164,16 @@ fn vault_edit_expected_hash_cas() {
         stale_report["error"]["code"], "stale-document-hash",
         "a consumer branches on the stable code, not the prose; got: {stale_resp}"
     );
+    // The refusal identifies the drifted document consistently: resolved path in
+    // both `report.target` and `error.path`, and named in the message (CLI parity).
+    assert_eq!(
+        stale_report["target"], "task.md",
+        "refusal target must be the resolved path; got: {stale_resp}"
+    );
+    assert_eq!(
+        stale_report["error"]["path"], "task.md",
+        "refusal error.path must name the drifted document; got: {stale_resp}"
+    );
     let mid = std::fs::read_to_string(&doc).unwrap();
     assert!(
         mid.contains("Task body") && !mid.contains("Edited body"),

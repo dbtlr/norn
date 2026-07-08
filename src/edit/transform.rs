@@ -56,8 +56,16 @@ pub enum EditError {
     /// Opt-in compare-and-swap precondition failed: the document's current
     /// content hash does not match the caller-supplied `expected_hash`. Not
     /// per-op / indexed — it guards the whole edit before any transform runs.
-    #[error("document has drifted from the expected hash: expected {expected}, found {actual}")]
-    ContentDrift { expected: String, actual: String },
+    /// Carries `path` so the message names the drifted document (CLI parity) and
+    /// the structured MCP refusal envelope gets a resolved `error.path`.
+    #[error(
+        "document {path} has drifted from the expected hash: expected {expected}, found {actual}"
+    )]
+    ContentDrift {
+        path: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl EditError {
@@ -76,6 +84,17 @@ impl EditError {
             // (`standards::apply::ApplyError::StaleDocumentHash`) so a consumer's
             // retry-on-drift branch is unified across both drift checks.
             EditError::ContentDrift { .. } => "stale-document-hash",
+        }
+    }
+
+    /// The offending document path when this refusal names one — the value for the
+    /// structured error envelope's `path`. Only the whole-document `ContentDrift`
+    /// CAS carries a path; the per-op anchor errors identify an anchor, not a
+    /// path (the document is named by the report's `target`).
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            EditError::ContentDrift { path, .. } => Some(path),
+            _ => None,
         }
     }
 }

@@ -808,6 +808,16 @@ validate:
         assert_eq!(report["outcome"], "refused");
         assert_eq!(report["error"]["code"], "destination-exists");
         assert_eq!(report["applied"], serde_json::json!(false));
+        assert_eq!(report["path"], "exists.md");
+        assert_eq!(report["error"]["path"], "exists.md");
+        // Shape parity with the success envelope + the set/edit refusal reports:
+        // a generic consumer reads these always-present fields on every outcome.
+        for field in ["trace_id", "frontmatter_created", "body_bytes", "warnings"] {
+            assert!(
+                report.get(field).is_some(),
+                "refusal envelope must carry always-present field `{field}`: {report}"
+            );
+        }
         // The pre-existing file is untouched.
         assert_eq!(
             std::fs::read_to_string(root.join("exists.md")).unwrap(),

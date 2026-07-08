@@ -84,7 +84,17 @@ pub fn handle_output(ctx: &VaultContext, p: EditParams) -> Result<MutationResult
     let report = match handle(ctx, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
-            Some(err) => EditReport::refused(Utf8PathBuf::from(target), err),
+            // Prefer the error's resolved path (present for a `stale-document-hash`
+            // CAS drift) so `report.target` matches the success path; fall back to
+            // the raw target for an anchor miss, which carries no path.
+            Some(err) => {
+                let report_target = err
+                    .path
+                    .clone()
+                    .map(Utf8PathBuf::from)
+                    .unwrap_or_else(|| Utf8PathBuf::from(target));
+                EditReport::refused(report_target, err)
+            }
             None => return Err(e),
         },
     };
@@ -250,6 +260,43 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("doc.md")).unwrap(),
             "---\ntype: note\n---\nHello world\n"
+        );
+    }
+
+    /// NRN-220 (review fix): an `expected_hash` CAS drift refusal reports the
+    /// RESOLVED vault-relative path in BOTH `report.target` and `error.path` — so
+    /// the field means the same thing as on the success path, and a consumer can
+    /// re-read the drifted document for a retry. The code is `stale-document-hash`.
+    #[test]
+    fn expected_hash_drift_reports_resolved_path() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let mr = handle_output(
+            &ctx,
+            EditParams {
+                // stem input; resolves to `doc.md` on disk.
+                target: "doc".into(),
+                edits: vec![str_replace("Hello world", "Goodbye")],
+                expected_hash: Some("deadbeefdeadbeefdeadbeefdeadbeef".into()),
+                confirm: true,
+            },
+        )
+        .expect("a CAS refusal returns Ok(MutationResult), not Err");
+
+        assert!(mr.is_error());
+        let report = report_of(mr);
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["error"]["code"], "stale-document-hash");
+        // Resolved path in both places (was the raw stem before the review fix).
+        assert_eq!(report["target"], "doc.md");
+        assert_eq!(report["error"]["path"], "doc.md");
+        // The Display message (what the CLI prints) still names the document.
+        assert!(
+            report["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("doc.md"),
+            "drift message must name the document: {report}"
         );
     }
 

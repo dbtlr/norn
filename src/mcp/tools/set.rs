@@ -200,7 +200,18 @@ pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<
     let report = match handle(ctx, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
-            Some(err) => SetReport::refused(Utf8PathBuf::from(target), err),
+            // Prefer the error's resolved vault-relative path so `report.target`
+            // means the same thing on refusal as on success (build_report uses the
+            // resolved path). Fall back to the raw target for a coded refusal that
+            // carries no path (an edit anchor miss identifies an anchor, not a doc).
+            Some(err) => {
+                let report_target = err
+                    .path
+                    .clone()
+                    .map(Utf8PathBuf::from)
+                    .unwrap_or_else(|| Utf8PathBuf::from(target));
+                SetReport::refused(report_target, err)
+            }
             None => return Err(e),
         },
     };
