@@ -148,6 +148,23 @@ mod tests {
         assert_round_trip(CountOutput::Total { total: 42 });
     }
 
+    /// A forwarded-note envelope (NRN-215): the daemon injects an `operator_notes`
+    /// sibling into `structuredContent` under lock contention. `reconstruct` must
+    /// ignore that extra key and rebuild the exact same `CountOutput` — the routed
+    /// stdout stays byte-identical while the note rides alongside for the routing
+    /// seam (`route_read`) to re-emit on stderr.
+    #[test]
+    fn reconstruct_ignores_operator_notes_sibling() {
+        let envelope = CountEnvelope::from_output(CountOutput::Total { total: 7 });
+        let mut structured = serde_json::to_value(&envelope).unwrap();
+        structured.as_object_mut().unwrap().insert(
+            "operator_notes".into(),
+            json!(["vault: another cache operation is in progress; using current cache state"]),
+        );
+        let rebuilt = reconstruct(&structured).unwrap();
+        assert_eq!(rebuilt, CountOutput::Total { total: 7 });
+    }
+
     #[test]
     fn round_trip_grouped() {
         let groups = [("active".to_string(), 3), ("backlog".to_string(), 7)]

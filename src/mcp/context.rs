@@ -233,6 +233,18 @@ pub(crate) struct VaultContext {
     /// a cloned `Arc`.
     config: Mutex<Arc<LoadedConfig>>,
     mode: Mode,
+    /// Operator notes generated while serving the CURRENT request — e.g. the
+    /// lock-contention note `query_cache_warm` produces when the implicit
+    /// refresh times out on the write lock. The tool funnel
+    /// ([`McpServer::run_wrapped`](crate::mcp::server::McpServer)) clears this at
+    /// the per-request seam ([`begin_request`](Self::begin_request)) and drains
+    /// it into the tool's `structuredContent.operator_notes` after the body runs,
+    /// both under the process-wide `call_lock` — so notes cannot leak across the
+    /// serialized requests of concurrent connections (NRN-215). On the direct
+    /// (non-daemon) path these notes still go straight to the CLI's stderr; this
+    /// buffer only exists so the DAEMON path can forward them to the routed CLI
+    /// instead of losing them on the daemon's own stderr.
+    operator_notes: Mutex<Vec<String>>,
 }
 
 impl VaultContext {
@@ -248,6 +260,7 @@ impl VaultContext {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
             mode: Mode::Cold,
+            operator_notes: Mutex::new(Vec::new()),
         })
     }
 
@@ -273,6 +286,7 @@ impl VaultContext {
                 state: Mutex::new(None),
                 config_fp: Mutex::new(config_fp),
             }),
+            operator_notes: Mutex::new(Vec::new()),
         })
     }
 
@@ -289,6 +303,15 @@ impl VaultContext {
     /// graph index with a new-config cache. A gone root surfaces here as the
     /// typed [`WarmContextError::RootGone`] the daemon downcasts to evict.
     pub(crate) fn begin_request(&self) -> Result<()> {
+        // Clear any operator notes left from a prior request FIRST (both modes),
+        // so this request starts with an empty buffer. Combined with the drain in
+        // `run_wrapped` — both under the process-wide `call_lock` — this bounds
+        // every note to the single request that produced it (NRN-215).
+        self.operator_notes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+
         let Mode::Warm(slot) = &self.mode else {
             return Ok(());
         };
@@ -333,6 +356,30 @@ impl VaultContext {
             let mut guard = lock_warm_state(slot);
             *guard = None;
         }
+    }
+
+    /// Record an operator note for the current request. Called from the read
+    /// pipeline (e.g. [`query_cache_warm`](Self::query_cache_warm) on a write-lock
+    /// timeout); drained by `run_wrapped` into the tool envelope's
+    /// `operator_notes` (NRN-215). A poisoned lock is recovered in place — a lost
+    /// note is a strictly better failure mode than panicking the request.
+    pub(crate) fn push_operator_note(&self, note: impl Into<String>) {
+        self.operator_notes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(note.into());
+    }
+
+    /// Drain and return the operator notes accumulated for the current request.
+    /// The tool funnel calls this under `call_lock` immediately after the tool
+    /// body, so the returned notes belong to exactly this request.
+    pub(crate) fn take_operator_notes(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .operator_notes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        )
     }
 
     /// The current config. Locks briefly, clones the `Arc`, and releases — so a
@@ -452,9 +499,15 @@ impl VaultContext {
             {
                 Ok(_) => {}
                 Err(CacheError::LockTimeout) => {
-                    eprintln!(
-                        "vault: another cache operation is in progress; using current cache state"
-                    );
+                    // BOTH surfaces (NRN-215): the daemon's own stderr is its
+                    // operational log — an operator tailing `norn serve` (or a
+                    // log pipeline) keeps the contention signal, alongside the
+                    // served markers — AND the per-request note buffer carries
+                    // it to the caller: `run_wrapped` forwards it in the tool
+                    // envelope and the routed CLI re-emits it on ITS stderr,
+                    // byte-identical to a direct run.
+                    eprintln!("{}", crate::cache::LOCK_CONTENTION_NOTE);
+                    self.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
                 }
                 Err(error) => return Err(error.into()),
             }

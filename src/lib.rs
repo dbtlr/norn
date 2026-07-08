@@ -292,9 +292,19 @@ fn route_read<T>(
             return None;
         }
     };
-    // Past reconstruction the read is committed to routing: `emit` writes stdout,
-    // and any write failure (e.g. a closed pipe) is surfaced as an error the top
-    // level maps like any other — broken pipe becomes a clean exit.
+    // Past reconstruction the read is committed to routing. Re-emit any
+    // daemon-side operator notes on THIS process's stderr FIRST, byte-for-byte,
+    // so a routed read reproduces the note the direct path would have printed
+    // (e.g. the write-lock contention note) ahead of any rendered output —
+    // matching the direct path, where the note prints during the cache open
+    // (NRN-215). Emitting only after reconstruction succeeds means a fall-back
+    // to Direct (which re-produces its own note) can never double-print it.
+    for note in crate::mcp::notes::operator_notes_from_structured(&structured) {
+        eprintln!("{note}");
+    }
+    // `emit` writes stdout, and any write failure (e.g. a closed pipe) is
+    // surfaced as an error the top level maps like any other — broken pipe
+    // becomes a clean exit.
     Some(emit(value))
 }
 

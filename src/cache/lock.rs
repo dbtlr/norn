@@ -10,6 +10,42 @@ use fs2::FileExt;
 
 use crate::cache::error::CacheError;
 
+/// The production write-lock acquire timeout for the cache write paths
+/// (`Cache::rebuild` / `Cache::index_incremental`): 5 seconds, always, unless
+/// the test-only env override below is set.
+pub(crate) const DEFAULT_WRITE_LOCK_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// Test-only override for the write-lock acquire timeout, in milliseconds.
+/// Lets contention tests hit `CacheError::LockTimeout` in ~100–200ms instead
+/// of stalling the suite the full 5s per contended acquire. DEBUG BUILDS ONLY:
+/// the env read is compiled out of release builds (see
+/// [`write_lock_timeout`]), so an inherited value in a production environment
+/// (a dev shell, a baked plist env) can never shrink the real 5s budget.
+#[cfg(debug_assertions)]
+const WRITE_LOCK_TIMEOUT_ENV: &str = "NORN_CACHE_LOCK_TIMEOUT_MS";
+
+/// The write-lock acquire timeout used by the cache write paths.
+///
+/// **Release builds always return [`DEFAULT_WRITE_LOCK_TIMEOUT`] (5s)** — the
+/// env read below is `#[cfg(debug_assertions)]`, compiled out entirely, so no
+/// environment can alter the production timeout. Debug builds (what
+/// `cargo test` builds and what its integration tests spawn) honor
+/// `NORN_CACHE_LOCK_TIMEOUT_MS` when it parses to a positive integer, read at
+/// every acquire (not cached) so a test child process scopes the override to
+/// its own environment.
+pub(crate) fn write_lock_timeout() -> std::time::Duration {
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var(WRITE_LOCK_TIMEOUT_ENV) {
+        if let Ok(ms) = raw.parse::<u64>() {
+            if ms > 0 {
+                return std::time::Duration::from_millis(ms);
+            }
+        }
+    }
+    DEFAULT_WRITE_LOCK_TIMEOUT
+}
+
 /// Open (creating if absent) the lock file at `lock_path` and acquire an
 /// exclusive advisory flock, polling until `timeout`. Returns the open
 /// `File` (caller keeps it alive to hold the lock) or an `Io` error on
@@ -77,6 +113,25 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
+
+    /// The production default is exactly 5s, and release builds compile the env
+    /// read out entirely (`#[cfg(debug_assertions)]`), so the test injection
+    /// cannot change production behavior. This pins the default; the env-unset
+    /// guard keeps the assert honest when a debug dev shell happens to export
+    /// the override. (No in-binary test mutates the process env — the env path
+    /// is exercised only by integration tests on their own child processes.)
+    #[test]
+    fn write_lock_timeout_defaults_to_five_seconds() {
+        assert_eq!(
+            DEFAULT_WRITE_LOCK_TIMEOUT,
+            std::time::Duration::from_secs(5)
+        );
+        #[cfg(debug_assertions)]
+        if std::env::var(WRITE_LOCK_TIMEOUT_ENV).is_ok() {
+            return;
+        }
+        assert_eq!(write_lock_timeout(), DEFAULT_WRITE_LOCK_TIMEOUT);
+    }
 
     #[test]
     fn lock_acquires_when_free() {

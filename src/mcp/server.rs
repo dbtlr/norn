@@ -23,6 +23,7 @@ use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 
 use super::mutation_result::MutationResult;
+use super::notes::Noted;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
@@ -187,7 +188,7 @@ impl McpServer {
     /// workers keeps them free for accepts, pings, and other vaults. The NRN-55
     /// serialization guarantee is unchanged: `call_lock` is still held across the
     /// whole blocking call, so per-vault work stays single-flight.
-    async fn run_wrapped<R, F>(&self, tool: &'static str, f: F) -> Result<R, rmcp::ErrorData>
+    async fn run_wrapped<R, F>(&self, tool: &'static str, f: F) -> Result<Noted<R>, rmcp::ErrorData>
     where
         R: Send + 'static,
         F: FnOnce(&VaultContext) -> anyhow::Result<R> + Send + 'static,
@@ -217,7 +218,29 @@ impl McpServer {
         })
         .await;
         match joined {
-            Ok(Ok(value)) => Ok(value),
+            // Drain the request's operator notes STILL UNDER `call_lock` (the
+            // guard is held until this fn returns), then pair them with the tool's
+            // own result. Draining here — not at the outer `call_tool` seam, which
+            // runs after the lock is released — is what keeps a note bound to the
+            // request that produced it, with no leakage into a concurrent
+            // connection's serialized request (NRN-215).
+            // Note that a tool-level FAILURE flagged in-band — the NRN-219/220
+            // refusal shape, `MutationResult { is_error: true }`, and vault.get's
+            // semantic not-found — flows through THIS arm too (the handler
+            // returned Ok), so its `isError: true` + structuredContent envelope
+            // carries the request's notes exactly like a success.
+            Ok(Ok(value)) => Ok(Noted::new(value, self.ctx.take_operator_notes())),
+            // The error arms deliberately do NOT touch the note buffer: a bare
+            // tool error / join failure crosses as a JSON-RPC `error` (rmcp
+            // `ErrorData`), which carries no structuredContent for a note to
+            // ride. The signal is still not lost — the capture point writes
+            // every note to the daemon's own stderr as it is recorded, and a
+            // routed client maps a JSON-RPC error to a verified DIRECT run,
+            // which re-produces the note canonically. Cross-request isolation
+            // is owned by ONE mechanism: `begin_request` clears the buffer at
+            // the start of every request (under `call_lock`), so a note left
+            // by a failed request can never leak into the next envelope.
+            //
             // A corruption-class SQLite failure evicts the warm state so the next
             // request fully reopens (integrity_check → rebuild) — the warm-mode
             // self-heal for in-place corruption (FIX-3). No-op in cold mode.
@@ -236,7 +259,11 @@ impl McpServer {
     /// this wraps in `Json<T>` (rmcp auto-derives its `outputSchema`). Thin wrapper
     /// over [`run_wrapped`](Self::run_wrapped). `T: JsonSchema` is what the tool
     /// macro needs to emit the schema; `T: Serialize` is what `Json<T>` renders.
-    async fn run_tool<T, F>(&self, tool: &'static str, f: F) -> Result<Json<T>, rmcp::ErrorData>
+    async fn run_tool<T, F>(
+        &self,
+        tool: &'static str,
+        f: F,
+    ) -> Result<Noted<Json<T>>, rmcp::ErrorData>
     where
         T: serde::Serialize + schemars::JsonSchema + Send + 'static,
         F: FnOnce(&VaultContext) -> anyhow::Result<T> + Send + 'static,
@@ -277,7 +304,8 @@ impl McpServer {
     async fn get(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::get::GetParams>,
-    ) -> Result<crate::mcp::mutation_result::MutationResult<GetOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<crate::mcp::mutation_result::MutationResult<GetOutput>>, rmcp::ErrorData>
+    {
         self.run_wrapped(tool_names::GET, |ctx| {
             crate::mcp::tools::get::handle_output(ctx, p)
         })
@@ -292,12 +320,16 @@ impl McpServer {
     /// Read-only: it never writes files or mutates the vault.
     #[tool(
         name = "vault.audit",
-        description = "Read the vault mutation audit trail (event stream): recent mutations with status/target/trace, newest-first and filterable. Read-only."
+        description = "Read the vault mutation audit trail (event stream): recent mutations with status/target/trace, newest-first and filterable. Read-only.",
+        // The `Noted<Json<T>>` envelope defeats rmcp's `Json`-only auto-derive, so
+        // publish the payload schema explicitly (same schema `Json<AuditOutput>`
+        // derived before — NRN-215).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<AuditOutput>()
     )]
     async fn audit(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::audit::AuditParams>,
-    ) -> Result<Json<AuditOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<Json<AuditOutput>>, rmcp::ErrorData> {
         self.run_tool(tool_names::AUDIT, |ctx| {
             crate::mcp::tools::audit::handle_output(ctx, p)
         })
@@ -313,12 +345,14 @@ impl McpServer {
     /// for why `CountOutput`'s untagged enum is projected into the envelope.
     #[tool(
         name = "vault.count",
-        description = "Count documents in the vault — total, or grouped by a frontmatter field — with the find filter surface."
+        description = "Count documents in the vault — total, or grouped by a frontmatter field — with the find filter surface.",
+        // `Noted<Json<T>>` envelope — publish the payload schema explicitly (NRN-215).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<CountEnvelope>()
     )]
     async fn count(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::count::CountParams>,
-    ) -> Result<Json<CountEnvelope>, rmcp::ErrorData> {
+    ) -> Result<Noted<Json<CountEnvelope>>, rmcp::ErrorData> {
         self.run_tool(tool_names::COUNT, |ctx| {
             crate::mcp::tools::count::handle(ctx, p)
         })
@@ -336,12 +370,14 @@ impl McpServer {
     /// generic JSON, matching the `vault.get` shape.
     #[tool(
         name = "vault.find",
-        description = "Find documents in the vault — full-text + metadata filters with sort, limit, and paging."
+        description = "Find documents in the vault — full-text + metadata filters with sort, limit, and paging.",
+        // `Noted<Json<T>>` envelope — publish the payload schema explicitly (NRN-215).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<FindOutput>()
     )]
     async fn find(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::find::FindParams>,
-    ) -> Result<Json<FindOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<Json<FindOutput>>, rmcp::ErrorData> {
         self.run_tool(tool_names::FIND, |ctx| {
             crate::mcp::tools::find::handle(ctx, p)
         })
@@ -359,12 +395,14 @@ impl McpServer {
     /// JSON because `Finding` carries `Utf8PathBuf` which has no `JsonSchema` impl.
     #[tool(
         name = "vault.validate",
-        description = "Validate vault graph facts and configured frontmatter/link rules; returns structured findings."
+        description = "Validate vault graph facts and configured frontmatter/link rules; returns structured findings.",
+        // `Noted<Json<T>>` envelope — publish the payload schema explicitly (NRN-215).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<ValidateOutput>()
     )]
     async fn validate(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::validate::ValidateParams>,
-    ) -> Result<Json<ValidateOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<Json<ValidateOutput>>, rmcp::ErrorData> {
         self.run_tool(tool_names::VALIDATE, |ctx| {
             crate::mcp::tools::validate::handle(ctx, p)
         })
@@ -383,12 +421,14 @@ impl McpServer {
     /// never calls the applier, and never mutates the vault.
     #[tool(
         name = "vault.repair",
-        description = "Produce a deterministic repair MigrationPlan (closest-match link rewrites, frontmatter fixes) without applying it. Feed the plan to vault.apply to execute."
+        description = "Produce a deterministic repair MigrationPlan (closest-match link rewrites, frontmatter fixes) without applying it. Feed the plan to vault.apply to execute.",
+        // `Noted<Json<T>>` envelope — publish the payload schema explicitly (NRN-215).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<RepairOutput>()
     )]
     async fn repair(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::repair::RepairParams>,
-    ) -> Result<Json<RepairOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<Json<RepairOutput>>, rmcp::ErrorData> {
         self.run_tool(tool_names::REPAIR, |ctx| {
             crate::mcp::tools::repair::handle(ctx, p)
         })
@@ -408,12 +448,14 @@ impl McpServer {
     /// vault for mutation.
     #[tool(
         name = "vault.describe",
-        description = "Describe this vault for an off-filesystem client: the folder tree, the declared path rules (which glob gets which frontmatter defaults — i.e. where each kind of doc lives), the frontmatter schema (field types, allowed values, required fields), and — with data: true (or by set) — a contents-summary (totals, field distributions, date bounds) filtered by the same predicates as vault.find/vault.count. Use it to construct the correct path for a new document, then call vault.new."
+        description = "Describe this vault for an off-filesystem client: the folder tree, the declared path rules (which glob gets which frontmatter defaults — i.e. where each kind of doc lives), the frontmatter schema (field types, allowed values, required fields), and — with data: true (or by set) — a contents-summary (totals, field distributions, date bounds) filtered by the same predicates as vault.find/vault.count. Use it to construct the correct path for a new document, then call vault.new.",
+        // `Noted<Json<T>>` envelope — publish the payload schema explicitly (NRN-215).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<DescribeOutput>()
     )]
     async fn describe(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::describe::DescribeParams>,
-    ) -> Result<Json<DescribeOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<Json<DescribeOutput>>, rmcp::ErrorData> {
         self.run_tool(tool_names::DESCRIBE, move |ctx| {
             crate::mcp::tools::describe::handle(ctx, &p)
         })
@@ -448,7 +490,7 @@ impl McpServer {
     async fn new_document(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::new::NewParams>,
-    ) -> Result<MutationResult<NewOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<MutationResult<NewOutput>>, rmcp::ErrorData> {
         // A coded preflight refusal (`destination-exists`, containment, …) crosses
         // as a structured `refused` report + `isError:true` (NRN-220); other
         // failures still propagate as a bare MCP `Err`.
@@ -480,7 +522,7 @@ impl McpServer {
     async fn set(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
-    ) -> Result<MutationResult<SetOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<MutationResult<SetOutput>>, rmcp::ErrorData> {
         // A coded precondition/CAS refusal crosses as a structured `refused` report
         // + `isError:true` (NRN-220); uncoded errors (set's schema-validation prose,
         // NRN-221) still propagate as a bare MCP `Err`.
@@ -508,7 +550,7 @@ impl McpServer {
     async fn edit(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::edit::EditParams>,
-    ) -> Result<MutationResult<EditOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<MutationResult<EditOutput>>, rmcp::ErrorData> {
         // A coded refusal — `expected_hash` CAS drift or an anchor miss
         // (`anchor-not-found`, …) — crosses as a structured `refused` report +
         // `isError:true` (NRN-220); other errors still propagate as a bare `Err`.
@@ -536,7 +578,7 @@ impl McpServer {
     async fn move_doc(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::move_doc::MoveParams>,
-    ) -> Result<MutationResult<MoveOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<MutationResult<MoveOutput>>, rmcp::ErrorData> {
         self.run_wrapped(tool_names::MOVE, |ctx| {
             crate::mcp::tools::move_doc::handle_output(ctx, p)
         })
@@ -561,7 +603,7 @@ impl McpServer {
     async fn delete(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::delete::DeleteParams>,
-    ) -> Result<MutationResult<DeleteOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<MutationResult<DeleteOutput>>, rmcp::ErrorData> {
         self.run_wrapped(tool_names::DELETE, |ctx| {
             crate::mcp::tools::delete::handle_output(ctx, p)
         })
@@ -586,7 +628,7 @@ impl McpServer {
     async fn rewrite_wikilink(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams>,
-    ) -> Result<MutationResult<RewriteWikilinkOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<MutationResult<RewriteWikilinkOutput>>, rmcp::ErrorData> {
         self.run_wrapped(tool_names::REWRITE_WIKILINK, |ctx| {
             crate::mcp::tools::rewrite_wikilink::handle_output(ctx, p)
         })
@@ -612,7 +654,7 @@ impl McpServer {
     async fn apply(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::apply::ApplyParams>,
-    ) -> Result<MutationResult<ApplyOutput>, rmcp::ErrorData> {
+    ) -> Result<Noted<MutationResult<ApplyOutput>>, rmcp::ErrorData> {
         self.run_wrapped(tool_names::APPLY, |ctx| {
             crate::mcp::tools::apply::handle_output(ctx, p)
         })
@@ -753,7 +795,7 @@ mod tests {
         for r in &results {
             let out = r.as_ref().expect("call should be Ok");
             assert_eq!(
-                out.value().records.len(),
+                out.inner().value().records.len(),
                 1,
                 "vault.get for `alpha` should return exactly one record"
             );
@@ -792,7 +834,11 @@ mod tests {
             .await
             .expect("first validate");
         assert!(
-            out1.0.findings.as_ref().is_some_and(|f| !f.is_empty()),
+            out1.inner()
+                .0
+                .findings
+                .as_ref()
+                .is_some_and(|f| !f.is_empty()),
             "baseline: broken wikilink must produce a finding"
         );
 
@@ -812,9 +858,112 @@ mod tests {
             .await
             .expect("second validate");
         assert!(
-            out2.0.findings.as_ref().is_some_and(|f| f.is_empty()),
+            out2.inner()
+                .0
+                .findings
+                .as_ref()
+                .is_some_and(|f| f.is_empty()),
             "config change (files.ignore) must be visible to the next warm request; got {:?}",
-            out2.0.findings
+            out2.inner().0.findings
+        );
+    }
+
+    /// The `run_wrapped` funnel forwards a request's operator notes in the tool
+    /// envelope (NRN-215): a note recorded on the context while the body runs
+    /// comes back paired with the result and serializes as the `operator_notes`
+    /// sibling in `structuredContent`; a note-free request adds nothing. The
+    /// note is recorded here through the same `push_operator_note` seam the real
+    /// capture point (`query_cache_warm`'s lock-timeout arm) uses; the GENUINE
+    /// end-to-end trigger — a live daemon under real flock contention, note
+    /// re-emitted byte-identically on the routed CLI's stderr — is proven by
+    /// `tests/serve_note_forwarding.rs`, where the daemon child process owns its
+    /// own (short-lock-timeout) environment.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_wrapped_forwards_request_notes_in_the_envelope() {
+        use rmcp::handler::server::tool::IntoCallToolResult;
+
+        let (_tmp, root) = cold_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let server = McpServer::new(ctx);
+
+        // A note-free request forwards nothing.
+        let quiet = server
+            .validate(Parameters(
+                crate::mcp::tools::validate::ValidateParams::default(),
+            ))
+            .await
+            .expect("validate");
+        assert!(
+            quiet.notes().is_empty(),
+            "a note-free request must forward no operator note"
+        );
+
+        // A request that records a note gets it back in the envelope. The body
+        // returns an object payload, like every real tool (`Noted` injects the
+        // sibling only into an object-shaped structuredContent).
+        let noted = server
+            .run_wrapped(
+                "vault.count",
+                |ctx| -> anyhow::Result<Json<serde_json::Value>> {
+                    ctx.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
+                    Ok(Json(serde_json::json!({ "total": 0 })))
+                },
+            )
+            .await
+            .expect("noted request");
+        assert_eq!(
+            noted.notes(),
+            [crate::cache::LOCK_CONTENTION_NOTE],
+            "the request's note must ride its own result"
+        );
+        let result = noted.into_call_tool_result().expect("serialize");
+        let sc = result
+            .structured_content
+            .expect("structured content present");
+        assert_eq!(
+            sc[crate::mcp::notes::OPERATOR_NOTES_KEY],
+            serde_json::json!([crate::cache::LOCK_CONTENTION_NOTE]),
+            "structuredContent.operator_notes must carry the forwarded note"
+        );
+    }
+
+    /// Cross-request note isolation is owned by ONE mechanism — `begin_request`
+    /// clears the buffer at the start of every request, under `call_lock` — so a
+    /// note recorded by a request that then FAILED (the bare-Err arm, whose
+    /// JSON-RPC error carries no structuredContent for the note to ride) can
+    /// never leak into the NEXT request's envelope, regardless of how the prior
+    /// request ended. (The failed request's note itself is not lost: the capture
+    /// point writes every note to the daemon's stderr as it is recorded, and a
+    /// routed client maps a JSON-RPC error to a verified Direct run, which
+    /// re-produces the note canonically.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn begin_request_clears_notes_left_by_a_failed_request() {
+        let (_tmp, root) = cold_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let server = McpServer::new(ctx);
+
+        // A request records a note, then its body fails: the buffered note has
+        // no envelope to ride and stays behind in the buffer.
+        let failed = server
+            .run_wrapped("vault.count", |ctx| -> anyhow::Result<Json<()>> {
+                ctx.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
+                anyhow::bail!("boom after the note")
+            })
+            .await;
+        assert!(failed.is_err(), "the failing body must surface as Err");
+
+        // The NEXT request's begin_request clears it — no stale note leaks.
+        let next = server
+            .validate(Parameters(
+                crate::mcp::tools::validate::ValidateParams::default(),
+            ))
+            .await
+            .expect("next validate");
+        assert!(
+            next.notes().is_empty(),
+            "a note left by a failed request must not leak into the next \
+             request's envelope, got {:?}",
+            next.notes()
         );
     }
 

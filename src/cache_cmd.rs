@@ -35,9 +35,7 @@ pub fn load_graph_index(
         match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
             Ok(_) => {}
             Err(CacheError::LockTimeout) => {
-                eprintln!(
-                    "vault: another cache operation is in progress; using current cache state"
-                );
+                eprintln!("{}", crate::cache::LOCK_CONTENTION_NOTE);
             }
             Err(error) => return Err(error.into()),
         }
@@ -74,9 +72,7 @@ pub fn open_for_query(
         match cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
             Ok(_) => {}
             Err(CacheError::LockTimeout) => {
-                eprintln!(
-                    "vault: another cache operation is in progress; using current cache state"
-                );
+                eprintln!("{}", crate::cache::LOCK_CONTENTION_NOTE);
             }
             Err(error) => return Err(error.into()),
         }
