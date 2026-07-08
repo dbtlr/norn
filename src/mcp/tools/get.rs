@@ -190,6 +190,12 @@ pub fn handle_output(ctx: &VaultContext, p: GetParams) -> Result<MutationResult<
 /// Pure handler for `vault.get`. Opens a fresh query cache (per-call freshness),
 /// constructs [`GetArgs`] with `norn get`'s defaults, and runs the show path.
 pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
+    // Per-CALL served marker (NRN-94 review F6 pattern; NRN-222). Fires on every
+    // actually-served `vault.get`, so the routing proof
+    // (`serve_find_get_routing`) can assert a routed get reached the daemon —
+    // including the isError not-found path — instead of passing vacuously when
+    // the probe silently decides Direct.
+    eprintln!("norn serve: served vault.get");
     // Mirror the CLI's `--limit` / `--no-limit` clap `conflicts_with` (F3): the
     // two are mutually exclusive. On the get path `limit` defaults to None, so
     // `no_limit` alone is already the default (return every target) and the

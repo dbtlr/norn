@@ -119,16 +119,27 @@ fn routed_get_not_found_exits_1_without_direct_fallback() {
     );
 
     // Routed: byte-identical triple against a live daemon.
-    let (_guard, cache_home, state_home, _stderr_path, _root) = spawn_daemon_logged();
+    let (_guard, cache_home, state_home, stderr_path, _root) = spawn_daemon_logged();
     let (r_stdout, r_stderr, r_code) = run_norn(&cache_home, &state_home, vault.path(), args);
     assert_eq!(r_code, d_code, "routed get must exit 1 like direct");
     assert_eq!(r_stdout, d_stdout, "routed get stdout must match direct");
     assert_eq!(r_stderr, d_stderr, "routed get stderr must match direct");
 
-    // The routing proof: with --verbose, a fall-back to Direct prints a
-    // "using direct execution" diagnostic. The isError result carries the full
-    // structuredContent, so the routed client must handle it WITHOUT falling
-    // back — a fallback here means the failing get executed twice.
+    // Positive routing proof (not vacuous): the daemon emits one per-call
+    // "served vault.get" marker for each tools/call it actually serves. A
+    // probe that silently decided Direct would leave the counter at zero —
+    // and the byte-identity assertions above would still pass — so the marker
+    // is what proves the isError result was SERVED, not bounced.
+    let served = count_served(&stderr_path, "vault.get");
+    assert_eq!(
+        served, 1,
+        "the daemon must have served exactly one vault.get for the routed \
+         not-found run, got {served}"
+    );
+
+    // And with --verbose, a fall-back to Direct would print a "using direct
+    // execution" diagnostic — its absence plus the incremented served counter
+    // proves the failing get executed exactly once, daemon-side.
     let verbose_args = &["--verbose", "get", "no-such-doc"][..];
     let (_v_stdout, v_stderr, v_code) =
         run_norn(&cache_home, &state_home, vault.path(), verbose_args);
@@ -139,6 +150,18 @@ fn routed_get_not_found_exits_1_without_direct_fallback() {
         "a not-found get must be served by the daemon, not re-executed \
          directly; verbose stderr shows a fallback:\n{v_stderr_text}"
     );
+    let served = count_served(&stderr_path, "vault.get");
+    assert_eq!(
+        served, 2,
+        "the verbose routed run must also have been served by the daemon \
+         (expected 2 total vault.get markers, got {served})"
+    );
+}
+
+/// Count the daemon's per-call "served <tool>" markers in its stderr log.
+fn count_served(stderr_path: &Path, tool: &str) -> usize {
+    let log = std::fs::read_to_string(stderr_path).unwrap_or_default();
+    log.matches(&format!("served {tool}")).count()
 }
 
 /// The missing-predicate help gate must hold on the routed path exactly as on
@@ -178,7 +201,31 @@ fn routed_find_respects_missing_predicate_gate() {
     }
 
     // Routed: same commands against a live daemon must behave identically.
-    let (_guard, cache_home, state_home, _stderr_path, _root) = spawn_daemon_logged();
+    let (_guard, cache_home, state_home, stderr_path, _root) = spawn_daemon_logged();
+
+    // Positive control FIRST: a predicated find against the same daemon must
+    // actually route (one served marker) and match its direct baseline — this
+    // is what keeps the zero-marker assertion below from passing vacuously
+    // (e.g. if the probe were broken and everything silently ran Direct).
+    let control = &["find", "--eq", "type:note"][..];
+    let d_control = run_norn(
+        direct_cache.path(),
+        direct_state.path(),
+        vault.path(),
+        control,
+    );
+    let r_control = run_norn(&cache_home, &state_home, vault.path(), control);
+    assert_eq!(
+        r_control, d_control,
+        "control predicated find must match direct on (stdout, stderr, code)"
+    );
+    let served = count_served(&stderr_path, "vault.find");
+    assert_eq!(
+        served, 1,
+        "the control predicated find must have been served by the daemon \
+         (expected 1 vault.find marker, got {served})"
+    );
+
     for (shape, (direct_stdout, direct_stderr, direct_code)) in
         gate_shapes.iter().zip(direct.iter())
     {
@@ -198,4 +245,13 @@ fn routed_find_respects_missing_predicate_gate() {
             "routed bare {shape:?} stderr must match direct"
         );
     }
+
+    // The gated shapes must never have reached the daemon: the served counter
+    // stays at the control's 1.
+    let served = count_served(&stderr_path, "vault.find");
+    assert_eq!(
+        served, 1,
+        "gated shapes must NOT route: expected the vault.find served counter \
+         to stay at 1 (the control), got {served}"
+    );
 }
