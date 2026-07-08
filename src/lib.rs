@@ -223,11 +223,20 @@ fn try_route_read(
 /// the direct dispatch serves the read (and re-produces any error canonically).
 /// The `reconstruct`-then-`emit` split keeps stdout untouched until
 /// reconstruction succeeds, so a fall-back to Direct never double-writes.
+///
+/// `accept_tool_error`: whether a result flagged `isError: true` that still
+/// carries `structuredContent` is served from that payload instead of falling
+/// back to Direct. `vault.get` opts in — its `isError` is the semantic
+/// not-found signal (the MCP twin of the CLI's exit 1) riding a complete,
+/// renderable payload, so falling back would execute the failing read twice.
+/// `count`/`find` keep the strict default (their tools flag no semantic
+/// errors; a flagged result there is a failure to re-produce directly).
 #[cfg(unix)]
 fn route_read<T>(
     cwd: &camino::Utf8Path,
     tool: &str,
     arguments: serde_json::Value,
+    accept_tool_error: bool,
     verbose: bool,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
@@ -243,7 +252,12 @@ fn route_read<T>(
         crate::service::RouteDecision::Direct => return None,
     };
 
-    let structured = match client.call_tool_structured(&canonical, tool, arguments) {
+    let call_result = if accept_tool_error {
+        client.call_tool_structured_accepting_error(&canonical, tool, arguments)
+    } else {
+        client.call_tool_structured(&canonical, tool, arguments)
+    };
+    let structured = match call_result {
         Ok(structured) => structured,
         Err(error) => {
             if verbose {
@@ -280,6 +294,7 @@ fn route_count(
         cwd,
         "vault.count",
         crate::count::route::to_mcp_arguments(args),
+        false,
         verbose,
         crate::count::route::reconstruct,
         |out| {
@@ -309,6 +324,7 @@ fn route_find(
         cwd,
         "vault.find",
         crate::find::route::to_mcp_arguments(args),
+        false,
         verbose,
         |structured| crate::find::route::reconstruct(structured, args),
         |routed| {
@@ -342,6 +358,11 @@ fn route_get(
         cwd,
         "vault.get",
         crate::show::route::to_mcp_arguments(args),
+        // vault.get flags a not-found target as `isError: true` while still
+        // shipping the full structuredContent (NRN-214); accept it so the
+        // routed client derives the CLI's exit-1 from the wire notes instead
+        // of re-executing the failing read directly.
+        true,
         verbose,
         |structured| crate::show::route::reconstruct(structured, args),
         |report| crate::show::emit(&report, args),

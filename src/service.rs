@@ -746,18 +746,53 @@ fn read_line_capped<R: std::io::BufRead>(
 /// attempt-then-fall-back is safe: a tool-level error (e.g. an invalid `--by`) is
 /// re-produced identically by the direct path, so error output and exit codes
 /// stay byte-identical too.
+///
+/// The one carve-out is [`call_tool_structured_accepting_error`]
+/// (`ServiceClient::call_tool_structured_accepting_error`): a tool like
+/// `vault.get` uses `isError: true` as a *semantic* signal (a requested target
+/// did not resolve — the MCP twin of the CLI's exit 1, NRN-214) while still
+/// returning the full `structuredContent`. For such a tool, the routed client
+/// accepts the flagged result and reproduces the CLI failure contract from the
+/// payload, instead of treating it as a transport failure and re-executing the
+/// whole read directly.
 #[cfg(unix)]
 impl ServiceClient {
     /// Route one read tool call to the warm daemon and return its
     /// `structuredContent` JSON. `vault_root` is the canonical vault root the
     /// caller computed once (the wire speaks canonical paths only — ADR 0005);
     /// `tool` is the MCP tool name (e.g. `"vault.count"`); `arguments` is the
-    /// tool's parameter object.
+    /// tool's parameter object. A result flagged `isError` is an `Err` (the
+    /// caller falls back to Direct, which re-produces the error canonically).
     pub fn call_tool_structured(
         &self,
         vault_root: &Utf8Path,
         tool: &str,
         arguments: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.call_tool_structured_inner(vault_root, tool, arguments, false)
+    }
+
+    /// Like [`Self::call_tool_structured`], but ACCEPTS a result flagged
+    /// `isError: true` as long as it carries a `structuredContent` payload —
+    /// for tools (e.g. `vault.get`, NRN-222) whose `isError` is a semantic
+    /// failure signal riding a complete, renderable payload rather than a
+    /// broken call. A flagged result WITHOUT `structuredContent` is still an
+    /// `Err` (nothing to render — fall back to Direct).
+    pub fn call_tool_structured_accepting_error(
+        &self,
+        vault_root: &Utf8Path,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.call_tool_structured_inner(vault_root, tool, arguments, true)
+    }
+
+    fn call_tool_structured_inner(
+        &self,
+        vault_root: &Utf8Path,
+        tool: &str,
+        arguments: serde_json::Value,
+        accept_tool_error: bool,
     ) -> anyhow::Result<serde_json::Value> {
         use std::io::BufReader;
 
@@ -835,9 +870,15 @@ impl ServiceClient {
             .get("result")
             .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no result"))?;
         // F5: a successful JSON-RPC envelope can still carry a tool-level failure
-        // via `isError: true` (an MCP CallToolResult convention). Treat it as a
-        // failure so we do not render a forged/error payload as a real count.
-        if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+        // via `isError: true` (an MCP CallToolResult convention). By default,
+        // treat it as a failure so we do not render a forged/error payload as a
+        // real result; a caller that opted in (`accept_tool_error`) instead
+        // takes the payload — the flag is that tool's semantic failure signal
+        // (e.g. vault.get's not-found → CLI exit 1) and the structuredContent
+        // check below still guards against an empty flagged result.
+        if !accept_tool_error
+            && result.get("isError").and_then(serde_json::Value::as_bool) == Some(true)
+        {
             anyhow::bail!("tool '{tool}' reported isError; using direct execution");
         }
         let structured = result

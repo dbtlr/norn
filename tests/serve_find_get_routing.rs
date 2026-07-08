@@ -90,6 +90,51 @@ fn spawn_daemon_logged() -> (ChildGuard, std::path::PathBuf, std::path::PathBuf,
     (guard, cache_home, state_home, stderr_path, daemon_root)
 }
 
+/// A `get` whose target does not resolve must be SERVED by the daemon — exit 1
+/// derived from the wire's `error:` note — not bounced to a second, direct
+/// execution (NRN-222 review F3). `vault.get` maps the not-found signal to
+/// `isError: true`; the routed client must accept that result (it carries the
+/// full structuredContent) and reproduce the CLI contract from it, instead of
+/// treating it as a transport failure and re-running the whole query directly.
+#[test]
+fn routed_get_not_found_exits_1_without_direct_fallback() {
+    let vault = seed_vault();
+
+    // Direct baseline (no daemon socket in this cache home).
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    let args = &["get", "no-such-doc"][..];
+    let (d_stdout, d_stderr, d_code) =
+        run_norn(direct_cache.path(), direct_state.path(), vault.path(), args);
+    assert_eq!(d_code, 1, "direct get of a missing target exits 1");
+    assert!(
+        String::from_utf8_lossy(&d_stderr).contains("error:"),
+        "direct get carries the error: note on stderr"
+    );
+
+    // Routed: byte-identical triple against a live daemon.
+    let (_guard, cache_home, state_home, _stderr_path, _root) = spawn_daemon_logged();
+    let (r_stdout, r_stderr, r_code) = run_norn(&cache_home, &state_home, vault.path(), args);
+    assert_eq!(r_code, d_code, "routed get must exit 1 like direct");
+    assert_eq!(r_stdout, d_stdout, "routed get stdout must match direct");
+    assert_eq!(r_stderr, d_stderr, "routed get stderr must match direct");
+
+    // The routing proof: with --verbose, a fall-back to Direct prints a
+    // "using direct execution" diagnostic. The isError result carries the full
+    // structuredContent, so the routed client must handle it WITHOUT falling
+    // back — a fallback here means the failing get executed twice.
+    let verbose_args = &["--verbose", "get", "no-such-doc"][..];
+    let (_v_stdout, v_stderr, v_code) =
+        run_norn(&cache_home, &state_home, vault.path(), verbose_args);
+    let v_stderr_text = String::from_utf8_lossy(&v_stderr);
+    assert_eq!(v_code, 1, "verbose routed get still exits 1");
+    assert!(
+        !v_stderr_text.contains("using direct execution"),
+        "a not-found get must be served by the daemon, not re-executed \
+         directly; verbose stderr shows a fallback:\n{v_stderr_text}"
+    );
+}
+
 /// The missing-predicate help gate must hold on the routed path exactly as on
 /// the direct path: a bare `norn find` (no predicates, no --all) — and its
 /// `--text ""` twin, which `has_predicate` treats as no predicate — prints the
