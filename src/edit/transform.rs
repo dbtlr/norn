@@ -53,6 +53,31 @@ pub enum EditError {
         heading: String,
         count: usize,
     },
+    /// Opt-in compare-and-swap precondition failed: the document's current
+    /// content hash does not match the caller-supplied `expected_hash`. Not
+    /// per-op / indexed — it guards the whole edit before any transform runs.
+    #[error("document has drifted from the expected hash: expected {expected}, found {actual}")]
+    ContentDrift { expected: String, actual: String },
+}
+
+impl EditError {
+    /// The stable, machine-branchable kebab code for this refusal (NRN-220), so
+    /// an MCP `vault.edit` consumer branches on the code — `anchor-not-found`,
+    /// `anchor-ambiguous`, … — rather than string-matching the prose message.
+    /// Mirrors the `.code()` convention of `standards::apply::ApplyError`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            EditError::InvalidOp { .. } => "empty-anchor",
+            EditError::StrNotFound { .. } => "anchor-not-found",
+            EditError::StrAmbiguous { .. } => "anchor-ambiguous",
+            EditError::HeadingNotFound { .. } => "heading-not-found",
+            EditError::HeadingAmbiguous { .. } => "heading-ambiguous",
+            // Vocabulary-aligned with the applier's index-snapshot CAS
+            // (`standards::apply::ApplyError::StaleDocumentHash`) so a consumer's
+            // retry-on-drift branch is unified across both drift checks.
+            EditError::ContentDrift { .. } => "stale-document-hash",
+        }
+    }
 }
 
 /// Apply `ops` to `old_body` sequentially. Returns the new body plus per-op

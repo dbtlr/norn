@@ -57,17 +57,26 @@ pub enum ApplyOutcome {
     Rebased,
 }
 
-impl ApplyReport {
+impl ApplyOutcome {
     /// The process exit code this outcome maps to: `applied` → 0, `failed` → 1
     /// (runtime op-failure), `refused` → 2 (preflight refusal). `rebased` is
     /// reserved (NRN-152) and maps to 0 until implemented. This is the one place
-    /// the outcome→exit mapping is defined, shared by every CLI mutation arm.
-    pub fn exit_code(&self) -> i32 {
-        match self.outcome {
+    /// the outcome→exit mapping is defined, shared by every CLI mutation arm and
+    /// the MCP `isError` derivation ([`MutationResult`](crate::mcp::mutation_result::MutationResult)).
+    pub fn exit_code(self) -> i32 {
+        match self {
             ApplyOutcome::Applied | ApplyOutcome::Rebased => 0,
             ApplyOutcome::Failed => 1,
             ApplyOutcome::Refused => 2,
         }
+    }
+}
+
+impl ApplyReport {
+    /// The process exit code for this report's outcome — delegates to
+    /// [`ApplyOutcome::exit_code`], the single outcome→exit mapping.
+    pub fn exit_code(&self) -> i32 {
+        self.outcome.exit_code()
     }
 }
 

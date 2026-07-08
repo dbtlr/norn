@@ -405,16 +405,18 @@ impl McpServer {
     /// file created, audited) is the same as `vault.set`.
     #[tool(
         name = "vault.new",
-        description = "Create a new document with schema-scaffolded frontmatter from its path. DRY-RUN by default (returns the planned creation without writing); pass confirm:true to create the file."
+        description = "Create a new document with schema-scaffolded frontmatter from its path. DRY-RUN by default (returns the planned creation without writing); pass confirm:true to create the file.",
+        // Explicit schema — MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219/220).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<NewOutput>()
     )]
     async fn new_document(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::new::NewParams>,
-    ) -> Result<Json<NewOutput>, rmcp::ErrorData> {
-        // `new` has no in-band not-applied outcome — an apply failure propagates
-        // as `Err` (mapped to a bare MCP error), so the result is always applied.
-        // `Json` keeps rmcp's auto-derived `outputSchema` (BUG-3 does not reach it).
-        self.run_mutation(|ctx| crate::mcp::tools::new::handle_output(ctx, p).map(Json))
+    ) -> Result<MutationResult<NewOutput>, rmcp::ErrorData> {
+        // A coded preflight refusal (`destination-exists`, containment, …) crosses
+        // as a structured `refused` report + `isError:true` (NRN-220); other
+        // failures still propagate as a bare MCP `Err`.
+        self.run_mutation(|ctx| crate::mcp::tools::new::handle_output(ctx, p))
             .await
     }
 
@@ -434,17 +436,18 @@ impl McpServer {
     /// acquires inside `handle` (confirm path only) is a different, inner lock.
     #[tool(
         name = "vault.set",
-        description = "Update one document's frontmatter (and optionally replace its body), schema-aware. DRY-RUN by default — returns the planned change without writing. Pass confirm:true to apply."
+        description = "Update one document's frontmatter (and optionally replace its body), schema-aware. DRY-RUN by default — returns the planned change without writing. Pass confirm:true to apply.",
+        // Explicit schema — MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219/220).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<SetOutput>()
     )]
     async fn set(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
-    ) -> Result<Json<SetOutput>, rmcp::ErrorData> {
-        // Like `new`: a failed/refused apply propagates as `Err`, so the result is
-        // always applied — `Json` keeps the auto-derived schema. (Structured
-        // refusal codes for the single-op mutators are a separate follow-up,
-        // NRN-220.)
-        self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p).map(Json))
+    ) -> Result<MutationResult<SetOutput>, rmcp::ErrorData> {
+        // A coded precondition/CAS refusal crosses as a structured `refused` report
+        // + `isError:true` (NRN-220); uncoded errors (set's schema-validation prose,
+        // NRN-221) still propagate as a bare MCP `Err`.
+        self.run_mutation(|ctx| crate::mcp::tools::set::handle_output(ctx, p))
             .await
     }
 
@@ -459,15 +462,18 @@ impl McpServer {
     /// `EditReport` as generic JSON, since the report carries a `Utf8PathBuf`).
     #[tool(
         name = "vault.edit",
-        description = "Edit one document's body with atomic content-anchored partial edits (str_replace + section ops). DRY-RUN by default — returns the plan without writing. Pass confirm:true to apply."
+        description = "Edit one document's body with atomic content-anchored partial edits (str_replace + section ops). DRY-RUN by default — returns the plan without writing. Pass confirm:true to apply.",
+        // Explicit schema — MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219/220).
+        output_schema = crate::mcp::mutation_result::output_schema_for::<EditOutput>()
     )]
     async fn edit(
         &self,
         Parameters(p): Parameters<crate::mcp::tools::edit::EditParams>,
-    ) -> Result<Json<EditOutput>, rmcp::ErrorData> {
-        // Like `new`/`set`: an apply failure propagates as `Err`, so the result is
-        // always applied — `Json` keeps the auto-derived schema.
-        self.run_mutation(|ctx| crate::mcp::tools::edit::handle_output(ctx, p).map(Json))
+    ) -> Result<MutationResult<EditOutput>, rmcp::ErrorData> {
+        // A coded refusal — `expected_hash` CAS drift or an anchor miss
+        // (`anchor-not-found`, …) — crosses as a structured `refused` report +
+        // `isError:true` (NRN-220); other errors still propagate as a bare `Err`.
+        self.run_mutation(|ctx| crate::mcp::tools::edit::handle_output(ctx, p))
             .await
     }
 

@@ -30,8 +30,11 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use camino::Utf8PathBuf;
+
 use crate::cli::{SetArgs, SetFormat};
 use crate::mcp::context::VaultContext;
+use crate::mcp::mutation_result::MutationResult;
 use crate::set::report::{build_report, SetReport};
 
 /// Parameters for `vault.set`.
@@ -188,9 +191,25 @@ fn expand_list_ops(map: &BTreeMap<String, serde_json::Value>, flag: &str) -> Res
 /// Build the MCP output envelope for `vault.set`: run the pure handler, then
 /// project the report into the typed [`SetOutput`]. The single function the
 /// `#[tool]` wrapper calls.
-pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<SetOutput> {
-    let report = handle(ctx, p)?;
-    SetOutput::from_report(&report)
+pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<SetOutput>> {
+    let dry_run = !p.confirm;
+    let target = p.target.clone();
+    // Capture a coded refusal (NRN-220): a recognized precondition/CAS refusal
+    // becomes a structured `refused` report + `isError:true`, not a bare MCP
+    // `Err` with the code laundered to prose. Unrecognized errors still propagate.
+    let report = match handle(ctx, p) {
+        Ok(report) => report,
+        Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
+            Some(err) => SetReport::refused(Utf8PathBuf::from(target), err),
+            None => return Err(e),
+        },
+    };
+    let outcome = report.outcome;
+    Ok(MutationResult::from_outcome(
+        SetOutput::from_report(&report)?,
+        dry_run,
+        outcome,
+    ))
 }
 
 /// Pure handler for `vault.set`.

@@ -56,11 +56,13 @@ pub fn preflight_and_plan(
     if let Some(expected) = expected_hash {
         let actual = blake3::hash(content.as_bytes()).to_hex().to_string();
         if !actual.eq_ignore_ascii_case(expected.trim()) {
-            anyhow::bail!(
-                "document {} has drifted: expected hash {}, found {actual}",
-                outcome.target,
-                expected.trim()
-            );
+            // A coded refusal (NRN-220): the MCP path surfaces `error.code =
+            // stale-document-hash`; the CLI still renders the message + exit 2.
+            return Err(crate::edit::transform::EditError::ContentDrift {
+                expected: expected.trim().to_string(),
+                actual,
+            }
+            .into());
         }
     }
 

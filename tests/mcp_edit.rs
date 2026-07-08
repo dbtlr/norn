@@ -146,6 +146,24 @@ fn vault_edit_expected_hash_cas() {
         Some(true),
         "stale expected_hash must not apply; got: {stale_resp}"
     );
+    // NRN-220: the refusal is STRUCTURED, not a bare JSON-RPC error. The result
+    // carries `isError:true` + a preserved report whose `outcome:"refused"` and
+    // machine-branchable `error.code` a consumer branches on — the code is no
+    // longer laundered to prose.
+    assert_eq!(
+        stale_resp["result"]["isError"],
+        serde_json::json!(true),
+        "stale expected_hash must map to isError:true; got: {stale_resp}"
+    );
+    let stale_report = &stale_resp["result"]["structuredContent"]["report"];
+    assert_eq!(
+        stale_report["outcome"], "refused",
+        "stale expected_hash report outcome must be refused; got: {stale_resp}"
+    );
+    assert_eq!(
+        stale_report["error"]["code"], "stale-document-hash",
+        "a consumer branches on the stable code, not the prose; got: {stale_resp}"
+    );
     let mid = std::fs::read_to_string(&doc).unwrap();
     assert!(
         mid.contains("Task body") && !mid.contains("Edited body"),

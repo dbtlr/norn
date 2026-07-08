@@ -29,6 +29,11 @@ pub fn render_json(
         "operation": "new",
         "path": path,
         "applied": applied,
+        // NRN-220: the success/dry-run outcome. `"applied"`/`"refused"` are the
+        // canonical kebab `ApplyOutcome` values; a refusal is rendered by
+        // `render_refusal_json`. Literal here to match this envelope's hand-built
+        // JSON style (schema_version, operation, …).
+        "outcome": "applied",
         "trace_id": trace_id,
         "frontmatter_created": plan.field_sources.iter().map(|fs| {
             let mut entry = serde_json::Map::new();
@@ -51,6 +56,26 @@ pub fn render_json(
             obj.insert("predicted_path".into(), Value::String(pred.to_string()));
         }
     }
+    serde_json::to_string_pretty(&envelope)
+}
+
+/// Render a `vault.new` REFUSAL envelope (NRN-220): a coded preflight refusal
+/// (`destination-exists`, `not-markdown`, containment, …) captured on the MCP
+/// path. `applied:false`, `outcome:"refused"`, and the structured `error` a
+/// consumer branches on. Nothing was created, so no `frontmatter_created` /
+/// `body_bytes` detail is present.
+pub fn render_refusal_json(
+    error: &crate::apply_report::ApplyError,
+) -> Result<String, serde_json::Error> {
+    let error_val = serde_json::to_value(error)?;
+    let envelope = json!({
+        "schema_version": 2,
+        "operation": "new",
+        "path": error.path.clone().unwrap_or_default(),
+        "applied": false,
+        "outcome": "refused",
+        "error": error_val,
+    });
     serde_json::to_string_pretty(&envelope)
 }
 

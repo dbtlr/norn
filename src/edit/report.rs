@@ -21,6 +21,34 @@ pub struct EditReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_bytes_new: Option<usize>,
     pub applied: bool,
+    /// Machine-branchable apply outcome (NRN-220): `applied` on success and
+    /// dry-run; `refused` when a coded refusal was captured (code in `error`).
+    pub outcome: crate::apply_report::ApplyOutcome,
+    /// Structured refusal envelope (kebab `code` + `message` + optional `path`)
+    /// when `outcome` is `refused`; `None` otherwise. A consumer branches on
+    /// `error.code` (`anchor-not-found`, `stale-document-hash`, …), not prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::apply_report::ApplyError>,
+}
+
+impl EditReport {
+    /// Build a minimal refusal report (NRN-220): a coded refusal captured on the
+    /// MCP path. Nothing applied; `error` carries the stable machine code.
+    pub fn refused(target: Utf8PathBuf, error: crate::apply_report::ApplyError) -> Self {
+        EditReport {
+            schema_version: SCHEMA_VERSION,
+            trace_id: String::new(),
+            operation: "edit".to_string(),
+            target,
+            edits: Vec::new(),
+            body_changed: false,
+            body_bytes_old: None,
+            body_bytes_new: None,
+            applied: false,
+            outcome: crate::apply_report::ApplyOutcome::Refused,
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +89,8 @@ pub fn build_report(
         body_bytes_old: Some(outcome.body_bytes_old),
         body_bytes_new: outcome.body_bytes_new,
         applied,
+        outcome: crate::apply_report::ApplyOutcome::Applied,
+        error: None,
     }
 }
 
