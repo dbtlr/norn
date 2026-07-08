@@ -201,7 +201,12 @@ fn remove_if_same_arc(
 fn open_server(canonical: &Utf8Path) -> anyhow::Result<McpServer> {
     let ctx = VaultContext::open_warm(canonical)?;
     eprintln!("norn serve: opened vault {canonical}");
-    Ok(McpServer::new(Arc::new(ctx), /*read_only=*/ false))
+    // `new_daemon`: the daemon path emits the per-call served markers the
+    // routing proofs count; a stdio `norn mcp` (plain `new`) never does.
+    Ok(McpServer::new_daemon(
+        Arc::new(ctx),
+        /*read_only=*/ false,
+    ))
 }
 
 #[cfg(test)]

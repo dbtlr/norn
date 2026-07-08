@@ -19,7 +19,7 @@
 #[path = "serve_util/mod.rs"]
 mod serve_util;
 
-use serve_util::{norn_bin, socket_path_for, wait_for_ready, ChildGuard};
+use serve_util::{count_served, norn_bin, socket_path_for, wait_for_ready, ChildGuard};
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -214,7 +214,7 @@ fn routed_count_is_byte_identical_to_direct() {
         daemon_log.contains("opened vault"),
         "the daemon must have opened the vault at least once, got stderr:\n{daemon_log}"
     );
-    let served = count_served(&daemon_log);
+    let served = count_served(&stderr_path, "vault.count");
     assert_eq!(
         served,
         arg_shapes().len(),
@@ -235,15 +235,10 @@ fn routed_count_is_byte_identical_to_direct() {
         routed_ncr, direct_ncr,
         "--no-cache-refresh must produce the same (stdout, stderr, code) as a direct run"
     );
-    let served_after = count_served(&std::fs::read_to_string(&stderr_path).unwrap_or_default());
+    let served_after = count_served(&stderr_path, "vault.count");
     assert_eq!(
         served_after, served,
         "--no-cache-refresh must NOT route: the daemon's served counter must not \
          increment (was {served}, now {served_after})"
     );
-}
-
-/// Count the daemon's per-call "served vault.count" markers in its stderr log.
-fn count_served(log: &str) -> usize {
-    log.matches("served vault.count").count()
 }

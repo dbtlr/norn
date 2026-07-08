@@ -145,14 +145,29 @@ impl GetOutput {
         let records = report
             .records
             .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .map(record_to_wire_json)
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             records,
             section_failures: report.section_failures.clone(),
             notes: report.notes.clone(),
         })
     }
+}
+
+/// One record as it travels on the `vault.get` WIRE: the full serialized
+/// [`ShowRecord`], EXCEPT that a record with NO frontmatter block
+/// (`frontmatter: None`) omits the `frontmatter` key entirely, while an empty
+/// `---\n---` block (`Some(Value::Null)`) keeps `"frontmatter": null`
+/// (NRN-222). Serde would collapse both `Option` states to JSON `null`, but the
+/// records renderer distinguishes them (`frontmatter  null` row vs no row), so
+/// the routed client — which re-renders from the wire value — needs the key
+/// presence to carry the distinction. The CLI `--format json` output is
+/// untouched (it serializes the record directly, conflating as before).
+pub(crate) fn record_to_wire_json(record: &crate::show::ShowRecord) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(record)?;
+    crate::route_wire::strip_absent_frontmatter(&mut v, record.frontmatter.is_none());
+    Ok(v)
 }
 
 /// Build the MCP output envelope for `vault.get`: run the pure handler, project
@@ -171,6 +186,9 @@ pub fn handle_output(ctx: &VaultContext, p: GetParams) -> Result<MutationResult<
 /// Pure handler for `vault.get`. Opens a fresh query cache (per-call freshness),
 /// constructs [`GetArgs`] with `norn get`'s defaults, and runs the show path.
 pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
+    // The per-call served marker (routing proofs) is emitted by the server
+    // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
+    // so a stdio `norn mcp` process writes no marker.
     // Mirror the CLI's `--limit` / `--no-limit` clap `conflicts_with` (F3): the
     // two are mutually exclusive. On the get path `limit` defaults to None, so
     // `no_limit` alone is already the default (return every target) and the

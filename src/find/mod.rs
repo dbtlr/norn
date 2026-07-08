@@ -2,6 +2,7 @@
 
 pub mod query;
 pub mod render;
+pub mod route;
 
 use std::io::{IsTerminal, Write};
 
@@ -24,6 +25,17 @@ fn has_predicate(args: &FindArgs) -> bool {
         filters.text = None;
     }
     filters != crate::cli::FilterArgs::default()
+}
+
+/// The missing-predicate help gate, whole: true when this invocation should
+/// print the find help page (exit 2) instead of querying — no predicate
+/// constrains the result set and `--all` (the full-dump escape hatch) was not
+/// passed. The ONE definition shared by the direct dispatch ([`run`]) and the
+/// daemon-routed path (`route_find` in `src/lib.rs`, which forces Direct so
+/// the gate fires there) — a bare `find` must never dump the vault through
+/// the daemon (NRN-222).
+pub(crate) fn wants_help_instead(args: &FindArgs) -> bool {
+    !args.all && !has_predicate(args)
 }
 
 /// Print `norn find --help` to stderr. Used as the "missing predicate" gate.
@@ -59,7 +71,7 @@ pub fn run(
     color: crate::cli::ColorWhen,
     dynamic_keys: &[String],
 ) -> Result<i32> {
-    if !args.all && !has_predicate(&args) {
+    if wants_help_instead(&args) {
         print_find_help()?;
         return Ok(2);
     }
@@ -78,12 +90,32 @@ pub fn run(
     // surfaces can't drift on which documents match or what gets fetched.
     let self::query::Selection { result, deep, raw } = self::query::select(&cache, &args)?;
 
-    // Recompute the sort echo for the renderers (`build_find_query` is cheap and
-    // pure; `select` already validated it succeeds).
-    let query = self::query::build_find_query(&args)?;
-
-    let format = resolve_format(args.format);
+    // Shared print seam with the daemon-routed path (`route_find`).
     let palette = crate::output::palette::resolve(color);
+    emit(&result, &deep, &raw, &args, &palette)?;
+
+    let exit = if cache.has_diagnostic_errors()? { 2 } else { 0 };
+    Ok(exit)
+}
+
+/// Render a completed find selection to stdout/stderr — the shared print seam
+/// used by both the direct dispatch ([`run`]) and the NRN-222 daemon-routed path
+/// (`route_find` in `src/lib.rs`), so the two cannot drift on format resolution,
+/// paging, or the `--col` warnings. Deliberately does NOT decide the exit code:
+/// both callers derive it from the vault's error-diagnostic signal — the direct
+/// path from `cache.has_diagnostic_errors()`, the routed path from the
+/// `has_diagnostic_errors` bit the `vault.find` envelope carries (NRN-222).
+pub fn emit(
+    result: &crate::cache::FindResult,
+    deep: &[Option<crate::cache::DocumentDeep>],
+    raw: &[Option<String>],
+    args: &FindArgs,
+    palette: &crate::output::palette::Palette,
+) -> Result<()> {
+    // `build_find_query` is pure and cheap; recompute the sort echo + paging
+    // offset the renderers want rather than thread them through.
+    let query = self::query::build_find_query(args)?;
+    let format = resolve_format(args.format);
 
     let (sort_field, sort_direction) = match &query.sort {
         Some(s) => (
@@ -102,15 +134,15 @@ pub fn run(
 
     let mut buffer: Vec<u8> = Vec::new();
     self::render::render(
-        &result,
-        &deep,
-        &raw,
-        &args,
+        result,
+        deep,
+        raw,
+        args,
         format,
         sort_field,
         sort_direction,
         query.starts_at,
-        &palette,
+        palette,
         &mut buffer,
         &mut stderr_lock,
     )?;
@@ -133,8 +165,6 @@ pub fn run(
     }
 
     self::render::warn_col_ignored_on_paths(&args.col, format, &mut stderr_lock)?;
-    self::render::warn_unknown_cols(&result, &args.col, &mut stderr_lock)?;
-
-    let exit = if cache.has_diagnostic_errors()? { 2 } else { 0 };
-    Ok(exit)
+    self::render::warn_unknown_cols(result, &args.col, &mut stderr_lock)?;
+    Ok(())
 }

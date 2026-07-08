@@ -307,6 +307,16 @@ pub fn probe(timeout: std::time::Duration) -> RouteDecision {
     probe_socket(&socket_path, timeout)
 }
 
+/// The ONE operator-actionable routing notice: the daemon's build version does
+/// not match this client's. Shared by the probe path and the request-connection
+/// gate (NRN-222 review) so operators and log scrapers see one exact line
+/// format. Version skew is worth a line — it's actionable and otherwise
+/// invisible (the CLI would quietly run Direct forever after a client upgrade).
+#[cfg(unix)]
+fn warn_version_skew(server: &str, client: &str) {
+    eprintln!("norn: service is v{server}, client is v{client} — restart the norn serve daemon");
+}
+
 /// Upper bound on the control-frame response size. The pong is a few dozen
 /// bytes; this cap turns a peer that streams bytes without a newline into a
 /// bounded `Err` (→ Direct) instead of an unbounded buffer growth.
@@ -350,9 +360,7 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
         // just quietly run Direct forever after a client upgrade). Exactly
         // one line, then fall back like every other failure.
         Err(HandshakeError::VersionSkew { server, client }) => {
-            eprintln!(
-                "norn: service is v{server}, client is v{client} — restart the norn serve daemon"
-            );
+            warn_version_skew(&server, &client);
             RouteDecision::Direct
         }
         // Hung (timeout), refused mid-handshake, protocol mismatch, or
@@ -746,18 +754,28 @@ fn read_line_capped<R: std::io::BufRead>(
 /// attempt-then-fall-back is safe: a tool-level error (e.g. an invalid `--by`) is
 /// re-produced identically by the direct path, so error output and exit codes
 /// stay byte-identical too.
+///
+/// The one carve-out is [`OnToolError::AcceptWithPayload`]: a tool like
+/// `vault.get` uses `isError: true` as a *semantic* signal (a requested target
+/// did not resolve — the MCP twin of the CLI's exit 1, NRN-214) while still
+/// returning the full `structuredContent`. For such a tool, the routed client
+/// accepts the flagged result and reproduces the CLI failure contract from the
+/// payload, instead of treating it as a transport failure and re-executing the
+/// whole read directly.
 #[cfg(unix)]
 impl ServiceClient {
     /// Route one read tool call to the warm daemon and return its
     /// `structuredContent` JSON. `vault_root` is the canonical vault root the
     /// caller computed once (the wire speaks canonical paths only — ADR 0005);
     /// `tool` is the MCP tool name (e.g. `"vault.count"`); `arguments` is the
-    /// tool's parameter object.
+    /// tool's parameter object; `on_tool_error` decides what a result flagged
+    /// `isError: true` means (see [`OnToolError`]).
     pub fn call_tool_structured(
         &self,
         vault_root: &Utf8Path,
         tool: &str,
         arguments: serde_json::Value,
+        on_tool_error: OnToolError,
     ) -> anyhow::Result<serde_json::Value> {
         use std::io::BufReader;
 
@@ -800,6 +818,21 @@ impl ServiceClient {
             Some("ready") => {}
             _ => anyhow::bail!("daemon did not answer hello with ready: {ready}"),
         }
+        // Version gate on the REQUEST connection too (NRN-222 review): the
+        // probe's ping is version-gated, but this is a separate connection — a
+        // daemon swapped between probe and request could serve a stale wire
+        // shape. Require the ready frame's exact build version; on skew, emit
+        // the SAME operator-actionable one-liner the probe path uses, then
+        // `Err` so the caller falls back to a verified direct open.
+        let client_version = env!("CARGO_PKG_VERSION");
+        match ready.get("version").and_then(|v| v.as_str()) {
+            Some(version) if version == client_version => {}
+            Some(server) => {
+                warn_version_skew(server, client_version);
+                anyhow::bail!("service/client version skew on the request connection");
+            }
+            None => anyhow::bail!("ready frame carries no version; refusing to route"),
+        }
 
         // 2. MCP handshake. The daemon serves rmcp over the remainder of the
         //    stream; `initialize` must succeed before any `tools/call`.
@@ -835,9 +868,15 @@ impl ServiceClient {
             .get("result")
             .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no result"))?;
         // F5: a successful JSON-RPC envelope can still carry a tool-level failure
-        // via `isError: true` (an MCP CallToolResult convention). Treat it as a
-        // failure so we do not render a forged/error payload as a real count.
-        if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+        // via `isError: true` (an MCP CallToolResult convention). Under
+        // `FallBackDirect`, treat it as a failure so we do not render a
+        // forged/error payload as a real result; under `AcceptWithPayload` the
+        // flag is that tool's semantic failure signal (e.g. vault.get's
+        // not-found → CLI exit 1) and the structuredContent check below still
+        // guards against an empty flagged result.
+        if on_tool_error == OnToolError::FallBackDirect
+            && result.get("isError").and_then(serde_json::Value::as_bool) == Some(true)
+        {
             anyhow::bail!("tool '{tool}' reported isError; using direct execution");
         }
         let structured = result
@@ -847,6 +886,24 @@ impl ServiceClient {
             .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no structuredContent"))?;
         Ok(structured)
     }
+}
+
+/// What a routed read does with a `tools/call` result flagged `isError: true`
+/// (NRN-222).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnToolError {
+    /// Treat the flagged result as a routing failure: `Err`, so the caller
+    /// falls back to a verified direct open, which re-produces the error (and
+    /// its output/exit code) canonically. The right default for tools whose
+    /// results never flag semantic errors (`vault.count`, `vault.find`).
+    FallBackDirect,
+    /// Accept the flagged result as long as it carries `structuredContent` —
+    /// for tools (`vault.get`) whose `isError` is a semantic failure signal
+    /// riding a complete, renderable payload (the MCP twin of a CLI nonzero
+    /// exit). A flagged result WITHOUT `structuredContent` is still an `Err`
+    /// (nothing to render — fall back to Direct).
+    AcceptWithPayload,
 }
 
 /// Whether the socket at `path` is trustworthy to route through (NRN-94 F4):
@@ -1066,6 +1123,7 @@ mod tests {
                 &vault_root,
                 "vault.count",
                 serde_json::json!({"by": "type"}),
+                OnToolError::FallBackDirect,
             )
             .expect("routed tool call should succeed");
 
@@ -1108,9 +1166,68 @@ mod tests {
             &Utf8PathBuf::from("/vaults/atlas"),
             "vault.count",
             serde_json::json!({}),
+            OnToolError::FallBackDirect,
         );
         assert!(result.is_err(), "an error preamble must be Err (→ Direct)");
         server.join().unwrap();
+    }
+
+    /// NRN-222 review: the REQUEST connection is version-gated like the probe.
+    /// A daemon swapped between probe and request answers `ready` with a
+    /// different build version — the client must refuse (→ Direct) instead of
+    /// riding a stale wire shape. A ready frame with NO version is refused too.
+    ///
+    /// The assertions require the GATE's distinctive error text, not just
+    /// `is_err()`: the stub closes the socket after `ready`, so with the gate
+    /// deleted the call still errors (a transport failure on `initialize`) —
+    /// a bare `is_err()` would pass vacuously.
+    #[test]
+    fn call_tool_structured_version_skew_on_ready_is_err() {
+        for (stale_ready, expected_in_error) in [
+            (
+                serde_json::json!({
+                    "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                    "version": "0.0.0-stale",
+                }),
+                "version skew",
+            ),
+            (
+                serde_json::json!({ "norn_control": "ready", "protocol": CONTROL_PROTOCOL }),
+                "carries no version",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+            let listener = bind_trusted(&path);
+
+            let server = thread::spawn(move || {
+                let (conn, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut w = conn;
+                let mut hello_line = String::new();
+                reader.read_line(&mut hello_line).unwrap();
+                writeln!(w, "{stale_ready}").unwrap();
+                w.flush().unwrap();
+            });
+
+            let client = ServiceClient {
+                socket_path: path.clone(),
+            };
+            let error = client
+                .call_tool_structured(
+                    &Utf8PathBuf::from("/vaults/atlas"),
+                    "vault.count",
+                    serde_json::json!({}),
+                    OnToolError::FallBackDirect,
+                )
+                .expect_err("a mismatched/missing version must be Err (→ Direct)");
+            assert!(
+                error.to_string().contains(expected_in_error),
+                "the error must come from the version GATE (expected {expected_in_error:?}), \
+                 not a downstream transport failure; got: {error}"
+            );
+            server.join().unwrap();
+        }
     }
 
     /// F5: a tools/call whose JSON-RPC envelope is a success (no `error` member)
@@ -1177,10 +1294,82 @@ mod tests {
             &Utf8PathBuf::from("/vaults/atlas"),
             "vault.count",
             serde_json::json!({}),
+            OnToolError::FallBackDirect,
         );
         assert!(
             result.is_err(),
             "isError:true must be Err (→ Direct), even with structuredContent present"
+        );
+        server.join().unwrap();
+    }
+
+    /// NRN-222: under `AcceptWithPayload`, the SAME flagged exchange returns the
+    /// structuredContent — the semantic-failure carve-out `vault.get` rides
+    /// (its `isError` is the not-found signal, and the payload carries the
+    /// notes the CLI's exit-1 derives from).
+    #[test]
+    fn call_tool_structured_is_error_accepted_with_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+            let mut hello_line = String::new();
+            reader.read_line(&mut hello_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+            let mut init_line = String::new();
+            reader.read_line(&mut init_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+            )
+            .unwrap();
+            w.flush().unwrap();
+            let mut call_line = String::new();
+            reader.read_line(&mut call_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2,
+                    "result": {
+                        "content": [{"type": "text", "text": "not found"}],
+                        "structuredContent": {"records": [], "notes": ["error: nope"]},
+                        "isError": true,
+                    }
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let structured = client
+            .call_tool_structured(
+                &Utf8PathBuf::from("/vaults/atlas"),
+                "vault.get",
+                serde_json::json!({"targets": ["nope"]}),
+                OnToolError::AcceptWithPayload,
+            )
+            .expect("AcceptWithPayload must take the flagged payload");
+        assert_eq!(
+            structured,
+            serde_json::json!({"records": [], "notes": ["error: nope"]})
         );
         server.join().unwrap();
     }

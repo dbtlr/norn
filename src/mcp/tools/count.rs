@@ -190,12 +190,9 @@ impl CountEnvelope {
 /// Pure handler for `vault.count`. Opens a fresh query cache (per-call freshness),
 /// constructs [`CountArgs`] with `norn count`'s defaults, and runs the count path.
 pub fn handle(ctx: &VaultContext, p: CountParams) -> Result<CountEnvelope> {
-    // Per-CALL served marker (NRN-94 review F6). The daemon's "opened vault" line
-    // fires once at hello time (before any tools/call), so it cannot detect an
-    // rmcp/envelope break that kills routing after the vault is open. This line
-    // fires on every actually-served `vault.count`, so the routing proof
-    // (`serve_count_routing`) can assert it fires exactly once per routed shape.
-    eprintln!("norn serve: served vault.count");
+    // The per-call served marker (NRN-94 review F6) is emitted by the server
+    // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
+    // so a stdio `norn mcp` process writes no marker.
     let cache = ctx.query_cache()?;
 
     let args = CountArgs {

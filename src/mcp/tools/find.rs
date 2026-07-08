@@ -164,6 +164,12 @@ pub struct FindOutput {
     /// 1-indexed paging offset of this page (floored at 1), matching the CLI
     /// `--format json` envelope's `starts_at`.
     pub starts_at: usize,
+    /// Whether the vault carries any error-severity diagnostic (e.g. an
+    /// unreadable document) — the signal `norn find` maps to exit 2 (NRN-222).
+    /// Render-critical envelope state in the NRN-214 spirit: without it a routed
+    /// find could not reproduce the direct path's exit code. Scoped to the whole
+    /// vault, not this query's matches.
+    pub has_diagnostic_errors: bool,
     /// Matched documents, in sort order, after limit/paging — the same
     /// per-document JSON `norn find --format json` emits. With no `col`/`all_cols`,
     /// each is `{path, frontmatter}`; projections add/narrow per the `col` syntax.
@@ -174,6 +180,9 @@ pub struct FindOutput {
 /// constructs [`FindArgs`] with `norn find`'s exact defaults (notably `limit`
 /// → 10 when omitted), and runs the shared `find::query` seam.
 pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
+    // The per-call served marker (routing proofs) is emitted by the server
+    // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
+    // so a stdio `norn mcp` process writes no marker.
     let cache = ctx.query_cache()?;
 
     let args = FindArgs {
@@ -219,12 +228,19 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
         no_pager: false,
     };
 
-    let (documents, envelope) = crate::find::query::query_with_envelope(&cache, &args, None)?;
+    // The WIRE projection (NRN-222): identical per-document JSON to the CLI's
+    // `--format json` except that a document with NO frontmatter block omits
+    // the `frontmatter` key (an empty `---\n---` block keeps `"frontmatter":
+    // null`), so the routed client can rebuild the exact direct-path state.
+    let (documents, envelope) = crate::find::query::query_wire_with_envelope(&cache, &args)?;
     Ok(FindOutput {
         total: envelope.total,
         returned: envelope.returned,
         truncated: envelope.truncated,
         starts_at: envelope.starts_at,
+        // The CLI's exit-2 signal (any error-severity diagnostic in the vault),
+        // carried so a routed find reproduces the direct exit code (NRN-222).
+        has_diagnostic_errors: cache.has_diagnostic_errors()?,
         documents,
     })
 }
