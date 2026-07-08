@@ -45,17 +45,7 @@ pub fn select(cache: &Cache, args: &FindArgs) -> Result<Selection> {
     // each `DocumentSummary`. Only pay the join cost when a deep facet is asked
     // for — the default frontmatter-only path stays at zero extra queries.
     let (facets, _fields) = crate::output::projection::split_cols(&args.col);
-    // `--all-cols` dumps every cache-served facet, so it implies the deep fetch
-    // (headings + link sets). Body comes from `DocumentSummary.body_text`; raw
-    // is excluded by design, so `--all-cols` never triggers a disk read.
-    let needs_deep = args.all_cols
-        || facets.iter().any(|f| {
-            matches!(
-                f.as_str(),
-                "headings" | "outgoing_links" | "unresolved_links" | "incoming_links"
-            )
-        });
-    let deep: Vec<Option<DocumentDeep>> = if needs_deep {
+    let deep: Vec<Option<DocumentDeep>> = if needs_deep(&facets, args.all_cols) {
         let mut out = Vec::with_capacity(result.matches.len());
         for doc in &result.matches {
             // body not needed — find already carries `body_text`.
@@ -68,8 +58,7 @@ pub fn select(cache: &Cache, args: &FindArgs) -> Result<Selection> {
 
     // `.raw` self-loads its per-match disk read only when requested — the
     // default path does zero disk reads.
-    let wants_raw = facets.iter().any(|f| f == "raw");
-    let raw: Vec<Option<String>> = if wants_raw {
+    let raw: Vec<Option<String>> = if wants_raw(&facets) {
         result
             .matches
             .iter()
@@ -80,6 +69,31 @@ pub fn select(cache: &Cache, args: &FindArgs) -> Result<Selection> {
     };
 
     Ok(Selection { result, deep, raw })
+}
+
+/// Whether a `--col` facet set (from `split_cols`) requires the per-document
+/// deep fetch: `--all-cols` (which dumps every cache-served facet) or any
+/// join-backed facet (`.headings` and the three link sets). Body comes from
+/// `DocumentSummary.body_text`; raw is excluded by design, so `--all-cols`
+/// never triggers a disk read.
+///
+/// Shared by [`select`] (the direct fetch decision) and the NRN-222 routed
+/// reconstruction (`find::route`), so the two cannot drift on which facets
+/// populate the parallel `deep` vector.
+pub fn needs_deep(facets: &[String], all_cols: bool) -> bool {
+    all_cols
+        || facets.iter().any(|f| {
+            matches!(
+                f.as_str(),
+                "headings" | "outgoing_links" | "unresolved_links" | "incoming_links"
+            )
+        })
+}
+
+/// Whether a `--col` facet set requires the per-document `.raw` disk read.
+/// Shared by [`select`] and the routed reconstruction, like [`needs_deep`].
+pub fn wants_raw(facets: &[String]) -> bool {
+    facets.iter().any(|f| f == "raw")
 }
 
 /// The result-count envelope around a find query — the totals the CLI renderers

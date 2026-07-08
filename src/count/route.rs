@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::cli::CountArgs;
 use crate::count::{CountOutput, GroupNode};
+use crate::route_wire::{insert_filter_args, json_type};
 
 /// Translate parsed `norn count` args into the `vault.count` tool's parameter
 /// object (the `CountParams` shape in `src/mcp/tools/count.rs`).
@@ -34,40 +35,11 @@ pub fn to_mcp_arguments(args: &CountArgs) -> Value {
         map.insert("by".into(), Value::String(args.by.join(",")));
     }
 
-    let f = &args.filters;
-    if let Some(text) = &f.text {
-        map.insert("text".into(), Value::String(text.clone()));
-    }
     // Filter predicate lists map 1:1 to identically-named tool fields (the `in`
     // field is serde-renamed from `r#in` on the tool side).
-    insert_list(&mut map, "eq", &f.eq);
-    insert_list(&mut map, "not_eq", &f.not_eq);
-    insert_list(&mut map, "in", &f.r#in);
-    insert_list(&mut map, "not_in", &f.not_in);
-    insert_list(&mut map, "starts_with", &f.starts_with);
-    insert_list(&mut map, "ends_with", &f.ends_with);
-    insert_list(&mut map, "contains", &f.contains);
-    insert_list(&mut map, "has", &f.has);
-    insert_list(&mut map, "missing", &f.missing);
-    insert_list(&mut map, "before", &f.before);
-    insert_list(&mut map, "after", &f.after);
-    insert_list(&mut map, "on", &f.on);
-    insert_list(&mut map, "path", &f.path);
-    insert_list(&mut map, "links_to", &f.links_to);
-    if f.unresolved_links {
-        map.insert("unresolved_links".into(), Value::Bool(true));
-    }
+    insert_filter_args(&mut map, &args.filters);
 
     Value::Object(map)
-}
-
-fn insert_list(map: &mut Map<String, Value>, key: &str, values: &[String]) {
-    if !values.is_empty() {
-        map.insert(
-            key.into(),
-            Value::Array(values.iter().cloned().map(Value::String).collect()),
-        );
-    }
 }
 
 /// Rebuild a [`CountOutput`] from a `vault.count` `structuredContent` object.
@@ -82,8 +54,12 @@ pub fn reconstruct(structured: &Value) -> Result<CountOutput> {
     let total = structured
         .get("total")
         .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("count envelope missing an integer `total`: {structured}"))?
-        as usize;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "vault.count envelope: `total` must be an unsigned integer, got {}",
+                json_type(structured.get("total"))
+            )
+        })? as usize;
 
     match structured.get("by") {
         None | Some(Value::Null) => Ok(CountOutput::Total { total }),
@@ -100,17 +76,19 @@ pub fn reconstruct(structured: &Value) -> Result<CountOutput> {
             let groups: BTreeMap<String, GroupNode> = groups_value(structured)?;
             Ok(CountOutput::GroupedMulti { by, total, groups })
         }
-        Some(other) => anyhow::bail!("count envelope has an unexpected `by` shape: {other}"),
+        Some(other) => anyhow::bail!(
+            "vault.count envelope: `by` must be null, a string, or an array, got {}",
+            json_type(Some(other))
+        ),
     }
 }
 
 /// Deserialize the `groups` object of a count envelope into `T`.
 fn groups_value<T: serde::de::DeserializeOwned>(structured: &Value) -> Result<T> {
-    let groups = structured
-        .get("groups")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("grouped count envelope missing `groups`: {structured}"))?;
-    Ok(serde_json::from_value(groups)?)
+    let groups = structured.get("groups").ok_or_else(|| {
+        anyhow::anyhow!("vault.count envelope: grouped count is missing `groups`")
+    })?;
+    Ok(T::deserialize(groups)?)
 }
 
 #[cfg(test)]

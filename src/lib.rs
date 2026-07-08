@@ -35,6 +35,7 @@ mod query;
 mod repair;
 mod repair_apply;
 mod rewrite_wikilink_cmd;
+mod route_wire;
 mod self_update;
 mod seq_alloc;
 mod serve;
@@ -201,14 +202,32 @@ fn try_route_read(
     color: crate::cli::ColorWhen,
     verbose: bool,
 ) -> Option<Result<i32>> {
-    if routing_forced_direct(explicit_config, no_cache_refresh) {
-        return None;
+    // The ONE non-Unix stub for the whole routing seam: the warm daemon rides
+    // Unix-domain sockets, so every read always runs Direct. Future routed
+    // commands inherit this — no per-command stub needed.
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            command,
+            cwd,
+            explicit_config,
+            no_cache_refresh,
+            color,
+            verbose,
+        );
+        None
     }
-    match command {
-        Command::Count(args) => route_count(args, cwd, verbose),
-        Command::Find(args) => route_find(args, cwd, color, verbose),
-        Command::Get(args) => route_get(args, cwd, verbose),
-        _ => None,
+    #[cfg(unix)]
+    {
+        if routing_forced_direct(explicit_config, no_cache_refresh) {
+            return None;
+        }
+        match command {
+            Command::Count(args) => route_count(args, cwd, verbose),
+            Command::Find(args) => route_find(args, cwd, color, verbose),
+            Command::Get(args) => route_get(args, cwd, verbose),
+            _ => None,
+        }
     }
 }
 
@@ -367,36 +386,6 @@ fn route_get(
         |structured| crate::show::route::reconstruct(structured, args),
         |report| crate::show::emit(&report, args),
     )
-}
-
-/// Non-Unix stubs: the warm daemon rides Unix-domain sockets, so a read never
-/// routes — it always runs Direct.
-#[cfg(not(unix))]
-fn route_count(
-    _args: &crate::cli::CountArgs,
-    _cwd: &camino::Utf8Path,
-    _verbose: bool,
-) -> Option<Result<i32>> {
-    None
-}
-
-#[cfg(not(unix))]
-fn route_find(
-    _args: &crate::cli::FindArgs,
-    _cwd: &camino::Utf8Path,
-    _color: crate::cli::ColorWhen,
-    _verbose: bool,
-) -> Option<Result<i32>> {
-    None
-}
-
-#[cfg(not(unix))]
-fn route_get(
-    _args: &crate::cli::GetArgs,
-    _cwd: &camino::Utf8Path,
-    _verbose: bool,
-) -> Option<Result<i32>> {
-    None
 }
 
 fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {

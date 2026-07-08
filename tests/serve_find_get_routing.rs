@@ -68,7 +68,13 @@ fn run_norn(
 
 /// Spawn a daemon on a private cache home, capturing its stderr to a file.
 /// Returns (guard, cache_home, state_home, stderr_path, root_tmp).
-fn spawn_daemon_logged() -> (ChildGuard, std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, TempDir) {
+fn spawn_daemon_logged() -> (
+    ChildGuard,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    TempDir,
+) {
     // Short prefix/subdirs: the socket must fit macOS's ~104-byte sun_path.
     let daemon_root = tempfile::Builder::new().prefix("nf-").tempdir().unwrap();
     let cache_home = daemon_root.path().join("c");
@@ -150,7 +156,14 @@ fn routed_find_respects_missing_predicate_gate() {
     let gate_shapes: Vec<Vec<&str>> = vec![vec!["find"], vec!["find", "--text", ""]];
     let direct: Vec<_> = gate_shapes
         .iter()
-        .map(|shape| run_norn(direct_cache.path(), direct_state.path(), vault.path(), shape))
+        .map(|shape| {
+            run_norn(
+                direct_cache.path(),
+                direct_state.path(),
+                vault.path(),
+                shape,
+            )
+        })
         .collect();
     for (shape, (stdout, stderr, code)) in gate_shapes.iter().zip(direct.iter()) {
         assert_eq!(*code, 2, "direct bare {shape:?} must exit 2 (help gate)");
@@ -175,7 +188,8 @@ fn routed_find_respects_missing_predicate_gate() {
             "routed bare {shape:?} must exit 2 like direct (help gate), got {code}"
         );
         assert_eq!(
-            stdout, *direct_stdout,
+            stdout,
+            *direct_stdout,
             "routed bare {shape:?} stdout must match direct\nrouted: {:?}",
             String::from_utf8_lossy(&stdout)
         );

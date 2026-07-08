@@ -20,10 +20,10 @@
 
 use anyhow::Result;
 use camino::Utf8PathBuf;
-use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::cli::GetArgs;
+use crate::route_wire::{insert_paging, json_type, take_vec};
 use crate::show::{ShowRecord, ShowReport};
 
 /// Translate parsed `norn get` args into the `vault.get` tool's parameter object
@@ -50,23 +50,7 @@ pub fn to_mcp_arguments(args: &GetArgs) -> Value {
         map.insert("all_cols".into(), Value::Bool(true));
     }
 
-    let p = &args.paging;
-    if let Some(sort) = &p.sort {
-        map.insert("sort".into(), Value::String(sort.clone()));
-    }
-    if p.desc {
-        map.insert("desc".into(), Value::Bool(true));
-    }
-    if let Some(limit) = p.limit {
-        map.insert("limit".into(), Value::Number(limit.into()));
-    }
-    if p.no_limit {
-        map.insert("no_limit".into(), Value::Bool(true));
-    }
-    // starts_at defaults to 1 on both surfaces; send only when non-default.
-    if p.starts_at != 1 {
-        map.insert("starts_at".into(), Value::Number(p.starts_at.into()));
-    }
+    insert_paging(&mut map, &args.paging);
 
     Value::Object(map)
 }
@@ -81,19 +65,26 @@ pub fn to_mcp_arguments(args: &GetArgs) -> Value {
 /// `--section` invocation is gated to Direct by the caller. Any shape mismatch is
 /// an `Err`, which the caller maps to a verified direct open.
 pub fn reconstruct(structured: &Value, _args: &GetArgs) -> Result<ShowReport> {
-    let records = structured
+    let envelope = structured.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "vault.get envelope: must be an object, got {}",
+            json_type(Some(structured))
+        )
+    })?;
+    let records = envelope
         .get("records")
         .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("get envelope missing `records` array: {structured}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "vault.get envelope: `records` must be an array, got {}",
+                json_type(envelope.get("records"))
+            )
+        })?
         .iter()
         .map(record_from_wire)
         .collect::<Result<Vec<_>>>()?;
 
-    let notes = structured
-        .get("notes")
-        .map(|v| serde_json::from_value::<Vec<String>>(v.clone()))
-        .transpose()?
-        .unwrap_or_default();
+    let notes: Vec<String> = take_vec(envelope, "notes")?;
 
     Ok(ShowReport {
         records,
@@ -105,14 +96,18 @@ pub fn reconstruct(structured: &Value, _args: &GetArgs) -> Result<ShowReport> {
 }
 
 fn record_from_wire(v: &Value) -> Result<ShowRecord> {
-    let obj = v
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("get record is not an object: {v}"))?;
-    let path = Utf8PathBuf::from(
-        obj.get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("get record missing string `path`: {v}"))?,
-    );
+    let obj = v.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "vault.get envelope: a `records` entry must be an object, got {}",
+            json_type(Some(v))
+        )
+    })?;
+    let path = Utf8PathBuf::from(obj.get("path").and_then(Value::as_str).ok_or_else(|| {
+        anyhow::anyhow!(
+            "vault.get envelope: a record's `path` must be a string, got {}",
+            json_type(obj.get("path"))
+        )
+    })?);
     // `stem` is `#[serde(skip)]` on the wire but a pure function of the path;
     // recompute it as `graph::build` does so `--col .stem` renders identically.
     let stem = path.file_stem().unwrap_or_default().to_string();
@@ -136,14 +131,6 @@ fn record_from_wire(v: &Value) -> Result<ShowRecord> {
         sections: None,
         raw: obj.get("raw").and_then(Value::as_str).map(str::to_string),
     })
-}
-
-/// Deserialize `obj[key]` into `Vec<T>`, treating an absent key as an empty vec.
-fn take_vec<T: DeserializeOwned>(obj: &Map<String, Value>, key: &str) -> Result<Vec<T>> {
-    match obj.get(key) {
-        Some(value) => Ok(serde_json::from_value(value.clone())?),
-        None => Ok(Vec::new()),
-    }
 }
 
 #[cfg(test)]

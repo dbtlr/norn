@@ -25,13 +25,13 @@
 
 use anyhow::Result;
 use camino::Utf8PathBuf;
-use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::cache::{DocumentDeep, FindResult};
 use crate::cli::FindArgs;
 use crate::core::DocumentSummary;
 use crate::output::projection::split_cols;
+use crate::route_wire::{insert_filter_args, insert_paging, json_type, take_vec};
 
 /// The reconstructed find result: the matched documents plus the parallel
 /// deep-fetch / raw-read vectors, in the exact shape `find::emit` consumes,
@@ -56,50 +56,10 @@ pub struct RoutedFind {
 pub fn to_mcp_arguments(args: &FindArgs) -> Value {
     let mut map = Map::new();
 
-    let f = &args.filters;
-    if let Some(text) = &f.text {
-        map.insert("text".into(), Value::String(text.clone()));
-    }
-    insert_list(&mut map, "eq", &f.eq);
-    insert_list(&mut map, "not_eq", &f.not_eq);
-    insert_list(&mut map, "in", &f.r#in);
-    insert_list(&mut map, "not_in", &f.not_in);
-    insert_list(&mut map, "starts_with", &f.starts_with);
-    insert_list(&mut map, "ends_with", &f.ends_with);
-    insert_list(&mut map, "contains", &f.contains);
-    insert_list(&mut map, "has", &f.has);
-    insert_list(&mut map, "missing", &f.missing);
-    insert_list(&mut map, "before", &f.before);
-    insert_list(&mut map, "after", &f.after);
-    insert_list(&mut map, "on", &f.on);
-    insert_list(&mut map, "path", &f.path);
-    insert_list(&mut map, "links_to", &f.links_to);
-    if f.unresolved_links {
-        map.insert("unresolved_links".into(), Value::Bool(true));
-    }
-
-    // Sort / limit / paging: name-for-name with the tool's params. An omitted
-    // `--limit` is left absent so the tool applies find's default of 10 (matching
-    // the direct path's `build_find_query`); an explicit `--limit`/`--no-limit`
-    // travels through.
-    let p = &args.paging;
-    if let Some(sort) = &p.sort {
-        map.insert("sort".into(), Value::String(sort.clone()));
-    }
-    if p.desc {
-        map.insert("desc".into(), Value::Bool(true));
-    }
-    if let Some(limit) = p.limit {
-        map.insert("limit".into(), Value::Number(limit.into()));
-    }
-    if p.no_limit {
-        map.insert("no_limit".into(), Value::Bool(true));
-    }
-    // starts_at defaults to 1 on both surfaces; send it only when non-default to
-    // keep the wire minimal (the tool floors at 1 either way).
-    if p.starts_at != 1 {
-        map.insert("starts_at".into(), Value::Number(p.starts_at.into()));
-    }
+    insert_filter_args(&mut map, &args.filters);
+    // An omitted `--limit` stays absent so the tool applies find's default of 10
+    // (matching the direct path's `build_find_query`).
+    insert_paging(&mut map, &args.paging);
 
     // Column projection: the tool applies the SAME `doc_to_json` projection the
     // CLI's `--format json` does, so the returned documents are already projected.
@@ -116,15 +76,6 @@ pub fn to_mcp_arguments(args: &FindArgs) -> Value {
     Value::Object(map)
 }
 
-fn insert_list(map: &mut Map<String, Value>, key: &str, values: &[String]) {
-    if !values.is_empty() {
-        map.insert(
-            key.into(),
-            Value::Array(values.iter().cloned().map(Value::String).collect()),
-        );
-    }
-}
-
 /// Rebuild a [`RoutedFind`] from a `vault.find` `structuredContent` object.
 ///
 /// The envelope (`total`/`returned`/`truncated`) rebuilds [`FindResult`]'s
@@ -137,50 +88,46 @@ fn insert_list(map: &mut Map<String, Value>, key: &str, values: &[String]) {
 pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
     let total = get_usize(structured, "total")?;
     let returned = get_usize(structured, "returned")?;
-    let truncated = structured
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| anyhow::anyhow!("find envelope missing bool `truncated`: {structured}"))?;
+    let truncated = get_bool(structured, "truncated")?;
     // Required, not defaulted: the exit code derives from this bit, and guessing
     // it (e.g. an older daemon that predates the field) would silently break the
     // routed/direct exit-2 isomorphism — better to fall back to Direct.
-    let has_diagnostic_errors = structured
-        .get("has_diagnostic_errors")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            anyhow::anyhow!("find envelope missing bool `has_diagnostic_errors`: {structured}")
-        })?;
+    let has_diagnostic_errors = get_bool(structured, "has_diagnostic_errors")?;
     let documents = structured
         .get("documents")
         .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("find envelope missing `documents` array: {structured}"))?;
-
-    // Mirror `find::query::select`'s facet decisions so the reconstructed
-    // deep/raw vectors are shaped exactly as the direct path's — empty when the
-    // projection asks for no join-backed facet / no raw read.
-    let (facets, _fields) = split_cols(&args.col);
-    let needs_deep = args.all_cols
-        || facets.iter().any(|f| {
-            matches!(
-                f.as_str(),
-                "headings" | "outgoing_links" | "unresolved_links" | "incoming_links"
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "vault.find envelope: `documents` must be an array, got {}",
+                json_type(structured.get("documents"))
             )
-        });
-    let wants_raw = facets.iter().any(|f| f == "raw");
+        })?;
+
+    // Mirror `find::query::select`'s facet decisions (the shared predicates) so
+    // the reconstructed deep/raw vectors are shaped exactly as the direct
+    // path's — empty when the projection asks for no join-backed facet / no
+    // raw read.
+    let (facets, _fields) = split_cols(&args.col);
+    let needs_deep = crate::find::query::needs_deep(&facets, args.all_cols);
+    let wants_raw = crate::find::query::wants_raw(&facets);
 
     let mut matches = Vec::with_capacity(documents.len());
     let mut deep: Vec<Option<DocumentDeep>> = Vec::new();
     let mut raw: Vec<Option<String>> = Vec::new();
 
     for doc in documents {
-        let obj = doc
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("find document is not an object: {doc}"))?;
-        let path = Utf8PathBuf::from(
-            obj.get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("find document missing string `path`: {doc}"))?,
-        );
+        let obj = doc.as_object().ok_or_else(|| {
+            anyhow::anyhow!(
+                "vault.find envelope: a `documents` entry must be an object, got {}",
+                json_type(Some(doc))
+            )
+        })?;
+        let path = Utf8PathBuf::from(obj.get("path").and_then(Value::as_str).ok_or_else(|| {
+            anyhow::anyhow!(
+                "vault.find envelope: a document's `path` must be a string, got {}",
+                json_type(obj.get("path"))
+            )
+        })?);
         // `stem` is a pure function of the path (never on the wire); recompute it
         // exactly as `graph::build` does, so `--col .stem` renders identically.
         let stem = path.file_stem().unwrap_or_default().to_string();
@@ -242,21 +189,22 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
     })
 }
 
-/// Deserialize `obj[key]` into `Vec<T>`, treating an absent key as an empty vec
-/// (a facet the projection did not include).
-fn take_vec<T: DeserializeOwned>(obj: &Map<String, Value>, key: &str) -> Result<Vec<T>> {
-    match obj.get(key) {
-        Some(value) => Ok(serde_json::from_value(value.clone())?),
-        None => Ok(Vec::new()),
-    }
+fn get_usize(structured: &Value, key: &str) -> Result<usize> {
+    Ok(structured.get(key).and_then(Value::as_u64).ok_or_else(|| {
+        anyhow::anyhow!(
+            "vault.find envelope: `{key}` must be an unsigned integer, got {}",
+            json_type(structured.get(key))
+        )
+    })? as usize)
 }
 
-fn get_usize(structured: &Value, key: &str) -> Result<usize> {
-    Ok(structured
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("find envelope missing integer `{key}`: {structured}"))?
-        as usize)
+fn get_bool(structured: &Value, key: &str) -> Result<bool> {
+    structured.get(key).and_then(Value::as_bool).ok_or_else(|| {
+        anyhow::anyhow!(
+            "vault.find envelope: `{key}` must be a bool, got {}",
+            json_type(structured.get(key))
+        )
+    })
 }
 
 #[cfg(test)]
