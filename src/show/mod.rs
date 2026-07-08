@@ -2,6 +2,7 @@
 //! wikilink-aware input resolution.
 
 pub mod render;
+pub mod route;
 pub mod target;
 
 use crate::cache::{Cache, IncomingLink};
@@ -276,6 +277,60 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
         notes,
         section_failures,
     })
+}
+
+/// Render a completed [`ShowReport`] for the NON-markdown formats and return the
+/// process exit code — the shared print seam used by both the direct dispatch
+/// (`Command::Get` in `src/lib.rs`) and the NRN-222 daemon-routed path
+/// (`route_get`), so the two cannot drift on rendering, the `--col`/`--section`
+/// ignored-warnings, note forwarding, or the exit-1 signal.
+///
+/// `markdown` is handled by the caller before this (a byte-faithful single-doc
+/// disk read); passing it here is a bug. On an `error:` note this calls
+/// `std::process::exit(1)` (identical to the pre-extraction direct path), so the
+/// stdout already written is flushed on exit; otherwise returns `Ok(0)`.
+pub fn emit(report: &ShowReport, args: &GetArgs) -> Result<i32> {
+    use std::io::Write;
+
+    let stdout_text = match args.format {
+        crate::cli::GetFormat::Json => render::render_json_with_col(report, &args.col),
+        crate::cli::GetFormat::Jsonl => render::render_jsonl_with_col(report, &args.col),
+        crate::cli::GetFormat::Paths => render::render_paths(report),
+        crate::cli::GetFormat::Records => render::render_records_with_col(report, &args.col),
+        crate::cli::GetFormat::Markdown => unreachable!("markdown is handled before show::emit"),
+    };
+    let stdout = std::io::stdout();
+    let mut stdout_lock = stdout.lock();
+    write!(stdout_lock, "{}", stdout_text)?;
+    if !stdout_text.ends_with('\n') {
+        writeln!(stdout_lock)?;
+    }
+    drop(stdout_lock);
+
+    let stderr = std::io::stderr();
+    let mut stderr_lock = stderr.lock();
+    crate::output::projection::warn_col_ignored(
+        &args.col,
+        matches!(args.format, crate::cli::GetFormat::Paths).then_some("paths"),
+        &mut stderr_lock,
+    )?;
+    crate::output::projection::warn_section_ignored(
+        &args.section,
+        matches!(args.format, crate::cli::GetFormat::Paths).then_some("paths"),
+        &mut stderr_lock,
+    )?;
+    render::warn_unknown_cols(&args.col, report, &mut stderr_lock)?;
+
+    for note in &report.notes {
+        writeln!(stderr_lock, "{}", note)?;
+    }
+    // Exit 1 on an `error:` note (unresolved target / all-missed section) — the
+    // same signal `vault.get` maps to `isError` (`ShowReport::has_error`), so CLI
+    // exit and MCP isError cannot drift.
+    if report.has_error() {
+        std::process::exit(1);
+    }
+    Ok(0)
 }
 
 /// Resolve every `--section` heading against one document's `body`, reusing

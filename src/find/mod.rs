@@ -2,6 +2,7 @@
 
 pub mod query;
 pub mod render;
+pub mod route;
 
 use std::io::{IsTerminal, Write};
 
@@ -78,12 +79,31 @@ pub fn run(
     // surfaces can't drift on which documents match or what gets fetched.
     let self::query::Selection { result, deep, raw } = self::query::select(&cache, &args)?;
 
-    // Recompute the sort echo for the renderers (`build_find_query` is cheap and
-    // pure; `select` already validated it succeeds).
-    let query = self::query::build_find_query(&args)?;
-
-    let format = resolve_format(args.format);
+    // Shared print seam with the daemon-routed path (`route_find`).
     let palette = crate::output::palette::resolve(color);
+    emit(&result, &deep, &raw, &args, &palette)?;
+
+    let exit = if cache.has_diagnostic_errors()? { 2 } else { 0 };
+    Ok(exit)
+}
+
+/// Render a completed find selection to stdout/stderr — the shared print seam
+/// used by both the direct dispatch ([`run`]) and the NRN-222 daemon-routed path
+/// (`route_find` in `src/lib.rs`), so the two cannot drift on format resolution,
+/// paging, or the `--col` warnings. Deliberately does NOT decide the exit code:
+/// the direct path derives it from the vault's diagnostics (`has_diagnostic_errors`),
+/// which the routed path — serving from an already-verified warm cache — cannot see.
+pub fn emit(
+    result: &crate::cache::FindResult,
+    deep: &[Option<crate::cache::DocumentDeep>],
+    raw: &[Option<String>],
+    args: &FindArgs,
+    palette: &crate::output::palette::Palette,
+) -> Result<()> {
+    // `build_find_query` is pure and cheap; recompute the sort echo + paging
+    // offset the renderers want rather than thread them through.
+    let query = self::query::build_find_query(args)?;
+    let format = resolve_format(args.format);
 
     let (sort_field, sort_direction) = match &query.sort {
         Some(s) => (
@@ -102,15 +122,15 @@ pub fn run(
 
     let mut buffer: Vec<u8> = Vec::new();
     self::render::render(
-        &result,
-        &deep,
-        &raw,
-        &args,
+        result,
+        deep,
+        raw,
+        args,
         format,
         sort_field,
         sort_direction,
         query.starts_at,
-        &palette,
+        palette,
         &mut buffer,
         &mut stderr_lock,
     )?;
@@ -133,8 +153,6 @@ pub fn run(
     }
 
     self::render::warn_col_ignored_on_paths(&args.col, format, &mut stderr_lock)?;
-    self::render::warn_unknown_cols(&result, &args.col, &mut stderr_lock)?;
-
-    let exit = if cache.has_diagnostic_errors()? { 2 } else { 0 };
-    Ok(exit)
+    self::render::warn_unknown_cols(result, &args.col, &mut stderr_lock)?;
+    Ok(())
 }

@@ -7,7 +7,7 @@
 use crate::core::{Heading, Link, LinkStatus};
 use camino::{Utf8Path, Utf8PathBuf};
 use rusqlite::OptionalExtension;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cache::error::CacheError;
 
@@ -30,7 +30,11 @@ pub struct DocumentDeep {
 
 /// A back-link: another document's path plus the `Link` record that points
 /// at the current document.
-#[derive(Debug, Serialize)]
+///
+/// `Deserialize` lets the CLI→daemon read-routing seam (NRN-222) rebuild the
+/// incoming-link set from a `vault.find` / `vault.get` `structuredContent`
+/// payload and render it through the SAME renderers the direct path uses.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IncomingLink {
     pub source_path: Utf8PathBuf,
     pub link: Link,
