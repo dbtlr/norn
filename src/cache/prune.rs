@@ -552,6 +552,51 @@ mod tests {
         assert!(report.cache.bytes_freed > 0);
     }
 
+    /// The service dirs under the cache tree — `log/` (the launchd
+    /// stdout/stderr sink, `norn service install`) and `run/` (the daemon's
+    /// socket + lock) — are NOT vault entries and must survive a sweep even
+    /// when every eviction pressure applies (zero retention, zero cap, dead
+    /// entries all around). Their names are not 64-hex, so `is_entry_hash`
+    /// filters them out of the scan; this guards that invariant.
+    #[test]
+    fn log_dir_under_the_cache_tree_survives_a_sweep() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        // A populated log/ dir (what `norn service install` provisions) and a
+        // run/ dir (socket + lock), plus one genuinely-evictable dead entry so
+        // the sweep demonstrably ran.
+        let log_dir = cache_tree.join("log");
+        std::fs::create_dir_all(log_dir.as_std_path()).unwrap();
+        std::fs::write(log_dir.join("serve.log").as_std_path(), b"daemon output\n").unwrap();
+        let run_dir = cache_tree.join("run");
+        std::fs::create_dir_all(run_dir.as_std_path()).unwrap();
+        std::fs::write(run_dir.join("norn.lock").as_std_path(), b"").unwrap();
+        mint_cache_entry(&cache_tree, H1, "/nonexistent/vault/gone");
+
+        // Maximum pressure: everything is over-age and over-cap.
+        let report = sweep(
+            &cache_tree,
+            &state_tree,
+            &PruneOptions {
+                retention: Duration::ZERO,
+                cap_bytes: 0,
+                dry_run: false,
+                exempt_hash: None,
+            },
+        );
+
+        assert_eq!(hashes(&report.cache.evicted), vec![H1], "the sweep ran");
+        assert!(
+            log_dir.join("serve.log").as_std_path().exists(),
+            "the service log must survive a full-pressure prune"
+        );
+        assert!(
+            run_dir.join("norn.lock").as_std_path().exists(),
+            "the daemon run dir must survive a full-pressure prune"
+        );
+    }
+
     #[test]
     fn unreadable_and_empty_cache_entries_evicted() {
         let trees = TempDir::new().unwrap();

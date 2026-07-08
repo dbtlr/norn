@@ -8,6 +8,26 @@
 
 use std::io::Write;
 
+/// The probed daemon state feeding [`assemble_status`]: launchctl's load/run
+/// verdict plus whatever the live control-ping returned (`running_version` /
+/// `uptime_secs` are `None` when nothing answered the socket).
+#[derive(Debug, Clone, Default)]
+pub struct ProbedState {
+    pub loaded: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub running_version: Option<String>,
+    pub uptime_secs: Option<u64>,
+}
+
+/// The resolved on-disk paths `status` reports.
+#[derive(Debug, Clone)]
+pub struct ServicePaths {
+    pub plist: String,
+    pub log: String,
+    pub socket: String,
+}
+
 /// The assembled `service status` report. `running_version`/`uptime_secs` come
 /// from the live daemon's pong (absent when nothing answered the control
 /// socket); `restart_pending` is set when a running version is known and differs
@@ -26,37 +46,30 @@ pub struct ServiceStatus {
     pub socket: String,
 }
 
-/// Fold probed inputs into a [`ServiceStatus`]. `running_version`/`uptime_secs`
-/// are the pong's (None when no daemon answered); `restart_pending` is true iff a
-/// running version is known and differs from `on_disk_version` — the operator's
-/// cue that the supervised process predates the installed binary and a
-/// `norn service restart` would pick up the new build.
-#[allow(clippy::too_many_arguments)]
+/// Fold the probed inputs into a [`ServiceStatus`]. `restart_pending` is true
+/// iff a running version is known and differs from `on_disk_version` — the
+/// operator's cue that the supervised process predates the installed binary and
+/// a `norn service restart` would pick up the new build.
 pub fn assemble_status(
-    loaded: bool,
-    running: bool,
-    pid: Option<u32>,
-    running_version: Option<String>,
-    uptime_secs: Option<u64>,
+    probed: ProbedState,
     on_disk_version: &str,
-    plist: String,
-    log: String,
-    socket: String,
+    paths: ServicePaths,
 ) -> ServiceStatus {
-    let restart_pending = running_version
+    let restart_pending = probed
+        .running_version
         .as_deref()
         .is_some_and(|v| v != on_disk_version);
     ServiceStatus {
-        loaded,
-        running,
-        pid,
-        running_version,
+        loaded: probed.loaded,
+        running: probed.running,
+        pid: probed.pid,
+        running_version: probed.running_version,
         on_disk_version: on_disk_version.to_string(),
         restart_pending,
-        uptime_secs,
-        plist,
-        log,
-        socket,
+        uptime_secs: probed.uptime_secs,
+        plist: paths.plist,
+        log: paths.log,
+        socket: paths.socket,
     }
 }
 
@@ -126,17 +139,25 @@ fn format_uptime(secs: u64) -> String {
 mod tests {
     use super::*;
 
+    fn paths() -> ServicePaths {
+        ServicePaths {
+            plist: "/p/serve.plist".into(),
+            log: "/l/serve.log".into(),
+            socket: "/s/norn.sock".into(),
+        }
+    }
+
     fn base(running_version: Option<&str>) -> ServiceStatus {
         assemble_status(
-            true,
-            true,
-            Some(4242),
-            running_version.map(str::to_string),
-            Some(3725),
+            ProbedState {
+                loaded: true,
+                running: true,
+                pid: Some(4242),
+                running_version: running_version.map(str::to_string),
+                uptime_secs: Some(3725),
+            },
             "0.45.1",
-            "/p/serve.plist".into(),
-            "/l/serve.log".into(),
-            "/s/norn.sock".into(),
+            paths(),
         )
     }
 
@@ -161,15 +182,12 @@ mod tests {
     #[test]
     fn no_pong_reports_no_answer_and_is_never_restart_pending() {
         let s = assemble_status(
-            true,
-            false,
-            None,
-            None,
-            None,
+            ProbedState {
+                loaded: true,
+                ..ProbedState::default()
+            },
             "0.45.1",
-            "/p".into(),
-            "/l".into(),
-            "/s".into(),
+            paths(),
         );
         assert!(!s.restart_pending);
         let mut buf = Vec::new();
@@ -181,17 +199,7 @@ mod tests {
 
     #[test]
     fn not_loaded_renders_cleanly() {
-        let s = assemble_status(
-            false,
-            false,
-            None,
-            None,
-            None,
-            "0.45.1",
-            "/p".into(),
-            "/l".into(),
-            "/s".into(),
-        );
+        let s = assemble_status(ProbedState::default(), "0.45.1", paths());
         let mut buf = Vec::new();
         render_text(&s, &mut buf).unwrap();
         assert!(String::from_utf8(buf)

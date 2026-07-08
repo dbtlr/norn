@@ -10,7 +10,11 @@
 //!   is tolerated), then `bootstrap`, so a re-install refreshes cleanly.
 //! - **Async-teardown race** — `bootout` returns before launchd has fully torn
 //!   the unit down, so an immediate `bootstrap` can lose the race with error 5;
-//!   retry the bootstrap on exactly that code.
+//!   retry the bootstrap on exactly that code. launchctl reports an
+//!   already-loaded unit with the SAME code 5, so the retry must only ever run
+//!   on a post-bootout path — `install` (after its own bootout) and `start`
+//!   (which the command layer gates to a not-loaded unit, so any code 5 there
+//!   is a just-finished `stop` still settling, never "already loaded").
 //! - **Honest stop** — a `KeepAlive` daemon is resurrected if merely killed, so
 //!   stop is a `bootout` (the plist stays on disk).
 //! - **restart** is `kickstart -k`; a nonzero `print` means the unit is not
@@ -24,7 +28,6 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct ExecResult {
     pub code: i32,
-    #[allow(dead_code)] // Captured for symmetry / future diagnostics; not read today.
     pub stdout: String,
     pub stderr: String,
 }
@@ -65,7 +68,8 @@ pub struct ServiceInfo {
 /// old unit down, so an immediate `bootstrap` races and fails with error 5
 /// ("Input/output error"), leaving nothing loaded. Retry the bootstrap a few
 /// times on exactly that code; any other exit is a genuine failure that
-/// surfaces at once.
+/// surfaces at once. (Code 5 also means "already loaded" — see the module docs
+/// for why the retry only ever runs on post-bootout paths.)
 const BOOTSTRAP_ATTEMPTS: u32 = 5;
 const BOOTSTRAP_SETTLE: Duration = Duration::from_millis(250);
 const BOOTSTRAP_RACE_CODE: i32 = 5;
@@ -82,6 +86,13 @@ pub struct LaunchdSupervisor<E: Exec> {
 }
 
 impl<E: Exec> LaunchdSupervisor<E> {
+    /// Test-only view of the exec seam, so command-layer tests can assert the
+    /// exact launchctl argv a policy decision produced (or suppressed).
+    #[cfg(test)]
+    pub(crate) fn exec(&self) -> &E {
+        &self.exec
+    }
+
     pub fn new(exec: E, uid: u32, label: &str) -> Self {
         Self {
             target: format!("gui/{uid}"),
@@ -125,7 +136,10 @@ impl<E: Exec> LaunchdSupervisor<E> {
 
     /// Bootstrap, retrying ONLY the async-teardown race so a genuine failure
     /// still surfaces immediately. A race that outlives the budget surfaces as
-    /// the usual load error.
+    /// the usual load error. Callers must guarantee the unit is NOT loaded when
+    /// this runs (install bootouts first; the command layer gates `start`),
+    /// because launchctl reports "already loaded" with the same code 5 the
+    /// retry treats as the race.
     fn bootstrap_with_retry(&self, plist_file: &str) -> anyhow::Result<()> {
         for attempt in 1..=BOOTSTRAP_ATTEMPTS {
             let full = ["launchctl", "bootstrap", &self.target, plist_file];
@@ -153,19 +167,19 @@ impl<E: Exec> LaunchdSupervisor<E> {
         Ok(())
     }
 
-    /// Unload the unit (tolerant of an already-unloaded unit). The plist file is
-    /// the caller's to remove.
-    pub fn uninstall(&self) -> anyhow::Result<()> {
-        self.run(&["bootout", &self.service], "", true)
-    }
-
     /// Bring an installed-but-unloaded unit back. A stop→start sequence hits the
-    /// same async-teardown race as a reinstall, so it shares the retry.
+    /// same async-teardown race as a reinstall (the prior stop's bootout may
+    /// still be settling), so it shares the retry. The command layer never
+    /// calls this on a loaded unit (an already-loaded bootstrap fails with the
+    /// race's code 5 and would spin the retry pointlessly).
     pub fn start(&self, plist_file: &str) -> anyhow::Result<()> {
         self.bootstrap_with_retry(plist_file)
     }
 
     /// Honest stop: `bootout` (KeepAlive would resurrect a merely-killed pid).
+    /// NOT tolerant — the caller gates on loaded state, so a failure here is a
+    /// genuine "could not unload" that must surface (uninstall relies on this
+    /// to avoid deleting the plist out from under a still-loaded daemon).
     pub fn stop(&self) -> anyhow::Result<()> {
         self.run(
             &["bootout", &self.service],
@@ -238,27 +252,29 @@ fn extract_pid(stdout: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Test doubles shared by this module's tests and the command layer's
+/// (`super::command`) regression tests, so both drive the SAME seam.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use std::cell::RefCell;
 
     /// Records every argv it is handed and replays a queued sequence of results,
     /// so a test can both assert the exact launchctl calls and drive multi-step
     /// flows (e.g. the bootstrap-race retry).
-    struct FakeExec {
+    pub(crate) struct FakeExec {
         calls: RefCell<Vec<Vec<String>>>,
         results: RefCell<std::collections::VecDeque<ExecResult>>,
     }
 
     impl FakeExec {
-        fn new(results: Vec<ExecResult>) -> Self {
+        pub(crate) fn new(results: Vec<ExecResult>) -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
                 results: RefCell::new(results.into_iter().collect()),
             }
         }
-        fn calls(&self) -> Vec<Vec<String>> {
+        pub(crate) fn calls(&self) -> Vec<Vec<String>> {
             self.calls.borrow().clone()
         }
     }
@@ -276,7 +292,7 @@ mod tests {
         }
     }
 
-    fn ok() -> ExecResult {
+    pub(crate) fn exec_ok() -> ExecResult {
         ExecResult {
             code: 0,
             stdout: String::new(),
@@ -284,17 +300,49 @@ mod tests {
         }
     }
 
-    fn sup(exec: FakeExec) -> LaunchdSupervisor<FakeExec> {
+    pub(crate) fn exec_fail(code: i32, stderr: &str) -> ExecResult {
+        ExecResult {
+            code,
+            stdout: String::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// A `launchctl print` result for a loaded, running unit with `pid`.
+    pub(crate) fn print_running(pid: u32) -> ExecResult {
+        ExecResult {
+            code: 0,
+            stdout: format!("com.dbtlr.norn.serve = {{\n\tstate = running\n\tpid = {pid}\n}}"),
+            stderr: String::new(),
+        }
+    }
+
+    /// A `launchctl print` result for a not-loaded unit.
+    pub(crate) fn print_not_loaded() -> ExecResult {
+        exec_fail(113, "Could not find service")
+    }
+
+    /// A supervisor over a [`FakeExec`] with a zero retry settle (so the
+    /// bootstrap-race path runs without real delay).
+    pub(crate) fn supervisor(exec: FakeExec) -> LaunchdSupervisor<FakeExec> {
         let mut s = LaunchdSupervisor::new(exec, 501, "com.dbtlr.norn.serve");
-        s.settle = Duration::ZERO; // no real sleep in the retry path
+        s.settle = Duration::ZERO;
         s
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{
+        exec_fail, exec_ok, print_not_loaded, print_running, supervisor, FakeExec,
+    };
+    use super::*;
 
     #[test]
     fn install_is_bootout_first_then_bootstrap() {
-        let s = sup(FakeExec::new(vec![ok(), ok()]));
+        let s = supervisor(FakeExec::new(vec![exec_ok(), exec_ok()]));
         s.install("/p/serve.plist").unwrap();
-        let calls = s.exec.calls();
+        let calls = s.exec().calls();
         assert_eq!(
             calls[0],
             vec!["launchctl", "bootout", "gui/501/com.dbtlr.norn.serve"]
@@ -308,13 +356,9 @@ mod tests {
     #[test]
     fn install_tolerates_a_bootout_no_op() {
         // bootout of an unloaded unit fails; install must still bootstrap and succeed.
-        let s = sup(FakeExec::new(vec![
-            ExecResult {
-                code: 3,
-                stdout: String::new(),
-                stderr: "No such process".into(),
-            },
-            ok(),
+        let s = supervisor(FakeExec::new(vec![
+            exec_fail(3, "No such process"),
+            exec_ok(),
         ]));
         assert!(s.install("/p/serve.plist").is_ok());
     }
@@ -322,52 +366,48 @@ mod tests {
     #[test]
     fn bootstrap_retries_only_the_race_code() {
         // First bootstrap loses the async-teardown race (code 5), second wins.
-        let s = sup(FakeExec::new(vec![
-            ok(), // bootout
-            ExecResult {
-                code: 5,
-                stdout: String::new(),
-                stderr: "Input/output error".into(),
-            },
-            ok(), // retried bootstrap
+        let s = supervisor(FakeExec::new(vec![
+            exec_ok(), // bootout
+            exec_fail(5, "Input/output error"),
+            exec_ok(), // retried bootstrap
         ]));
         s.install("/p/serve.plist").unwrap();
-        let calls = s.exec.calls();
+        let calls = s.exec().calls();
         assert_eq!(calls.len(), 3, "one bootout + two bootstrap attempts");
     }
 
     #[test]
     fn a_non_race_bootstrap_failure_surfaces_immediately() {
-        let s = sup(FakeExec::new(vec![
-            ok(), // bootout
-            ExecResult {
-                code: 2,
-                stdout: String::new(),
-                stderr: "bad plist".into(),
-            },
+        let s = supervisor(FakeExec::new(vec![
+            exec_ok(), // bootout
+            exec_fail(2, "bad plist"),
         ]));
         let err = s.install("/p/serve.plist").unwrap_err().to_string();
         assert!(err.contains("could not load the service"), "got {err}");
         assert!(err.contains("bad plist"), "stderr is surfaced: {err}");
-        assert_eq!(s.exec.calls().len(), 2, "no retry on a non-race failure");
+        assert_eq!(s.exec().calls().len(), 2, "no retry on a non-race failure");
     }
 
     #[test]
-    fn stop_is_a_bootout() {
-        let s = sup(FakeExec::new(vec![ok()]));
+    fn stop_is_a_bootout_and_surfaces_failure() {
+        let s = supervisor(FakeExec::new(vec![exec_ok()]));
         s.stop().unwrap();
         assert_eq!(
-            s.exec.calls()[0],
+            s.exec().calls()[0],
             vec!["launchctl", "bootout", "gui/501/com.dbtlr.norn.serve"]
         );
+        // A genuine bootout failure is NOT tolerated (uninstall relies on this).
+        let s = supervisor(FakeExec::new(vec![exec_fail(1, "boom")]));
+        let err = s.stop().unwrap_err().to_string();
+        assert!(err.contains("could not unload the service"), "got {err}");
     }
 
     #[test]
     fn restart_is_kickstart_k() {
-        let s = sup(FakeExec::new(vec![ok()]));
+        let s = supervisor(FakeExec::new(vec![exec_ok()]));
         s.restart().unwrap();
         assert_eq!(
-            s.exec.calls()[0],
+            s.exec().calls()[0],
             vec![
                 "launchctl",
                 "kickstart",
@@ -379,11 +419,7 @@ mod tests {
 
     #[test]
     fn info_reports_not_loaded_on_nonzero_print() {
-        let s = sup(FakeExec::new(vec![ExecResult {
-            code: 113,
-            stdout: String::new(),
-            stderr: "Could not find service".into(),
-        }]));
+        let s = supervisor(FakeExec::new(vec![print_not_loaded()]));
         assert_eq!(
             s.info().unwrap(),
             ServiceInfo {
@@ -396,12 +432,7 @@ mod tests {
 
     #[test]
     fn info_parses_pid_and_running_state() {
-        let dump = "com.dbtlr.norn.serve = {\n\tstate = running\n\tpid = 4242\n}";
-        let s = sup(FakeExec::new(vec![ExecResult {
-            code: 0,
-            stdout: dump.into(),
-            stderr: String::new(),
-        }]));
+        let s = supervisor(FakeExec::new(vec![print_running(4242)]));
         assert_eq!(
             s.info().unwrap(),
             ServiceInfo {
@@ -415,7 +446,7 @@ mod tests {
     #[test]
     fn info_loaded_but_not_running_has_no_pid() {
         let dump = "com.dbtlr.norn.serve = {\n\tstate = not running\n}";
-        let s = sup(FakeExec::new(vec![ExecResult {
+        let s = supervisor(FakeExec::new(vec![ExecResult {
             code: 0,
             stdout: dump.into(),
             stderr: String::new(),
@@ -428,5 +459,16 @@ mod tests {
                 pid: None
             }
         );
+    }
+
+    /// The captured stdout/stderr are load-bearing, not symmetry: stdout feeds
+    /// `parse_print` (info) and stderr feeds the failure message.
+    #[test]
+    fn exec_result_streams_are_consumed() {
+        let s = supervisor(FakeExec::new(vec![print_running(7)]));
+        assert_eq!(s.info().unwrap().pid, Some(7), "stdout drives info()");
+        let s = supervisor(FakeExec::new(vec![exec_fail(1, "the reason")]));
+        let err = s.stop().unwrap_err().to_string();
+        assert!(err.contains("the reason"), "stderr drives the error: {err}");
     }
 }
