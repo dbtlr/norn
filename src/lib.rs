@@ -123,6 +123,10 @@ pub fn cli_main() {
 ///   contradict the flag's intent (serve whatever the on-disk cache holds without
 ///   a refresh) and could return counts that differ from the direct path on a
 ///   stale cache. Direct honors it exactly.
+///
+/// Unix-only, like the routing seam that calls it: on non-Unix targets
+/// `try_route_read` is a compile-time Direct stub that consults nothing.
+#[cfg(unix)]
 fn routing_forced_direct(explicit_config: bool, no_cache_refresh: bool) -> bool {
     explicit_config || no_cache_refresh
 }
@@ -2015,7 +2019,7 @@ fn exit_code_for(index: &GraphIndex) -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::routing_forced_direct;
 
