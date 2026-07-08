@@ -145,14 +145,33 @@ impl GetOutput {
         let records = report
             .records
             .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .map(record_to_wire_json)
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             records,
             section_failures: report.section_failures.clone(),
             notes: report.notes.clone(),
         })
     }
+}
+
+/// One record as it travels on the `vault.get` WIRE: the full serialized
+/// [`ShowRecord`], EXCEPT that a record with NO frontmatter block
+/// (`frontmatter: None`) omits the `frontmatter` key entirely, while an empty
+/// `---\n---` block (`Some(Value::Null)`) keeps `"frontmatter": null`
+/// (NRN-222). Serde would collapse both `Option` states to JSON `null`, but the
+/// records renderer distinguishes them (`frontmatter  null` row vs no row), so
+/// the routed client — which re-renders from the wire value — needs the key
+/// presence to carry the distinction. The CLI `--format json` output is
+/// untouched (it serializes the record directly, conflating as before).
+pub(crate) fn record_to_wire_json(record: &crate::show::ShowRecord) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(record)?;
+    if record.frontmatter.is_none() {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("frontmatter");
+        }
+    }
+    Ok(v)
 }
 
 /// Build the MCP output envelope for `vault.get`: run the pure handler, project

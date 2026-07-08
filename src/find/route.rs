@@ -3,8 +3,9 @@
 //! `find` is routable byte-identically because the `vault.find` MCP tool's
 //! [`FindOutput`](crate::mcp::tools::find::FindOutput) carries everything the CLI
 //! renderers need: the `total`/`returned`/`truncated`/`starts_at` envelope
-//! (NRN-214) and, per document, the SAME projected JSON `find --format json`
-//! emits (`doc_to_json`). The client rebuilds a [`FindResult`] plus the parallel
+//! (NRN-214) and, per document, the projected JSON `find --format json` emits
+//! (`doc_to_wire_json` — `doc_to_json` plus the absent-vs-null frontmatter
+//! distinction). The client rebuilds a [`FindResult`] plus the parallel
 //! deep-fetch / raw-read vectors from that payload and renders it through the
 //! SAME `find::emit` seam the direct path uses, so routed and direct output are
 //! byte-for-byte equal.
@@ -138,10 +139,12 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        // A frontmatter-less document serializes as JSON `null`; normalize back
-        // to `None` (as show/route does) so the renderers see the same absence
-        // the direct path's `DocumentSummary` carries.
-        let frontmatter = obj.get("frontmatter").filter(|v| !v.is_null()).cloned();
+        // The wire keys the absent-vs-null frontmatter distinction on KEY
+        // presence (`doc_to_wire_json`, NRN-222): an absent key is a document
+        // with no frontmatter block (`None`); `"frontmatter": null` is an
+        // empty `---\n---` block (`Some(Value::Null)`), which the records
+        // renderer prints as a `frontmatter  null` row.
+        let frontmatter = obj.get("frontmatter").cloned();
         let body_text = obj
             .get("body")
             .and_then(Value::as_str)
@@ -280,7 +283,9 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                crate::find::render::doc_to_json(
+                // The REAL wire projection (what `vault.find` serializes),
+                // including the absent-vs-null frontmatter distinction.
+                crate::find::query::doc_to_wire_json(
                     d,
                     deep.get(i).and_then(|x| x.as_ref()),
                     raw.get(i).and_then(|x| x.as_deref()),
@@ -526,6 +531,33 @@ mod tests {
             truncated: false,
         };
         // Both the default projection and the explicit `.frontmatter` facet.
+        assert_round_trip(result.clone(), vec![], vec![], base_args());
+        let mut args = base_args();
+        args.col = vec![".frontmatter".into()];
+        assert_round_trip(result, vec![], vec![], args);
+    }
+
+    /// An EMPTY `---\n---` frontmatter block is `Some(Value::Null)` on the
+    /// direct path — a distinct state from a document with NO block (`None`).
+    /// The wire keeps them apart (`"frontmatter": null` vs an absent key), and
+    /// the round-trip must preserve the direct rendering: `--col .frontmatter
+    /// --format records` prints a `frontmatter  null` row for the empty block,
+    /// vs "(no matching fields)" for the absent one.
+    #[test]
+    fn round_trip_empty_frontmatter_block() {
+        let empty_block = DocumentSummary {
+            path: Utf8PathBuf::from("empty-block.md"),
+            stem: "empty-block".into(),
+            hash: "h".into(),
+            frontmatter: Some(Value::Null),
+            body_text: "body\n".into(),
+        };
+        let result = FindResult {
+            matches: vec![empty_block],
+            total: 1,
+            returned: 1,
+            truncated: false,
+        };
         assert_round_trip(result.clone(), vec![], vec![], base_args());
         let mut args = base_args();
         args.col = vec![".frontmatter".into()];

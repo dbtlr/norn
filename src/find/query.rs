@@ -127,6 +127,25 @@ pub fn query_with_envelope(
     args: &FindArgs,
     _alias_field: Option<&str>,
 ) -> Result<(Vec<serde_json::Value>, FindEnvelope)> {
+    query_with_envelope_via(cache, args, false)
+}
+
+/// The WIRE twin of [`query_with_envelope`], used by the `vault.find` MCP tool
+/// (NRN-222): same selection, same envelope, but each document is projected
+/// with [`doc_to_wire_json`] so the absent-vs-null frontmatter distinction
+/// survives the wire. The CLI JSON path is untouched.
+pub fn query_wire_with_envelope(
+    cache: &Cache,
+    args: &FindArgs,
+) -> Result<(Vec<serde_json::Value>, FindEnvelope)> {
+    query_with_envelope_via(cache, args, true)
+}
+
+fn query_with_envelope_via(
+    cache: &Cache,
+    args: &FindArgs,
+    wire: bool,
+) -> Result<(Vec<serde_json::Value>, FindEnvelope)> {
     let selection = select(cache, args)?;
     let documents = selection
         .result
@@ -134,13 +153,13 @@ pub fn query_with_envelope(
         .iter()
         .enumerate()
         .map(|(i, doc)| {
-            crate::find::render::doc_to_json(
-                doc,
-                selection.deep.get(i).and_then(|d| d.as_ref()),
-                selection.raw.get(i).and_then(|r| r.as_deref()),
-                &args.col,
-                args.all_cols,
-            )
+            let deep = selection.deep.get(i).and_then(|d| d.as_ref());
+            let raw = selection.raw.get(i).and_then(|r| r.as_deref());
+            if wire {
+                doc_to_wire_json(doc, deep, raw, &args.col, args.all_cols)
+            } else {
+                crate::find::render::doc_to_json(doc, deep, raw, &args.col, args.all_cols)
+            }
         })
         .collect();
     let envelope = FindEnvelope {
@@ -150,6 +169,30 @@ pub fn query_with_envelope(
         starts_at: args.paging.starts_at.max(1),
     };
     Ok((documents, envelope))
+}
+
+/// Per-document JSON as it travels on the `vault.find` WIRE: identical to
+/// [`crate::find::render::doc_to_json`] EXCEPT that a document with NO
+/// frontmatter block (`frontmatter: None`) omits the `frontmatter` key
+/// entirely, while an empty `---\n---` block (`Some(Value::Null)`) keeps
+/// `"frontmatter": null` (NRN-222). The CLI JSON conflates both states as
+/// `null` and is unchanged; the wire must keep them apart because the records
+/// renderer distinguishes them (`frontmatter  null` vs "(no matching fields)")
+/// and a routed result is re-rendered client-side from the wire value.
+pub(crate) fn doc_to_wire_json(
+    doc: &crate::core::DocumentSummary,
+    deep: Option<&DocumentDeep>,
+    raw: Option<&str>,
+    cols: &[String],
+    all_cols: bool,
+) -> serde_json::Value {
+    let mut v = crate::find::render::doc_to_json(doc, deep, raw, cols, all_cols);
+    if doc.frontmatter.is_none() {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("frontmatter");
+        }
+    }
+    v
 }
 
 /// The per-document JSON values without the envelope — a thin wrapper over

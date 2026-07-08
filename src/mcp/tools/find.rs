@@ -225,7 +225,11 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
         no_pager: false,
     };
 
-    let (documents, envelope) = crate::find::query::query_with_envelope(&cache, &args, None)?;
+    // The WIRE projection (NRN-222): identical per-document JSON to the CLI's
+    // `--format json` except that a document with NO frontmatter block omits
+    // the `frontmatter` key (an empty `---\n---` block keeps `"frontmatter":
+    // null`), so the routed client can rebuild the exact direct-path state.
+    let (documents, envelope) = crate::find::query::query_wire_with_envelope(&cache, &args)?;
     Ok(FindOutput {
         total: envelope.total,
         returned: envelope.returned,

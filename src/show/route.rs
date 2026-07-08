@@ -119,9 +119,12 @@ fn record_from_wire(v: &Value) -> Result<ShowRecord> {
             .get("document_hash")
             .and_then(Value::as_str)
             .map(str::to_string),
-        // `None` frontmatter serializes as JSON `null`; normalize it back so the
-        // re-serialized record and the record renderers see the same absence.
-        frontmatter: obj.get("frontmatter").filter(|v| !v.is_null()).cloned(),
+        // The wire keys the absent-vs-null frontmatter distinction on KEY
+        // presence (`record_to_wire_json`, NRN-222): an absent key is a record
+        // with no frontmatter block (`None`); `"frontmatter": null` is an empty
+        // `---\n---` block (`Some(Value::Null)`), which the records renderer
+        // prints as a `frontmatter  null` row.
+        frontmatter: obj.get("frontmatter").cloned(),
         headings: take_vec(obj, "headings")?,
         outgoing_links: take_vec(obj, "outgoing_links")?,
         unresolved_links: take_vec(obj, "unresolved_links")?,
@@ -176,14 +179,15 @@ mod tests {
 
     // ── Round-trip isomorphism (NRN-222, per the count template) ──────────────
 
-    /// Project a `ShowReport` to the `vault.get` wire envelope, exactly as
-    /// `mcp::tools::get::GetOutput::from_report` does (each record serialized in
-    /// full, plus notes), then serialize to the `structuredContent` value.
+    /// Project a `ShowReport` to the `vault.get` wire envelope, using the REAL
+    /// per-record wire projection (`record_to_wire_json` — what
+    /// `GetOutput::from_report` serializes, incl. the absent-vs-null
+    /// frontmatter distinction), plus notes, as the `structuredContent` value.
     fn to_wire(report: &ShowReport) -> Value {
         let records: Vec<Value> = report
             .records
             .iter()
-            .map(|r| serde_json::to_value(r).unwrap())
+            .map(|r| crate::mcp::tools::get::record_to_wire_json(r).unwrap())
             .collect();
         json!({
             "records": records,
@@ -309,6 +313,30 @@ mod tests {
             section_failures: vec![],
         };
         assert_round_trip(report, vec![]);
+        // The `.frontmatter` facet must keep printing "(no fields)" for an
+        // absent block after the round-trip.
+        let report = ShowReport {
+            records: vec![record("bare.md", None, None)],
+            notes: vec![],
+            section_failures: vec![],
+        };
+        assert_round_trip(report, vec![".frontmatter".into()]);
+    }
+
+    /// An EMPTY `---\n---` block is `Some(Value::Null)` — distinct from an
+    /// absent block (`None`). The wire keeps the two apart (`"frontmatter":
+    /// null` vs an absent key), so the `--col .frontmatter` records row
+    /// (`frontmatter  null`) survives the round-trip instead of collapsing to
+    /// "(no fields)".
+    #[test]
+    fn round_trip_empty_frontmatter_block() {
+        let make = || ShowReport {
+            records: vec![record("empty-block.md", Some(Value::Null), None)],
+            notes: vec![],
+            section_failures: vec![],
+        };
+        assert_round_trip(make(), vec![]);
+        assert_round_trip(make(), vec![".frontmatter".into()]);
     }
 
     #[test]
