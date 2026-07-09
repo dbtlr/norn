@@ -465,3 +465,136 @@ fn dry_run_writes_no_audit_events() {
         "dry-run (confirm:false) must persist no events-*.jsonl file"
     );
 }
+
+// ── NRN-221: `set`'s schema-refusal prose is now a coded structured refusal ────
+
+/// Seed a vault whose `.norn/config.yaml` declares `status` as a
+/// `required_frontmatter` field for `type: task` documents — the minimal schema
+/// needed to trigger `SetError::RequiredFieldRemoved` (code
+/// `required-field-removed`) from a `vault.set` call.
+fn seeded_vault_with_required_status() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-mcp-set-refusal-")
+        .tempdir()
+        .unwrap();
+    std::fs::write(
+        tmp.path().join("task.md"),
+        "---\ntype: task\nstatus: backlog\n---\nTask body\n",
+    )
+    .unwrap();
+    let config_dir = tmp.path().join(".norn");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.yaml"),
+        r#"
+validate:
+  rules:
+    - name: task-rule
+      match:
+        frontmatter:
+          type: task
+      required_frontmatter: [status]
+"#,
+    )
+    .unwrap();
+    tmp
+}
+
+/// NRN-221: a `vault.set` call that hits `set`'s schema-validation refusal
+/// (removing a `required_frontmatter` field without `force`) now returns the
+/// SAME structured coded envelope the `stale-document-hash` / CAS refusals do
+/// (NRN-220) — `isError:true` + `report.error.code` — instead of a bare MCP
+/// `Err` with the code laundered to prose. Mirrors
+/// `tests/mcp_edit.rs::vault_edit_expected_hash_cas`'s refusal assertions.
+#[test]
+fn confirm_schema_refusal_returns_coded_structured_error() {
+    let vault = seeded_vault_with_required_status();
+    prebuild_cache(&vault);
+
+    let mut child = Command::new(norn_bin())
+        .arg("--cwd")
+        .arg(vault.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("XDG_CACHE_HOME", vault.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", vault.path().join(".xdg-state"))
+        .spawn()
+        .expect("failed to spawn norn mcp");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not captured");
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "norn-set-refusal-client", "version": "0.0.1" }
+                }
+            })))
+            .unwrap();
+        // Removing a required field without `force` is a schema refusal
+        // (`SetError::RequiredFieldRemoved`).
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.set",
+                    "arguments": {
+                        "target": "task",
+                        "remove": ["status"],
+                        "confirm": true
+                    }
+                }
+            })))
+            .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait on norn mcp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "norn mcp exited non-zero ({})\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+
+    let responses: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let resp = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .unwrap_or_else(|| panic!("no tools/call response\nstdout: {stdout}\nstderr: {stderr}"));
+
+    assert_eq!(
+        resp["result"]["isError"],
+        serde_json::json!(true),
+        "a required-field removal must map to isError:true; got: {resp}"
+    );
+    let report = &resp["result"]["structuredContent"]["report"];
+    assert_eq!(
+        report["outcome"], "refused",
+        "schema refusal report outcome must be refused; got: {resp}"
+    );
+    assert_eq!(
+        report["error"]["code"], "required-field-removed",
+        "a consumer branches on the stable code, not the prose; got: {resp}"
+    );
+
+    assert_eq!(
+        disk_status(&vault),
+        "backlog",
+        "a refused vault.set call must leave the file on disk UNCHANGED"
+    );
+}
