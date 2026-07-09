@@ -105,8 +105,9 @@ pub fn handle_output(
 /// WITHOUT touching any file (and still refuses, via `Err`, when OLD is
 /// unresolvable).
 ///
-/// CONFIRM (`confirm`): same plan, but acquire the mutation lock, open a real
-/// event sink, and apply with `dry_run = false`.
+/// CONFIRM (`confirm`): acquire the mutation lock FIRST — before the index
+/// load — then build the same plan, open a real event sink, and apply with
+/// `dry_run = false`.
 pub fn handle(
     ctx: &VaultContext,
     p: RewriteWikilinkParams,
@@ -115,6 +116,17 @@ pub fn handle(
     use crate::migration_plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 
     let cwd = ctx.vault_root.clone();
+
+    // CONFIRM acquires the per-vault mutation lock BEFORE the graph-index
+    // read — matching `norn rewrite-wikilink` (main.rs), which locks before
+    // loading the graph index. The lock must span the index load + apply so a
+    // concurrent norn writer can't drift the vault in the read→apply window.
+    // The DRY-RUN path is read-only and takes NO lock.
+    let _mutation_lock = if p.confirm {
+        Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    } else {
+        None
+    };
 
     // Load the graph index honoring files.ignore, exactly like the CLI path.
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
@@ -160,8 +172,8 @@ pub fn handle(
         return Ok(report);
     }
 
-    // ── CONFIRM: acquire mutation lock, open real sink, apply ──────────────────
-    let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
+    // ── CONFIRM: the mutation lock was already acquired above, before the
+    // index load — open the real sink and apply.
 
     // Open a real, file-backed event sink — the same audit trail
     // `norn rewrite-wikilink` writes via `open_event_sink`. `apply_migration_plan`

@@ -236,6 +236,18 @@ pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<
 pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
+    // CONFIRM acquires the per-vault mutation lock BEFORE the preflight read —
+    // matching `norn set` (main.rs), which locks before `preflight_and_plan`.
+    // The lock must span the index load + plan + apply so a concurrent norn
+    // writer can't drift the file in the read→apply window and slip past both
+    // the plan-time doc-hash CAS and the applier's index-snapshot hash check.
+    // The DRY-RUN path is read-only and takes NO lock.
+    let _mutation_lock = if p.confirm {
+        Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    } else {
+        None
+    };
+
     // ONE query_cache call serves both needs: the graph index (honoring
     // files.ignore, applied at cache-build time) and the cache handle for target
     // resolution come from the same snapshot — the pipeline (ground-shift,
@@ -306,8 +318,8 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         return Ok(build_report(&outcome, false, ""));
     }
 
-    // CONFIRM: acquire the per-vault mutation lock, then apply.
-    let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
+    // CONFIRM: the mutation lock was already acquired above, before the
+    // preflight read — apply now.
 
     // Open a REAL, file-backed event sink on the apply path — the same audit
     // trail `norn set --yes` writes (lifecycle → op_planned → action → finished).

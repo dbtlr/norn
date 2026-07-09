@@ -118,8 +118,9 @@ pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<MutationResul
 /// **DRY-RUN (`!confirm`):** no lock, discard sink, applier in `dry_run = true`
 /// mode — forecasts the apply (expansion + preflight) without writing.
 ///
-/// **CONFIRM (`confirm`):** acquire mutation lock, open real event sink, apply
-/// with `dry_run = false` — the same path `norn apply --yes` takes.
+/// **CONFIRM (`confirm`):** acquire the mutation lock BEFORE loading the graph
+/// index, open a real event sink, apply with `dry_run = false` — the same
+/// path `norn apply --yes` takes.
 pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report::ApplyReport> {
     use crate::applier::{apply_migration_plan, ApplyContext};
     use crate::migration_plan::MigrationPlan;
@@ -144,11 +145,22 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
         );
     }
 
+    let dry_run = !p.confirm;
+
+    // CONFIRM acquires the per-vault mutation lock BEFORE the graph-index
+    // read — matching `norn apply` (main.rs), which locks before loading the
+    // graph index. The lock must span the index load + apply so a concurrent
+    // norn writer can't drift the vault in the read→apply window. The
+    // DRY-RUN path is read-only and takes NO lock.
+    let _mutation_lock = if dry_run {
+        None
+    } else {
+        Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    };
+
     // ── Step 3: load graph index (same entry point apply uses) ────────────────
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
     let index = ctx.load_graph_index()?;
-
-    let dry_run = !p.confirm;
 
     let apply_ctx = ApplyContext {
         dry_run,
@@ -171,8 +183,8 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
         return Ok(report);
     }
 
-    // ── CONFIRM: acquire mutation lock, open real sink, apply ──────────────────
-    let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
+    // ── CONFIRM: the mutation lock was already acquired above, before the
+    // index load — open the real sink and apply.
 
     // Open a real, file-backed event sink — the same audit trail `norn apply`
     // writes. `apply_migration_plan` emits the per-op spans and action events

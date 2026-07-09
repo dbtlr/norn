@@ -115,13 +115,28 @@ pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<MutationResu
 /// `dry_run = true`, no lock, no real sink. The applier's dry-run forecasts the
 /// cascade WITHOUT removing the file.
 ///
-/// CONFIRM (`confirm`): same plan, but acquire the mutation lock, open a real
-/// event sink, and apply with `dry_run = false`.
+/// CONFIRM (`confirm`): acquire the mutation lock FIRST — before the index load
+/// and preflight — then run the same plan, open a real event sink, and apply
+/// with `dry_run = false`.
 pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report::ApplyReport> {
     use crate::applier::{apply_migration_plan, ApplyContext};
     use crate::migration_plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 
     let cwd = ctx.vault_root.clone();
+
+    // The MCP contract: `confirm` drives apply vs dry-run.
+    let dry_run = !p.confirm;
+
+    // CONFIRM acquires the per-vault mutation lock BEFORE the preflight read —
+    // matching `norn delete` (main.rs), which locks before loading the graph
+    // index. The lock must span the index load + preflight + apply so a
+    // concurrent norn writer can't drift the vault in the read→apply window.
+    // The DRY-RUN path is read-only and takes NO lock.
+    let _mutation_lock = if dry_run {
+        None
+    } else {
+        Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    };
 
     // Load the graph index honoring files.ignore, exactly like the CLI delete path.
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
@@ -162,9 +177,6 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
         plan_footnote: None,
     };
 
-    // The MCP contract: `confirm` drives apply vs dry-run.
-    let dry_run = !p.confirm;
-
     let apply_ctx = ApplyContext {
         dry_run,
         parents: false,
@@ -187,8 +199,8 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
         return Ok(report);
     }
 
-    // ── CONFIRM: acquire mutation lock, open real sink, apply ──────────────────
-    let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
+    // ── CONFIRM: the mutation lock was already acquired above, before the
+    // index load — open the real sink and apply.
 
     // Open a real, file-backed event sink — the same audit trail `norn delete`
     // writes via `open_event_sink`. `apply_migration_plan` emits the per-op
