@@ -352,6 +352,15 @@ fn execute_routed_call<T>(
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
+    // A committing mutation must use `AcceptWithPayload`: under `FallBackDirect`
+    // a clean daemon-side refusal (`isError: true`) surfaces as a post-send
+    // `Err`, which Commit would misreport as a false "may have applied" alarm
+    // instead of rendering the refusal envelope the payload carries.
+    debug_assert!(
+        !(on_tool_error == crate::service::OnToolError::FallBackDirect
+            && after_send == FallbackAfterSend::Commit),
+        "a committing routed mutation must use OnToolError::AcceptWithPayload"
+    );
     let structured =
         match client.call_tool_structured_phased(canonical, tool, arguments, on_tool_error) {
             Ok(structured) => structured,
@@ -388,7 +397,10 @@ fn execute_routed_call<T>(
     // byte-identical error the direct gate would (exit 1 at the top level), NOT a
     // fall-back to Direct (which would re-execute the read). Forward any operator
     // notes FIRST so the stderr ordering matches the direct path, where the cache
-    // open prints its contention note before the gate error (NRN-215).
+    // open prints its contention note before the gate error (NRN-215). Ignoring
+    // `after_send` here is safe under any policy: the gate is pre-execution
+    // validation, so a refusal is proof the daemon did NOT mutate — surfacing
+    // the byte-identical refusal (not the uncertainty error) is always correct.
     if let Some(message) = crate::grammar::dynamic_field_refusal_message(&structured) {
         for note in crate::mcp::notes::operator_notes_from_structured(&structured) {
             eprintln!("{note}");
@@ -488,9 +500,29 @@ fn route_read<T>(
 /// so the seam surfaces an explicit uncertainty error (exit 1) rather than
 /// risking a double-apply.
 ///
+/// Mutation callers pass [`crate::service::OnToolError::AcceptWithPayload`]:
+/// the NRN-220 refusal envelopes ride `structuredContent` and flow through
+/// `reconstruct` into the CLI's refusal rendering, whereas `FallBackDirect`
+/// would turn every clean daemon-side refusal (`isError: true` → a post-send
+/// `Err`) into a false "may have applied" alarm under Commit (debug-asserted
+/// in `execute_routed_call`).
+///
 /// `pub` so it is part of the routing seam a future integration test (and the
 /// mutation commands wired in NRN-229+) can reach; no production command routes
-/// through it yet, so it is exercised today by the in-crate routing tests.
+/// through it yet, so it is exercised today by the in-crate routing tests. Two
+/// notes for the NRN-229 wiring:
+///
+/// - Like the whole seam, this is `cfg(unix)`-only (the daemon rides UDS). A
+///   cfg-agnostic caller must add a `#[cfg(not(unix))]` stub returning `None`,
+///   mirroring `try_route_read`'s Direct stub — always-Direct is safe there
+///   because no daemon can exist to have half-applied anything.
+/// - The composed path here (well-known-socket probe + policy selection) is
+///   deliberately untested: the probe reads the process-global
+///   `XDG_CACHE_HOME`, which in-process tests cannot set without racing other
+///   tests (the same rule the service-module tests follow). The in-crate seam
+///   tests inject a stub `ServiceClient` into `execute_routed_call` instead;
+///   the probe half is covered by the e2e `serve_*_routing` suites and will be
+///   for mutations once NRN-229 gives them a routable command.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub fn route_call<T>(

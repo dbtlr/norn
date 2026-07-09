@@ -1073,6 +1073,11 @@ impl ServiceClient {
             "tools/call",
             serde_json::json!({ "name": tool, "arguments": arguments }),
         );
+        // The WRITE itself is tagged post-send even though, at today's newline
+        // framing, a write failure provably means the daemon never parsed the
+        // frame. The tag deliberately does not depend on that framing invariant:
+        // mutation safety must not couple to a separate component's parser
+        // behavior, so the conservative tag holds across daemon changes.
         write_json_line(&stream, &call).map_err(CallToolError::post_send)?;
         let resp = read_rpc_response(&mut reader, 2, deadline).map_err(CallToolError::post_send)?;
         if let Some(err) = resp.get("error") {
