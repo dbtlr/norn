@@ -363,10 +363,16 @@ fn execute_routed_call<T>(
                 // Every other case — any `Fallback` failure, or a PRE-send
                 // failure in either policy (the tool never ran) — falls back to
                 // Direct exactly like a read, with the byte-identical verbose note.
-                if after_send == FallbackAfterSend::Commit
-                    && error.phase == crate::service::CallPhase::PostSend
-                {
-                    return Some(Err(post_send_uncertainty_error(tool, &error.source)));
+                // Exhaustive match, NOT `==`: a future policy variant (the
+                // NRN-151/CAS retry seam) must fail to compile here rather than
+                // silently falling through to an unguarded Direct re-run.
+                match after_send {
+                    FallbackAfterSend::Commit => {
+                        if error.phase == crate::service::CallPhase::PostSend {
+                            return Some(Err(post_send_uncertainty_error(tool, error.source)));
+                        }
+                    }
+                    FallbackAfterSend::Fallback => {}
                 }
                 if verbose {
                     eprintln!(
@@ -392,6 +398,16 @@ fn execute_routed_call<T>(
     let value = match reconstruct(&structured) {
         Ok(value) => value,
         Err(error) => {
+            // The call itself SUCCEEDED — the daemon executed the tool — so an
+            // unreadable envelope here is post-send uncertainty for a committing
+            // mutation: falling back would re-run an already-applied change.
+            // Same exhaustive-match rule as the failure branch above.
+            match after_send {
+                FallbackAfterSend::Commit => {
+                    return Some(Err(post_send_uncertainty_error(tool, error)));
+                }
+                FallbackAfterSend::Fallback => {}
+            }
             if verbose {
                 eprintln!(
                     "norn: routed {tool} envelope unreadable ({error}); using direct execution"
@@ -423,7 +439,7 @@ fn execute_routed_call<T>(
 /// 1 at the top level — the "vault may be partially mutated" code
 /// (`docs/errors.md`), distinct from a clean pre-flight refusal (exit 2).
 #[cfg(unix)]
-fn post_send_uncertainty_error(tool: &str, source: &anyhow::Error) -> anyhow::Error {
+fn post_send_uncertainty_error(tool: &str, source: anyhow::Error) -> anyhow::Error {
     anyhow::anyhow!(
         "routed {tool} failed after the request was sent ({source}); the daemon may have \
          applied the change. Inspect the target (e.g. `norn get <target>`) or re-run with \
@@ -2276,15 +2292,26 @@ mod tests {
         listener
     }
 
-    /// Spawn a stub daemon that drives the request wire to a chosen failure
-    /// point, then drops the connection:
-    /// - `after_call == false` (PRE-send): read `hello`, then drop without a
-    ///   `ready` frame — the client fails at the preamble, before the
-    ///   `tools/call` frame is ever written.
-    /// - `after_call == true` (POST-send): complete `hello`/`ready` and MCP
-    ///   `initialize`, read the `tools/call`, then drop WITHOUT a response — the
-    ///   request has crossed to the daemon, but no result comes back.
-    fn spawn_stub(listener: UnixListener, after_call: bool) -> thread::JoinHandle<()> {
+    /// How far the stub daemon drives the request wire before dropping (or
+    /// completing) the connection.
+    enum Stub {
+        /// PRE-send: read `hello`, then drop without a `ready` frame — the
+        /// client fails at the preamble, before the `tools/call` frame is ever
+        /// written.
+        DropBeforeReady,
+        /// POST-send: complete `hello`/`ready` and MCP `initialize`, read the
+        /// `tools/call`, then drop WITHOUT a response — the request has crossed
+        /// to the daemon, but no result comes back.
+        DropAfterCall,
+        /// Success: like `DropAfterCall`, but answer the `tools/call` with a
+        /// valid success envelope carrying `structuredContent` — the daemon
+        /// EXECUTED the tool; any later failure (e.g. `reconstruct`) is
+        /// post-send by construction.
+        RespondOk,
+    }
+
+    /// Spawn a stub daemon behaving per [`Stub`].
+    fn spawn_stub(listener: UnixListener, mode: Stub) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let (conn, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(conn.try_clone().unwrap());
@@ -2292,7 +2319,7 @@ mod tests {
 
             let mut hello = String::new();
             reader.read_line(&mut hello).unwrap();
-            if !after_call {
+            if matches!(mode, Stub::DropBeforeReady) {
                 // Pre-send: never answer `ready`. Dropping both fds (w now, the
                 // reader clone at return) gives the client a prompt EOF.
                 return;
@@ -2318,10 +2345,28 @@ mod tests {
             .unwrap();
             w.flush().unwrap();
 
-            // Read the tools/call (so the client's write completes), then drop
-            // without responding — the post-send failure.
+            // Read the tools/call (so the client's write completes)...
             let mut call = String::new();
             reader.read_line(&mut call).unwrap();
+            if matches!(mode, Stub::DropAfterCall) {
+                // ...then drop without responding — the post-send failure.
+                return;
+            }
+            // ...and answer it with a valid success envelope (`RespondOk`).
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2,
+                    "result": {
+                        "content": [{"type": "text", "text": "{\"ok\":true}"}],
+                        "structuredContent": {"ok": true},
+                        "isError": false,
+                    }
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
         })
     }
 
@@ -2357,7 +2402,7 @@ mod tests {
     fn commit_falls_back_to_direct_on_a_pre_send_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
-        let stub = spawn_stub(bind_trusted(&path), false);
+        let stub = spawn_stub(bind_trusted(&path), Stub::DropBeforeReady);
 
         let client = ServiceClient {
             socket_path: path.clone(),
@@ -2388,7 +2433,7 @@ mod tests {
     fn commit_surfaces_uncertainty_on_a_post_send_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
-        let stub = spawn_stub(bind_trusted(&path), true);
+        let stub = spawn_stub(bind_trusted(&path), Stub::DropAfterCall);
 
         let client = ServiceClient {
             socket_path: path.clone(),
@@ -2429,7 +2474,7 @@ mod tests {
     fn dry_run_fallback_is_silent_on_a_post_send_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
-        let stub = spawn_stub(bind_trusted(&path), true);
+        let stub = spawn_stub(bind_trusted(&path), Stub::DropAfterCall);
 
         let client = ServiceClient {
             socket_path: path.clone(),
@@ -2452,6 +2497,74 @@ mod tests {
         stub.join().unwrap();
     }
 
+    /// Commit mode, `reconstruct` failure AFTER a successful call: the daemon
+    /// EXECUTED the tool (the envelope came back fine — this process just can't
+    /// read it), so falling back to Direct would double-apply. The seam must
+    /// surface the same uncertainty error as a dropped response, not `None`.
+    #[test]
+    fn commit_surfaces_uncertainty_on_a_reconstruct_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
+        let stub = spawn_stub(bind_trusted(&path), Stub::RespondOk);
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let out = execute_routed_call(
+            Utf8Path::new("/vaults/atlas"),
+            &client,
+            "vault.set",
+            serde_json::json!({}),
+            OnToolError::AcceptWithPayload,
+            FallbackAfterSend::Commit,
+            false,
+            |_| -> Result<()> { Err(anyhow::anyhow!("envelope shape mismatch")) },
+            emit_never,
+        );
+        let result = out.expect("Commit must NOT fall back on a reconstruct failure (Some)");
+        let error = result.expect_err("a post-success reconstruct failure is an error");
+        let message = format!("{error}");
+        assert!(
+            message.contains("the daemon may have applied the change"),
+            "the error names the uncertainty; got: {message}"
+        );
+        assert!(
+            message.contains("--dry-run") && message.contains("norn get"),
+            "the error names the inspect / --dry-run remedy; got: {message}"
+        );
+        stub.join().unwrap();
+    }
+
+    /// Fallback mode (a routed dry-run), the SAME post-success `reconstruct`
+    /// failure: a dry-run writes nothing, so the seam keeps today's silent
+    /// fall-back to Direct (`None`).
+    #[test]
+    fn dry_run_fallback_is_silent_on_a_reconstruct_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
+        let stub = spawn_stub(bind_trusted(&path), Stub::RespondOk);
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let out = execute_routed_call(
+            Utf8Path::new("/vaults/atlas"),
+            &client,
+            "vault.set",
+            serde_json::json!({}),
+            OnToolError::AcceptWithPayload,
+            FallbackAfterSend::Fallback,
+            false,
+            |_| -> Result<()> { Err(anyhow::anyhow!("envelope shape mismatch")) },
+            emit_never,
+        );
+        assert!(
+            out.is_none(),
+            "a dry-run (Fallback) reconstruct failure must silently fall back to Direct (None)"
+        );
+        stub.join().unwrap();
+    }
+
     /// The stub's PRE-send drop really does fail the client before the tool call
     /// is sent — proven at the phase-tagged layer so the fallback tests above
     /// can't pass on a mis-tagged phase. (POST-send tagging is proven by the
@@ -2460,7 +2573,7 @@ mod tests {
     fn stub_pre_send_drop_is_tagged_pre_send() {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
-        let stub = spawn_stub(bind_trusted(&path), false);
+        let stub = spawn_stub(bind_trusted(&path), Stub::DropBeforeReady);
 
         let client = ServiceClient {
             socket_path: path.clone(),
