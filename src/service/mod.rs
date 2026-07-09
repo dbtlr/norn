@@ -1230,23 +1230,25 @@ fn read_rpc_response<R: std::io::BufRead>(
     anyhow::bail!("no JSON-RPC response for request {id}")
 }
 
+/// Bind a stub listener and pin the socket to 0600, so the request path's
+/// F4 trust gate ([`socket_is_trusted`]) accepts it regardless of the ambient
+/// umask (which could otherwise leave it group/other-writable). Shared by this
+/// module's request-path tests and the crate-root routing-seam tests (NRN-228)
+/// — hence hoisted out of the inner `tests` module.
+#[cfg(all(test, unix))]
+pub(crate) fn bind_trusted(path: &Utf8Path) -> std::os::unix::net::UnixListener {
+    use std::os::unix::fs::PermissionsExt;
+    let listener = std::os::unix::net::UnixListener::bind(path.as_std_path()).unwrap();
+    std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    listener
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
     use std::thread;
-
-    /// Bind a stub listener and pin the socket to 0600, so the request path's
-    /// F4 trust gate (`socket_is_trusted`) accepts it regardless of the ambient
-    /// umask (which could otherwise leave it group/other-writable).
-    fn bind_trusted(path: &Utf8PathBuf) -> UnixListener {
-        use std::os::unix::fs::PermissionsExt;
-        let listener = UnixListener::bind(path).unwrap();
-        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600))
-            .unwrap();
-        listener
-    }
 
     /// The host socket path is deterministic (same process env => same
     /// answer every call) and lands at the well-known `norn/run/norn.sock`

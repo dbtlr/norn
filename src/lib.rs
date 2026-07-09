@@ -2284,7 +2284,7 @@ fn exit_code_for(index: &GraphIndex) -> i32 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{after_send_for, execute_routed_call, routing_forced_direct, FallbackAfterSend};
-    use crate::service::{CallPhase, OnToolError, ServiceClient, CONTROL_PROTOCOL};
+    use crate::service::{bind_trusted, CallPhase, OnToolError, ServiceClient, CONTROL_PROTOCOL};
     use anyhow::Result;
     use camino::{Utf8Path, Utf8PathBuf};
     use std::io::{BufRead, BufReader, Write};
@@ -2315,16 +2315,6 @@ mod tests {
     // share once a daemon is proven live) against a stub UDS daemon on a temp
     // socket, so the send-commit policy is observed end-to-end without touching
     // the process-global env the well-known-socket probe reads.
-
-    /// Bind a stub listener and pin it to 0600 so the request path's F4 trust
-    /// gate (`socket_is_trusted`) accepts it regardless of the ambient umask.
-    fn bind_trusted(path: &Utf8Path) -> UnixListener {
-        use std::os::unix::fs::PermissionsExt;
-        let listener = UnixListener::bind(path.as_std_path()).unwrap();
-        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600))
-            .unwrap();
-        listener
-    }
 
     /// How far the stub daemon drives the request wire before dropping (or
     /// completing) the connection.
