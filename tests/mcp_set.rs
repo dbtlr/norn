@@ -598,3 +598,104 @@ fn confirm_schema_refusal_returns_coded_structured_error() {
         "a refused vault.set call must leave the file on disk UNCHANGED"
     );
 }
+
+/// NRN-221: a DRY-RUN (`confirm` omitted) `vault.set` call that forecasts a
+/// schema refusal carries the same structured `outcome: "refused"` report +
+/// `error.code` but stays `isError: false` — converging on the edit/new
+/// dry-run-refusal contract (NRN-220): an SDK that raises on `isError` must
+/// not throw on a preview. Previously this was a bare JSON-RPC `Err`.
+#[test]
+fn dry_run_schema_refusal_is_structured_but_not_is_error() {
+    let vault = seeded_vault_with_required_status();
+    prebuild_cache(&vault);
+
+    let mut child = Command::new(norn_bin())
+        .arg("--cwd")
+        .arg(vault.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("XDG_CACHE_HOME", vault.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", vault.path().join(".xdg-state"))
+        .spawn()
+        .expect("failed to spawn norn mcp");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not captured");
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "norn-set-refusal-client", "version": "0.0.1" }
+                }
+            })))
+            .unwrap();
+        // `confirm` omitted → dry-run; the required-field removal is still
+        // refused at preflight, but as a forecast, not an error.
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.set",
+                    "arguments": {
+                        "target": "task",
+                        "remove": ["status"]
+                    }
+                }
+            })))
+            .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("wait on norn mcp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "norn mcp exited non-zero ({})\nstdout: {}\nstderr: {}",
+        output.status,
+        stdout,
+        stderr
+    );
+
+    let responses: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let resp = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .unwrap_or_else(|| panic!("no tools/call response\nstdout: {stdout}\nstderr: {stderr}"));
+
+    assert!(
+        resp.get("error").is_none(),
+        "a dry-run refusal forecast must not be a JSON-RPC error; got: {resp}"
+    );
+    assert_ne!(
+        resp["result"]["isError"],
+        serde_json::json!(true),
+        "a dry-run refusal forecast must stay isError:false; got: {resp}"
+    );
+    let report = &resp["result"]["structuredContent"]["report"];
+    assert_eq!(
+        report["outcome"], "refused",
+        "the forecast report outcome must be refused; got: {resp}"
+    );
+    assert_eq!(
+        report["error"]["code"], "required-field-removed",
+        "the forecast carries the stable code; got: {resp}"
+    );
+
+    assert_eq!(
+        disk_status(&vault),
+        "backlog",
+        "a dry-run refusal forecast must leave the file on disk UNCHANGED"
+    );
+}
