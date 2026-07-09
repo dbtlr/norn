@@ -49,17 +49,18 @@ pub(crate) fn acquire_mutation_lock(cwd: &Utf8Path) -> anyhow::Result<Option<Mut
 /// (`set`/`edit`/`new`) can raise — the rich apply-time
 /// [`ApplyError`](crate::standards::apply::ApplyError) (CAS / precondition), a
 /// [`ContainmentError`](crate::standards::apply::ContainmentError), the `edit`
-/// anchor/CAS family ([`EditError`](crate::edit::transform::EditError)), and
-/// `vault.new`'s [`PreflightError`](crate::new::validate::PreflightError). Returns
-/// `None` for everything else — plain-prose validation errors, IO, internal
+/// anchor/CAS family ([`EditError`](crate::edit::transform::EditError)),
+/// `vault.new`'s [`PreflightError`](crate::new::validate::PreflightError), and
+/// `vault.set`'s schema/argument-refusal family
+/// ([`SetError`](crate::set::error::SetError), NRN-221). Returns `None` for
+/// everything else — IO, cache corruption, and other genuinely internal
 /// failures — so those still propagate as a bare MCP `Err` rather than being
 /// laundered into a misleading `internal-error` structured refusal.
 ///
 /// This is the deliberate counterpart to
 /// [`ApplyError::from_anyhow`](crate::apply_report::ApplyError::from_anyhow),
 /// which ALWAYS produces an envelope (falling back to `internal-error`): here a
-/// non-refusal must stay a non-refusal. `set`'s schema-validation prose is
-/// intentionally in the `None` bucket until it is coded (NRN-221).
+/// non-refusal must stay a non-refusal.
 pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_report::ApplyError> {
     use crate::apply_report::ApplyError as Envelope;
     use crate::standards::apply::{ApplyError as RichApplyError, ContainmentError};
@@ -82,6 +83,16 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
             code: pf.code().to_string(),
             message: pf.to_string(),
             path: pf.path(),
+        });
+    }
+    if let Some(se) = e.downcast_ref::<crate::set::error::SetError>() {
+        // No SetError variant resolves a vault-relative document path — the
+        // offending identifier is a field name or a raw (possibly unresolved)
+        // target token, not a path the envelope can name.
+        return Some(Envelope {
+            code: se.code().to_string(),
+            message: se.to_string(),
+            path: None,
         });
     }
     None
@@ -182,13 +193,31 @@ mod refusal_tests {
         assert_eq!(env.path.as_deref(), Some("x.md"));
     }
 
-    /// THE load-bearing invariant (NRN-220/221): an UNRECOGNIZED error — e.g.
-    /// `set`'s still-uncoded schema-validation prose — returns `None`, so it stays
-    /// a bare MCP `Err` and is NOT laundered into a misleading `internal-error`
-    /// structured refusal. This is what keeps the deferred `set` scope honest.
+    /// `vault.set`'s schema/argument-refusal family (`SetError`, NRN-221) is
+    /// recognized with its code. This is the behavior change NRN-221 makes: a
+    /// `set` schema refusal used to fall into the `None` bucket (see the git
+    /// history of this test) and is now a structured, coded refusal like
+    /// `edit`/`new`.
+    #[test]
+    fn set_error_yields_its_code() {
+        let e: anyhow::Error = crate::set::error::SetError::ValueNotAllowed {
+            field: "status".into(),
+            value: "bogus".into(),
+            allowed: "backlog, done".into(),
+        }
+        .into();
+        let env = refusal_from_error(&e).expect("a SetError is a recognized refusal");
+        assert_eq!(env.code, "value-not-allowed");
+        assert_eq!(env.path, None);
+    }
+
+    /// THE load-bearing invariant (NRN-220/221): an UNRECOGNIZED error — an
+    /// opaque anyhow-wrapped string that matches none of the typed refusal
+    /// families above — returns `None`, so it stays a bare MCP `Err` and is NOT
+    /// laundered into a misleading `internal-error` structured refusal.
     #[test]
     fn unrecognized_prose_error_is_not_a_refusal() {
-        let e = anyhow::anyhow!("field 'status' is not one of the allowed values");
+        let e = anyhow::anyhow!("some genuinely internal failure with no typed home");
         assert!(
             refusal_from_error(&e).is_none(),
             "uncoded prose must propagate as a bare Err, not a laundered refusal"
