@@ -6,6 +6,38 @@ use std::time::Duration;
 
 pub const MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Test-only override for the mutation-lock acquire timeout, in milliseconds.
+/// Lets contention tests hit `CacheError::MutationLockTimeout` in ~100–200ms
+/// instead of stalling the suite the full 5s per contended acquire. DEBUG
+/// BUILDS ONLY: the env read is compiled out of release builds (see
+/// [`mutation_lock_timeout`]), so an inherited value in a production
+/// environment (a dev shell, a baked plist env) can never shrink the real 5s
+/// budget. Same pattern as the cache write lock's `NORN_CACHE_LOCK_TIMEOUT_MS`
+/// (src/cache/lock.rs).
+#[cfg(debug_assertions)]
+const MUTATION_LOCK_TIMEOUT_ENV: &str = "NORN_MUTATION_LOCK_TIMEOUT_MS";
+
+/// The mutation-lock acquire timeout used by every mutating command surface.
+///
+/// **Release builds always return [`MUTATION_LOCK_TIMEOUT`] (5s)** — the env
+/// read below is `#[cfg(debug_assertions)]`, compiled out entirely, so no
+/// environment can alter the production timeout. Debug builds (what
+/// `cargo test` builds and what its integration tests spawn) honor
+/// `NORN_MUTATION_LOCK_TIMEOUT_MS` when it parses to a positive integer, read
+/// at every acquire (not cached) so a test child process scopes the override
+/// to its own environment.
+fn mutation_lock_timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var(MUTATION_LOCK_TIMEOUT_ENV) {
+        if let Ok(ms) = raw.parse::<u64>() {
+            if ms > 0 {
+                return Duration::from_millis(ms);
+            }
+        }
+    }
+    MUTATION_LOCK_TIMEOUT
+}
+
 #[derive(Debug)]
 pub struct MutationLock {
     _file: std::fs::File,
@@ -16,7 +48,7 @@ impl MutationLock {
         state_dir: &Utf8Path,
         is_apply: bool,
     ) -> Result<Option<Self>, CacheError> {
-        Self::acquire_with_timeout(state_dir, is_apply, MUTATION_LOCK_TIMEOUT)
+        Self::acquire_with_timeout(state_dir, is_apply, mutation_lock_timeout())
     }
 
     fn acquire_with_timeout(
