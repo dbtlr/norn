@@ -191,13 +191,23 @@ pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<
 ///   4. `render_json(plan, applied=false, trace_id="")` — no lock, no apply.
 ///
 /// CONFIRM (`confirm`):
-///   1–3. Same.
-///   4. Acquire mutation lock.
-///   5. Open real event sink via `open_mutation_event_sink`, emit lifecycle events.
-///   6. Build single-change `RepairPlan`, apply via `apply_repair_plan_with_context`.
-///   7. `render_json(plan, applied=true, trace_id)`.
+///   0. Acquire the mutation lock FIRST — before config/index load, preflight,
+///      or `build_plan` — so a concurrent norn writer can't drift the vault in
+///      the read→apply window.
+///   1–3. Same steps as DRY-RUN, now lock-held.
+///   4. Open real event sink via `open_mutation_event_sink`, emit lifecycle events.
+///   5. Build single-change `RepairPlan`, apply via `apply_repair_plan_with_context`.
+///   6. `render_json(plan, applied=true, trace_id)`.
 pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     let cwd = ctx.vault_root.clone();
+
+    // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
+    // See `crate::mcp::mutate::acquire_mutation_lock` for the invariant.
+    let _mutation_lock = if p.confirm {
+        Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    } else {
+        None
+    };
 
     // ── Step 1: Load config + graph index ─────────────────────────────────────
     // `preflight_and_plan` does this internally; we replicate it so we can
@@ -310,10 +320,8 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("render_json: {e}"));
     }
 
-    // ── CONFIRM: acquire mutation lock, open sink, apply ───────────────────────
-
-    // Acquire mutation lock — same pattern as `Command::New` in main.rs.
-    let _mutation_lock = crate::mcp::mutate::acquire_mutation_lock(&cwd)?;
+    // ── CONFIRM: the mutation lock was already acquired above, before the
+    // config/index load — open the real sink and apply.
 
     // Open a real, file-backed event sink — the same audit trail `norn new --yes`
     // writes via `apply_and_render` → `open_event_sink`. The MCP analogue is

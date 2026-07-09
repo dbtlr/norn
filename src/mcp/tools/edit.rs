@@ -123,12 +123,9 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
         anyhow::bail!("edits array is empty");
     }
 
-    // CONFIRM acquires the per-vault mutation lock BEFORE the preflight read —
-    // matching `norn edit` (main.rs), which locks before `preflight_and_plan`.
-    // The lock must span the body read + transform + apply so a concurrent norn
-    // writer can't drift the file in the read→apply window and slip past both
-    // the `expected_hash` CAS and the applier's index-snapshot hash check. The
-    // DRY-RUN path is read-only and takes NO lock.
+    // CONFIRM locks BEFORE any read that feeds the write (NRN-99); dry-run
+    // never locks. See `crate::mcp::mutate::acquire_mutation_lock` for the
+    // invariant.
     let _mutation_lock = if p.confirm {
         Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
     } else {

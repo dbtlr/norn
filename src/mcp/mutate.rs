@@ -20,10 +20,22 @@ use camino::Utf8Path;
 
 /// Acquire the per-vault mutation lock on an MCP mutation's CONFIRM/apply path.
 ///
-/// Sweeps stale pending markers, then acquires the lock with `is_apply = true` —
-/// every MCP mutation reaches this only after its dry-run early-return, so the
-/// apply is always real. Returns the RAII guard the caller must hold for the
-/// duration of the apply; a timeout or lock error becomes an `anyhow` error.
+/// **THE ordering invariant (NRN-99 / NRN-106), canonical statement:** on
+/// `confirm`, every MCP mutation tool acquires this lock BEFORE any read that
+/// feeds the write — the graph-index load, the query-cache open, preflight,
+/// and plan synthesis all run lock-held — so a concurrent norn writer cannot
+/// drift a file in the read→apply window and slip past both the plan-time
+/// hash checks and the applier's index-snapshot check. Dry-run
+/// (`confirm: false`) NEVER locks: it is read-only by contract. Each handler
+/// guards with `if p.confirm { Some(acquire_mutation_lock(..)?) } else { None }`
+/// at the top of its confirm path, mirroring the CLI arms in `main.rs`, which
+/// lock before their cache load. Cheap, read-free argument validation (plan
+/// parsing, schema-version checks, param-shape refusals) stays BEFORE the
+/// lock so malformed input never contends.
+///
+/// Sweeps stale pending markers, then acquires the lock with `is_apply = true`.
+/// Returns the RAII guard the caller must hold for the duration of the apply;
+/// a timeout or lock error becomes an `anyhow` error.
 ///
 /// This is the MCP analogue of the CLI's lock block in `main.rs`, which differs
 /// deliberately: the CLI maps a timeout to exit code 2 + a stderr line, whereas
@@ -147,6 +159,225 @@ pub(crate) fn open_mutation_event_sink(ctx: &VaultContext) -> EventSink {
             .unwrap_or_else(|_| EventSink::discard(IdGen::new(), Clock::System))
     } else {
         EventSink::discard(ids, clock)
+    }
+}
+
+#[cfg(test)]
+mod lock_ordering_tests {
+    use crate::mcp::context::VaultContext;
+    use camino::Utf8PathBuf;
+    use fs2::FileExt;
+    use tempfile::TempDir;
+
+    /// RAII cleanup for the per-vault state dir under the REAL XDG state home.
+    ///
+    /// We deliberately do NOT set `XDG_STATE_HOME` in-process:
+    /// `std::env::set_var` is process-global and races other in-binary tests
+    /// that resolve state/cache dirs mid-flight (the same reason
+    /// `server.rs::cold_seeded_vault` documents for the cache dir). Vault
+    /// identity is a hash of the unique tempdir root, so the state dir is
+    /// already test-private; this guard removes it on drop — panic included —
+    /// so the held `.mutation.lock` never outlives the test run.
+    struct StateDirCleanup(Utf8PathBuf);
+    impl Drop for StateDirCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.as_std_path());
+        }
+    }
+
+    /// Seed a temp vault with one real document, hold its `.mutation.lock`
+    /// exclusively (the same fs2 mechanism `tests/mutation_lock.rs` uses for
+    /// the CLI arms), and return everything the ordering assertions need.
+    fn contended_vault() -> (TempDir, Utf8PathBuf, std::fs::File, StateDirCleanup) {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-lock-order-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(root.join("doc.md"), "---\ntype: note\n---\nHello\n").unwrap();
+
+        let (_, state_dir) =
+            crate::cache::state_dir_for(&root).expect("resolve state dir for lock path");
+        std::fs::create_dir_all(state_dir.as_std_path()).unwrap();
+        let cleanup = StateDirCleanup(state_dir.clone());
+        let lock_path = state_dir.join(".mutation.lock");
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path.as_std_path())
+            .unwrap();
+        held.try_lock_exclusive()
+            .expect("test setup: could not hold the mutation lock");
+        (tmp, root, held, cleanup)
+    }
+
+    /// NRN-106: on the confirm path, EVERY mutation tool acquires the mutation
+    /// lock BEFORE any read that feeds the write. Proven by ORDER, not just
+    /// presence, wherever the harness allows: each case targets a document
+    /// that does not exist, so a preflight-first ordering would fail fast with
+    /// that tool's not-found/preflight error (naming the bogus target) and
+    /// never reach the lock. With the lock held by a simulated concurrent
+    /// writer, every confirm call must instead surface the lock-contention
+    /// refusal — and never a message naming the bogus target.
+    ///
+    /// For `vault.rewrite_wikilink` and `vault.apply` the pre-lock steps
+    /// (index load / plan parse) cannot observably fail on a bogus target, so
+    /// their cases pin contention-refusal-under-held-lock rather than strict
+    /// error precedence.
+    ///
+    /// Runs all seven tools in one test against one contended vault, with the
+    /// debug-only `NORN_MUTATION_LOCK_TIMEOUT_MS` override keeping each
+    /// contended acquire at ~150ms instead of the real 5s.
+    #[test]
+    fn confirm_locks_before_any_preflight_read_across_all_mutation_tools() {
+        // Debug-build-only knob (compiled out of release); other tests never
+        // contend on a mutation lock, so a process-visible short timeout is
+        // inert outside this test.
+        std::env::set_var("NORN_MUTATION_LOCK_TIMEOUT_MS", "150");
+
+        let (_tmp, root, held, _cleanup) = contended_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        type Case = (&'static str, Box<dyn Fn(&VaultContext) -> anyhow::Error>);
+        let cases: Vec<Case> = vec![
+            (
+                "set",
+                Box::new(|ctx| {
+                    let mut set = std::collections::BTreeMap::new();
+                    set.insert("status".to_string(), serde_json::json!("active"));
+                    crate::mcp::tools::set::handle(
+                        ctx,
+                        crate::mcp::tools::set::SetParams {
+                            target: "bogus-target".into(),
+                            set,
+                            confirm: true,
+                            ..Default::default()
+                        },
+                    )
+                    .expect_err("held lock must refuse vault.set confirm")
+                }),
+            ),
+            (
+                "edit",
+                Box::new(|ctx| {
+                    crate::mcp::tools::edit::handle(
+                        ctx,
+                        crate::mcp::tools::edit::EditParams {
+                            target: "bogus-target".into(),
+                            edits: vec![crate::edit::ops::EditOp::StrReplace {
+                                old: "Hello".into(),
+                                new: "Goodbye".into(),
+                                replace_all: false,
+                            }],
+                            expected_hash: None,
+                            confirm: true,
+                        },
+                    )
+                    .expect_err("held lock must refuse vault.edit confirm")
+                }),
+            ),
+            (
+                "delete",
+                Box::new(|ctx| {
+                    crate::mcp::tools::delete::handle(
+                        ctx,
+                        crate::mcp::tools::delete::DeleteParams {
+                            target: "bogus-target.md".into(),
+                            rewrite_to: None,
+                            allow_broken_links: true,
+                            confirm: true,
+                        },
+                    )
+                    .expect_err("held lock must refuse vault.delete confirm")
+                }),
+            ),
+            (
+                "move",
+                Box::new(|ctx| {
+                    crate::mcp::tools::move_doc::handle(
+                        ctx,
+                        crate::mcp::tools::move_doc::MoveParams {
+                            from: "bogus-target.md".into(),
+                            to: "dst.md".into(),
+                            confirm: true,
+                            ..Default::default()
+                        },
+                    )
+                    .expect_err("held lock must refuse vault.move confirm")
+                }),
+            ),
+            (
+                "new",
+                Box::new(|ctx| {
+                    crate::mcp::tools::new::handle(
+                        ctx,
+                        crate::mcp::tools::new::NewParams {
+                            // Missing parent dir without `parents` — a
+                            // preflight-first ordering refuses on this path.
+                            path: Some("bogus-target/nested.md".to_string()),
+                            parents: false,
+                            confirm: true,
+                            ..Default::default()
+                        },
+                    )
+                    .expect_err("held lock must refuse vault.new confirm")
+                }),
+            ),
+            (
+                "rewrite_wikilink",
+                Box::new(|ctx| {
+                    crate::mcp::tools::rewrite_wikilink::handle(
+                        ctx,
+                        crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams {
+                            from: "bogus-target".into(),
+                            to: "doc".into(),
+                            confirm: true,
+                        },
+                    )
+                    .expect_err("held lock must refuse vault.rewrite_wikilink confirm")
+                }),
+            ),
+            (
+                "apply",
+                Box::new(|ctx| {
+                    let plan = serde_json::json!({
+                        "schema_version": 1,
+                        "vault_root": ctx.vault_root.to_string(),
+                        "operations": [{
+                            "kind": "delete_document",
+                            "fields": { "path": "bogus-target.md" }
+                        }]
+                    });
+                    crate::mcp::tools::apply::handle(
+                        ctx,
+                        crate::mcp::tools::apply::ApplyParams {
+                            plan,
+                            confirm: true,
+                            parents: false,
+                        },
+                    )
+                    .expect_err("held lock must refuse vault.apply confirm")
+                }),
+            ),
+        ];
+
+        for (tool, call) in cases {
+            let msg = call(&ctx).to_string();
+            assert!(
+                msg.contains("another norn mutation is in progress"),
+                "[{tool}] expected the lock-contention refusal (proving the \
+                 lock is acquired before the preflight read), got: {msg}"
+            );
+            assert!(
+                !msg.contains("bogus-target"),
+                "[{tool}] no preflight read may run while the lock is held — \
+                 the error must not name the bogus target: {msg}"
+            );
+        }
+
+        drop(held);
     }
 }
 
