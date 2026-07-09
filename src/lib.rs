@@ -1508,8 +1508,15 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             ) {
                 Ok(o) => o,
                 Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(2);
+                    // NRN-221: structured envelope on stdout for `--format json`
+                    // (matching the move/delete arms) — a schema/argument refusal
+                    // carries its stable `code` instead of bare prose. Records/TTY
+                    // output stays byte-identical: prose on stderr, exit 2.
+                    match args.format {
+                        crate::cli::SetFormat::Json => render_json_error_envelope(&e)?,
+                        crate::cli::SetFormat::Records => eprintln!("error: {e}"),
+                    }
+                    return Ok(2);
                 }
             };
 

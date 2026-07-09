@@ -229,10 +229,12 @@ impl ApplyError {
         if let Some(c) = e.downcast_ref::<crate::standards::apply::ContainmentError>() {
             return Self::from_containment(c);
         }
-        // `norn set`'s schema/argument-refusal family (NRN-221): a CLI
-        // `--format json` consumer gets the same stable code an MCP `vault.set`
-        // client sees via `mcp::mutate::refusal_from_error`, instead of the
-        // generic `internal-error` fallback below.
+        // `norn set`'s schema/argument-refusal family (NRN-221): the Set
+        // dispatch arm's `--format json` error path (`render_json_error_envelope`
+        // in lib.rs) funnels through here, so a CLI JSON consumer gets the same
+        // stable code an MCP `vault.set` client sees via
+        // `mcp::mutate::refusal_from_error`. Previously the Set arm emitted only
+        // prose on stderr (no envelope at all); the Records/TTY path still does.
         if let Some(se) = e.downcast_ref::<crate::set::error::SetError>() {
             return Self {
                 code: se.code().to_string(),
