@@ -114,8 +114,13 @@ impl SetError {
             SetError::InvalidDatetime { .. }
             | SetError::InvalidDate { .. }
             | SetError::InvalidWikilink { .. }
-            | SetError::UnknownFieldType { .. }
             | SetError::FieldJsonTypeInvalid { .. } => "field-type-invalid",
+            // Deliberately NOT `field-type-invalid`: that family means "the
+            // caller supplied a bad value" (retryable — fix the value). This one
+            // means the vault's SCHEMA declares a field_type norn does not
+            // support — a config defect only a human can fix; an agent must not
+            // loop re-prompting for a different value.
+            SetError::UnknownFieldType { .. } => "field-type-unsupported",
             SetError::ValueTooLong { .. } => "value-too-long",
             SetError::ValueNotAllowed { .. } | SetError::FieldJsonNotAllowed { .. } => {
                 "value-not-allowed"
@@ -214,19 +219,26 @@ mod tests {
             "field-type-invalid"
         );
         assert_eq!(
-            SetError::UnknownFieldType {
-                field_type: "x".into()
-            }
-            .code(),
-            "field-type-invalid"
-        );
-        assert_eq!(
             SetError::FieldJsonTypeInvalid {
                 field: "x".into(),
                 field_type: "y".into()
             }
             .code(),
             "field-type-invalid"
+        );
+    }
+
+    /// An unsupported DECLARED field type is a schema/config defect, not a bad
+    /// caller value — it gets its own code so an agent branching on
+    /// `field-type-invalid` to re-prompt never loops against a broken schema.
+    #[test]
+    fn unsupported_declared_type_is_not_field_type_invalid() {
+        assert_eq!(
+            SetError::UnknownFieldType {
+                field_type: "x".into()
+            }
+            .code(),
+            "field-type-unsupported"
         );
     }
 

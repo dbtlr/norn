@@ -161,7 +161,8 @@ underlying condition, so it is not a separate code.
 
 | Code | Cause |
 |---|---|
-| `field-type-invalid` | a value does not coerce to its field's declared schema type (datetime/date/wikilink shape, `--field-json` type mismatch, or an unrecognized declared type) |
+| `field-type-invalid` | a value does not coerce to its field's declared schema type (datetime/date/wikilink shape, or a `--field-json` type mismatch) — fix the value and retry |
+| `field-type-unsupported` | the vault's schema declares a `field_type` this norn build does not support — a config defect; fix the schema, not the value |
 | `value-too-long` | a `string` / `list_of_strings` value exceeds the field's `max_length` |
 | `value-not-allowed` | a value is outside the field's `allowed_values` set |
 | `field-json-invalid` | a `--field-json` value is not valid JSON |
