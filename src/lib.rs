@@ -247,52 +247,136 @@ fn try_route_read(
     }
 }
 
-/// The generic read-routing skeleton behind `count`/`find`/`get` (NRN-222).
+/// What a routed tool call does when the call fails AFTER the `tools/call`
+/// frame has been sent to the daemon (NRN-228). Decided at send time and passed
+/// down into [`execute_routed_call`], which shares one body between reads and
+/// mutations. A failure BEFORE the send always falls back to Direct regardless
+/// of this policy (the tool never ran, so a Direct retry cannot double-apply).
+///
+/// [NRN-151/CAS seam: a future safe-retry policy — e.g. a compare-and-swap
+/// precondition that makes a post-send retry provably safe — slots in here as
+/// another variant without reshaping the seam.]
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackAfterSend {
+    /// Any post-send failure falls back to Direct silently. The request is
+    /// idempotent — a read, or a dry-run mutation that writes nothing — so a
+    /// second verified direct open is safe and byte-identical.
+    Fallback,
+    /// A post-send failure is NOT retried: the daemon may have applied the
+    /// mutation, so a Direct re-run could double-apply. Surface an explicit
+    /// uncertainty error (exit 1) naming the inspect / `--dry-run` remedy.
+    Commit,
+}
+
+/// The generic routing skeleton shared by reads (`count`/`find`/`get`, NRN-222)
+/// and mutations (NRN-228).
 ///
 /// Computes the canonical vault root ONCE (threaded into the preamble — NRN-92
-/// review F5), probes the well-known socket, delegates `tool` with `arguments`,
-/// then hands the `structuredContent` to `reconstruct` (rebuild the command's
-/// native result type) and `emit` (render it exactly like the direct path). Every
-/// failure mode — un-canonicalizable root, no/stale daemon, preamble mismatch,
-/// transport error, tool error, or an unreadable envelope — returns `None`, so
-/// the direct dispatch serves the read (and re-produces any error canonically).
-/// The `reconstruct`-then-`emit` split keeps stdout untouched until
-/// reconstruction succeeds, so a fall-back to Direct never double-writes.
+/// review F5), probes the well-known socket, and delegates to
+/// [`execute_routed_call`], which runs `tool` with `arguments` and applies the
+/// `after_send` policy. Every pre-flight miss — an un-canonicalizable root or no
+/// live daemon — returns `None`, so the direct dispatch serves the request (and
+/// re-produces any error canonically).
 ///
-/// `on_tool_error` decides what a result flagged `isError: true` means for
-/// this tool (see [`crate::service::OnToolError`]): `vault.get` accepts the
-/// payload (its `isError` is the semantic not-found signal — falling back
-/// would execute the failing read twice); `count`/`find` fall back to Direct.
+/// `on_tool_error` decides what a result flagged `isError: true` means for this
+/// tool (see [`crate::service::OnToolError`]): `vault.get` accepts the payload
+/// (its `isError` is the semantic not-found signal — falling back would execute
+/// the failing read twice); `count`/`find` fall back to Direct.
 #[cfg(unix)]
-fn route_read<T>(
+#[allow(clippy::too_many_arguments)]
+fn route_tool_call<T>(
     cwd: &camino::Utf8Path,
     tool: &str,
     arguments: serde_json::Value,
     on_tool_error: crate::service::OnToolError,
+    after_send: FallbackAfterSend,
     verbose: bool,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
     // A root that cannot canonicalize cannot be served warm either — fall back to
-    // Direct, which reports the failure canonically.
+    // Direct, which reports the failure canonically. A pre-send miss, so both
+    // policies fall back.
     let (canonical, _hash) = crate::cache::vault_identity(cwd).ok()?;
 
     // Probe the well-known control socket. No daemon => a cheap stat => Direct,
     // with zero added latency (the common case pays nothing beyond the stat).
+    // Also a pre-send miss (the request never left this process).
     let client = match crate::service::probe(crate::service::handshake_timeout()) {
         crate::service::RouteDecision::Route(client) => client,
         crate::service::RouteDecision::Direct => return None,
     };
 
-    let structured = match client.call_tool_structured(&canonical, tool, arguments, on_tool_error) {
-        Ok(structured) => structured,
-        Err(error) => {
-            if verbose {
-                eprintln!("norn: routed {tool} failed ({error}); using direct execution");
+    execute_routed_call(
+        &canonical,
+        &client,
+        tool,
+        arguments,
+        on_tool_error,
+        after_send,
+        verbose,
+        reconstruct,
+        emit,
+    )
+}
+
+/// The body shared by every routed call once a live daemon is proven (NRN-228):
+/// invoke `tool` on `client`, apply the send-commit `after_send` policy to a
+/// failure, then hand a success to `reconstruct` (rebuild the command's native
+/// result type) and `emit` (render it exactly like the direct path).
+///
+/// The failure branch is the whole point of the send-commit split. A pre-send
+/// failure (socket trust, connect, preamble, version gate, MCP initialize)
+/// always falls back to Direct — the tool never ran. A post-send failure
+/// (timeout, dropped connection, unreadable response) falls back only under
+/// `Fallback`; under `Commit` it is surfaced as an explicit uncertainty error
+/// (the daemon may have applied the change) instead of risking a double-apply.
+///
+/// The `reconstruct`-then-`emit` split keeps stdout untouched until
+/// reconstruction succeeds, so a fall-back to Direct never double-writes.
+///
+/// Split from [`route_tool_call`] so unit tests can drive it with a stub
+/// `ServiceClient` on a temp socket, without touching the process-global env the
+/// well-known-socket probe reads.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn execute_routed_call<T>(
+    canonical: &camino::Utf8Path,
+    client: &crate::service::ServiceClient,
+    tool: &str,
+    arguments: serde_json::Value,
+    on_tool_error: crate::service::OnToolError,
+    after_send: FallbackAfterSend,
+    verbose: bool,
+    reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
+    emit: impl FnOnce(T) -> Result<i32>,
+) -> Option<Result<i32>> {
+    let structured =
+        match client.call_tool_structured_phased(canonical, tool, arguments, on_tool_error) {
+            Ok(structured) => structured,
+            Err(error) => {
+                // Send-commit refusal (NRN-228): a committing mutation whose call
+                // failed AFTER the request crossed to the daemon must NOT fall
+                // back to a Direct re-run — the change may already be applied, so
+                // a retry could double-apply. Surface the uncertainty (exit 1).
+                // Every other case — any `Fallback` failure, or a PRE-send
+                // failure in either policy (the tool never ran) — falls back to
+                // Direct exactly like a read, with the byte-identical verbose note.
+                if after_send == FallbackAfterSend::Commit
+                    && error.phase == crate::service::CallPhase::PostSend
+                {
+                    return Some(Err(post_send_uncertainty_error(tool, &error.source)));
+                }
+                if verbose {
+                    eprintln!(
+                        "norn: routed {tool} failed ({}); using direct execution",
+                        error.source
+                    );
+                }
+                return None;
             }
-            return None;
-        }
-    };
+        };
     // NRN-218: a daemon-side field-universe gate refusal (an unknown dynamic-field
     // predicate) crosses back in the envelope. Commit to routing — re-emit the
     // byte-identical error the direct gate would (exit 1 at the top level), NOT a
@@ -330,6 +414,99 @@ fn route_read<T>(
     // surfaced as an error the top level maps like any other — broken pipe
     // becomes a clean exit.
     Some(emit(value))
+}
+
+/// The explicit error a committing routed mutation surfaces when the daemon call
+/// fails AFTER the request was sent (NRN-228). Unlike a read, the seam does NOT
+/// fall back to a Direct re-run (which could double-apply a change the daemon may
+/// already have made); it names the remedy an operator can act on. Maps to exit
+/// 1 at the top level — the "vault may be partially mutated" code
+/// (`docs/errors.md`), distinct from a clean pre-flight refusal (exit 2).
+#[cfg(unix)]
+fn post_send_uncertainty_error(tool: &str, source: &anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "routed {tool} failed after the request was sent ({source}); the daemon may have \
+         applied the change. Inspect the target (e.g. `norn get <target>`) or re-run with \
+         --dry-run before retrying."
+    )
+}
+
+/// The read-routing skeleton behind `count`/`find`/`get` (NRN-222): route the
+/// read, and on ANY failure fall back to Direct. A read is idempotent, so both a
+/// pre-send and a post-send failure fall back safely and byte-identically —
+/// hence the [`FallbackAfterSend::Fallback`] policy.
+#[cfg(unix)]
+fn route_read<T>(
+    cwd: &camino::Utf8Path,
+    tool: &str,
+    arguments: serde_json::Value,
+    on_tool_error: crate::service::OnToolError,
+    verbose: bool,
+    reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
+    emit: impl FnOnce(T) -> Result<i32>,
+) -> Option<Result<i32>> {
+    route_tool_call(
+        cwd,
+        tool,
+        arguments,
+        on_tool_error,
+        FallbackAfterSend::Fallback,
+        verbose,
+        reconstruct,
+        emit,
+    )
+}
+
+/// The mutation sibling of [`route_read`] (NRN-228): route a mutating tool call
+/// to the warm daemon under a send-commit fallback policy.
+///
+/// A routed **dry-run** is a read in mutation clothing — it writes nothing — so
+/// it uses [`FallbackAfterSend::Fallback`]: any failure, pre- or post-send,
+/// silently falls back to Direct, exactly like a read. A routed **apply** uses
+/// [`FallbackAfterSend::Commit`]: a failure BEFORE the tool call is sent
+/// (forced-direct flags, probe miss, handshake / version-gate failure) falls
+/// back to Direct like a read, but a failure AFTER send (timeout, connection
+/// drop, unreadable response) does NOT — the daemon may have applied the change,
+/// so the seam surfaces an explicit uncertainty error (exit 1) rather than
+/// risking a double-apply.
+///
+/// `pub` so it is part of the routing seam a future integration test (and the
+/// mutation commands wired in NRN-229+) can reach; no production command routes
+/// through it yet, so it is exercised today by the in-crate routing tests.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub fn route_call<T>(
+    cwd: &camino::Utf8Path,
+    tool: &str,
+    arguments: serde_json::Value,
+    on_tool_error: crate::service::OnToolError,
+    dry_run: bool,
+    verbose: bool,
+    reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
+    emit: impl FnOnce(T) -> Result<i32>,
+) -> Option<Result<i32>> {
+    route_tool_call(
+        cwd,
+        tool,
+        arguments,
+        on_tool_error,
+        after_send_for(dry_run),
+        verbose,
+        reconstruct,
+        emit,
+    )
+}
+
+/// The send-commit policy a routed mutation runs under: a dry-run writes nothing
+/// (a read in mutation clothing), so it may fall back after send; an apply
+/// commits, so a post-send failure is surfaced, never silently retried.
+#[cfg(unix)]
+fn after_send_for(dry_run: bool) -> FallbackAfterSend {
+    if dry_run {
+        FallbackAfterSend::Fallback
+    } else {
+        FallbackAfterSend::Commit
+    }
 }
 
 /// Route a `count` to the warm daemon, or `None` to run Direct.
