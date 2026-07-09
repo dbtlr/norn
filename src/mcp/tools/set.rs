@@ -236,12 +236,20 @@ pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<
 pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
-    // CONFIRM acquires the per-vault mutation lock BEFORE the preflight read —
-    // matching `norn set` (main.rs), which locks before `preflight_and_plan`.
-    // The lock must span the index load + plan + apply so a concurrent norn
-    // writer can't drift the file in the read→apply window and slip past both
-    // the plan-time doc-hash CAS and the applier's index-snapshot hash check.
-    // The DRY-RUN path is read-only and takes NO lock.
+    // Pure argument validation runs BEFORE the lock so malformed push/pop
+    // input never contends (the same parse-before-lock discipline vault.apply
+    // uses for its plan). `push` / `pop` maps route through the CLI's
+    // string-coercing --push/--pop seam (infer_scalar), so each value renders
+    // as a bare KEY=VALUE string (not JSON-quoted) — matching
+    // `norn set --push status=done`. An array value explodes into N sequential
+    // entries (matching repeated CLI flags); an object, or a nested
+    // array/object element, is refused rather than stringified into a literal
+    // list element.
+    let push = expand_list_ops(&p.push, "push")?;
+    let pop = expand_list_ops(&p.pop, "pop")?;
+
+    // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
+    // See `crate::mcp::mutate::acquire_mutation_lock` for the invariant.
     let _mutation_lock = if p.confirm {
         Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
     } else {
@@ -269,15 +277,6 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
         .iter()
         .map(|(k, v)| Ok(format!("{k}={}", serde_json::to_string(v)?)))
         .collect::<Result<Vec<_>>>()?;
-
-    // `push` / `pop` maps route through the CLI's string-coercing --push/--pop
-    // seam (infer_scalar), so each value renders as a bare KEY=VALUE string (not
-    // JSON-quoted) — matching `norn set --push status=done`. An array value
-    // explodes into N sequential entries (matching repeated CLI flags); an
-    // object, or a nested array/object element, is refused rather than
-    // stringified into a literal list element.
-    let push = expand_list_ops(&p.push, "push")?;
-    let pop = expand_list_ops(&p.pop, "pop")?;
 
     let args = SetArgs {
         target: p.target.clone(),

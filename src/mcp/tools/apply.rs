@@ -147,15 +147,13 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
 
     let dry_run = !p.confirm;
 
-    // CONFIRM acquires the per-vault mutation lock BEFORE the graph-index
-    // read — matching `norn apply` (main.rs), which locks before loading the
-    // graph index. The lock must span the index load + apply so a concurrent
-    // norn writer can't drift the vault in the read→apply window. The
-    // DRY-RUN path is read-only and takes NO lock.
-    let _mutation_lock = if dry_run {
-        None
-    } else {
+    // CONFIRM locks BEFORE any read that feeds the write (plan parsing above
+    // stays pre-lock — it reads no vault state); dry-run never locks. See
+    // `crate::mcp::mutate::acquire_mutation_lock` for the invariant.
+    let _mutation_lock = if p.confirm {
         Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    } else {
+        None
     };
 
     // ── Step 3: load graph index (same entry point apply uses) ────────────────

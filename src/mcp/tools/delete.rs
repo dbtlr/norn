@@ -127,15 +127,12 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
     // The MCP contract: `confirm` drives apply vs dry-run.
     let dry_run = !p.confirm;
 
-    // CONFIRM acquires the per-vault mutation lock BEFORE the preflight read —
-    // matching `norn delete` (main.rs), which locks before loading the graph
-    // index. The lock must span the index load + preflight + apply so a
-    // concurrent norn writer can't drift the vault in the read→apply window.
-    // The DRY-RUN path is read-only and takes NO lock.
-    let _mutation_lock = if dry_run {
-        None
-    } else {
+    // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
+    // See `crate::mcp::mutate::acquire_mutation_lock` for the invariant.
+    let _mutation_lock = if p.confirm {
         Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
+    } else {
+        None
     };
 
     // Load the graph index honoring files.ignore, exactly like the CLI delete path.

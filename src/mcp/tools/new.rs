@@ -201,11 +201,8 @@ pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<
 pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     let cwd = ctx.vault_root.clone();
 
-    // CONFIRM acquires the per-vault mutation lock BEFORE the preflight read —
-    // matching `norn new` (main.rs), which locks up front, before config/index
-    // load and preflight. The lock must span the index load + preflight +
-    // build_plan + apply so a concurrent norn writer can't drift the vault in
-    // the read→apply window. The DRY-RUN path is read-only and takes NO lock.
+    // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
+    // See `crate::mcp::mutate::acquire_mutation_lock` for the invariant.
     let _mutation_lock = if p.confirm {
         Some(crate::mcp::mutate::acquire_mutation_lock(&cwd)?)
     } else {

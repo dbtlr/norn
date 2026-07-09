@@ -20,10 +20,22 @@ use camino::Utf8Path;
 
 /// Acquire the per-vault mutation lock on an MCP mutation's CONFIRM/apply path.
 ///
-/// Sweeps stale pending markers, then acquires the lock with `is_apply = true` —
-/// every MCP mutation reaches this only after its dry-run early-return, so the
-/// apply is always real. Returns the RAII guard the caller must hold for the
-/// duration of the apply; a timeout or lock error becomes an `anyhow` error.
+/// **THE ordering invariant (NRN-99 / NRN-106), canonical statement:** on
+/// `confirm`, every MCP mutation tool acquires this lock BEFORE any read that
+/// feeds the write — the graph-index load, the query-cache open, preflight,
+/// and plan synthesis all run lock-held — so a concurrent norn writer cannot
+/// drift a file in the read→apply window and slip past both the plan-time
+/// hash checks and the applier's index-snapshot check. Dry-run
+/// (`confirm: false`) NEVER locks: it is read-only by contract. Each handler
+/// guards with `if p.confirm { Some(acquire_mutation_lock(..)?) } else { None }`
+/// at the top of its confirm path, mirroring the CLI arms in `main.rs`, which
+/// lock before their cache load. Cheap, read-free argument validation (plan
+/// parsing, schema-version checks, param-shape refusals) stays BEFORE the
+/// lock so malformed input never contends.
+///
+/// Sweeps stale pending markers, then acquires the lock with `is_apply = true`.
+/// Returns the RAII guard the caller must hold for the duration of the apply;
+/// a timeout or lock error becomes an `anyhow` error.
 ///
 /// This is the MCP analogue of the CLI's lock block in `main.rs`, which differs
 /// deliberately: the CLI maps a timeout to exit code 2 + a stderr line, whereas
