@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use crate::core::Document;
+use crate::set::error::SetError;
 use crate::standards::PlannedChange;
 use crate::standards::VaultConfig;
 use anyhow::Result;
@@ -97,33 +98,39 @@ pub fn coerce_value_for_type(
             if crate::standards::predicates::is_datetime_string(raw) {
                 Ok(Value::String(raw.to_string()))
             } else {
-                anyhow::bail!(
-                    "value '{raw}' is not a valid datetime (expected YYYY-MM-DDTHH:MM[:SS])"
-                )
+                Err(SetError::InvalidDatetime {
+                    value: raw.to_string(),
+                }
+                .into())
             }
         }
         "date" => {
             if crate::standards::predicates::is_date_string(raw) {
                 Ok(Value::String(raw.to_string()))
             } else {
-                anyhow::bail!("value '{raw}' is not a valid date (expected YYYY-MM-DD)")
+                Err(SetError::InvalidDate {
+                    value: raw.to_string(),
+                }
+                .into())
             }
         }
         "wikilink" => {
             let wrapped = wrap_wikilink(raw);
             if !crate::standards::predicates::is_wikilink_string(&wrapped) {
-                anyhow::bail!(
-                    "value '{raw}' is not shape-valid as a wikilink (need non-empty stem inside [[…]])"
-                )
+                return Err(SetError::InvalidWikilink {
+                    value: raw.to_string(),
+                }
+                .into());
             }
             Ok(Value::String(wrapped))
         }
         "wikilink_or_list" => {
             let wrapped = wrap_wikilink(raw);
             if !crate::standards::predicates::is_wikilink_string(&wrapped) {
-                anyhow::bail!(
-                    "value '{raw}' is not shape-valid as a wikilink (need non-empty stem inside [[…]])"
-                )
+                return Err(SetError::InvalidWikilink {
+                    value: raw.to_string(),
+                }
+                .into());
             }
             Ok(Value::String(wrapped))
         }
@@ -136,14 +143,22 @@ pub fn coerce_value_for_type(
             Ok(Value::String(raw.to_string()))
         }
         "text" => Ok(Value::String(raw.to_string())),
-        unknown => anyhow::bail!("unknown field_type: {unknown}"),
+        unknown => Err(SetError::UnknownFieldType {
+            field_type: unknown.to_string(),
+        }
+        .into()),
     }
 }
 
 fn check_max_length(raw: &str, max_length: Option<u32>, field_type: &str) -> Result<()> {
     if let Some(bound) = max_length {
         if raw.chars().count() > bound as usize {
-            anyhow::bail!("value '{raw}' exceeds max_length {bound} for field type '{field_type}'");
+            return Err(SetError::ValueTooLong {
+                value: raw.to_string(),
+                bound,
+                field_type: field_type.to_string(),
+            }
+            .into());
         }
     }
     Ok(())
@@ -383,10 +398,12 @@ fn coerce_kv_slice(
             if let Some(allowed) = lookup_allowed_values(cfg, doc, &key) {
                 if !value_in_allowed(&coerced, &allowed) {
                     if !force {
-                        anyhow::bail!(
-                            "value '{raw}' is not allowed for '{key}' (allowed: {}); use --force to override",
-                            display_allowed(&allowed)
-                        );
+                        return Err(SetError::ValueNotAllowed {
+                            field: key.clone(),
+                            value: raw.clone(),
+                            allowed: display_allowed(&allowed),
+                        }
+                        .into());
                     }
                     w.push(SetWarning::ForceBypass {
                         field: key.clone(),
@@ -446,17 +463,22 @@ pub fn synth_with_schema(
     let mut field_json_typed: Vec<(String, Value)> = Vec::new();
     for kv in field_json {
         let (key, raw_json) = crate::set::synth::parse_kv(kv)?;
-        let parsed: Value = serde_json::from_str(&raw_json)
-            .map_err(|e| anyhow::anyhow!("--field-json value is not valid JSON ({key}): {e}"))?;
+        let parsed: Value =
+            serde_json::from_str(&raw_json).map_err(|e| SetError::FieldJsonInvalid {
+                field: key.clone(),
+                detail: e.to_string(),
+            })?;
         if let Some(ty) = lookup_field_type(cfg, doc, &key) {
             let max_length = lookup_field_max_length(cfg, doc, &key);
             let valid =
                 crate::standards::predicates::frontmatter_type_matches(&parsed, &ty, max_length);
             if !valid {
                 if !force {
-                    anyhow::bail!(
-                        "--field-json value for '{key}' does not match schema type '{ty}'"
-                    );
+                    return Err(SetError::FieldJsonTypeInvalid {
+                        field: key.clone(),
+                        field_type: ty.clone(),
+                    }
+                    .into());
                 }
                 warnings.push(SetWarning::ForceBypass {
                     field: key.clone(),
@@ -474,10 +496,11 @@ pub fn synth_with_schema(
         if let Some(allowed) = lookup_allowed_values(cfg, doc, &key) {
             if !value_in_allowed(&parsed, &allowed) {
                 if !force {
-                    anyhow::bail!(
-                        "--field-json value for '{key}' is not allowed (allowed: {}); use --force to override",
-                        display_allowed(&allowed)
-                    );
+                    return Err(SetError::FieldJsonNotAllowed {
+                        field: key.clone(),
+                        allowed: display_allowed(&allowed),
+                    }
+                    .into());
                 }
                 warnings.push(SetWarning::ForceBypass {
                     field: key.clone(),
@@ -495,7 +518,7 @@ pub fn synth_with_schema(
             continue;
         }
         if !force {
-            anyhow::bail!("cannot remove required field '{key}'; use --force to override");
+            return Err(SetError::RequiredFieldRemoved { field: key.clone() }.into());
         }
         warnings.push(SetWarning::ForceBypass {
             field: key.clone(),

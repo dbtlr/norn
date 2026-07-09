@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cache::Cache;
+use crate::set::error::SetError;
 use crate::standards::PlannedChange;
-use anyhow::{anyhow, bail, Result};
+use anyhow::Result;
 use camino::Utf8PathBuf;
 use serde_json::Value;
 
@@ -25,20 +26,25 @@ pub fn resolve_target(cache: &Cache, raw: &str) -> Result<Utf8PathBuf> {
             // named that is still addressable) but add a hint to the not-found
             // message for the separator-shaped case.
             if crate::grammar::split_field_value(raw).is_some() {
-                bail!(
-                    "doc not found: {raw}\n  hint: '{raw}' looks like a field assignment — \
-                     did you forget the document argument? Usage: norn set <doc> [key=value ...]"
-                );
+                return Err(SetError::TargetNotFoundHint {
+                    target: raw.to_string(),
+                }
+                .into());
             }
-            bail!("doc not found: {raw}")
+            Err(SetError::TargetNotFound {
+                target: raw.to_string(),
+            }
+            .into())
         }
         1 => Ok(resolved.paths.into_iter().next().unwrap()),
         n => {
             let candidates: Vec<String> = resolved.paths.iter().map(|p| p.to_string()).collect();
-            Err(anyhow!(
-                "ambiguous doc target: '{raw}' matches {n} docs: {}",
-                candidates.join(", ")
-            ))
+            Err(SetError::TargetAmbiguous {
+                target: raw.to_string(),
+                count: n,
+                candidates: candidates.join(", "),
+            }
+            .into())
         }
     }
 }
@@ -49,10 +55,15 @@ pub fn resolve_target(cache: &Cache, raw: &str) -> Result<Utf8PathBuf> {
 /// separator or empty KEY. VALUE may contain additional separator characters
 /// (preserved verbatim).
 pub fn parse_kv(raw: &str) -> Result<(String, String)> {
-    let (k, v) = crate::grammar::split_field_value(raw)
-        .ok_or_else(|| anyhow!("expected KEY=VALUE, got: {raw}"))?;
+    let (k, v) =
+        crate::grammar::split_field_value(raw).ok_or_else(|| SetError::AssignmentMalformed {
+            raw: raw.to_string(),
+        })?;
     if k.is_empty() {
-        bail!("KEY cannot be empty in: {raw}");
+        return Err(SetError::AssignmentKeyEmpty {
+            raw: raw.to_string(),
+        }
+        .into());
     }
     Ok((k.to_string(), v.to_string()))
 }
@@ -71,7 +82,10 @@ pub fn desugar_positional_fields(positionals: &[String], fields: &[String]) -> R
     let mut combined = fields.to_vec();
     for token in positionals {
         if crate::grammar::split_field_value(token).is_none() {
-            bail!("expected key=value, got '{token}'");
+            return Err(SetError::PositionalAssignmentMalformed {
+                raw: token.to_string(),
+            }
+            .into());
         }
         combined.push(token.clone());
     }
@@ -129,7 +143,7 @@ pub fn detect_cross_class_conflicts(
         msg.push_str(&format!("  '{k}': {}\n", classes.join(" + ")));
     }
     msg.push_str("each key may be targeted by only one of --field/--field-json/--push/--pop/--remove per invocation");
-    bail!("{msg}")
+    Err(SetError::FieldConflict { message: msg }.into())
 }
 
 /// Light type inference for schema-silent values:
@@ -209,7 +223,7 @@ pub fn synth_frontmatter_ops(
 
     let current_obj = current_frontmatter
         .as_object()
-        .ok_or_else(|| anyhow!("frontmatter is not a top-level mapping"))?;
+        .ok_or(SetError::FrontmatterNotMapping)?;
 
     let mut changes: Vec<PlannedChange> = Vec::new();
 
@@ -242,8 +256,11 @@ pub fn synth_frontmatter_ops(
     // --field-json: raw JSON parsed verbatim.
     for kv in field_json {
         let (key, raw_json) = parse_kv(kv)?;
-        let parsed: Value = serde_json::from_str(&raw_json)
-            .map_err(|e| anyhow!("--field-json value is not valid JSON ({key}): {e}"))?;
+        let parsed: Value =
+            serde_json::from_str(&raw_json).map_err(|e| SetError::FieldJsonInvalid {
+                field: key.clone(),
+                detail: e.to_string(),
+            })?;
         let op = if current_obj.contains_key(&key) {
             "set_frontmatter"
         } else {
@@ -270,7 +287,7 @@ pub fn synth_frontmatter_ops(
             Some(Value::Array(existing)) => existing.clone(),
             None => Vec::new(),
             Some(_) => {
-                bail!("--push on key '{key}' requires an array-typed value (current is scalar)")
+                return Err(SetError::PushOnScalar { key: key.clone() }.into());
             }
         };
         new_array.extend(values.iter().cloned());
@@ -351,7 +368,7 @@ pub fn synth_frontmatter_ops_typed(
 ) -> Result<Vec<PlannedChange>> {
     let current_obj = current_frontmatter
         .as_object()
-        .ok_or_else(|| anyhow!("frontmatter is not a top-level mapping"))?;
+        .ok_or(SetError::FrontmatterNotMapping)?;
 
     let mut changes: Vec<PlannedChange> = Vec::new();
 
@@ -390,7 +407,7 @@ pub fn synth_frontmatter_ops_typed(
             Some(Value::Array(existing)) => existing.clone(),
             None => Vec::new(),
             Some(_) => {
-                bail!("--push on key '{key}' requires an array-typed value (current is scalar)")
+                return Err(SetError::PushOnScalar { key: key.clone() }.into());
             }
         };
         new_array.extend(values.iter().cloned());
@@ -637,14 +654,14 @@ fn parse_doc(content: &str) -> anyhow::Result<(serde_json::Value, String)> {
         crate::frontmatter::extract_frontmatter(content, &mut diagnostics);
 
     if !diagnostics.is_empty() {
-        anyhow::bail!(
-            "frontmatter parse errors: {}",
-            diagnostics
+        return Err(SetError::FrontmatterParseFailed {
+            detail: diagnostics
                 .iter()
                 .map(|d| d.message.as_str())
                 .collect::<Vec<_>>()
-                .join("; ")
-        );
+                .join("; "),
+        }
+        .into());
     }
 
     let fm = frontmatter.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
