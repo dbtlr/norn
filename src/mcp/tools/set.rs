@@ -903,4 +903,67 @@ mod tests {
             "pop of an absent value must not introduce it:\n{content}"
         );
     }
+
+    /// NRN-106: the mutation lock is acquired BEFORE the preflight read on the
+    /// confirm path — not after. Proven by ORDER, not just presence: `target`
+    /// names a document that does not exist, so a preflight-first ordering
+    /// would fail fast with `doc not found: missing` and NEVER reach the lock.
+    /// With a concurrent holder of the `.mutation.lock` file (simulated here via
+    /// `fs2`, the same mechanism `tests/mutation_lock.rs` uses for the CLI),
+    /// `handle` must instead time out on the LOCK — proving the lock acquisition
+    /// runs first and gates the read that would otherwise resolve the target.
+    #[test]
+    fn confirm_lock_is_acquired_before_preflight_read() {
+        let (_tmp, root) = seeded_vault();
+
+        // Hold the vault's mutation lock directly, exactly as the CLI-level
+        // contention tests in tests/mutation_lock.rs do.
+        use fs2::FileExt;
+        let (_, state_dir) =
+            crate::cache::state_dir_for(&root).expect("resolve state dir for lock path");
+        std::fs::create_dir_all(state_dir.as_std_path()).unwrap();
+        let lock_path = state_dir.join(".mutation.lock");
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path.as_std_path())
+            .unwrap();
+        held.try_lock_exclusive()
+            .expect("test setup: could not hold the mutation lock");
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let mut set = BTreeMap::new();
+        set.insert("status".to_string(), serde_json::json!("active"));
+
+        let err = handle(
+            &ctx,
+            SetParams {
+                // A target that does not exist in the seeded vault — a
+                // preflight-first ordering would refuse with "doc not found"
+                // before ever touching the lock.
+                target: "missing".into(),
+                set,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("a held mutation lock must block the confirm call");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("another norn mutation is in progress"),
+            "expected the lock-contention refusal (proving the lock is acquired \
+             before the preflight read), got: {msg}"
+        );
+        assert!(
+            !msg.contains("doc not found"),
+            "the preflight read must never run while the lock is held — the \
+             confirm call would otherwise surface 'doc not found' first: {msg}"
+        );
+
+        drop(held);
+    }
 }
