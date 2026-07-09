@@ -877,6 +877,42 @@ impl std::error::Error for CallToolError {
     }
 }
 
+/// The typed error a committing routed mutation surfaces when the daemon call
+/// fails AFTER the request was sent (NRN-228): the seam refuses to fall back to
+/// a Direct re-run (which could double-apply a change the daemon may already
+/// have made) and names the remedy instead.
+///
+/// Typed (not bare anyhow prose) so [`code`](Self::code) rides the
+/// `ApplyError::from_anyhow` downcast chain into the structured `{code,
+/// message}` failure envelope (NRN-150/220) — a JSON consumer branches on
+/// `post-send-uncertain`, never the prose. Cross-platform on purpose: the
+/// downcast chain references it on every target, though only the unix routing
+/// seam ever constructs it.
+///
+/// `cause` is deliberately NOT the std `source` (its text already rides the
+/// Display message; chaining it as `source` too would double-print it under
+/// anyhow's `{:#}` rendering).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "routed {tool} failed after the request was sent ({cause}); the daemon may have \
+     applied the change. Inspect the target (e.g. `norn get <target>`) or re-run with \
+     --dry-run before retrying."
+)]
+pub struct PostSendUncertainError {
+    /// The MCP tool name of the mutation whose outcome is unknown.
+    pub tool: String,
+    /// The underlying failure (transport drop, timeout, unreadable envelope).
+    pub cause: anyhow::Error,
+}
+
+impl PostSendUncertainError {
+    /// The stable, machine-branchable kebab code (NRN-220), mirroring the
+    /// `.code()` convention of `standards::apply::ApplyError` / `EditError`.
+    pub fn code(&self) -> &'static str {
+        "post-send-uncertain"
+    }
+}
+
 /// The request half of the routing seam (NRN-94).
 ///
 /// A [`ServiceClient`] is proof that a daemon answered the liveness ping on a

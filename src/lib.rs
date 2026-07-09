@@ -437,14 +437,16 @@ fn execute_routed_call<T>(
 /// fall back to a Direct re-run (which could double-apply a change the daemon may
 /// already have made); it names the remedy an operator can act on. Maps to exit
 /// 1 at the top level — the "vault may be partially mutated" code
-/// (`docs/errors.md`), distinct from a clean pre-flight refusal (exit 2).
+/// (`docs/errors.md`), distinct from a clean pre-flight refusal (exit 2). Typed
+/// ([`crate::service::PostSendUncertainError`], code `post-send-uncertain`) so
+/// the structured failure envelope recovers a machine-branchable code via
+/// `ApplyError::from_anyhow` instead of laundering it to `internal-error`.
 #[cfg(unix)]
 fn post_send_uncertainty_error(tool: &str, source: anyhow::Error) -> anyhow::Error {
-    anyhow::anyhow!(
-        "routed {tool} failed after the request was sent ({source}); the daemon may have \
-         applied the change. Inspect the target (e.g. `norn get <target>`) or re-run with \
-         --dry-run before retrying."
-    )
+    anyhow::Error::new(crate::service::PostSendUncertainError {
+        tool: tool.to_string(),
+        cause: source,
+    })
 }
 
 /// The read-routing skeleton behind `count`/`find`/`get` (NRN-222): route the
@@ -2463,6 +2465,12 @@ mod tests {
         assert!(
             message.contains("norn get"),
             "the error names the inspect remedy; got: {message}"
+        );
+        // NRN-220: the error is typed, so the structured failure envelope
+        // recovers the stable machine code from the seam's actual error value.
+        assert_eq!(
+            crate::apply_report::ApplyError::from_anyhow(&error).code,
+            "post-send-uncertain"
         );
         stub.join().unwrap();
     }
