@@ -152,6 +152,28 @@ CHANGELOG breaking change.
 | `delete-source-missing` | the delete source does not exist |
 | `delete-source-is-symlink` | the delete source is a symlink, not a regular file |
 
+### Terminal — `set` schema / argument refusals
+
+`norn set` / `vault.set`'s schema-aware validation and `KEY=VALUE` argument
+parsing (NRN-221). `frontmatter-parse-failed` reuses the write-safety code
+above — a `set` target whose on-disk frontmatter fails to parse hits the same
+underlying condition, so it is not a separate code.
+
+| Code | Cause |
+|---|---|
+| `field-type-invalid` | a value does not coerce to its field's declared schema type (datetime/date/wikilink shape, or a `--field-json` type mismatch) — fix the value and retry |
+| `field-type-unsupported` | the vault's schema declares a `field_type` this norn build does not support — a config defect; fix the schema, not the value |
+| `value-too-long` | a `string` / `list_of_strings` value exceeds the field's `max_length` |
+| `value-not-allowed` | a value is outside the field's `allowed_values` set |
+| `field-json-invalid` | a `--field-json` value is not valid JSON |
+| `required-field-removed` | `--remove` targets a `required_frontmatter` field |
+| `target-not-found` | the `DOC` argument does not resolve to any document |
+| `target-ambiguous` | the `DOC` argument resolves to more than one document |
+| `assignment-malformed` | a `KEY=VALUE` argument is missing its separator or has an empty key |
+| `field-conflict` | the same key is targeted by more than one of `--field`/`--field-json`/`--push`/`--pop`/`--remove` |
+| `push-on-scalar` | `--push` targets a key whose current value is a scalar, not an array |
+| `frontmatter-not-mapping` | a document's frontmatter parses to a non-mapping JSON value |
+
 ### Terminal — vault containment
 
 The vault is self-contained; a target that resolves outside the vault root is

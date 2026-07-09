@@ -186,6 +186,64 @@ fn set_refuses_field_json_with_malformed_json() {
     );
 }
 
+/// NRN-221: a `--format json` schema refusal emits the structured
+/// `{ code, message, path? }` error envelope on STDOUT with the SPECIFIC
+/// kebab code — not the generic `internal-error` fallback, and not bare
+/// prose on stderr. Matches the move/delete arms' NRN-150 contract.
+#[test]
+fn set_format_json_schema_refusal_emits_coded_error_envelope() {
+    let tmp = Builder::new().prefix("norn-set-").tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join(".norn")).unwrap();
+    fs::write(
+        tmp.path().join(".norn/config.yaml"),
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - done\n",
+    )
+    .unwrap();
+    let doc = tmp.path().join("task.md");
+    fs::write(&doc, "---\ntype: task\nstatus: backlog\n---\nbody\n").unwrap();
+
+    let output = norn_cmd(&tmp)
+        .args([
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "set",
+            "task.md",
+            "--field",
+            "status=bogus",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a schema refusal exits 2; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout must be a JSON error envelope");
+    assert_eq!(
+        envelope["code"], "value-not-allowed",
+        "the envelope carries the specific schema-refusal code, not internal-error; got: {envelope}"
+    );
+    assert!(
+        envelope["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("is not allowed for 'status'")),
+        "envelope message preserves the prose; got: {envelope}"
+    );
+    // Disk untouched: the refusal fires before any write.
+    let content = fs::read_to_string(&doc).unwrap();
+    assert!(
+        content.contains("status: backlog") && !content.contains("bogus"),
+        "a refused set must write nothing: {content}"
+    );
+}
+
 // === Task 6.3: combined ops + body change ===
 
 #[test]

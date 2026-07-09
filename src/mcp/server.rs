@@ -523,9 +523,10 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<crate::mcp::tools::set::SetParams>,
     ) -> Result<Noted<MutationResult<SetOutput>>, rmcp::ErrorData> {
-        // A coded precondition/CAS refusal crosses as a structured `refused` report
-        // + `isError:true` (NRN-220); uncoded errors (set's schema-validation prose,
-        // NRN-221) still propagate as a bare MCP `Err`.
+        // A coded refusal — a precondition/CAS failure (NRN-220) or a schema/
+        // argument refusal (`value-not-allowed`, `required-field-removed`, …;
+        // NRN-221) — crosses as a structured `refused` report + `isError:true`;
+        // genuinely internal errors still propagate as a bare MCP `Err`.
         self.run_wrapped(tool_names::SET, |ctx| {
             crate::mcp::tools::set::handle_output(ctx, p)
         })

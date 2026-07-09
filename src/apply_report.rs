@@ -229,6 +229,19 @@ impl ApplyError {
         if let Some(c) = e.downcast_ref::<crate::standards::apply::ContainmentError>() {
             return Self::from_containment(c);
         }
+        // `norn set`'s schema/argument-refusal family (NRN-221): the Set
+        // dispatch arm's `--format json` error path (`render_json_error_envelope`
+        // in lib.rs) funnels through here, so a CLI JSON consumer gets the same
+        // stable code an MCP `vault.set` client sees via
+        // `mcp::mutate::refusal_from_error`. Previously the Set arm emitted only
+        // prose on stderr (no envelope at all); the Records/TTY path still does.
+        if let Some(se) = e.downcast_ref::<crate::set::error::SetError>() {
+            return Self {
+                code: se.code().to_string(),
+                message: se.to_string(),
+                path: None,
+            };
+        }
         if let Some(cache) = e.downcast_ref::<crate::cache::CacheError>() {
             if matches!(cache, crate::cache::CacheError::MutationLockTimeout) {
                 return Self {
@@ -293,6 +306,24 @@ mod tests {
             envelope.path, None,
             "the uncertainty carries no single path"
         );
+    }
+
+    /// NRN-221: `set`'s schema/argument-refusal family keeps its stable code
+    /// through the anyhow seam too — a CLI `--format json` consumer sees e.g.
+    /// `required-field-removed`, not a laundered `internal-error`.
+    #[test]
+    fn from_anyhow_recovers_the_set_error_code() {
+        let error: anyhow::Error = crate::set::error::SetError::RequiredFieldRemoved {
+            field: "status".to_string(),
+        }
+        .into();
+        let envelope = ApplyError::from_anyhow(&error);
+        assert_eq!(envelope.code, "required-field-removed");
+        assert_eq!(
+            envelope.message,
+            "cannot remove required field 'status'; use --force to override"
+        );
+        assert_eq!(envelope.path, None);
     }
 
     #[test]
