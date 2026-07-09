@@ -238,6 +238,17 @@ impl ApplyError {
                 };
             }
         }
+        // A committing routed mutation whose daemon call failed after the
+        // request was sent (NRN-228): the vault state is UNKNOWN, so a consumer
+        // must branch to inspect/re-read, never blind-retry. No path — the
+        // uncertainty spans whatever the tool call targeted.
+        if let Some(uncertain) = e.downcast_ref::<crate::service::PostSendUncertainError>() {
+            return Self {
+                code: uncertain.code().to_string(),
+                message: uncertain.to_string(),
+                path: None,
+            };
+        }
         Self {
             code: "internal-error".to_string(),
             // `{:#}` renders the full anyhow context chain, matching the prose the
@@ -259,6 +270,30 @@ pub struct ApplyWarning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NRN-228: the routed-mutation uncertainty error keeps its stable code
+    /// through the anyhow seam — a JSON consumer sees `post-send-uncertain`,
+    /// not a laundered `internal-error`.
+    #[test]
+    fn from_anyhow_recovers_the_post_send_uncertain_code() {
+        let error = anyhow::Error::new(crate::service::PostSendUncertainError {
+            tool: "vault.set".to_string(),
+            cause: anyhow::anyhow!("connection reset"),
+        });
+        let envelope = ApplyError::from_anyhow(&error);
+        assert_eq!(envelope.code, "post-send-uncertain");
+        assert!(
+            envelope
+                .message
+                .contains("the daemon may have applied the change"),
+            "the message keeps the uncertainty prose; got: {}",
+            envelope.message
+        );
+        assert_eq!(
+            envelope.path, None,
+            "the uncertainty carries no single path"
+        );
+    }
 
     #[test]
     fn apply_report_serializes_with_per_op_status() {

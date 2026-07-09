@@ -51,7 +51,7 @@
 //!
 //! This lands the *client half*: host-socket-path derivation, the probe, the
 //! control-frame protocol, and (NRN-94) the request path —
-//! [`ServiceClient::call_tool_structured`] sends the `hello` vault preamble and
+//! [`ServiceClient::call_tool_structured_phased`] sends the `hello` vault preamble and
 //! runs the MCP `initialize` + `tools/call` exchange over the same stream. The
 //! daemon that answers is NRN-93. The routing seam in `src/lib.rs` decides which
 //! commands actually route (only `count` today — see `try_route_read`); every
@@ -274,7 +274,7 @@ pub enum RouteDecision {
 #[cfg(unix)]
 pub struct ServiceClient {
     /// The socket a handshake just succeeded against, and where the request
-    /// connection ([`ServiceClient::call_tool_structured`]) reconnects.
+    /// connection ([`ServiceClient::call_tool_structured_phased`]) reconnects.
     pub socket_path: Utf8PathBuf,
 }
 
@@ -809,6 +809,110 @@ fn read_line_capped<R: std::io::BufRead>(
     }
 }
 
+/// Where a routed tool call failed, relative to the moment the `tools/call`
+/// frame crosses to the daemon (NRN-228).
+///
+/// For a read this distinction is invisible (every failure falls back to a
+/// verified direct open either way). For a *mutation* it is the whole ballgame:
+/// a pre-send failure never reached the tool, so a Direct retry is safe; a
+/// post-send failure may have applied, so a Direct retry could double-apply.
+/// [`ServiceClient::call_tool_structured_phased`] tags every failure with one of
+/// these so a send-commit policy (see the routing seam's `route_call`) can decide.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallPhase {
+    /// The `tools/call` frame was never written — the failure happened during
+    /// the socket-trust check, the request connect, the `hello`/`ready`
+    /// preamble, the request-connection version gate, or the MCP `initialize`.
+    /// The tool never ran, so re-running Direct cannot double-apply.
+    PreSend,
+    /// The `tools/call` frame was written; the daemon may have executed the
+    /// tool. The failure is a lost/garbled/timed-out response — NOT proof the
+    /// tool did not run — so a mutation must not silently retry Direct.
+    PostSend,
+}
+
+/// A routed tool-call failure carrying its [`CallPhase`] (NRN-228). The read
+/// path collapses this to a plain `anyhow::Error` (it falls back regardless);
+/// the mutation path branches on `phase`.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct CallToolError {
+    /// Whether the tool request had already been sent when the failure hit.
+    pub phase: CallPhase,
+    /// The underlying failure, preserved verbatim for the operator-facing message.
+    pub source: anyhow::Error,
+}
+
+#[cfg(unix)]
+impl CallToolError {
+    /// Tag a failure that struck before the `tools/call` frame was written.
+    fn pre_send(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            phase: CallPhase::PreSend,
+            source: source.into(),
+        }
+    }
+
+    /// Tag a failure that struck at or after the `tools/call` frame was written.
+    fn post_send(source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            phase: CallPhase::PostSend,
+            source: source.into(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for CallToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for CallToolError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// The typed error a committing routed mutation surfaces when the daemon call
+/// fails AFTER the request was sent (NRN-228): the seam refuses to fall back to
+/// a Direct re-run (which could double-apply a change the daemon may already
+/// have made) and names the remedy instead.
+///
+/// Typed (not bare anyhow prose) so [`code`](Self::code) rides the
+/// `ApplyError::from_anyhow` downcast chain into the structured `{code,
+/// message}` failure envelope (NRN-150/220) — a JSON consumer branches on
+/// `post-send-uncertain`, never the prose. Cross-platform on purpose: the
+/// downcast chain references it on every target, though only the unix routing
+/// seam ever constructs it.
+///
+/// `cause` is deliberately NOT the std `source` (its text already rides the
+/// Display message; chaining it as `source` too would double-print it under
+/// anyhow's `{:#}` rendering).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "routed {tool} failed after the request was sent ({cause}); the daemon may have \
+     applied the change. Inspect the target (e.g. `norn get <target>`) or re-run with \
+     --dry-run before retrying."
+)]
+pub struct PostSendUncertainError {
+    /// The MCP tool name of the mutation whose outcome is unknown.
+    pub tool: String,
+    /// The underlying failure (transport drop, timeout, unreadable envelope).
+    pub cause: anyhow::Error,
+}
+
+impl PostSendUncertainError {
+    /// The stable, machine-branchable kebab code (NRN-220), mirroring the
+    /// `.code()` convention of `standards::apply::ApplyError` / `EditError`.
+    pub fn code(&self) -> &'static str {
+        "post-send-uncertain"
+    }
+}
+
 /// The request half of the routing seam (NRN-94).
 ///
 /// A [`ServiceClient`] is proof that a daemon answered the liveness ping on a
@@ -844,21 +948,32 @@ impl ServiceClient {
     /// `tool` is the MCP tool name (e.g. `"vault.count"`); `arguments` is the
     /// tool's parameter object; `on_tool_error` decides what a result flagged
     /// `isError: true` means (see [`OnToolError`]).
-    pub fn call_tool_structured(
+    /// Route one tool call to the warm daemon and return its `structuredContent`
+    /// JSON, tagging every failure with the [`CallPhase`] about the moment the
+    /// `tools/call` frame is written (the send boundary). A read discards the
+    /// phase (it falls back to Direct on any failure — see `route_read`); a
+    /// mutation branches on it, refusing to fall back once the request has
+    /// crossed to the daemon (see `route_call`). NRN-228.
+    pub fn call_tool_structured_phased(
         &self,
         vault_root: &Utf8Path,
         tool: &str,
         arguments: serde_json::Value,
         on_tool_error: OnToolError,
-    ) -> anyhow::Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, CallToolError> {
         use std::io::BufReader;
+
+        // ── PRE-SEND: nothing below has written the tool call yet, so every
+        //    failure here is `CallPhase::PreSend` — the tool never ran. ──
 
         // TRUST (NRN-94 review F4): before naming the vault, verify the socket is
         // ours. A squatter who binds the well-known path must not learn vault
         // paths (from the `hello`) or serve forged counts. On any mismatch, bail
         // so the caller falls back to a verified direct open — trust over speed.
         if !socket_is_trusted(&self.socket_path) {
-            anyhow::bail!("service socket failed the ownership check; using direct execution");
+            return Err(CallToolError::pre_send(anyhow::anyhow!(
+                "service socket failed the ownership check; using direct execution"
+            )));
         }
 
         // One overall wall-clock deadline for the whole routed read (F3): a
@@ -867,12 +982,17 @@ impl ServiceClient {
         let deadline = std::time::Instant::now() + ROUTED_READ_BUDGET;
 
         // Fresh request connection, bounded by the same budget.
-        let stream = connect_control(&self.socket_path, ROUTED_READ_BUDGET)?;
+        let stream = connect_control(&self.socket_path, ROUTED_READ_BUDGET)
+            .map_err(CallToolError::pre_send)?;
         // `SO_RCVTIMEO` is the per-read poll interval (short, so the reader wakes
         // to re-check the deadline); the deadline bounds the cumulative time. Set
         // once — per-read `setsockopt` trips EINVAL on macOS under load.
-        stream.set_read_timeout(Some(REQUEST_POLL_INTERVAL))?;
-        stream.set_write_timeout(Some(ROUTED_READ_BUDGET))?;
+        stream
+            .set_read_timeout(Some(REQUEST_POLL_INTERVAL))
+            .map_err(CallToolError::pre_send)?;
+        stream
+            .set_write_timeout(Some(ROUTED_READ_BUDGET))
+            .map_err(CallToolError::pre_send)?;
         // Read via a BufReader over `&stream`; write via `&stream` directly. Both
         // are shared borrows, so no `try_clone` (whose dup'd-fd churn trips the
         // macOS `SO_RCVTIMEO` EINVAL noted on the probe path).
@@ -885,12 +1005,19 @@ impl ServiceClient {
             protocol: CONTROL_PROTOCOL,
             vault_root: vault_root.as_str().to_string(),
         };
-        write_json_line(&stream, &hello)?;
-        let ready = read_json_value(&mut reader, deadline)?
-            .ok_or_else(|| anyhow::anyhow!("daemon closed before answering hello"))?;
+        write_json_line(&stream, &hello).map_err(CallToolError::pre_send)?;
+        let ready = read_json_value(&mut reader, deadline)
+            .map_err(CallToolError::pre_send)?
+            .ok_or_else(|| {
+                CallToolError::pre_send(anyhow::anyhow!("daemon closed before answering hello"))
+            })?;
         match ready.get("norn_control").and_then(|v| v.as_str()) {
             Some("ready") => {}
-            _ => anyhow::bail!("daemon did not answer hello with ready: {ready}"),
+            _ => {
+                return Err(CallToolError::pre_send(anyhow::anyhow!(
+                    "daemon did not answer hello with ready: {ready}"
+                )))
+            }
         }
         // Version gate on the REQUEST connection too (NRN-222 review): the
         // probe's ping is version-gated, but this is a separate connection — a
@@ -903,13 +1030,20 @@ impl ServiceClient {
             Some(version) if version == client_version => {}
             Some(server) => {
                 warn_version_skew(server, client_version);
-                anyhow::bail!("service/client version skew on the request connection");
+                return Err(CallToolError::pre_send(anyhow::anyhow!(
+                    "service/client version skew on the request connection"
+                )));
             }
-            None => anyhow::bail!("ready frame carries no version; refusing to route"),
+            None => {
+                return Err(CallToolError::pre_send(anyhow::anyhow!(
+                    "ready frame carries no version; refusing to route"
+                )))
+            }
         }
 
         // 2. MCP handshake. The daemon serves rmcp over the remainder of the
-        //    stream; `initialize` must succeed before any `tools/call`.
+        //    stream; `initialize` must succeed before any `tools/call`. Still
+        //    pre-send — `initialize` mutates nothing.
         let init = json_rpc_request(
             1,
             "initialize",
@@ -919,28 +1053,41 @@ impl ServiceClient {
                 "clientInfo": { "name": "norn-cli", "version": env!("CARGO_PKG_VERSION") },
             }),
         );
-        write_json_line(&stream, &init)?;
-        let init_resp = read_rpc_response(&mut reader, 1, deadline)?;
+        write_json_line(&stream, &init).map_err(CallToolError::pre_send)?;
+        let init_resp =
+            read_rpc_response(&mut reader, 1, deadline).map_err(CallToolError::pre_send)?;
         if let Some(err) = init_resp.get("error") {
-            anyhow::bail!("MCP initialize failed: {err}");
+            return Err(CallToolError::pre_send(anyhow::anyhow!(
+                "MCP initialize failed: {err}"
+            )));
         }
 
-        // 3. The actual tool call. A JSON-RPC `error` OR a `result` flagged
-        //    `isError` is a tool-level failure — bail so the caller falls back to
-        //    Direct, which re-produces the identical error and exit code.
+        // ── SEND BOUNDARY: writing the `tools/call` frame commits the request to
+        //    the daemon. From here every failure is `CallPhase::PostSend` — the
+        //    tool may have run, so a mutation caller must NOT silently retry
+        //    Direct. A JSON-RPC `error` OR a `result` flagged `isError` is a
+        //    tool-level failure; for a read the caller falls back to Direct
+        //    (which re-produces the identical error and exit code). ──
         let call = json_rpc_request(
             2,
             "tools/call",
             serde_json::json!({ "name": tool, "arguments": arguments }),
         );
-        write_json_line(&stream, &call)?;
-        let resp = read_rpc_response(&mut reader, 2, deadline)?;
+        // The WRITE itself is tagged post-send even though, at today's newline
+        // framing, a write failure provably means the daemon never parsed the
+        // frame. The tag deliberately does not depend on that framing invariant:
+        // mutation safety must not couple to a separate component's parser
+        // behavior, so the conservative tag holds across daemon changes.
+        write_json_line(&stream, &call).map_err(CallToolError::post_send)?;
+        let resp = read_rpc_response(&mut reader, 2, deadline).map_err(CallToolError::post_send)?;
         if let Some(err) = resp.get("error") {
-            anyhow::bail!("tool '{tool}' failed on the daemon: {err}");
+            return Err(CallToolError::post_send(anyhow::anyhow!(
+                "tool '{tool}' failed on the daemon: {err}"
+            )));
         }
-        let result = resp
-            .get("result")
-            .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no result"))?;
+        let result = resp.get("result").ok_or_else(|| {
+            CallToolError::post_send(anyhow::anyhow!("tool '{tool}' returned no result"))
+        })?;
         // F5: a successful JSON-RPC envelope can still carry a tool-level failure
         // via `isError: true` (an MCP CallToolResult convention). Under
         // `FallBackDirect`, treat it as a failure so we do not render a
@@ -951,13 +1098,19 @@ impl ServiceClient {
         if on_tool_error == OnToolError::FallBackDirect
             && result.get("isError").and_then(serde_json::Value::as_bool) == Some(true)
         {
-            anyhow::bail!("tool '{tool}' reported isError; using direct execution");
+            return Err(CallToolError::post_send(anyhow::anyhow!(
+                "tool '{tool}' reported isError; using direct execution"
+            )));
         }
         let structured = result
             .get("structuredContent")
             .cloned()
             .filter(|v| !v.is_null())
-            .ok_or_else(|| anyhow::anyhow!("tool '{tool}' returned no structuredContent"))?;
+            .ok_or_else(|| {
+                CallToolError::post_send(anyhow::anyhow!(
+                    "tool '{tool}' returned no structuredContent"
+                ))
+            })?;
         Ok(structured)
     }
 }
@@ -1077,23 +1230,25 @@ fn read_rpc_response<R: std::io::BufRead>(
     anyhow::bail!("no JSON-RPC response for request {id}")
 }
 
+/// Bind a stub listener and pin the socket to 0600, so the request path's
+/// F4 trust gate ([`socket_is_trusted`]) accepts it regardless of the ambient
+/// umask (which could otherwise leave it group/other-writable). Shared by this
+/// module's request-path tests and the crate-root routing-seam tests (NRN-228)
+/// — hence hoisted out of the inner `tests` module.
+#[cfg(all(test, unix))]
+pub(crate) fn bind_trusted(path: &Utf8Path) -> std::os::unix::net::UnixListener {
+    use std::os::unix::fs::PermissionsExt;
+    let listener = std::os::unix::net::UnixListener::bind(path.as_std_path()).unwrap();
+    std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    listener
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::UnixListener;
     use std::thread;
-
-    /// Bind a stub listener and pin the socket to 0600, so the request path's
-    /// F4 trust gate (`socket_is_trusted`) accepts it regardless of the ambient
-    /// umask (which could otherwise leave it group/other-writable).
-    fn bind_trusted(path: &Utf8PathBuf) -> UnixListener {
-        use std::os::unix::fs::PermissionsExt;
-        let listener = UnixListener::bind(path).unwrap();
-        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600))
-            .unwrap();
-        listener
-    }
 
     /// The host socket path is deterministic (same process env => same
     /// answer every call) and lands at the well-known `norn/run/norn.sock`
@@ -1193,7 +1348,7 @@ mod tests {
         };
         let vault_root = Utf8PathBuf::from("/vaults/atlas");
         let structured = client
-            .call_tool_structured(
+            .call_tool_structured_phased(
                 &vault_root,
                 "vault.count",
                 serde_json::json!({"by": "type"}),
@@ -1236,7 +1391,7 @@ mod tests {
         let client = ServiceClient {
             socket_path: path.clone(),
         };
-        let result = client.call_tool_structured(
+        let result = client.call_tool_structured_phased(
             &Utf8PathBuf::from("/vaults/atlas"),
             "vault.count",
             serde_json::json!({}),
@@ -1288,7 +1443,7 @@ mod tests {
                 socket_path: path.clone(),
             };
             let error = client
-                .call_tool_structured(
+                .call_tool_structured_phased(
                     &Utf8PathBuf::from("/vaults/atlas"),
                     "vault.count",
                     serde_json::json!({}),
@@ -1364,7 +1519,7 @@ mod tests {
         let client = ServiceClient {
             socket_path: path.clone(),
         };
-        let result = client.call_tool_structured(
+        let result = client.call_tool_structured_phased(
             &Utf8PathBuf::from("/vaults/atlas"),
             "vault.count",
             serde_json::json!({}),
@@ -1434,7 +1589,7 @@ mod tests {
             socket_path: path.clone(),
         };
         let structured = client
-            .call_tool_structured(
+            .call_tool_structured_phased(
                 &Utf8PathBuf::from("/vaults/atlas"),
                 "vault.get",
                 serde_json::json!({"targets": ["nope"]}),
@@ -1444,6 +1599,108 @@ mod tests {
         assert_eq!(
             structured,
             serde_json::json!({"records": [], "notes": ["error: nope"]})
+        );
+        server.join().unwrap();
+    }
+
+    /// NRN-228: a failure BEFORE the `tools/call` frame is written is tagged
+    /// `CallPhase::PreSend` — the tool never ran. The stub accepts `hello` and
+    /// then drops the connection without a `ready` frame, so the client fails at
+    /// the preamble. A mutation caller can safely fall back to Direct here.
+    #[test]
+    fn call_tool_structured_phased_tags_a_preamble_failure_pre_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut hello_line = String::new();
+            reader.read_line(&mut hello_line).unwrap();
+            // Drop without answering `ready`: the tool call is never written.
+            drop(conn);
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let error = client
+            .call_tool_structured_phased(
+                &Utf8PathBuf::from("/vaults/atlas"),
+                "vault.set",
+                serde_json::json!({}),
+                OnToolError::AcceptWithPayload,
+            )
+            .expect_err("a dropped preamble must be Err");
+        assert_eq!(
+            error.phase,
+            CallPhase::PreSend,
+            "a pre-`tools/call` failure must be tagged PreSend (got {error})"
+        );
+        server.join().unwrap();
+    }
+
+    /// NRN-228: a failure AFTER the `tools/call` frame is written is tagged
+    /// `CallPhase::PostSend` — the daemon may have run the tool. The stub
+    /// completes `hello`/`ready` and `initialize`, reads the `tools/call`, then
+    /// drops WITHOUT a response, so the client fails reading the tool result.
+    /// A mutation caller must NOT silently retry Direct here.
+    #[test]
+    fn call_tool_structured_phased_tags_a_dropped_response_post_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+            // hello → ready
+            let mut hello_line = String::new();
+            reader.read_line(&mut hello_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+            // initialize → result
+            let mut init_line = String::new();
+            reader.read_line(&mut init_line).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+            )
+            .unwrap();
+            w.flush().unwrap();
+            // Read the tools/call, then DROP before responding: the request has
+            // crossed to the daemon, but no result comes back.
+            let mut call_line = String::new();
+            reader.read_line(&mut call_line).unwrap();
+            drop(w);
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let error = client
+            .call_tool_structured_phased(
+                &Utf8PathBuf::from("/vaults/atlas"),
+                "vault.set",
+                serde_json::json!({}),
+                OnToolError::AcceptWithPayload,
+            )
+            .expect_err("a dropped response must be Err");
+        assert_eq!(
+            error.phase,
+            CallPhase::PostSend,
+            "a post-`tools/call` failure must be tagged PostSend (got {error})"
         );
         server.join().unwrap();
     }
