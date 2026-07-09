@@ -114,17 +114,7 @@ pub fn coerce_value_for_type(
                 .into())
             }
         }
-        "wikilink" => {
-            let wrapped = wrap_wikilink(raw);
-            if !crate::standards::predicates::is_wikilink_string(&wrapped) {
-                return Err(SetError::InvalidWikilink {
-                    value: raw.to_string(),
-                }
-                .into());
-            }
-            Ok(Value::String(wrapped))
-        }
-        "wikilink_or_list" => {
+        "wikilink" | "wikilink_or_list" => {
             let wrapped = wrap_wikilink(raw);
             if !crate::standards::predicates::is_wikilink_string(&wrapped) {
                 return Err(SetError::InvalidWikilink {
