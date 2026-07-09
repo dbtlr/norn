@@ -2233,7 +2233,13 @@ fn exit_code_for(index: &GraphIndex) -> i32 {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::routing_forced_direct;
+    use super::{after_send_for, execute_routed_call, routing_forced_direct, FallbackAfterSend};
+    use crate::service::{CallPhase, OnToolError, ServiceClient, CONTROL_PROTOCOL};
+    use anyhow::Result;
+    use camino::{Utf8Path, Utf8PathBuf};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
 
     /// F1 seam-level gate: BOTH `--config` and `--no-cache-refresh` force a
     /// routable read onto the Direct path, independent of any live daemon. The
@@ -2251,5 +2257,223 @@ mod tests {
             "--no-cache-refresh forces Direct"
         );
         assert!(routing_forced_direct(true, true), "both flags force Direct");
+    }
+
+    // ── NRN-228 route_call send-commit seam ──────────────────────────────────
+    //
+    // These drive `execute_routed_call` (the body `route_call` and `route_read`
+    // share once a daemon is proven live) against a stub UDS daemon on a temp
+    // socket, so the send-commit policy is observed end-to-end without touching
+    // the process-global env the well-known-socket probe reads.
+
+    /// Bind a stub listener and pin it to 0600 so the request path's F4 trust
+    /// gate (`socket_is_trusted`) accepts it regardless of the ambient umask.
+    fn bind_trusted(path: &Utf8Path) -> UnixListener {
+        use std::os::unix::fs::PermissionsExt;
+        let listener = UnixListener::bind(path.as_std_path()).unwrap();
+        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        listener
+    }
+
+    /// Spawn a stub daemon that drives the request wire to a chosen failure
+    /// point, then drops the connection:
+    /// - `after_call == false` (PRE-send): read `hello`, then drop without a
+    ///   `ready` frame — the client fails at the preamble, before the
+    ///   `tools/call` frame is ever written.
+    /// - `after_call == true` (POST-send): complete `hello`/`ready` and MCP
+    ///   `initialize`, read the `tools/call`, then drop WITHOUT a response — the
+    ///   request has crossed to the daemon, but no result comes back.
+    fn spawn_stub(listener: UnixListener, after_call: bool) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+
+            let mut hello = String::new();
+            reader.read_line(&mut hello).unwrap();
+            if !after_call {
+                // Pre-send: never answer `ready`. Dropping both fds (w now, the
+                // reader clone at return) gives the client a prompt EOF.
+                return;
+            }
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "norn_control": "ready", "protocol": CONTROL_PROTOCOL,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+            )
+            .unwrap();
+            w.flush().unwrap();
+
+            let mut init = String::new();
+            reader.read_line(&mut init).unwrap();
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+            )
+            .unwrap();
+            w.flush().unwrap();
+
+            // Read the tools/call (so the client's write completes), then drop
+            // without responding — the post-send failure.
+            let mut call = String::new();
+            reader.read_line(&mut call).unwrap();
+        })
+    }
+
+    /// `reconstruct`/`emit` must never run on a FAILED routed call — the failure
+    /// branch returns before them. Panicking closures prove it.
+    fn reconstruct_never(_: &serde_json::Value) -> Result<()> {
+        panic!("reconstruct must not run on a failed routed call")
+    }
+    fn emit_never(_: ()) -> Result<i32> {
+        panic!("emit must not run on a failed routed call")
+    }
+
+    /// The policy mapping: a dry-run writes nothing (a read in mutation
+    /// clothing) so it may fall back after send; an apply commits, so a
+    /// post-send failure is surfaced, never silently retried.
+    #[test]
+    fn after_send_for_maps_dry_run_and_apply() {
+        assert_eq!(
+            after_send_for(true),
+            FallbackAfterSend::Fallback,
+            "a dry-run may fall back after send"
+        );
+        assert_eq!(
+            after_send_for(false),
+            FallbackAfterSend::Commit,
+            "an apply commits — no post-send fallback"
+        );
+    }
+
+    /// Commit mode, PRE-send failure: the tool never ran, so the seam falls back
+    /// to Direct (returns `None`) exactly like a read.
+    #[test]
+    fn commit_falls_back_to_direct_on_a_pre_send_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
+        let stub = spawn_stub(bind_trusted(&path), false);
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let out = execute_routed_call(
+            Utf8Path::new("/vaults/atlas"),
+            &client,
+            "vault.set",
+            serde_json::json!({}),
+            OnToolError::AcceptWithPayload,
+            FallbackAfterSend::Commit,
+            false,
+            reconstruct_never,
+            emit_never,
+        );
+        assert!(
+            out.is_none(),
+            "a pre-send failure under Commit must fall back to Direct (None)"
+        );
+        stub.join().unwrap();
+    }
+
+    /// Commit mode, POST-send failure: the daemon may have applied the change,
+    /// so the seam does NOT fall back. It returns `Some(Err(..))` — an error the
+    /// top level maps to exit 1 — whose message names the inspect / `--dry-run`
+    /// remedy. `Some` (not `None`) is the no-fallback proof.
+    #[test]
+    fn commit_surfaces_uncertainty_on_a_post_send_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
+        let stub = spawn_stub(bind_trusted(&path), true);
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let out = execute_routed_call(
+            Utf8Path::new("/vaults/atlas"),
+            &client,
+            "vault.set",
+            serde_json::json!({}),
+            OnToolError::AcceptWithPayload,
+            FallbackAfterSend::Commit,
+            false,
+            reconstruct_never,
+            emit_never,
+        );
+        let result = out.expect("Commit must NOT fall back after send (Some, not None)");
+        let error = result.expect_err("a post-send Commit failure is an error, not a success");
+        let message = format!("{error}");
+        assert!(
+            message.contains("the daemon may have applied the change"),
+            "the error names the uncertainty; got: {message}"
+        );
+        assert!(
+            message.contains("--dry-run"),
+            "the error names the --dry-run remedy; got: {message}"
+        );
+        assert!(
+            message.contains("norn get"),
+            "the error names the inspect remedy; got: {message}"
+        );
+        stub.join().unwrap();
+    }
+
+    /// Fallback mode (a routed dry-run), the SAME post-send failure: because a
+    /// dry-run writes nothing, the seam silently falls back to Direct (`None`).
+    /// The only difference from the Commit case above is the policy.
+    #[test]
+    fn dry_run_fallback_is_silent_on_a_post_send_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
+        let stub = spawn_stub(bind_trusted(&path), true);
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let out = execute_routed_call(
+            Utf8Path::new("/vaults/atlas"),
+            &client,
+            "vault.set",
+            serde_json::json!({}),
+            OnToolError::AcceptWithPayload,
+            FallbackAfterSend::Fallback,
+            false,
+            reconstruct_never,
+            emit_never,
+        );
+        assert!(
+            out.is_none(),
+            "a dry-run (Fallback) post-send failure must silently fall back to Direct (None)"
+        );
+        stub.join().unwrap();
+    }
+
+    /// The stub's PRE-send drop really does fail the client before the tool call
+    /// is sent — proven at the phase-tagged layer so the fallback tests above
+    /// can't pass on a mis-tagged phase. (POST-send tagging is proven by the
+    /// service-module unit tests.)
+    #[test]
+    fn stub_pre_send_drop_is_tagged_pre_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("s.sock")).unwrap();
+        let stub = spawn_stub(bind_trusted(&path), false);
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let error = client
+            .call_tool_structured_phased(
+                Utf8Path::new("/vaults/atlas"),
+                "vault.set",
+                serde_json::json!({}),
+                OnToolError::AcceptWithPayload,
+            )
+            .expect_err("a dropped preamble must be Err");
+        assert_eq!(error.phase, CallPhase::PreSend);
+        stub.join().unwrap();
     }
 }
