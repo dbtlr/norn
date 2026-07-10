@@ -19,6 +19,7 @@
 //! per-binary dead-code warnings here (clippy runs with `-D warnings`).
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -360,6 +361,96 @@ pub fn paths(docs: &[Value]) -> Vec<String> {
 /// Read a whole file to a string (tests are allowed to read their temp vault).
 pub fn read_to_string(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// A spawned daemon whose stderr is captured to a file, so the mutation-routing
+/// suite can prove routing happened via [`count_served`]. The analogue of
+/// [`Daemon`] for the mutation tests (the read suites inline this spawn).
+pub struct DaemonWithLog {
+    pub child: ChildGuard,
+    pub cache_home: PathBuf,
+    pub state_home: PathBuf,
+    pub socket_path: PathBuf,
+    pub stderr_path: PathBuf,
+    _tmp: TempDir,
+}
+
+/// Spawn a daemon on a private cache/state home with stderr captured to a file,
+/// wait until it answers a ping, and return everything the mutation-routing
+/// assertions need. `extra_env` threads extra environment (e.g. the debug-only
+/// `NORN_MUTATION_LOCK_TIMEOUT_MS` knob for the contention case) into the daemon.
+///
+/// Subdir names are kept SHORT (`c`/`s`) so the control socket at
+/// `<cache_home>/norn/run/norn.sock` fits macOS's ~104-byte `sun_path` limit
+/// under the long `/var/folders/...` temp base.
+pub fn spawn_ready_daemon_with_log(extra_env: &[(&str, &str)]) -> DaemonWithLog {
+    let tmp = tempfile::Builder::new()
+        .prefix("nsm-")
+        .tempdir()
+        .expect("tempdir");
+    let cache_home = tmp.path().join("c");
+    let state_home = tmp.path().join("s");
+    let stderr_path = tmp.path().join("err");
+    let stderr_file = std::fs::File::create(&stderr_path).expect("create daemon stderr log");
+    let mut cmd = Command::new(norn_bin());
+    cmd.arg("serve")
+        .env("XDG_CACHE_HOME", &cache_home)
+        .env("XDG_STATE_HOME", &state_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file));
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn().expect("spawn norn serve");
+    let socket_path = socket_path_for(&cache_home);
+    wait_for_ready(&socket_path, Duration::from_secs(10));
+    DaemonWithLog {
+        child: ChildGuard(child),
+        cache_home,
+        state_home,
+        socket_path,
+        stderr_path,
+        _tmp: tmp,
+    }
+}
+
+/// Write a set of `(relative_path, contents)` files into `root`, creating parent
+/// directories as needed. Used to seed identical vault copies for the
+/// direct-vs-routed comparison.
+pub fn write_vault(root: &Path, files: &[(&str, &str)]) {
+    for (rel, contents) in files {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create vault subdir");
+        }
+        std::fs::write(&path, contents).expect("write seed file");
+    }
+}
+
+/// A recursive `relative-path -> bytes` snapshot of every file under `root`, for
+/// asserting two vault copies are byte-for-byte identical in their POST state
+/// (every file, not just the mutated doc).
+pub fn dir_snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                walk(base, &path, out);
+            } else {
+                let rel = path
+                    .strip_prefix(base)
+                    .expect("strip base prefix")
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(rel, std::fs::read(&path).expect("read file"));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
 }
 
 /// Count the daemon's per-call `norn serve: served <tool>` markers in its

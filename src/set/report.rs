@@ -6,13 +6,19 @@
 use std::io::Write;
 
 use camino::Utf8PathBuf;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::set::validate::SetWarning;
 
 pub const SET_REPORT_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` is derived so the CLI→service routing seam (NRN-229) can rebuild
+/// a `SetReport` from a routed `vault.set`'s `structuredContent` and render it
+/// through the SAME `render_json`/`render_records` the direct path uses — the
+/// load-bearing routed↔direct isomorphism (ADR 0005). Serialization is unchanged
+/// (the added `#[serde(default)]` on `warnings` affects deserialization only), so
+/// the MCP tool output stays byte-identical.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetReport {
     pub schema_version: u32,
     /// Trace ID shared by every telemetry event emitted for this invocation.
@@ -37,7 +43,7 @@ pub struct SetReport {
     /// `error.code` (`stale-document-hash`, …) rather than the prose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::apply_report::ApplyError>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<SetWarning>,
 }
 
@@ -64,7 +70,7 @@ impl SetReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrontmatterChange {
     pub op: String,
     pub field: String,

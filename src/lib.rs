@@ -269,29 +269,49 @@ enum FallbackAfterSend {
     Commit,
 }
 
+/// The literate description of a single routed tool call: the pieces every layer
+/// of the routing seam needs to name the tool, thread its arguments, and decide
+/// what an `isError` result means (NRN-229). A caller builds one `CallSpec` and
+/// hands it to [`route_call`] (mutations) or [`route_read`] (reads) — nothing
+/// lower in the seam takes bare `tool`/`arguments`/`on_tool_error`/`verbose`
+/// params anymore.
+#[cfg(unix)]
+pub struct CallSpec<'a> {
+    pub tool: &'a str,
+    pub arguments: serde_json::Value,
+    pub on_tool_error: crate::service::OnToolError,
+    pub verbose: bool,
+}
+
+/// A [`CallSpec`] plus the send-commit policy (NRN-228) — the shape the inner
+/// seam ([`route_tool_call`]/[`execute_routed_call`]) actually executes against.
+/// Built by [`route_call`] (via [`after_send_for`]) and [`route_read`] (which
+/// always hardcodes [`FallbackAfterSend::Fallback`]); a command's `route_*`
+/// wrapper never constructs one directly.
+#[cfg(unix)]
+struct RoutedCall<'a> {
+    spec: CallSpec<'a>,
+    after_send: FallbackAfterSend,
+}
+
 /// The generic routing skeleton shared by reads (`count`/`find`/`get`, NRN-222)
 /// and mutations (NRN-228).
 ///
 /// Computes the canonical vault root ONCE (threaded into the preamble — NRN-92
 /// review F5), probes the well-known socket, and delegates to
-/// [`execute_routed_call`], which runs `tool` with `arguments` and applies the
-/// `after_send` policy. Every pre-flight miss — an un-canonicalizable root or no
-/// live daemon — returns `None`, so the direct dispatch serves the request (and
-/// re-produces any error canonically).
+/// [`execute_routed_call`], which runs the call's tool with its arguments and
+/// applies the `after_send` policy. Every pre-flight miss — an
+/// un-canonicalizable root or no live daemon — returns `None`, so the direct
+/// dispatch serves the request (and re-produces any error canonically).
 ///
-/// `on_tool_error` decides what a result flagged `isError: true` means for this
-/// tool (see [`crate::service::OnToolError`]): `vault.get` accepts the payload
-/// (its `isError` is the semantic not-found signal — falling back would execute
-/// the failing read twice); `count`/`find` fall back to Direct.
+/// `call.spec.on_tool_error` decides what a result flagged `isError: true` means
+/// for this tool (see [`crate::service::OnToolError`]): `vault.get` accepts the
+/// payload (its `isError` is the semantic not-found signal — falling back would
+/// execute the failing read twice); `count`/`find` fall back to Direct.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn route_tool_call<T>(
     cwd: &camino::Utf8Path,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
-    after_send: FallbackAfterSend,
-    verbose: bool,
+    call: RoutedCall<'_>,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
@@ -308,17 +328,7 @@ fn route_tool_call<T>(
         crate::service::RouteDecision::Direct => return None,
     };
 
-    execute_routed_call(
-        &canonical,
-        &client,
-        tool,
-        arguments,
-        on_tool_error,
-        after_send,
-        verbose,
-        reconstruct,
-        emit,
-    )
+    execute_routed_call(&canonical, &client, call, reconstruct, emit)
 }
 
 /// The body shared by every routed call once a live daemon is proven (NRN-228):
@@ -340,18 +350,20 @@ fn route_tool_call<T>(
 /// `ServiceClient` on a temp socket, without touching the process-global env the
 /// well-known-socket probe reads.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn execute_routed_call<T>(
     canonical: &camino::Utf8Path,
     client: &crate::service::ServiceClient,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
-    after_send: FallbackAfterSend,
-    verbose: bool,
+    call: RoutedCall<'_>,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
+    let RoutedCall { spec, after_send } = call;
+    let CallSpec {
+        tool,
+        arguments,
+        on_tool_error,
+        verbose,
+    } = spec;
     // A committing mutation must use `AcceptWithPayload`: under `FallBackDirect`
     // a clean daemon-side refusal (`isError: true`) surfaces as a post-send
     // `Err`, which Commit would misreport as a false "may have applied" alarm
@@ -468,20 +480,16 @@ fn post_send_uncertainty_error(tool: &str, source: anyhow::Error) -> anyhow::Err
 #[cfg(unix)]
 fn route_read<T>(
     cwd: &camino::Utf8Path,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
-    verbose: bool,
+    spec: CallSpec<'_>,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
     route_tool_call(
         cwd,
-        tool,
-        arguments,
-        on_tool_error,
-        FallbackAfterSend::Fallback,
-        verbose,
+        RoutedCall {
+            spec,
+            after_send: FallbackAfterSend::Fallback,
+        },
         reconstruct,
         emit,
     )
@@ -524,24 +532,19 @@ fn route_read<T>(
 ///   the probe half is covered by the e2e `serve_*_routing` suites and will be
 ///   for mutations once NRN-229 gives them a routable command.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 pub fn route_call<T>(
     cwd: &camino::Utf8Path,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
+    spec: CallSpec<'_>,
     dry_run: bool,
-    verbose: bool,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
     route_tool_call(
         cwd,
-        tool,
-        arguments,
-        on_tool_error,
-        after_send_for(dry_run),
-        verbose,
+        RoutedCall {
+            spec,
+            after_send: after_send_for(dry_run),
+        },
         reconstruct,
         emit,
     )
@@ -569,10 +572,12 @@ fn route_count(
 ) -> Option<Result<i32>> {
     route_read(
         cwd,
-        "vault.count",
-        crate::count::route::to_mcp_arguments(args, dynamic_keys),
-        crate::service::OnToolError::FallBackDirect,
-        verbose,
+        CallSpec {
+            tool: "vault.count",
+            arguments: crate::count::route::to_mcp_arguments(args, dynamic_keys),
+            on_tool_error: crate::service::OnToolError::FallBackDirect,
+            verbose,
+        },
         crate::count::route::reconstruct,
         |out| {
             let mut stdout = std::io::stdout().lock();
@@ -600,10 +605,12 @@ fn route_find(
     }
     route_read(
         cwd,
-        "vault.find",
-        crate::find::route::to_mcp_arguments(args, dynamic_keys),
-        crate::service::OnToolError::FallBackDirect,
-        verbose,
+        CallSpec {
+            tool: "vault.find",
+            arguments: crate::find::route::to_mcp_arguments(args, dynamic_keys),
+            on_tool_error: crate::service::OnToolError::FallBackDirect,
+            verbose,
+        },
         |structured| crate::find::route::reconstruct(structured, args),
         |routed| {
             let palette = crate::output::palette::resolve(color);
@@ -634,17 +641,221 @@ fn route_get(
     }
     route_read(
         cwd,
-        "vault.get",
-        crate::show::route::to_mcp_arguments(args),
-        // vault.get flags a not-found target as `isError: true` while still
-        // shipping the full structuredContent (NRN-214); accept it so the
-        // routed client derives the CLI's exit-1 from the wire notes instead
-        // of re-executing the failing read directly.
-        crate::service::OnToolError::AcceptWithPayload,
-        verbose,
+        CallSpec {
+            tool: "vault.get",
+            arguments: crate::show::route::to_mcp_arguments(args),
+            // vault.get flags a not-found target as `isError: true` while still
+            // shipping the full structuredContent (NRN-214); accept it so the
+            // routed client derives the CLI's exit-1 from the wire notes instead
+            // of re-executing the failing read directly.
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
         |structured| crate::show::route::reconstruct(structured, args),
         |report| crate::show::emit(&report, args),
     )
+}
+
+/// Attempt to route a `norn set` to the warm daemon (NRN-229), or return `None`
+/// to run the direct path.
+///
+/// **Routing runs BEFORE the direct arm's local mutation lock.** The daemon
+/// acquires the SAME per-vault lock in-process, so a CLI that held the lock while
+/// routing would deadlock a routed apply. Only the direct fallback performs
+/// today's sweep + lock + execute sequence.
+///
+/// **Mode mapping** (settled NRN-229 decisions):
+/// - `--dry-run` → routed dry-run (`confirm: false`).
+/// - `--yes` (non-interactive apply) → routed apply (`confirm: true`).
+/// - `--format json` without `--yes` → routed preview (implicit dry-run,
+///   `confirm: false`).
+/// - interactive TTY without `--yes` → NOT routed: the preview→prompt→apply flow
+///   stays direct (the daemon cannot drive the terminal prompt).
+/// - non-TTY without `--yes` (and not `--format json`) → routed dry-run,
+///   preserving today's "implicit dry-run preview, no prompt" semantics.
+///
+/// **Gated to Direct** (no byte-faithful wire encoding, see `set::route`):
+/// `--field-json`, `--push`, `--pop`, `--body-from-stdin`. `--config` /
+/// `--no-cache-refresh` force Direct up front via the SAME
+/// [`routing_forced_direct`] guard the read seam uses (the daemon loads each
+/// vault's own default config and always serves a refreshed warm cache, so
+/// routing either flag would silently ignore it).
+///
+/// A routed apply runs under the seam's `Commit` policy: a post-send failure
+/// surfaces `post-send-uncertain` (exit 1) rather than a double-applying Direct
+/// retry. `AcceptWithPayload` lets a coded refusal (NRN-220/221) cross as
+/// `isError: true` carrying the structured report, which `reconstruct` renders as
+/// the byte-identical exit-2 refusal.
+#[cfg(unix)]
+fn try_route_set(
+    args: &crate::cli::SetArgs,
+    combined_fields: &[String],
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    use std::io::IsTerminal as _;
+
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
+
+    // Shapes with no byte-faithful wire encoding run Direct.
+    if args.body_from_stdin
+        || !args.field_json.is_empty()
+        || !args.push.is_empty()
+        || !args.pop.is_empty()
+    {
+        return None;
+    }
+
+    // Decide the effective mode, mirroring the direct arm's `should_apply` ladder.
+    let confirm = if args.dry_run {
+        false
+    } else if args.yes {
+        true
+    } else if matches!(args.format, crate::cli::SetFormat::Json) {
+        false
+    } else if std::io::stdin().is_terminal() {
+        // Interactive preview→prompt→apply stays Direct.
+        return None;
+    } else {
+        // Non-TTY without --yes: implicit dry-run preview.
+        false
+    };
+
+    let format = args.format;
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.set",
+            arguments: crate::set::route::to_mcp_arguments(args, combined_fields, confirm),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        /*dry_run=*/ !confirm,
+        crate::set::route::reconstruct,
+        move |report| crate::set::route::emit(report, format),
+    )
+}
+
+/// Non-Unix build: the warm daemon rides Unix-domain sockets, so `set` always
+/// runs Direct. Always-Direct is safe here — no daemon can exist to half-apply a
+/// mutation (mirrors `try_route_read`'s Direct stub).
+#[cfg(not(unix))]
+fn try_route_set(
+    args: &crate::cli::SetArgs,
+    combined_fields: &[String],
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (
+        args,
+        combined_fields,
+        cwd,
+        explicit_config,
+        no_cache_refresh,
+        verbose,
+    );
+    None
+}
+
+/// Attempt to route a `norn edit` to the warm daemon (NRN-229 PR A), or return
+/// `None` to run the direct path. Copies `try_route_set`'s shape exactly.
+///
+/// **Routing runs BEFORE the direct arm's local mutation lock**, same reason as
+/// `set`: the daemon acquires the SAME per-vault lock in-process.
+///
+/// `ops` is whatever the direct arm already resolved (sugar-desugared, or
+/// parsed from `--edits-json`/`--ops-file`/stdin) BEFORE this is called — see
+/// `edit::route`'s module doc for why the ops source is never a gating reason
+/// (unlike `set`'s `--body-from-stdin`).
+///
+/// **Mode mapping** (identical ladder to `set`, NRN-229 decisions):
+/// - `--dry-run` → routed dry-run (`confirm: false`).
+/// - `--yes` (non-interactive apply) → routed apply (`confirm: true`).
+/// - `--format json` without `--yes` → routed preview (implicit dry-run,
+///   `confirm: false`).
+/// - interactive TTY without `--yes` → NOT routed: the preview→prompt→apply
+///   flow stays direct (the daemon cannot drive the terminal prompt).
+/// - non-TTY without `--yes` (and not `--format json`) → routed dry-run,
+///   preserving today's "implicit dry-run preview, no prompt" semantics.
+///
+/// **Gated to Direct:** no edit-specific flag today — see `edit::route`'s
+/// module doc. `--config` / `--no-cache-refresh` force Direct up front via the
+/// SAME [`routing_forced_direct`] guard the read seam and `try_route_set` use
+/// (the daemon loads each vault's own default config and always serves a
+/// refreshed warm cache, so routing either flag would silently ignore it).
+///
+/// A routed apply runs under the seam's `Commit` policy, same as `set`: a
+/// post-send failure surfaces `post-send-uncertain` (exit 1) rather than a
+/// double-applying Direct retry. `AcceptWithPayload` lets a coded refusal
+/// (NRN-220) cross as `isError: true` carrying the structured report, which
+/// `reconstruct` renders as the (format-independent, see `edit::route::emit`)
+/// exit-2 refusal.
+#[cfg(unix)]
+fn try_route_edit(
+    args: &crate::cli::EditArgs,
+    ops: &[crate::edit::ops::EditOp],
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    use std::io::IsTerminal as _;
+
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
+
+    // Decide the effective mode, mirroring the direct arm's `should_apply`
+    // ladder (and `try_route_set`'s identical shape).
+    let confirm = if args.dry_run {
+        false
+    } else if args.yes {
+        true
+    } else if matches!(args.format, crate::cli::EditFormat::Json) {
+        false
+    } else if std::io::stdin().is_terminal() {
+        // Interactive preview→prompt→apply stays Direct.
+        return None;
+    } else {
+        // Non-TTY without --yes: implicit dry-run preview.
+        false
+    };
+
+    let format = args.format;
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.edit",
+            arguments: crate::edit::route::to_mcp_arguments(args, ops, confirm),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        /*dry_run=*/ !confirm,
+        crate::edit::route::reconstruct,
+        move |report| crate::edit::route::emit(report, format),
+    )
+}
+
+/// Non-Unix build: the warm daemon rides Unix-domain sockets, so `edit` always
+/// runs Direct. Always-Direct is safe here — no daemon can exist to half-apply a
+/// mutation (mirrors `try_route_set`'s Direct stub).
+#[cfg(not(unix))]
+fn try_route_edit(
+    args: &crate::cli::EditArgs,
+    ops: &[crate::edit::ops::EditOp],
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (args, ops, cwd, explicit_config, no_cache_refresh, verbose);
+    None
 }
 
 fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
@@ -1431,14 +1642,38 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use std::io::{IsTerminal, Write};
 
             // F5: validate the trailing `KEY=VALUE` positional shape BEFORE the
-            // mutation lock + cache load. A pure argv error (`set doc.md badtoken`
-            // with no separator) must fail fast without side effects, matching the
-            // edit path which validates arg shape before the lock.
-            if let Err(e) =
-                crate::set::synth::desugar_positional_fields(&args.field_pos, &args.fields)
-            {
-                eprintln!("error: {e}");
-                return Ok(2);
+            // mutation lock, cache load, OR routing. A pure argv error (`set doc.md
+            // badtoken` with no separator) must fail fast without side effects,
+            // matching the edit path which validates arg shape before the lock. The
+            // combined `--field` list (explicit `--field` + desugared positionals)
+            // also feeds the NRN-229 routing translation below.
+            let combined_fields =
+                match crate::set::synth::desugar_positional_fields(&args.field_pos, &args.fields) {
+                    Ok(combined) => combined,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return Ok(2);
+                    }
+                };
+
+            // NRN-229 routing seam: attempt to serve the mutation from a warm
+            // `norn serve` daemon BEFORE acquiring the local mutation lock (the
+            // daemon takes the SAME per-vault lock in-process; holding it here
+            // would deadlock a routed apply). `Some` => the request was served (or
+            // deliberately refused) by routing; `None` => no live daemon, a gated
+            // shape (including `--config` / `--no-cache-refresh`, which force
+            // Direct exactly as they do for routed reads), or the interactive
+            // path => fall through to the direct sweep + lock + execute sequence
+            // below, unchanged.
+            if let Some(result) = try_route_set(
+                &args,
+                &combined_fields,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
+                return result;
             }
 
             // Acquire mutation lock before cache load.
@@ -1657,6 +1892,25 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             if ops.is_empty() {
                 eprintln!("error: edits array is empty");
                 return Ok(2);
+            }
+
+            // NRN-229 routing seam: attempt to serve the mutation from a warm
+            // `norn serve` daemon BEFORE acquiring the local mutation lock (the
+            // daemon takes the SAME per-vault lock in-process; holding it here
+            // would deadlock a routed apply). `Some` => the request was served
+            // (or deliberately refused) by routing; `None` => no live daemon, a
+            // forced-Direct flag (`--config` / `--no-cache-refresh`, exactly as
+            // for routed reads), or the interactive path => fall through to the
+            // direct sweep + lock + execute sequence below, unchanged.
+            if let Some(result) = try_route_edit(
+                &args,
+                &ops,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
+                return result;
             }
 
             let (_, state_dir) = crate::cache::state_dir_for(&cwd)
@@ -2265,7 +2519,10 @@ fn exit_code_for(index: &GraphIndex) -> i32 {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{after_send_for, execute_routed_call, routing_forced_direct, FallbackAfterSend};
+    use super::{
+        after_send_for, execute_routed_call, routing_forced_direct, CallSpec, FallbackAfterSend,
+        RoutedCall,
+    };
     use crate::service::{bind_trusted, CallPhase, OnToolError, ServiceClient, CONTROL_PROTOCOL};
     use anyhow::Result;
     use camino::{Utf8Path, Utf8PathBuf};
@@ -2416,11 +2673,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Commit,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Commit,
+            },
             reconstruct_never,
             emit_never,
         );
@@ -2447,11 +2708,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Commit,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Commit,
+            },
             reconstruct_never,
             emit_never,
         );
@@ -2494,11 +2759,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Fallback,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Fallback,
+            },
             reconstruct_never,
             emit_never,
         );
@@ -2525,11 +2794,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Commit,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Commit,
+            },
             |_| -> Result<()> { Err(anyhow::anyhow!("envelope shape mismatch")) },
             emit_never,
         );
@@ -2562,11 +2835,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Fallback,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Fallback,
+            },
             |_| -> Result<()> { Err(anyhow::anyhow!("envelope shape mismatch")) },
             emit_never,
         );
