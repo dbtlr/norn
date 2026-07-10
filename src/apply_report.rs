@@ -78,6 +78,46 @@ impl ApplyReport {
     pub fn exit_code(&self) -> i32 {
         self.outcome.exit_code()
     }
+
+    /// Build a minimal REFUSED report (`outcome: refused`, exit 2) carrying a
+    /// coded [`ApplyError`] envelope, for an MCP mutation tool whose PREFLIGHT (or
+    /// mutation-lock acquisition) refused BEFORE any plan/apply context existed —
+    /// `vault.move` / `vault.delete` / `vault.rewrite_wikilink` / `vault.apply`
+    /// (NRN-229). A refusal writes nothing, so the vault is byte-identical: one
+    /// `failed` op holds the `{code, message, path?}` envelope. This is the
+    /// `ApplyReport` counterpart to `SetReport::refused` / `EditReport::refused`.
+    ///
+    /// `dry_run` records whether the refused call was a `confirm: false` forecast,
+    /// so [`MutationResult::from_apply_report`](crate::mcp::mutation_result::MutationResult::from_apply_report)
+    /// never flags a preview as a failed tool call.
+    pub fn refused(vault_root: String, dry_run: bool, op_kind: &str, error: ApplyError) -> Self {
+        let path = error.path.clone();
+        Self {
+            schema_version: APPLY_REPORT_SCHEMA_VERSION,
+            trace_id: String::new(),
+            plan_hash: String::new(),
+            vault_root,
+            dry_run,
+            applied: 0,
+            skipped: 0,
+            failed: 1,
+            remaining: 0,
+            operations: vec![ApplyReportOp {
+                op_id: "0".to_string(),
+                kind: op_kind.to_string(),
+                status: OpStatus::Failed,
+                from: None,
+                path,
+                stem: None,
+                summary: error.message.clone(),
+                error: Some(error),
+                footnote: None,
+                cascade: None,
+            }],
+            warnings: Vec::new(),
+            outcome: ApplyOutcome::Refused,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +282,34 @@ impl ApplyError {
                 path: None,
             };
         }
+        // `norn move` / `norn delete` / `norn rewrite-wikilink`'s typed preflight
+        // refusals (NRN-229): the `--format json` error path funnels through here,
+        // so a CLI JSON consumer gets the same stable code an MCP client sees via
+        // `mcp::mutate::refusal_from_error`. Previously these `anyhow::bail!`-ed
+        // into a bare string laundered to `internal-error`.
+        if let Some(mv) = e.downcast_ref::<crate::move_doc::MovePreflightError>() {
+            return Self {
+                code: mv.code().to_string(),
+                message: mv.to_string(),
+                path: None,
+            };
+        }
+        if let Some(del) = e.downcast_ref::<crate::delete_doc::DeletePreflightError>() {
+            return Self {
+                code: del.code().to_string(),
+                message: del.to_string(),
+                path: None,
+            };
+        }
+        if let Some(rw) =
+            e.downcast_ref::<crate::planner::intent::rewrite_wikilink::RewriteWikilinkError>()
+        {
+            return Self {
+                code: rw.code().to_string(),
+                message: rw.to_string(),
+                path: None,
+            };
+        }
         if let Some(cache) = e.downcast_ref::<crate::cache::CacheError>() {
             if matches!(cache, crate::cache::CacheError::MutationLockTimeout) {
                 return Self {
@@ -324,6 +392,50 @@ mod tests {
             "cannot remove required field 'status'; use --force to override"
         );
         assert_eq!(envelope.path, None);
+    }
+
+    /// NRN-229: the `move` / `delete` / `rewrite-wikilink` typed preflight
+    /// refusals keep their stable codes through the anyhow seam — a CLI
+    /// `--format json` consumer sees the semantic code, not `internal-error`.
+    #[test]
+    fn from_anyhow_recovers_the_preflight_refusal_codes() {
+        let e: anyhow::Error =
+            crate::move_doc::MovePreflightError::DestinationExists("b.md".into()).into();
+        assert_eq!(ApplyError::from_anyhow(&e).code, "destination-exists");
+
+        let e: anyhow::Error = crate::delete_doc::DeletePreflightError::RewriteToSelf.into();
+        assert_eq!(ApplyError::from_anyhow(&e).code, "rewrite-to-self");
+
+        let e: anyhow::Error =
+            crate::planner::intent::rewrite_wikilink::RewriteWikilinkError::OldUnresolved(
+                "old".into(),
+            )
+            .into();
+        assert_eq!(ApplyError::from_anyhow(&e).code, "target-not-found");
+    }
+
+    /// NRN-229: the `refused` constructor builds a minimal `outcome: refused`
+    /// report (exit 2) with the coded envelope in a single `failed` op, and
+    /// records `dry_run` so the `isError` derivation can tell a forecast apart.
+    #[test]
+    fn refused_builds_a_coded_refusal_report() {
+        let env = ApplyError {
+            code: "target-not-found".into(),
+            message: "doc not found".into(),
+            path: None,
+        };
+        let report = ApplyReport::refused("/v".into(), false, "delete_document", env);
+        assert_eq!(report.outcome, ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.operations.len(), 1);
+        assert_eq!(report.operations[0].kind, "delete_document");
+        assert_eq!(report.operations[0].status, OpStatus::Failed);
+        assert_eq!(
+            report.operations[0].error.as_ref().unwrap().code,
+            "target-not-found"
+        );
     }
 
     #[test]
