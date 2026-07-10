@@ -269,29 +269,49 @@ enum FallbackAfterSend {
     Commit,
 }
 
+/// The literate description of a single routed tool call: the pieces every layer
+/// of the routing seam needs to name the tool, thread its arguments, and decide
+/// what an `isError` result means (NRN-229). A caller builds one `CallSpec` and
+/// hands it to [`route_call`] (mutations) or [`route_read`] (reads) — nothing
+/// lower in the seam takes bare `tool`/`arguments`/`on_tool_error`/`verbose`
+/// params anymore.
+#[cfg(unix)]
+pub struct CallSpec<'a> {
+    pub tool: &'a str,
+    pub arguments: serde_json::Value,
+    pub on_tool_error: crate::service::OnToolError,
+    pub verbose: bool,
+}
+
+/// A [`CallSpec`] plus the send-commit policy (NRN-228) — the shape the inner
+/// seam ([`route_tool_call`]/[`execute_routed_call`]) actually executes against.
+/// Built by [`route_call`] (via [`after_send_for`]) and [`route_read`] (which
+/// always hardcodes [`FallbackAfterSend::Fallback`]); a command's `route_*`
+/// wrapper never constructs one directly.
+#[cfg(unix)]
+struct RoutedCall<'a> {
+    spec: CallSpec<'a>,
+    after_send: FallbackAfterSend,
+}
+
 /// The generic routing skeleton shared by reads (`count`/`find`/`get`, NRN-222)
 /// and mutations (NRN-228).
 ///
 /// Computes the canonical vault root ONCE (threaded into the preamble — NRN-92
 /// review F5), probes the well-known socket, and delegates to
-/// [`execute_routed_call`], which runs `tool` with `arguments` and applies the
-/// `after_send` policy. Every pre-flight miss — an un-canonicalizable root or no
-/// live daemon — returns `None`, so the direct dispatch serves the request (and
-/// re-produces any error canonically).
+/// [`execute_routed_call`], which runs the call's tool with its arguments and
+/// applies the `after_send` policy. Every pre-flight miss — an
+/// un-canonicalizable root or no live daemon — returns `None`, so the direct
+/// dispatch serves the request (and re-produces any error canonically).
 ///
-/// `on_tool_error` decides what a result flagged `isError: true` means for this
-/// tool (see [`crate::service::OnToolError`]): `vault.get` accepts the payload
-/// (its `isError` is the semantic not-found signal — falling back would execute
-/// the failing read twice); `count`/`find` fall back to Direct.
+/// `call.spec.on_tool_error` decides what a result flagged `isError: true` means
+/// for this tool (see [`crate::service::OnToolError`]): `vault.get` accepts the
+/// payload (its `isError` is the semantic not-found signal — falling back would
+/// execute the failing read twice); `count`/`find` fall back to Direct.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn route_tool_call<T>(
     cwd: &camino::Utf8Path,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
-    after_send: FallbackAfterSend,
-    verbose: bool,
+    call: RoutedCall<'_>,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
@@ -308,17 +328,7 @@ fn route_tool_call<T>(
         crate::service::RouteDecision::Direct => return None,
     };
 
-    execute_routed_call(
-        &canonical,
-        &client,
-        tool,
-        arguments,
-        on_tool_error,
-        after_send,
-        verbose,
-        reconstruct,
-        emit,
-    )
+    execute_routed_call(&canonical, &client, call, reconstruct, emit)
 }
 
 /// The body shared by every routed call once a live daemon is proven (NRN-228):
@@ -340,18 +350,20 @@ fn route_tool_call<T>(
 /// `ServiceClient` on a temp socket, without touching the process-global env the
 /// well-known-socket probe reads.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 fn execute_routed_call<T>(
     canonical: &camino::Utf8Path,
     client: &crate::service::ServiceClient,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
-    after_send: FallbackAfterSend,
-    verbose: bool,
+    call: RoutedCall<'_>,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
+    let RoutedCall { spec, after_send } = call;
+    let CallSpec {
+        tool,
+        arguments,
+        on_tool_error,
+        verbose,
+    } = spec;
     // A committing mutation must use `AcceptWithPayload`: under `FallBackDirect`
     // a clean daemon-side refusal (`isError: true`) surfaces as a post-send
     // `Err`, which Commit would misreport as a false "may have applied" alarm
@@ -468,20 +480,16 @@ fn post_send_uncertainty_error(tool: &str, source: anyhow::Error) -> anyhow::Err
 #[cfg(unix)]
 fn route_read<T>(
     cwd: &camino::Utf8Path,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
-    verbose: bool,
+    spec: CallSpec<'_>,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
     route_tool_call(
         cwd,
-        tool,
-        arguments,
-        on_tool_error,
-        FallbackAfterSend::Fallback,
-        verbose,
+        RoutedCall {
+            spec,
+            after_send: FallbackAfterSend::Fallback,
+        },
         reconstruct,
         emit,
     )
@@ -524,24 +532,19 @@ fn route_read<T>(
 ///   the probe half is covered by the e2e `serve_*_routing` suites and will be
 ///   for mutations once NRN-229 gives them a routable command.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 pub fn route_call<T>(
     cwd: &camino::Utf8Path,
-    tool: &str,
-    arguments: serde_json::Value,
-    on_tool_error: crate::service::OnToolError,
+    spec: CallSpec<'_>,
     dry_run: bool,
-    verbose: bool,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
     emit: impl FnOnce(T) -> Result<i32>,
 ) -> Option<Result<i32>> {
     route_tool_call(
         cwd,
-        tool,
-        arguments,
-        on_tool_error,
-        after_send_for(dry_run),
-        verbose,
+        RoutedCall {
+            spec,
+            after_send: after_send_for(dry_run),
+        },
         reconstruct,
         emit,
     )
@@ -569,10 +572,12 @@ fn route_count(
 ) -> Option<Result<i32>> {
     route_read(
         cwd,
-        "vault.count",
-        crate::count::route::to_mcp_arguments(args, dynamic_keys),
-        crate::service::OnToolError::FallBackDirect,
-        verbose,
+        CallSpec {
+            tool: "vault.count",
+            arguments: crate::count::route::to_mcp_arguments(args, dynamic_keys),
+            on_tool_error: crate::service::OnToolError::FallBackDirect,
+            verbose,
+        },
         crate::count::route::reconstruct,
         |out| {
             let mut stdout = std::io::stdout().lock();
@@ -600,10 +605,12 @@ fn route_find(
     }
     route_read(
         cwd,
-        "vault.find",
-        crate::find::route::to_mcp_arguments(args, dynamic_keys),
-        crate::service::OnToolError::FallBackDirect,
-        verbose,
+        CallSpec {
+            tool: "vault.find",
+            arguments: crate::find::route::to_mcp_arguments(args, dynamic_keys),
+            on_tool_error: crate::service::OnToolError::FallBackDirect,
+            verbose,
+        },
         |structured| crate::find::route::reconstruct(structured, args),
         |routed| {
             let palette = crate::output::palette::resolve(color);
@@ -634,14 +641,16 @@ fn route_get(
     }
     route_read(
         cwd,
-        "vault.get",
-        crate::show::route::to_mcp_arguments(args),
-        // vault.get flags a not-found target as `isError: true` while still
-        // shipping the full structuredContent (NRN-214); accept it so the
-        // routed client derives the CLI's exit-1 from the wire notes instead
-        // of re-executing the failing read directly.
-        crate::service::OnToolError::AcceptWithPayload,
-        verbose,
+        CallSpec {
+            tool: "vault.get",
+            arguments: crate::show::route::to_mcp_arguments(args),
+            // vault.get flags a not-found target as `isError: true` while still
+            // shipping the full structuredContent (NRN-214); accept it so the
+            // routed client derives the CLI's exit-1 from the wire notes instead
+            // of re-executing the failing read directly.
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
         |structured| crate::show::route::reconstruct(structured, args),
         |report| crate::show::emit(&report, args),
     )
@@ -2265,7 +2274,10 @@ fn exit_code_for(index: &GraphIndex) -> i32 {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{after_send_for, execute_routed_call, routing_forced_direct, FallbackAfterSend};
+    use super::{
+        after_send_for, execute_routed_call, routing_forced_direct, CallSpec, FallbackAfterSend,
+        RoutedCall,
+    };
     use crate::service::{bind_trusted, CallPhase, OnToolError, ServiceClient, CONTROL_PROTOCOL};
     use anyhow::Result;
     use camino::{Utf8Path, Utf8PathBuf};
@@ -2416,11 +2428,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Commit,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Commit,
+            },
             reconstruct_never,
             emit_never,
         );
@@ -2447,11 +2463,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Commit,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Commit,
+            },
             reconstruct_never,
             emit_never,
         );
@@ -2494,11 +2514,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Fallback,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Fallback,
+            },
             reconstruct_never,
             emit_never,
         );
@@ -2525,11 +2549,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Commit,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Commit,
+            },
             |_| -> Result<()> { Err(anyhow::anyhow!("envelope shape mismatch")) },
             emit_never,
         );
@@ -2562,11 +2590,15 @@ mod tests {
         let out = execute_routed_call(
             Utf8Path::new("/vaults/atlas"),
             &client,
-            "vault.set",
-            serde_json::json!({}),
-            OnToolError::AcceptWithPayload,
-            FallbackAfterSend::Fallback,
-            false,
+            RoutedCall {
+                spec: CallSpec {
+                    tool: "vault.set",
+                    arguments: serde_json::json!({}),
+                    on_tool_error: OnToolError::AcceptWithPayload,
+                    verbose: false,
+                },
+                after_send: FallbackAfterSend::Fallback,
+            },
             |_| -> Result<()> { Err(anyhow::anyhow!("envelope shape mismatch")) },
             emit_never,
         );
