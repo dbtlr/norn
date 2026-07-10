@@ -653,6 +653,59 @@ fn move_without_parents_refuses_when_dst_parent_missing() {
     );
 }
 
+/// NRN-229: a `--format json` PREFLIGHT refusal emits the structured
+/// `{code, message}` envelope on stdout (exit 2) carrying the stable code —
+/// matching the `set` NRN-221 contract — instead of the old format-blind
+/// `error: …` prose on stderr.
+#[test]
+fn move_preflight_refusal_format_json_emits_coded_envelope() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    // a.md → b.md, b.md already exists, no --force → destination-exists refusal.
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["move", "a.md", "b.md", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "preflight refusal → exit 2");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be the JSON error envelope");
+    assert_eq!(
+        envelope["code"], "destination-exists",
+        "envelope: {envelope}"
+    );
+    // The refusal prose no longer leaks to stderr: it rides the stdout envelope.
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("error: destination already exists"),
+        "json refusal writes the envelope to stdout, not the prose to stderr"
+    );
+}
+
+/// NRN-229: the DEFAULT (Records) preflight refusal is byte-identical to before
+/// — `error: …` prose on stderr, no JSON on stdout.
+#[test]
+fn move_preflight_refusal_records_stays_prose_on_stderr() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["move", "a.md", "b.md"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "Records refusal must not emit JSON on stdout"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("error: destination already exists"),
+        "stderr prose must be unchanged: {stderr}"
+    );
+}
+
 #[test]
 fn move_recursive_folder_rename() {
     let tmp = synth_folder_vault();

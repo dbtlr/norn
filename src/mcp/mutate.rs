@@ -34,21 +34,27 @@ use camino::Utf8Path;
 /// lock so malformed input never contends.
 ///
 /// Sweeps stale pending markers, then acquires the lock with `is_apply = true`.
-/// Returns the RAII guard the caller must hold for the duration of the apply;
-/// a timeout or lock error becomes an `anyhow` error.
+/// Returns the RAII guard the caller must hold for the duration of the apply.
 ///
-/// This is the MCP analogue of the CLI's lock block in `main.rs`, which differs
-/// deliberately: the CLI maps a timeout to exit code 2 + a stderr line, whereas
-/// an MCP tool surfaces it as a tool error.
+/// On contention the TYPED [`CacheError::MutationLockTimeout`](crate::cache::CacheError::MutationLockTimeout)
+/// propagates (NRN-229) — not a bail'd string — so the tool's `handle_output`
+/// recovers it via [`refusal_from_error`] and returns a coded, structured
+/// `mutation-lock-timeout` refusal RESULT. This is the MCP analogue of the CLI's
+/// lock block in `main.rs`, which maps a timeout to exit code 2 + a stderr line;
+/// here it becomes the same-coded structured refusal every mutation tool shares.
 pub(crate) fn acquire_mutation_lock(cwd: &Utf8Path) -> anyhow::Result<Option<MutationLock>> {
     let (_, state_dir) = crate::cache::state_dir_for(cwd)
         .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
     crate::mutation_lock::pending::sweep_pending(&state_dir);
     match MutationLock::acquire_if_mutating(&state_dir, /*is_apply=*/ true) {
         Ok(guard) => Ok(guard),
-        Err(crate::cache::CacheError::MutationLockTimeout) => anyhow::bail!(
-            "another norn mutation is in progress against this vault (timed out after 5 s)"
-        ),
+        // NRN-229: propagate the TYPED `MutationLockTimeout` (not a bail'd string)
+        // so it survives `downcast_ref` — each mutation tool's `handle_output`
+        // recovers it via `refusal_from_error` and returns a coded, structured
+        // `mutation-lock-timeout` refusal RESULT (isError + report) instead of a
+        // JSON-RPC protocol error that a committing routed apply can't tell apart
+        // from an unknown-state transport failure.
+        Err(e @ crate::cache::CacheError::MutationLockTimeout) => Err(e.into()),
         Err(e) => anyhow::bail!("mutation lock error: {e}"),
     }
 }
@@ -57,17 +63,18 @@ pub(crate) fn acquire_mutation_lock(cwd: &Utf8Path) -> anyhow::Result<Option<Mut
 /// error, IF it is a recognized precondition/refusal carrying a stable machine
 /// `code`.
 ///
-/// Returns `Some` for the coded refusal types the single-op mutators
-/// (`set`/`edit`/`new`) can raise — the rich apply-time
-/// [`ApplyError`](crate::standards::apply::ApplyError) (CAS / precondition), a
-/// [`ContainmentError`](crate::standards::apply::ContainmentError), the `edit`
-/// anchor/CAS family ([`EditError`](crate::edit::transform::EditError)),
-/// `vault.new`'s [`PreflightError`](crate::new::validate::PreflightError), and
+/// Returns `Some` for the coded refusal types the mutation tools can raise — the
+/// rich apply-time [`ApplyError`](crate::standards::apply::ApplyError) (CAS /
+/// precondition), a [`ContainmentError`](crate::standards::apply::ContainmentError),
+/// the `edit` anchor/CAS family ([`EditError`](crate::edit::transform::EditError)),
+/// `vault.new`'s [`PreflightError`](crate::new::validate::PreflightError),
 /// `vault.set`'s schema/argument-refusal family
-/// ([`SetError`](crate::set::error::SetError), NRN-221). Returns `None` for
-/// everything else — IO, cache corruption, and other genuinely internal
-/// failures — so those still propagate as a bare MCP `Err` rather than being
-/// laundered into a misleading `internal-error` structured refusal.
+/// ([`SetError`](crate::set::error::SetError), NRN-221), the `move` / `delete` /
+/// `rewrite_wikilink` typed preflight refusals and the per-vault
+/// mutation-lock timeout (NRN-229). Returns `None` for everything else — IO,
+/// cache corruption, and other genuinely internal failures — so those still
+/// propagate as a bare MCP `Err` rather than being laundered into a misleading
+/// `internal-error` structured refusal.
 ///
 /// This is the deliberate counterpart to
 /// [`ApplyError::from_anyhow`](crate::apply_report::ApplyError::from_anyhow),
@@ -106,6 +113,48 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
             message: se.to_string(),
             path: None,
         });
+    }
+    // NRN-229: the `move` / `delete` / `rewrite_wikilink` typed PREFLIGHT
+    // refusals. Previously these `anyhow::bail!("{e}")`-ed in the tool handlers,
+    // discarding the type — so the code laundered to `internal-error` (or, on a
+    // committing routed apply, `post-send-uncertain`). Recovered here, each
+    // becomes a coded, structured `refused` report.
+    if let Some(mv) = e.downcast_ref::<crate::move_doc::MovePreflightError>() {
+        return Some(Envelope {
+            code: mv.code().to_string(),
+            message: mv.to_string(),
+            path: None,
+        });
+    }
+    if let Some(del) = e.downcast_ref::<crate::delete_doc::DeletePreflightError>() {
+        return Some(Envelope {
+            code: del.code().to_string(),
+            message: del.to_string(),
+            path: None,
+        });
+    }
+    if let Some(rw) =
+        e.downcast_ref::<crate::planner::intent::rewrite_wikilink::RewriteWikilinkError>()
+    {
+        return Some(Envelope {
+            code: rw.code().to_string(),
+            message: rw.to_string(),
+            path: None,
+        });
+    }
+    // NRN-229: the per-vault mutation-lock TIMEOUT. `acquire_mutation_lock` now
+    // propagates the typed `CacheError::MutationLockTimeout`; recover it here so a
+    // lock-contention refusal is a coded, structured `mutation-lock-timeout`
+    // RESULT across every mutation tool, not a bare protocol error. `from_anyhow`
+    // already recognizes the same code for the CLI `--format json` envelope.
+    if let Some(cache) = e.downcast_ref::<crate::cache::CacheError>() {
+        if matches!(cache, crate::cache::CacheError::MutationLockTimeout) {
+            return Some(Envelope {
+                code: "mutation-lock-timeout".to_string(),
+                message: cache.to_string(),
+                path: None,
+            });
+        }
     }
     None
 }
@@ -379,6 +428,167 @@ mod lock_ordering_tests {
 
         drop(held);
     }
+
+    /// NRN-229: under lock contention, every mutation tool's `handle_output`
+    /// returns a STRUCTURED, coded refusal RESULT (`isError:true` + the
+    /// `mutation-lock-timeout` code in the structured content) — not a bare
+    /// JSON-RPC protocol error. This is what makes a routed apply's daemon-side
+    /// lock contention reconcilable with Direct's clean refusal (the seam the next
+    /// checkpoint routes over). Covers all seven mutation tools in one contended
+    /// vault. Normalizes each tool's typed output to `(isError, structured JSON)`.
+    #[test]
+    fn confirm_lock_timeout_is_a_structured_coded_refusal_across_all_tools() {
+        std::env::set_var("NORN_MUTATION_LOCK_TIMEOUT_MS", "150");
+
+        let (_tmp, root, held, _cleanup) = contended_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        type Case = (
+            &'static str,
+            Box<dyn Fn(&VaultContext) -> (bool, serde_json::Value)>,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "set",
+                Box::new(|ctx| {
+                    let mut set = std::collections::BTreeMap::new();
+                    set.insert("status".to_string(), serde_json::json!("active"));
+                    let r = crate::mcp::tools::set::handle_output(
+                        ctx,
+                        crate::mcp::tools::set::SetParams {
+                            target: "doc.md".into(),
+                            set,
+                            confirm: true,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("lock timeout must be a structured refusal, not Err");
+                    (r.is_error(), serde_json::to_value(r.value()).unwrap())
+                }),
+            ),
+            (
+                "edit",
+                Box::new(|ctx| {
+                    let r = crate::mcp::tools::edit::handle_output(
+                        ctx,
+                        crate::mcp::tools::edit::EditParams {
+                            target: "doc.md".into(),
+                            edits: vec![crate::edit::ops::EditOp::StrReplace {
+                                old: "Hello".into(),
+                                new: "Goodbye".into(),
+                                replace_all: false,
+                            }],
+                            expected_hash: None,
+                            confirm: true,
+                        },
+                    )
+                    .expect("lock timeout must be a structured refusal, not Err");
+                    (r.is_error(), serde_json::to_value(r.value()).unwrap())
+                }),
+            ),
+            (
+                "new",
+                Box::new(|ctx| {
+                    let r = crate::mcp::tools::new::handle_output(
+                        ctx,
+                        crate::mcp::tools::new::NewParams {
+                            path: Some("fresh.md".to_string()),
+                            confirm: true,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("lock timeout must be a structured refusal, not Err");
+                    (r.is_error(), serde_json::to_value(r.value()).unwrap())
+                }),
+            ),
+            (
+                "move",
+                Box::new(|ctx| {
+                    let r = crate::mcp::tools::move_doc::handle_output(
+                        ctx,
+                        crate::mcp::tools::move_doc::MoveParams {
+                            from: "doc.md".into(),
+                            to: "dst.md".into(),
+                            confirm: true,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("lock timeout must be a structured refusal, not Err");
+                    (r.is_error(), serde_json::to_value(r.value()).unwrap())
+                }),
+            ),
+            (
+                "delete",
+                Box::new(|ctx| {
+                    let r = crate::mcp::tools::delete::handle_output(
+                        ctx,
+                        crate::mcp::tools::delete::DeleteParams {
+                            target: "doc.md".into(),
+                            rewrite_to: None,
+                            allow_broken_links: true,
+                            confirm: true,
+                        },
+                    )
+                    .expect("lock timeout must be a structured refusal, not Err");
+                    (r.is_error(), serde_json::to_value(r.value()).unwrap())
+                }),
+            ),
+            (
+                "rewrite_wikilink",
+                Box::new(|ctx| {
+                    let r = crate::mcp::tools::rewrite_wikilink::handle_output(
+                        ctx,
+                        crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams {
+                            from: "doc".into(),
+                            to: "renamed".into(),
+                            confirm: true,
+                        },
+                    )
+                    .expect("lock timeout must be a structured refusal, not Err");
+                    (r.is_error(), serde_json::to_value(r.value()).unwrap())
+                }),
+            ),
+            (
+                "apply",
+                Box::new(|ctx| {
+                    let plan = serde_json::json!({
+                        "schema_version": 1,
+                        "vault_root": ctx.vault_root.to_string(),
+                        "operations": [{
+                            "kind": "delete_document",
+                            "fields": { "path": "doc.md" }
+                        }]
+                    });
+                    let r = crate::mcp::tools::apply::handle_output(
+                        ctx,
+                        crate::mcp::tools::apply::ApplyParams {
+                            plan,
+                            confirm: true,
+                            parents: false,
+                        },
+                    )
+                    .expect("lock timeout must be a structured refusal, not Err");
+                    (r.is_error(), serde_json::to_value(r.value()).unwrap())
+                }),
+            ),
+        ];
+
+        for (tool, call) in cases {
+            let (is_error, value) = call(&ctx);
+            assert!(
+                is_error,
+                "[{tool}] a confirmed lock-timeout refusal must map to isError:true"
+            );
+            let json = value.to_string();
+            assert!(
+                json.contains("mutation-lock-timeout"),
+                "[{tool}] structured content must carry the mutation-lock-timeout \
+                 code, got: {json}"
+            );
+        }
+
+        drop(held);
+    }
 }
 
 #[cfg(test)]
@@ -440,6 +650,69 @@ mod refusal_tests {
         let env = refusal_from_error(&e).expect("a SetError is a recognized refusal");
         assert_eq!(env.code, "value-not-allowed");
         assert_eq!(env.path, None);
+    }
+
+    /// NRN-229: the `move` typed preflight family is recognized with its code.
+    #[test]
+    fn move_preflight_error_yields_its_code() {
+        let e: anyhow::Error =
+            crate::move_doc::MovePreflightError::SourceMissing("a.md".into()).into();
+        assert_eq!(
+            refusal_from_error(&e)
+                .expect("a MovePreflightError is a recognized refusal")
+                .code,
+            "target-not-found"
+        );
+        let e: anyhow::Error = crate::move_doc::MovePreflightError::SamePath("a.md".into()).into();
+        assert_eq!(
+            refusal_from_error(&e).expect("recognized").code,
+            "source-destination-same"
+        );
+    }
+
+    /// NRN-229: the `delete` typed preflight family is recognized with its code.
+    #[test]
+    fn delete_preflight_error_yields_its_code() {
+        let e: anyhow::Error =
+            crate::delete_doc::DeletePreflightError::IncomingLinksRefused { count: 2 }.into();
+        assert_eq!(
+            refusal_from_error(&e)
+                .expect("a DeletePreflightError is a recognized refusal")
+                .code,
+            "backlinks-present"
+        );
+    }
+
+    /// NRN-229: `rewrite_wikilink`'s typed OLD-unresolvable refusal is recognized
+    /// — previously a bare `anyhow!` string that laundered to `internal-error`.
+    #[test]
+    fn rewrite_wikilink_error_yields_its_code() {
+        let e: anyhow::Error =
+            crate::planner::intent::rewrite_wikilink::RewriteWikilinkError::OldUnresolved(
+                "old".into(),
+            )
+            .into();
+        assert_eq!(
+            refusal_from_error(&e)
+                .expect("a RewriteWikilinkError is a recognized refusal")
+                .code,
+            "target-not-found"
+        );
+    }
+
+    /// NRN-229: the per-vault mutation-lock TIMEOUT is a recognized refusal
+    /// (`mutation-lock-timeout`), so a routed apply hitting daemon-side lock
+    /// contention becomes a clean coded refusal, not `post-send-uncertain`.
+    #[test]
+    fn mutation_lock_timeout_yields_its_code() {
+        let e: anyhow::Error = crate::cache::CacheError::MutationLockTimeout.into();
+        let env = refusal_from_error(&e).expect("a lock-timeout is a recognized refusal");
+        assert_eq!(env.code, "mutation-lock-timeout");
+        assert!(
+            env.message.contains("another norn mutation is in progress"),
+            "message keeps the contention prose; got: {}",
+            env.message
+        );
     }
 
     /// THE load-bearing invariant (NRN-220/221): an UNRECOGNIZED error — an

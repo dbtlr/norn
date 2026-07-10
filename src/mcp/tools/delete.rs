@@ -97,7 +97,25 @@ impl DeleteOutput {
 
 /// Build the MCP output envelope for `vault.delete`.
 pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<MutationResult<DeleteOutput>> {
-    let report = handle(ctx, p)?;
+    let dry_run = !p.confirm;
+    let vault_root = ctx.vault_root.to_string();
+    // Capture a coded refusal (NRN-220/229): a recognized preflight refusal
+    // (`target-not-found`, `backlinks-present`, `rewrite-to-*`, …) or a
+    // mutation-lock timeout becomes a structured `refused` report + `isError` (on
+    // confirm) instead of a bare MCP `Err` with the code laundered to prose.
+    // Others still propagate.
+    let report = match handle(ctx, p) {
+        Ok(report) => report,
+        Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
+            Some(err) => crate::apply_report::ApplyReport::refused(
+                vault_root,
+                dry_run,
+                "delete_document",
+                err,
+            ),
+            None => return Err(e),
+        },
+    };
     // BUG-3 / NRN-219: `isError` derived from the report's outcome. See
     // `apply::handle_output` and `MutationResult::from_apply_report`.
     Ok(MutationResult::from_apply_report(
@@ -149,9 +167,11 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
         vault_root: &cwd,
         index: &index,
     };
-    if let Err(e) = crate::delete_doc::preflight_and_plan(cfg) {
-        anyhow::bail!("{e}");
-    }
+    // NRN-229: propagate the TYPED `DeletePreflightError` (not a bail'd string)
+    // so `handle_output` recovers its `.code()` via `refusal_from_error` and
+    // returns a coded, structured refusal instead of laundering to
+    // `internal-error`. The `Display` prose is unchanged.
+    crate::delete_doc::preflight_and_plan(cfg)?;
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.
     let plan = MigrationPlan {
@@ -305,6 +325,43 @@ mod tests {
         assert!(std::fs::read_to_string(root.join("linker.md"))
             .unwrap()
             .contains("[[doc]]"));
+    }
+
+    /// NRN-229: a CONFIRM preflight refusal (incoming links present, no
+    /// `allow_broken_links` / `rewrite_to`) is a structured `refused` report +
+    /// `isError:true` carrying the stable `backlinks-present` code — NOT a bare
+    /// MCP `Err` laundered to prose.
+    #[test]
+    fn confirm_refusal_is_structured_and_coded() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            DeleteParams {
+                target: "doc.md".into(), // linker.md links [[doc]]; no ack → refuse
+                rewrite_to: None,
+                allow_broken_links: false,
+                confirm: true,
+            },
+        )
+        .expect("a coded refusal must be Ok(structured), not Err");
+
+        assert!(
+            result.is_error(),
+            "a confirmed refusal maps to isError:true"
+        );
+        let report = &result.value().report;
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(
+            report["operations"][0]["error"]["code"],
+            "backlinks-present"
+        );
+        // A refusal writes nothing: the file is untouched.
+        assert!(
+            root.join("doc.md").exists(),
+            "a refused delete must not remove the file"
+        );
     }
 
     /// `confirm: true` with `rewrite_to` deletes `doc.md` AND redirects the

@@ -7,6 +7,8 @@
 
 use std::io::Write;
 
+pub mod route;
+
 use crate::core::GraphIndex;
 use crate::standards::{
     classify_link_risk, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary,
@@ -96,6 +98,35 @@ pub enum MovePreflightError {
     DestinationParentMissing(Utf8PathBuf),
     #[error("source and destination resolve to the same canonical path: {0}")]
     SamePath(Utf8PathBuf),
+}
+
+impl MovePreflightError {
+    /// The stable, machine-branchable kebab code for this preflight refusal
+    /// (NRN-229), so an MCP `vault.move` consumer / a `--format json` CLI caller
+    /// branches on the code rather than string-matching the prose. `Display` is
+    /// unchanged (byte-identical CLI/stderr output); the code rides alongside.
+    ///
+    /// Reuses existing codes where the semantic is genuinely identical (NRN-235,
+    /// one-semantic-one-code): `target-not-found` / `target-ambiguous` are `set`'s
+    /// primary-target resolution codes (the move SOURCE not resolving to an
+    /// indexed document is the same condition), and `destination-exists` /
+    /// `parent-missing` are `new`'s destination codes (a move destination that
+    /// already exists, or whose parent dir is absent, is the same condition
+    /// `new` refuses on). Only the no-op same-path case is move-specific.
+    ///
+    /// NOTE: distinct from the applier's apply-time `move-source-missing` /
+    /// `move-destination-exists` lifecycle codes — those fire when the file is
+    /// missing/present on the FILESYSTEM at apply time; these fire earlier, when
+    /// the argument does not resolve against the graph index.
+    pub fn code(&self) -> &'static str {
+        match self {
+            MovePreflightError::SourceMissing(_) => "target-not-found",
+            MovePreflightError::SourceAmbiguous { .. } => "target-ambiguous",
+            MovePreflightError::DestinationExists(_) => "destination-exists",
+            MovePreflightError::DestinationParentMissing(_) => "parent-missing",
+            MovePreflightError::SamePath(_) => "source-destination-same",
+        }
+    }
 }
 
 pub(crate) struct PreflightConfig<'a> {
@@ -462,5 +493,46 @@ mod tests {
         );
 
         assert_eq!(plan.summary.planned_changes, 1);
+    }
+
+    /// NRN-229: every `MovePreflightError` variant carries a stable kebab
+    /// `.code()`. Source-resolution failures REUSE `set`'s target codes and
+    /// destination collisions REUSE `new`'s destination codes
+    /// (one-semantic-one-code); only the no-op same-path case is move-specific.
+    #[test]
+    fn move_preflight_error_codes_are_stable_and_reuse_shared_semantics() {
+        use camino::Utf8PathBuf;
+        let cases: Vec<(MovePreflightError, &str)> = vec![
+            (
+                MovePreflightError::SourceMissing("x".into()),
+                "target-not-found",
+            ),
+            (
+                MovePreflightError::SourceAmbiguous {
+                    stem: "x".into(),
+                    candidates: vec![],
+                },
+                "target-ambiguous",
+            ),
+            (
+                MovePreflightError::DestinationExists(Utf8PathBuf::from("x.md")),
+                "destination-exists",
+            ),
+            (
+                MovePreflightError::DestinationParentMissing(Utf8PathBuf::from("d")),
+                "parent-missing",
+            ),
+            (
+                MovePreflightError::SamePath(Utf8PathBuf::from("x.md")),
+                "source-destination-same",
+            ),
+        ];
+        for (err, code) in cases {
+            assert_eq!(err.code(), code, "wrong code for {err:?}");
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "code {code:?} is not kebab-case"
+            );
+        }
     }
 }

@@ -110,7 +110,28 @@ impl MoveOutput {
 
 /// Build the MCP output envelope for `vault.move`.
 pub fn handle_output(ctx: &VaultContext, p: MoveParams) -> Result<MutationResult<MoveOutput>> {
-    let report = handle(ctx, p)?;
+    let dry_run = !p.confirm;
+    // Folder vs single-file — for the refused-report op label only (cheap; a
+    // refusal moved nothing so `from` is unchanged on disk).
+    let op_kind = if p.recursive || ctx.vault_root.join(&p.from).as_std_path().is_dir() {
+        "move_folder"
+    } else {
+        "move_document"
+    };
+    let vault_root = ctx.vault_root.to_string();
+    // Capture a coded refusal (NRN-220/229): a recognized preflight refusal
+    // (`target-not-found`, `destination-exists`, …) or a mutation-lock timeout
+    // becomes a structured `refused` report + `isError` (on confirm) instead of a
+    // bare MCP `Err` with the code laundered to prose. Others still propagate.
+    let report = match handle(ctx, p) {
+        Ok(report) => report,
+        Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
+            Some(err) => {
+                crate::apply_report::ApplyReport::refused(vault_root, dry_run, op_kind, err)
+            }
+            None => return Err(e),
+        },
+    };
     // BUG-3 / NRN-219: `isError` derived from the report's outcome. See
     // `apply::handle_output` and `MutationResult::from_apply_report`.
     Ok(MutationResult::from_apply_report(
@@ -172,9 +193,11 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
             vault_root: &cwd,
             index: &index,
         };
-        if let Err(e) = crate::move_doc::preflight_and_plan(cfg) {
-            anyhow::bail!("{e}");
-        }
+        // NRN-229: propagate the TYPED `MovePreflightError` (not a bail'd string)
+        // so `handle_output` recovers its `.code()` via `refusal_from_error` and
+        // returns a coded, structured refusal instead of laundering to
+        // `internal-error`. The `Display` prose is unchanged.
+        crate::move_doc::preflight_and_plan(cfg)?;
     }
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.
@@ -485,6 +508,72 @@ mod tests {
         assert!(
             root.join("a.md").exists(),
             "dry-run must not move the source"
+        );
+    }
+
+    /// NRN-229: a CONFIRM preflight refusal (destination exists, no force) is a
+    /// structured `refused` report + `isError:true` carrying the stable
+    /// `destination-exists` code — NOT a bare MCP `Err` laundered to prose.
+    #[test]
+    fn confirm_refusal_is_structured_and_coded() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            MoveParams {
+                from: "a.md".into(),
+                to: "b.md".into(), // b.md exists → destination-exists
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("a coded refusal must be Ok(structured), not Err");
+
+        assert!(
+            result.is_error(),
+            "a confirmed refusal maps to isError:true"
+        );
+        let report = &result.value().report;
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(
+            report["operations"][0]["error"]["code"],
+            "destination-exists"
+        );
+        // A refusal writes nothing: the source is untouched.
+        assert!(
+            root.join("a.md").exists(),
+            "a refused move must not move the source"
+        );
+    }
+
+    /// NRN-229: the SAME refusal on a `confirm: false` forecast still carries the
+    /// coded `outcome: refused` report but stays `isError:false` — a forecasted
+    /// refusal is not a failed tool call (the edit/new/set dry-run contract).
+    #[test]
+    fn dry_run_refusal_is_structured_but_not_is_error() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            MoveParams {
+                from: "a.md".into(),
+                to: "b.md".into(),
+                confirm: false,
+                ..Default::default()
+            },
+        )
+        .expect("a coded refusal must be Ok(structured), not Err");
+
+        assert!(
+            !result.is_error(),
+            "a dry-run refusal forecast stays isError:false"
+        );
+        assert_eq!(result.value().report["outcome"], "refused");
+        assert_eq!(
+            result.value().report["operations"][0]["error"]["code"],
+            "destination-exists"
         );
     }
 

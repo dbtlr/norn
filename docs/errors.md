@@ -174,6 +174,31 @@ underlying condition, so it is not a separate code.
 | `push-on-scalar` | `--push` targets a key whose current value is a scalar, not an array |
 | `frontmatter-not-mapping` | a document's frontmatter parses to a non-mapping JSON value |
 
+### Terminal — `move` / `delete` / `rewrite-wikilink` preflight refusals
+
+`norn move` / `delete` / `rewrite-wikilink` and their `vault.*` MCP tools
+(NRN-229). These fire at PREFLIGHT — when an argument does not resolve against
+the graph index, or a policy blocks the mutation — before any plan is applied,
+so the vault is byte-identical. They reuse `set`'s `target-*` and `new`'s
+destination codes wherever the semantic is identical (one-semantic-one-code).
+
+Distinct from the apply-time `move-source-missing` / `delete-source-missing`
+lifecycle codes above: those fire inside the applier when the file is
+missing/present on the FILESYSTEM at apply time; these fire earlier, at
+argument resolution.
+
+| Code | Cause |
+|---|---|
+| `target-not-found` | the move SOURCE / delete target / rewrite OLD does not resolve to any document (shared with `set`) |
+| `target-ambiguous` | the move SOURCE / delete target resolves to more than one document (shared with `set`) |
+| `destination-exists` | the move destination already exists; pass `--force` to overwrite (shared with `new`) |
+| `parent-missing` | the move destination's parent directory does not exist; pass `-p` / `--parents` (shared with `new`) |
+| `source-destination-same` | the move source and destination resolve to the same canonical path (a no-op) |
+| `backlinks-present` | the delete target has incoming links; pass `--allow-broken-links` or `--rewrite-to <ALT_DOC>` |
+| `rewrite-to-not-found` | the delete `--rewrite-to` target does not resolve to any document |
+| `rewrite-to-self` | the delete `--rewrite-to` target resolves to the document being deleted |
+| `rewrite-to-ambiguous` | the delete `--rewrite-to` target resolves to more than one document |
+
 ### Terminal — vault containment
 
 The vault is self-contained; a target that resolves outside the vault root is

@@ -86,7 +86,24 @@ pub fn handle_output(
     ctx: &VaultContext,
     p: RewriteWikilinkParams,
 ) -> Result<MutationResult<RewriteWikilinkOutput>> {
-    let report = handle(ctx, p)?;
+    let dry_run = !p.confirm;
+    let vault_root = ctx.vault_root.to_string();
+    // Capture a coded refusal (NRN-220/229): the OLD-unresolvable preflight
+    // refusal (`target-not-found`) or a mutation-lock timeout becomes a structured
+    // `refused` report + `isError` (on confirm) instead of a bare MCP `Err` with
+    // the code laundered to `internal-error`. Others still propagate.
+    let report = match handle(ctx, p) {
+        Ok(report) => report,
+        Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
+            Some(err) => crate::apply_report::ApplyReport::refused(
+                vault_root,
+                dry_run,
+                "rewrite_wikilink",
+                err,
+            ),
+            None => return Err(e),
+        },
+    };
     // BUG-3 / NRN-219: `isError` derived from the report's outcome. See
     // `apply::handle_output` and `MutationResult::from_apply_report`.
     Ok(MutationResult::from_apply_report(
@@ -266,6 +283,33 @@ mod tests {
             1,
             "dry-run must leave b.md's [[old-target]] intact"
         );
+    }
+
+    /// NRN-229: a CONFIRM refusal (OLD resolves to no document) is a structured
+    /// `refused` report + `isError:true` carrying the stable `target-not-found`
+    /// code — previously a bare MCP `Err` laundered to `internal-error`.
+    #[test]
+    fn confirm_refusal_is_structured_and_coded() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            RewriteWikilinkParams {
+                from: "no-such-target".into(),
+                to: "new-target".into(),
+                confirm: true,
+            },
+        )
+        .expect("a coded refusal must be Ok(structured), not Err");
+
+        assert!(
+            result.is_error(),
+            "a confirmed refusal maps to isError:true"
+        );
+        let report = &result.value().report;
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["operations"][0]["error"]["code"], "target-not-found");
     }
 
     /// `confirm: true` retargets every `[[old-target]]` occurrence to
