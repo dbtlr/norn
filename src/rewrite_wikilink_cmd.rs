@@ -8,6 +8,8 @@
 //! - 1: runtime failure (at least one op failed during apply)
 //! - 2: pre-flight refusal (OLD does not resolve to any document)
 
+pub mod route;
+
 use crate::applier::{apply_migration_plan, ApplyContext};
 use crate::apply_report::ApplyReport;
 use crate::cache::state_dir_for;

@@ -340,6 +340,66 @@ impl ApplyError {
     }
 }
 
+/// Rebuild an [`ApplyReport`] from a `vault.move` / `vault.delete` /
+/// `vault.rewrite_wikilink` `structuredContent` object (NRN-229 PR B).
+///
+/// Each tool wraps its report under a `report` key (`MoveOutput` /
+/// `DeleteOutput` / `RewriteWikilinkOutput`), so this pulls `structured["report"]`
+/// and deserializes it back into the native [`ApplyReport`] — the exact inverse
+/// of the daemon's `serde_json::to_value(report)` projection, so rendering the
+/// rebuilt value equals rendering the direct value. A refused report MUST carry
+/// its coded `error` on a `failed` op (what [`emit_refusal`] renders); a missing
+/// one is a malformed envelope, returned as `Err` so the routing seam handles it
+/// (fall back to Direct on a dry-run, post-send-uncertain on an apply). Any shape
+/// mismatch is likewise an `Err`. The shared analogue of `set::route::reconstruct`
+/// / `edit::route::reconstruct` — every cascade command wraps the same
+/// `ApplyReport` on the wire.
+pub fn reconstruct_wire_report(structured: &serde_json::Value) -> anyhow::Result<ApplyReport> {
+    let report_val = structured.get("report").ok_or_else(|| {
+        anyhow::anyhow!("mutation envelope: missing `report` object in structuredContent")
+    })?;
+    let report: ApplyReport = serde_json::from_value(report_val.clone())
+        .map_err(|e| anyhow::anyhow!("mutation envelope: unreadable report: {e}"))?;
+    if matches!(report.outcome, ApplyOutcome::Refused)
+        && !report.operations.iter().any(|o| o.error.is_some())
+    {
+        anyhow::bail!("mutation envelope: refused report carries no coded error");
+    }
+    Ok(report)
+}
+
+/// Reproduce a direct mutation-command PREFLIGHT-REFUSAL from a reconstructed
+/// `outcome: refused` [`ApplyReport`] (the routed path), byte-for-byte and
+/// exiting 2 (NRN-229 PR B).
+///
+/// - `json = true`: the pretty `ApplyError` envelope on stdout, matching
+///   `render_json_error_envelope` (which is `to_string_pretty` of the SAME
+///   `ApplyError` the daemon's `refusal_from_error` built for the SAME underlying
+///   error — identical `{code, message, path?}`).
+/// - `json = false`: `error: <message>` prose on stderr, matching the direct
+///   arms' `eprintln!("error: {e}")` (`move`/`delete`) and
+///   `eprintln!("error: {e:#}")` (`rewrite-wikilink`) — for a single typed
+///   preflight error with no anyhow context chain, `{e}` and `{e:#}` render the
+///   identical `Display` string the envelope's `message` carries.
+pub fn emit_refusal(report: &ApplyReport, json: bool) -> anyhow::Result<i32> {
+    use std::io::Write as _;
+    let error = report
+        .operations
+        .iter()
+        .find_map(|o| o.error.as_ref())
+        .expect("reconstruct_wire_report guarantees a refused report carries a coded error");
+    if json {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let s = serde_json::to_string_pretty(error)?;
+        out.write_all(s.as_bytes())?;
+        out.write_all(b"\n")?;
+    } else {
+        eprintln!("error: {}", error.message);
+    }
+    Ok(2)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyWarning {
     pub code: String,

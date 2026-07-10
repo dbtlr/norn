@@ -7,6 +7,8 @@
 
 use std::io::Write;
 
+pub mod route;
+
 use crate::core::GraphIndex;
 use crate::standards::{
     classify_link_risk, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary,

@@ -858,6 +858,234 @@ fn try_route_edit(
     None
 }
 
+/// The dry-run/apply confirm switch, mirroring `set`/`edit`'s ladder and the
+/// `resolve_{move,delete}_dry_run` helpers EXACTLY: `--dry-run` → dry-run,
+/// `--yes` → apply, `--format json` (without `--yes`) → implicit dry-run,
+/// interactive TTY → `None` (stays Direct: the daemon cannot drive the prompt),
+/// non-TTY without `--yes` → implicit dry-run. Returns `Some(confirm)` or `None`
+/// to force the interactive path Direct.
+#[cfg(unix)]
+fn routed_confirm(dry_run: bool, yes: bool, format_is_json: bool) -> Option<bool> {
+    use std::io::IsTerminal as _;
+    if dry_run {
+        Some(false)
+    } else if yes {
+        Some(true)
+    } else if format_is_json {
+        Some(false)
+    } else if std::io::stdin().is_terminal() {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+/// Attempt to route a `norn move` to the warm daemon (NRN-229 PR B), or return
+/// `None` to run the direct path. Copies `try_route_set`'s shape.
+///
+/// **Gated to Direct** beyond the shared `routing_forced_direct` flags and the
+/// interactive-TTY path: a move whose SOURCE is NOT a real path on disk. The CLI
+/// arm applies the preflight-RESOLVED source (NRN-216) while `vault.move` applies
+/// the raw argument, so a resolvable bare stem would diverge; the on-disk guard
+/// keeps only exact-path (and folder) moves — for which raw == resolved — on the
+/// wire. See `move_doc::route`.
+#[cfg(unix)]
+fn try_route_move(
+    args: &crate::cli::MoveArgs,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
+
+    // On-disk source guard: only route when the raw source is an exact path (a
+    // file → single-file move; a directory → folder move). A bare stem needing
+    // index resolution — or a missing source (refused identically on Direct) —
+    // stays Direct.
+    let src_full = cwd.join(&args.src);
+    if !src_full.as_std_path().exists() {
+        return None;
+    }
+    let is_folder = args.recursive || src_full.as_std_path().is_dir();
+
+    let confirm = routed_confirm(
+        args.dry_run,
+        args.yes,
+        matches!(args.format, crate::cli::MoveFormat::Json),
+    )?;
+
+    let format = args.format;
+    let src = args.src.clone();
+    let dst = args.dst.clone();
+    let dry_run = !confirm;
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.move",
+            arguments: crate::move_doc::route::to_mcp_arguments(args, confirm),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        dry_run,
+        crate::apply_report::reconstruct_wire_report,
+        move |report| crate::move_doc::route::emit(report, format, &src, &dst, is_folder, dry_run),
+    )
+}
+
+/// Non-Unix build: `move` always runs Direct (the daemon rides Unix sockets).
+#[cfg(not(unix))]
+fn try_route_move(
+    args: &crate::cli::MoveArgs,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (args, cwd, explicit_config, no_cache_refresh, verbose);
+    None
+}
+
+/// Attempt to route a `norn delete` to the warm daemon (NRN-229 PR B), or return
+/// `None` to run the direct path.
+///
+/// **Gated to Direct** beyond the shared flags and the interactive-TTY path:
+/// - a target that is NOT an exact on-disk path (the same stem-resolution guard
+///   as `move`: `vault.delete` applies the raw `target`, the CLI arm the resolved
+///   path, NRN-57);
+/// - `--format records` WITH `--rewrite-to` or `--allow-broken-links` — the
+///   records renderer needs index-derived incoming-link data (counts, file paths,
+///   the resolved redirect target) absent from the wire `ApplyReport`. The
+///   neither-flag records path is routable: a successful delete there provably had
+///   zero incoming links (else preflight refuses), so the renderer needs no index
+///   data. See `delete_doc::route`.
+#[cfg(unix)]
+fn try_route_delete(
+    args: &crate::cli::DeleteArgs,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
+
+    // On-disk target guard (same rationale as `move`).
+    if !cwd.join(&args.doc).as_std_path().exists() {
+        return None;
+    }
+
+    // Records rendering needs index-derived incoming-link data when a redirect or
+    // broken-link acknowledgement is in play; gate those to Direct.
+    if matches!(args.format, crate::cli::DeleteFormat::Records)
+        && (args.rewrite_to.is_some() || args.allow_broken_links)
+    {
+        return None;
+    }
+
+    let confirm = routed_confirm(
+        args.dry_run,
+        args.yes,
+        matches!(args.format, crate::cli::DeleteFormat::Json),
+    )?;
+
+    let format = args.format;
+    let doc = args.doc.clone();
+    let dry_run = !confirm;
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.delete",
+            arguments: crate::delete_doc::route::to_mcp_arguments(args, confirm),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        dry_run,
+        crate::apply_report::reconstruct_wire_report,
+        move |report| crate::delete_doc::route::emit(report, format, &doc, dry_run),
+    )
+}
+
+/// Non-Unix build: `delete` always runs Direct.
+#[cfg(not(unix))]
+fn try_route_delete(
+    args: &crate::cli::DeleteArgs,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (args, cwd, explicit_config, no_cache_refresh, verbose);
+    None
+}
+
+/// Attempt to route a `norn rewrite-wikilink` to the warm daemon (NRN-229 PR B),
+/// or return `None` to run the direct path.
+///
+/// The cleanest cascade command to route: BOTH surfaces apply the raw
+/// `{old, new}` (no stem-resolution divergence), so no on-disk guard is needed —
+/// every input routes, including an unresolvable OLD (a `target-not-found` coded
+/// refusal). `--out` is reproduced client-side in `rewrite_wikilink_cmd::route::emit`.
+#[cfg(unix)]
+fn try_route_rewrite_wikilink(
+    args: &crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
+
+    let confirm = routed_confirm(
+        args.dry_run,
+        args.yes,
+        matches!(args.format, crate::cli::RewriteWikilinkFormat::Json),
+    )?;
+
+    let arguments = crate::rewrite_wikilink_cmd::route::to_mcp_arguments(args, confirm);
+    let dry_run = !confirm;
+    // The emit closure needs the run args (old/new/format/out); clone the small
+    // owned fields it reads into a captured copy.
+    let emit_args = crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs {
+        old: args.old.clone(),
+        new: args.new.clone(),
+        dry_run: args.dry_run,
+        yes: args.yes,
+        format: args.format,
+        out: args.out.clone(),
+    };
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.rewrite_wikilink",
+            arguments,
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        dry_run,
+        crate::apply_report::reconstruct_wire_report,
+        move |report| crate::rewrite_wikilink_cmd::route::emit(report, &emit_args),
+    )
+}
+
+/// Non-Unix build: `rewrite-wikilink` always runs Direct.
+#[cfg(not(unix))]
+fn try_route_rewrite_wikilink(
+    args: &crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (args, cwd, explicit_config, no_cache_refresh, verbose);
+    None
+}
+
 fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     let Cli {
         cwd,
@@ -966,6 +1194,18 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 format: args.format,
                 out: args.out,
             };
+            // NRN-229 routing seam: serve from a warm daemon BEFORE `run` takes the
+            // local mutation lock. `None` => no daemon / forced-Direct flags / the
+            // interactive path => fall through to the direct `run`, unchanged.
+            if let Some(result) = try_route_rewrite_wikilink(
+                &run_args,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
+                return result;
+            }
             rewrite_wikilink_cmd::run(
                 run_args,
                 &cwd,
@@ -1198,6 +1438,22 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use crate::mutation_lock::pending::sweep_pending;
             use crate::mutation_lock::MutationLock;
             use std::io::Write;
+
+            // NRN-229 routing seam: serve the mutation from a warm `norn serve`
+            // daemon BEFORE acquiring the local mutation lock (the daemon takes the
+            // SAME per-vault lock in-process; holding it here would deadlock a
+            // routed apply). `None` => no daemon, a gated shape (forced-Direct
+            // flags, a stem source, the interactive path) => fall through to the
+            // direct sweep + lock + execute below, unchanged.
+            if let Some(result) = try_route_move(
+                &args,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
+                return result;
+            }
 
             // Acquire mutation lock before cache load.
             // Note: for move, --format json is an implicit DRY-RUN (unlike apply),
@@ -1447,6 +1703,20 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use crate::mutation_lock::pending::sweep_pending;
             use crate::mutation_lock::MutationLock;
             use std::io::Write;
+
+            // NRN-229 routing seam (same contract as the `move` arm): serve from a
+            // warm daemon BEFORE the local mutation lock. `None` => no daemon, a
+            // gated shape (forced-Direct flags, a stem target, or a records delete
+            // with --rewrite-to / --allow-broken-links), or the interactive path.
+            if let Some(result) = try_route_delete(
+                &args,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
+                return result;
+            }
 
             // Acquire mutation lock before cache load.
             // For delete: --format json is also an implicit dry-run.
@@ -2248,7 +2518,7 @@ fn run_self_update_command(args: cli::SelfUpdateArgs, color: cli::ColorWhen) -> 
 /// Emit a loud stderr warning for any backlink that remained failed after the
 /// retry pass. The primary op still succeeded (exit code unaffected); this is
 /// the explainability signal the exit code deliberately doesn't carry.
-fn emit_cascade_failure_warnings(report: &crate::apply_report::ApplyReport) {
+pub(crate) fn emit_cascade_failure_warnings(report: &crate::apply_report::ApplyReport) {
     for op in &report.operations {
         let Some(cascade) = op.cascade.as_ref() else {
             continue;
