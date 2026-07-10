@@ -526,3 +526,148 @@ fn routed_apply_under_held_lock_is_safe() {
     let _ = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN) };
     drop(lock_file);
 }
+
+/// `--config` / `--no-cache-refresh` force Direct even with a live daemon — the
+/// same `routing_forced_direct` guard the read seam and `set` routing apply
+/// (the wire speaks canonical vault roots only: the daemon loads each vault's
+/// own default config and always serves a refreshed warm cache, so routing
+/// either flag would silently ignore it).
+///
+/// The `--config` shape is made semantically load-bearing, not just a
+/// served-count probe: the vault's OWN config `files.ignore`s the target doc,
+/// while the alternate config passed via `--config` ignores nothing. Direct
+/// honors the alternate config, resolves the target, and APPLIES (exit 0,
+/// edited bytes on disk); a regression that routed this shape would have the
+/// daemon load the vault's own config, never see the doc, and REFUSE
+/// (target-not-found, exit 2, nothing written) — divergence on all three
+/// identity axes, not merely a count change.
+#[test]
+fn forced_direct_flags_never_route() {
+    let daemon = spawn_ready_daemon_with_log(&[]);
+
+    // Seed for the --config shape: the vault's own config ignores note.md.
+    let ignoring_seed: Vec<(&str, &str)> = vec![
+        (".norn/config.yaml", "files:\n  ignore:\n    - note.md\n"),
+        (
+            "note.md",
+            "---\ntype: note\ntitle: A Note\n---\n# Note\n\nHello world\n\n## Section\n\nSection body\n",
+        ),
+        (
+            "other.md",
+            "---\ntype: note\ntitle: Other\n---\nOther body\n",
+        ),
+    ];
+    // An alternate config OUTSIDE the vault that ignores nothing, so the
+    // target resolves and the edit applies on the direct path.
+    let alt_config_dir = TempDir::new().unwrap();
+    let alt_config = alt_config_dir.path().join("alt-config.yaml");
+    std::fs::write(&alt_config, "files:\n  ignore: []\n").unwrap();
+    let alt_config_str = alt_config.to_str().expect("utf8 alt config path");
+
+    let config_args = vec![
+        "note",
+        "--str-replace",
+        "Hello world",
+        "--new",
+        "Goodbye world",
+        "--yes",
+        "--config",
+        alt_config_str,
+    ];
+    let no_refresh_args = vec![
+        "note",
+        "--str-replace",
+        "Hello world",
+        "--new",
+        "Goodbye world",
+        "--yes",
+        "--no-cache-refresh",
+    ];
+    // (name, seed, args, direct-must-apply): the --no-cache-refresh shape uses
+    // the plain seed (no config) so its target is resolvable on the direct path.
+    type ForcedDirectShape<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str], bool);
+    let plain_seed = seeded_vault_files();
+    let shapes: Vec<ForcedDirectShape> = vec![
+        (
+            "--config alt-config apply",
+            &ignoring_seed,
+            &config_args,
+            true,
+        ),
+        (
+            "--no-cache-refresh apply",
+            &plain_seed,
+            &no_refresh_args,
+            false,
+        ),
+    ];
+
+    for (name, seed, args, direct_must_apply) in shapes {
+        let direct_vault = fresh_vault();
+        let routed_vault = fresh_vault();
+        write_vault(direct_vault.path(), seed);
+        write_vault(routed_vault.path(), seed);
+
+        let direct_cache = TempDir::new().unwrap();
+        let direct_state = TempDir::new().unwrap();
+        let (d_out, d_err, d_code) = run_edit(
+            direct_cache.path(),
+            direct_state.path(),
+            direct_vault.path(),
+            args,
+        );
+        if direct_must_apply {
+            assert_eq!(
+                d_code,
+                0,
+                "[{name}] direct must APPLY under the alternate config (note.md not ignored); stderr: {}",
+                String::from_utf8_lossy(&d_err)
+            );
+            let on_disk = std::fs::read_to_string(direct_vault.path().join("note.md")).unwrap();
+            assert!(
+                on_disk.contains("Goodbye world"),
+                "[{name}] the alternate config must have taken effect on disk:\n{on_disk}"
+            );
+        }
+
+        // Same invocation against the daemon's cache home: the forced-Direct
+        // guard must keep it off the wire entirely.
+        let (r_out, r_err, r_code) = run_edit(
+            &daemon.cache_home,
+            &daemon.state_home,
+            routed_vault.path(),
+            args,
+        );
+        assert_eq!(
+            redact_trace(&r_out),
+            redact_trace(&d_out),
+            "[{name}] stdout must match direct\nrouted-home: {:?}\ndirect: {:?}",
+            String::from_utf8_lossy(&r_out),
+            String::from_utf8_lossy(&d_out),
+        );
+        assert_eq!(
+            r_err,
+            d_err,
+            "[{name}] stderr must match direct\nrouted-home: {:?}\ndirect: {:?}",
+            String::from_utf8_lossy(&r_err),
+            String::from_utf8_lossy(&d_err),
+        );
+        assert_eq!(r_code, d_code, "[{name}] exit code must match direct");
+        assert_eq!(
+            dir_snapshot(direct_vault.path()),
+            dir_snapshot(routed_vault.path()),
+            "[{name}] the whole post-state vault must be byte-identical",
+        );
+
+        // The load-bearing guard assertion: the daemon must NEVER have served
+        // a vault.edit for a forced-Direct flag.
+        let served = count_served(&daemon.stderr_path, "vault.edit");
+        assert_eq!(
+            served,
+            0,
+            "[{name}] --config / --no-cache-refresh must force Direct: the daemon served {served} \
+             vault.edit call(s).\ndaemon stderr:\n{}",
+            std::fs::read_to_string(&daemon.stderr_path).unwrap_or_default(),
+        );
+    }
+}

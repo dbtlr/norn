@@ -437,3 +437,126 @@ fn routed_apply_under_held_lock_is_safe() {
     let _ = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN) };
     drop(lock_file);
 }
+
+/// `--config` / `--no-cache-refresh` force Direct even with a live daemon — the
+/// same `routing_forced_direct` guard the read seam applies (the wire speaks
+/// canonical vault roots only: the daemon loads each vault's own default config
+/// and always serves a refreshed warm cache, so routing either flag would
+/// silently ignore it).
+///
+/// The `--config` shape is made semantically load-bearing, not just a
+/// served-count probe: the vault's own config refuses `status: frozen`
+/// (`allowed_values`), while the alternate config passed via `--config` allows
+/// it. Direct honors the alternate config and APPLIES (exit 0, `frozen` on
+/// disk); a regression that routed this shape would have the daemon enforce the
+/// vault's own config and REFUSE (exit 2, nothing written) — divergence on all
+/// three identity axes, not merely a count change.
+#[test]
+fn forced_direct_flags_never_route() {
+    let seed = seeded_vault_files();
+    let daemon = spawn_ready_daemon_with_log(&[]);
+
+    // An alternate config OUTSIDE the vault that widens `allowed_values` to
+    // include `frozen` — the value the vault's own config refuses.
+    let alt_config_dir = TempDir::new().unwrap();
+    let alt_config = alt_config_dir.path().join("alt-config.yaml");
+    std::fs::write(
+        &alt_config,
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        \
+         frontmatter:\n          type: task\n      allowed_values:\n        \
+         status:\n          - backlog\n          - active\n          - done\n          - frozen\n",
+    )
+    .unwrap();
+    let alt_config_str = alt_config.to_str().expect("utf8 alt config path");
+
+    // (name, args, direct-must-apply): both shapes must run Direct on both
+    // sides (served count stays 0) and stay byte-identical.
+    let config_args = vec![
+        "task",
+        "--field",
+        "status=frozen",
+        "--yes",
+        "--config",
+        alt_config_str,
+    ];
+    let no_refresh_args = vec![
+        "task",
+        "--field",
+        "status=active",
+        "--yes",
+        "--no-cache-refresh",
+    ];
+    let shapes: Vec<(&str, &[&str], bool)> = vec![
+        ("--config alt-config apply", &config_args, true),
+        ("--no-cache-refresh apply", &no_refresh_args, false),
+    ];
+
+    for (name, args, direct_must_apply) in shapes {
+        let direct_vault = fresh_vault();
+        let routed_vault = fresh_vault();
+        write_vault(direct_vault.path(), &seed);
+        write_vault(routed_vault.path(), &seed);
+
+        let direct_cache = TempDir::new().unwrap();
+        let direct_state = TempDir::new().unwrap();
+        let (d_out, d_err, d_code) = run_set(
+            direct_cache.path(),
+            direct_state.path(),
+            direct_vault.path(),
+            args,
+        );
+        if direct_must_apply {
+            assert_eq!(
+                d_code,
+                0,
+                "[{name}] direct must APPLY under the alternate config (frozen allowed); stderr: {}",
+                String::from_utf8_lossy(&d_err)
+            );
+            let on_disk = std::fs::read_to_string(direct_vault.path().join("task.md")).unwrap();
+            assert!(
+                on_disk.contains("status: frozen"),
+                "[{name}] the alternate config must have taken effect on disk:\n{on_disk}"
+            );
+        }
+
+        // Same invocation against the daemon's cache home: the forced-Direct
+        // guard must keep it off the wire entirely.
+        let (r_out, r_err, r_code) = run_set(
+            &daemon.cache_home,
+            &daemon.state_home,
+            routed_vault.path(),
+            args,
+        );
+        assert_eq!(
+            redact_trace(&r_out),
+            redact_trace(&d_out),
+            "[{name}] stdout must match direct\nrouted-home: {:?}\ndirect: {:?}",
+            String::from_utf8_lossy(&r_out),
+            String::from_utf8_lossy(&d_out),
+        );
+        assert_eq!(
+            r_err,
+            d_err,
+            "[{name}] stderr must match direct\nrouted-home: {:?}\ndirect: {:?}",
+            String::from_utf8_lossy(&r_err),
+            String::from_utf8_lossy(&d_err),
+        );
+        assert_eq!(r_code, d_code, "[{name}] exit code must match direct");
+        assert_eq!(
+            dir_snapshot(direct_vault.path()),
+            dir_snapshot(routed_vault.path()),
+            "[{name}] the whole post-state vault must be byte-identical",
+        );
+
+        // The load-bearing guard assertion: the daemon must NEVER have served
+        // a vault.set for a forced-Direct flag.
+        let served = count_served(&daemon.stderr_path, "vault.set");
+        assert_eq!(
+            served,
+            0,
+            "[{name}] --config / --no-cache-refresh must force Direct: the daemon served {served} \
+             vault.set call(s).\ndaemon stderr:\n{}",
+            std::fs::read_to_string(&daemon.stderr_path).unwrap_or_default(),
+        );
+    }
+}

@@ -675,7 +675,11 @@ fn route_get(
 ///   preserving today's "implicit dry-run preview, no prompt" semantics.
 ///
 /// **Gated to Direct** (no byte-faithful wire encoding, see `set::route`):
-/// `--field-json`, `--push`, `--pop`, `--body-from-stdin`.
+/// `--field-json`, `--push`, `--pop`, `--body-from-stdin`. `--config` /
+/// `--no-cache-refresh` force Direct up front via the SAME
+/// [`routing_forced_direct`] guard the read seam uses (the daemon loads each
+/// vault's own default config and always serves a refreshed warm cache, so
+/// routing either flag would silently ignore it).
 ///
 /// A routed apply runs under the seam's `Commit` policy: a post-send failure
 /// surfaces `post-send-uncertain` (exit 1) rather than a double-applying Direct
@@ -687,9 +691,15 @@ fn try_route_set(
     args: &crate::cli::SetArgs,
     combined_fields: &[String],
     cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
     verbose: bool,
 ) -> Option<Result<i32>> {
     use std::io::IsTerminal as _;
+
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
 
     // Shapes with no byte-faithful wire encoding run Direct.
     if args.body_from_stdin
@@ -738,9 +748,18 @@ fn try_route_set(
     args: &crate::cli::SetArgs,
     combined_fields: &[String],
     cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
     verbose: bool,
 ) -> Option<Result<i32>> {
-    let _ = (args, combined_fields, cwd, verbose);
+    let _ = (
+        args,
+        combined_fields,
+        cwd,
+        explicit_config,
+        no_cache_refresh,
+        verbose,
+    );
     None
 }
 
@@ -765,7 +784,11 @@ fn try_route_set(
 /// - non-TTY without `--yes` (and not `--format json`) → routed dry-run,
 ///   preserving today's "implicit dry-run preview, no prompt" semantics.
 ///
-/// **Gated to Direct:** nothing today — see `edit::route`'s module doc.
+/// **Gated to Direct:** no edit-specific flag today — see `edit::route`'s
+/// module doc. `--config` / `--no-cache-refresh` force Direct up front via the
+/// SAME [`routing_forced_direct`] guard the read seam and `try_route_set` use
+/// (the daemon loads each vault's own default config and always serves a
+/// refreshed warm cache, so routing either flag would silently ignore it).
 ///
 /// A routed apply runs under the seam's `Commit` policy, same as `set`: a
 /// post-send failure surfaces `post-send-uncertain` (exit 1) rather than a
@@ -778,9 +801,15 @@ fn try_route_edit(
     args: &crate::cli::EditArgs,
     ops: &[crate::edit::ops::EditOp],
     cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
     verbose: bool,
 ) -> Option<Result<i32>> {
     use std::io::IsTerminal as _;
+
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
 
     // Decide the effective mode, mirroring the direct arm's `should_apply`
     // ladder (and `try_route_set`'s identical shape).
@@ -821,9 +850,11 @@ fn try_route_edit(
     args: &crate::cli::EditArgs,
     ops: &[crate::edit::ops::EditOp],
     cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
     verbose: bool,
 ) -> Option<Result<i32>> {
-    let _ = (args, ops, cwd, verbose);
+    let _ = (args, ops, cwd, explicit_config, no_cache_refresh, verbose);
     None
 }
 
@@ -1630,9 +1661,18 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // daemon takes the SAME per-vault lock in-process; holding it here
             // would deadlock a routed apply). `Some` => the request was served (or
             // deliberately refused) by routing; `None` => no live daemon, a gated
-            // shape, or the interactive path => fall through to the direct
-            // sweep + lock + execute sequence below, unchanged.
-            if let Some(result) = try_route_set(&args, &combined_fields, &cwd, verbose) {
+            // shape (including `--config` / `--no-cache-refresh`, which force
+            // Direct exactly as they do for routed reads), or the interactive
+            // path => fall through to the direct sweep + lock + execute sequence
+            // below, unchanged.
+            if let Some(result) = try_route_set(
+                &args,
+                &combined_fields,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
                 return result;
             }
 
@@ -1858,10 +1898,18 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // `norn serve` daemon BEFORE acquiring the local mutation lock (the
             // daemon takes the SAME per-vault lock in-process; holding it here
             // would deadlock a routed apply). `Some` => the request was served
-            // (or deliberately refused) by routing; `None` => no live daemon or
-            // the interactive path => fall through to the direct sweep + lock +
-            // execute sequence below, unchanged.
-            if let Some(result) = try_route_edit(&args, &ops, &cwd, verbose) {
+            // (or deliberately refused) by routing; `None` => no live daemon, a
+            // forced-Direct flag (`--config` / `--no-cache-refresh`, exactly as
+            // for routed reads), or the interactive path => fall through to the
+            // direct sweep + lock + execute sequence below, unchanged.
+            if let Some(result) = try_route_edit(
+                &args,
+                &ops,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
                 return result;
             }
 
