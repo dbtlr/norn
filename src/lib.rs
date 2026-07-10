@@ -1270,8 +1270,17 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 match crate::move_doc::preflight_and_plan(cfg) {
                     Ok(plan) => Some(plan),
                     Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(2);
+                        // NRN-229: structured envelope on stdout for `--format
+                        // json` (matching the applier-refusal arm below and the
+                        // `set` arm) — a preflight refusal carries its stable
+                        // `code`. Records/TTY stays byte-identical: prose on
+                        // stderr, exit 2.
+                        let e = anyhow::Error::new(e);
+                        match args.format {
+                            crate::cli::MoveFormat::Json => render_json_error_envelope(&e)?,
+                            crate::cli::MoveFormat::Records => eprintln!("error: {e}"),
+                        }
+                        return Ok(2);
                     }
                 }
             } else {
@@ -1482,8 +1491,16 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             let outcome = match crate::delete_doc::preflight_and_plan(cfg) {
                 Ok(o) => o,
                 Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(2);
+                    // NRN-229: structured envelope on stdout for `--format json`
+                    // (matching the `set` arm) — a preflight refusal carries its
+                    // stable `code`. Records/TTY stays byte-identical: prose on
+                    // stderr, exit 2.
+                    let e = anyhow::Error::new(e);
+                    match args.format {
+                        crate::cli::DeleteFormat::Json => render_json_error_envelope(&e)?,
+                        crate::cli::DeleteFormat::Records => eprintln!("error: {e}"),
+                    }
+                    return Ok(2);
                 }
             };
 

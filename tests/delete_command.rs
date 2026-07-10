@@ -38,6 +38,58 @@ fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
     c
 }
 
+/// NRN-229: a `--format json` PREFLIGHT refusal emits the structured
+/// `{code, message}` envelope on stdout (exit 2) carrying the stable code —
+/// matching the `set` NRN-221 contract — instead of format-blind stderr prose.
+#[test]
+fn delete_preflight_refusal_format_json_emits_coded_envelope() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    // b.md has an incoming link from a.md ([[b]]); no --allow-broken-links /
+    // --rewrite-to → backlinks-present refusal.
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["delete", "b.md", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "preflight refusal → exit 2");
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be the JSON error envelope");
+    assert_eq!(
+        envelope["code"], "backlinks-present",
+        "envelope: {envelope}"
+    );
+    assert!(
+        vault.join("b.md").exists(),
+        "a refused delete must not remove the file"
+    );
+}
+
+/// NRN-229: the DEFAULT (Records) preflight refusal is byte-identical to before
+/// — prose on stderr, no JSON on stdout.
+#[test]
+fn delete_preflight_refusal_records_stays_prose_on_stderr() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["delete", "b.md"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        out.stdout.is_empty(),
+        "Records refusal must not emit JSON on stdout"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("error: document has 1 incoming link"),
+        "stderr prose must be unchanged: {stderr}"
+    );
+}
+
 #[test]
 fn delete_leaf_dry_run_no_op() {
     let tmp = synth();
