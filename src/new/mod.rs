@@ -39,6 +39,72 @@ pub struct ResolvedTarget {
     pub body_scaffold: Option<String>,
 }
 
+/// Typed refusals from [`resolve_target`]'s three-mode path resolution
+/// (NRN-230, F3). Mirrors the established `.code()` convention
+/// ([`PreflightError`](crate::new::validate::PreflightError),
+/// [`SetError`](crate::set::error::SetError)): `Display` preserves the EXACT
+/// prose the prior `anyhow::bail!`/`anyhow!()` call sites produced
+/// (byte-identical CLI/stderr output), and `.code()` gives an MCP
+/// `vault.new` consumer a stable, machine-branchable kebab code instead of
+/// string-matching the message.
+#[derive(Debug, thiserror::Error)]
+pub enum NewResolveError {
+    #[error("pass either a path or --as, not both")]
+    PathAndRuleConflict,
+    #[error("unknown rule `{0}`")]
+    UnknownRule(String),
+    #[error("rule `{0}` is not creatable (no `target`)")]
+    RuleNotCreatable(String),
+    /// `generate_path`'s own refusal family (missing var, missing title,
+    /// template render failure, misplaced `{{seq}}`) — transparent so
+    /// `Display`/`.code()` both delegate to the inner error verbatim.
+    #[error(transparent)]
+    GeneratePath(#[from] crate::new::generate::GeneratePathError),
+    #[error("no path, no --as, and no inbox configured")]
+    NoInboxConfigured,
+    #[error("inbox creation requires --title")]
+    InboxRequiresTitle,
+}
+
+impl NewResolveError {
+    /// The stable, machine-branchable kebab code for this refusal (NRN-230).
+    /// `GeneratePath` delegates to the inner
+    /// [`GeneratePathError`](crate::new::generate::GeneratePathError)'s own
+    /// code so template-generation refusals keep their existing vocabulary
+    /// (one-semantic-one-code).
+    pub fn code(&self) -> &'static str {
+        match self {
+            NewResolveError::PathAndRuleConflict => "path-and-rule-conflict",
+            NewResolveError::UnknownRule(_) => "unknown-rule",
+            NewResolveError::RuleNotCreatable(_) => "rule-not-creatable",
+            NewResolveError::GeneratePath(e) => e.code(),
+            NewResolveError::NoInboxConfigured => "no-inbox-configured",
+            NewResolveError::InboxRequiresTitle => "inbox-requires-title",
+        }
+    }
+}
+
+/// Typed refusal for a rule `body` scaffold template that fails to render
+/// (NRN-230): an unknown placeholder, unknown transform, or malformed
+/// template in the rule's `body`. `Display` preserves the EXACT prose the
+/// prior `anyhow!("body scaffold render error: {e}")` call sites produced
+/// (byte-identical CLI/stderr output); `.code()` rides alongside for the MCP
+/// refusal envelope.
+#[derive(Debug, thiserror::Error)]
+#[error("body scaffold render error: {0}")]
+pub struct BodyScaffoldRenderError(pub crate::standards::substitution::RenderError);
+
+impl BodyScaffoldRenderError {
+    /// The stable, machine-branchable kebab code (NRN-230). REUSES
+    /// `template-render-failed` — a body-scaffold render failure and a
+    /// path-template render failure are one semantic (a configured template
+    /// failed to render; one-semantic-one-code, NRN-235). The envelope
+    /// `message` carries the site-distinguishing prose.
+    pub fn code(&self) -> &'static str {
+        "template-render-failed"
+    }
+}
+
 /// Resolve the creation target from primitive inputs — no dependency on `NewArgs`.
 ///
 /// Implements three-mode resolution:
@@ -61,9 +127,9 @@ pub fn resolve_target(
     as_rule: Option<&str>,
     title: Option<&str>,
     vars: &BTreeMap<String, String>,
-) -> Result<ResolvedTarget> {
+) -> Result<ResolvedTarget, NewResolveError> {
     match (doc_path, as_rule) {
-        (Some(_), Some(_)) => Err(anyhow::anyhow!("pass either a path or --as, not both")),
+        (Some(_), Some(_)) => Err(NewResolveError::PathAndRuleConflict),
         (Some(p), None) => Ok(ResolvedTarget {
             path: p.to_owned(),
             path_vars: BTreeMap::new(),
@@ -75,14 +141,13 @@ pub fn resolve_target(
                 .rules
                 .iter()
                 .find(|r| r.name.as_deref() == Some(name))
-                .ok_or_else(|| anyhow::anyhow!("unknown rule `{name}`"))?;
+                .ok_or_else(|| NewResolveError::UnknownRule(name.to_string()))?;
             let target = rule
                 .target
                 .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("rule `{name}` is not creatable (no `target`)"))?;
+                .ok_or_else(|| NewResolveError::RuleNotCreatable(name.to_string()))?;
             let inputs = crate::new::generate::GenerateInputs { title, vars };
-            let generated = crate::new::generate::generate_path(target, &inputs, cfg)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let generated = crate::new::generate::generate_path(target, &inputs, cfg)?;
             let scaffold = rule.body.clone();
             Ok(ResolvedTarget {
                 path: Utf8PathBuf::from(generated),
@@ -95,15 +160,14 @@ pub fn resolve_target(
                 .inbox
                 .path
                 .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("no path, no --as, and no inbox configured"))?;
-            let t = title.ok_or_else(|| anyhow::anyhow!("inbox creation requires --title"))?;
+                .ok_or(NewResolveError::NoInboxConfigured)?;
+            let t = title.ok_or(NewResolveError::InboxRequiresTitle)?;
             let target = format!("{inbox}/{{{{title|slugify}}}}.md");
             let inputs = crate::new::generate::GenerateInputs {
                 title: Some(t),
                 vars,
             };
-            let generated = crate::new::generate::generate_path(&target, &inputs, cfg)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let generated = crate::new::generate::generate_path(&target, &inputs, cfg)?;
             Ok(ResolvedTarget {
                 path: Utf8PathBuf::from(generated),
                 path_vars: vars.clone(),
@@ -193,13 +257,20 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
             date_format: cfg.templates.date_format.clone(),
             time_format: cfg.templates.time_format.clone(),
         };
-        crate::standards::substitution::render(&scaffold, &ctx)
-            .map_err(|e| anyhow::anyhow!("body scaffold render error: {e}"))?
+        // NRN-230: preserve the typed `BodyScaffoldRenderError` (its Display
+        // carries the exact "body scaffold render error: …" prose) so the MCP
+        // refusal seam can downcast it to `template-render-failed`.
+        crate::standards::substitution::render(&scaffold, &ctx).map_err(BodyScaffoldRenderError)?
     } else {
         String::new()
     };
 
     // ── Step 6: Synthesize the plan ───────────────────────────────────────────
+    // NRN-230/F4: preserve the typed `SynthError` (do NOT stringify it) so the
+    // MCP refusal seam (`crate::mcp::mutate::refusal_from_error`) can downcast
+    // it to a structured `error.code`. `?` alone converts via thiserror's
+    // `Into<anyhow::Error>`, which keeps the concrete type recoverable — the
+    // same pattern `PreflightError` already uses on the MCP path.
     let mut plan = crate::new::synth::build_plan(
         args,
         &doc_path,
@@ -208,8 +279,7 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         &loaded_config.compiled,
         Some(&index),
         body.clone(),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    )?;
 
     // NRN-37c: `--title` has no effect in Mode A (explicit path, no `--as`) —
     // `{{title}}` substitution always derives from the path stem

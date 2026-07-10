@@ -279,15 +279,23 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
             date_format: cfg.templates.date_format.clone(),
             time_format: cfg.templates.time_format.clone(),
         };
+        // NRN-230: preserve the typed `BodyScaffoldRenderError` (its Display
+        // carries the exact "body scaffold render error: …" prose the CLI
+        // prints) so `refusal_from_error` can downcast it to a structured
+        // `template-render-failed` refusal.
         crate::standards::substitution::render(&scaffold, &ctx_sub)
-            .map_err(|e| anyhow::anyhow!("body scaffold render error: {e}"))?
+            .map_err(crate::new::BodyScaffoldRenderError)?
     } else {
         String::new()
     };
 
     let body_bytes = body.len();
 
-    let plan = crate::new::synth::build_plan(
+    // NRN-230/F4: preserve the typed `SynthError` (do NOT stringify it) so the
+    // MCP refusal seam (`crate::mcp::mutate::refusal_from_error`) can downcast
+    // it to a structured `error.code` — the same pattern `PreflightError`
+    // already uses just above (Step 3).
+    let mut plan = crate::new::synth::build_plan(
         &args,
         &doc_path,
         &resolved.path_vars,
@@ -295,8 +303,22 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         &loaded_config.compiled,
         Some(&index),
         body.clone(),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    )?;
+
+    // NRN-230/F1: `--title` has no effect in Mode A (explicit path, no
+    // `rule`) — mirrors the CLI's warning push in
+    // `new::preflight_and_plan` (byte-identical `Warning::TitleIgnored`),
+    // which this MCP replica previously omitted entirely: a confirmed parity
+    // gap where `vault.new` returned `warnings: []` for the same Mode-A +
+    // `title` input the CLI warns on.
+    if p.path.is_some() && p.rule.is_none() {
+        if let Some(title) = &p.title {
+            plan.warnings
+                .push(crate::new::synth::Warning::TitleIgnored {
+                    title: title.clone(),
+                });
+        }
+    }
 
     let doc_path_str = doc_path.as_str().to_owned();
 
@@ -833,5 +855,447 @@ validate:
             std::fs::read_to_string(root.join("exists.md")).unwrap(),
             "---\ntype: note\n---\nbody\n"
         );
+    }
+
+    /// F1 (NRN-230): Mode A (explicit `path`, no `rule`) + `title` must push
+    /// the SAME `title-ignored` warning the CLI's `new::preflight_and_plan`
+    /// pushes — mirror-asserted against the CLI's own `--format json`
+    /// warnings output on the SAME vault + input (not a hardcoded literal),
+    /// so the parity is explicit. This was a confirmed gap: the MCP replica
+    /// previously never pushed this warning at all, so `vault.new` returned
+    /// `warnings: []` where the CLI warned.
+    #[test]
+    fn f1_title_ignored_warning_matches_cli_parity() {
+        let (_tmp, root) = seeded_vault();
+
+        // ── CLI side: the real `new::preflight_and_plan`, JSON dry-run ───────
+        let cli_args = NewArgs {
+            path: Some(camino::Utf8PathBuf::from("notes/mode-a.md")),
+            as_rule: None,
+            title: Some("Ignored Title".to_string()),
+            var: vec![],
+            field: vec![],
+            field_json: vec![],
+            body_from_stdin: false,
+            force: false,
+            parents: true,
+            yes: false,
+            dry_run: true,
+            format: NewFormat::Json,
+        };
+        let cli_bundle =
+            crate::new::preflight_and_plan(&cli_args, &root).expect("CLI dry-run must succeed");
+        let cli_json: serde_json::Value = serde_json::from_str(&cli_bundle.rendered).unwrap();
+        let cli_warnings = cli_json["warnings"]
+            .as_array()
+            .expect("CLI warnings must be an array");
+
+        // ── MCP side: the SAME vault, the SAME Mode-A + title input ──────────
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let mcp_json = handle(
+            &ctx,
+            NewParams {
+                path: Some("notes/mode-a.md".to_string()),
+                title: Some("Ignored Title".to_string()),
+                parents: true,
+                confirm: false,
+                ..Default::default()
+            },
+        )
+        .expect("MCP dry-run must succeed");
+        let mcp_value: serde_json::Value = serde_json::from_str(&mcp_json).unwrap();
+        let mcp_warnings = mcp_value["warnings"]
+            .as_array()
+            .expect("MCP warnings must be an array");
+
+        // Parity is explicit, not hardcoded: the MCP replica's warnings array
+        // must equal the CLI's, byte-for-byte.
+        assert_eq!(
+            mcp_warnings, cli_warnings,
+            "vault.new must emit the SAME warnings the CLI emits for the same \
+             Mode-A + title input"
+        );
+        // Guard against a vacuous pass (both sides silently emitting nothing):
+        // the CLI is known to warn here (NRN-37c), so assert the warning
+        // actually fired on both sides.
+        assert!(
+            cli_warnings.iter().any(|w| w["kind"] == "title-ignored"),
+            "expected the CLI to emit a title-ignored warning, got: {cli_warnings:?}"
+        );
+        assert!(
+            mcp_warnings.iter().any(|w| w["kind"] == "title-ignored"),
+            "expected vault.new to emit a title-ignored warning, got: {mcp_warnings:?}"
+        );
+    }
+
+    // ── NRN-230 (PR A): resolve/synth refusal coding ─────────────────────────
+    //
+    // For EVERY newly-coded semantic (F3's `NewResolveError` family, F4's
+    // `SynthError` family), assert the structured refusal `vault.new` returns:
+    // `isError:true`, `error.code`, and `error.message` byte-identical to the
+    // CLI's `error: {Display}` prose (verified against the exact literal, since
+    // the CLI and this MCP replica print/carry the SAME typed error's Display).
+
+    /// Seed a vault with an arbitrary `.norn/config.yaml`.
+    fn vault_with_config(config_yaml: &str) -> (TempDir, Utf8PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-new-resolve-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let norn_dir = root.join(".norn");
+        std::fs::create_dir_all(&norn_dir).unwrap();
+        std::fs::write(norn_dir.join("config.yaml"), config_yaml).unwrap();
+        (tmp, root)
+    }
+
+    /// Run a `vault.new` confirm call and return `(code, message)` from the
+    /// structured refusal envelope — failing the test outright if the call
+    /// was NOT a coded refusal (bare `Err`, or a successful create).
+    fn refusal_code_and_message(ctx: &VaultContext, p: NewParams) -> (String, String) {
+        let mr =
+            handle_output(ctx, p).expect("a coded refusal returns Ok(MutationResult), not Err");
+        assert!(
+            mr.is_error(),
+            "expected a structured refusal (isError:true)"
+        );
+        let report = &mr.value().report;
+        (
+            report["error"]["code"]
+                .as_str()
+                .expect("error.code present")
+                .to_string(),
+            report["error"]["message"]
+                .as_str()
+                .expect("error.message present")
+                .to_string(),
+        )
+    }
+
+    /// F3: supplying both `path` and `rule` is `path-and-rule-conflict`.
+    #[test]
+    fn resolve_both_path_and_rule_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config("validate: {}\n");
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                path: Some("x.md".to_string()),
+                rule: Some("whatever".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "path-and-rule-conflict");
+        assert_eq!(message, "pass either a path or --as, not both");
+    }
+
+    /// F3: a `rule` name absent from `validate.rules` is `unknown-rule`.
+    #[test]
+    fn resolve_unknown_rule_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config("validate: {}\n");
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                rule: Some("bogus-rule".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "unknown-rule");
+        assert_eq!(message, "unknown rule `bogus-rule`");
+    }
+
+    /// F3: a rule with no `target` (non-creatable) is `rule-not-creatable`.
+    #[test]
+    fn resolve_rule_not_creatable_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config(
+            "validate:\n  rules:\n    - name: no-target-rule\n      match:\n        path: \"**/*.md\"\n      frontmatter_defaults:\n        type: note\n",
+        );
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                rule: Some("no-target-rule".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "rule-not-creatable");
+        assert_eq!(
+            message,
+            "rule `no-target-rule` is not creatable (no `target`)"
+        );
+    }
+
+    /// F3: `generate_path`'s missing-var refusal is `missing-var`, delegated
+    /// transparently through `NewResolveError::GeneratePath`.
+    #[test]
+    fn resolve_generate_path_missing_var_is_coded_refusal() {
+        let (_tmp, root) = vault_with_rule();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                rule: Some("task".to_string()),
+                title: Some("Fix It".to_string()),
+                // No `workspace` var supplied — the rule target references
+                // `{{var.workspace}}`.
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "missing-var");
+        assert_eq!(
+            message,
+            "missing required template variable `workspace` (supply with --var workspace=...)"
+        );
+    }
+
+    /// F3: `generate_path`'s missing-title refusal is `missing-title`.
+    #[test]
+    fn resolve_generate_path_missing_title_is_coded_refusal() {
+        let (_tmp, root) = vault_with_rule();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("workspace".to_string(), "norn".to_string());
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                rule: Some("task".to_string()),
+                vars,
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "missing-title");
+        assert_eq!(message, "this target needs a title (supply with --title)");
+    }
+
+    /// F3: `generate_path`'s template-render refusal (an unknown bare
+    /// `{{placeholder}}`, distinct from `var.`/`path.`/`title`) is
+    /// `template-render-failed`.
+    #[test]
+    fn resolve_generate_path_render_failure_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config(
+            "validate:\n  rules:\n    - name: bad-template\n      target: \"notes/{{bogus}}.md\"\n",
+        );
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                rule: Some("bad-template".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "template-render-failed");
+        assert_eq!(message, "template error: unknown variable `bogus`");
+    }
+
+    /// NRN-230: a rule `body` scaffold that fails to render is a coded
+    /// refusal with the REUSED `template-render-failed` code — a body-scaffold
+    /// render failure and a path-template render failure are one semantic (a
+    /// configured template failed to render); the message carries the
+    /// site-distinguishing "body scaffold render error: …" prose, byte-identical
+    /// to the CLI's stderr.
+    #[test]
+    fn body_scaffold_render_failure_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config(
+            "validate:\n  rules:\n    - name: scaffolded\n      target: \"fixed.md\"\n      body: \"hello {{bogus}}\"\n",
+        );
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                rule: Some("scaffolded".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "template-render-failed");
+        assert_eq!(
+            message,
+            "body scaffold render error: unknown variable `bogus`"
+        );
+    }
+
+    /// F3: a misplaced `{{seq}}` (in a directory component, not the file name)
+    /// is `seq-misplaced`.
+    #[test]
+    fn resolve_generate_path_seq_misplaced_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config(
+            "validate:\n  rules:\n    - name: seq-bad\n      target: \"{{seq}}/note.md\"\n",
+        );
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                rule: Some("seq-bad".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "seq-misplaced");
+        assert_eq!(
+            message,
+            "`{{seq}}` is only supported once, in the file name of a rule target"
+        );
+    }
+
+    /// F3: neither `path` nor `rule`, and no `inbox.path` configured, is
+    /// `no-inbox-configured`.
+    #[test]
+    fn resolve_no_inbox_configured_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config("validate: {}\n");
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                title: Some("Some Title".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "no-inbox-configured");
+        assert_eq!(message, "no path, no --as, and no inbox configured");
+    }
+
+    /// F3: the inbox fallback with no `title` is `inbox-requires-title`.
+    #[test]
+    fn resolve_inbox_requires_title_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config("inbox:\n  path: Inbox\n");
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "inbox-requires-title");
+        assert_eq!(message, "inbox creation requires --title");
+    }
+
+    /// F4: a malformed `--field` `KEY=VALUE` pair is `assignment-malformed`
+    /// (reused from `set`'s identical semantic, NRN-235).
+    #[test]
+    fn synth_invalid_field_format_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config("validate: {}\n");
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                path: Some("foo.md".to_string()),
+                field: vec!["no_equals_sign".to_string()],
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "assignment-malformed");
+        assert_eq!(
+            message,
+            "invalid --field format (expected key=value): no_equals_sign"
+        );
+    }
+
+    /// F4: a `--field-json` value that fails to parse as JSON is
+    /// `field-json-invalid` (reused from `set`'s identical semantic). The
+    /// serde_json parse-error suffix is not pinned (it is not part of norn's
+    /// own stable contract), but the `new`-specific prefix is.
+    #[test]
+    fn synth_invalid_field_json_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config("validate: {}\n");
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                path: Some("foo.md".to_string()),
+                field_json: vec!["tags={not valid json".to_string()],
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "field-json-invalid");
+        assert!(
+            message.starts_with("invalid --field-json tags: "),
+            "got: {message}"
+        );
+    }
+
+    /// F4: a value that fails schema-aware coercion to its field's declared
+    /// type is `field-type-invalid` (reused from `set`'s identical semantic).
+    #[test]
+    fn synth_coercion_failure_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config(
+            "validate:\n  rules:\n    - name: r\n      match:\n        path: \"**/*.md\"\n      field_types:\n        bad_date: date\n",
+        );
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                path: Some("foo.md".to_string()),
+                field: vec!["bad_date=notadate".to_string()],
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "field-type-invalid");
+        assert_eq!(
+            message,
+            "schema-aware coercion failed for field `bad_date`: value 'notadate' is not a valid date (expected YYYY-MM-DD)"
+        );
+    }
+
+    /// F4: a `frontmatter_defaults` value whose template references an
+    /// unknown variable fails `resolve_to_fixpoint`'s substitution pass —
+    /// `substitution-failed`, a genuinely new, `new`-specific semantic.
+    #[test]
+    fn synth_substitution_failure_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config(
+            "validate:\n  rules:\n    - name: r\n      match:\n        path: \"**/*.md\"\n      frontmatter_defaults:\n        foo: \"{{nope}}\"\n",
+        );
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (code, message) = refusal_code_and_message(
+            &ctx,
+            NewParams {
+                path: Some("foo.md".to_string()),
+                confirm: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(code, "substitution-failed");
+        assert_eq!(
+            message,
+            "substitution failed: substitution failed: rule pass 0: unknown variable `nope`"
+        );
+    }
+
+    /// F4: a path excluded by `files.ignore` is `path-ignored` — a genuinely
+    /// new, `new`-specific semantic (no `set` analog). The envelope names the
+    /// offending path.
+    #[test]
+    fn synth_path_ignored_is_coded_refusal() {
+        let (_tmp, root) = vault_with_config("files:\n  ignore:\n    - \"scratch/**\"\n");
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let mr = handle_output(
+            &ctx,
+            NewParams {
+                path: Some("scratch/foo.md".to_string()),
+                parents: true,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("a coded refusal returns Ok(MutationResult), not Err");
+        assert!(mr.is_error());
+        let report = &mr.value().report;
+        assert_eq!(report["error"]["code"], "path-ignored");
+        assert_eq!(
+            report["error"]["message"],
+            "cannot create scratch/foo.md: excluded by files.ignore (norn does not manage ignored paths)"
+        );
+        assert_eq!(report["error"]["path"], "scratch/foo.md");
     }
 }

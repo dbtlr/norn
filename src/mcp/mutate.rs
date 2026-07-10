@@ -68,7 +68,11 @@ pub(crate) fn acquire_mutation_lock(cwd: &Utf8Path) -> anyhow::Result<Option<Mut
 /// precondition), a [`ContainmentError`](crate::standards::apply::ContainmentError),
 /// the `edit` anchor/CAS family ([`EditError`](crate::edit::transform::EditError)),
 /// `vault.new`'s [`PreflightError`](crate::new::validate::PreflightError),
-/// `vault.set`'s schema/argument-refusal family
+/// its target-resolution family ([`NewResolveError`](crate::new::NewResolveError)),
+/// its body-scaffold render refusal
+/// ([`BodyScaffoldRenderError`](crate::new::BodyScaffoldRenderError))
+/// and its plan-synthesis family ([`SynthError`](crate::new::synth::SynthError),
+/// NRN-230), `vault.set`'s schema/argument-refusal family
 /// ([`SetError`](crate::set::error::SetError), NRN-221), the `move` / `delete` /
 /// `rewrite_wikilink` typed preflight refusals and the per-vault
 /// mutation-lock timeout (NRN-229). Returns `None` for everything else — IO,
@@ -102,6 +106,39 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
             code: pf.code().to_string(),
             message: pf.to_string(),
             path: pf.path(),
+        });
+    }
+    // NRN-230 (PR A, F3): `vault.new`'s three-mode target-resolution refusals
+    // (both path+rule given, unknown/non-creatable rule, `generate_path`'s
+    // missing-var/missing-title/render/seq family, no inbox configured) —
+    // previously bare `anyhow!()` strings that laundered to `internal-error`.
+    if let Some(re) = e.downcast_ref::<crate::new::NewResolveError>() {
+        return Some(Envelope {
+            code: re.code().to_string(),
+            message: re.to_string(),
+            path: None,
+        });
+    }
+    // NRN-230 (PR A): a rule `body` scaffold template that fails to render —
+    // previously stringified via `anyhow!("body scaffold render error: {e}")`
+    // at both call sites, destroying the type. Reuses `template-render-failed`
+    // (same semantic as a path-template render failure; one-semantic-one-code);
+    // the message carries the site-distinguishing prose.
+    if let Some(bs) = e.downcast_ref::<crate::new::BodyScaffoldRenderError>() {
+        return Some(Envelope {
+            code: bs.code().to_string(),
+            message: bs.to_string(),
+            path: None,
+        });
+    }
+    // NRN-230 (PR A, F4): `vault.new`'s plan-synthesis refusal family
+    // (`SynthError`) — previously stringified via `anyhow!("{e}")` before it
+    // reached this seam, destroying the type.
+    if let Some(se) = e.downcast_ref::<crate::new::synth::SynthError>() {
+        return Some(Envelope {
+            code: se.code().to_string(),
+            message: se.to_string(),
+            path: se.path(),
         });
     }
     if let Some(se) = e.downcast_ref::<crate::set::error::SetError>() {
@@ -632,6 +669,71 @@ mod refusal_tests {
         let env = refusal_from_error(&e).expect("recognized");
         assert_eq!(env.code, "destination-exists");
         assert_eq!(env.path.as_deref(), Some("x.md"));
+    }
+
+    /// NRN-230 (F3): `vault.new`'s `NewResolveError` family is recognized with
+    /// its code. `GeneratePath`'s transparent delegation carries the inner
+    /// `GeneratePathError`'s own code through unchanged.
+    #[test]
+    fn new_resolve_error_yields_its_code() {
+        let e: anyhow::Error = crate::new::NewResolveError::UnknownRule("bogus".into()).into();
+        let env = refusal_from_error(&e).expect("a NewResolveError is a recognized refusal");
+        assert_eq!(env.code, "unknown-rule");
+        assert_eq!(env.message, "unknown rule `bogus`");
+
+        let e: anyhow::Error = crate::new::NewResolveError::GeneratePath(
+            crate::new::generate::GeneratePathError::MissingTitle,
+        )
+        .into();
+        let env = refusal_from_error(&e).expect("recognized");
+        assert_eq!(
+            env.code, "missing-title",
+            "GeneratePath must delegate to the inner GeneratePathError's code"
+        );
+    }
+
+    /// NRN-230: a rule `body` scaffold render failure is recognized with the
+    /// REUSED `template-render-failed` code (same semantic as a path-template
+    /// render failure), keeping the exact "body scaffold render error: …"
+    /// Display as the message.
+    #[test]
+    fn body_scaffold_render_error_yields_its_code() {
+        let e: anyhow::Error = crate::new::BodyScaffoldRenderError(
+            crate::standards::substitution::RenderError::UnknownVariable {
+                name: "bogus".into(),
+                hint: String::new(),
+            },
+        )
+        .into();
+        let env =
+            refusal_from_error(&e).expect("a BodyScaffoldRenderError is a recognized refusal");
+        assert_eq!(env.code, "template-render-failed");
+        assert_eq!(
+            env.message,
+            "body scaffold render error: unknown variable `bogus`"
+        );
+        assert_eq!(env.path, None);
+    }
+
+    /// NRN-230 (F4): `vault.new`'s plan-synthesis refusal family (`SynthError`)
+    /// is recognized with its code — previously stringified via
+    /// `anyhow!("{e}")` before reaching this seam. `PathIgnored` also carries
+    /// the offending path.
+    #[test]
+    fn synth_error_yields_its_code() {
+        let e: anyhow::Error = crate::new::synth::SynthError::PathIgnored {
+            path: "scratch/x.md".into(),
+        }
+        .into();
+        let env = refusal_from_error(&e).expect("a SynthError is a recognized refusal");
+        assert_eq!(env.code, "path-ignored");
+        assert_eq!(env.path.as_deref(), Some("scratch/x.md"));
+
+        let e: anyhow::Error = crate::new::synth::SynthError::InvalidField("bogus".into()).into();
+        assert_eq!(
+            refusal_from_error(&e).expect("recognized").code,
+            "assignment-malformed"
+        );
     }
 
     /// `vault.set`'s schema/argument-refusal family (`SetError`, NRN-221) is

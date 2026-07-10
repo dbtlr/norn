@@ -658,3 +658,110 @@ validate:
         "got unexpected missing-required-field: {kinds:?}"
     );
 }
+
+// ── NRN-230 (PR A): resolve/synth refusal prose is BYTE-IDENTICAL ───────────
+//
+// The CLI `norn new` refusal surface has no JSON error envelope (deliberate —
+// see docs/errors.md's MCP-only coded-refusal contract); it prints
+// `error: {Display}` to stderr and exits 2. Coding these refusals for the MCP
+// surface (NRN-230) must NOT change one byte of this CLI-side prose. These
+// pin the exact stderr text for a representative newly-typed refusal from
+// each family (`NewResolveError` / F3, `SynthError` / F4).
+
+#[test]
+fn process_level_path_and_rule_conflict_prints_exact_prose() {
+    let vault = build_vault("validate: {}\n");
+
+    let output = norn_cmd(&vault)
+        .args(["new", "foo.md", "--as", "whatever", "--yes"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: pass either a path or --as, not both\n"
+    );
+}
+
+#[test]
+fn process_level_unknown_rule_prints_exact_prose() {
+    let vault = build_vault("validate: {}\n");
+
+    let output = norn_cmd(&vault)
+        .args(["new", "--as", "bogus-rule", "--yes"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: unknown rule `bogus-rule`\n"
+    );
+}
+
+#[test]
+fn process_level_no_inbox_configured_prints_exact_prose() {
+    let vault = build_vault("validate: {}\n");
+
+    let output = norn_cmd(&vault)
+        .args(["new", "--title", "Some Title", "--yes"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: no path, no --as, and no inbox configured\n"
+    );
+}
+
+#[test]
+fn process_level_invalid_field_format_prints_exact_prose() {
+    let vault = build_vault("validate: {}\n");
+
+    let output = norn_cmd(&vault)
+        .args(["new", "foo.md", "--yes", "--field", "no_equals_sign"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: invalid --field format (expected key=value): no_equals_sign\n"
+    );
+}
+
+#[test]
+fn process_level_body_scaffold_render_failure_prints_exact_prose() {
+    // NRN-230: typing the body-scaffold render refusal (BodyScaffoldRenderError,
+    // coded `template-render-failed` on MCP) must keep the CLI's stderr prose
+    // byte-identical, in both formats — the CLI new path has no JSON error
+    // envelope (deliberate).
+    let vault = build_vault(
+        "validate:\n  rules:\n    - name: scaffolded\n      target: \"fixed.md\"\n      body: \"hello {{bogus}}\"\n",
+    );
+
+    for format_args in [&[][..], &["--format", "json"][..]] {
+        let output = norn_cmd(&vault)
+            .args(["new", "--as", "scaffolded", "--yes"])
+            .args(format_args)
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "format args: {format_args:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "error: body scaffold render error: unknown variable `bogus`\n",
+            "format args: {format_args:?}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the CLI new refusal path emits nothing on stdout (format args: {format_args:?})"
+        );
+    }
+}

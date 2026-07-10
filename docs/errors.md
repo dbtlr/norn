@@ -199,6 +199,29 @@ argument resolution.
 | `rewrite-to-self` | the delete `--rewrite-to` target resolves to the document being deleted |
 | `rewrite-to-ambiguous` | the delete `--rewrite-to` target resolves to more than one document |
 
+### Terminal — `new` target-resolution / plan-synthesis refusals
+
+`norn new` / `vault.new`'s three-mode target resolution (NRN-230) and plan
+synthesis. `assignment-malformed`, `field-json-invalid`, and
+`field-type-invalid` are NOT re-documented here — they are `set`'s existing
+codes above, reused because the semantic is identical (a malformed
+`--field`/`--field-json` pair, an invalid `--field-json` JSON payload, and a
+value failing schema-aware coercion, respectively).
+
+| Code | Cause |
+|---|---|
+| `path-and-rule-conflict` | both a path and `--as` were supplied |
+| `unknown-rule` | `--as RULE` names a rule absent from `validate.rules` |
+| `rule-not-creatable` | the named rule has no `target` template |
+| `missing-var` | a rule `target` references `{{var.NAME}}` / `{{path.NAME}}` not supplied via `--var` |
+| `missing-title` | a rule `target` (or the inbox fallback) references `{{title}}` and no `--title` was given |
+| `template-render-failed` | a rule template failed to render — either its path `target` or its `body` scaffold references an unknown placeholder, or is otherwise malformed (one code, both sites; the `message` names the failing site) |
+| `seq-misplaced` | a rule `target`'s `{{seq}}` appears outside the file name, or more than once |
+| `no-inbox-configured` | neither a path nor `--as` was given, and no `inbox.path` is configured |
+| `inbox-requires-title` | the inbox fallback (no path, no `--as`) was used without `--title` |
+| `path-ignored` | the resolved path is excluded by `files.ignore` (norn does not manage ignored paths) |
+| `substitution-failed` | a `frontmatter_defaults` template value references an unresolvable substitution |
+
 ### Terminal — vault containment
 
 The vault is self-contained; a target that resolves outside the vault root is
