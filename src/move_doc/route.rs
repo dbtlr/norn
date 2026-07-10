@@ -13,14 +13,19 @@
 //!
 //! **Routable surface** (the gating lives in `try_route_move`, `src/lib.rs`):
 //!
-//! - Routed: a move whose SOURCE argument is a real path on disk (a single `.md`
-//!   file, or a directory → folder move). Both the CLI arm and `vault.move` apply
-//!   the raw destination and the (raw == on-disk) source, so the plans agree.
-//! - Gated to Direct: a bare-STEM source that requires index resolution. The CLI
+//! - Routed: a move whose SOURCE argument is an exact on-disk `.md` doc path
+//!   (single-file move) or a directory (folder move). Both the CLI arm and
+//!   `vault.move` apply the raw destination and the (raw == resolved) source, so
+//!   the plans agree.
+//! - Gated to Direct: any source that is not exactly that — a bare STEM needing
+//!   index resolution, a missing source, or a non-`.md` on-disk entry. The CLI
 //!   arm applies the preflight-RESOLVED path (NRN-216) while `vault.move` applies
 //!   the raw argument, so a resolvable stem would diverge (direct moves the
-//!   resolved doc; routed no-ops/fails on the literal stem). A missing source is
-//!   caught by the same on-disk guard and refuses identically on the Direct path.
+//!   resolved doc; routed no-ops/fails on the literal stem). The `.md`-extension
+//!   requirement (not bare existence) closes the stem-SHADOWING hole: an
+//!   extensionless file `foo` beside `foo.md` makes bare `foo` exist on disk
+//!   while the index still resolves the stem to `foo.md` — routing it would
+//!   silently move a DIFFERENT file than Direct.
 //!
 //! `remove_empty_dirs` after a live folder move runs on BOTH surfaces — the CLI
 //! arm (`src/lib.rs`) AND inside `vault.move`'s handler

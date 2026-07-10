@@ -21,9 +21,13 @@
 //!   - `--format records` WITH `--rewrite-to` or `--allow-broken-links` (the
 //!     renderer prints incoming counts / file paths / the resolved redirect
 //!     target that the wire report omits).
-//!   - Any bare-STEM target needing index resolution — `vault.delete` applies the
-//!     raw `target` while the CLI arm applies the preflight-RESOLVED path (NRN-57)
-//!     — gated by the same on-disk guard `move` uses.
+//!   - Any target that is not an exact on-disk `.md` doc FILE path — `vault.delete`
+//!     applies the raw `target` while the CLI arm applies the preflight-RESOLVED
+//!     path (NRN-57) — gated by the same `.md`-extension guard `move` uses (bare
+//!     existence is not enough: an extensionless `foo` beside `foo.md` shadows
+//!     the stem, and routing it would act on a different doc than Direct).
+//!     `--rewrite-to` needs no such guard: BOTH surfaces put the RAW value into
+//!     the plan fields and preflight it identically, so it cannot diverge.
 
 use serde_json::{Map, Value};
 

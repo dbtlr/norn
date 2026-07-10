@@ -905,11 +905,25 @@ fn try_route_move(
     // file → single-file move; a directory → folder move). A bare stem needing
     // index resolution — or a missing source (refused identically on Direct) —
     // stays Direct.
+    //
+    // The single-file case additionally requires the on-disk entry to carry the
+    // `.md` extension — bare existence is NOT enough. Without it, a non-doc
+    // filesystem entry named exactly like a bare stem (vault has `foo.md` AND an
+    // extensionless file `foo`, e.g. README/README.md) shadows the stem: `norn
+    // move foo dst` would pass an exists() check and route, making the daemon
+    // apply the RAW `foo` while the direct arm applies the index-RESOLVED
+    // `foo.md` — silently moving a DIFFERENT file. Only an exact `.md` doc path
+    // (which the index resolves to itself, exact-path-match-first) or a
+    // directory (folder moves apply the raw path on both surfaces) can route.
     let src_full = cwd.join(&args.src);
-    if !src_full.as_std_path().exists() {
+    let src_std = src_full.as_std_path();
+    if !src_std.exists() {
         return None;
     }
-    let is_folder = args.recursive || src_full.as_std_path().is_dir();
+    let is_folder = args.recursive || src_std.is_dir();
+    if !is_folder && src_full.extension() != Some("md") {
+        return None;
+    }
 
     let confirm = routed_confirm(
         args.dry_run,
@@ -952,9 +966,12 @@ fn try_route_move(
 /// `None` to run the direct path.
 ///
 /// **Gated to Direct** beyond the shared flags and the interactive-TTY path:
-/// - a target that is NOT an exact on-disk path (the same stem-resolution guard
-///   as `move`: `vault.delete` applies the raw `target`, the CLI arm the resolved
-///   path, NRN-57);
+/// - a target that is NOT an exact on-disk `.md` doc path (the same
+///   stem-shadowing guard as `move`: `vault.delete` applies the raw `target`,
+///   the CLI arm the resolved path, NRN-57). `--rewrite-to` needs NO such guard:
+///   BOTH surfaces put the RAW `rewrite_to` into the plan fields (the CLI arm
+///   deliberately does not use the preflight-resolved value there) and run the
+///   same preflight against it, so raw-vs-resolved cannot diverge for it;
 /// - `--format records` WITH `--rewrite-to` or `--allow-broken-links` — the
 ///   records renderer needs index-derived incoming-link data (counts, file paths,
 ///   the resolved redirect target) absent from the wire `ApplyReport`. The
@@ -973,8 +990,14 @@ fn try_route_delete(
         return None;
     }
 
-    // On-disk target guard (same rationale as `move`).
-    if !cwd.join(&args.doc).as_std_path().exists() {
+    // On-disk target guard (same rationale as `move`): only an exact `.md` doc
+    // FILE path routes. The extension check closes the stem-shadowing hole — a
+    // non-doc entry named like a bare stem (`foo` beside `foo.md`, e.g.
+    // README/README.md) would pass a bare exists() check and route, making the
+    // daemon apply the RAW `foo` (refusing or acting on the wrong thing) while
+    // the direct arm applies the index-RESOLVED `foo.md`.
+    let doc_full = cwd.join(&args.doc);
+    if !doc_full.as_std_path().is_file() || doc_full.extension() != Some("md") {
         return None;
     }
 

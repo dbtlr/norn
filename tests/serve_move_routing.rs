@@ -261,6 +261,81 @@ fn no_daemon_runs_direct() {
     }
 }
 
+/// Stem-shadowing regression: the vault holds `foo.md` AND an extensionless
+/// non-doc file `foo` (README/README.md-style). `norn move foo dst.md --yes`
+/// makes a bare exists() check true, but the CLI arm applies the index-RESOLVED
+/// `foo.md` while `vault.move` would apply the RAW `foo` — silently moving a
+/// DIFFERENT file with exit 0 on both sides. The `.md`-extension gate must keep
+/// this shape Direct (served == 0) with full triple + vault-byte identity.
+#[test]
+fn stem_shadowed_by_non_doc_file_gates_direct() {
+    let mut seed = seeded_vault_files();
+    seed.push(("foo.md", "---\ntype: note\n---\nThe real doc\n"));
+    seed.push(("foo", "an extensionless non-doc file shadowing the stem\n"));
+    let daemon = spawn_ready_daemon_with_log(&[]);
+
+    let args = &["foo", "dst.md", "--yes"];
+
+    let direct_vault = fresh_vault();
+    let routed_vault = fresh_vault();
+    write_vault(direct_vault.path(), &seed);
+    write_vault(routed_vault.path(), &seed);
+
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    let (d_out, d_err, d_code) = run_move(
+        direct_cache.path(),
+        direct_state.path(),
+        direct_vault.path(),
+        args,
+    );
+    // Direct semantics sanity: the RESOLVED doc moved; the shadow file did not.
+    assert_eq!(
+        d_code,
+        0,
+        "direct stem move must apply; stderr: {}",
+        String::from_utf8_lossy(&d_err)
+    );
+    assert!(
+        !direct_vault.path().join("foo.md").exists() && direct_vault.path().join("dst.md").exists(),
+        "direct must move the RESOLVED foo.md"
+    );
+    assert!(
+        direct_vault.path().join("foo").exists(),
+        "direct must leave the extensionless shadow file untouched"
+    );
+
+    let (r_out, r_err, r_code) = run_move(
+        &daemon.cache_home,
+        &daemon.state_home,
+        routed_vault.path(),
+        args,
+    );
+    assert_eq!(
+        redact(&r_out),
+        redact(&d_out),
+        "shadowed-stem stdout must match direct"
+    );
+    assert_eq!(
+        redact(&r_err),
+        redact(&d_err),
+        "shadowed-stem stderr must match direct"
+    );
+    assert_eq!(r_code, d_code, "shadowed-stem exit must match direct");
+    assert_eq!(
+        dir_snapshot(direct_vault.path()),
+        dir_snapshot(routed_vault.path()),
+        "shadowed-stem post-state vault must be byte-identical",
+    );
+
+    // The load-bearing gate assertion: the shape must NEVER reach the daemon.
+    let served = count_served(&daemon.stderr_path, "vault.move");
+    assert_eq!(
+        served, 0,
+        "a stem shadowed by a non-doc file must gate Direct; the daemon served {served} vault.move call(s)"
+    );
+}
+
 fn find_file_named(root: &Path, name: &str) -> Option<std::path::PathBuf> {
     for entry in std::fs::read_dir(root).ok()? {
         let entry = entry.ok()?;
