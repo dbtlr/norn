@@ -227,7 +227,7 @@ pub enum OpStatus {
 /// consumer distinguishes RETRYABLE CAS drift (`stale-document-hash` /
 /// `expected-old-value-mismatch`) from a TERMINAL refusal by comparing `code`,
 /// never the prose.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyError {
     pub code: String,
     pub message: String,

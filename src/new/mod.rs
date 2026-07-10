@@ -316,22 +316,17 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
         } else {
             None
         };
+        let report = crate::new::report::build_report(
+            &plan,
+            &doc_path_str,
+            applied,
+            body_bytes,
+            "",
+            predicted_path.as_deref(),
+        );
         Ok(match args.format {
-            NewFormat::Records => crate::new::report::render_records(
-                &plan,
-                &doc_path_str,
-                applied,
-                body_bytes,
-                predicted_path.as_deref(),
-            ),
-            NewFormat::Json => crate::new::report::render_json(
-                &plan,
-                &doc_path_str,
-                applied,
-                body_bytes,
-                "",
-                predicted_path.as_deref(),
-            )?,
+            NewFormat::Records => crate::new::report::render_records(&report),
+            NewFormat::Json => crate::new::report::render_json(&report)?,
         })
     };
 
@@ -537,22 +532,17 @@ fn apply_and_render(
         field_sources: plan.field_sources.clone(),
     };
     augmented.warnings.extend(post_warnings);
+    let report = crate::new::report::build_report(
+        &augmented,
+        effective_path.as_str(),
+        true,
+        body_bytes,
+        &trace_id,
+        None,
+    );
     let mut rendered = match args.format {
-        crate::cli::NewFormat::Records => crate::new::report::render_records(
-            &augmented,
-            effective_path.as_str(),
-            true,
-            body_bytes,
-            None,
-        ),
-        crate::cli::NewFormat::Json => crate::new::report::render_json(
-            &augmented,
-            effective_path.as_str(),
-            true,
-            body_bytes,
-            &trace_id,
-            None,
-        )?,
+        crate::cli::NewFormat::Records => crate::new::report::render_records(&report),
+        crate::cli::NewFormat::Json => crate::new::report::render_json(&report)?,
     };
 
     // TTY `trace:` footer on real apply (Records format only; JSON carries
