@@ -544,6 +544,49 @@ fn move_with_parents_creates_missing_dst_dirs() {
     assert!(vault.join("deep/nested/new.md").exists());
 }
 
+/// NRN-234: `--parents --dry-run` must leave the filesystem byte-identical —
+/// no destination parent directory created, source untouched, destination
+/// absent. Parent-directory creation is planned/audited apply-step work, not
+/// an unconditional side effect of the `--parents` flag itself.
+#[test]
+fn move_with_parents_dry_run_creates_nothing() {
+    let tmp = synth();
+    let vault = tmp.path().join("vault");
+    assert!(
+        !vault.join("deep").exists(),
+        "precondition: deep/ must not exist yet"
+    );
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args([
+            "move",
+            "b.md",
+            "deep/nested/new.md",
+            "--parents",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !vault.join("deep").exists(),
+        "--parents --dry-run must not create the destination parent directory"
+    );
+    assert!(
+        vault.join("b.md").exists(),
+        "--parents --dry-run must leave the source file in place"
+    );
+    assert!(
+        !vault.join("deep/nested/new.md").exists(),
+        "--parents --dry-run must not create the destination"
+    );
+}
+
 /// F2 (NRN-145 follow-up): `--parents` creates missing destination parent
 /// directories BEFORE the containment gate runs (the gate lives inside the
 /// apply orchestrator, invoked well after this pre-create). A traversal

@@ -129,8 +129,9 @@ pub fn handle_output(ctx: &VaultContext, p: MoveParams) -> Result<MutationResult
 /// cascade without writing.
 ///
 /// CONFIRM (`confirm`): acquire the mutation lock FIRST — before the index
-/// load, parent-directory creation, and preflight — then run the same plan,
-/// open a real event sink, and apply with `dry_run = false`.
+/// load and preflight — then run the same plan, open a real event sink, and
+/// apply with `dry_run = false`. Destination parent-directory creation
+/// (`--parents`) happens inside `apply_migration_plan`, not here (NRN-234).
 pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::ApplyReport> {
     use crate::applier::{apply_migration_plan, ApplyContext};
     use crate::migration_plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
@@ -155,31 +156,19 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     let src_is_dir = src_full.as_std_path().is_dir();
     let is_folder = p.recursive || src_is_dir;
 
-    // `--parents` for single-file moves: create missing destination parents
-    // before preflight (folder moves handle parents in the expander). Mirrors the
-    // CLI. Only side-effecting on the confirm path — on dry-run we must not touch
-    // disk, so we only create parents when actually applying.
-    if !is_folder && p.parents && p.confirm {
-        let dst_path = camino::Utf8Path::new(&p.to);
-        if let Some(parent) = dst_path.parent() {
-            if !parent.as_str().is_empty() {
-                std::fs::create_dir_all(cwd.join(parent)).map_err(|e| {
-                    anyhow::anyhow!("failed to create destination parents for {}: {e}", p.to)
-                })?;
-            }
-        }
-    }
-
-    // Single-file preflight: refuse early (the CLI exits 2). On dry-run with
-    // `--parents`, the destination parent may not exist yet; the CLI only creates
-    // it on the apply branch, so a dry-run preflight can legitimately surface a
-    // missing-parent refusal — same as the CLI's non-apply preview.
+    // Single-file preflight: refuse early (the CLI exits 2). `parents: p.parents`
+    // (NRN-234) tells preflight to skip its missing-destination-parent refusal
+    // when `--parents` was requested — the parent is created inside the applier
+    // as part of the audited apply step (the same shared containment gate that
+    // already handles a not-yet-existing `-p`/`--parents` subtree), identically
+    // on dry-run and confirm, matching the CLI.
     if !is_folder {
         let cfg = crate::move_doc::PreflightConfig {
             src: &p.from,
             dst: &p.to,
             force: p.force,
             no_link_rewrite: p.no_link_rewrite,
+            parents: p.parents,
             vault_root: &cwd,
             index: &index,
         };
@@ -465,6 +454,69 @@ mod tests {
         assert!(
             root.join("b.md").exists(),
             "force move must leave the (overwritten) destination in place"
+        );
+    }
+
+    /// NRN-234: `confirm: false` (dry-run) with `parents: true` must not create
+    /// the missing destination parent directory — the applier, not the MCP
+    /// handler, owns parent creation, and only as part of a real apply.
+    #[test]
+    fn dry_run_parents_creates_nothing() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let report = handle(
+            &ctx,
+            MoveParams {
+                from: "a.md".into(),
+                to: "deep/nested/renamed.md".into(),
+                parents: true,
+                confirm: false,
+                ..Default::default()
+            },
+        )
+        .expect("handle (dry-run + parents) should succeed");
+
+        assert!(report.dry_run, "dry-run report must have dry_run == true");
+        assert!(
+            !root.join("deep").exists(),
+            "dry-run with parents:true must not create the destination parent directory"
+        );
+        assert!(
+            root.join("a.md").exists(),
+            "dry-run must not move the source"
+        );
+    }
+
+    /// NRN-234: `confirm: true` with `parents: true` creates the missing
+    /// destination parent directory via the applier and moves the file — the
+    /// same applier path `norn move --parents --yes` uses.
+    #[test]
+    fn confirm_parents_creates_missing_dst_dirs() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let report = handle(
+            &ctx,
+            MoveParams {
+                from: "a.md".into(),
+                to: "deep/nested/renamed.md".into(),
+                parents: true,
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (confirm + parents) should succeed");
+
+        assert!(!report.dry_run, "confirm report must have dry_run == false");
+        assert!(report.applied >= 1, "confirm must report >= 1 applied");
+        assert!(
+            root.join("deep/nested/renamed.md").exists(),
+            "confirm with parents:true must create the destination parent directories and move the file"
+        );
+        assert!(
+            !root.join("a.md").exists(),
+            "confirm must move a.md off its original path"
         );
     }
 }
