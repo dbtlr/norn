@@ -103,6 +103,41 @@ pub enum SynthError {
     PathIgnored { path: String },
 }
 
+impl SynthError {
+    /// The stable, machine-branchable kebab code for this refusal (NRN-230,
+    /// F4), so an MCP `vault.new` consumer branches on the code instead of
+    /// string-matching the prose. `Display` is unchanged (byte-identical
+    /// CLI/stderr output).
+    ///
+    /// Reuses `set`'s existing codes where the semantic is identical
+    /// (one-semantic-one-code, NRN-235): a malformed `--field`/`--field-json`
+    /// `KEY=VALUE` pair is the same condition as `set`'s
+    /// `assignment-malformed`; an invalid `--field-json` JSON payload is the
+    /// same as `set`'s `field-json-invalid`; a value that fails schema-aware
+    /// coercion is the same as `set`'s `field-type-invalid`. `path-ignored`
+    /// and `substitution-failed` are genuinely new — `new`-specific semantics
+    /// with no `set` analog.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SynthError::InvalidField(_) => "assignment-malformed",
+            SynthError::InvalidFieldJson { .. } => "field-json-invalid",
+            SynthError::Substitution(_) => "substitution-failed",
+            SynthError::Coercion { .. } => "field-type-invalid",
+            SynthError::PathIgnored { .. } => "path-ignored",
+        }
+    }
+
+    /// The offending vault-relative path, when this refusal names one. Only
+    /// `PathIgnored` carries a document path — the other variants are about a
+    /// field name or a raw `KEY=VALUE`/JSON token, not a path.
+    pub fn path(&self) -> Option<String> {
+        match self {
+            SynthError::PathIgnored { path } => Some(path.clone()),
+            _ => None,
+        }
+    }
+}
+
 // ── build_plan ────────────────────────────────────────────────────────────────
 
 /// Synthesize a [`CreateDocumentPlan`] from CLI args + compiled schema + optional index.

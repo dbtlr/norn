@@ -19,6 +19,23 @@ pub enum GeneratePathError {
     SeqPlacement,
 }
 
+impl GeneratePathError {
+    /// The stable, machine-branchable kebab code for this refusal (NRN-230), so
+    /// an MCP `vault.new` consumer branches on the code — `missing-var`,
+    /// `missing-title`, … — rather than the prose. `Display` is unchanged
+    /// (byte-identical CLI/stderr output); the code rides alongside via
+    /// [`NewResolveError::GeneratePath`](crate::new::NewResolveError::GeneratePath)'s
+    /// transparent delegation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            GeneratePathError::MissingVar { .. } => "missing-var",
+            GeneratePathError::MissingTitle => "missing-title",
+            GeneratePathError::Render(_) => "template-render-failed",
+            GeneratePathError::SeqPlacement => "seq-misplaced",
+        }
+    }
+}
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 pub struct GenerateInputs<'a> {
