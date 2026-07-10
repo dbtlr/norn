@@ -135,6 +135,35 @@ pub enum DeletePreflightError {
     },
 }
 
+impl DeletePreflightError {
+    /// The stable, machine-branchable kebab code for this preflight refusal
+    /// (NRN-229), so an MCP `vault.delete` consumer / a `--format json` CLI caller
+    /// branches on the code rather than string-matching the prose. `Display` is
+    /// unchanged (byte-identical CLI/stderr output); the code rides alongside.
+    ///
+    /// Reuses `set`'s `target-not-found` / `target-ambiguous` for the primary
+    /// target (identical semantic: the DOC argument does not resolve, or resolves
+    /// to more than one indexed document — NRN-235, one-semantic-one-code). The
+    /// `--rewrite-to` alternate target gets its own `rewrite-to-*` codes because
+    /// the remediation differs (fix the `--rewrite-to` argument, not the target),
+    /// and `backlinks-present` is the delete-specific policy refusal.
+    ///
+    /// NOTE: distinct from the applier's apply-time `delete-source-missing`
+    /// lifecycle code — that fires when the file is missing on the FILESYSTEM at
+    /// apply time; `target-not-found` fires earlier, when the argument does not
+    /// resolve against the graph index.
+    pub fn code(&self) -> &'static str {
+        match self {
+            DeletePreflightError::DocMissing(_) => "target-not-found",
+            DeletePreflightError::DocAmbiguous { .. } => "target-ambiguous",
+            DeletePreflightError::IncomingLinksRefused { .. } => "backlinks-present",
+            DeletePreflightError::RewriteToMissing(_) => "rewrite-to-not-found",
+            DeletePreflightError::RewriteToSelf => "rewrite-to-self",
+            DeletePreflightError::RewriteToAmbiguous { .. } => "rewrite-to-ambiguous",
+        }
+    }
+}
+
 pub(crate) struct PreflightConfig<'a> {
     pub doc: &'a str,
     pub allow_broken_links: bool,
@@ -360,5 +389,48 @@ mod tests {
             index: &index,
         });
         assert!(matches!(result, Err(DeletePreflightError::RewriteToSelf)));
+    }
+
+    /// NRN-229: every `DeletePreflightError` variant carries a stable kebab
+    /// `.code()`. The primary target REUSES `set`'s `target-*` codes; the
+    /// `--rewrite-to` alternate and the backlink-policy refusal get their own.
+    #[test]
+    fn delete_preflight_error_codes_are_stable() {
+        let cases: Vec<(DeletePreflightError, &str)> = vec![
+            (
+                DeletePreflightError::DocMissing("x".into()),
+                "target-not-found",
+            ),
+            (
+                DeletePreflightError::DocAmbiguous {
+                    stem: "x".into(),
+                    candidates: vec![],
+                },
+                "target-ambiguous",
+            ),
+            (
+                DeletePreflightError::IncomingLinksRefused { count: 3 },
+                "backlinks-present",
+            ),
+            (
+                DeletePreflightError::RewriteToMissing("y".into()),
+                "rewrite-to-not-found",
+            ),
+            (DeletePreflightError::RewriteToSelf, "rewrite-to-self"),
+            (
+                DeletePreflightError::RewriteToAmbiguous {
+                    stem: "y".into(),
+                    candidates: vec![],
+                },
+                "rewrite-to-ambiguous",
+            ),
+        ];
+        for (err, code) in cases {
+            assert_eq!(err.code(), code, "wrong code for {err:?}");
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "code {code:?} is not kebab-case"
+            );
+        }
     }
 }

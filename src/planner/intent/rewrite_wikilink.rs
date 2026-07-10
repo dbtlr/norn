@@ -23,13 +23,38 @@
 
 use crate::core::{GraphIndex, LinkKind, LinkSourceArea};
 use crate::standards::PlannedChange;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use camino::Utf8PathBuf;
 use serde_json::Value;
 
 pub(crate) struct RewriteWikilinkOp {
     pub old: String,
     pub new: String,
+}
+
+/// Typed pre-flight refusal for `rewrite_wikilink` (NRN-229).
+///
+/// `Display` preserves the EXACT prose the prior `anyhow!()` call site produced
+/// (byte-identical CLI/stderr output); `.code()` gives an MCP / `--format json`
+/// consumer a stable, machine-branchable kebab code instead of a laundered
+/// `internal-error`. As long as nothing wraps it with `.context(...)`, the
+/// concrete type survives to the top of the `anyhow` chain for `downcast_ref` to
+/// recover in both `ApplyError::from_anyhow` and `mcp::mutate::refusal_from_error`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RewriteWikilinkError {
+    #[error("rewrite_wikilink: '{0}' does not resolve to any document in the vault (pre-flight refusal)")]
+    OldUnresolved(String),
+}
+
+impl RewriteWikilinkError {
+    /// Reuses `set`'s `target-not-found` (NRN-235, one-semantic-one-code): the
+    /// OLD wikilink target not resolving to any indexed document is the same
+    /// condition as `set`'s DOC argument not resolving.
+    pub fn code(&self) -> &'static str {
+        match self {
+            RewriteWikilinkError::OldUnresolved(_) => "target-not-found",
+        }
+    }
 }
 
 /// Expand a `rewrite_wikilink` op into concrete body-rewrite and
@@ -55,7 +80,7 @@ pub(crate) fn expand_rewrite_wikilink(
 ) -> Result<Vec<PlannedChange>> {
     // --- Step 1: resolve op.old → document path ---
     let old_path: Utf8PathBuf = resolve_stem_to_path(&op.old, index)
-        .ok_or_else(|| anyhow!("rewrite_wikilink: '{}' does not resolve to any document in the vault (pre-flight refusal)", op.old))?;
+        .ok_or_else(|| RewriteWikilinkError::OldUnresolved(op.old.clone()))?;
 
     let mut changes: Vec<PlannedChange> = Vec::new();
 
@@ -340,5 +365,40 @@ mod tests {
                 "new_value must be 'new-target' for rewrite_link ops"
             );
         }
+    }
+
+    /// NRN-229: the OLD-unresolvable refusal is a TYPED `RewriteWikilinkError`
+    /// (not a bare `anyhow!`), so it carries `target-not-found` (reused from
+    /// `set`) and its `Display` is byte-identical to the prior `anyhow!()` prose.
+    #[test]
+    fn rewrite_wikilink_error_code_and_display_are_stable() {
+        let err = RewriteWikilinkError::OldUnresolved("no-such".into());
+        assert_eq!(err.code(), "target-not-found");
+        assert_eq!(
+            err.to_string(),
+            "rewrite_wikilink: 'no-such' does not resolve to any document in the vault (pre-flight refusal)"
+        );
+    }
+
+    /// The typed error survives to the top of the `anyhow` chain (nothing wraps
+    /// it with `.context(...)`), so `downcast_ref` recovers it — the property the
+    /// `from_anyhow` / `refusal_from_error` recognition depends on.
+    #[test]
+    fn rewrite_wikilink_refusal_downcasts_from_anyhow() {
+        let tmp = synth_vault_with_links();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+        let err = expand_rewrite_wikilink(
+            &RewriteWikilinkOp {
+                old: "no-such-target".into(),
+                new: "x".into(),
+            },
+            &index,
+        )
+        .unwrap_err();
+        let typed = err
+            .downcast_ref::<RewriteWikilinkError>()
+            .expect("the OLD-unresolvable refusal must survive as a typed error");
+        assert_eq!(typed.code(), "target-not-found");
     }
 }
