@@ -4,10 +4,16 @@
 
 use crate::edit::transform::EditDescriptor;
 use camino::Utf8PathBuf;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` is derived so the CLI→service routing seam (NRN-229) can
+/// rebuild an `EditReport` from a routed `vault.edit`'s `structuredContent` and
+/// render it through the SAME `render_json`/`render_records` the direct path
+/// uses — the load-bearing routed↔direct isomorphism (ADR 0005), mirroring
+/// `SetReport`. Serialization is unchanged, so the MCP tool output stays
+/// byte-identical.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditReport {
     pub schema_version: u32,
     /// Shared by every telemetry event for this invocation. Empty on dry-run.
@@ -51,7 +57,7 @@ impl EditReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditChange {
     pub op: String,
     pub anchor: String,

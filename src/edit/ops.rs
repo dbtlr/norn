@@ -3,9 +3,14 @@
 //! (MCP). Internally tagged on `op`; `deny_unknown_fields` is intentionally
 //! omitted (serde forbids it on internally-tagged enums).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+/// `Serialize` is derived so the CLI→service routing seam (NRN-229) can
+/// re-encode the locally-resolved ops (sugar-desugared or parsed from
+/// `--edits-json`/`--ops-file`/stdin) as the `edits` array `vault.edit` expects
+/// on the wire — the exact inverse of the `Deserialize` impl, so a round trip
+/// through JSON is lossless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum EditOp {
     /// Replace literal `old` with `new`. Unique-match-or-refuse unless

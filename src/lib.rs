@@ -744,6 +744,89 @@ fn try_route_set(
     None
 }
 
+/// Attempt to route a `norn edit` to the warm daemon (NRN-229 PR A), or return
+/// `None` to run the direct path. Copies `try_route_set`'s shape exactly.
+///
+/// **Routing runs BEFORE the direct arm's local mutation lock**, same reason as
+/// `set`: the daemon acquires the SAME per-vault lock in-process.
+///
+/// `ops` is whatever the direct arm already resolved (sugar-desugared, or
+/// parsed from `--edits-json`/`--ops-file`/stdin) BEFORE this is called — see
+/// `edit::route`'s module doc for why the ops source is never a gating reason
+/// (unlike `set`'s `--body-from-stdin`).
+///
+/// **Mode mapping** (identical ladder to `set`, NRN-229 decisions):
+/// - `--dry-run` → routed dry-run (`confirm: false`).
+/// - `--yes` (non-interactive apply) → routed apply (`confirm: true`).
+/// - `--format json` without `--yes` → routed preview (implicit dry-run,
+///   `confirm: false`).
+/// - interactive TTY without `--yes` → NOT routed: the preview→prompt→apply
+///   flow stays direct (the daemon cannot drive the terminal prompt).
+/// - non-TTY without `--yes` (and not `--format json`) → routed dry-run,
+///   preserving today's "implicit dry-run preview, no prompt" semantics.
+///
+/// **Gated to Direct:** nothing today — see `edit::route`'s module doc.
+///
+/// A routed apply runs under the seam's `Commit` policy, same as `set`: a
+/// post-send failure surfaces `post-send-uncertain` (exit 1) rather than a
+/// double-applying Direct retry. `AcceptWithPayload` lets a coded refusal
+/// (NRN-220) cross as `isError: true` carrying the structured report, which
+/// `reconstruct` renders as the (format-independent, see `edit::route::emit`)
+/// exit-2 refusal.
+#[cfg(unix)]
+fn try_route_edit(
+    args: &crate::cli::EditArgs,
+    ops: &[crate::edit::ops::EditOp],
+    cwd: &camino::Utf8Path,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    use std::io::IsTerminal as _;
+
+    // Decide the effective mode, mirroring the direct arm's `should_apply`
+    // ladder (and `try_route_set`'s identical shape).
+    let confirm = if args.dry_run {
+        false
+    } else if args.yes {
+        true
+    } else if matches!(args.format, crate::cli::EditFormat::Json) {
+        false
+    } else if std::io::stdin().is_terminal() {
+        // Interactive preview→prompt→apply stays Direct.
+        return None;
+    } else {
+        // Non-TTY without --yes: implicit dry-run preview.
+        false
+    };
+
+    let format = args.format;
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.edit",
+            arguments: crate::edit::route::to_mcp_arguments(args, ops, confirm),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        /*dry_run=*/ !confirm,
+        crate::edit::route::reconstruct,
+        move |report| crate::edit::route::emit(report, format),
+    )
+}
+
+/// Non-Unix build: the warm daemon rides Unix-domain sockets, so `edit` always
+/// runs Direct. Always-Direct is safe here — no daemon can exist to half-apply a
+/// mutation (mirrors `try_route_set`'s Direct stub).
+#[cfg(not(unix))]
+fn try_route_edit(
+    args: &crate::cli::EditArgs,
+    ops: &[crate::edit::ops::EditOp],
+    cwd: &camino::Utf8Path,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (args, ops, cwd, verbose);
+    None
+}
+
 fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     let Cli {
         cwd,
@@ -1769,6 +1852,17 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             if ops.is_empty() {
                 eprintln!("error: edits array is empty");
                 return Ok(2);
+            }
+
+            // NRN-229 routing seam: attempt to serve the mutation from a warm
+            // `norn serve` daemon BEFORE acquiring the local mutation lock (the
+            // daemon takes the SAME per-vault lock in-process; holding it here
+            // would deadlock a routed apply). `Some` => the request was served
+            // (or deliberately refused) by routing; `None` => no live daemon or
+            // the interactive path => fall through to the direct sweep + lock +
+            // execute sequence below, unchanged.
+            if let Some(result) = try_route_edit(&args, &ops, &cwd, verbose) {
+                return result;
             }
 
             let (_, state_dir) = crate::cache::state_dir_for(&cwd)

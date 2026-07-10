@@ -3,6 +3,7 @@
 
 pub mod ops;
 pub mod report;
+pub mod route;
 pub mod sugar;
 pub mod synth;
 pub mod transform;
