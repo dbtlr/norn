@@ -1,10 +1,14 @@
-//! NRN-83 acceptance benchmark — the daemon initiative's founding-bug proof.
+//! NRN-83/232 acceptance benchmark — the daemon initiative's founding-bug proof,
+//! extended from reads to routed WRITES.
 //!
 //! The founding bug: `Cache::open` runs `PRAGMA integrity_check` on every open,
 //! an O(db-size) cost that dwarfs the actual query at scale. ADR 0005's
 //! resolution relocated the check to the warm `norn serve` daemon
 //! (open-once / verify-once); routed reads inherit the already-verified state.
-//! This harness proves that end-to-end at 50k-doc scale, re-runnably.
+//! NRN-229 then routed `norn set` (and the other mutation commands) through the
+//! same daemon. This harness proves the verify-once win end-to-end at 50k-doc
+//! scale for BOTH halves of the daemon's traffic — reads and writes — in one
+//! daemon lifetime, re-runnably.
 //!
 //! ## The structural (non-timing) acceptance observable
 //!
@@ -13,18 +17,45 @@
 //! Because a `Cache::open` on an EXISTING db always runs the check, this marker
 //! is a deterministic, cross-process count of how many times a code path pays it:
 //!
-//!   * A **direct** invocation reopens the cache every time → one marker PER call.
+//!   * A **direct** invocation reopens the cache every time. `count`/`find`/`get`
+//!     open it once per call → one marker per call. `set` (unlike the reads)
+//!     opens the cache TWICE per direct call — `crate::cache_cmd::load_graph_index`
+//!     (the planning `GraphIndex`) and `crate::cache_cmd::open_for_query` (target
+//!     resolution) are two separate `Cache::open_with_index` calls in the direct
+//!     dispatch (`src/lib.rs`, `Command::Set`; tracked as seed NRN-s15) — so the
+//!     harness asserts EXACTLY two markers per direct `set` call, a hard pin
+//!     that fails on drift in either direction (a third open, or the two opens
+//!     collapsing into one).
 //!   * The **warm daemon** opens the cache once and holds it → ONE marker across
-//!     every routed read, no matter how many `count`/`find`/`get` calls arrive.
+//!     every routed call, no matter how many reads OR writes arrive. `vault.set`
+//!     collapses the same two needs (index + query cache) into a SINGLE
+//!     `ctx.query_cache()` + `cache.load_graph_index()` call over its resident
+//!     connection (NRN-130), so the routed write path never re-pays the check
+//!     the direct path pays twice.
 //!
 //! So the acceptance criterion is asserted structurally, not by timing: after N
-//! routed reads the daemon's stderr carries exactly ONE integrity_check marker,
-//! while N direct reads carry N. Timings are collected as supporting operator
-//! evidence, printed as a table under `--nocapture`. The `count_served` markers
-//! (one per tools/call the daemon actually serves) prove the routed reads were
-//! genuinely served warm and did not silently fall back to a direct open — so
-//! the one-marker result is a real verify-once win, not a vacuous zero-traffic
-//! artifact.
+//! routed reads AND M routed writes (plus one post-apply verification read) the
+//! daemon's stderr carries exactly ONE integrity_check marker total, while each
+//! direct call carries its own (constant, per-shape) non-zero count. Timings are
+//! collected as supporting operator evidence, printed as a table under
+//! `--nocapture`. The `count_served` markers (one per tools/call the daemon
+//! actually serves) prove the routed calls were genuinely served warm and did
+//! not silently fall back to a direct open — so the one-marker result is a real
+//! verify-once win, not a vacuous zero-traffic artifact.
+//!
+//! ## Write shape
+//!
+//! The write phases exercise `set <doc> --field bench_status=<value> --yes` —
+//! the routable `set` surface (NRN-229; `--field-json`/`--push`/`--pop`/
+//! `--body-from-stdin` stay gated to Direct and would make routing vacuous).
+//! `bench_status` is a field the synthetic vault's generated docs never declare
+//! and the vault carries no `.norn/config.yaml` (see `bench_util::generate_vault`),
+//! so it is schema-UNKNOWN: the set applies cleanly (exit 0) with a harmless
+//! `unknown field` warning, never a `--force` bypass. Each iteration writes a
+//! distinct value (`v0`, `v1`, …) so no call is a no-op. The direct-write phase
+//! targets `doc-000001` and the routed-write phase targets `doc-000002` —
+//! distinct from each other and from the read phase's `get` target
+//! (`doc-000000`) — so the three phases never race on the same file.
 //!
 //! Run it explicitly (it is `#[ignore]`-gated; the 50k build takes real seconds):
 //!
@@ -66,12 +97,15 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Outcome of one `norn` invocation: exit code plus wall-clock and the count of
-/// integrity_check markers on its OWN stderr (direct runs carry them here).
+/// Outcome of one `norn` invocation: exit code plus wall-clock, the count of
+/// integrity_check markers on its OWN stderr (direct runs carry them here), and
+/// captured stdout (used by the post-apply state check to parse `get --format
+/// json`; every other call site ignores it).
 struct RunResult {
     code: i32,
     elapsed: Duration,
     integrity_markers: usize,
+    stdout: Vec<u8>,
 }
 
 /// Run `norn --cwd <vault> <args…>` with a private cache/state home and the
@@ -96,6 +130,7 @@ fn run_norn(cache_home: &Path, state_home: &Path, vault: &Path, args: &[&str]) -
         code: out.status.code().unwrap_or(-1),
         elapsed,
         integrity_markers: markers,
+        stdout: out.stdout,
     }
 }
 
@@ -157,6 +192,31 @@ fn read_shapes() -> Vec<(&'static str, Vec<&'static str>)> {
     ]
 }
 
+/// Frontmatter field used for the write phases: absent from every generated doc
+/// and from the vault's (nonexistent) schema config, so a set only warns
+/// (`unknown field`) rather than refusing — see the module doc's "Write shape"
+/// section.
+const BENCH_FIELD: &str = "bench_status";
+
+/// Direct-write target: distinct from the read phase's `get doc-000000` and
+/// from the routed-write target below, so no phase races another's file.
+const DIRECT_SET_DOC: &str = "doc-000001";
+
+/// Routed-write target: distinct from `DIRECT_SET_DOC` and from `doc-000000`.
+const ROUTED_SET_DOC: &str = "doc-000002";
+
+/// Build the routable `set <doc> --field bench_status=<value> --yes` argv for
+/// iteration `i` (value `v{i}`), so repeated sets are never no-ops.
+fn set_args(doc: &str, i: usize) -> Vec<String> {
+    vec![
+        "set".to_string(),
+        doc.to_string(),
+        "--field".to_string(),
+        format!("{BENCH_FIELD}=v{i}"),
+        "--yes".to_string(),
+    ]
+}
+
 #[test]
 #[ignore = "50k-doc acceptance benchmark; run explicitly with --ignored --nocapture"]
 fn integrity_check_acceptance_50k() {
@@ -166,6 +226,11 @@ fn integrity_check_acceptance_50k() {
     assert!(
         iters >= 2,
         "need at least 2 iterations to separate cold/warm"
+    );
+    assert!(
+        n >= 3,
+        "benchmark needs ≥3 docs: reads doc-000000, direct-set doc-000001, \
+         routed-set doc-000002"
     );
 
     // ---- Generate the synthetic vault -----------------------------------
@@ -234,6 +299,39 @@ fn integrity_check_acceptance_50k() {
         direct_medians.push((label, median(samples)));
     }
 
+    // ---- Direct write baseline: `set` BEFORE any daemon exists -----------
+    // This MUST run before the daemon spawns below — a live socket would route
+    // these calls instead of exercising the no-daemon direct write path.
+    //
+    // Unlike the single-open reads, the direct `set` dispatch pays
+    // integrity_check EXACTLY TWICE per call: `src/lib.rs`'s `Command::Set` arm
+    // opens the cache once via `cache_cmd::load_graph_index` (the planning
+    // `GraphIndex`) and again via `cache_cmd::open_for_query` (target
+    // resolution) — two separate `Cache::open_with_index` sites. The value 2 is
+    // pinned hard (not first-call-captured) so uniform drift in EITHER
+    // direction fails loudly: a 2→3 regression (a third open) AND a 2→1
+    // improvement (the two opens collapsed, e.g. mirroring the daemon-side
+    // NRN-130 consolidation — a change this benchmark should celebrate by
+    // updating the pin, not absorb silently). Tracked as seed NRN-s15.
+    const DIRECT_SET_MARKERS_PER_CALL: usize = 2;
+    let mut direct_set_samples = Vec::with_capacity(iters);
+    for i in 0..iters {
+        let args = set_args(DIRECT_SET_DOC, i);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let r = run_norn(&cache_home, &state_home, vault, &arg_refs);
+        assert_eq!(r.code, 0, "direct set (iter {i}) must exit 0");
+        assert_eq!(
+            r.integrity_markers, DIRECT_SET_MARKERS_PER_CALL,
+            "direct set (iter {i}) must pay integrity_check exactly TWICE \
+             (load_graph_index + open_for_query in src/lib.rs's Command::Set arm; \
+             NRN-s15) — trust preserved on the no-daemon write path; got {}",
+            r.integrity_markers
+        );
+        direct_set_samples.push(r.elapsed);
+    }
+    let direct_set_median = median(direct_set_samples);
+    let direct_set_integrity_total = DIRECT_SET_MARKERS_PER_CALL * iters;
+
     // ---- Routed: spawn the daemon on the SAME (already-built) cache home --
     let (_guard, daemon_stderr) = spawn_daemon_traced(&cache_home, &state_home);
 
@@ -269,32 +367,108 @@ fn integrity_check_acceptance_50k() {
         served_counts.push((label, count_served(&daemon_stderr, tool)));
     }
 
+    // Routing was real, not a vacuous fall-back to direct: each READ shape was
+    // served `iters` times by the daemon so far (before any write traffic).
+    for (label, served) in &served_counts {
+        assert_eq!(
+            *served, iters,
+            "routed {label} must have been SERVED {iters} times by the daemon, got {served}; \
+             a lower count means it silently ran direct and the acceptance result below \
+             would be vacuous"
+        );
+    }
+
+    // ---- Routed writes: SAME daemon lifetime as the routed reads above ----
+    // `set` on `ROUTED_SET_DOC` — distinct from every doc touched above — using
+    // the SAME routable shape (`--field KEY=VALUE --yes`) NRN-229 routes.
+    let mut routed_set_warm_samples = Vec::with_capacity(iters - 1);
+    for i in 0..iters {
+        let args = set_args(ROUTED_SET_DOC, i);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let r = run_norn(&cache_home, &state_home, vault, &arg_refs);
+        assert_eq!(r.code, 0, "routed set (iter {i}) must exit 0");
+        assert_eq!(
+            r.integrity_markers, 0,
+            "routed set (iter {i}) must not run integrity_check in the CLI process"
+        );
+        if i > 0 {
+            routed_set_warm_samples.push(r.elapsed);
+        }
+    }
+    let routed_set_median = median(routed_set_warm_samples);
+
+    // Non-vacuous routing for the write phase: the daemon actually SERVED every
+    // routed set, not a silent fall-back to Direct.
+    let routed_set_served = count_served(&daemon_stderr, "vault.set");
+    assert_eq!(
+        routed_set_served, iters,
+        "routed set must have been SERVED {iters} times by the daemon, got {routed_set_served}; \
+         a lower count means it silently ran direct and the acceptance result below would be vacuous"
+    );
+
+    // ---- Post-apply state check: the routed writes genuinely landed --------
+    // One more routed `get` (JSON) of the routed-write target must show the
+    // FINAL iteration's value. This call is itself routed too, so it is folded
+    // into the `vault.get` served-count arithmetic below rather than ignored.
+    let final_value = format!("v{}", iters - 1);
+    let post_apply_get = run_norn(
+        &cache_home,
+        &state_home,
+        vault,
+        &["get", ROUTED_SET_DOC, "--format", "json"],
+    );
+    assert_eq!(post_apply_get.code, 0, "post-apply routed get must exit 0");
+    assert_eq!(
+        post_apply_get.integrity_markers, 0,
+        "post-apply routed get must not run integrity_check in the CLI process"
+    );
+    let post_apply_json: serde_json::Value = serde_json::from_slice(&post_apply_get.stdout)
+        .unwrap_or_else(|e| {
+            panic!(
+                "post-apply get must emit valid JSON: {e}\nstdout: {}",
+                String::from_utf8_lossy(&post_apply_get.stdout)
+            )
+        });
+    let post_apply_value = post_apply_json[0]["frontmatter"][BENCH_FIELD].as_str();
+    assert_eq!(
+        post_apply_value,
+        Some(final_value.as_str()),
+        "post-apply get of {ROUTED_SET_DOC} must show the FINAL routed-write value \
+         ({final_value}), proving the writes genuinely landed through the daemon; got {post_apply_json}"
+    );
+
+    // `vault.get` was served `iters` times during the read phase, plus this one
+    // post-apply verification call — keep the arithmetic honest rather than
+    // re-baselining the count.
+    let get_served_total = count_served(&daemon_stderr, "vault.get");
+    assert_eq!(
+        get_served_total,
+        iters + 1,
+        "vault.get must have been served {iters} times in the read phase plus 1 for the \
+         post-apply verification get, got {get_served_total}"
+    );
+
     // ---- STRUCTURAL ACCEPTANCE ASSERTION --------------------------------
-    // The daemon opened the cache once and held it: across ALL routed reads its
-    // stderr carries exactly ONE integrity_check marker. If routed reads paid the
-    // check per invocation (the founding bug, un-fixed), this would be
-    // total_routed_calls instead.
+    // The daemon opened the cache once and held it: across ALL routed traffic —
+    // reads, writes, AND the post-apply verification read — its stderr carries
+    // exactly ONE integrity_check marker. If routed calls paid the check per
+    // invocation (the founding bug, un-fixed, or a write-path regression that
+    // never inherited the reads' verify-once win), this would be
+    // `total_routed_all` instead.
+    let total_routed_all = total_routed_calls + iters + 1;
     let daemon_markers = daemon_integrity_markers(&daemon_stderr);
     assert_eq!(
         daemon_markers,
         1,
         "ACCEPTANCE: the warm daemon must pay integrity_check exactly ONCE across \
-         all {total_routed_calls} routed reads (verify-once); got {daemon_markers}. \
+         all {total_routed_all} routed reads+writes (verify-once); got {daemon_markers}. \
          daemon stderr:\n{}",
         std::fs::read_to_string(&daemon_stderr).unwrap_or_default()
     );
 
-    // Routing was real, not a vacuous fall-back to direct: each shape was served
-    // `iters` times by the daemon.
-    for (label, served) in &served_counts {
-        assert_eq!(
-            *served, iters,
-            "routed {label} must have been SERVED {iters} times by the daemon, got {served}; \
-             a lower count means it silently ran direct and the one-marker result above is vacuous"
-        );
-    }
-
-    // Regression guard tally: direct reads verified every time.
+    // Regression guard tally: direct reads verified every time. (The direct-set
+    // side needs no tally here — its per-call count is hard-pinned to
+    // DIRECT_SET_MARKERS_PER_CALL inside the loop above.)
     assert_eq!(
         direct_integrity_total,
         iters * read_shapes().len(),
@@ -315,14 +489,22 @@ fn integrity_check_acceptance_50k() {
              above still held"
         );
     }
+    if routed_set_median >= direct_set_median {
+        println!(
+            "WARN: routed warm set median ({routed_set_median:?}) was not faster than direct \
+             ({direct_set_median:?}); timing is evidence only — the structural verify-once gates \
+             above still held"
+        );
+    }
 
     // ---- Evidence table --------------------------------------------------
-    println!("\n==================== NRN-83 integrity_check acceptance ====================");
+    println!("\n================= NRN-83/232 integrity_check acceptance ==================");
     println!("documents generated      : {n}  (seed {seed})");
     println!("vault generation         : {gen_elapsed:?}");
     println!("cold cache build (count) : {build_elapsed:?}");
     println!("cache.db size            : {} bytes", cache_db_bytes);
     println!("iterations per shape     : {iters}");
+    println!("write field / target     : {BENCH_FIELD} on {DIRECT_SET_DOC} (direct) / {ROUTED_SET_DOC} (routed)");
     println!("--------------------------------------------------------------------------");
     println!(
         "{:<8} {:>18} {:>18} {:>10}",
@@ -334,11 +516,23 @@ fn integrity_check_acceptance_50k() {
         let (_, served) = served_counts[i];
         println!("{label:<8} {:>18?} {:>18?} {:>10}", d, r, served);
     }
+    println!(
+        "{:<8} {:>18?} {:>18?} {:>10}",
+        "set", direct_set_median, routed_set_median, routed_set_served
+    );
     println!("--------------------------------------------------------------------------");
     println!(
-        "integrity_check markers  : direct = {} (one per read), daemon = {} (verify-once)",
-        direct_integrity_total, daemon_markers
+        "integrity_check markers  : direct reads = {} ({} per call), direct writes = {} \
+         ({} per call), daemon = {} (verify-once across reads+writes)",
+        direct_integrity_total,
+        1,
+        direct_set_integrity_total,
+        DIRECT_SET_MARKERS_PER_CALL,
+        daemon_markers
     );
-    println!("routed reads served      : {total_routed_calls} total across all shapes");
+    println!(
+        "routed calls served      : {total_routed_calls} reads + {iters} writes + 1 \
+         post-apply verification get = {total_routed_all} total"
+    );
     println!("==========================================================================\n");
 }
