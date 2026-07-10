@@ -95,7 +95,23 @@ impl ApplyOutput {
 
 /// Build the MCP output envelope for `vault.apply`.
 pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<MutationResult<ApplyOutput>> {
-    let report = handle(ctx, p)?;
+    let dry_run = !p.confirm;
+    let vault_root = ctx.vault_root.to_string();
+    // NRN-229: a mutation-lock timeout (the one refusal `apply` raises before the
+    // applier's own `refuse_as_report` path takes over) becomes a coded,
+    // structured `mutation-lock-timeout` refusal + `isError` instead of a bare
+    // protocol error — the same idiom every mutation tool shares. A malformed /
+    // wrong-schema plan is NOT a coded refusal and still propagates as a bare
+    // `Err` (unrecognized → `None`).
+    let report = match handle(ctx, p) {
+        Ok(report) => report,
+        Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
+            Some(err) => {
+                crate::apply_report::ApplyReport::refused(vault_root, dry_run, "apply", err)
+            }
+            None => return Err(e),
+        },
+    };
     // BUG-3 / NRN-219: `isError` is derived from the report's outcome by
     // `from_apply_report` (a not-applied confirm → true; a dry-run forecast →
     // false), while the structured report is preserved so a consumer branches on
