@@ -8,12 +8,14 @@ use crate::set::error::SetError;
 use crate::standards::PlannedChange;
 use crate::standards::VaultConfig;
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ── Warning types ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+// `Deserialize` is derived so the NRN-229 routing seam can rebuild a `SetReport`
+// (which owns a `Vec<SetWarning>`) from a routed `vault.set` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SetWarning {
     UnknownField {

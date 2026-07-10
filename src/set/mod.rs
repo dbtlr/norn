@@ -5,5 +5,6 @@
 
 pub mod error;
 pub mod report;
+pub mod route;
 pub mod synth;
 pub mod validate;

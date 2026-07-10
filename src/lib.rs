@@ -656,6 +656,94 @@ fn route_get(
     )
 }
 
+/// Attempt to route a `norn set` to the warm daemon (NRN-229), or return `None`
+/// to run the direct path.
+///
+/// **Routing runs BEFORE the direct arm's local mutation lock.** The daemon
+/// acquires the SAME per-vault lock in-process, so a CLI that held the lock while
+/// routing would deadlock a routed apply. Only the direct fallback performs
+/// today's sweep + lock + execute sequence.
+///
+/// **Mode mapping** (settled NRN-229 decisions):
+/// - `--dry-run` → routed dry-run (`confirm: false`).
+/// - `--yes` (non-interactive apply) → routed apply (`confirm: true`).
+/// - `--format json` without `--yes` → routed preview (implicit dry-run,
+///   `confirm: false`).
+/// - interactive TTY without `--yes` → NOT routed: the preview→prompt→apply flow
+///   stays direct (the daemon cannot drive the terminal prompt).
+/// - non-TTY without `--yes` (and not `--format json`) → routed dry-run,
+///   preserving today's "implicit dry-run preview, no prompt" semantics.
+///
+/// **Gated to Direct** (no byte-faithful wire encoding, see `set::route`):
+/// `--field-json`, `--push`, `--pop`, `--body-from-stdin`.
+///
+/// A routed apply runs under the seam's `Commit` policy: a post-send failure
+/// surfaces `post-send-uncertain` (exit 1) rather than a double-applying Direct
+/// retry. `AcceptWithPayload` lets a coded refusal (NRN-220/221) cross as
+/// `isError: true` carrying the structured report, which `reconstruct` renders as
+/// the byte-identical exit-2 refusal.
+#[cfg(unix)]
+fn try_route_set(
+    args: &crate::cli::SetArgs,
+    combined_fields: &[String],
+    cwd: &camino::Utf8Path,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    use std::io::IsTerminal as _;
+
+    // Shapes with no byte-faithful wire encoding run Direct.
+    if args.body_from_stdin
+        || !args.field_json.is_empty()
+        || !args.push.is_empty()
+        || !args.pop.is_empty()
+    {
+        return None;
+    }
+
+    // Decide the effective mode, mirroring the direct arm's `should_apply` ladder.
+    let confirm = if args.dry_run {
+        false
+    } else if args.yes {
+        true
+    } else if matches!(args.format, crate::cli::SetFormat::Json) {
+        false
+    } else if std::io::stdin().is_terminal() {
+        // Interactive preview→prompt→apply stays Direct.
+        return None;
+    } else {
+        // Non-TTY without --yes: implicit dry-run preview.
+        false
+    };
+
+    let format = args.format;
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.set",
+            arguments: crate::set::route::to_mcp_arguments(args, combined_fields, confirm),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        /*dry_run=*/ !confirm,
+        crate::set::route::reconstruct,
+        move |report| crate::set::route::emit(report, format),
+    )
+}
+
+/// Non-Unix build: the warm daemon rides Unix-domain sockets, so `set` always
+/// runs Direct. Always-Direct is safe here — no daemon can exist to half-apply a
+/// mutation (mirrors `try_route_read`'s Direct stub).
+#[cfg(not(unix))]
+fn try_route_set(
+    args: &crate::cli::SetArgs,
+    combined_fields: &[String],
+    cwd: &camino::Utf8Path,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (args, combined_fields, cwd, verbose);
+    None
+}
+
 fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     let Cli {
         cwd,
@@ -1440,14 +1528,29 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use std::io::{IsTerminal, Write};
 
             // F5: validate the trailing `KEY=VALUE` positional shape BEFORE the
-            // mutation lock + cache load. A pure argv error (`set doc.md badtoken`
-            // with no separator) must fail fast without side effects, matching the
-            // edit path which validates arg shape before the lock.
-            if let Err(e) =
-                crate::set::synth::desugar_positional_fields(&args.field_pos, &args.fields)
-            {
-                eprintln!("error: {e}");
-                return Ok(2);
+            // mutation lock, cache load, OR routing. A pure argv error (`set doc.md
+            // badtoken` with no separator) must fail fast without side effects,
+            // matching the edit path which validates arg shape before the lock. The
+            // combined `--field` list (explicit `--field` + desugared positionals)
+            // also feeds the NRN-229 routing translation below.
+            let combined_fields =
+                match crate::set::synth::desugar_positional_fields(&args.field_pos, &args.fields) {
+                    Ok(combined) => combined,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return Ok(2);
+                    }
+                };
+
+            // NRN-229 routing seam: attempt to serve the mutation from a warm
+            // `norn serve` daemon BEFORE acquiring the local mutation lock (the
+            // daemon takes the SAME per-vault lock in-process; holding it here
+            // would deadlock a routed apply). `Some` => the request was served (or
+            // deliberately refused) by routing; `None` => no live daemon, a gated
+            // shape, or the interactive path => fall through to the direct
+            // sweep + lock + execute sequence below, unchanged.
+            if let Some(result) = try_route_set(&args, &combined_fields, &cwd, verbose) {
+                return result;
             }
 
             // Acquire mutation lock before cache load.
