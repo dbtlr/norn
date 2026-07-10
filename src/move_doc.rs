@@ -103,6 +103,12 @@ pub(crate) struct PreflightConfig<'a> {
     pub dst: &'a str,
     pub force: bool,
     pub no_link_rewrite: bool,
+    /// Mirrors `-p` / `--parents`: when true, a missing destination parent
+    /// directory is not refused here — it is created inside the applier as
+    /// part of the audited apply step (NRN-234). Threaded onto the resulting
+    /// `move_document` PlannedChange's `parents` field so the applier knows
+    /// to create it.
+    pub parents: bool,
     pub vault_root: &'a Utf8PathBuf,
     pub index: &'a GraphIndex,
 }
@@ -148,14 +154,17 @@ pub(crate) fn preflight_and_plan(
         }
     }
 
-    // Destination parent must exist.
-    if let Some(parent) = dst_rel.parent() {
-        if !parent.as_str().is_empty() {
-            let parent_abs = cfg.vault_root.join(parent);
-            if !parent_abs.as_std_path().exists() {
-                return Err(MovePreflightError::DestinationParentMissing(
-                    parent.to_path_buf(),
-                ));
+    // Destination parent must exist — unless `--parents` was passed, in which
+    // case the applier creates it as part of the audited apply step (NRN-234).
+    if !cfg.parents {
+        if let Some(parent) = dst_rel.parent() {
+            if !parent.as_str().is_empty() {
+                let parent_abs = cfg.vault_root.join(parent);
+                if !parent_abs.as_std_path().exists() {
+                    return Err(MovePreflightError::DestinationParentMissing(
+                        parent.to_path_buf(),
+                    ));
+                }
             }
         }
     }
@@ -206,7 +215,7 @@ pub(crate) fn preflight_and_plan(
         link_risk,
         warnings: Vec::new(),
         force: cfg.force,
-        parents: false,
+        parents: cfg.parents,
     };
 
     let changes = vec![move_change];
@@ -291,6 +300,7 @@ mod tests {
             dst: "renamed.md",
             force: false,
             no_link_rewrite: false,
+            parents: false,
             vault_root: &root,
             index: &index,
         })
@@ -309,6 +319,7 @@ mod tests {
             dst: "b.md",
             force: false,
             no_link_rewrite: false,
+            parents: false,
             vault_root: &root,
             index: &index,
         })
@@ -327,6 +338,7 @@ mod tests {
             dst: "a.md",
             force: true, // force can't override same-path
             no_link_rewrite: false,
+            parents: false,
             vault_root: &root,
             index: &index,
         })
@@ -345,6 +357,7 @@ mod tests {
             dst: "notes/b.md", // notes/ doesn't exist
             force: false,
             no_link_rewrite: false,
+            parents: false,
             vault_root: &root,
             index: &index,
         })
@@ -352,6 +365,35 @@ mod tests {
         assert!(
             matches!(err, MovePreflightError::DestinationParentMissing(_)),
             "expected DestinationParentMissing, got: {err}"
+        );
+    }
+
+    /// NRN-234: with `parents: true`, preflight must NOT refuse a missing
+    /// destination parent — that directory is created inside the applier as
+    /// part of the audited apply step, not pre-created (or refused) here. The
+    /// resulting `move_document` change carries `parents: true` so the applier
+    /// knows to create it.
+    #[test]
+    fn move_preflight_parents_true_skips_destination_parent_check() {
+        let (_tmp, root, index) = fixture_vault();
+        let plan = preflight_and_plan(PreflightConfig {
+            src: "a.md",
+            dst: "notes/b.md", // notes/ doesn't exist
+            force: false,
+            no_link_rewrite: false,
+            parents: true,
+            vault_root: &root,
+            index: &index,
+        })
+        .expect("parents: true must not refuse a missing destination parent");
+
+        assert!(
+            !root.join("notes").as_std_path().exists(),
+            "preflight must not create the destination parent itself"
+        );
+        assert!(
+            plan.changes[0].parents,
+            "the move_document change must carry parents: true for the applier"
         );
     }
 
@@ -365,6 +407,7 @@ mod tests {
             dst: "renamed.md",
             force: false,
             no_link_rewrite: false,
+            parents: false,
             vault_root: &root,
             index: &index,
         })
@@ -402,6 +445,7 @@ mod tests {
             dst: "renamed.md",
             force: false,
             no_link_rewrite: true,
+            parents: false,
             vault_root: &root,
             index: &index,
         })

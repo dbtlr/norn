@@ -1025,40 +1025,6 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             let src_is_dir = src_full.as_std_path().is_dir();
             let is_folder = args.recursive || src_is_dir;
 
-            // --parents: for single-file moves, create missing destination parent
-            // directories before preflight. (Folder moves handle parents via the expander.)
-            if !is_folder && args.parents {
-                // NRN-145 F2: the shared containment gate (`ensure_within_vault`)
-                // normally runs inside the apply orchestrator, well after this
-                // pre-create — so a traversal/absolute/symlink-escape destination
-                // would create a directory OUTSIDE the vault before the gate ever
-                // saw it, even on --dry-run (dry-run is resolved further below,
-                // after this block runs). Run the same shared check here first,
-                // before creating anything, so a refused destination creates
-                // nothing anywhere.
-                let canonical_root = cwd
-                    .as_std_path()
-                    .canonicalize()
-                    .map_err(|e| anyhow::anyhow!("cannot canonicalize vault root {cwd}: {e}"))?;
-                let dst_path = camino::Utf8Path::new(&args.dst);
-                if let Err(e) =
-                    crate::standards::apply::ensure_within_vault(&cwd, &canonical_root, dst_path)
-                {
-                    eprintln!("error: {e}");
-                    std::process::exit(2);
-                }
-                if let Some(parent) = dst_path.parent() {
-                    if !parent.as_str().is_empty() {
-                        std::fs::create_dir_all(cwd.join(parent)).map_err(|e| {
-                            anyhow::anyhow!(
-                                "failed to create destination parents for {}: {e}",
-                                args.dst
-                            )
-                        })?;
-                    }
-                }
-            }
-
             // Pre-flight (single-file only): validate src/dst before building
             // the MigrationPlan so we can exit 2 on refusal. The cascade counts
             // for TTY rendering are read from the report after apply, not here.
@@ -1072,12 +1038,21 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // filesystem) while `--yes` failed with "move source missing in
             // filesystem: <stem>" as soon as the applier tried to rename a
             // literal file named after the stem.
+            //
+            // NRN-234: `--parents` no longer pre-creates the destination parent
+            // here — that was an unaudited filesystem side effect that ran even
+            // on `--dry-run`. `preflight_and_plan` skips its missing-parent
+            // refusal when `args.parents` is set (deferring to the applier),
+            // and the containment gate (`ensure_within_vault`, which already
+            // handles a not-yet-existing `-p`/`--parents` subtree) still runs
+            // inside the apply orchestrator before any write, on dry-run too.
             let move_plan = if !is_folder {
                 let cfg = crate::move_doc::PreflightConfig {
                     src: &args.src,
                     dst: &args.dst,
                     force: args.force,
                     no_link_rewrite: args.no_link_rewrite,
+                    parents: args.parents,
                     vault_root: &cwd,
                     index: &index,
                 };

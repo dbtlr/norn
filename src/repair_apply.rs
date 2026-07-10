@@ -1931,6 +1931,7 @@ mod tests {
             dst: "b.md",
             force: false,
             no_link_rewrite: false,
+            parents: false,
             vault_root: &root,
             index: &index,
         };
