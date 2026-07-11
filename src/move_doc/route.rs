@@ -207,6 +207,7 @@ mod tests {
                 error: None,
                 footnote: None,
                 cascade,
+                link_impact: None,
             }],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,

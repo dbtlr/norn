@@ -113,6 +113,7 @@ impl ApplyReport {
                 error: Some(error),
                 footnote: None,
                 cascade: None,
+                link_impact: None,
             }],
             warnings: Vec::new(),
             outcome: ApplyOutcome::Refused,
@@ -148,6 +149,43 @@ pub struct ApplyReportOp {
     pub footnote: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cascade: Option<CascadeSummary>,
+    /// Index-derived, PLANNING-TIME link impact for a `delete_document` op — the
+    /// incoming-backlink data the records renderer prints (count, distinct source
+    /// files, resolved redirect target). Contrast with [`ApplyReportOp::cascade`],
+    /// which reports apply-time ACTUALS: `link_impact` is what the graph index said
+    /// BEFORE the delete (identical on the dry-run forecast and the confirmed
+    /// apply), computed once in the applier so both the direct and warm-daemon
+    /// (wire) paths render byte-identically without re-consulting the index
+    /// (NRN-237). Populated ONLY for `delete_document` ops; `None` for every other
+    /// op kind, so their serialized bytes are unchanged. Additive + serde-defaulted:
+    /// the schema version stays 2 (a pre-NRN-237 report with no `link_impact` key
+    /// still deserializes, and an op without it serializes no key).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub link_impact: Option<LinkImpact>,
+}
+
+/// Index-derived, planning-time incoming-link impact of a `delete_document` op
+/// (NRN-237) — the values the `--format records` renderer needs that the
+/// apply-time [`CascadeSummary`] does not carry.
+///
+/// Computed once in the applier from the graph index (the same `backlinks` /
+/// `resolve_target_path` the CLI preflight uses), so it rides the wire
+/// `ApplyReport` and the routed (warm-daemon) records path reproduces the direct
+/// path byte-for-byte. Distinct from `cascade` (apply-time actuals): this is the
+/// pre-delete index view, identical on a dry-run forecast and a confirmed apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkImpact {
+    /// Count of incoming backlinks to the deleted document (its `backlinks` len).
+    pub incoming_total: usize,
+    /// Distinct, sorted, vault-relative source files holding those backlinks. When
+    /// `--rewrite-to` is set and no backlink resolves to the deleted doc, this
+    /// falls back to the `link_risk` rewrite-source files, matching the direct arm.
+    pub incoming_files: Vec<String>,
+    /// The resolved `--rewrite-to` target (index-resolved from the raw argument,
+    /// the same resolution the CLI preflight performs), or `None` when no redirect
+    /// was requested. Omitted from the wire when absent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub redirect_to: Option<String>,
 }
 
 /// Per-op summary of the backlink cascade triggered by a `move_document` or
@@ -521,6 +559,7 @@ mod tests {
                 error: None,
                 footnote: None,
                 cascade: None,
+                link_impact: None,
             }],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
@@ -629,6 +668,7 @@ mod tests {
                 }],
                 failures: vec![],
             }),
+            link_impact: None,
         };
         let json = serde_json::to_value(&op).unwrap();
         assert_eq!(json["cascade"]["planned"], 3);
@@ -648,6 +688,7 @@ mod tests {
             error: None,
             footnote: None,
             cascade: None,
+            link_impact: None,
         };
         let bare_json = serde_json::to_value(&bare).unwrap();
         assert!(bare_json.get("cascade").is_none());
@@ -669,6 +710,7 @@ mod tests {
             error: None,
             footnote: None,
             cascade: None,
+            link_impact: None,
         };
         let bare_json = serde_json::to_value(&bare).unwrap();
         assert!(bare_json.get("path").is_none(), "path omitted when None");
@@ -685,6 +727,7 @@ mod tests {
             error: None,
             footnote: None,
             cascade: None,
+            link_impact: None,
         };
         let pop_json = serde_json::to_value(&populated).unwrap();
         assert_eq!(pop_json["path"], "tasks/task-7.md");
@@ -717,5 +760,91 @@ mod tests {
             json["failures"][0]["detail"],
             "Permission denied (os error 13)"
         );
+    }
+
+    /// NRN-237: `link_impact` serializes only when populated (a `delete_document`
+    /// op), so a sibling verb's op stays byte-identical to the pre-NRN-237 shape;
+    /// `redirect_to` is omitted when the delete carried no `--rewrite-to`.
+    #[test]
+    fn link_impact_skips_serialize_when_none_present_when_some() {
+        let sibling = ApplyReportOp {
+            op_id: "0".into(),
+            kind: "move_document".into(),
+            status: OpStatus::Applied,
+            from: None,
+            path: None,
+            stem: None,
+            summary: "moved a.md → b.md".into(),
+            error: None,
+            footnote: None,
+            cascade: None,
+            link_impact: None,
+        };
+        let sibling_json = serde_json::to_value(&sibling).unwrap();
+        assert!(
+            sibling_json.get("link_impact").is_none(),
+            "a non-delete op emits no link_impact key"
+        );
+
+        let deleted = ApplyReportOp {
+            op_id: "1".into(),
+            kind: "delete_document".into(),
+            status: OpStatus::Applied,
+            from: None,
+            path: None,
+            stem: None,
+            summary: "delete doc.md".into(),
+            error: None,
+            footnote: None,
+            cascade: None,
+            link_impact: Some(LinkImpact {
+                incoming_total: 2,
+                incoming_files: vec!["x.md".into(), "y.md".into()],
+                redirect_to: None,
+            }),
+        };
+        let del_json = serde_json::to_value(&deleted).unwrap();
+        assert_eq!(del_json["link_impact"]["incoming_total"], 2);
+        assert_eq!(del_json["link_impact"]["incoming_files"][0], "x.md");
+        assert_eq!(del_json["link_impact"]["incoming_files"][1], "y.md");
+        assert!(
+            del_json["link_impact"].get("redirect_to").is_none(),
+            "redirect_to omitted when no --rewrite-to"
+        );
+
+        let redirected = LinkImpact {
+            incoming_total: 1,
+            incoming_files: vec!["x.md".into()],
+            redirect_to: Some("alt.md".into()),
+        };
+        let rj = serde_json::to_value(&redirected).unwrap();
+        assert_eq!(rj["redirect_to"], "alt.md");
+    }
+
+    /// NRN-237: the field is additive + serde-defaulted, so a pre-NRN-237 report
+    /// JSON (no `link_impact` key on any op) still deserializes — the schema
+    /// version stays 2, no breaking bump.
+    #[test]
+    fn pre_nrn237_report_without_link_impact_still_deserializes() {
+        let legacy = serde_json::json!({
+            "schema_version": 2,
+            "trace_id": "",
+            "plan_hash": "h",
+            "vault_root": "/v",
+            "dry_run": false,
+            "applied": 1,
+            "skipped": 0,
+            "failed": 0,
+            "remaining": 0,
+            "operations": [{
+                "op_id": "0",
+                "kind": "delete_document",
+                "status": "applied",
+                "summary": "delete doc.md",
+            }],
+        });
+        let back: ApplyReport = serde_json::from_value(legacy).unwrap();
+        assert_eq!(back.operations.len(), 1);
+        assert!(back.operations[0].link_impact.is_none());
     }
 }

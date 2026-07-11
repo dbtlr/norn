@@ -395,4 +395,66 @@ mod tests {
             "confirm + rewrite_to must redirect the incoming link to [[alt]]:\n{linker}"
         );
     }
+
+    /// NRN-237: `link_impact` on the `delete_document` op must be IDENTICAL
+    /// between a `confirm: false` (dry-run) call and a `confirm: true` call
+    /// against the same seeded vault state — the dry-run forecast and the
+    /// confirm actuals both derive from the same graph-index backlink data, so
+    /// `incoming_total` / `incoming_files` / `redirect_to` must match exactly.
+    #[test]
+    fn link_impact_identical_between_dry_run_and_confirm() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let dry_run_result = handle_output(
+            &ctx,
+            DeleteParams {
+                target: "doc.md".into(),
+                rewrite_to: Some("alt.md".into()),
+                allow_broken_links: false,
+                confirm: false,
+            },
+        )
+        .expect("dry-run handle_output should succeed");
+        let dry_run_report = &dry_run_result.value().report;
+        assert_eq!(dry_run_report["dry_run"], true);
+        let dry_run_link_impact = &dry_run_report["operations"][0]["link_impact"];
+        assert!(
+            !dry_run_link_impact.is_null(),
+            "dry-run report must carry a link_impact for a doc with incoming links"
+        );
+
+        // The dry-run must not have deleted anything; re-open on unchanged state
+        // and confirm.
+        assert!(root.join("doc.md").exists(), "dry-run must not delete");
+
+        let confirm_result = handle_output(
+            &ctx,
+            DeleteParams {
+                target: "doc.md".into(),
+                rewrite_to: Some("alt.md".into()),
+                allow_broken_links: false,
+                confirm: true,
+            },
+        )
+        .expect("confirm handle_output should succeed");
+        let confirm_report = &confirm_result.value().report;
+        assert_eq!(confirm_report["dry_run"], false);
+        let confirm_link_impact = &confirm_report["operations"][0]["link_impact"];
+        assert!(
+            !confirm_link_impact.is_null(),
+            "confirm report must carry a link_impact for a doc with incoming links"
+        );
+
+        assert_eq!(
+            dry_run_link_impact, confirm_link_impact,
+            "link_impact must be identical between dry-run and confirm:\ndry-run: {dry_run_link_impact}\nconfirm: {confirm_link_impact}"
+        );
+        assert_eq!(
+            confirm_link_impact["incoming_total"], 1,
+            "sanity: doc.md has exactly one incoming link (linker.md)"
+        );
+        assert_eq!(confirm_link_impact["incoming_files"][0], "linker.md");
+        assert_eq!(confirm_link_impact["redirect_to"], "alt.md");
+    }
 }

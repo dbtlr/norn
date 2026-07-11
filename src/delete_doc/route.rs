@@ -1,26 +1,15 @@
 //! CLI→service routing translation for `norn delete` (NRN-229 PR B).
 //!
 //! `delete` wraps the same [`ApplyReport`] on the wire as `move`, rebuilt via
-//! [`crate::apply_report::reconstruct_wire_report`]. The `--format json` surface
-//! is a straight report projection, so it is routable byte-identically. The
-//! `--format records` renderer, however, is only PARTIALLY reconstructable — it
-//! reads index-derived incoming-link data (`incoming_total`, the incoming file
-//! PATHS, and the RESOLVED `--rewrite-to` target) that never rides the wire
-//! `ApplyReport` — so its routability is gated (see `try_route_delete`,
-//! `src/lib.rs`):
+//! [`crate::apply_report::reconstruct_wire_report`]. Both the `--format json` and
+//! `--format records` surfaces are straight report projections: the applier
+//! attaches the records renderer's index-derived incoming-link data to the
+//! `delete_document` op as `link_impact` (NRN-237), so it rides the wire report
+//! and the routed records path reproduces the direct path byte-identically —
+//! including the `--rewrite-to` and `--allow-broken-links` shapes.
 //!
-//! - Routed:
-//!   - `--format json` (always — the report is the whole output).
-//!   - `--format records` ONLY when neither `--rewrite-to` nor
-//!     `--allow-broken-links` is passed. Without either flag, a doc WITH incoming
-//!     links is REFUSED at preflight (`backlinks-present`, routed as a coded
-//!     refusal), so a SUCCESSFUL records delete under this gate necessarily had
-//!     ZERO incoming links — and the renderer then needs no index data (`✓
-//!     deleted <doc>` / `norn delete <doc>`).
+//! - Routed: `--format json` and `--format records` (all flag combinations).
 //! - Gated to Direct:
-//!   - `--format records` WITH `--rewrite-to` or `--allow-broken-links` (the
-//!     renderer prints incoming counts / file paths / the resolved redirect
-//!     target that the wire report omits).
 //!   - Any target that is not an exact on-disk `.md` doc FILE path — `vault.delete`
 //!     applies the raw `target` while the CLI arm applies the preflight-RESOLVED
 //!     path (NRN-57) — gated by the same `.md`-extension guard `move` uses (bare
@@ -59,10 +48,11 @@ pub fn to_mcp_arguments(args: &DeleteArgs, confirm: bool) -> Value {
 /// - **refused**: the pretty `ApplyError` envelope on stdout for json, or `error:
 ///   <message>` on stderr for records — exit 2.
 /// - **applied / dry-run**: cascade-failure warnings to stderr, then the report
-///   (json) or the clean `render_delete_apply_tty` (records). The records path is
-///   only reached under the neither-flag gate, so incoming links are provably
-///   zero and the renderer takes only `doc` + `applied`; the `trace:` footer
-///   follows a real apply.
+///   (json) or the shared `render_delete_records` (records). Since NRN-237 the
+///   records renderer's incoming-link inputs (count / files / redirect target)
+///   ride the wire report as the delete op's `link_impact`, so this reproduces
+///   the direct arm byte-for-byte for the `--rewrite-to` / `--allow-broken-links`
+///   shapes too — no longer gated to the zero-incoming-links path.
 pub fn emit(
     report: ApplyReport,
     format: DeleteFormat,
@@ -87,23 +77,7 @@ pub fn emit(
             out.write_all(b"\n")?;
         }
         DeleteFormat::Records => {
-            // Routed records deletes are gated to the neither-flag path (no
-            // --rewrite-to / --allow-broken-links); a non-refused delete there
-            // provably had zero incoming links, so the renderer needs no
-            // index-derived data.
-            let applied = !dry_run && exit == 0;
-            crate::delete_doc::render_delete_apply_tty(
-                &mut out,
-                doc,
-                /*incoming_total=*/ 0,
-                /*incoming_files=*/ &[],
-                /*rewrite_to=*/ None,
-                /*rewrite_total=*/ 0,
-                applied,
-            )?;
-            if !dry_run {
-                writeln!(out, "trace: {}", report.trace_id)?;
-            }
+            crate::delete_doc::render_delete_records(&mut out, &report, doc, dry_run)?;
         }
     }
     Ok(exit)
@@ -183,5 +157,59 @@ mod tests {
             rebuilt.operations[0].error.as_ref().unwrap().code,
             "backlinks-present"
         );
+    }
+
+    /// NRN-237: the delete op's index-derived `link_impact` survives the wire
+    /// round-trip through `reconstruct_wire_report` unchanged, so the routed
+    /// records renderer reads the same incoming-link data the direct arm computed.
+    #[test]
+    fn wire_round_trip_preserves_link_impact() {
+        use crate::apply_report::{
+            ApplyOutcome, ApplyReportOp, LinkImpact, OpStatus, APPLY_REPORT_SCHEMA_VERSION,
+        };
+        let report = ApplyReport {
+            schema_version: APPLY_REPORT_SCHEMA_VERSION,
+            trace_id: "abc".into(),
+            plan_hash: "h".into(),
+            vault_root: "/v".into(),
+            dry_run: false,
+            applied: 1,
+            skipped: 0,
+            failed: 0,
+            remaining: 0,
+            operations: vec![ApplyReportOp {
+                op_id: "0".into(),
+                kind: "delete_document".into(),
+                status: OpStatus::Applied,
+                from: None,
+                path: None,
+                stem: None,
+                summary: "delete doc.md".into(),
+                error: None,
+                footnote: None,
+                cascade: None,
+                link_impact: Some(LinkImpact {
+                    incoming_total: 1,
+                    incoming_files: vec!["a.md".into()],
+                    redirect_to: Some("c.md".into()),
+                }),
+            }],
+            warnings: vec![],
+            outcome: ApplyOutcome::Applied,
+        };
+        let wire = json!({ "report": serde_json::to_value(&report).unwrap() });
+        let rebuilt = crate::apply_report::reconstruct_wire_report(&wire).unwrap();
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::to_value(&rebuilt).unwrap(),
+            "the full report (incl. link_impact) must round-trip byte-identically"
+        );
+        let li = rebuilt.operations[0]
+            .link_impact
+            .as_ref()
+            .expect("link_impact must survive the round trip");
+        assert_eq!(li.incoming_total, 1);
+        assert_eq!(li.incoming_files, vec!["a.md".to_string()]);
+        assert_eq!(li.redirect_to.as_deref(), Some("c.md"));
     }
 }

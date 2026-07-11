@@ -335,6 +335,27 @@ fn delete_rewrite_to_cascade_counts_in_json() {
     );
     assert_eq!(cascade["files"], 1, "1 file contained the backlink");
 
+    // NRN-237: the index-derived link_impact rides the report — one incoming
+    // backlink from a.md, and the raw `c.md` redirect resolved to `c.md`.
+    let li = &del_op["link_impact"];
+    assert!(
+        !li.is_null(),
+        "link_impact must be present on delete_document op: {del_op}"
+    );
+    assert_eq!(
+        li["incoming_total"], 1,
+        "1 incoming backlink; link_impact: {li}"
+    );
+    assert_eq!(
+        li["incoming_files"].as_array().unwrap(),
+        &vec![serde_json::json!("a.md")],
+        "incoming_files must list a.md; link_impact: {li}"
+    );
+    assert_eq!(
+        li["redirect_to"], "c.md",
+        "redirect_to must be the resolved rewrite target; link_impact: {li}"
+    );
+
     // Verify filesystem + content mutations
     assert!(
         !tmp.path().join("vault/b.md").exists(),
@@ -371,6 +392,22 @@ fn delete_format_json_emits_envelope() {
             .contains("b.md"),
         "summary should mention b.md: {:?}",
         v["operations"][0]["summary"]
+    );
+    // NRN-237: link_impact rides even the allow-broken-links dry-run report —
+    // one incoming backlink from a.md, no redirect target.
+    let li = &v["operations"][0]["link_impact"];
+    assert_eq!(
+        li["incoming_total"], 1,
+        "1 incoming backlink; link_impact: {li}"
+    );
+    assert_eq!(
+        li["incoming_files"].as_array().unwrap(),
+        &vec![serde_json::json!("a.md")],
+        "incoming_files must list a.md; link_impact: {li}"
+    );
+    assert!(
+        li.get("redirect_to").is_none(),
+        "redirect_to omitted without --rewrite-to; link_impact: {li}"
     );
     // --format json without --yes is implicitly non-interactive; file must not be deleted.
     assert!(

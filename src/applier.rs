@@ -17,7 +17,7 @@
 
 use crate::apply_report::{
     ApplyReport, ApplyReportOp, ApplyWarning, CascadeFailure, CascadeRewrite, CascadeSkip,
-    CascadeSummary, OpStatus, APPLY_REPORT_SCHEMA_VERSION,
+    CascadeSummary, LinkImpact, OpStatus, APPLY_REPORT_SCHEMA_VERSION,
 };
 use crate::core::GraphIndex;
 use crate::migration_plan::{MigrationOp, MigrationPlan};
@@ -279,6 +279,7 @@ pub(crate) fn apply_migration_plan(
         ctx.verbose,
         &span_ids,
         sink.events(),
+        index,
     );
 
     let applied = ops
@@ -413,6 +414,9 @@ fn build_refusal_report(
                 error,
                 footnote: parent_op.footnote.clone(),
                 cascade: None,
+                // A byte-identical refusal writes nothing and renders no records
+                // link-impact line — the coded error is the whole output.
+                link_impact: None,
             }
         })
         .collect();
@@ -517,6 +521,9 @@ fn build_partial_failure_report(
                 error,
                 footnote: parent_op.footnote.clone(),
                 cascade: None,
+                // A partial-failure report is the abort/error surface, not the
+                // records success renderer; link-impact is unused here.
+                link_impact: None,
             }
         })
         .collect();
@@ -790,6 +797,69 @@ fn fold_cascade_from_events(events: &[Event], span: Option<&str>, verbose: bool)
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Compute the [`LinkImpact`] for a `delete_document` change from the graph
+/// index (NRN-237) — the single source of truth for the records renderer's
+/// incoming-link inputs, shared by the direct and warm-daemon paths.
+///
+/// Reproduces the semantics of the former CLI-arm locals verbatim:
+/// - `incoming_total` / `incoming_files`: [`backlinks`](crate::target::backlinks)
+///   against the deleted doc's path, deduped + sorted through a `BTreeSet` of
+///   the vault-relative source paths.
+/// - fallback: when `--rewrite-to` is present but no backlink resolves to the
+///   deleted doc, the files list is the `link_risk` rewrite sources (the same
+///   `stem_links` + `path_qualified_wikilinks` + `markdown_links` union the CLI
+///   arm used).
+/// - `redirect_to`: the raw `rewrite_to` field resolved against the index the
+///   same way the CLI preflight resolves it — so a stem argument renders as its
+///   resolved `.md` path, byte-identical to the direct arm.
+fn build_link_impact(
+    change: &PlannedChange,
+    parent_op: &MigrationOp,
+    index: &GraphIndex,
+) -> LinkImpact {
+    use std::collections::BTreeSet;
+
+    let bl = crate::target::backlinks(index, &change.path);
+    let incoming_total = bl.len();
+
+    let mut files: BTreeSet<Utf8PathBuf> = bl.iter().map(|link| link.source_path.clone()).collect();
+
+    // The raw `--rewrite-to` argument, if any, lives on the parent MigrationOp.
+    let raw_rewrite_to = parent_op.fields.get("rewrite_to").and_then(|v| v.as_str());
+
+    // Fallback: a redirect with no surviving backlink resolves its files from the
+    // change's link_risk rewrite sources (populated by `expand` when rewrite_to
+    // is present), matching the direct arm's former behavior.
+    if raw_rewrite_to.is_some() && files.is_empty() {
+        if let Some(risk) = &change.link_risk {
+            for affected in risk
+                .stem_links
+                .iter()
+                .chain(risk.path_qualified_wikilinks.iter())
+                .chain(risk.markdown_links.iter())
+            {
+                files.insert(affected.source_path.clone());
+            }
+        }
+    }
+
+    // Resolve the raw redirect target against the index exactly as the CLI
+    // preflight does (a bare stem → its `.md` path). Preflight already validated
+    // resolvability before this plan was built, so `.ok()` is the success value.
+    let redirect_to = raw_rewrite_to.and_then(|raw| {
+        crate::target::resolve_target_path(index, raw)
+            .ok()
+            .map(|p| p.to_string())
+    });
+
+    LinkImpact {
+        incoming_total,
+        incoming_files: files.into_iter().map(|p| p.to_string()).collect(),
+        redirect_to,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_report_ops(
     changes: &[PlannedChange],
     provenance: &[usize],
@@ -799,6 +869,7 @@ fn build_report_ops(
     verbose: bool,
     span_ids: &[String],
     events: &[Event],
+    index: &GraphIndex,
 ) -> Vec<ApplyReportOp> {
     // NRN-101: create_document ops are recorded in `created_documents` in the
     // same order they appear here, each carrying its apply-time-resolved
@@ -896,6 +967,17 @@ fn build_report_ops(
                 _ => None,
             };
 
+            // NRN-237: index-derived incoming-link impact for a `delete_document`
+            // op, so the `--format records` renderer's inputs ride the wire report
+            // and the routed path reproduces the direct path byte-for-byte. This
+            // reproduces the CLI arm's former locals EXACTLY: `backlinks` for the
+            // count, BTreeSet-distinct sorted source paths for the files, the
+            // `link_risk`-sources fallback when `--rewrite-to` is set and no
+            // backlink resolves, and the index-RESOLVED redirect target. The index
+            // view is identical on dry-run and confirm, so populate on both.
+            let link_impact = (change.operation == "delete_document")
+                .then(|| build_link_impact(change, parent_op, index));
+
             ApplyReportOp {
                 op_id: i.to_string(),
                 kind: change.operation.clone(),
@@ -907,6 +989,7 @@ fn build_report_ops(
                 error: None, // see note below
                 footnote: parent_op.footnote.clone(),
                 cascade,
+                link_impact,
             }
         })
         .collect()
@@ -1102,6 +1185,14 @@ mod tests {
             verification: None,
         };
 
+        // The ops under test are all create_document (no link_impact), so an empty
+        // index suffices.
+        let empty_index = GraphIndex {
+            root: Utf8PathBuf::from("/"),
+            files: vec![],
+            ignored_files: vec![],
+            documents: vec![],
+        };
         let ops = build_report_ops(
             &changes,
             &provenance,
@@ -1111,6 +1202,7 @@ mod tests {
             false, // not verbose
             &span_ids,
             &events,
+            &empty_index,
         );
 
         assert_eq!(ops.len(), 2);
