@@ -82,7 +82,7 @@ These commands never write to the vault. An agent can run them with confidence:
 ### Validation finding (JSONL row)
 
 ```json
-{"code":"frontmatter-disallowed-value","severity":"warning","path":"tasks/triage.md","rule":"task-status","field":"status","actual_value":"someday","allowed_values":["backlog","in_progress","completed","wont_do"]}
+{"code":"value-not-allowed","severity":"warning","path":"tasks/triage.md","rule":"task-status","field":"status","actual_value":"someday","allowed_values":["backlog","in_progress","completed","wont_do"]}
 ```
 
 ### Migration plan (JSON)
@@ -91,7 +91,7 @@ These commands never write to the vault. An agent can run them with confidence:
 {
   "schema_version": 1,
   "vault_root": "/abs/path/to/vault",
-  "source_filters": { "code": "frontmatter-disallowed-value", "field": "status" },
+  "source_filters": { "code": "value-not-allowed", "field": "status" },
   "summary": {
     "findings": 4,
     "planned_changes": 3,
@@ -129,8 +129,8 @@ The filter dimensions on `norn validate` (`--code`, `--severity`, `--field`, `--
 Use `--summary` first to size a queue, then re-run without `--summary` to read the queue itself:
 
 ```bash
-norn validate --code frontmatter-invalid-type --field modified --summary --format json
-norn validate --code frontmatter-invalid-type --field modified --format jsonl
+norn validate --code field-type-invalid --field modified --summary --format json
+norn validate --code field-type-invalid --field modified --format jsonl
 ```
 
 ## Plan/apply boundary
@@ -149,14 +149,14 @@ for a targeted fix without a full plan/apply cycle:
 
 ```bash
 # 1. Validate — surface a disallowed-value finding on one doc
-norn validate --code frontmatter-disallowed-value --field status --format jsonl
+norn validate --code value-not-allowed --field status --format jsonl
 
 # 2. Fix — update that document's status field directly
 norn set notes/task.md --field status=backlog --dry-run
 norn set notes/task.md --field status=backlog --yes
 
 # 3. Re-validate — confirm the finding is gone
-norn validate --code frontmatter-disallowed-value --field status --format jsonl
+norn validate --code value-not-allowed --field status --format jsonl
 ```
 
 For batch fixes across many documents, prefer the `repair --plan` → `apply` loop.

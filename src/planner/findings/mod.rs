@@ -186,7 +186,7 @@ mod tests {
 
     fn finding_disallowed_value(path: &str, field: &str, value: serde_json::Value) -> Finding {
         Finding {
-            code: "frontmatter-disallowed-value".into(),
+            code: "value-not-allowed".into(),
             severity: Severity::Warning,
             path: path.into(),
             message: format!("frontmatter field has a disallowed value: {field}"),
@@ -348,7 +348,7 @@ mod tests {
 
         assert_eq!(plan.operations.len(), 0);
         assert_eq!(plan.skipped.len(), 1);
-        assert_eq!(plan.skipped[0].finding_code, "frontmatter-disallowed-value");
+        assert_eq!(plan.skipped[0].finding_code, "value-not-allowed");
         assert_eq!(plan.skipped[0].path, "task.md");
     }
 }

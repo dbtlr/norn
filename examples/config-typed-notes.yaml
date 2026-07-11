@@ -71,7 +71,7 @@ repair:
     # Heal a legacy status value.
     - name: legacy-task-status-someday
       match:
-        code: frontmatter-disallowed-value
+        code: value-not-allowed
         rule: task-status
         field: status
         actual_value: someday

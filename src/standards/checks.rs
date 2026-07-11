@@ -409,7 +409,7 @@ mod tests {
         let doc = doc_with_frontmatter(json!({"project": 12345}));
         let findings = check_field_types(&doc, &types, None);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].code, "frontmatter-invalid-type");
+        assert_eq!(findings[0].code, "field-type-invalid");
     }
 
     #[test]

@@ -268,7 +268,7 @@ fn repair_plan_generates_configured_frontmatter_change() {
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\n          - completed\n          - wont_do\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        rule: task-status\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\n          - completed\n          - wont_do\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: value-not-allowed\n        rule: task-status\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -286,7 +286,7 @@ fn repair_plan_generates_configured_frontmatter_change() {
         "repair",
         "--plan",
         "--code",
-        "frontmatter-disallowed-value,frontmatter-forbidden-field",
+        "value-not-allowed,frontmatter-forbidden-field",
         "--field",
         "status",
     ]);
@@ -328,7 +328,7 @@ fn repair_plan_out_writes_json_artifact_without_stdout() {
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: value-not-allowed\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -389,7 +389,7 @@ fn broad_repair_plan_with_skipped_findings_still_applies_changes() {
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: value-not-allowed\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -450,7 +450,7 @@ fn repair_apply_writes_frontmatter_plan_and_verifies() {
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: value-not-allowed\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -468,7 +468,7 @@ fn repair_apply_writes_frontmatter_plan_and_verifies() {
         "repair",
         "--plan",
         "--code",
-        "frontmatter-disallowed-value",
+        "value-not-allowed",
         "--field",
         "status",
     ]);
@@ -506,7 +506,7 @@ fn repair_apply_writes_frontmatter_plan_and_verifies() {
         "repair",
         "--plan",
         "--code",
-        "frontmatter-disallowed-value",
+        "value-not-allowed",
         "--field",
         "status",
     ]);
@@ -526,7 +526,7 @@ fn repair_apply_dry_run_does_not_write() {
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: value-not-allowed\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -575,7 +575,7 @@ fn repair_apply_rejects_stale_plan() {
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: frontmatter-disallowed-value\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\nrepair:\n  rules:\n    - name: map-someday-status\n      match:\n        code: value-not-allowed\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -639,7 +639,7 @@ fn repair_apply_preserves_double_quoted_workspace_field() {
     let config_path = root.with_extension("yaml");
     fs::write(
         &config_path,
-        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\n          - completed\n          - wont_do\nrepair:\n  rules:\n    - name: legacy-task-status-someday\n      match:\n        code: frontmatter-disallowed-value\n        rule: task-status\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
+        "validate:\n  rules:\n    - name: task-status\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status:\n          - backlog\n          - in_progress\n          - completed\n          - wont_do\nrepair:\n  rules:\n    - name: legacy-task-status-someday\n      match:\n        code: value-not-allowed\n        rule: task-status\n        field: status\n        actual_value: someday\n      set_frontmatter:\n        field: status\n        value: backlog\n",
     )
     .expect("config should write");
     fs::create_dir_all(&root).expect("temp dir should be created");
@@ -1082,7 +1082,7 @@ fn validate_filters_raw_findings_for_triage() {
         "--config",
         config_path.to_str().unwrap(),
         "--code",
-        "frontmatter-invalid-type",
+        "field-type-invalid",
         "--field",
         "created",
         "--rule",
@@ -1099,7 +1099,7 @@ fn validate_filters_raw_findings_for_triage() {
     let findings = parsed["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["path"], "Notes/bad-created.md");
-    assert_eq!(findings[0]["code"], "frontmatter-invalid-type");
+    assert_eq!(findings[0]["code"], "field-type-invalid");
     assert_eq!(findings[0]["field"], "created");
 
     fs::remove_dir_all(root).ok();
@@ -1129,7 +1129,7 @@ fn validate_filters_summary_before_grouping() {
         "--config",
         config_path.to_str().unwrap(),
         "--code",
-        "frontmatter-invalid-type",
+        "field-type-invalid",
         "--field",
         "created",
         "--summary",
@@ -1290,7 +1290,7 @@ fn validate_reports_allowed_value_findings() {
     let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
     let findings = parsed["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0]["code"], "frontmatter-disallowed-value");
+    assert_eq!(findings[0]["code"], "value-not-allowed");
     assert_eq!(findings[0]["path"], "task.md");
     assert_eq!(findings[0]["field"], "status");
     assert_eq!(findings[0]["rule"], "task-status-values");
@@ -1329,7 +1329,7 @@ fn validate_allowed_values_do_not_coerce_types() {
     let parsed = serde_json::from_str::<Value>(&output).expect("output should be JSON");
     let findings = parsed["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0]["code"], "frontmatter-disallowed-value");
+    assert_eq!(findings[0]["code"], "value-not-allowed");
     assert_eq!(findings[0]["actual_value"], 1);
     assert_eq!(findings[0]["allowed_values"], serde_json::json!(["1"]));
 

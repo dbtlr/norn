@@ -134,9 +134,9 @@ Constraints (independent and additive):
 |---|---|---|
 | `required_frontmatter` | `frontmatter-required-field-missing` | Listed field is absent or null. |
 | `forbidden_frontmatter` | `frontmatter-forbidden-field` | Listed field is present and non-null. |
-| `field_types` | `frontmatter-invalid-type` | Present value doesn't match declared shape. |
+| `field_types` | `field-type-invalid` | Present value doesn't match declared shape. |
 | `field_types` (`max_length`) | `frontmatter-exceeds-max-length` | Present `string`/`list_of_strings` value matches its declared type but exceeds the effective `max_length` bound. |
-| `allowed_values` | `frontmatter-disallowed-value` | Present value isn't one of the declared values. |
+| `allowed_values` | `value-not-allowed` | Present value isn't one of the declared values. |
 | `allowed_paths` | `document-misrouted` | Document path matches no declared glob. |
 | `field_references` | `frontmatter-reference-type` | A field's wikilink resolves to a document whose `type` is outside the declared `target_type` set. |
 
@@ -153,7 +153,7 @@ Supported `field_types`: `datetime`, `date`, `list_of_strings`, `wikilink`, `wik
 
 `datetime` accepts ISO/YAML forms with optional seconds, fractional seconds, `Z`, numeric timezone offsets, or a space separator. `date` accepts plain `YYYY-MM-DD` values and YAML-normalized midnight datetime strings.
 
-`string` is a bounded scalar: at most `max_length` characters, default 64, raisable to a 256-char ceiling. `text` is its unbounded counterpart — any length, no `max_length` allowed. `list_of_strings` elements are bounded the same way as `string` (default 64, same 256 ceiling), each element checked independently. An over-length `string`/`list_of_strings` value reports `frontmatter-exceeds-max-length` rather than `frontmatter-invalid-type`.
+`string` is a bounded scalar: at most `max_length` characters, default 64, raisable to a 256-char ceiling. `text` is its unbounded counterpart — any length, no `max_length` allowed. `list_of_strings` elements are bounded the same way as `string` (default 64, same 256 ceiling), each element checked independently. An over-length `string`/`list_of_strings` value reports `frontmatter-exceeds-max-length` rather than `field-type-invalid`.
 
 ### Extended `field_types` form
 
@@ -234,7 +234,7 @@ Replace an existing frontmatter field's value. Apply preserves byte-for-byte the
 ```yaml
 - name: legacy-task-status-someday
   match:
-    code: frontmatter-disallowed-value
+    code: value-not-allowed
     rule: task-status
     field: status
     actual_value: someday

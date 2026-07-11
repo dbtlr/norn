@@ -1781,7 +1781,7 @@ mod tests {
             change_id: "test-change-id".to_string(),
             path: path.into(),
             document_hash: hash.to_string(),
-            finding_code: "frontmatter-disallowed-value".into(),
+            finding_code: "value-not-allowed".into(),
             finding_rule: None,
             repair_rule: "test".into(),
             operation: operation.to_string(),

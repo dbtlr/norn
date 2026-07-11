@@ -243,7 +243,7 @@ norn -C /path/to/vault validate --severity error --path 'notes/**' --format json
 
 `--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (pipe default — a finding has no path), `json` (`{ total, findings[] }`), `paths` (unique source paths). Exit code reflects **whole-vault** error-severity diagnostics — it does not change with `--code`/`--severity`/`--path`, and most finding codes default to `warning` severity. Don't gate a pipeline on exit code alone; check `--summary` totals or the returned findings instead.
 
-Stable finding codes (18): `read-failed`, `frontmatter-unclosed`, `frontmatter-parse-failed`, `frontmatter-json-conversion-failed`, `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-forbidden-field`, `frontmatter-invalid-type`, `frontmatter-exceeds-max-length`, `frontmatter-disallowed-value`, `document-misrouted`, `frontmatter-reference-type`, `frontmatter-alias-malformed`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`. See [validation.md](https://github.com/dbtlr/norn/tree/main/docs/validation.md) for severity and source per code. Renames are CHANGELOG breaking changes.
+Stable finding codes (18): `read-failed`, `frontmatter-unclosed`, `frontmatter-parse-failed`, `frontmatter-json-conversion-failed`, `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-forbidden-field`, `field-type-invalid`, `frontmatter-exceeds-max-length`, `value-not-allowed`, `document-misrouted`, `frontmatter-reference-type`, `frontmatter-alias-malformed`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`. See [validation.md](https://github.com/dbtlr/norn/tree/main/docs/validation.md) for severity and source per code. Renames are CHANGELOG breaking changes.
 
 ### The plan/apply loop
 
@@ -252,7 +252,7 @@ Stable finding codes (18): `read-failed`, `frontmatter-unclosed`, `frontmatter-p
 norn -C /vault validate --summary --format json
 
 # 2. plan (read-only; never writes)
-norn -C /vault repair --plan --code frontmatter-disallowed-value --field status --out plan.json
+norn -C /vault repair --plan --code value-not-allowed --field status --out plan.json
 
 # 3. review plan.json — read summary.planned_changes and the skipped section
 

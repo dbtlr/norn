@@ -7,10 +7,10 @@ pub fn fix_hint_for(code: &str) -> Option<&'static str> {
         "frontmatter-required-field-missing" => Some(
             "add the field to the document's frontmatter, or scope the rule to exclude this path",
         ),
-        "frontmatter-disallowed-value" => Some(
+        "value-not-allowed" => Some(
             "change the value to one of the allowed values, or relax the rule's allowed-values list",
         ),
-        "frontmatter-invalid-type" => Some(
+        "field-type-invalid" => Some(
             "coerce the value to the expected type, or relax the rule's field-type constraint",
         ),
         "frontmatter-exceeds-max-length" => Some(
@@ -61,6 +61,8 @@ mod tests {
     fn known_codes_return_hint() {
         assert!(fix_hint_for("frontmatter-required-field-missing").is_some());
         assert!(fix_hint_for("link-target-missing").is_some());
+        assert!(fix_hint_for("value-not-allowed").is_some());
+        assert!(fix_hint_for("field-type-invalid").is_some());
     }
 
     #[test]

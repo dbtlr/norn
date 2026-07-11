@@ -161,10 +161,10 @@ underlying condition, so it is not a separate code.
 
 | Code | Cause |
 |---|---|
-| `field-type-invalid` | a value does not coerce to its field's declared schema type (datetime/date/wikilink shape, or a `--field-json` type mismatch) — fix the value and retry |
+| `field-type-invalid` | a value does not coerce to its field's declared schema type (datetime/date/wikilink shape, or a `--field-json` type mismatch) — fix the value and retry. Shared with `norn validate`, which emits the same code for the same schema condition on an existing on-disk value |
 | `field-type-unsupported` | the vault's schema declares a `field_type` this norn build does not support — a config defect; fix the schema, not the value |
 | `value-too-long` | a `string` / `list_of_strings` value exceeds the field's `max_length` |
-| `value-not-allowed` | a value is outside the field's `allowed_values` set |
+| `value-not-allowed` | a value is outside the field's `allowed_values` set. Shared with `norn validate`, which emits the same code for the same schema condition on an existing on-disk value |
 | `field-json-invalid` | a `--field-json` value is not valid JSON |
 | `required-field-removed` | `--remove` targets a `required_frontmatter` field |
 | `target-not-found` | the `DOC` argument does not resolve to any document |

@@ -15,7 +15,7 @@ Findings are emitted as flat JSON objects keyed by `code`, with variant-specific
 
 ```bash
 norn validate --format jsonl
-norn validate --code frontmatter-invalid-type --field created --format jsonl
+norn validate --code field-type-invalid --field created --format jsonl
 norn validate --rule typed-note --path "notes/**/*.md" --format jsonl
 ```
 
@@ -35,9 +35,9 @@ This is the complete, authoritative list of finding codes norn emits (also refer
 | `link-ambiguous` | warning | Stem lookup matched more than one document. Carries `candidates`. |
 | `frontmatter-required-field-missing` | warning | `required_frontmatter` field is absent or null. Carries `field`, `rule`. |
 | `frontmatter-forbidden-field` | warning | `forbidden_frontmatter` field is present. Carries `field`, `rule`. |
-| `frontmatter-invalid-type` | warning | Present field doesn't match declared `field_types` shape. Carries `field`, `expected_type`, `rule`. |
+| `field-type-invalid` | warning | Present field doesn't match declared `field_types` shape. Carries `field`, `expected_type`, `rule`. |
 | `frontmatter-exceeds-max-length` | warning | Present `string`/`list_of_strings` field matches its type's shape but exceeds the effective `max_length` bound. Carries `field`, `max_length`, `actual_length`, `rule`. |
-| `frontmatter-disallowed-value` | warning | Present scalar field value isn't in `allowed_values`. Carries `field`, `actual_value`, `allowed_values`, `rule`. |
+| `value-not-allowed` | warning | Present scalar field value isn't in `allowed_values`. Carries `field`, `actual_value`, `allowed_values`, `rule`. |
 | `document-misrouted` | warning | Document path matches no `allowed_paths` glob. Carries `allowed_paths`, `rule`. |
 | `frontmatter-reference-type` | warning | A frontmatter wikilink resolves to a document whose `type` is outside the field's `field_references.target_type` set. Carries `field`, `reference`, `target`, `actual_type`, `allowed_types`, `rule`. |
 | `frontmatter-alias-malformed` | warning | The alias field holds one or more non-scalar entries; those entries are skipped from alias resolution. Carries `field`, `invalid_entries`. |
@@ -63,7 +63,7 @@ Use summaries to size a cleanup queue before reading raw findings.
 
 ```bash
 norn validate --summary --format records
-norn validate --summary --code frontmatter-invalid-type --field created --format json
+norn validate --summary --code field-type-invalid --field created --format json
 ```
 
 ## Triage filters
@@ -84,7 +84,7 @@ Comma-separated values within one filter are ORed (`--code link-target-missing,l
 
 ```bash
 norn validate --code link-target-missing --format jsonl
-norn validate --code frontmatter-disallowed-value --field status --summary --format json
+norn validate --code value-not-allowed --field status --summary --format json
 norn validate --severity error --format jsonl
 ```
 
@@ -95,8 +95,8 @@ norn validate --severity error --format jsonl
 ### Size a queue, then read it
 
 ```bash
-norn validate --summary --code frontmatter-invalid-type --field created --format records
-norn validate --code frontmatter-invalid-type --field created --format jsonl
+norn validate --summary --code field-type-invalid --field created --format records
+norn validate --code field-type-invalid --field created --format jsonl
 ```
 
 ### Split link cleanup by failure mode
@@ -122,7 +122,7 @@ norn validate --path "tasks/**/*.md" --rule task-status --format jsonl
 ```bash
 norn repair --plan --format json
 norn repair --plan --out plan.json
-norn repair --plan --code frontmatter-disallowed-value --field status --out plan.json
+norn repair --plan --code value-not-allowed --field status --out plan.json
 ```
 
 ### Plan schema
@@ -141,7 +141,7 @@ norn repair --plan --code frontmatter-disallowed-value --field status --out plan
     }
   },
   "operations": [ { "kind": "set_frontmatter", "fields": { "...": "..." } } ],
-  "skipped": [ { "finding_code": "frontmatter-disallowed-value", "path": "notes/x.md", "reason": "no-rule-matched" } ]
+  "skipped": [ { "finding_code": "value-not-allowed", "path": "notes/x.md", "reason": "no-rule-matched" } ]
 }
 ```
 
@@ -170,7 +170,7 @@ The validate → plan → apply → verify loop closes for these finding classes
 
 | Finding code | Repair action | Notes |
 |---|---|---|
-| `frontmatter-disallowed-value` | `set_frontmatter` | Replace the disallowed value with a configured value. |
+| `value-not-allowed` | `set_frontmatter` | Replace the disallowed value with a configured value. |
 | `frontmatter-required-field-missing` | `add_frontmatter` | Insert the missing field with a configured value. |
 | `frontmatter-forbidden-field` | `remove_frontmatter` | Remove the forbidden field. |
 | `document-misrouted` | `move_document` | Move the file to a configured destination (with backlink rewriting). |

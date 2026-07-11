@@ -865,7 +865,7 @@ mod tests {
 
     fn finding_disallowed_value(path: &str, field: &str, value: serde_json::Value) -> Finding {
         Finding {
-            code: "frontmatter-disallowed-value".into(),
+            code: "value-not-allowed".into(),
             severity: Severity::Warning,
             path: path.into(),
             message: format!("frontmatter field has a disallowed value: {field}"),
@@ -1031,7 +1031,7 @@ mod tests {
         let config = RepairConfig {
             rules: vec![make_rule(
                 "fix-someday",
-                "frontmatter-disallowed-value",
+                "value-not-allowed",
                 Some("status"),
                 Some(json!("someday")),
                 RepairAction::SetFrontmatter {
@@ -1189,7 +1189,7 @@ mod tests {
         let config = RepairConfig {
             rules: vec![make_rule(
                 "fix-someday",
-                "frontmatter-disallowed-value",
+                "value-not-allowed",
                 Some("status"),
                 Some(json!("someday")),
                 RepairAction::SetFrontmatter {
@@ -1306,7 +1306,7 @@ mod tests {
         let config = RepairConfig {
             rules: vec![make_rule(
                 "fix-someday",
-                "frontmatter-disallowed-value",
+                "value-not-allowed",
                 Some("status"),
                 Some(json!("someday")),
                 RepairAction::SetFrontmatter {

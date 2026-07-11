@@ -40,9 +40,9 @@ emissions.
 |---|---|---|
 | `required_frontmatter` | `frontmatter-required-field-missing` | Listed field is absent or null |
 | `forbidden_frontmatter` | `frontmatter-forbidden-field` | Listed field is present and non-null |
-| `field_types` | `frontmatter-invalid-type` | Present value doesn't match declared shape |
+| `field_types` | `field-type-invalid` | Present value doesn't match declared shape |
 | `field_types` (`max_length`) | `frontmatter-exceeds-max-length` | Present `string`/`list_of_strings` value matches its declared type but exceeds the effective `max_length` bound |
-| `allowed_values` | `frontmatter-disallowed-value` | Present value isn't one of the declared values |
+| `allowed_values` | `value-not-allowed` | Present value isn't one of the declared values |
 | `allowed_paths` | `document-misrouted` | Document path matches no declared glob |
 | `field_references` | `frontmatter-reference-type` | A field's wikilink resolves to a document whose `type` is outside the allowed set |
 
