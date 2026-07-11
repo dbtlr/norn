@@ -566,8 +566,11 @@ fn status_cmd(
 /// fatal — the swap already succeeded — so the CLI boundary renders it as a
 /// warning, never as an error that changes `self-update`'s exit code. Not
 /// platform-gated itself (an `anyhow::Error` carries fine everywhere); only
-/// the two [`restart_after_update`] bodies below are.
+/// the two [`restart_after_update`] bodies below are — which leaves
+/// [`Restarted`](Self::Restarted) and [`Failed`](Self::Failed) matched but
+/// never constructed on non-unix, hence the dead_code allowance there.
 #[derive(Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum RestartOutcome {
     /// The unit was loaded; `kickstart -k` restarted it.
     Restarted,
