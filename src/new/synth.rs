@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use camino::Utf8PathBuf;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -30,7 +31,14 @@ pub struct FieldSource {
 }
 
 /// Where a frontmatter field's value originated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` derived so `report::NewReport` (NRN-230) can carry
+/// this typed provenance through the wire round-trip instead of a hand-rolled
+/// label string; `kebab-case` renders identically to the labels
+/// `report::source_kind_label` has always produced
+/// (`schema-default`/`operator-flag`/`operator-flag-json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FieldSourceKind {
     SchemaDefault,
     OperatorFlag,
@@ -38,7 +46,14 @@ pub enum FieldSourceKind {
 }
 
 /// Non-blocking informational warnings emitted by `build_plan`.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` are hand-implemented below (NOT derived) rather
+/// than a standard `#[serde(tag = "kind")]` enum: `ValidationFinding`'s `kind`
+/// is a DYNAMIC finding code (the same vocabulary `norn validate` emits), not
+/// one of a fixed set of literals, so no fixed-tag derive can express it. The
+/// wire shape is unchanged from what `norn new --format json` has always
+/// emitted (NRN-37a/b/c): `{"kind": "...", ...variant fields}`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Warning {
     MissingRequiredField {
         field: String,
@@ -86,6 +101,169 @@ pub enum Warning {
     TitleIgnored {
         title: String,
     },
+}
+
+// ── Warning wire encoding (NRN-230) ─────────────────────────────────────────
+//
+// Serialize/Deserialize are hand-written (see the enum doc comment) so that
+// `ValidationFinding`'s DYNAMIC `code` survives as `kind` verbatim, including
+// codes this build has never seen (a future `norn validate` finding). The
+// disambiguation rule: none of the fixed variants below carry a `message`
+// field, so a `message` key's presence — regardless of what string `kind`
+// holds — identifies a `ValidationFinding`. This makes serialize→deserialize
+// a fixed point for every warning shape the system can emit, known or not.
+
+impl Serialize for Warning {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        warning_to_wire(self).serialize(serializer)
+    }
+}
+
+/// Build the `{"kind": "...", ...}` wire `Value` for one `Warning` — the SAME
+/// shape `norn new --format json` has emitted since NRN-37a/b/c.
+fn warning_to_wire(w: &Warning) -> Value {
+    match w {
+        Warning::MissingRequiredField { field, rules } => serde_json::json!({
+            "kind": "missing-required-field",
+            "field": field,
+            "rules": rules,
+        }),
+        Warning::UnresolvedWikilink { field, target } => serde_json::json!({
+            "kind": "unresolved-wikilink",
+            "field": field,
+            "target": target,
+        }),
+        Warning::AmbiguousWikilink {
+            field,
+            target,
+            candidates,
+        } => serde_json::json!({
+            "kind": "ambiguous-wikilink",
+            "field": field,
+            "target": target,
+            "candidates": candidates.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        }),
+        Warning::StemCollision { stem, locations } => serde_json::json!({
+            "kind": "stem-collision",
+            "stem": stem,
+            "locations": locations.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        }),
+        Warning::PathVariableUnresolved { field, variable } => serde_json::json!({
+            "kind": "path-variable-unresolved",
+            "field": field,
+            "variable": variable,
+        }),
+        Warning::UnknownField { field } => serde_json::json!({
+            "kind": "unknown-field",
+            "field": field,
+        }),
+        // NRN-37a: the finding's own code becomes `kind` verbatim — the same
+        // code `norn validate` reports for the identical finding.
+        Warning::ValidationFinding { code, message } => serde_json::json!({
+            "kind": code,
+            "message": message,
+        }),
+        Warning::TitleIgnored { title } => serde_json::json!({
+            "kind": "title-ignored",
+            "title": title,
+        }),
+    }
+}
+
+/// Untyped wire shape every `Warning` variant's JSON is deserialized through —
+/// every field optional since each variant only populates a subset.
+#[derive(Deserialize)]
+struct WarningWire {
+    kind: String,
+    #[serde(default)]
+    field: Option<String>,
+    #[serde(default)]
+    rules: Option<Vec<String>>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    candidates: Option<Vec<String>>,
+    #[serde(default)]
+    stem: Option<String>,
+    #[serde(default)]
+    locations: Option<Vec<String>>,
+    #[serde(default)]
+    variable: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Warning {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let wire = WarningWire::deserialize(deserializer)?;
+
+        // Message-presence disambiguation (NRN-230): see the module doc above.
+        if let Some(message) = wire.message {
+            return Ok(Warning::ValidationFinding {
+                code: wire.kind,
+                message,
+            });
+        }
+
+        match wire.kind.as_str() {
+            "missing-required-field" => Ok(Warning::MissingRequiredField {
+                field: wire.field.ok_or_else(|| D::Error::missing_field("field"))?,
+                rules: wire.rules.ok_or_else(|| D::Error::missing_field("rules"))?,
+            }),
+            "unresolved-wikilink" => Ok(Warning::UnresolvedWikilink {
+                field: wire.field.ok_or_else(|| D::Error::missing_field("field"))?,
+                target: wire
+                    .target
+                    .ok_or_else(|| D::Error::missing_field("target"))?,
+            }),
+            "ambiguous-wikilink" => Ok(Warning::AmbiguousWikilink {
+                field: wire.field.ok_or_else(|| D::Error::missing_field("field"))?,
+                target: wire
+                    .target
+                    .ok_or_else(|| D::Error::missing_field("target"))?,
+                candidates: wire
+                    .candidates
+                    .ok_or_else(|| D::Error::missing_field("candidates"))?
+                    .into_iter()
+                    .map(Utf8PathBuf::from)
+                    .collect(),
+            }),
+            "stem-collision" => Ok(Warning::StemCollision {
+                stem: wire.stem.ok_or_else(|| D::Error::missing_field("stem"))?,
+                locations: wire
+                    .locations
+                    .ok_or_else(|| D::Error::missing_field("locations"))?
+                    .into_iter()
+                    .map(Utf8PathBuf::from)
+                    .collect(),
+            }),
+            "path-variable-unresolved" => Ok(Warning::PathVariableUnresolved {
+                field: wire.field.ok_or_else(|| D::Error::missing_field("field"))?,
+                variable: wire
+                    .variable
+                    .ok_or_else(|| D::Error::missing_field("variable"))?,
+            }),
+            "unknown-field" => Ok(Warning::UnknownField {
+                field: wire.field.ok_or_else(|| D::Error::missing_field("field"))?,
+            }),
+            "title-ignored" => Ok(Warning::TitleIgnored {
+                title: wire.title.ok_or_else(|| D::Error::missing_field("title"))?,
+            }),
+            other => Err(D::Error::custom(format!(
+                "unrecognized warning kind `{other}` (no `message` field present to \
+                 disambiguate it as a dynamic validation finding)"
+            ))),
+        }
+    }
 }
 
 /// Hard errors that prevent plan synthesis.

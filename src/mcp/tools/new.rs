@@ -126,50 +126,48 @@ pub struct NewParams {
 
 /// Structured output for `vault.new`.
 ///
-/// Wraps the `render_json` envelope as a generic `serde_json::Value` inside this
-/// typed root struct, mirroring the `SetOutput` / `GetOutput` pattern: rmcp
-/// requires a `type: object` root `outputSchema`, and the inner envelope carries
-/// a `Utf8PathBuf`-adjacent `path` field that cannot derive `JsonSchema` directly
-/// (it is serialized as a plain string, but the type lives in the `new` module's
-/// domain types). The full envelope is byte-identical to what `norn new --format
-/// json --yes` emits — the `applied` flag, `frontmatter_created`, `warnings`,
-/// `body_bytes`, and (on confirm) `trace_id`.
+/// Wraps the [`NewReport`](crate::new::report::NewReport) as a generic
+/// `serde_json::Value` inside this typed root struct, mirroring the
+/// `SetOutput` / `GetOutput` pattern: rmcp requires a `type: object` root
+/// `outputSchema`, and the inner report carries a `Utf8PathBuf`-adjacent
+/// `path` field that cannot derive `JsonSchema` directly (it is serialized as
+/// a plain string, but the type lives in the `new` module's domain types). The
+/// full report is byte-for-byte the same shape `norn new --format json --yes`
+/// emits — the `applied` flag, `frontmatter_created`, `warnings`,
+/// `body_bytes`, and (on confirm) `trace_id` (NRN-230).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct NewOutput {
-    /// The `norn new` JSON envelope: operation, path, applied flag, scaffolded
-    /// frontmatter fields (with source provenance), body_bytes, warnings, and
-    /// (on confirm) the trace_id. Byte-for-byte the same shape `norn new
-    /// --format json --yes` emits.
+    /// The `NewReport`: schema_version, operation, path, applied flag,
+    /// scaffolded frontmatter fields (with source provenance), body_bytes,
+    /// warnings, and (on confirm) the trace_id. Byte-for-byte the same shape
+    /// `norn new --format json --yes` emits.
     pub report: Value,
 }
 
 impl NewOutput {
-    fn from_json(json: String) -> Result<Self> {
+    fn from_report(report: &crate::new::report::NewReport) -> Result<Self> {
         Ok(Self {
-            report: serde_json::from_str(&json)?,
+            report: serde_json::to_value(report)?,
         })
     }
 }
 
 /// Build the MCP output envelope for `vault.new`.
 pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<NewOutput>> {
-    use crate::apply_report::ApplyOutcome;
     let dry_run = !p.confirm;
     // Capture a coded refusal (NRN-220): a recognized preflight refusal
     // (`destination-exists`, containment, …) becomes a structured `refused`
-    // envelope + `isError:true` instead of a bare MCP `Err`. Others propagate.
-    let (json, outcome) = match handle(ctx, p) {
-        Ok(json) => (json, ApplyOutcome::Applied),
+    // report + `isError:true` instead of a bare MCP `Err`. Others propagate.
+    let report = match handle(ctx, p) {
+        Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
-            Some(err) => (
-                crate::new::report::render_refusal_json(&err)?,
-                ApplyOutcome::Refused,
-            ),
+            Some(err) => crate::new::report::NewReport::refused(err),
             None => return Err(e),
         },
     };
+    let outcome = report.outcome;
     Ok(MutationResult::from_outcome(
-        NewOutput::from_json(json)?,
+        NewOutput::from_report(&report)?,
         dry_run,
         outcome,
     ))
@@ -177,7 +175,9 @@ pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<
 
 /// Pure handler for `vault.new`.
 ///
-/// Returns the `render_json` envelope string (same as `norn new --format json`).
+/// Returns the typed `NewReport` (NRN-230) — the same data `norn new --format
+/// json` renders, before rendering. The caller (`handle_output`) projects it
+/// into the `{ "report": <NewReport> } ` MCP envelope via `serde_json::to_value`.
 ///
 /// ## Non-TTY path mirrored
 ///
@@ -188,7 +188,7 @@ pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<
 ///   1. Load config + index.
 ///   2. Preflight (path checks).
 ///   3. `build_plan` → `CreateDocumentPlan`.
-///   4. `render_json(plan, applied=false, trace_id="")` — no lock, no apply.
+///   4. `build_report(plan, applied=false, trace_id="")` — no lock, no apply.
 ///
 /// CONFIRM (`confirm`):
 ///   0. Acquire the mutation lock FIRST — before config/index load, preflight,
@@ -197,8 +197,8 @@ pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<
 ///   1–3. Same steps as DRY-RUN, now lock-held.
 ///   4. Open real event sink via `open_mutation_event_sink`, emit lifecycle events.
 ///   5. Build single-change `RepairPlan`, apply via `apply_repair_plan_with_context`.
-///   6. `render_json(plan, applied=true, trace_id)`.
-pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
+///   6. `build_report(plan, applied=true, trace_id)`.
+pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<crate::new::report::NewReport> {
     let cwd = ctx.vault_root.clone();
 
     // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
@@ -331,15 +331,14 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
         } else {
             None
         };
-        return crate::new::report::render_json(
+        return Ok(crate::new::report::build_report(
             &plan,
             &doc_path_str,
             false,
             body_bytes,
             "",
             predicted.as_deref(),
-        )
-        .map_err(|e| anyhow::anyhow!("render_json: {e}"));
+        ));
     }
 
     // ── CONFIRM: the mutation lock was already acquired above, before the
@@ -427,15 +426,14 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<String> {
     };
     augmented.warnings.extend(post_warnings);
 
-    crate::new::report::render_json(
+    Ok(crate::new::report::build_report(
         &augmented,
         effective_path.as_str(),
         true,
         body_bytes,
         &trace_id,
         None,
-    )
-    .map_err(|e| anyhow::anyhow!("render_json: {e}"))
+    ))
 }
 
 #[cfg(test)]
@@ -490,8 +488,8 @@ validate:
         std::fs::write(norn_dir.join("config.yaml"), CONFIG_WITH_SEQ_RULE).unwrap();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let call = |confirm: bool| {
-            handle(
+        let call = |confirm: bool| -> serde_json::Value {
+            let report = handle(
                 &ctx,
                 NewParams {
                     rule: Some("task".to_string()),
@@ -500,17 +498,18 @@ validate:
                     ..Default::default()
                 },
             )
-            .expect("handle should succeed")
+            .expect("handle should succeed");
+            serde_json::to_value(report).unwrap()
         };
 
         // Confirm → allocates MMR-1 and writes it.
-        let v1: serde_json::Value = serde_json::from_str(&call(true)).unwrap();
+        let v1 = call(true);
         assert_eq!(v1["applied"], serde_json::json!(true));
         assert_eq!(v1["path"], serde_json::json!("tasks/MMR-1.md"));
         assert!(root.join("tasks/MMR-1.md").exists());
 
         // Dry-run → predicts MMR-2 (non-binding), writes nothing.
-        let v2: serde_json::Value = serde_json::from_str(&call(false)).unwrap();
+        let v2 = call(false);
         assert_eq!(v2["applied"], serde_json::json!(false));
         assert_eq!(v2["path"], serde_json::json!("tasks/MMR-{{seq}}.md"));
         assert_eq!(v2["predicted_path"], serde_json::json!("tasks/MMR-2.md"));
@@ -526,7 +525,7 @@ validate:
         let new_path = "notes/new-doc.md";
 
         // The parent "notes/" does not exist; use parents:true so preflight passes.
-        let json = handle(
+        let report = handle(
             &ctx,
             NewParams {
                 path: Some(new_path.to_string()),
@@ -537,7 +536,7 @@ validate:
         )
         .expect("handle (dry-run) should succeed");
 
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let v: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(
             v["applied"].as_bool(),
             Some(false),
@@ -560,7 +559,7 @@ validate:
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let new_path = "notes/new-doc.md";
 
-        let json = handle(
+        let report = handle(
             &ctx,
             NewParams {
                 path: Some(new_path.to_string()),
@@ -571,7 +570,7 @@ validate:
         )
         .expect("handle (confirm) should succeed");
 
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let v: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(
             v["applied"].as_bool(),
             Some(true),
@@ -600,7 +599,7 @@ validate:
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let new_path = "flat-doc.md";
 
-        let json = handle(
+        let report = handle(
             &ctx,
             NewParams {
                 path: Some(new_path.to_string()),
@@ -610,7 +609,7 @@ validate:
         )
         .expect("handle (dry-run flat) should succeed");
 
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let v: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(v["applied"].as_bool(), Some(false));
         assert!(
             !root.join(new_path).exists(),
@@ -625,7 +624,7 @@ validate:
         let (_tmp, root) = seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let json = handle(
+        let report = handle(
             &ctx,
             NewParams {
                 path: Some("another.md".to_string()),
@@ -635,7 +634,7 @@ validate:
         )
         .expect("handle (confirm) should succeed");
 
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let v: serde_json::Value = serde_json::to_value(&report).unwrap();
         let fc = v["frontmatter_created"]
             .as_array()
             .expect("frontmatter_created must be array");
@@ -700,7 +699,7 @@ validate:
         vars.insert("workspace".to_string(), "norn".to_string());
 
         // dry-run (confirm:false default).
-        let json = handle(
+        let report = handle(
             &ctx,
             NewParams {
                 rule: Some("task".to_string()),
@@ -713,7 +712,7 @@ validate:
         )
         .expect("handle (dry-run by rule) should succeed");
 
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let v: serde_json::Value = serde_json::to_value(&report).unwrap();
         assert_eq!(
             v["applied"].as_bool(),
             Some(false),
@@ -746,7 +745,7 @@ validate:
         let mut vars = std::collections::BTreeMap::new();
         vars.insert("workspace".to_string(), "norn".to_string());
 
-        let json_dry = handle(
+        let report_dry = handle(
             &ctx_dry,
             NewParams {
                 rule: Some("task".to_string()),
@@ -759,7 +758,7 @@ validate:
         )
         .expect("dry-run should succeed");
 
-        let v_dry: serde_json::Value = serde_json::from_str(&json_dry).unwrap();
+        let v_dry: serde_json::Value = serde_json::to_value(&report_dry).unwrap();
         assert_eq!(v_dry["applied"].as_bool(), Some(false));
         let derived_path = v_dry["path"].as_str().expect("path in dry-run response");
         assert!(
@@ -774,7 +773,7 @@ validate:
 
         // ── confirm: drain dry-run first, then send confirm ───────────────────
         let ctx_confirm = VaultContext::open(&root, None).expect("open ctx for confirm");
-        let json_confirm = handle(
+        let report_confirm = handle(
             &ctx_confirm,
             NewParams {
                 rule: Some("task".to_string()),
@@ -787,7 +786,7 @@ validate:
         )
         .expect("confirm should succeed");
 
-        let v_confirm: serde_json::Value = serde_json::from_str(&json_confirm).unwrap();
+        let v_confirm: serde_json::Value = serde_json::to_value(&report_confirm).unwrap();
         assert_eq!(
             v_confirm["applied"].as_bool(),
             Some(true),
@@ -892,7 +891,7 @@ validate:
 
         // ── MCP side: the SAME vault, the SAME Mode-A + title input ──────────
         let ctx = VaultContext::open(&root, None).expect("open ctx");
-        let mcp_json = handle(
+        let mcp_report = handle(
             &ctx,
             NewParams {
                 path: Some("notes/mode-a.md".to_string()),
@@ -903,7 +902,7 @@ validate:
             },
         )
         .expect("MCP dry-run must succeed");
-        let mcp_value: serde_json::Value = serde_json::from_str(&mcp_json).unwrap();
+        let mcp_value: serde_json::Value = serde_json::to_value(&mcp_report).unwrap();
         let mcp_warnings = mcp_value["warnings"]
             .as_array()
             .expect("MCP warnings must be an array");
