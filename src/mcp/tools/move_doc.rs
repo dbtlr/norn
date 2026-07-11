@@ -187,8 +187,9 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     // already handles a not-yet-existing `-p`/`--parents` subtree), identically
     // on dry-run and confirm, matching the CLI.
     //
-    // NRN-239: capture the RESOLVED plan (mirrors the CLI direct arm at
-    // src/lib.rs:1877-1896) instead of discarding it. `preflight_and_plan`
+    // NRN-239: capture the RESOLVED plan (mirrors the CLI direct arm's
+    // `Command::Move` handling in `src/lib.rs`) instead of discarding it.
+    // `preflight_and_plan`
     // resolves a bare stem (e.g. "a") to its full vault-relative path (e.g.
     // "a.md") via `resolve_src`; the raw `from` may not match a real filesystem
     // path at all. Building `MigrationOp.fields` from `p.from` verbatim (the old
@@ -211,12 +212,7 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
         // returns a coded, structured refusal instead of laundering to
         // `internal-error`. The `Display` prose is unchanged.
         let plan = crate::move_doc::preflight_and_plan(cfg)?;
-        let move_change = plan
-            .changes
-            .iter()
-            .find(|c| c.operation == "move_document")
-            .expect("preflight_and_plan must produce a move_document op");
-        Some(move_change.path.to_string())
+        Some(plan.expect_change("move_document").path.to_string())
     } else {
         None
     };

@@ -177,19 +177,15 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
     // returns a coded, structured refusal instead of laundering to
     // `internal-error`. The `Display` prose is unchanged.
     //
-    // NRN-239: capture the RESOLVED plan (mirrors the CLI direct arm at
-    // src/lib.rs:2120-2129) instead of discarding it. `preflight_and_plan`
+    // NRN-239: capture the RESOLVED plan (mirrors the CLI direct arm's
+    // `Command::Delete` handling in `src/lib.rs`) instead of discarding it.
+    // `preflight_and_plan`
     // resolves a bare stem (e.g. "doc") to its full vault-relative path (e.g.
     // "doc.md") via `resolve_target_path`; the raw `target` may not match a
     // real filesystem path at all. `rewrite_to` stays the RAW value — the
     // applier resolves it only for `link_impact.redirect_to`, matching the CLI.
     let outcome = crate::delete_doc::preflight_and_plan(cfg)?;
-    let delete_change = outcome
-        .plan
-        .changes
-        .iter()
-        .find(|c| c.operation == "delete_document")
-        .expect("preflight_and_plan must produce a delete_document op");
+    let delete_change = outcome.plan.expect_change("delete_document");
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.
     let plan = MigrationPlan {

@@ -1858,11 +1858,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // plan and use the raw args as before (a folder path isn't
             // stem-resolved).
             let (resolved_src, resolved_dst) = if let Some(plan) = &move_plan {
-                let move_change = plan
-                    .changes
-                    .iter()
-                    .find(|c| c.operation == "move_document")
-                    .expect("preflight_and_plan must produce a move_document op");
+                let move_change = plan.expect_change("move_document");
                 (
                     move_change.path.to_string(),
                     move_change
@@ -2075,12 +2071,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // computed here: the applier attaches it to the delete_document op as
             // `link_impact` (NRN-237), so the direct and warm-daemon records paths
             // render byte-identically from the one report.
-            let delete_op = outcome
-                .plan
-                .changes
-                .iter()
-                .find(|c| c.operation == "delete_document")
-                .expect("preflight_and_plan must produce a delete_document op");
+            let delete_op = outcome.plan.expect_change("delete_document");
 
             // ----------------------------------------------------------------
             // Resolve dry_run.
