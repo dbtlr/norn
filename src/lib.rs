@@ -763,6 +763,107 @@ fn try_route_set(
     None
 }
 
+/// Attempt to route a `norn new` to the warm daemon (NRN-230 PR C), or return
+/// `None` to run the direct path. Copies `try_route_set`'s shape.
+///
+/// **Routing runs BEFORE the direct arm's local mutation lock**, same reason as
+/// `set`: the daemon acquires the SAME per-vault lock in-process, so a CLI that
+/// held the lock while routing would deadlock a routed apply.
+///
+/// `vars` is the `--var` map already parsed CLI-side by `parse_var_args` BEFORE
+/// this is called — a malformed `--var` refuses pre-send in the arm, so the wire
+/// only ever carries a valid `vars` map.
+///
+/// **Mode mapping** (mirrors `new::preflight_and_plan`'s dry-run/apply ladder,
+/// which keys TTY off STDOUT — not stdin like `set`):
+/// - `--dry-run` → routed dry-run (`confirm: false`).
+/// - `--yes` (non-interactive apply) → routed apply (`confirm: true`).
+/// - `--format json` without `--yes` → routed preview (implicit dry-run).
+/// - interactive TTY (stdout) without `--yes` → NOT routed: the preview→prompt→
+///   apply flow stays direct (the daemon cannot drive the terminal prompt).
+/// - non-TTY without `--yes` (and not `--format json`) → routed dry-run,
+///   preserving today's "implicit dry-run preview, no prompt" semantics.
+///
+/// **Gated to Direct**: `--body-from-stdin` (no byte-faithful stdin analogue).
+/// `--config` / `--no-cache-refresh` force Direct up front via the SAME
+/// [`routing_forced_direct`] guard the read seam uses. Both `--field` AND
+/// `--field-json` route (unlike `set`): `vault.new`'s params carry them as
+/// ordered `Vec<String>` token lists, so the wire preserves last-wins exactly.
+///
+/// A routed apply runs under the seam's `Commit` policy: a post-send failure
+/// surfaces `post-send-uncertain` (exit 1) rather than a double-applying Direct
+/// retry. `AcceptWithPayload` lets a coded refusal cross as `isError: true`
+/// carrying the structured report, which `reconstruct` renders as the
+/// byte-identical exit-2 refusal (`error:` prose on stderr, both formats — `new`
+/// has no JSON error envelope, audit F5).
+#[cfg(unix)]
+fn try_route_new(
+    args: &crate::cli::NewArgs,
+    vars: &std::collections::BTreeMap<String, String>,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    use std::io::IsTerminal as _;
+
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
+
+    // The one shape with no byte-faithful wire encoding runs Direct.
+    if args.body_from_stdin {
+        return None;
+    }
+
+    // Decide the effective mode, mirroring the direct arm's decision tree in
+    // `new::preflight_and_plan` — which detects a terminal on STDOUT (new shows
+    // its interactive preview on stdout), not stdin like `set`.
+    let confirm = if args.dry_run {
+        false
+    } else if args.yes {
+        true
+    } else if matches!(args.format, crate::cli::NewFormat::Json) {
+        false
+    } else if std::io::stdout().is_terminal() {
+        // Interactive preview→prompt→apply stays Direct.
+        return None;
+    } else {
+        // Non-TTY without --yes: implicit dry-run preview.
+        false
+    };
+
+    let format = args.format;
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.new",
+            arguments: crate::new::route::to_mcp_arguments(args, vars, confirm),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        /*dry_run=*/ !confirm,
+        crate::new::route::reconstruct,
+        move |report| crate::new::route::emit(report, format),
+    )
+}
+
+/// Non-Unix build: the warm daemon rides Unix-domain sockets, so `new` always
+/// runs Direct. Always-Direct is safe here — no daemon can exist to half-apply a
+/// mutation (mirrors `try_route_read`'s Direct stub).
+#[cfg(not(unix))]
+fn try_route_new(
+    args: &crate::cli::NewArgs,
+    vars: &std::collections::BTreeMap<String, String>,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (args, vars, cwd, explicit_config, no_cache_refresh, verbose);
+    None
+}
+
 /// Attempt to route a `norn edit` to the warm daemon (NRN-229 PR A), or return
 /// `None` to run the direct path. Copies `try_route_set`'s shape exactly.
 ///
@@ -2363,6 +2464,41 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             use crate::cache::CacheError;
             use crate::mutation_lock::pending::sweep_pending;
             use crate::mutation_lock::MutationLock;
+
+            // Parse `--var KEY=VALUE` BEFORE routing OR the mutation lock (the F5
+            // pattern `set` uses for its positional-field shape): a malformed
+            // `--var` is a pure argv error that must fail fast with the direct
+            // path's exact `error: {e}` prose + exit 2 and NO side effects. The
+            // parsed map also feeds the NRN-230 routed `vars` wire object below.
+            // The direct path re-parses it inside `preflight_and_plan`
+            // (idempotent); front-running the validation keeps the routed and
+            // direct refusals byte-identical.
+            let vars = match crate::new::parse_var_args(&args.var) {
+                Ok(vars) => vars,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Ok(2);
+                }
+            };
+
+            // NRN-230 routing seam: attempt to serve the creation from a warm
+            // `norn serve` daemon BEFORE acquiring the local mutation lock (the
+            // daemon takes the SAME per-vault lock in-process; holding it here
+            // would deadlock a routed apply). `Some` => served (or deliberately
+            // refused) by routing; `None` => no live daemon, a gated shape
+            // (`--body-from-stdin`, `--config` / `--no-cache-refresh`), or the
+            // interactive TTY path => fall through to the direct sweep + lock +
+            // preflight_and_plan sequence below, unchanged.
+            if let Some(result) = try_route_new(
+                &args,
+                &vars,
+                &cwd,
+                config_path.is_some(),
+                no_cache_refresh,
+                verbose,
+            ) {
+                return result;
+            }
 
             // Acquire mutation lock before preflight_and_plan (which does the cache load).
             // New uses stdout for TTY detection (interactive preview shown on stdout).
