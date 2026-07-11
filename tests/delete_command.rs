@@ -520,3 +520,195 @@ fn delete_full_path_still_works_after_stem_fix() {
         "c.md should have been deleted via full-path addressing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// NRN-248 — the applier's `build_link_impact` fallback branch fires when
+// `backlinks()` (resolution-keyed) misses a link that `link_risk`'s textual
+// fallback (`link_targets_path`) still catches: `resolved_path == None` links
+// that are either an ambiguous same-stem wikilink or a dangling relative
+// markdown link whose raw target textually coincides with the deleted path.
+// ---------------------------------------------------------------------------
+
+/// Class 1: `x/b.md` and `y/b.md` share the stem `b`; `a.md`'s bare `[[b]]`
+/// wikilink is therefore Ambiguous (`resolved_path == None`), invisible to
+/// `backlinks()`. `link_risk`'s textual fallback still matches it as a
+/// stem-only link once `resolved_path` is None.
+fn synth_ambiguous_stem() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-delete-int-ambig-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+    std::fs::create_dir(root.join("x")).unwrap();
+    std::fs::create_dir(root.join("y")).unwrap();
+    std::fs::write(root.join("x/b.md"), "---\ntype: note\n---\n# B in x\n").unwrap();
+    std::fs::write(root.join("y/b.md"), "---\ntype: note\n---\n# B in y\n").unwrap();
+    std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n[[b]]\n").unwrap();
+    std::fs::write(root.join("c.md"), "---\ntype: note\n---\n# C\n").unwrap();
+    tmp
+}
+
+/// Class 2: `sub/note.md` contains a relative markdown link `[x](b.md)`,
+/// which resolves relative to `sub/` (looking for `sub/b.md`) and is
+/// therefore dangling (`resolved_path == None`) even though its raw target
+/// textually equals the root-level `b.md` being deleted.
+fn synth_dangling_markdown() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-delete-int-dangling-")
+        .tempdir()
+        .unwrap();
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("b.md"), "---\ntype: note\n---\n# B\n").unwrap();
+    std::fs::write(
+        root.join("sub/note.md"),
+        "---\ntype: note\n---\n# Note\n[x](b.md)\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("c.md"), "---\ntype: note\n---\n# C\n").unwrap();
+    tmp
+}
+
+#[test]
+fn rewrite_to_fallback_fires_on_ambiguous_stem_backlink() {
+    let tmp = synth_ambiguous_stem();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args([
+            "delete",
+            "x/b.md",
+            "--rewrite-to",
+            "c.md",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+
+    let del_op = v["operations"]
+        .as_array()
+        .expect("operations array")
+        .iter()
+        .find(|o| o["kind"] == "delete_document")
+        .expect("delete_document op present");
+
+    // The fallback-only shape: no resolved backlink (a.md's [[b]] is
+    // Ambiguous, so backlinks() misses it), yet incoming_files is non-empty
+    // because link_risk's textual fallback still caught it as a stem_link.
+    let li = &del_op["link_impact"];
+    assert_eq!(
+        li["incoming_total"], 0,
+        "no resolved backlink; link_impact: {li}"
+    );
+    assert_eq!(
+        li["incoming_files"].as_array().unwrap(),
+        &vec![serde_json::json!("a.md")],
+        "incoming_files must come from the link_risk fallback; link_impact: {li}"
+    );
+    assert_eq!(
+        li["redirect_to"], "c.md",
+        "redirect_to must be the resolved rewrite target; link_impact: {li}"
+    );
+
+    // Filesystem: x/b.md gone, the unrelated same-stem y/b.md untouched.
+    assert!(
+        !tmp.path().join("vault/x/b.md").exists(),
+        "x/b.md should have been deleted"
+    );
+    assert!(
+        tmp.path().join("vault/y/b.md").exists(),
+        "y/b.md (same-stem sibling, not the delete target) must be untouched"
+    );
+
+    // What did the cascade do to a.md's body? Observed and pinned, not assumed:
+    // apply_link_rewrites iterates the SAME link_risk stem_links/markdown_links
+    // used by the link_impact fallback and does a literal raw->rewritten
+    // string-replace, so the ambiguous [[b]] wikilink DOES get rewritten to
+    // [[c]] despite being invisible to backlinks()/preflight.
+    let a = std::fs::read_to_string(tmp.path().join("vault/a.md")).unwrap();
+    assert_eq!(
+        a, "---\ntype: note\n---\n# A\n[[c]]\n",
+        "a.md's ambiguous [[b]] wikilink was rewritten to [[c]] by the cascade: {a}"
+    );
+}
+
+#[test]
+fn rewrite_to_fallback_fires_on_dangling_markdown_link() {
+    let tmp = synth_dangling_markdown();
+    let out = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(tmp.path().join("vault"))
+        .args([
+            "delete",
+            "b.md",
+            "--rewrite-to",
+            "c.md",
+            "--yes",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("must parse as JSON: {e}\ngot: {}", stdout.trim()));
+
+    let del_op = v["operations"]
+        .as_array()
+        .expect("operations array")
+        .iter()
+        .find(|o| o["kind"] == "delete_document")
+        .expect("delete_document op present");
+
+    let li = &del_op["link_impact"];
+    assert_eq!(
+        li["incoming_total"], 0,
+        "sub/note.md's [x](b.md) is dangling (resolves relative to sub/), so \
+         backlinks() sees no resolved backlink; link_impact: {li}"
+    );
+    assert_eq!(
+        li["incoming_files"].as_array().unwrap(),
+        &vec![serde_json::json!("sub/note.md")],
+        "incoming_files must come from the link_risk fallback; link_impact: {li}"
+    );
+    assert_eq!(
+        li["redirect_to"], "c.md",
+        "redirect_to must be the resolved rewrite target; link_impact: {li}"
+    );
+
+    assert!(
+        !tmp.path().join("vault/b.md").exists(),
+        "b.md should have been deleted"
+    );
+
+    // What did the cascade do to sub/note.md's body? Observed and pinned:
+    // the raw markdown href "b.md" textually coincides with the deleted
+    // path, so link_risk's markdown_links fallback catches it and
+    // apply_link_rewrites rewrites it to the relative path to c.md.
+    let note = std::fs::read_to_string(tmp.path().join("vault/sub/note.md")).unwrap();
+    assert_eq!(
+        note, "---\ntype: note\n---\n# Note\n[x](../c.md)\n",
+        "sub/note.md's dangling [x](b.md) link was rewritten by the cascade: {note}"
+    );
+}
