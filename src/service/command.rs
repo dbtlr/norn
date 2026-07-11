@@ -17,6 +17,7 @@
 //! no unit selector — a verb acts on the single serve daemon.
 
 use crate::cli::{ServiceCommand, ServiceFormat, ServiceSubcommand};
+use crate::self_update::resolve::Action;
 
 #[cfg(unix)]
 use super::launchd::{Exec, LaunchdSupervisor, LoadState, RealExec};
@@ -581,6 +582,31 @@ pub(crate) enum RestartOutcome {
     Failed(anyhow::Error),
 }
 
+/// The ONE definition of the NRN-226 gate: a service restart may follow
+/// exactly one action — a real completed swap. Exhaustive so a new
+/// [`Action`] variant forces a deliberate decision here rather than
+/// silently inheriting either answer.
+fn swap_completed(action: Action) -> bool {
+    match action {
+        Action::Updated => true,
+        Action::WouldUpdate | Action::WouldNoOp | Action::NoOp => false,
+    }
+}
+
+/// Gate + restart as one tested unit: `None` means the gate refused
+/// ([`swap_completed`] said no — dry-run preview or no-op) and the
+/// supervisor was never consulted; `Some` carries the restart outcome for
+/// a real swap. The CLI boundary calls the edge below unconditionally, so
+/// the dry-run-safety property lives HERE, where the fake-[`Exec`] tests
+/// pin it.
+#[cfg(unix)]
+fn maybe_restart_after_update_outcome<E: Exec>(
+    action: Action,
+    supervisor: &LaunchdSupervisor<E>,
+) -> Option<RestartOutcome> {
+    swap_completed(action).then(|| restart_after_update_outcome(supervisor))
+}
+
 /// The restart-after-update decision, over the seam (testable with a fake):
 /// probe first — a probe failure is [`RestartOutcome::Failed`], never read as
 /// not-loaded, the same "unknown must surface" rule [`lifecycle_outcome`]
@@ -600,27 +626,27 @@ fn restart_after_update_outcome<E: Exec>(supervisor: &LaunchdSupervisor<E>) -> R
     }
 }
 
-/// Real-edge wiring `self-update` calls after a successful swap: restart a
-/// loaded unit so it picks up the freshly-swapped binary. Unlike
-/// [`require_macos`], this never refuses — self-update already ran and the
-/// binary is already updated; a non-macOS host simply has no launchd to
-/// restart, so it silently reads as [`RestartOutcome::NotLoaded`]. The
-/// `cfg(not(unix))` twin below covers every remaining host so the crate
-/// builds everywhere.
+/// Real-edge wiring `self-update` calls unconditionally after its report is
+/// rendered; the [`swap_completed`] gate inside decides whether anything
+/// happens. Unlike [`require_macos`], a fired gate never refuses —
+/// self-update already ran and the binary is already updated; a non-macOS
+/// host simply has no launchd to restart, so a real swap silently reads as
+/// [`RestartOutcome::NotLoaded`]. The `cfg(not(unix))` twin below covers
+/// every remaining host so the crate builds everywhere.
 #[cfg(unix)]
-pub(crate) fn restart_after_update() -> RestartOutcome {
+pub(crate) fn maybe_restart_after_update(action: Action) -> Option<RestartOutcome> {
     if std::env::consts::OS != "macos" {
-        return RestartOutcome::NotLoaded;
+        return swap_completed(action).then(|| RestartOutcome::NotLoaded);
     }
     // SAFETY: `getuid(2)` is always successful and takes no arguments.
     let uid = unsafe { libc::getuid() };
     let supervisor = LaunchdSupervisor::new(RealExec, uid, plist::SERVE_LABEL);
-    restart_after_update_outcome(&supervisor)
+    maybe_restart_after_update_outcome(action, &supervisor)
 }
 
 #[cfg(not(unix))]
-pub(crate) fn restart_after_update() -> RestartOutcome {
-    RestartOutcome::NotLoaded
+pub(crate) fn maybe_restart_after_update(action: Action) -> Option<RestartOutcome> {
+    swap_completed(action).then(|| RestartOutcome::NotLoaded)
 }
 
 #[cfg(test)]
@@ -1013,6 +1039,36 @@ mod tests {
             assert!(
                 !resolved.as_str().ends_with("norn-0.45.1-real"),
                 "must not resolve to the versioned target"
+            );
+        }
+
+        /// The dry-run-safety property (NRN-226 review): every non-swap
+        /// action is refused by the gate WITHOUT the supervisor ever being
+        /// consulted — a `--dry-run` can never `kickstart -k` a live daemon.
+        /// The empty `FakeExec` script doubles as a tripwire: any probe or
+        /// restart attempt would panic the fake.
+        #[test]
+        fn gate_refuses_every_non_swap_action_without_touching_the_supervisor() {
+            for action in [Action::WouldUpdate, Action::WouldNoOp, Action::NoOp] {
+                let s = supervisor(FakeExec::new(vec![]));
+                let outcome = maybe_restart_after_update_outcome(action, &s);
+                assert!(outcome.is_none(), "{action:?} must be gate-refused");
+                assert_eq!(
+                    s.exec().calls().len(),
+                    0,
+                    "{action:?} must not probe or restart"
+                );
+            }
+        }
+
+        /// A real completed swap passes the gate and the restart runs.
+        #[test]
+        fn gate_fires_the_restart_on_a_completed_swap() {
+            let s = supervisor(FakeExec::new(vec![print_running(4242), exec_ok()]));
+            let outcome = maybe_restart_after_update_outcome(Action::Updated, &s);
+            assert!(
+                matches!(outcome, Some(RestartOutcome::Restarted)),
+                "{outcome:?}"
             );
         }
 

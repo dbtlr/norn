@@ -2781,21 +2781,22 @@ fn run_self_update_command(args: cli::SelfUpdateArgs, color: cli::ColorWhen) -> 
             }
             // A launchd-loaded serve daemon keeps running the OLD binary
             // until restarted — the swap alone does not pick it up — so a
-            // REAL swap (never dry-run/no-op) best-effort restarts a loaded
-            // unit (NRN-226). Failure is a warning only: the binary IS
-            // updated either way, and the version-skew fallback keeps
-            // routing safe until a manual `norn service restart`.
-            if report.action == self_update::resolve::Action::Updated {
-                match crate::service::command::restart_after_update() {
-                    crate::service::command::RestartOutcome::Restarted => {
-                        eprintln!("serve restarted to pick up the updated binary");
-                    }
-                    crate::service::command::RestartOutcome::NotLoaded => {}
-                    crate::service::command::RestartOutcome::Failed(error) => {
-                        eprintln!(
-                            "warning: norn updated successfully, but the running service could not be restarted ({error:#}) — run `norn service restart` to pick up the new binary"
-                        );
-                    }
+            // REAL swap best-effort restarts a loaded unit (NRN-226). The
+            // only-on-a-completed-swap gate (never dry-run/no-op) lives
+            // inside `maybe_restart_after_update`, where it is unit-tested;
+            // this boundary just prints the outcome. Failure is a warning
+            // only: the binary IS updated either way, and the version-skew
+            // fallback keeps routing safe until a manual `norn service
+            // restart`.
+            match crate::service::command::maybe_restart_after_update(report.action) {
+                None | Some(crate::service::command::RestartOutcome::NotLoaded) => {}
+                Some(crate::service::command::RestartOutcome::Restarted) => {
+                    eprintln!("serve restarted to pick up the updated binary");
+                }
+                Some(crate::service::command::RestartOutcome::Failed(error)) => {
+                    eprintln!(
+                        "warning: norn updated successfully, but the running service could not be restarted ({error:#}) — run `norn service restart` to pick up the new binary"
+                    );
                 }
             }
             Ok(exit)
