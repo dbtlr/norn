@@ -187,6 +187,21 @@ fn shape_matrix() -> Vec<(&'static str, Vec<&'static str>, i32, bool)> {
             0,
             true,
         ),
+        // NRN-237: dry-run variants of the two rows above — the dry-run renderer
+        // is the heaviest consumer of link_impact (prints "⚠ N incoming links
+        // will break across M files:" plus the file list), so pin it routed too.
+        (
+            "records rewrite-to dry-run (routed)",
+            vec!["doc.md", "--rewrite-to", "alt", "--dry-run"],
+            0,
+            true,
+        ),
+        (
+            "records allow-broken dry-run (routed)",
+            vec!["doc.md", "--allow-broken-links", "--dry-run"],
+            0,
+            true,
+        ),
         // unknown-target refusal: no doc on disk → gated Direct.
         (
             "unknown-target refusal (gated Direct)",
