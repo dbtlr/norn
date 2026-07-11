@@ -1,4 +1,5 @@
 pub mod render;
+pub mod route;
 pub mod skip_reasons;
 
 use std::collections::BTreeMap;
@@ -6,11 +7,12 @@ use std::fs;
 use std::io::Write;
 
 use anyhow::Result;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cli::{RepairArgs, RepairPlanFormat};
-use crate::config_loader::{load_config, resolve_path};
+use crate::config_loader::load_config;
 use crate::core::GraphIndex;
+use crate::migration_plan::MigrationPlan;
 use crate::planner::findings::plan_from_findings;
 use crate::repair::skip_reasons::code_matches_any;
 use crate::standards::{validate_with_compiled, ConfidenceFilter, RepairPlanFilters};
@@ -103,10 +105,44 @@ pub fn run_plan(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32> {
             .retain(|sf| code_matches_any(&sf.reason, &skip_patterns));
     }
 
-    // --out: always writes JSON to the file (independent of --format).
+    // The exit-code signal: any error-severity diagnostic anywhere in the FULL
+    // index, independent of the triage filters just applied to `plan` — the
+    // SAME predicate `crate::exit_code_for` derives from, so the shared
+    // `emit_plan` (used by both this direct path and the routed path, NRN-231)
+    // reproduces it without needing the `GraphIndex` itself.
+    let has_diagnostic_errors = crate::graph::has_errors(&index);
+
+    emit_plan(&plan, args, ctx.cwd, has_diagnostic_errors)
+}
+
+/// Render `plan` to stdout / `--out`, and derive the exit code — the SHARED
+/// post-plan-construction step for both `norn repair --plan` (direct) and the
+/// routed path (`vault.repair` reconstructed via `repair::route`, NRN-231).
+/// Byte-identical by construction: both callers funnel through this one
+/// function rather than duplicating the render/write logic.
+///
+/// `has_diagnostic_errors` is the exit-code signal (any error-severity
+/// diagnostic anywhere in the vault) — the direct caller derives it from its
+/// own `GraphIndex` (`crate::graph::has_errors`); the routed caller reads it
+/// off the wire (`vault.repair`'s `RepairOutput::has_diagnostic_errors`).
+pub(crate) fn emit_plan(
+    plan: &MigrationPlan,
+    args: &RepairArgs,
+    cwd: &Utf8Path,
+    has_diagnostic_errors: bool,
+) -> Result<i32> {
+    // --out: always writes JSON to the file (independent of --format). Mirrors
+    // `resolve_path` (`config_loader.rs`), which takes `&Utf8PathBuf` rather
+    // than `&Utf8Path` — inlined here so both callers (direct's owned `cwd:
+    // &Utf8PathBuf` and the routed seam's `cwd: &Utf8Path`) pass through
+    // without an extra allocation.
     if let Some(out) = &args.out {
-        let out_path = resolve_path(ctx.cwd, out);
-        let plan_text = serde_json::to_string_pretty(&plan)?;
+        let out_path = if out.is_absolute() {
+            out.clone()
+        } else {
+            cwd.join(out)
+        };
+        let plan_text = serde_json::to_string_pretty(plan)?;
         fs::write(&out_path, format!("{plan_text}\n")).map_err(|error| {
             anyhow::anyhow!("failed to write migration plan {out_path}: {error}")
         })?;
@@ -128,19 +164,19 @@ pub fn run_plan(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32> {
 
     if let Some(format) = stdout_format {
         match format {
-            RepairPlanFormat::Report => render::write_report(&plan, args)?,
+            RepairPlanFormat::Report => render::write_report(plan, args)?,
             RepairPlanFormat::Json => {
-                let json = serde_json::to_string_pretty(&plan)?;
+                let json = serde_json::to_string_pretty(plan)?;
                 let stdout = std::io::stdout();
                 let mut stdout = stdout.lock();
                 stdout.write_all(json.as_bytes())?;
                 stdout.write_all(b"\n")?;
             }
-            RepairPlanFormat::Paths => render::write_paths(&plan)?,
+            RepairPlanFormat::Paths => render::write_paths(plan)?,
         }
     }
 
-    Ok(crate::exit_code_for(&index))
+    Ok(if has_diagnostic_errors { 1 } else { 0 })
 }
 
 /// `norn repair` (bare) — print a read-only findings summary. Placeholder for a

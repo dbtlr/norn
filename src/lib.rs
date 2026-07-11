@@ -184,11 +184,12 @@ fn stdin_carries_redirected_payload() -> bool {
 /// `--config` / `--no-cache-refresh` force Direct up front (see
 /// [`routing_forced_direct`]).
 ///
-/// **Routing coverage.** `count` (NRN-94), `find` and `get` (NRN-222) route
-/// today. Each command's MCP tool returns a `structuredContent` payload that the
-/// client rebuilds into the command's native result type and renders through the
-/// SAME renderers the direct path uses, so routed and direct output are
-/// byte-identical (the load-bearing isomorphism, ADR 0005):
+/// **Routing coverage.** `count` (NRN-94), `find` and `get` (NRN-222), and
+/// `repair --plan` (NRN-231) route today. Each command's MCP tool returns a
+/// `structuredContent` payload that the client rebuilds into the command's
+/// native result type and renders through the SAME renderers the direct path
+/// uses, so routed and direct output are byte-identical (the load-bearing
+/// isomorphism, ADR 0005):
 ///
 /// - `count` — `vault.count`'s `CountEnvelope` losslessly re-encodes `CountOutput`.
 /// - `find` — `vault.find` carries the `total`/`returned`/`truncated`/`starts_at`
@@ -199,6 +200,12 @@ fn stdin_carries_redirected_payload() -> bool {
 ///   (NRN-214); the client rebuilds a `ShowReport` and renders via `show::emit`,
 ///   applying the CLI's client-side `--col` narrowing. `--format markdown` and
 ///   `--section` stay Direct (see `route_get`).
+/// - `repair --plan` — `vault.repair` carries the full `MigrationPlan` (byte-equal
+///   to `serde_json::to_value(&plan)`) plus `has_diagnostic_errors` (the exit-1
+///   signal); the client rebuilds the `MigrationPlan` and renders/writes it via
+///   the SAME `repair::emit_plan` the direct path uses (report / json / paths,
+///   `--out`). Bare `repair` (summary mode) has no wire analogue and stays
+///   Direct (see `route_repair`).
 ///
 /// **byte-identical output outranks routing coverage** — routing a read whose
 /// output would differ is worse than not routing it. Any daemon-side failure
@@ -242,6 +249,7 @@ fn try_route_read(
             Command::Count(args) => route_count(args, cwd, verbose, dynamic_keys),
             Command::Find(args) => route_find(args, cwd, color, verbose, dynamic_keys),
             Command::Get(args) => route_get(args, cwd, verbose),
+            Command::Repair(args) => route_repair(args, cwd, verbose),
             _ => None,
         }
     }
@@ -653,6 +661,40 @@ fn route_get(
         },
         |structured| crate::show::route::reconstruct(structured, args),
         |report| crate::show::emit(&report, args),
+    )
+}
+
+/// Route a `repair --plan` to the warm daemon, or `None` to run Direct.
+///
+/// Only `--plan` shapes route: bare `norn repair` (summary mode) has no wire
+/// analogue (`vault.repair` only ever returns a `MigrationPlan`), so it
+/// returns `None` up front and always runs Direct.
+#[cfg(unix)]
+fn route_repair(
+    args: &crate::cli::RepairArgs,
+    cwd: &camino::Utf8Path,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    if !args.plan {
+        return None;
+    }
+    route_read(
+        cwd,
+        CallSpec {
+            tool: "vault.repair",
+            arguments: crate::repair::route::to_mcp_arguments(args),
+            on_tool_error: crate::service::OnToolError::FallBackDirect,
+            verbose,
+        },
+        crate::repair::route::reconstruct,
+        |routed| {
+            // `--out` writes and stdout rendering run through the SAME
+            // `emit_plan` the direct path calls, so a routed `--out` write is
+            // byte-identical to the direct `fs::write`, and the exit code
+            // (1 if the vault carries any error-severity diagnostic) matches
+            // `crate::exit_code_for(&index)` on the direct path (NRN-231).
+            crate::repair::emit_plan(&routed.plan, args, cwd, routed.has_diagnostic_errors)
+        },
     )
 }
 
