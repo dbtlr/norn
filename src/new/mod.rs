@@ -2,6 +2,7 @@
 
 pub mod generate;
 pub mod report;
+pub mod route;
 pub mod synth;
 pub mod validate;
 
@@ -402,7 +403,12 @@ pub fn preflight_and_plan(args: &NewArgs, vault_root: &Utf8Path) -> Result<Outpu
 
 /// Parse `--var KEY=VALUE` arguments into a `BTreeMap`.
 /// Returns exit-2 error on malformed entries (no `=`).
-fn parse_var_args(var_args: &[String]) -> Result<BTreeMap<String, String>> {
+///
+/// `pub(crate)` so the NRN-230 routing seam (`src/lib.rs`) can parse `--var`
+/// CLI-side with the EXACT same function the direct path uses, before shipping
+/// the resulting `vars` map on the `vault.new` wire — a malformed `--var` then
+/// refuses pre-send with byte-identical `error:` prose + exit 2.
+pub(crate) fn parse_var_args(var_args: &[String]) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     for kv in var_args {
         let (k, v) = kv
