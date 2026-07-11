@@ -17,6 +17,7 @@
 //! no unit selector — a verb acts on the single serve daemon.
 
 use crate::cli::{ServiceCommand, ServiceFormat, ServiceSubcommand};
+use crate::self_update::resolve::Action;
 
 #[cfg(unix)]
 use super::launchd::{Exec, LaunchdSupervisor, LoadState, RealExec};
@@ -561,6 +562,93 @@ fn status_cmd(
     Ok(status::exit_code(&report))
 }
 
+/// What came of trying to restart a loaded `serve` unit after `self-update`
+/// swapped the binary (NRN-226). Best-effort: [`Failed`](Self::Failed) is not
+/// fatal — the swap already succeeded — so the CLI boundary renders it as a
+/// warning, never as an error that changes `self-update`'s exit code. Not
+/// platform-gated itself (an `anyhow::Error` carries fine everywhere); only
+/// the two [`restart_after_update`] bodies below are — which leaves
+/// [`Restarted`](Self::Restarted) and [`Failed`](Self::Failed) matched but
+/// never constructed on non-unix, hence the dead_code allowance there.
+#[derive(Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) enum RestartOutcome {
+    /// The unit was loaded; `kickstart -k` restarted it.
+    Restarted,
+    /// Not installed or not loaded (including every non-macOS host, which
+    /// has no launchd) — nothing to restart.
+    NotLoaded,
+    /// The load-state probe or the restart call itself failed.
+    Failed(anyhow::Error),
+}
+
+/// The ONE definition of the NRN-226 gate: a service restart may follow
+/// exactly one action — a real completed swap. Exhaustive so a new
+/// [`Action`] variant forces a deliberate decision here rather than
+/// silently inheriting either answer.
+fn swap_completed(action: Action) -> bool {
+    match action {
+        Action::Updated => true,
+        Action::WouldUpdate | Action::WouldNoOp | Action::NoOp => false,
+    }
+}
+
+/// Gate + restart as one tested unit: `None` means the gate refused
+/// ([`swap_completed`] said no — dry-run preview or no-op) and the
+/// supervisor was never consulted; `Some` carries the restart outcome for
+/// a real swap. The CLI boundary calls the edge below unconditionally, so
+/// the dry-run-safety property lives HERE, where the fake-[`Exec`] tests
+/// pin it.
+#[cfg(unix)]
+fn maybe_restart_after_update_outcome<E: Exec>(
+    action: Action,
+    supervisor: &LaunchdSupervisor<E>,
+) -> Option<RestartOutcome> {
+    swap_completed(action).then(|| restart_after_update_outcome(supervisor))
+}
+
+/// The restart-after-update decision, over the seam (testable with a fake):
+/// probe first — a probe failure is [`RestartOutcome::Failed`], never read as
+/// not-loaded, the same "unknown must surface" rule [`lifecycle_outcome`]
+/// follows — then restart only a definitively LOADED unit.
+#[cfg(unix)]
+fn restart_after_update_outcome<E: Exec>(supervisor: &LaunchdSupervisor<E>) -> RestartOutcome {
+    let state = match supervisor.load_state() {
+        Ok(state) => state,
+        Err(error) => return RestartOutcome::Failed(error),
+    };
+    if !state.loaded() {
+        return RestartOutcome::NotLoaded;
+    }
+    match supervisor.restart() {
+        Ok(()) => RestartOutcome::Restarted,
+        Err(error) => RestartOutcome::Failed(error),
+    }
+}
+
+/// Real-edge wiring `self-update` calls unconditionally after its report is
+/// rendered; the [`swap_completed`] gate inside decides whether anything
+/// happens. Unlike [`require_macos`], a fired gate never refuses —
+/// self-update already ran and the binary is already updated; a non-macOS
+/// host simply has no launchd to restart, so a real swap silently reads as
+/// [`RestartOutcome::NotLoaded`]. The `cfg(not(unix))` twin below covers
+/// every remaining host so the crate builds everywhere.
+#[cfg(unix)]
+pub(crate) fn maybe_restart_after_update(action: Action) -> Option<RestartOutcome> {
+    if std::env::consts::OS != "macos" {
+        return swap_completed(action).then(|| RestartOutcome::NotLoaded);
+    }
+    // SAFETY: `getuid(2)` is always successful and takes no arguments.
+    let uid = unsafe { libc::getuid() };
+    let supervisor = LaunchdSupervisor::new(RealExec, uid, plist::SERVE_LABEL);
+    maybe_restart_after_update_outcome(action, &supervisor)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn maybe_restart_after_update(action: Action) -> Option<RestartOutcome> {
+    swap_completed(action).then(|| RestartOutcome::NotLoaded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,6 +1040,95 @@ mod tests {
                 !resolved.as_str().ends_with("norn-0.45.1-real"),
                 "must not resolve to the versioned target"
             );
+        }
+
+        /// The dry-run-safety property (NRN-226 review): every non-swap
+        /// action is refused by the gate WITHOUT the supervisor ever being
+        /// consulted — a `--dry-run` can never `kickstart -k` a live daemon.
+        /// The empty `FakeExec` script doubles as a tripwire: any probe or
+        /// restart attempt would panic the fake.
+        #[test]
+        fn gate_refuses_every_non_swap_action_without_touching_the_supervisor() {
+            for action in [Action::WouldUpdate, Action::WouldNoOp, Action::NoOp] {
+                let s = supervisor(FakeExec::new(vec![]));
+                let outcome = maybe_restart_after_update_outcome(action, &s);
+                assert!(outcome.is_none(), "{action:?} must be gate-refused");
+                assert_eq!(
+                    s.exec().calls().len(),
+                    0,
+                    "{action:?} must not probe or restart"
+                );
+            }
+        }
+
+        /// A real completed swap passes the gate and the restart runs.
+        #[test]
+        fn gate_fires_the_restart_on_a_completed_swap() {
+            let s = supervisor(FakeExec::new(vec![print_running(4242), exec_ok()]));
+            let outcome = maybe_restart_after_update_outcome(Action::Updated, &s);
+            assert!(
+                matches!(outcome, Some(RestartOutcome::Restarted)),
+                "{outcome:?}"
+            );
+        }
+
+        /// A loaded unit is restarted via `kickstart -k` — the same call
+        /// `service restart` makes.
+        #[test]
+        fn restart_after_update_restarts_a_loaded_unit() {
+            let s = supervisor(FakeExec::new(vec![print_running(4242), exec_ok()]));
+            let outcome = restart_after_update_outcome(&s);
+            assert!(matches!(outcome, RestartOutcome::Restarted), "{outcome:?}");
+            assert_eq!(
+                s.exec().calls()[1],
+                vec![
+                    "launchctl",
+                    "kickstart",
+                    "-k",
+                    "gui/501/com.dbtlr.norn.serve"
+                ]
+            );
+        }
+
+        /// A not-loaded unit (never installed, or installed but stopped) is a
+        /// silent no-op — no restart attempt.
+        #[test]
+        fn restart_after_update_is_a_no_op_when_not_loaded() {
+            let s = supervisor(FakeExec::new(vec![print_not_loaded()]));
+            let outcome = restart_after_update_outcome(&s);
+            assert!(matches!(outcome, RestartOutcome::NotLoaded), "{outcome:?}");
+            assert_eq!(s.exec().calls().len(), 1, "probe only, no restart attempt");
+        }
+
+        /// A genuine probe failure must surface as `Failed`, never read as
+        /// not-loaded — the same rule `lifecycle_outcome` follows.
+        #[test]
+        fn restart_after_update_probe_failure_is_failed_not_not_loaded() {
+            let s = supervisor(FakeExec::new(vec![print_probe_failed()]));
+            let outcome = restart_after_update_outcome(&s);
+            match outcome {
+                RestartOutcome::Failed(error) => {
+                    assert!(error.to_string().contains("could not determine"), "{error}");
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
+        }
+
+        /// A restart (`kickstart -k`) failure on a loaded unit surfaces as
+        /// `Failed` too — the CLI boundary warns, exit code is untouched.
+        #[test]
+        fn restart_after_update_restart_failure_is_failed() {
+            let s = supervisor(FakeExec::new(vec![
+                print_running(4242),
+                exec_fail(1, "boom"),
+            ]));
+            let outcome = restart_after_update_outcome(&s);
+            match outcome {
+                RestartOutcome::Failed(error) => {
+                    assert!(error.to_string().contains("boom"), "{error}");
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
         }
     }
 }

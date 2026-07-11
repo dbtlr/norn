@@ -194,6 +194,8 @@ norn: service is a different build of v0.45.1 — restart the norn serve daemon
 
 `norn service status` shows the same condition as `restart pending` / `restart pending (rebuilt)` (see [status](#status) above). Plainly stated: after you upgrade or rebuild `norn`, the still-running daemon stops serving requests — silently, on every command — until you run `norn service restart`. Nothing breaks in the meantime; every command just runs the direct path it always could.
 
+`norn self-update` closes this gap for itself: after it swaps in a new binary, it restarts a loaded `serve` unit automatically (`kickstart -k`), so the daemon picks up the update without a manual `norn service restart`. If the restart itself fails, `self-update` still exits successfully — the binary is updated either way — and prints a stderr warning pointing back at `norn service restart` as the fallback.
+
 ### Byte-identity promise
 
 Routed and direct output are byte-for-byte identical: stdout, stderr, exit code, and the on-disk result of a mutation — the telemetry `trace_id` aside, which is non-deterministic on the direct path too. There is no observable way to tell, from a command's output, whether it was served warm by the daemon or run direct; the daemon is purely a speed optimization over the same trust-verified path.

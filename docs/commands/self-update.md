@@ -7,6 +7,8 @@ description: Update norn to the latest GitHub release.
 
 Update norn to the latest GitHub release. Works only when norn was installed via the official GitHub install script — for a `cargo install`, Homebrew, or source build, use that tool's update mechanism instead.
 
+If a `norn service` unit is loaded, a successful update restarts it automatically so the daemon picks up the new binary — see [Version and build skew](../service.md#version-and-build-skew).
+
 ## Examples
 
 ```bash
