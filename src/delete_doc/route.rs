@@ -8,15 +8,21 @@
 //! and the routed records path reproduces the direct path byte-identically —
 //! including the `--rewrite-to` and `--allow-broken-links` shapes.
 //!
-//! - Routed: `--format json` and `--format records` (all flag combinations).
-//! - Gated to Direct:
-//!   - Any target that is not an exact on-disk `.md` doc FILE path — `vault.delete`
-//!     applies the raw `target` while the CLI arm applies the preflight-RESOLVED
-//!     path (NRN-57) — gated by the same `.md`-extension guard `move` uses (bare
-//!     existence is not enough: an extensionless `foo` beside `foo.md` shadows
-//!     the stem, and routing it would act on a different doc than Direct).
-//!     `--rewrite-to` needs no such guard: BOTH surfaces put the RAW value into
-//!     the plan fields and preflight it identically, so it cannot diverge.
+//! - Routed: `--format json` and `--format records` (all flag combinations),
+//!   and every target shape — an exact on-disk `.md` doc path, a bare STEM
+//!   needing index resolution, or a stem shadowed by a non-doc on-disk entry
+//!   (`foo` beside `foo.md`). Since NRN-239 `vault.delete` runs the SAME
+//!   stem-resolving preflight the CLI direct arm does and plans the RESOLVED
+//!   target, not the raw argument — raw-vs-resolved divergence is structurally
+//!   impossible, so no on-disk existence/extension guard is needed (the
+//!   `rewrite_wikilink` model). An unresolvable or ambiguous target still
+//!   refuses (coded `target-not-found` / `target-ambiguous`), reconstructed
+//!   byte-identically on the wire. `--rewrite-to` needed no such guard even
+//!   before NRN-239: BOTH surfaces put the RAW value into the plan fields and
+//!   preflight it identically, so it cannot diverge.
+//! - Gated to Direct: only the shared flags (`--config` /
+//!   `--no-cache-refresh`) and the interactive-TTY path, same as every other
+//!   routed mutation.
 
 use serde_json::{Map, Value};
 
@@ -26,9 +32,11 @@ use crate::cli::{DeleteArgs, DeleteFormat};
 /// Translate parsed `norn delete` args into the `vault.delete` tool's parameter
 /// object (the `DeleteParams` shape in `src/mcp/tools/delete.rs`).
 ///
-/// The wire carries the RAW `target` — the caller has gated any target needing
-/// stem resolution. `confirm` is the dry-run/apply switch. `rewrite_to` /
-/// `allow_broken_links` are omitted when absent/false (the tool defaults them).
+/// The wire carries the RAW `target` — `vault.delete` runs its own
+/// stem-resolving preflight and plans the RESOLVED target (NRN-239), so a bare
+/// stem here resolves identically to what the direct arm would apply.
+/// `confirm` is the dry-run/apply switch. `rewrite_to` / `allow_broken_links`
+/// are omitted when absent/false (the tool defaults them).
 pub fn to_mcp_arguments(args: &DeleteArgs, confirm: bool) -> Value {
     let mut map = Map::new();
     map.insert("target".into(), Value::String(args.doc.clone()));

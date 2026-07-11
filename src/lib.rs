@@ -1028,12 +1028,16 @@ fn routed_confirm(dry_run: bool, yes: bool, format_is_json: bool) -> Option<bool
 /// Attempt to route a `norn move` to the warm daemon (NRN-229 PR B), or return
 /// `None` to run the direct path. Copies `try_route_set`'s shape.
 ///
-/// **Gated to Direct** beyond the shared `routing_forced_direct` flags and the
-/// interactive-TTY path: a move whose SOURCE is NOT a real path on disk. The CLI
-/// arm applies the preflight-RESOLVED source (NRN-216) while `vault.move` applies
-/// the raw argument, so a resolvable bare stem would diverge; the on-disk guard
-/// keeps only exact-path (and folder) moves — for which raw == resolved — on the
-/// wire. See `move_doc::route`.
+/// **No on-disk source guard.** Both surfaces now plan the index-RESOLVED
+/// source (NRN-239: `vault.move`'s handler runs the same stem-resolving
+/// preflight the CLI direct arm does and builds its `MigrationPlan` from the
+/// RESOLVED path, not the raw argument), so raw-vs-resolved divergence is
+/// structurally impossible — the `rewrite_wikilink` model. A bare stem, an
+/// exact path, and a stem shadowed by a non-doc file on disk (e.g. `foo`
+/// beside `foo.md`) all route and resolve identically to Direct. An
+/// unresolvable or ambiguous source still refuses (a coded `target-not-found`
+/// / `target-ambiguous`), reconstructed byte-identically on the wire. See
+/// `move_doc::route`.
 #[cfg(unix)]
 fn try_route_move(
     args: &crate::cli::MoveArgs,
@@ -1046,29 +1050,13 @@ fn try_route_move(
         return None;
     }
 
-    // On-disk source guard: only route when the raw source is an exact path (a
-    // file → single-file move; a directory → folder move). A bare stem needing
-    // index resolution — or a missing source (refused identically on Direct) —
-    // stays Direct.
-    //
-    // The single-file case additionally requires the on-disk entry to carry the
-    // `.md` extension — bare existence is NOT enough. Without it, a non-doc
-    // filesystem entry named exactly like a bare stem (vault has `foo.md` AND an
-    // extensionless file `foo`, e.g. README/README.md) shadows the stem: `norn
-    // move foo dst` would pass an exists() check and route, making the daemon
-    // apply the RAW `foo` while the direct arm applies the index-RESOLVED
-    // `foo.md` — silently moving a DIFFERENT file. Only an exact `.md` doc path
-    // (which the index resolves to itself, exact-path-match-first) or a
-    // directory (folder moves apply the raw path on both surfaces) can route.
+    // Folder-move detection (unrelated to routing eligibility): explicit `-r`,
+    // or the raw source resolves to a directory on disk. This only selects the
+    // renderer (`render_folder_apply_tty` vs `render_move_apply_tty`) and the
+    // folder-op field shape — folder moves apply the raw src/dst on both
+    // surfaces (a directory path isn't stem-resolved), matching the CLI.
     let src_full = cwd.join(&args.src);
-    let src_std = src_full.as_std_path();
-    if !src_std.exists() {
-        return None;
-    }
-    let is_folder = args.recursive || src_std.is_dir();
-    if !is_folder && src_full.extension() != Some("md") {
-        return None;
-    }
+    let is_folder = args.recursive || src_full.as_std_path().is_dir();
 
     let confirm = routed_confirm(
         args.dry_run,
@@ -1110,13 +1098,19 @@ fn try_route_move(
 /// Attempt to route a `norn delete` to the warm daemon (NRN-229 PR B), or return
 /// `None` to run the direct path.
 ///
-/// **Gated to Direct** beyond the shared flags and the interactive-TTY path:
-/// - a target that is NOT an exact on-disk `.md` doc path (the same
-///   stem-shadowing guard as `move`: `vault.delete` applies the raw `target`,
-///   the CLI arm the resolved path, NRN-57). `--rewrite-to` needs NO such guard:
-///   BOTH surfaces put the RAW `rewrite_to` into the plan fields (the CLI arm
-///   deliberately does not use the preflight-resolved value there) and run the
-///   same preflight against it, so raw-vs-resolved cannot diverge for it.
+/// **No on-disk target guard.** Both surfaces now plan the index-RESOLVED
+/// target (NRN-239: `vault.delete`'s handler runs the same stem-resolving
+/// preflight the CLI direct arm does and builds its `MigrationPlan` from the
+/// RESOLVED path, not the raw argument), so raw-vs-resolved divergence is
+/// structurally impossible — the `rewrite_wikilink` model. A bare stem, an
+/// exact path, and a stem shadowed by a non-doc file on disk (e.g. `foo`
+/// beside `foo.md`) all route and resolve identically to Direct. An
+/// unresolvable or ambiguous target still refuses (a coded `target-not-found`
+/// / `target-ambiguous`), reconstructed byte-identically on the wire.
+/// `--rewrite-to` needed no such guard even before NRN-239: BOTH surfaces put
+/// the RAW `rewrite_to` into the plan fields (the CLI arm deliberately does not
+/// use the preflight-resolved value there) and run the same preflight against
+/// it, so raw-vs-resolved cannot diverge for it.
 ///
 /// `--format records` WITH `--rewrite-to` / `--allow-broken-links` now routes
 /// (NRN-237): the applier attaches the records renderer's index-derived
@@ -1132,17 +1126,6 @@ fn try_route_delete(
     verbose: bool,
 ) -> Option<Result<i32>> {
     if routing_forced_direct(explicit_config, no_cache_refresh) {
-        return None;
-    }
-
-    // On-disk target guard (same rationale as `move`): only an exact `.md` doc
-    // FILE path routes. The extension check closes the stem-shadowing hole — a
-    // non-doc entry named like a bare stem (`foo` beside `foo.md`, e.g.
-    // README/README.md) would pass a bare exists() check and route, making the
-    // daemon apply the RAW `foo` (refusing or acting on the wrong thing) while
-    // the direct arm applies the index-RESOLVED `foo.md`.
-    let doc_full = cwd.join(&args.doc);
-    if !doc_full.as_std_path().is_file() || doc_full.extension() != Some("md") {
         return None;
     }
 

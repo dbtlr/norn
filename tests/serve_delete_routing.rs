@@ -7,7 +7,11 @@
 //! the renderer's index-derived incoming-link data (count / files / resolved
 //! redirect target) rides the wire report as the delete op's `link_impact`, so
 //! the `--rewrite-to` and `--allow-broken-links` records shapes reproduce Direct
-//! byte-for-byte. Only a non-`.md`/stem target (NRN-239) stays gated to Direct.
+//! byte-for-byte. Since NRN-239 `vault.delete` also plans the preflight-RESOLVED
+//! target exactly like the CLI direct arm, so a non-`.md`/stem target routes too
+//! — every target shape reproduces Direct byte-for-byte, including the
+//! README-shadow case. Only the shared `routing_forced_direct` flags and the
+//! interactive-TTY path stay Direct.
 
 #![cfg(unix)]
 
@@ -202,12 +206,23 @@ fn shape_matrix() -> Vec<(&'static str, Vec<&'static str>, i32, bool)> {
             0,
             true,
         ),
-        // unknown-target refusal: no doc on disk → gated Direct.
+        // NRN-239: unknown-target refusal now ROUTES — both surfaces run the same
+        // stem-resolving preflight and reproduce the coded `target-not-found`
+        // refusal identically, so there is no more on-disk guard to gate it.
         (
-            "unknown-target refusal (gated Direct)",
+            "unknown-target refusal (routed)",
             vec!["nonexistent.md", "--yes"],
             2,
-            false,
+            true,
+        ),
+        // NRN-239: a bare stem (no doc on disk named exactly "orphan") now routes
+        // and resolves through the daemon's preflight identically to Direct.
+        ("bare-stem apply (routed)", vec!["orphan", "--yes"], 0, true),
+        (
+            "bare-stem dry-run (routed)",
+            vec!["orphan", "--dry-run"],
+            0,
+            true,
         ),
     ]
 }
@@ -299,14 +314,16 @@ fn no_daemon_runs_direct() {
     }
 }
 
-/// Stem-shadowing regression (the delete twin of `move`'s): the vault holds
-/// `foo.md` AND an extensionless non-doc file `foo`. `norn delete foo --yes`
-/// makes a bare exists() check true, but the CLI arm deletes the index-RESOLVED
-/// `foo.md` while `vault.delete` would apply the RAW `foo` (refusing) — routed
-/// and direct would diverge on exit code AND on-disk state. The `.md`-extension
-/// gate must keep this shape Direct (served == 0) with full identity.
+/// Stem-shadowing regression (the delete twin of `move`'s, NRN-239 contract):
+/// the vault holds `foo.md` AND an extensionless non-doc file `foo`. `norn
+/// delete foo --yes` used to make a bare `exists()` check true and — before
+/// NRN-239 — `vault.delete` planned the RAW `foo` while the CLI planned the
+/// index-RESOLVED `foo.md`, so this shape stayed gated to Direct. Now BOTH
+/// surfaces plan the preflight-RESOLVED path, so the shape ROUTES: `served ==
+/// 1`, both surfaces delete `foo.md`, the shadow file `foo` is left untouched
+/// on both, and the full triple + vault snapshot stay byte-identical.
 #[test]
-fn stem_shadowed_by_non_doc_file_gates_direct() {
+fn stem_shadowed_by_non_doc_file_routes_and_resolves() {
     let mut seed = seeded_vault_files();
     seed.push(("foo.md", "---\ntype: note\n---\nThe real doc\n"));
     seed.push(("foo", "an extensionless non-doc file shadowing the stem\n"));
@@ -365,12 +382,22 @@ fn stem_shadowed_by_non_doc_file_gates_direct() {
         dir_snapshot(routed_vault.path()),
         "shadowed-stem post-state vault must be byte-identical",
     );
+    // The routed side must ALSO have deleted the resolved foo.md and left the
+    // shadow file untouched (not just byte-identical to direct, but correct).
+    assert!(
+        !routed_vault.path().join("foo.md").exists(),
+        "routed must delete the RESOLVED foo.md"
+    );
+    assert!(
+        routed_vault.path().join("foo").exists(),
+        "routed must leave the extensionless shadow file untouched"
+    );
 
-    // The load-bearing gate assertion: the shape must NEVER reach the daemon.
+    // The load-bearing NRN-239 assertion: this shape now ROUTES.
     let served = count_served(&daemon.stderr_path, "vault.delete");
     assert_eq!(
-        served, 0,
-        "a stem shadowed by a non-doc file must gate Direct; the daemon served {served} vault.delete call(s)"
+        served, 1,
+        "a stem shadowed by a non-doc file must now route (NRN-239); the daemon served {served} vault.delete call(s)"
     );
 }
 

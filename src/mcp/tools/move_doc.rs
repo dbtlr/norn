@@ -41,14 +41,17 @@ use crate::mcp::mutation_result::MutationResult;
 /// `from` is the source and `to` is the destination — the same `SRC` / `DST`
 /// arguments `norn move` takes. `recursive` and `parents` mirror `-r` / `-p`.
 ///
-/// NOTE (mirrors a CLI quirk): the single-file `move_document` op resolves the
-/// source as a **vault-relative path** (`a.md`), not a bare stem — the CLI's
-/// stem-resolving preflight does not feed the apply plan, so `norn move a dst`
-/// also fails `MoveSourceMissing`. `vault.move` mirrors that exactly.
+/// `from` resolves exactly like the CLI's stem-resolving preflight (NRN-239):
+/// an exact vault-relative path match first, then a case-insensitive stem
+/// match, refusing with the coded `target-ambiguous` when more than one
+/// document shares the stem. The plan is built from the RESOLVED path, so a
+/// bare stem (`a`) applies to the same document `norn move a dst` would.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct MoveParams {
-    /// Source document: vault-relative path (e.g. `notes/a.md`), as `norn move
-    /// SRC` resolves it on the apply path.
+    /// Source document: a vault-relative path (`notes/a.md`) or a bare stem
+    /// (`a`). A bare stem resolves like `norn move SRC` does — exact path
+    /// first, then case-insensitive stem match, refusing `target-ambiguous`
+    /// on more than one match.
     pub from: String,
 
     /// Destination: vault-relative path (`norn move DST`).
@@ -183,7 +186,17 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     // as part of the audited apply step (the same shared containment gate that
     // already handles a not-yet-existing `-p`/`--parents` subtree), identically
     // on dry-run and confirm, matching the CLI.
-    if !is_folder {
+    //
+    // NRN-239: capture the RESOLVED plan (mirrors the CLI direct arm at
+    // src/lib.rs:1877-1896) instead of discarding it. `preflight_and_plan`
+    // resolves a bare stem (e.g. "a") to its full vault-relative path (e.g.
+    // "a.md") via `resolve_src`; the raw `from` may not match a real filesystem
+    // path at all. Building `MigrationOp.fields` from `p.from` verbatim (the old
+    // behavior) let a resolvable stem pass THIS preflight while the apply plan
+    // still carried the raw stem, so the applier either no-op'd or acted on the
+    // wrong on-disk entry. The destination stays the RAW `p.to` — the CLI never
+    // stem-resolves destinations either.
+    let resolved_src = if !is_folder {
         let cfg = crate::move_doc::PreflightConfig {
             src: &p.from,
             dst: &p.to,
@@ -197,8 +210,16 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
         // so `handle_output` recovers its `.code()` via `refusal_from_error` and
         // returns a coded, structured refusal instead of laundering to
         // `internal-error`. The `Display` prose is unchanged.
-        crate::move_doc::preflight_and_plan(cfg)?;
-    }
+        let plan = crate::move_doc::preflight_and_plan(cfg)?;
+        let move_change = plan
+            .changes
+            .iter()
+            .find(|c| c.operation == "move_document")
+            .expect("preflight_and_plan must produce a move_document op");
+        Some(move_change.path.to_string())
+    } else {
+        None
+    };
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.
     let op_kind = if is_folder {
@@ -206,8 +227,10 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     } else {
         "move_document"
     };
+    // Folder moves have no preflight plan (a folder path isn't stem-resolved) —
+    // fall back to the raw `p.from`, matching the CLI's folder-move arm.
     let mut fields = serde_json::json!({
-        "src": p.from.clone(),
+        "src": resolved_src.unwrap_or_else(|| p.from.clone()),
         "dst": p.to.clone(),
         "parents": p.parents,
     });
@@ -607,5 +630,70 @@ mod tests {
             !root.join("a.md").exists(),
             "confirm must move a.md off its original path"
         );
+    }
+
+    /// NRN-239: `from` given as a bare stem resolves through preflight exactly
+    /// like the CLI — the RESOLVED `a.md` is what gets planned and moved, not
+    /// the raw stem string (which previously reached the applier verbatim and
+    /// either no-op'd or moved the wrong on-disk entry).
+    #[test]
+    fn confirm_bare_stem_resolves_and_moves() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let report = handle(
+            &ctx,
+            MoveParams {
+                from: "a".into(), // bare stem, not "a.md"
+                to: "renamed.md".into(),
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (bare stem) should succeed");
+
+        assert!(!report.dry_run, "confirm report must have dry_run == false");
+        assert!(report.applied >= 1, "bare-stem move must apply");
+        assert!(
+            !root.join("a.md").exists(),
+            "bare-stem move must move the RESOLVED a.md off its path"
+        );
+        assert!(
+            root.join("renamed.md").exists(),
+            "bare-stem move must create the destination"
+        );
+    }
+
+    /// NRN-239: an ambiguous bare stem (two docs sharing the same stem) is
+    /// refused with the coded `target-ambiguous` — not a silent move of the
+    /// wrong file and not a bare-`Err` laundered to prose.
+    #[test]
+    fn confirm_ambiguous_stem_is_refused() {
+        let (_tmp, root) = seeded_vault();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/a.md"), "---\ntype: note\n---\nAnother A\n").unwrap();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            MoveParams {
+                from: "a".into(), // ambiguous: a.md AND sub/a.md share the stem "a"
+                to: "renamed.md".into(),
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("a coded refusal must be Ok(structured), not Err");
+
+        assert!(
+            result.is_error(),
+            "a confirmed ambiguous-stem refusal maps to isError:true"
+        );
+        let report = &result.value().report;
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["operations"][0]["error"]["code"], "target-ambiguous");
+        // Nothing moved: both candidates are untouched.
+        assert!(root.join("a.md").exists());
+        assert!(root.join("sub/a.md").exists());
     }
 }

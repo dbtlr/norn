@@ -243,6 +243,91 @@ fn dry_run_then_confirm_roundtrip() {
     );
 }
 
+// ── Bare-stem resolution through the tool (NRN-239) ─────────────────────────────
+
+/// NRN-239: `target` given as a bare stem resolves through the tool's own
+/// preflight exactly like the CLI — the confirm deletes the RESOLVED `doc.md`,
+/// and the report's `summary` prose names the resolved document rather than the
+/// raw stem.
+#[test]
+fn bare_stem_resolves_through_tool() {
+    let vault = seeded_vault();
+    prebuild_cache(&vault);
+    let state = vault.path().join(".xdg-state");
+
+    let responses = run_delete_responses(
+        &vault,
+        &state,
+        serde_json::json!({ "target": "doc", "allow_broken_links": true, "confirm": true }),
+        false,
+    );
+    let resp = responses
+        .iter()
+        .find(|r| r["id"] == 3)
+        .expect("no response");
+    assert!(
+        resp.get("error").is_none(),
+        "bare-stem confirm vault.delete must not error, got: {resp}"
+    );
+    let report = &resp["result"]["structuredContent"]["report"];
+    assert_eq!(report["dry_run"].as_bool(), Some(false));
+    assert_eq!(report["applied"].as_u64(), Some(1));
+    let op = &report["operations"][0];
+    assert_eq!(
+        op["summary"].as_str().unwrap_or(""),
+        "delete doc.md",
+        "the RESOLVED target, not the raw stem, must appear in the plan/report: {op}"
+    );
+
+    assert!(
+        !vault.path().join("doc.md").exists(),
+        "bare-stem delete must delete the RESOLVED doc.md"
+    );
+}
+
+/// NRN-239: an ambiguous bare stem (two docs sharing the stem) is refused with
+/// the coded `target-ambiguous` through the tool — a structured `isError:true`
+/// refusal, not a silent delete of either candidate.
+#[test]
+fn ambiguous_stem_refuses_through_tool() {
+    let vault = seeded_vault();
+    std::fs::create_dir_all(vault.path().join("sub")).unwrap();
+    std::fs::write(
+        vault.path().join("sub/doc.md"),
+        "---\ntype: note\n---\nAnother doc\n",
+    )
+    .unwrap();
+    prebuild_cache(&vault);
+    let state = vault.path().join(".xdg-state");
+
+    let responses = run_delete_responses(
+        &vault,
+        &state,
+        serde_json::json!({ "target": "doc", "allow_broken_links": true, "confirm": true }),
+        false,
+    );
+    let resp = responses
+        .iter()
+        .find(|r| r["id"] == 3)
+        .expect("no response");
+    assert!(
+        resp.get("error").is_none(),
+        "an ambiguous-stem refusal must be Ok(structured), not a bare JSON-RPC Err: {resp}"
+    );
+    assert_eq!(
+        resp["result"]["isError"],
+        serde_json::json!(true),
+        "a confirmed ambiguous-stem refusal maps to isError:true; got: {resp}"
+    );
+    let report = &resp["result"]["structuredContent"]["report"];
+    assert_eq!(report["outcome"], "refused");
+    assert_eq!(report["operations"][0]["error"]["code"], "target-ambiguous");
+
+    // Nothing deleted: both candidates are untouched.
+    assert!(vault.path().join("doc.md").exists());
+    assert!(vault.path().join("sub/doc.md").exists());
+}
+
 // ── Audit trail: MCP delete writes the event stream like the CLI (NRN-33) ──────
 
 fn find_event_files(dir: &Path) -> Vec<std::path::PathBuf> {

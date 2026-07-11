@@ -44,13 +44,18 @@ use crate::mcp::mutation_result::MutationResult;
 /// will break — required when the doc has incoming links and `rewrite_to` is not
 /// given, matching `norn delete`'s refusal policy.
 ///
-/// NOTE (mirrors a CLI quirk): the `delete_document` op resolves `target` as a
-/// **vault-relative path** (`doc.md`), not a bare stem — the CLI's
-/// stem-resolving preflight does not feed the apply plan, so `norn delete doc`
-/// also no-ops on the apply side. `vault.delete` mirrors that exactly.
+/// `target` resolves exactly like the CLI's stem-resolving preflight
+/// (NRN-239): an exact vault-relative path match first, then a
+/// case-insensitive stem match, refusing with the coded `target-ambiguous`
+/// when more than one document shares the stem. The plan is built from the
+/// RESOLVED path, so a bare stem (`doc`) deletes the same document `norn
+/// delete doc` would.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct DeleteParams {
-    /// Document to delete: vault-relative path (e.g. `notes/doc.md`).
+    /// Document to delete: a vault-relative path (`notes/doc.md`) or a bare
+    /// stem (`doc`). A bare stem resolves like `norn delete TARGET` does —
+    /// exact path first, then case-insensitive stem match, refusing
+    /// `target-ambiguous` on more than one match.
     pub target: String,
 
     /// Redirect every incoming link to this alternate document before deleting.
@@ -171,7 +176,20 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
     // so `handle_output` recovers its `.code()` via `refusal_from_error` and
     // returns a coded, structured refusal instead of laundering to
     // `internal-error`. The `Display` prose is unchanged.
-    crate::delete_doc::preflight_and_plan(cfg)?;
+    //
+    // NRN-239: capture the RESOLVED plan (mirrors the CLI direct arm at
+    // src/lib.rs:2120-2129) instead of discarding it. `preflight_and_plan`
+    // resolves a bare stem (e.g. "doc") to its full vault-relative path (e.g.
+    // "doc.md") via `resolve_target_path`; the raw `target` may not match a
+    // real filesystem path at all. `rewrite_to` stays the RAW value — the
+    // applier resolves it only for `link_impact.redirect_to`, matching the CLI.
+    let outcome = crate::delete_doc::preflight_and_plan(cfg)?;
+    let delete_change = outcome
+        .plan
+        .changes
+        .iter()
+        .find(|c| c.operation == "delete_document")
+        .expect("preflight_and_plan must produce a delete_document op");
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.
     let plan = MigrationPlan {
@@ -184,7 +202,7 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
             id: None,
             requires: vec![],
             fields: serde_json::json!({
-                "path": p.target,
+                "path": delete_change.path,
                 "rewrite_to": p.rewrite_to.as_ref(),
                 "allow_broken_links": p.allow_broken_links,
             }),
@@ -456,5 +474,70 @@ mod tests {
         );
         assert_eq!(confirm_link_impact["incoming_files"][0], "linker.md");
         assert_eq!(confirm_link_impact["redirect_to"], "alt.md");
+    }
+
+    /// NRN-239: `target` given as a bare stem resolves through preflight
+    /// exactly like the CLI — the RESOLVED `doc.md` is what gets planned and
+    /// deleted, not the raw stem string (which previously reached the applier
+    /// verbatim and no-op'd on the apply side).
+    #[test]
+    fn confirm_bare_stem_resolves_and_deletes() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let report = handle(
+            &ctx,
+            DeleteParams {
+                target: "doc".into(), // bare stem, not "doc.md"
+                rewrite_to: None,
+                allow_broken_links: true,
+                confirm: true,
+            },
+        )
+        .expect("handle (bare stem) should succeed");
+
+        assert!(!report.dry_run, "confirm report must have dry_run == false");
+        assert!(report.applied >= 1, "bare-stem delete must apply");
+        assert!(
+            !root.join("doc.md").exists(),
+            "bare-stem delete must remove the RESOLVED doc.md"
+        );
+    }
+
+    /// NRN-239: an ambiguous bare stem (two docs sharing the same stem) is
+    /// refused with the coded `target-ambiguous` — not a silent delete of the
+    /// wrong file and not a bare-`Err` laundered to prose.
+    #[test]
+    fn confirm_ambiguous_stem_is_refused() {
+        let (_tmp, root) = seeded_vault();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(
+            root.join("sub/doc.md"),
+            "---\ntype: note\n---\nAnother doc\n",
+        )
+        .unwrap();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            DeleteParams {
+                target: "doc".into(), // ambiguous: doc.md AND sub/doc.md share the stem
+                rewrite_to: None,
+                allow_broken_links: true,
+                confirm: true,
+            },
+        )
+        .expect("a coded refusal must be Ok(structured), not Err");
+
+        assert!(
+            result.is_error(),
+            "a confirmed ambiguous-stem refusal maps to isError:true"
+        );
+        let report = &result.value().report;
+        assert_eq!(report["outcome"], "refused");
+        assert_eq!(report["operations"][0]["error"]["code"], "target-ambiguous");
+        // Nothing deleted: both candidates are untouched.
+        assert!(root.join("doc.md").exists());
+        assert!(root.join("sub/doc.md").exists());
     }
 }
