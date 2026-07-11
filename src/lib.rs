@@ -1072,13 +1072,13 @@ fn try_route_move(
 ///   the CLI arm the resolved path, NRN-57). `--rewrite-to` needs NO such guard:
 ///   BOTH surfaces put the RAW `rewrite_to` into the plan fields (the CLI arm
 ///   deliberately does not use the preflight-resolved value there) and run the
-///   same preflight against it, so raw-vs-resolved cannot diverge for it;
-/// - `--format records` WITH `--rewrite-to` or `--allow-broken-links` — the
-///   records renderer needs index-derived incoming-link data (counts, file paths,
-///   the resolved redirect target) absent from the wire `ApplyReport`. The
-///   neither-flag records path is routable: a successful delete there provably had
-///   zero incoming links (else preflight refuses), so the renderer needs no index
-///   data. See `delete_doc::route`.
+///   same preflight against it, so raw-vs-resolved cannot diverge for it.
+///
+/// `--format records` WITH `--rewrite-to` / `--allow-broken-links` now routes
+/// (NRN-237): the applier attaches the records renderer's index-derived
+/// incoming-link data to the `delete_document` op as `link_impact`, so it rides
+/// the wire `ApplyReport` and the routed path renders byte-identically. See
+/// `delete_doc::route`.
 #[cfg(unix)]
 fn try_route_delete(
     args: &crate::cli::DeleteArgs,
@@ -1099,14 +1099,6 @@ fn try_route_delete(
     // the direct arm applies the index-RESOLVED `foo.md`.
     let doc_full = cwd.join(&args.doc);
     if !doc_full.as_std_path().is_file() || doc_full.extension() != Some("md") {
-        return None;
-    }
-
-    // Records rendering needs index-derived incoming-link data when a redirect or
-    // broken-link acknowledgement is in play; gate those to Direct.
-    if matches!(args.format, crate::cli::DeleteFormat::Records)
-        && (args.rewrite_to.is_some() || args.allow_broken_links)
-    {
         return None;
     }
 
@@ -1898,41 +1890,17 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 }
             };
 
-            // Compute incoming-links info for TTY rendering.
+            // The resolved delete target path feeds the plan below. Its
+            // incoming-link data (counts / files / redirect target) is no longer
+            // computed here: the applier attaches it to the delete_document op as
+            // `link_impact` (NRN-237), so the direct and warm-daemon records paths
+            // render byte-identically from the one report.
             let delete_op = outcome
                 .plan
                 .changes
                 .iter()
                 .find(|c| c.operation == "delete_document")
                 .expect("preflight_and_plan must produce a delete_document op");
-            let bl = crate::target::backlinks(&index, &delete_op.path);
-            let incoming_total = bl.len();
-            let mut incoming_file_paths: Vec<camino::Utf8PathBuf> = {
-                use std::collections::BTreeSet;
-                let mut seen: BTreeSet<camino::Utf8PathBuf> = BTreeSet::new();
-                for link in &bl {
-                    seen.insert(link.source_path.clone());
-                }
-                seen.into_iter().collect()
-            };
-            // If rewrite_to is present but no incoming links broke, files list is the
-            // rewrite sources (from link_risk source_path).
-            if args.rewrite_to.is_some() && incoming_file_paths.is_empty() {
-                if let Some(risk) = &delete_op.link_risk {
-                    use std::collections::BTreeSet;
-                    let mut seen: BTreeSet<camino::Utf8PathBuf> = BTreeSet::new();
-                    for a in risk
-                        .stem_links
-                        .iter()
-                        .chain(risk.path_qualified_wikilinks.iter())
-                        .chain(risk.markdown_links.iter())
-                    {
-                        seen.insert(a.source_path.clone());
-                    }
-                    incoming_file_paths = seen.into_iter().collect();
-                }
-            }
-            let resolved_rewrite_to = outcome.resolved_rewrite_to.clone();
 
             // ----------------------------------------------------------------
             // Resolve dry_run.
@@ -2008,14 +1976,6 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
 
             emit_cascade_failure_warnings(&report);
 
-            // rewrite_total comes from the delete_document op's cascade.
-            let rewrite_total = report
-                .operations
-                .iter()
-                .find(|o| o.kind == "delete_document")
-                .and_then(|o| o.cascade.as_ref())
-                .map_or(0, |c| c.applied);
-
             // ----------------------------------------------------------------
             // Render output.
             // ----------------------------------------------------------------
@@ -2028,19 +1988,12 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     out.write_all(b"\n")?;
                 }
                 crate::cli::DeleteFormat::Records => {
-                    let applied = !dry_run && exit == 0;
-                    crate::delete_doc::render_delete_apply_tty(
-                        &mut out,
-                        &args.doc,
-                        incoming_total,
-                        &incoming_file_paths,
-                        resolved_rewrite_to.as_deref().map(camino::Utf8Path::as_str),
-                        rewrite_total,
-                        applied,
+                    // The renderer reads the delete op's index-derived `link_impact`
+                    // (NRN-237) and apply-time `cascade` straight off the report —
+                    // the same report the routed path reconstructs, so both match.
+                    crate::delete_doc::render_delete_records(
+                        &mut out, &report, &args.doc, dry_run,
                     )?;
-                    if !dry_run {
-                        writeln!(out, "trace: {}", report.trace_id)?;
-                    }
                 }
             }
 

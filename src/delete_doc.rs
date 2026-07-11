@@ -20,19 +20,70 @@ use camino::Utf8PathBuf;
 // ApplyReport-based TTY renderer for delete
 // ---------------------------------------------------------------------------
 
+/// Render the records-format `norn delete` output from an [`ApplyReport`],
+/// shared by the direct CLI arm and the routed (warm-daemon) emitter so both
+/// paths are byte-identical (NRN-237).
+///
+/// The renderer's incoming-link inputs (`incoming_total`, `incoming_files`, the
+/// resolved `redirect_to`) come from the `delete_document` op's index-derived
+/// [`LinkImpact`](crate::apply_report::LinkImpact) — which now rides the wire
+/// report — defaulting to empty when absent (a sibling verb or pre-NRN-237
+/// report). `rewrite_total` comes from the apply-time `cascade.applied`. The
+/// `trace:` footer follows a real apply (`!dry_run`).
+pub fn render_delete_records<W: Write>(
+    out: &mut W,
+    report: &crate::apply_report::ApplyReport,
+    doc: &str,
+    dry_run: bool,
+) -> std::io::Result<()> {
+    let delete_op = report
+        .operations
+        .iter()
+        .find(|o| o.kind == "delete_document");
+
+    let (incoming_total, incoming_files, redirect_to): (usize, &[String], Option<&str>) = delete_op
+        .and_then(|o| o.link_impact.as_ref())
+        .map_or((0, &[][..], None), |li| {
+            (
+                li.incoming_total,
+                li.incoming_files.as_slice(),
+                li.redirect_to.as_deref(),
+            )
+        });
+
+    let rewrite_total = delete_op
+        .and_then(|o| o.cascade.as_ref())
+        .map_or(0, |c| c.applied);
+
+    let applied = !dry_run && report.exit_code() == 0;
+    render_delete_apply_tty(
+        out,
+        doc,
+        incoming_total,
+        incoming_files,
+        redirect_to,
+        rewrite_total,
+        applied,
+    )?;
+    if !dry_run {
+        writeln!(out, "trace: {}", report.trace_id)?;
+    }
+    Ok(())
+}
+
 /// Render a human-readable TTY summary for a delete operation.
 ///
 /// `doc` is the vault-relative path of the deleted document.
-/// `incoming_total` is the count of backlinks (from preflight).
+/// `incoming_total` is the count of backlinks (from `LinkImpact`).
 /// `incoming_files` is the list of source file paths that hold backlinks.
 /// `rewrite_to` is the resolved rewrite target path (if `--rewrite-to` was used).
-/// `rewrite_total` is the number of links rewritten (from link_risk; 0 if no rewrite).
+/// `rewrite_total` is the number of links rewritten (from cascade; 0 if no rewrite).
 /// `applied` is `true` when the operation was executed, `false` for dry-run/preview.
 pub fn render_delete_apply_tty<W: Write>(
     out: &mut W,
     doc: &str,
     incoming_total: usize,
-    incoming_files: &[camino::Utf8PathBuf],
+    incoming_files: &[String],
     rewrite_to: Option<&str>,
     rewrite_total: usize,
     applied: bool,
