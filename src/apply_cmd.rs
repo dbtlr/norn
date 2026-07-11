@@ -16,7 +16,7 @@ use crate::applier::{apply_migration_plan, ApplyContext};
 use crate::apply_report::ApplyReport;
 use crate::cli::{ApplyFormat, InputFormat};
 use crate::migration_plan::{MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
-use crate::mutation_lock::pending::{delete_pending_plan, save_pending_plan};
+use crate::mutation_lock::pending::delete_pending_plan;
 use crate::mutation_lock::MutationLock;
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -122,23 +122,10 @@ pub fn run_direct(
         match MutationLock::acquire_if_mutating(state_dir, is_apply) {
             Ok(guard) => guard,
             Err(crate::cache::CacheError::MutationLockTimeout) => {
-                if args.plan_path == "-" {
-                    match save_pending_plan(state_dir, raw) {
-                        Ok(pending_path) => {
-                            eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
-                            eprintln!("retry with: norn apply {pending_path}");
-                        }
-                        Err(save_err) => {
-                            eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
-                            eprintln!("warning: could not save stdin plan for retry: {save_err}");
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "error: another norn mutation is in progress against this vault (timed out after 5 s)"
-                    );
-                }
-                return Ok(EXIT_PREFLIGHT);
+                // NRN-231 review F5: the stash prose + stdin-vs-file branch lives
+                // once, in `route::emit_lock_timeout_stash`; the direct arm calls
+                // straight into it so the two paths cannot drift.
+                return route::emit_lock_timeout_stash(&args.plan_path, raw, state_dir);
             }
             Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
         }
@@ -239,15 +226,25 @@ pub fn run_direct(
     // ------------------------------------------------------------------
     render_report(&report, args.format, args.out.as_deref())?;
 
-    // Delete the pending plan on successful retry so it self-cleans.
-    if exit == EXIT_OK {
-        let path = camino::Utf8Path::new(&args.plan_path);
-        if path.as_str().contains("/pending/") && path.as_str().ends_with(".plan.json") {
-            delete_pending_plan(path);
-        }
-    }
+    // Delete the pending plan on successful retry so it self-cleans (shared with
+    // the routed emit).
+    self_clean_pending_plan(exit, &args.plan_path);
 
     Ok(exit)
+}
+
+/// Delete the pending plan on a successful `/pending/` retry so it self-cleans.
+/// Shared by the direct tail ([`run_direct`]) and the routed emit
+/// ([`route::emit`]) so the `/pending/`-path check exists exactly once (NRN-231
+/// review F4). A no-op unless the applied plan came from a stashed pending file.
+pub(crate) fn self_clean_pending_plan(exit: i32, plan_path: &str) {
+    if exit != EXIT_OK {
+        return;
+    }
+    let path = camino::Utf8Path::new(plan_path);
+    if path.as_str().contains("/pending/") && path.as_str().ends_with(".plan.json") {
+        delete_pending_plan(path);
+    }
 }
 
 /// Read plan content from a file path or stdin (`-`).

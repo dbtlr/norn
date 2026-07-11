@@ -55,6 +55,12 @@ enum PlanKind {
     /// `add_frontmatter` with a wrong `document_hash` → `stale-document-hash`
     /// refusal (writes nothing).
     StaleHash,
+    /// A `create_document` whose `new_value` has no `frontmatter` object → the
+    /// applier's bare-`anyhow` PRE-WRITE refusal (NRN-231 review F1). Direct
+    /// exits 2 with the plain error; the routed path must reproduce that exit-2
+    /// refusal, NOT a false post-send-uncertain (exit 1), because the daemon
+    /// crosses the pre-write error as a coded, report-shaped refusal.
+    MissingFrontmatter,
     /// A structurally valid plan with an unsupported `schema_version` → the
     /// CLIENT-side preflight refusal (must NOT route).
     BadVersion,
@@ -73,6 +79,10 @@ fn plan_json(kind: PlanKind, vault_root: &str) -> String {
         ),
         PlanKind::StaleHash => format!(
             r##"{{"schema_version":1,"vault_root":{root},"operations":[{{"kind":"add_frontmatter","fields":{{"path":"note.md","field":"status","new_value":"done","document_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}}}]}}"##,
+            root = serde_json::to_string(vault_root).unwrap()
+        ),
+        PlanKind::MissingFrontmatter => format!(
+            r##"{{"schema_version":1,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"new.md","new_value":{{"body":"# New\n"}}}}}}]}}"##,
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::BadVersion => format!(
@@ -303,6 +313,27 @@ fn shape_matrix() -> Vec<Shape> {
         shape(
             "records refusal (stale-document-hash)",
             PlanKind::StaleHash,
+            Deliver::File,
+            vec!["--yes"],
+            2,
+            true,
+        ),
+        // NRN-231 review F1: a PRE-WRITE bare-`anyhow` refusal (create_document
+        // with no frontmatter object) must route byte-identically to Direct's
+        // exit-2 refusal — json and records shapes — not surface as a false
+        // post-send-uncertain (exit 1). These route (the request reaches the
+        // daemon, which crosses the refusal as a coded, report-shaped result).
+        shape(
+            "json pre-write refusal (missing frontmatter)",
+            PlanKind::MissingFrontmatter,
+            Deliver::File,
+            vec!["--yes", "--format", "json"],
+            2,
+            true,
+        ),
+        shape(
+            "records pre-write refusal (missing frontmatter)",
+            PlanKind::MissingFrontmatter,
             Deliver::File,
             vec!["--yes"],
             2,

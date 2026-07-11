@@ -111,7 +111,28 @@ pub(crate) fn apply_migration_plan(
     let mut provenance: Vec<usize> = Vec::new(); // change idx → parent op idx
 
     for (i, op) in plan.operations.iter().enumerate() {
-        let expanded = expand(op, index)?;
+        let expanded = match expand(op, index) {
+            Ok(expanded) => expanded,
+            Err(e) => {
+                // Expansion is pure (index-only, no filesystem write), so ANY
+                // failure here is provably PRE-WRITE — the vault is byte-identical
+                // (NRN-231 review F1). Under `refuse_as_report` (the daemon/MCP
+                // surface, ADR 0011) cross it as a coded, report-shaped refusal so
+                // a routed apply reconstructs the exact exit-2 refusal the direct
+                // arm renders, instead of a false post-send-uncertain. The CLI
+                // leaves `refuse_as_report` false and still renders the `Err`
+                // envelope itself (exit 2).
+                if ctx.refuse_as_report {
+                    return Ok(build_plan_refusal_report(
+                        plan,
+                        ctx.dry_run,
+                        i,
+                        crate::apply_report::ApplyError::from_anyhow(&e),
+                    ));
+                }
+                return Err(e);
+            }
+        };
         for c in expanded {
             provenance.push(i);
             all_changes.push(c);
@@ -247,22 +268,39 @@ pub(crate) fn apply_migration_plan(
                     &trace_id,
                 ));
             }
-            // CLEAN REFUSAL: nothing written yet, the vault is byte-identical.
-            // Return-report-on-refusal (NRN-150/MMR-202) when the caller opted in
-            // (`refuse_as_report`); otherwise (CLI) propagate the `Err` so the
-            // structured stdout envelope renders and the arm exits 2.
-            match e.downcast_ref::<crate::standards::apply::ApplyError>() {
-                Some(rich) if ctx.refuse_as_report => {
-                    return Ok(build_refusal_report(
-                        plan,
-                        &hydrated,
-                        &provenance,
-                        ctx.dry_run,
-                        rich,
-                    ));
-                }
-                _ => return Err(e),
+            // CLEAN REFUSAL: nothing written yet (`wrote_any == false`), the vault
+            // is byte-identical. Return-report-on-refusal (NRN-150/MMR-202) when
+            // the caller opted in (`refuse_as_report`); otherwise (CLI) propagate
+            // the `Err` so the structured stdout envelope renders and the arm
+            // exits 2.
+            //
+            // NRN-231 review F1: this covers the WHOLE pre-write error class, not
+            // just typed rich `ApplyError`s. A bare `anyhow` raised before any
+            // write (create_document frontmatter/serialize validation, the
+            // `{{seq}}`/ignore/exists guards, the up-front validation gates) is
+            // also byte-identical here, so under `refuse_as_report` it too crosses
+            // as a coded, report-shaped refusal — `internal-error` + the `{e:#}`
+            // message, exactly what the CLI's `Err` path renders — instead of
+            // escaping as a bare MCP error that a routed apply would misreport as
+            // post-send-uncertain. Because the gate is the runtime write-state
+            // (`wrote_any`), a bare error raised MID-apply took the `if wrote_any`
+            // partial-failure branch above and never reaches here.
+            if ctx.refuse_as_report {
+                let rich = e.downcast_ref::<crate::standards::apply::ApplyError>();
+                let envelope = rich
+                    .map(crate::apply_report::ApplyError::from_rich)
+                    .unwrap_or_else(|| crate::apply_report::ApplyError::from_anyhow(&e));
+                let error_path = rich.and_then(|r| r.path().map(|p| p.to_path_buf()));
+                return Ok(build_refusal_report(
+                    plan,
+                    &hydrated,
+                    &provenance,
+                    ctx.dry_run,
+                    envelope,
+                    error_path.as_deref(),
+                ));
             }
+            return Err(e);
         }
     };
 
@@ -364,26 +402,34 @@ pub(crate) fn apply_migration_plan(
     })
 }
 
-/// Build a return-report-on-refusal (NRN-150/MMR-202) from a VALIDATION-PHASE
-/// precondition error. The refusal is byte-identical (nothing was written), so
-/// every expanded change becomes a `not_run` op EXCEPT the first whose path
-/// matches the error's path, which becomes `failed` carrying the structured
-/// `error` envelope. `outcome = refused`. When the error carries no path (a
-/// plan-level refusal), the first op is marked failed so the code is never lost.
+/// Build a return-report-on-refusal (NRN-150/MMR-202) from a PRE-WRITE refusal
+/// (`wrote_any == false` proves the vault is byte-identical). Every expanded
+/// change becomes a `not_run` op EXCEPT the first whose path matches
+/// `error_path`, which becomes `failed` carrying the structured `error`
+/// envelope. `outcome = refused`. When the error carries no path (a plan-level
+/// refusal, or a bare `anyhow` without a resolvable path), the first op is
+/// marked failed so the code is never lost.
+///
+/// `envelope` is prebuilt by the caller: a typed rich `ApplyError` contributes
+/// its stable `code`/`path` (`ApplyError::from_rich`); a bare `anyhow` (NRN-231
+/// review F1 — create_document validation, op expansion, etc.) falls back to
+/// `internal-error` + the `{e:#}` message (`ApplyError::from_anyhow`), exactly
+/// what the CLI's `render_json_error_envelope` / `eprintln!("error: {e:#}")`
+/// renders on the `Err` path — so a routed refusal stays byte-identical to
+/// Direct's exit-2 refusal.
 fn build_refusal_report(
     plan: &MigrationPlan,
     changes: &[PlannedChange],
     provenance: &[usize],
     dry_run: bool,
-    rich: &crate::standards::apply::ApplyError,
+    envelope: crate::apply_report::ApplyError,
+    error_path: Option<&Utf8Path>,
 ) -> ApplyReport {
-    use crate::apply_report::{ApplyError as ErrorEnvelope, ApplyOutcome};
+    use crate::apply_report::ApplyOutcome;
 
-    let envelope = ErrorEnvelope::from_rich(rich);
     // Index of the op to mark failed: the first change whose path matches the
     // error path; else the first op (pathless plan-level refusal).
-    let failed_idx = rich
-        .path()
+    let failed_idx = error_path
         .and_then(|ep| changes.iter().position(|c| c.path == ep))
         .unwrap_or(0);
 
@@ -439,6 +485,80 @@ fn build_refusal_report(
         warnings: Vec::new(),
         outcome: ApplyOutcome::Refused,
     }
+}
+
+/// Build a pre-write refusal report for an EXPANSION-PHASE failure (NRN-231
+/// review F1), before any `PlannedChange` exists. Expansion is pure (index-only,
+/// no filesystem write), so this is byte-identical: every plan operation becomes
+/// a `not_run` op EXCEPT `failed_op_idx`, which is `failed` carrying the
+/// structured `error` envelope. `outcome = refused` (exit 2). Mirrors
+/// [`build_refusal_report`] but keys off `plan.operations` rather than expanded
+/// changes, since expansion is exactly what failed.
+fn build_plan_refusal_report(
+    plan: &MigrationPlan,
+    dry_run: bool,
+    failed_op_idx: usize,
+    envelope: crate::apply_report::ApplyError,
+) -> ApplyReport {
+    use crate::apply_report::ApplyOutcome;
+
+    let ops: Vec<ApplyReportOp> = plan
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(i, op)| {
+            let (status, error) = if i == failed_op_idx {
+                (OpStatus::Failed, Some(envelope.clone()))
+            } else {
+                (OpStatus::NotRun, None)
+            };
+            ApplyReportOp {
+                op_id: i.to_string(),
+                kind: op.kind.clone(),
+                status,
+                from: None,
+                path: None,
+                stem: None,
+                summary: format!("would {} {}", op.kind, op_display_path(op)),
+                error,
+                footnote: op.footnote.clone(),
+                cascade: None,
+                link_impact: None,
+            }
+        })
+        .collect();
+
+    let failed = ops.iter().filter(|o| o.status == OpStatus::Failed).count();
+    let remaining = ops.iter().filter(|o| o.status == OpStatus::NotRun).count();
+
+    ApplyReport {
+        schema_version: APPLY_REPORT_SCHEMA_VERSION,
+        trace_id: String::new(),
+        plan_hash: plan.canonical_hash(),
+        vault_root: plan.vault_root.clone(),
+        dry_run,
+        applied: 0,
+        skipped: 0,
+        failed,
+        remaining,
+        operations: ops,
+        warnings: Vec::new(),
+        outcome: ApplyOutcome::Refused,
+    }
+}
+
+/// Best-effort display token for a raw `MigrationOp` (an expansion-phase refusal
+/// has no `PlannedChange` to summarize). Reads the common `path`/`src` fields;
+/// falls back to the op kind's placeholder. Only feeds the refusal report's
+/// `summary`, which the refusal renderer does not print — the coded `error` is
+/// the whole output — so exact prose here is not load-bearing.
+fn op_display_path(op: &MigrationOp) -> String {
+    op.fields
+        .get("path")
+        .or_else(|| op.fields.get("src"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>")
+        .to_string()
 }
 
 /// Build the TRUTHFUL partial-failure report (NRN-150/183) for an apply that
@@ -1486,6 +1606,132 @@ mod tests {
             original,
             "a clean refusal leaves the vault byte-identical"
         );
+    }
+
+    /// NRN-231 review F1: a BARE-`anyhow` PRE-WRITE refusal (a create_document
+    /// whose `new_value` has no frontmatter object) crosses as a coded,
+    /// report-shaped refusal on the `refuse_as_report` surface (`internal-error`
+    /// plus the `{e:#}` message), NOT a bare `Err`. This is the class that made a
+    /// routed apply misreport post-send-uncertain; the vault stays byte-identical.
+    #[test]
+    fn bare_prewrite_refusal_returns_report_under_refuse_as_report() {
+        let (tmp, index) = synth_vault();
+        let before = std::fs::read_dir(tmp.path()).unwrap().count();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 1,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            operations: vec![MigrationOp {
+                kind: "create_document".into(),
+                id: None,
+                requires: vec![],
+                // new_value with a body but NO frontmatter object → the bare
+                // `anyhow!("create_document: missing or non-object frontmatter …")`
+                // raised in Phase B BEFORE any write.
+                fields: serde_json::json!({
+                    "path": "new.md",
+                    "new_value": { "body": "# New\n" }
+                }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let ctx = ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+            refuse_as_report: true,
+        };
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink())
+            .expect("a bare pre-write refusal must return a report, not Err");
+
+        assert_eq!(report.outcome, crate::apply_report::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2, "a clean refusal maps to exit 2");
+        assert_eq!(report.applied, 0);
+        let op = &report.operations[0];
+        assert_eq!(op.status, crate::apply_report::OpStatus::Failed);
+        let err = op.error.as_ref().expect("failed op carries an error");
+        assert_eq!(
+            err.code, "internal-error",
+            "a bare anyhow falls back to internal-error, matching the CLI Err path"
+        );
+        assert!(
+            err.message
+                .contains("create_document: missing or non-object frontmatter"),
+            "the message carries the bare error prose: {}",
+            err.message
+        );
+        // Byte-identical: nothing was created.
+        assert!(!tmp.path().join("new.md").exists());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), before);
+    }
+
+    /// NRN-231 review F1 (expansion phase): a PRE-WRITE expansion failure (an
+    /// unknown op kind) likewise crosses as a coded, report-shaped refusal under
+    /// `refuse_as_report`, before any `PlannedChange` exists. The CLI surface
+    /// (`refuse_as_report: false`) keeps propagating the bare `Err`.
+    #[test]
+    fn expansion_failure_returns_report_under_refuse_as_report() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 1,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            operations: vec![MigrationOp {
+                kind: "no_such_kind".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({ "path": "a.md" }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+
+        // refuse_as_report: report-shaped refusal, exit 2.
+        let report = apply_migration_plan(
+            &plan,
+            &index,
+            ApplyContext {
+                dry_run: false,
+                parents: false,
+                verbose: false,
+                refuse_as_report: true,
+            },
+            &mut test_sink(),
+        )
+        .expect("an expansion failure must return a report under refuse_as_report");
+        assert_eq!(report.outcome, crate::apply_report::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        assert_eq!(report.operations.len(), 1);
+        assert_eq!(
+            report.operations[0].status,
+            crate::apply_report::OpStatus::Failed
+        );
+        assert!(report.operations[0]
+            .error
+            .as_ref()
+            .is_some_and(|e| e.message.contains("unknown operation kind")));
+
+        // CLI surface: still a bare Err (renders its own envelope, exits 2).
+        let err = apply_migration_plan(
+            &plan,
+            &index,
+            ApplyContext {
+                dry_run: false,
+                parents: false,
+                verbose: false,
+                refuse_as_report: false,
+            },
+            &mut test_sink(),
+        )
+        .expect_err("the CLI surface keeps propagating the bare Err");
+        assert!(err.to_string().contains("unknown operation kind"));
     }
 
     #[test]

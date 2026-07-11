@@ -914,18 +914,36 @@ mod tests {
             })
         };
 
-        // parents omitted → the missing parent dir is a refusal (Err), nothing written.
-        let refused = handle(
+        // parents omitted → the missing parent dir is a PRE-WRITE refusal. NRN-231
+        // review F1: this bare-`anyhow` refusal now crosses as a coded,
+        // report-shaped refusal (`outcome: refused`, exit 2) rather than a bare
+        // `Err`, so a routed apply reconstructs the exit-2 refusal instead of a
+        // false post-send-uncertain. `wrote_any == false` proves the vault is
+        // byte-identical, so nothing is written.
+        use crate::apply_report::{ApplyOutcome, OpStatus};
+        let report = handle(
             &ctx,
             ApplyParams {
                 plan: plan(),
                 confirm: true,
                 parents: false,
             },
+        )
+        .expect("a pre-write refusal returns a report, not Err");
+        assert_eq!(
+            report.outcome,
+            ApplyOutcome::Refused,
+            "create into a missing dir must refuse without parents: {report:?}"
         );
+        assert_eq!(report.exit_code(), 2, "a clean refusal maps to exit 2");
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.operations[0].status, OpStatus::Failed);
         assert!(
-            refused.is_err(),
-            "create into a missing dir must refuse without parents, got {refused:?}"
+            report.operations[0]
+                .error
+                .as_ref()
+                .is_some_and(|e| e.message.contains("parent directory does not exist")),
+            "the failing op carries the coded pre-write error: {report:?}"
         );
         assert!(
             !root.join("sub/dir/new.md").as_std_path().exists(),

@@ -131,17 +131,12 @@ pub(crate) fn emit_plan(
     cwd: &Utf8Path,
     has_diagnostic_errors: bool,
 ) -> Result<i32> {
-    // --out: always writes JSON to the file (independent of --format). Mirrors
-    // `resolve_path` (`config_loader.rs`), which takes `&Utf8PathBuf` rather
-    // than `&Utf8Path` — inlined here so both callers (direct's owned `cwd:
-    // &Utf8PathBuf` and the routed seam's `cwd: &Utf8Path`) pass through
-    // without an extra allocation.
+    // --out: always writes JSON to the file (independent of --format). The
+    // absolute-vs-join resolution is the shared `config_loader::resolve_path`
+    // (widened to `&Utf8Path` so both callers — direct's owned `cwd:
+    // &Utf8PathBuf` and the routed seam's `cwd: &Utf8Path` — pass through).
     if let Some(out) = &args.out {
-        let out_path = if out.is_absolute() {
-            out.clone()
-        } else {
-            cwd.join(out)
-        };
+        let out_path = crate::config_loader::resolve_path(cwd, out);
         let plan_text = serde_json::to_string_pretty(plan)?;
         fs::write(&out_path, format!("{plan_text}\n")).map_err(|error| {
             anyhow::anyhow!("failed to write migration plan {out_path}: {error}")

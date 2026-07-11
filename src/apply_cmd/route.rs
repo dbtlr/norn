@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 use crate::apply_report::{emit_refusal, ApplyOutcome, ApplyReport};
 use crate::cli::ApplyFormat;
 use crate::migration_plan::MigrationPlan;
-use crate::mutation_lock::pending::{delete_pending_plan, save_pending_plan};
+use crate::mutation_lock::pending::save_pending_plan;
 use camino::Utf8Path;
 
 /// The daemon-side coded refusal that maps back to the CLI's lock-timeout stash
@@ -99,21 +99,18 @@ pub fn emit(
     super::render_report(&report, format, out)?;
 
     // Delete the pending plan on a successful retry so it self-cleans — the same
-    // check the direct tail makes.
-    if exit == super::EXIT_OK {
-        let path = Utf8Path::new(plan_path);
-        if path.as_str().contains("/pending/") && path.as_str().ends_with(".plan.json") {
-            delete_pending_plan(path);
-        }
-    }
+    // shared check the direct tail makes.
+    super::self_clean_pending_plan(exit, plan_path);
 
     Ok(exit)
 }
 
-/// Reproduce the direct arm's lock-timeout stash branch byte-identically
-/// (`apply_cmd::run_direct`'s `MutationLockTimeout` arm): stash a stdin plan and
-/// print the `retry with:` hint, or print just the error for a file plan. Exit 2.
-fn emit_lock_timeout_stash(
+/// Reproduce (and, since NRN-231 review F5, SHARE with) the direct arm's
+/// lock-timeout stash branch (`apply_cmd::run_direct`'s `MutationLockTimeout`
+/// arm): stash a stdin plan and print the `retry with:` hint, or print just the
+/// error for a file plan. Exit 2. The direct arm calls straight into this, so
+/// the prose strings and the stdin-vs-file branch exist exactly once.
+pub(super) fn emit_lock_timeout_stash(
     plan_path: &str,
     raw: &str,
     state_dir: &Utf8Path,
