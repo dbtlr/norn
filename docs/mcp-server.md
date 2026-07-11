@@ -76,11 +76,25 @@ This mirrors the CLI's `--dry-run` / apply split: the dry-run is a reviewable fo
 
 ```jsonc
 // Dry-run: returns the planned change, writes nothing
-{ "name": "vault.set", "arguments": { "target": "notes/task.md", "set": { "status": "backlog" } } }
+{ "name": "vault.set", "arguments": { "target": "notes/task.md", "field_json": ["status=\"backlog\""] } }
 
 // Apply: writes the change under the mutation lock, audits the event
-{ "name": "vault.set", "arguments": { "target": "notes/task.md", "set": { "status": "backlog" }, "confirm": true } }
+{ "name": "vault.set", "arguments": { "target": "notes/task.md", "field_json": ["status=\"backlog\""], "confirm": true } }
 ```
+
+`vault.set` parameters:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `target` | string | Target document (stem or path), as `norn set` accepts. |
+| `field_json` | string[] (optional) | Frontmatter fields to set, as ordered `KEY=JSON` tokens. Applied in order and fed through `norn set --field-json KEY=JSON` — coerced and schema-validated exactly as the CLI flag is. A key repeated across tokens accumulates into an array. |
+| `field` | string[] (optional) | Frontmatter field overrides in `KEY=VALUE` format — the coercing counterpart to `field_json` (string coercion against the schema). |
+| `push` | string[] (optional) | Append to a list-typed frontmatter field, as ordered `KEY=VALUE` tokens. A key repeated across tokens pushes each value in turn. Creates a single-element array if the key does not exist. |
+| `pop` | string[] (optional) | Remove from a list-typed frontmatter field, as ordered `KEY=VALUE` tokens. Silent no-op for a member that is not present. |
+| `remove` | string[] (optional) | Frontmatter keys to remove entirely. Silent no-op for missing keys. |
+| `body` | string (optional) | Wholesale body replacement — the MCP analogue of `norn set --body-from-stdin`. Absent = body unchanged. |
+| `force` | bool (optional) | Bypass schema enforcement (type validation + required-field protection). |
+| `confirm` | bool (default `false`) | `false` = dry-run (returns plan, writes nothing); `true` = apply. |
 
 ## Placing a new document
 

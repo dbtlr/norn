@@ -276,17 +276,17 @@ fn specs() -> Vec<Spec> {
                 // No MCP twin needed — the canonical surface already has parity.
                 shape: &["field_pos"],
                 naming: &[
-                    // MCP `set` is the typed (field-json) frontmatter map; MCP
-                    // `body` is the wholesale-replacement analogue of stdin. The
-                    // CLI's coercing `--field` (clap id `fields`) is the MCP
+                    // MCP `body` is the wholesale-replacement analogue of stdin.
+                    // The CLI's coercing `--field` (clap id `fields`) is the MCP
                     // `field` param (NRN-181) — a plural→singular rename mirroring
                     // vault.new's `field`.
-                    ("field_json", "set"),
                     ("body_from_stdin", "body"),
                     ("fields", "field"),
                 ],
-                // NRN-181 CLOSED: `push` / `pop` are now identity-mapped MCP
-                // fields; the coercing `--field` maps via the naming entry above.
+                // NRN-181/NRN-238 CLOSED: `field_json` / `push` / `pop` are now
+                // identity-mapped MCP fields (ordered token lists, same name and
+                // shape as `vault.new`'s `field_json`); the coercing `--field`
+                // maps via the naming entry above.
                 gaps: &[],
             },
         },

@@ -717,8 +717,12 @@ fn route_repair(
 ///   preserving today's "implicit dry-run preview, no prompt" semantics.
 ///
 /// **Gated to Direct** (no byte-faithful wire encoding, see `set::route`):
-/// `--field-json`, `--push`, `--pop`, `--body-from-stdin`. `--config` /
-/// `--no-cache-refresh` force Direct up front via the SAME
+/// `--body-from-stdin` (no wire-faithful stdin analogue). `--field-json`,
+/// `--push`, and `--pop` now route (NRN-238): `vault.set`'s params carry them
+/// as ORDERED `Vec<String>` token lists (not sorted maps), so passing the
+/// CLI's `Vec`s through verbatim preserves order and duplicate-key-accumulate
+/// semantics exactly, the same way `vault.new`'s `field`/`field_json` already
+/// do. `--config` / `--no-cache-refresh` force Direct up front via the SAME
 /// [`routing_forced_direct`] guard the read seam uses (the daemon loads each
 /// vault's own default config and always serves a refreshed warm cache, so
 /// routing either flag would silently ignore it).
@@ -743,12 +747,10 @@ fn try_route_set(
         return None;
     }
 
-    // Shapes with no byte-faithful wire encoding run Direct.
-    if args.body_from_stdin
-        || !args.field_json.is_empty()
-        || !args.push.is_empty()
-        || !args.pop.is_empty()
-    {
+    // The only shape with no byte-faithful wire encoding: an MCP server has no
+    // stdin. `--field-json` / `--push` / `--pop` route (NRN-238) — see
+    // `set::route::to_mcp_arguments`.
+    if args.body_from_stdin {
         return None;
     }
 

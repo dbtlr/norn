@@ -331,13 +331,11 @@ mod lock_ordering_tests {
             (
                 "set",
                 Box::new(|ctx| {
-                    let mut set = std::collections::BTreeMap::new();
-                    set.insert("status".to_string(), serde_json::json!("active"));
                     crate::mcp::tools::set::handle(
                         ctx,
                         crate::mcp::tools::set::SetParams {
                             target: "bogus-target".into(),
-                            set,
+                            field_json: vec![r#"status="active""#.into()],
                             confirm: true,
                             ..Default::default()
                         },
@@ -488,13 +486,11 @@ mod lock_ordering_tests {
             (
                 "set",
                 Box::new(|ctx| {
-                    let mut set = std::collections::BTreeMap::new();
-                    set.insert("status".to_string(), serde_json::json!("active"));
                     let r = crate::mcp::tools::set::handle_output(
                         ctx,
                         crate::mcp::tools::set::SetParams {
                             target: "doc.md".into(),
-                            set,
+                            field_json: vec![r#"status="active""#.into()],
                             confirm: true,
                             ..Default::default()
                         },

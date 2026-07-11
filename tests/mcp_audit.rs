@@ -245,7 +245,7 @@ fn vault_audit_status_enum_filters_and_rejects_typos() {
                     "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {
                         "name": "vault.set",
-                        "arguments": { "target": "note", "set": { "status": "done" }, "confirm": true }
+                        "arguments": { "target": "note", "field_json": ["status=\"done\""], "confirm": true }
                     }
                 })))
                 .unwrap();
@@ -400,7 +400,7 @@ fn vault_audit_returns_a_persisted_mutation() {
                     "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                     "params": {
                         "name": "vault.set",
-                        "arguments": { "target": "note", "set": { "status": "done" }, "confirm": true }
+                        "arguments": { "target": "note", "field_json": ["status=\"done\""], "confirm": true }
                     }
                 })))
                 .unwrap();

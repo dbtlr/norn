@@ -31,6 +31,7 @@ mod serve_util;
 
 use serve_util::{count_served, dir_snapshot, norn_bin, spawn_ready_daemon_with_log, write_vault};
 
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -51,7 +52,8 @@ fn fresh_vault() -> TempDir {
 /// A seed vault: a `task` whose `status` is schema-constrained to an enum (so a
 /// disallowed value refuses with the coded `value-not-allowed` NRN-221 refusal),
 /// plus an untouched `note`. The `note` and the config prove the WHOLE post-state
-/// vault — not just the mutated doc — is identical across copies.
+/// vault — not just the mutated doc — is identical across copies. `tags` is a
+/// schemaless list field (NRN-238's `--push`/`--pop` rows mutate it).
 fn seeded_vault_files() -> Vec<(&'static str, &'static str)> {
     vec![
         (
@@ -62,7 +64,7 @@ fn seeded_vault_files() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "task.md",
-            "---\ntype: task\nstatus: backlog\ntitle: Task One\n---\nTask body\n",
+            "---\ntype: task\nstatus: backlog\ntitle: Task One\ntags:\n  - alpha\n  - beta\n---\nTask body\n",
         ),
         (
             "note.md",
@@ -96,6 +98,38 @@ fn run_set(
         .args(args)
         .output()
         .expect("run norn set");
+    (out.stdout, out.stderr, out.status.code().unwrap_or(-1))
+}
+
+/// Like [`run_set`] but feeds `stdin` to the process (for `--body-from-stdin`,
+/// NRN-238's one remaining gated-to-Direct shape).
+fn run_set_with_stdin(
+    cache_home: &Path,
+    state_home: &Path,
+    vault: &Path,
+    args: &[&str],
+    stdin: &str,
+) -> (Vec<u8>, Vec<u8>, i32) {
+    let mut child = Command::new(norn_bin())
+        .env("XDG_CACHE_HOME", cache_home)
+        .env("XDG_STATE_HOME", state_home)
+        .env("NORN_SERVICE_HANDSHAKE_TIMEOUT_MS", "5000")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("--cwd")
+        .arg(vault)
+        .arg("set")
+        .args(args)
+        .spawn()
+        .expect("spawn norn set");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait norn set");
     (out.stdout, out.stderr, out.status.code().unwrap_or(-1))
 }
 
@@ -166,6 +200,59 @@ fn shape_matrix() -> Vec<(&'static str, Vec<&'static str>, i32)> {
         (
             "remove apply",
             vec!["task", "--remove", "title", "--yes"],
+            0,
+        ),
+        // ── NRN-238: --field-json / --push / --pop now route (previously gated
+        // to Direct because the old map-shaped params could reorder or collapse
+        // relative to the CLI's argv-ordered Vecs) ──
+        (
+            "field-json apply (typed set)",
+            vec!["task", "--field-json", "status=\"active\"", "--yes"],
+            0,
+        ),
+        (
+            "field-json dry-run",
+            vec!["task", "--field-json", "status=\"active\"", "--dry-run"],
+            0,
+        ),
+        (
+            "push apply",
+            vec!["task", "--push", "tags=gamma", "--yes"],
+            0,
+        ),
+        (
+            "push dry-run",
+            vec!["task", "--push", "tags=gamma", "--dry-run"],
+            0,
+        ),
+        ("pop apply", vec!["task", "--pop", "tags=alpha", "--yes"], 0),
+        (
+            "pop dry-run",
+            vec!["task", "--pop", "tags=alpha", "--dry-run"],
+            0,
+        ),
+        // ── NRN-238: duplicate-key accumulate — the exact semantic a sorted
+        // BTreeMap could never express (a repeated key silently collapses to
+        // one entry), which is why the map shape had to go. `--field` already
+        // routed pre-NRN-238; this row proves the wire preserves the
+        // duplicate-key-accumulates-into-array semantic under routing too. ──
+        (
+            "duplicate-key field apply (accumulate)",
+            vec![
+                "task", "--field", "labels=a", "--field", "labels=b", "--yes",
+            ],
+            0,
+        ),
+        (
+            "duplicate-key field dry-run (accumulate)",
+            vec![
+                "task",
+                "--field",
+                "labels=a",
+                "--field",
+                "labels=b",
+                "--dry-run",
+            ],
             0,
         ),
         // ── dry-run via --dry-run ──
@@ -436,6 +523,83 @@ fn routed_apply_under_held_lock_is_safe() {
     // SAFETY: release the flock via the owning fd before it drops.
     let _ = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN) };
     drop(lock_file);
+}
+
+/// `--body-from-stdin` has no wire-faithful stdin analogue, so it is the ONE
+/// shape still GATED to Direct even with a live daemon (NRN-238 routed
+/// `--field-json`/`--push`/`--pop`, but an MCP server has no stdin to read a
+/// wholesale body replacement from). Both the direct and the daemon-home runs
+/// must be byte-identical AND the daemon must have served ZERO `vault.set`
+/// calls — the served count staying flat is the load-bearing proof that this
+/// shape never reached the wire.
+#[test]
+fn body_from_stdin_runs_direct() {
+    let seed = seeded_vault_files();
+    let daemon = spawn_ready_daemon_with_log(&[]);
+    let args = &["task", "--body-from-stdin", "--yes"];
+    let body = "Replaced from stdin\n";
+
+    let direct_vault = fresh_vault();
+    let routed_vault = fresh_vault();
+    write_vault(direct_vault.path(), &seed);
+    write_vault(routed_vault.path(), &seed);
+
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    let (d_out, d_err, d_code) = run_set_with_stdin(
+        direct_cache.path(),
+        direct_state.path(),
+        direct_vault.path(),
+        args,
+        body,
+    );
+    assert_eq!(
+        d_code,
+        0,
+        "direct --body-from-stdin apply must succeed; stderr: {}",
+        String::from_utf8_lossy(&d_err)
+    );
+
+    let (r_out, r_err, r_code) = run_set_with_stdin(
+        &daemon.cache_home,
+        &daemon.state_home,
+        routed_vault.path(),
+        args,
+        body,
+    );
+
+    assert_eq!(
+        redact_trace(&r_out),
+        redact_trace(&d_out),
+        "stdout must match direct\nrouted: {:?}\ndirect: {:?}",
+        String::from_utf8_lossy(&r_out),
+        String::from_utf8_lossy(&d_out),
+    );
+    assert_eq!(r_err, d_err, "stderr must match direct");
+    assert_eq!(r_code, d_code, "exit code must match direct");
+    assert_eq!(
+        dir_snapshot(direct_vault.path()),
+        dir_snapshot(routed_vault.path()),
+        "the whole post-state vault must be byte-identical",
+    );
+
+    // The gate: the daemon must NEVER have served a vault.set for a stdin body —
+    // served count stays flat at 0.
+    let served = count_served(&daemon.stderr_path, "vault.set");
+    assert_eq!(
+        served,
+        0,
+        "--body-from-stdin must force Direct: the daemon served {served} vault.set call(s).\n\
+         daemon stderr:\n{}",
+        std::fs::read_to_string(&daemon.stderr_path).unwrap_or_default(),
+    );
+
+    // Sanity: the stdin body actually landed on disk.
+    let created = std::fs::read_to_string(direct_vault.path().join("task.md")).unwrap();
+    assert!(
+        created.contains("Replaced from stdin"),
+        "stdin body must be written: {created}"
+    );
 }
 
 /// `--config` / `--no-cache-refresh` force Direct even with a live daemon — the
