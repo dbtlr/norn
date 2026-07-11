@@ -916,12 +916,10 @@ validate:
         // to report warnings — an allowed_values violation is silently dropped,
         // producing a false-clean envelope (`"warnings": []`).
         let warnings = v["warnings"].as_array().unwrap();
-        let has_disallowed = warnings
-            .iter()
-            .any(|w| w["kind"] == "frontmatter-disallowed-value");
+        let has_disallowed = warnings.iter().any(|w| w["kind"] == "value-not-allowed");
         assert!(
             has_disallowed,
-            "expected frontmatter-disallowed-value in warnings: {warnings:?}"
+            "expected value-not-allowed in warnings: {warnings:?}"
         );
     }
 

@@ -65,8 +65,8 @@ Codes are stable; renames are called out as breaking changes in the CHANGELOG.
 | `link-block-missing` | The target exists but the `^block-ref` isn't present. |
 | `link-ambiguous` | A link resolves to multiple candidates. |
 | `frontmatter-required-field-missing` | A required field is absent. |
-| `frontmatter-disallowed-value` | A field's value is not in the configured set. |
-| `frontmatter-invalid-type` | A field's value doesn't match its declared type. |
+| `value-not-allowed` | A field's value is not in the configured set. |
+| `field-type-invalid` | A field's value doesn't match its declared type. |
 | `frontmatter-exceeds-max-length` | A field's value exceeds its effective max length. |
 | `frontmatter-forbidden-field` | A field the rule forbids is present. |
 | `frontmatter-reference-type` | A frontmatter wikilink resolves to a document of a disallowed `type`. |

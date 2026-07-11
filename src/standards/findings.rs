@@ -159,7 +159,7 @@ impl Finding {
     ) -> Self {
         let message = format!("frontmatter field has a disallowed value: {field}");
         Self {
-            code: "frontmatter-disallowed-value".to_string(),
+            code: "value-not-allowed".to_string(),
             severity: Severity::Warning,
             path,
             message,
@@ -213,7 +213,7 @@ impl Finding {
         let message =
             format!("frontmatter field has invalid type: {field}; expected {expected_type}");
         Self {
-            code: "frontmatter-invalid-type".to_string(),
+            code: "field-type-invalid".to_string(),
             severity: Severity::Warning,
             path,
             message,

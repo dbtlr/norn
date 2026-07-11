@@ -1466,7 +1466,7 @@ repair:
   rules:
     - name: fix-someday
       match:
-        code: frontmatter-disallowed-value
+        code: value-not-allowed
         field: status
         actual_value: someday
       set_frontmatter:

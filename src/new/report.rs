@@ -983,7 +983,7 @@ mod round_trip_tests {
     #[test]
     fn dynamic_validation_finding_round_trips_including_unknown_codes() {
         let known = Warning::ValidationFinding {
-            code: "frontmatter-disallowed-value".to_string(),
+            code: "value-not-allowed".to_string(),
             message: "field `status` has disallowed value `someday`".to_string(),
         };
         let unknown_future_code = Warning::ValidationFinding {
