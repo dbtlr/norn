@@ -131,7 +131,7 @@ fn dry_run_then_confirm_roundtrip() {
                     "name": "vault.set",
                     "arguments": {
                         "target": "task",
-                        "set": { "status": "active" }
+                        "field_json": ["status=\"active\""]
                     }
                 }
             })))
@@ -146,7 +146,7 @@ fn dry_run_then_confirm_roundtrip() {
                     "name": "vault.set",
                     "arguments": {
                         "target": "task",
-                        "set": { "status": "active" },
+                        "field_json": ["status=\"active\""],
                         "confirm": true
                     }
                 }
@@ -287,7 +287,7 @@ fn dry_run_alone_writes_nothing() {
                     "name": "vault.set",
                     "arguments": {
                         "target": "task",
-                        "set": { "status": "active" },
+                        "field_json": ["status=\"active\""],
                         "confirm": false
                     }
                 }
@@ -391,7 +391,7 @@ fn run_set_call(vault: &TempDir, state_dir: &Path, confirm: bool) {
                     "name": "vault.set",
                     "arguments": {
                         "target": "task",
-                        "set": { "status": "active" },
+                        "field_json": ["status=\"active\""],
                         "confirm": confirm
                     }
                 }

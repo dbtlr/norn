@@ -121,7 +121,7 @@ fn mutation_over_socket() {
         "vault.set",
         serde_json::json!({
             "target": "alpha",
-            "set": { "status": "active" },
+            "field_json": ["status=\"active\""],
             "confirm": true,
         }),
     );

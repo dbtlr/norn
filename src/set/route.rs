@@ -15,12 +15,13 @@
 //!
 //! - Routed: `target`, `--field` / trailing `KEY=VALUE` positionals (folded into
 //!   the tool's `field` list in the SAME order `desugar_positional_fields`
-//!   produces), `--remove`, `--force`.
-//! - Gated to Direct: `--field-json`, `--push`, `--pop` (they map onto the tool's
-//!   `set`/`push`/`pop` **maps**, whose sorted-key serialization can reorder or
-//!   collapse relative to the CLI's argv-ordered `Vec`s) and `--body-from-stdin`
-//!   (no wire-faithful stdin analogue). These stay Direct until an order-preserving
-//!   wire mapping lands.
+//!   produces), `--field-json`, `--push`, `--pop` (NRN-238: `vault.set`'s params
+//!   carry these as ORDERED `Vec<String>` token lists — not sorted maps — so the
+//!   CLI's argv-ordered `Vec`s ride the wire verbatim, preserving order and
+//!   duplicate-key-accumulate semantics exactly, the same way `vault.new`'s
+//!   `field`/`field_json` already do), `--remove`, `--force`.
+//! - Gated to Direct: `--body-from-stdin` (no wire-faithful stdin analogue — an
+//!   MCP server has no stdin).
 //!
 //! `to_mcp_arguments` / `reconstruct` / `emit` are pure so they unit-test without
 //! a live daemon; the probe + wire round-trip live in the routing seam
@@ -42,9 +43,11 @@ use crate::set::report::SetReport;
 /// must carry the pre-combined list in the identical order. `confirm` is the
 /// dry-run/apply switch (false = dry-run/preview, true = apply).
 ///
-/// The caller (`route_set`) has already gated any shape this does not encode
-/// (`--field-json` / `--push` / `--pop` / `--body-from-stdin`), so those fields
-/// are deliberately absent here.
+/// `--field-json` / `--push` / `--pop` ride the wire as ordered `Vec<String>`
+/// token lists — the SAME lists the daemon's `set::synth`/`validate` seam
+/// consumes — mirroring `vault.new`'s `field`/`field_json` (NRN-238). The caller
+/// (`route_set`) has already gated `--body-from-stdin` (no wire-faithful stdin
+/// analogue), so that field is deliberately absent here.
 pub fn to_mcp_arguments(args: &SetArgs, combined_fields: &[String], confirm: bool) -> Value {
     let mut map = Map::new();
     map.insert("target".into(), Value::String(args.target.clone()));
@@ -53,6 +56,24 @@ pub fn to_mcp_arguments(args: &SetArgs, combined_fields: &[String], confirm: boo
         map.insert(
             "field".into(),
             Value::Array(combined_fields.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !args.field_json.is_empty() {
+        map.insert(
+            "field_json".into(),
+            Value::Array(args.field_json.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !args.push.is_empty() {
+        map.insert(
+            "push".into(),
+            Value::Array(args.push.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !args.pop.is_empty() {
+        map.insert(
+            "pop".into(),
+            Value::Array(args.pop.iter().cloned().map(Value::String).collect()),
         );
     }
     if !args.remove.is_empty() {
@@ -191,6 +212,45 @@ mod tests {
         assert_eq!(v["remove"], json!(["stale"]));
         assert_eq!(v["force"], true);
         assert_eq!(v["confirm"], true);
+    }
+
+    /// NRN-238: `--field-json` / `--push` / `--pop` ride the wire as ordered
+    /// `Vec<String>` token lists, verbatim — including a duplicate key across
+    /// tokens, which a sorted map could never express (the load-bearing reason
+    /// these three now route instead of gating to Direct).
+    #[test]
+    fn to_mcp_arguments_maps_field_json_push_pop_verbatim_with_duplicate_keys() {
+        let mut args = base_args();
+        args.field_json = vec!["tags=[\"a\"]".into(), "status=\"done\"".into()];
+        args.push = vec!["tags=gamma".into(), "tags=delta".into()];
+        args.pop = vec!["tags=alpha".into()];
+
+        let v = to_mcp_arguments(&args, &[], true);
+        assert_eq!(
+            v["field_json"],
+            json!(["tags=[\"a\"]", "status=\"done\""]),
+            "field_json tokens must ride the wire in order, verbatim"
+        );
+        assert_eq!(
+            v["push"],
+            json!(["tags=gamma", "tags=delta"]),
+            "a duplicate push key across tokens must ride the wire as two ordered entries"
+        );
+        assert_eq!(v["pop"], json!(["tags=alpha"]));
+    }
+
+    /// Omit-when-empty: an empty `field_json`/`push`/`pop` must not appear in the
+    /// wire object at all, mirroring `field`/`remove`/`force` (and `vault.new`'s
+    /// `field`/`field_json` omission, `src/new/route.rs`).
+    #[test]
+    fn to_mcp_arguments_omits_empty_field_json_push_pop() {
+        let v = to_mcp_arguments(&base_args(), &[], false);
+        assert!(
+            v.get("field_json").is_none(),
+            "empty field_json list must be omitted"
+        );
+        assert!(v.get("push").is_none(), "empty push list must be omitted");
+        assert!(v.get("pop").is_none(), "empty pop list must be omitted");
     }
 
     #[test]

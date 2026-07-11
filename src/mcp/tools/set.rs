@@ -25,8 +25,6 @@
 //! travels as a `body` param and the body op is synthesized via the same
 //! `set::synth::synth_body_op` seam the CLI's stdin path uses.
 
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -39,47 +37,52 @@ use crate::set::report::{build_report, SetReport};
 
 /// Parameters for `vault.set`.
 ///
-/// `set` is the frontmatter mutation map: each `field -> value` pair sets that
-/// field to the given JSON value. Values travel as JSON (scalars, arrays,
-/// objects, explicit null) and are fed through the CLI's `--field-json` seam, so
-/// they are coerced and schema-validated exactly as `norn set --field-json`
-/// does. `remove` drops keys entirely. `body`, when present, wholly replaces the
-/// document body (the MCP analogue of `norn set --body-from-stdin`).
+/// `field_json` carries the frontmatter mutation as ordered `KEY=JSON` tokens
+/// (the same shape `vault.new`'s `field_json` uses): each token sets that field
+/// to the given JSON value, applied in order, and fed through the CLI's
+/// `--field-json` seam, so they are coerced and schema-validated exactly as
+/// `norn set --field-json` does — a key repeated across tokens accumulates into
+/// an array. `remove` drops keys entirely. `body`, when present, wholly
+/// replaces the document body (the MCP analogue of `norn set --body-from-stdin`).
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct SetParams {
     /// Target document (stem or path), as `norn set` accepts.
     pub target: String,
 
-    /// Frontmatter fields to set: `field -> JSON value`. Each value is applied
-    /// verbatim (scalar, array, object, or null) and schema-validated like
-    /// `norn set --field-json field=<json>`. Empty map = no frontmatter change.
+    /// Frontmatter fields to set, as raw `KEY=JSON` tokens, repeatable. Applied
+    /// in order, and fed verbatim into `norn set --field-json KEY=JSON`: each
+    /// value is JSON-parsed (scalar, array, object, or explicit null) and
+    /// schema-validated exactly as the CLI flag is. A key repeated across
+    /// tokens accumulates into an array (matching repeated `--field-json`
+    /// flags). Empty list = no frontmatter change.
     #[serde(default)]
-    pub set: BTreeMap<String, serde_json::Value>,
+    pub field_json: Vec<String>,
 
     /// Frontmatter field overrides in `KEY=VALUE` format, repeatable. The value
     /// is string-coerced against the schema (dates, numbers, enums) exactly like
-    /// `norn set --field KEY=VALUE` — the coercing counterpart to the typed `set`
-    /// map. Use `set` when you need to pass a structured JSON value verbatim.
+    /// `norn set --field KEY=VALUE` — the coercing counterpart to the typed
+    /// `field_json` tokens. Use `field_json` when you need to pass a structured
+    /// JSON value verbatim.
     #[serde(default)]
     pub field: Vec<String>,
 
-    /// Append to a list-typed frontmatter field: `field -> value`. A scalar
-    /// value appends one element; an **array** value appends each element in
-    /// order (equivalent to repeating `norn set --push KEY=VALUE` once per
-    /// element). Creates a single-element array if the key does not exist.
-    /// Values are string-coerced like `norn set --push KEY=VALUE`. An object
-    /// value, or an array containing a nested array/object, is refused — never
-    /// stringified.
+    /// Append to a list-typed frontmatter field, as raw `KEY=VALUE` tokens,
+    /// repeatable. Applied in order, and fed verbatim into `norn set --push
+    /// KEY=VALUE`: each token appends one element, string-coerced against the
+    /// schema exactly like the CLI flag. A key repeated across tokens pushes
+    /// each value in turn (matching repeated `--push` flags). Creates a
+    /// single-element array if the key does not exist.
     #[serde(default)]
-    pub push: BTreeMap<String, serde_json::Value>,
+    pub push: Vec<String>,
 
-    /// Remove from a list-typed frontmatter field: `field -> value`. A scalar
-    /// value removes one member; an **array** value removes each named member in
-    /// order. Silent no-op for a member that is not present. String-coerced like
-    /// `norn set --pop KEY=VALUE`. An object value, or an array containing a
-    /// nested array/object, is refused — never stringified.
+    /// Remove from a list-typed frontmatter field, as raw `KEY=VALUE` tokens,
+    /// repeatable. Applied in order, and fed verbatim into `norn set --pop
+    /// KEY=VALUE`: each token removes one member, string-coerced against the
+    /// schema exactly like the CLI flag. A key repeated across tokens pops each
+    /// value in turn (matching repeated `--pop` flags). Silent no-op for a
+    /// member that is not present.
     #[serde(default)]
-    pub pop: BTreeMap<String, serde_json::Value>,
+    pub pop: Vec<String>,
 
     /// Frontmatter keys to remove entirely. Silent no-op for missing keys, like
     /// `norn set --remove key`.
@@ -127,65 +130,6 @@ impl SetOutput {
             report: serde_json::to_value(report)?,
         })
     }
-}
-
-/// Render a JSON **scalar** as the bare `VALUE` half of a `KEY=VALUE` argument
-/// for the coercing `--push` / `--pop` seam. A JSON string yields its unquoted
-/// contents (`"done"` -> `done`); a number/bool/null yields its compact JSON
-/// form (`5`, `true`, `null`), which `infer_scalar` then coerces exactly as the
-/// CLI does. An array or object is **not** a scalar and yields `None` — the
-/// caller refuses it rather than stringifying a structured value into a single
-/// literal list element.
-fn scalar_arg(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
-            Some(v.to_string())
-        }
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
-    }
-}
-
-/// Expand a `push` / `pop` map into the flat `KEY=VALUE` vector the CLI
-/// `--push` / `--pop` seam consumes.
-///
-/// A scalar value produces one `KEY=VALUE` entry. An **array** value explodes
-/// into N sequential entries (order preserved), byte-for-byte equivalent to
-/// repeating the CLI flag once per element — so `push {tags: [a, b]}` appends
-/// two real members, not one literal `["a","b"]` element.
-///
-/// An **object** value, or an array element that is itself an array/object, is
-/// refused with a params error: these have no scalar `KEY=VALUE` form, and
-/// stringifying one would silently append a literal `{...}`/`[...]` element (a
-/// silent-corruption bug). `flag` names the offending param (`push`/`pop`) in
-/// the error.
-fn expand_list_ops(map: &BTreeMap<String, serde_json::Value>, flag: &str) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    for (key, value) in map {
-        match value {
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    let scalar = scalar_arg(item).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "{flag} value for '{key}' must be a scalar or a flat array of \
-                             scalars; a nested array/object list element is not allowed"
-                        )
-                    })?;
-                    out.push(format!("{key}={scalar}"));
-                }
-            }
-            scalar_or_object => {
-                let scalar = scalar_arg(scalar_or_object).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{flag} value for '{key}' must be a scalar or a flat array of \
-                         scalars, not an object"
-                    )
-                })?;
-                out.push(format!("{key}={scalar}"));
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Build the MCP output envelope for `vault.set`: run the pure handler, then
@@ -236,18 +180,6 @@ pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<
 pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
-    // Pure argument validation runs BEFORE the lock so malformed push/pop
-    // input never contends (the same parse-before-lock discipline vault.apply
-    // uses for its plan). `push` / `pop` maps route through the CLI's
-    // string-coercing --push/--pop seam (infer_scalar), so each value renders
-    // as a bare KEY=VALUE string (not JSON-quoted) — matching
-    // `norn set --push status=done`. An array value explodes into N sequential
-    // entries (matching repeated CLI flags); an object, or a nested
-    // array/object element, is refused rather than stringified into a literal
-    // list element.
-    let push = expand_list_ops(&p.push, "push")?;
-    let pop = expand_list_ops(&p.pop, "pop")?;
-
     // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
     // See `crate::mcp::mutate::acquire_mutation_lock` for the invariant.
     let _mutation_lock = if p.confirm {
@@ -267,27 +199,26 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
 
     let vault_cfg = &config.vault_config;
 
-    // Build SetArgs inline. The MCP `set` map routes through --field-json so JSON
-    // values (scalars, arrays, objects, null) are applied verbatim and
-    // schema-validated like the CLI. `body` is handled below via the same
-    // synth_body_op seam the CLI's --body-from-stdin path uses, so we leave
-    // body_from_stdin false (an MCP server has no stdin).
-    let field_json: Vec<String> = p
-        .set
-        .iter()
-        .map(|(k, v)| Ok(format!("{k}={}", serde_json::to_string(v)?)))
-        .collect::<Result<Vec<_>>>()?;
-
+    // Build SetArgs inline, passing the ordered `field_json` / `push` / `pop`
+    // token vectors straight through — the same pattern `vault.new`'s handler
+    // uses for `field`/`field_json` (new.rs). Each is already the raw
+    // `KEY=JSON` / `KEY=VALUE` token shape `preflight_and_plan` (via
+    // `set::synth::synth_with_schema`) parses and schema-validates, so
+    // malformed-token / type / allowed-values refusals surface as the same
+    // coded errors the CLI produces — no map→token façade left to maintain.
+    // `body` is handled below via the same synth_body_op seam the CLI's
+    // --body-from-stdin path uses, so we leave body_from_stdin false (an MCP
+    // server has no stdin).
     let args = SetArgs {
         target: p.target.clone(),
-        // `field` is the coercing --field path (string coercion); `set` is the
-        // typed --field-json path routed above.
+        // `field` is the coercing --field path (string coercion); `field_json`
+        // is the typed --field-json path, both passed through verbatim.
         fields: p.field.clone(),
         // MCP passes fields via `field`; no CLI positional surface exists here.
         field_pos: Vec::new(),
-        field_json,
-        push,
-        pop,
+        field_json: p.field_json.clone(),
+        push: p.push.clone(),
+        pop: p.pop.clone(),
         remove: p.remove.clone(),
         body_from_stdin: false,
         force: p.force,
@@ -397,14 +328,11 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let mut set = BTreeMap::new();
-        set.insert("status".to_string(), serde_json::json!("active"));
-
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                set,
+                field_json: vec![r#"status="active""#.into()],
                 remove: Vec::new(),
                 body: None,
                 force: false,
@@ -429,14 +357,11 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let mut set = BTreeMap::new();
-        set.insert("status".to_string(), serde_json::json!("active"));
-
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                set,
+                field_json: vec![r#"status="active""#.into()],
                 remove: Vec::new(),
                 body: None,
                 force: false,
@@ -465,7 +390,6 @@ mod tests {
             &ctx,
             SetParams {
                 target: "task".into(),
-                set: BTreeMap::new(),
                 remove: Vec::new(),
                 body: Some("Replaced body\n".into()),
                 force: false,
@@ -498,7 +422,6 @@ mod tests {
             &ctx,
             SetParams {
                 target: "task".into(),
-                set: BTreeMap::new(),
                 remove: Vec::new(),
                 body: Some("Replaced body\n".into()),
                 force: false,
@@ -572,16 +495,16 @@ mod tests {
             .map(str::trim)
     }
 
-    /// NRN-181: the coercing `field` param (KEY=VALUE) routes through the CLI's
-    /// `--field` seam (string coercion against the schema), which is a *distinct*
-    /// path from the JSON-typed `set` map (`--field-json`).
+    /// NRN-181/NRN-238: the coercing `field` param (KEY=VALUE) routes through the
+    /// CLI's `--field` seam (string coercion against the schema), which is a
+    /// *distinct* path from the JSON-typed `field_json` tokens (`--field-json`).
     ///
     /// The blind-spot fix (F4): a schemaless string value made both paths emit an
     /// identical `Value::String`, so a mis-wire (routing `field` through the typed
     /// seam) would go undetected. Here `up` is `wikilink`-typed, so the coercing
     /// path *wraps* a bare stem (`norn` -> `[[norn]]`) while the same bare string
-    /// through the typed `set` path is refused (a bare string is not a shape-valid
-    /// wikilink). The two paths therefore provably differ.
+    /// through the typed `field_json` path is refused (a bare string is not a
+    /// shape-valid wikilink). The two paths therefore provably differ.
     #[test]
     fn confirm_field_coerces_and_writes() {
         let (_tmp, root) = seeded_vault_with_wikilink_schema();
@@ -608,41 +531,36 @@ mod tests {
             "coercing field param must wrap the bare stem into a wikilink on disk, got: {up}\n{content}"
         );
 
-        // The SAME bare string through the typed `set` (--field-json) path is
-        // refused — a bare `"norn"` is not a shape-valid wikilink — proving the
+        // The SAME bare string through the typed `field_json` (--field-json) path
+        // is refused — a bare `"norn"` is not a shape-valid wikilink — proving the
         // coercing and typed paths are distinct, not two names for one seam.
-        let mut set = BTreeMap::new();
-        set.insert("up".to_string(), serde_json::json!("norn"));
         let typed = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                set,
+                field_json: vec![r#"up="norn""#.into()],
                 confirm: false,
                 ..Default::default()
             },
         );
         assert!(
             typed.is_err(),
-            "the same bare string through the typed `set` path must be refused (not a valid wikilink), \
-             proving the coercing --field path is a distinct seam"
+            "the same bare string through the typed `field_json` path must be refused (not a valid \
+             wikilink), proving the coercing --field path is a distinct seam"
         );
     }
 
-    /// NRN-181: the `push` map appends a value to a list-typed field.
+    /// NRN-181/NRN-238: a `push` token appends a value to a list-typed field.
     #[test]
     fn confirm_push_appends_to_list() {
         let (_tmp, root) = seeded_vault_with_tags();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let mut push = BTreeMap::new();
-        push.insert("tags".to_string(), serde_json::json!("gamma"));
-
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                push,
+                push: vec!["tags=gamma".into()],
                 confirm: true,
                 ..Default::default()
             },
@@ -662,20 +580,17 @@ mod tests {
         );
     }
 
-    /// NRN-181: the `pop` map removes a value from a list-typed field.
+    /// NRN-181/NRN-238: a `pop` token removes a value from a list-typed field.
     #[test]
     fn confirm_pop_removes_from_list() {
         let (_tmp, root) = seeded_vault_with_tags();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let mut pop = BTreeMap::new();
-        pop.insert("tags".to_string(), serde_json::json!("alpha"));
-
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                pop,
+                pop: vec!["tags=alpha".into()],
                 confirm: true,
                 ..Default::default()
             },
@@ -694,48 +609,50 @@ mod tests {
         );
     }
 
-    /// F1: an **array** `push` value explodes into N real members (order
-    /// preserved), matching repeated `norn set --push` flags — not one literal
-    /// `["gamma","delta"]` element.
+    /// NRN-238: repeating the SAME key across multiple `push` tokens accumulates
+    /// N real members (order preserved) — the raw-token wire equivalent of the
+    /// old map era's "array push explodes" test (an array-valued `push` map entry
+    /// has no expression once `push` is an ordered token list; the CLI has always
+    /// pushed multiple values via repeated `--push KEY=VALUE` flags, matching
+    /// `norn set --push tags=gamma --push tags=delta`).
     #[test]
-    fn confirm_push_array_appends_all_members() {
+    fn confirm_push_duplicate_key_accumulates_all_members() {
         let (_tmp, root) = seeded_vault_with_tags();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
-
-        let mut push = BTreeMap::new();
-        push.insert("tags".to_string(), serde_json::json!(["gamma", "delta"]));
 
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                push,
+                push: vec!["tags=gamma".into(), "tags=delta".into()],
                 confirm: true,
                 ..Default::default()
             },
         )
-        .expect("handle (array push) should succeed");
+        .expect("handle (duplicate-key push) should succeed");
 
-        assert!(report.applied, "array push must apply");
+        assert!(report.applied, "duplicate-key push must apply");
         let content = std::fs::read_to_string(root.join("task.md")).unwrap();
         // Both new members land as real list elements alongside the originals.
         for member in ["alpha", "beta", "gamma", "delta"] {
             assert!(
                 content.contains(member),
-                "array push must append each member as a real element ({member} missing):\n{content}"
+                "duplicate-key push must append each member as a real element ({member} missing):\n{content}"
             );
         }
-        // Never stringify the array into one literal element.
+        // Never stringify anything into a literal list/array element.
         assert!(
             !content.contains("[[") && !content.contains("[\""),
-            "array push must NOT append a literal array element:\n{content}"
+            "duplicate-key push must NOT append a literal array element:\n{content}"
         );
     }
 
-    /// F1: an **array** `pop` value removes each named member; the untouched
-    /// members survive.
+    /// NRN-238: repeating the SAME key across multiple `pop` tokens removes each
+    /// named member; the untouched members survive — the raw-token wire
+    /// equivalent of the old map era's "array pop removes named members" test
+    /// (matching `norn set --pop tags=alpha --pop tags=gamma`).
     #[test]
-    fn confirm_pop_array_removes_named_members() {
+    fn confirm_pop_duplicate_key_removes_named_members() {
         let tmp = tempfile::Builder::new()
             .prefix("norn-mcp-set-poparr-")
             .tempdir()
@@ -748,85 +665,59 @@ mod tests {
         .unwrap();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let mut pop = BTreeMap::new();
-        pop.insert("tags".to_string(), serde_json::json!(["alpha", "gamma"]));
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                pop: vec!["tags=alpha".into(), "tags=gamma".into()],
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("handle (duplicate-key pop) should succeed");
+
+        assert!(report.applied, "duplicate-key pop must apply");
+        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
+        assert!(
+            !content.contains("alpha") && !content.contains("gamma"),
+            "duplicate-key pop must remove every named member:\n{content}"
+        );
+        assert!(
+            content.contains("beta"),
+            "duplicate-key pop must leave the untouched members:\n{content}"
+        );
+    }
+
+    /// NRN-238: a `push` VALUE that happens to look like JSON (`{"nested":
+    /// "object"}`) is treated as an opaque string, exactly like `norn set --push
+    /// tags='{"nested":"object"}'` — `--push` has no JSON parsing, so the raw
+    /// token shape can no longer refuse a "structured" push value the way the
+    /// map-era `expand_list_ops` façade did (there is no wire form left that
+    /// carries a JSON object into `push`/`pop`: every token is one scalar
+    /// `KEY=VALUE` pair). Verified against the live CLI (`cargo run -- set
+    /// --push tags='{"nested":"object"}'`) before writing this assertion, per the
+    /// migration mandate to match CLI token behavior exactly rather than guess.
+    #[test]
+    fn push_json_shaped_value_is_literal_string_not_parsed() {
+        let (_tmp, root) = seeded_vault_with_tags();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                pop,
+                push: vec![r#"tags={"nested":"object"}"#.into()],
                 confirm: true,
                 ..Default::default()
             },
         )
-        .expect("handle (array pop) should succeed");
+        .expect("handle (JSON-shaped push value) should succeed — --push never parses JSON");
 
-        assert!(report.applied, "array pop must apply");
+        assert!(report.applied, "JSON-shaped push value must apply");
         let content = std::fs::read_to_string(root.join("task.md")).unwrap();
         assert!(
-            !content.contains("alpha") && !content.contains("gamma"),
-            "array pop must remove every named member:\n{content}"
-        );
-        assert!(
-            content.contains("beta"),
-            "array pop must leave the untouched members:\n{content}"
-        );
-    }
-
-    /// F1: an **object** `push` value has no scalar KEY=VALUE form and is refused
-    /// with a params error — never stringified into a literal `{...}` element.
-    #[test]
-    fn push_object_value_is_refused() {
-        let (_tmp, root) = seeded_vault_with_tags();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
-
-        let mut push = BTreeMap::new();
-        push.insert("tags".to_string(), serde_json::json!({"nested": "object"}));
-
-        let result = handle(
-            &ctx,
-            SetParams {
-                target: "task".into(),
-                push,
-                confirm: true,
-                ..Default::default()
-            },
-        );
-        assert!(
-            result.is_err(),
-            "an object push value must be refused, not stringified"
-        );
-        // Disk is untouched: the refusal happens before any lock or write.
-        let content = std::fs::read_to_string(root.join("task.md")).unwrap();
-        assert!(
-            !content.contains("nested"),
-            "a refused object push must write nothing:\n{content}"
-        );
-    }
-
-    /// F1: an array `pop` value containing a nested array/object element is
-    /// refused — the nested element has no scalar form.
-    #[test]
-    fn pop_nested_array_element_is_refused() {
-        let (_tmp, root) = seeded_vault_with_tags();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
-
-        let mut pop = BTreeMap::new();
-        pop.insert("tags".to_string(), serde_json::json!(["alpha", ["nested"]]));
-
-        let result = handle(
-            &ctx,
-            SetParams {
-                target: "task".into(),
-                pop,
-                confirm: true,
-                ..Default::default()
-            },
-        );
-        assert!(
-            result.is_err(),
-            "a nested-array pop element must be refused, not stringified"
+            content.contains(r#"{"nested":"object"}"#),
+            "the JSON-shaped value must land as a literal string list element:\n{content}"
         );
     }
 
@@ -837,14 +728,11 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let mut push = BTreeMap::new();
-        push.insert("tags".to_string(), serde_json::json!("solo"));
-
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                push,
+                push: vec!["tags=solo".into()],
                 confirm: true,
                 ..Default::default()
             },
@@ -867,15 +755,12 @@ mod tests {
         let (_tmp, root) = seeded_vault_with_tags();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
-        let mut pop = BTreeMap::new();
-        // `zeta` is not a member of [alpha, beta].
-        pop.insert("tags".to_string(), serde_json::json!("zeta"));
-
         let report = handle(
             &ctx,
             SetParams {
                 target: "task".into(),
-                pop,
+                // `zeta` is not a member of [alpha, beta].
+                pop: vec!["tags=zeta".into()],
                 confirm: true,
                 ..Default::default()
             },
