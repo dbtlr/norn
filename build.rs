@@ -89,62 +89,83 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Recursively collect every file under `dir` into `out`.
+/// Recursively collect every regular `.rs` file under `dir` into `out`.
+///
+/// The filter is what keeps the fingerprint reproducible across checkouts:
+/// incidental non-source files (`.DS_Store`, editor swap/backup files) must
+/// not perturb the id, and non-regular entries (fifos, sockets) must not
+/// fail the read. Symlinks — file or directory — are skipped entirely: a
+/// directory symlink could cycle the walk, and a symlinked module's target
+/// wouldn't be rerun-tracked reliably anyway.
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.is_dir() {
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
             collect_files(&path, out)?;
-        } else {
+        } else if meta.is_file() && path.extension().is_some_and(|e| e == "rs") {
             out.push(path);
         }
     }
     Ok(())
 }
 
-/// Hash the crate's `src/` tree (sorted relative paths + contents) and
-/// `Cargo.lock`, export the digest as `NORN_BUILD_ID`, and print the
-/// `rerun-if-changed` lines that keep the id — and the completion/man side
-/// effects — tracked (see module docs).
+/// Feed one length-prefixed `(name, contents)` record into the hasher.
+///
+/// Length prefixes (not separators) frame the records: contents may embed
+/// any byte, including NUL, without two different trees ever producing the
+/// same byte stream.
+fn hash_record(hasher: &mut blake3::Hasher, name: &str, contents: &[u8]) {
+    hasher.update(&(name.len() as u64).to_le_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(&(contents.len() as u64).to_le_bytes());
+    hasher.update(contents);
+}
+
+/// Hash the crate's `src/` tree (sorted relative paths + contents of every
+/// regular `.rs` file) plus `Cargo.toml` and `Cargo.lock`, export the digest
+/// as `NORN_BUILD_ID`, and print the `rerun-if-changed` lines that keep the
+/// id — and the completion/man side effects — tracked (see module docs).
+///
+/// `Cargo.toml` is included because a feature or profile flip can change the
+/// wire schema without touching `src/` or the lockfile; `Cargo.lock` because
+/// a dep-tree change can. Both are REQUIRED: a build without a readable
+/// lockfile would silently drop the dep-tree contribution and let two
+/// wire-different builds share an id, so it fails the build instead.
 fn emit_build_id(manifest_dir: &Path) -> std::io::Result<()> {
     let src_dir = manifest_dir.join("src");
     let mut files = Vec::new();
     collect_files(&src_dir, &mut files)?;
-    // Sort by the RELATIVE path so the hash is stable regardless of the
-    // absolute checkout location or filesystem read order.
-    files.sort_by(|a, b| {
-        let ra = a.strip_prefix(manifest_dir).unwrap_or(a);
-        let rb = b.strip_prefix(manifest_dir).unwrap_or(b);
-        ra.cmp(rb)
-    });
+    // Absolute paths all share the manifest-dir prefix, so a plain sort
+    // orders identically to sorting the relative paths; the RELATIVE path is
+    // what feeds the hash, keeping the id stable across checkout locations.
+    files.sort();
 
     let mut hasher = blake3::Hasher::new();
     for file in &files {
         let rel = file.strip_prefix(manifest_dir).unwrap_or(file);
-        // Path then a NUL separator then contents: a rename or a content move
-        // across files can't collide with an unchanged tree.
-        hasher.update(rel.to_string_lossy().as_bytes());
-        hasher.update(&[0]);
-        hasher.update(&std::fs::read(file)?);
+        hash_record(&mut hasher, &rel.to_string_lossy(), &std::fs::read(file)?);
         println!("cargo:rerun-if-changed={}", file.display());
     }
 
-    // Cargo.lock: a dep-tree change can shift the wire schema without touching
-    // src/, so it belongs in the fingerprint.
-    let lock = manifest_dir.join("Cargo.lock");
-    if let Ok(contents) = std::fs::read(&lock) {
-        hasher.update(b"Cargo.lock");
-        hasher.update(&[0]);
-        hasher.update(&contents);
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        let path = manifest_dir.join(name);
+        let contents = std::fs::read(&path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("NORN_BUILD_ID requires a readable {name}: {e}"),
+            )
+        })?;
+        hash_record(&mut hasher, name, &contents);
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 
     println!(
         "cargo:rustc-env=NORN_BUILD_ID={}",
         hasher.finalize().to_hex()
     );
-    // The dir line catches file additions/removals; the Cargo.lock line catches
-    // dep changes. Per-file lines above are the reliable rerun trigger for edits.
+    // The dir line catches file additions/removals; per-file lines above are
+    // the reliable rerun trigger for edits.
     println!("cargo:rerun-if-changed={}", src_dir.display());
-    println!("cargo:rerun-if-changed={}", lock.display());
     Ok(())
 }
