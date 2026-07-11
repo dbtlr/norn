@@ -134,6 +134,19 @@ pub struct RepairPlan {
     pub footnotes: Vec<PlanFootnote>,
 }
 
+impl RepairPlan {
+    /// The single preflight-produced op of `kind`, panicking with a uniform
+    /// message if absent. The CLI direct arms and the MCP tools all pull the
+    /// preflight-RESOLVED path out of the plan through this one accessor, so
+    /// the routed and direct surfaces cannot drift on the extraction (NRN-239).
+    pub(crate) fn expect_change(&self, kind: &str) -> &PlannedChange {
+        self.changes
+            .iter()
+            .find(|c| c.operation == kind)
+            .unwrap_or_else(|| panic!("preflight_and_plan must produce a {kind} op"))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepairPlanSummary {
     pub findings: usize,

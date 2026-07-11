@@ -13,19 +13,18 @@
 //!
 //! **Routable surface** (the gating lives in `try_route_move`, `src/lib.rs`):
 //!
-//! - Routed: a move whose SOURCE argument is an exact on-disk `.md` doc path
-//!   (single-file move) or a directory (folder move). Both the CLI arm and
-//!   `vault.move` apply the raw destination and the (raw == resolved) source, so
-//!   the plans agree.
-//! - Gated to Direct: any source that is not exactly that — a bare STEM needing
-//!   index resolution, a missing source, or a non-`.md` on-disk entry. The CLI
-//!   arm applies the preflight-RESOLVED path (NRN-216) while `vault.move` applies
-//!   the raw argument, so a resolvable stem would diverge (direct moves the
-//!   resolved doc; routed no-ops/fails on the literal stem). The `.md`-extension
-//!   requirement (not bare existence) closes the stem-SHADOWING hole: an
-//!   extensionless file `foo` beside `foo.md` makes bare `foo` exist on disk
-//!   while the index still resolves the stem to `foo.md` — routing it would
-//!   silently move a DIFFERENT file than Direct.
+//! - Routed: every source shape — an exact on-disk `.md` doc path, a directory
+//!   (folder move), a bare STEM needing index resolution, or a stem shadowed by
+//!   a non-doc on-disk entry (`foo` beside `foo.md`). Since NRN-239 `vault.move`
+//!   runs the SAME stem-resolving preflight the CLI direct arm does and plans
+//!   the RESOLVED source, not the raw argument — raw-vs-resolved divergence is
+//!   structurally impossible, so no on-disk existence/extension guard is needed
+//!   (the `rewrite_wikilink` model). An unresolvable or ambiguous source still
+//!   refuses (coded `target-not-found` / `target-ambiguous`), reconstructed
+//!   byte-identically on the wire.
+//! - Gated to Direct: only the shared flags (`--config` /
+//!   `--no-cache-refresh`) and the interactive-TTY path (`routing_forced_direct`
+//!   / `routed_confirm`), same as every other routed mutation.
 //!
 //! `remove_empty_dirs` after a live folder move runs on BOTH surfaces — the CLI
 //! arm (`src/lib.rs`) AND inside `vault.move`'s handler
@@ -41,11 +40,12 @@ use crate::cli::{MoveArgs, MoveFormat};
 /// Translate parsed `norn move` args into the `vault.move` tool's parameter
 /// object (the `MoveParams` shape in `src/mcp/tools/move_doc.rs`).
 ///
-/// The wire carries the RAW `from`/`to` — the caller (`try_route_move`) has
-/// already gated any source needing stem resolution, so raw == the resolved
-/// path the direct arm applies. `confirm` is the dry-run/apply switch (false =
-/// dry-run/preview, true = apply). Boolean flags are omitted when false (the
-/// tool defaults them), matching `set`'s omit-when-empty projection.
+/// The wire carries the RAW `from`/`to` — `vault.move` runs its own
+/// stem-resolving preflight and plans the RESOLVED source (NRN-239), so a bare
+/// stem here resolves identically to what the direct arm would apply.
+/// `confirm` is the dry-run/apply switch (false = dry-run/preview, true =
+/// apply). Boolean flags are omitted when false (the tool defaults them),
+/// matching `set`'s omit-when-empty projection.
 pub fn to_mcp_arguments(args: &MoveArgs, confirm: bool) -> Value {
     let mut map = Map::new();
     map.insert("from".into(), Value::String(args.src.clone()));
