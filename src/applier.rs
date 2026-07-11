@@ -947,9 +947,19 @@ fn build_link_impact(
     // The raw `--rewrite-to` argument, if any, lives on the parent MigrationOp.
     let raw_rewrite_to = parent_op.fields.get("rewrite_to").and_then(|v| v.as_str());
 
-    // Fallback: a redirect with no surviving backlink resolves its files from the
-    // change's link_risk rewrite sources (populated by `expand` when rewrite_to
-    // is present), matching the direct arm's former behavior.
+    // Fallback (NRN-248): `backlinks()` is resolution-keyed — it only sees links
+    // with `resolved_path == Some(change.path)`. Two realizable classes of link
+    // to the deleted doc have `resolved_path == None` and are therefore invisible
+    // to it, yet `classify_link_risk`'s textual fallback (`link_targets_path`)
+    // still matches them by comparing the raw target string: (1) an ambiguous
+    // same-stem wikilink (two docs share a stem, so resolution reports Ambiguous
+    // instead of picking one) and (2) a dangling relative markdown link whose raw
+    // href textually coincides with the deleted path but resolves relative to a
+    // different directory. When `--rewrite-to` is set and no resolved backlink
+    // survived, fall back to the change's link_risk rewrite sources so these
+    // links still show up in the report — the resulting shape (`incoming_total:
+    // 0` with non-empty `incoming_files`) is unique to this path and is the
+    // signal that a redirect reached links `backlinks()` couldn't count.
     if raw_rewrite_to.is_some() && files.is_empty() {
         if let Some(risk) = &change.link_risk {
             for affected in risk
@@ -1219,6 +1229,81 @@ mod tests {
         // Apply: file moved
         assert!(!tmp.path().join("a.md").exists());
         assert!(tmp.path().join("renamed.md").exists());
+    }
+
+    /// NRN-248: `build_link_impact`'s fallback branch (files come from
+    /// `link_risk` rewrite sources rather than `backlinks()`) fires end to end
+    /// through `apply_migration_plan` for a `delete_document` op whose only
+    /// incoming reference is an ambiguous same-stem wikilink — `x/b.md` and
+    /// `y/b.md` share stem `b`, so `a.md`'s bare `[[b]]` resolves to
+    /// `resolved_path: None` (Ambiguous) and is invisible to `backlinks()`,
+    /// but `link_risk`'s textual fallback still catches it. See the
+    /// integration-test pair in `tests/delete_command.rs` for the full CLI
+    /// surface + observed cascade rewrite; this unit test pins the same
+    /// shape at the `apply_migration_plan` boundary in dry-run (no FS
+    /// mutation needed to observe the computed `LinkImpact`).
+    #[test]
+    fn build_link_impact_fallback_fires_on_ambiguous_stem_backlink() {
+        let tmp = tempfile::Builder::new()
+            .prefix("applier-nrn248-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("x")).unwrap();
+        std::fs::create_dir(root.join("y")).unwrap();
+        std::fs::write(root.join("x/b.md"), "---\ntype: note\n---\n# B in x\n").unwrap();
+        std::fs::write(root.join("y/b.md"), "---\ntype: note\n---\n# B in y\n").unwrap();
+        std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n[[b]]\n").unwrap();
+        std::fs::write(root.join("c.md"), "---\ntype: note\n---\n# C\n").unwrap();
+        let utf8_root = Utf8Path::from_path(root).unwrap();
+        let index = crate::graph::build_index(utf8_root).unwrap();
+
+        let vault_root = root.to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 1,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            operations: vec![MigrationOp {
+                kind: "delete_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({
+                    "path": "x/b.md",
+                    "rewrite_to": "c.md",
+                    "allow_broken_links": false,
+                }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let ctx = ApplyContext {
+            dry_run: true,
+            parents: false,
+            verbose: false,
+            refuse_as_report: false,
+        };
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
+        let op = &report.operations[0];
+        let li = op
+            .link_impact
+            .as_ref()
+            .expect("link_impact must be present on delete_document op");
+        assert_eq!(
+            li.incoming_total, 0,
+            "no resolved backlink; link_impact: {li:?}"
+        );
+        assert_eq!(
+            li.incoming_files,
+            vec!["a.md".to_string()],
+            "incoming_files must come from the link_risk fallback; link_impact: {li:?}"
+        );
+        assert_eq!(
+            li.redirect_to.as_deref(),
+            Some("c.md"),
+            "redirect_to must be the resolved rewrite target; link_impact: {li:?}"
+        );
     }
 
     /// F6: the `created_documents` iterator is walked in lockstep ONLY with
