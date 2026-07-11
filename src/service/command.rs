@@ -561,6 +561,65 @@ fn status_cmd(
     Ok(status::exit_code(&report))
 }
 
+/// What came of trying to restart a loaded `serve` unit after `self-update`
+/// swapped the binary (NRN-226). Best-effort: [`Failed`](Self::Failed) is not
+/// fatal — the swap already succeeded — so the CLI boundary renders it as a
+/// warning, never as an error that changes `self-update`'s exit code. Not
+/// platform-gated itself (an `anyhow::Error` carries fine everywhere); only
+/// the two [`restart_after_update`] bodies below are.
+#[derive(Debug)]
+pub(crate) enum RestartOutcome {
+    /// The unit was loaded; `kickstart -k` restarted it.
+    Restarted,
+    /// Not installed or not loaded (including every non-macOS host, which
+    /// has no launchd) — nothing to restart.
+    NotLoaded,
+    /// The load-state probe or the restart call itself failed.
+    Failed(anyhow::Error),
+}
+
+/// The restart-after-update decision, over the seam (testable with a fake):
+/// probe first — a probe failure is [`RestartOutcome::Failed`], never read as
+/// not-loaded, the same "unknown must surface" rule [`lifecycle_outcome`]
+/// follows — then restart only a definitively LOADED unit.
+#[cfg(unix)]
+fn restart_after_update_outcome<E: Exec>(supervisor: &LaunchdSupervisor<E>) -> RestartOutcome {
+    let state = match supervisor.load_state() {
+        Ok(state) => state,
+        Err(error) => return RestartOutcome::Failed(error),
+    };
+    if !state.loaded() {
+        return RestartOutcome::NotLoaded;
+    }
+    match supervisor.restart() {
+        Ok(()) => RestartOutcome::Restarted,
+        Err(error) => RestartOutcome::Failed(error),
+    }
+}
+
+/// Real-edge wiring `self-update` calls after a successful swap: restart a
+/// loaded unit so it picks up the freshly-swapped binary. Unlike
+/// [`require_macos`], this never refuses — self-update already ran and the
+/// binary is already updated; a non-macOS host simply has no launchd to
+/// restart, so it silently reads as [`RestartOutcome::NotLoaded`]. The
+/// `cfg(not(unix))` twin below covers every remaining host so the crate
+/// builds everywhere.
+#[cfg(unix)]
+pub(crate) fn restart_after_update() -> RestartOutcome {
+    if std::env::consts::OS != "macos" {
+        return RestartOutcome::NotLoaded;
+    }
+    // SAFETY: `getuid(2)` is always successful and takes no arguments.
+    let uid = unsafe { libc::getuid() };
+    let supervisor = LaunchdSupervisor::new(RealExec, uid, plist::SERVE_LABEL);
+    restart_after_update_outcome(&supervisor)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restart_after_update() -> RestartOutcome {
+    RestartOutcome::NotLoaded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,6 +1011,65 @@ mod tests {
                 !resolved.as_str().ends_with("norn-0.45.1-real"),
                 "must not resolve to the versioned target"
             );
+        }
+
+        /// A loaded unit is restarted via `kickstart -k` — the same call
+        /// `service restart` makes.
+        #[test]
+        fn restart_after_update_restarts_a_loaded_unit() {
+            let s = supervisor(FakeExec::new(vec![print_running(4242), exec_ok()]));
+            let outcome = restart_after_update_outcome(&s);
+            assert!(matches!(outcome, RestartOutcome::Restarted), "{outcome:?}");
+            assert_eq!(
+                s.exec().calls()[1],
+                vec![
+                    "launchctl",
+                    "kickstart",
+                    "-k",
+                    "gui/501/com.dbtlr.norn.serve"
+                ]
+            );
+        }
+
+        /// A not-loaded unit (never installed, or installed but stopped) is a
+        /// silent no-op — no restart attempt.
+        #[test]
+        fn restart_after_update_is_a_no_op_when_not_loaded() {
+            let s = supervisor(FakeExec::new(vec![print_not_loaded()]));
+            let outcome = restart_after_update_outcome(&s);
+            assert!(matches!(outcome, RestartOutcome::NotLoaded), "{outcome:?}");
+            assert_eq!(s.exec().calls().len(), 1, "probe only, no restart attempt");
+        }
+
+        /// A genuine probe failure must surface as `Failed`, never read as
+        /// not-loaded — the same rule `lifecycle_outcome` follows.
+        #[test]
+        fn restart_after_update_probe_failure_is_failed_not_not_loaded() {
+            let s = supervisor(FakeExec::new(vec![print_probe_failed()]));
+            let outcome = restart_after_update_outcome(&s);
+            match outcome {
+                RestartOutcome::Failed(error) => {
+                    assert!(error.to_string().contains("could not determine"), "{error}");
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
+        }
+
+        /// A restart (`kickstart -k`) failure on a loaded unit surfaces as
+        /// `Failed` too — the CLI boundary warns, exit code is untouched.
+        #[test]
+        fn restart_after_update_restart_failure_is_failed() {
+            let s = supervisor(FakeExec::new(vec![
+                print_running(4242),
+                exec_fail(1, "boom"),
+            ]));
+            let outcome = restart_after_update_outcome(&s);
+            match outcome {
+                RestartOutcome::Failed(error) => {
+                    assert!(error.to_string().contains("boom"), "{error}");
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
         }
     }
 }
