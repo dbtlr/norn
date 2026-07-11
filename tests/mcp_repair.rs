@@ -205,6 +205,19 @@ fn lists_and_calls_vault_repair() {
         "vault.repair result must carry a plan object, got: {repair_resp}"
     );
 
+    // NRN-231: `has_diagnostic_errors` rides alongside `plan` — the exit-code
+    // signal a routed `repair --plan` reconstructs.
+    let has_diagnostic_errors =
+        &repair_resp["result"]["structuredContent"]["has_diagnostic_errors"];
+    assert!(
+        has_diagnostic_errors.is_boolean(),
+        "vault.repair result must carry a has_diagnostic_errors bool, got: {repair_resp}"
+    );
+    assert_eq!(
+        has_diagnostic_errors, false,
+        "the fixable-link fixture has no error-severity diagnostic"
+    );
+
     // ── Structural MigrationPlan checks (Task 12 readiness) ──
     assert_eq!(
         plan["schema_version"], 1,

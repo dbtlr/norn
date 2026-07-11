@@ -107,6 +107,15 @@ pub struct RepairOutput {
     /// `skipped` (array, omitted when empty).
     /// Feed this value to `vault.apply` to execute the rewrites.
     pub plan: serde_json::Value,
+
+    /// Whether the vault carries any error-severity diagnostic — the SAME
+    /// predicate `norn repair --plan`'s exit code derives from
+    /// (`crate::graph::has_errors(&index)`, checked over the FULL loaded
+    /// index, independent of the triage filters applied to `plan`). Carried
+    /// so a routed `repair --plan` reproduces the direct path's exit code
+    /// (NRN-231, mirroring `vault.find`'s `has_diagnostic_errors` bit from
+    /// NRN-222).
+    pub has_diagnostic_errors: bool,
 }
 
 /// Pure handler for `vault.repair`.
@@ -125,6 +134,12 @@ pub fn handle(ctx: &VaultContext, p: RepairParams) -> Result<RepairOutput> {
     // Use the context's current config (`ctx.config()`; hot-swapped in warm mode).
     let config = ctx.config();
     let index = ctx.load_graph_index()?;
+
+    // The CLI's exit-code signal (any error-severity diagnostic anywhere in the
+    // vault), computed off the FULL index BEFORE triage filtering — same as
+    // `repair::run_plan`'s `crate::exit_code_for(&index)`. Carried so a routed
+    // `repair --plan` reproduces the direct exit code (NRN-231).
+    let has_diagnostic_errors = crate::graph::has_errors(&index);
 
     // Collect all validation findings using the context's current config.
     let findings = validate_with_compiled(
@@ -206,7 +221,10 @@ pub fn handle(ctx: &VaultContext, p: RepairParams) -> Result<RepairOutput> {
     // same bytes `norn repair --plan --format json` writes.
     let plan_value = serde_json::to_value(&plan)?;
 
-    Ok(RepairOutput { plan: plan_value })
+    Ok(RepairOutput {
+        plan: plan_value,
+        has_diagnostic_errors,
+    })
 }
 
 fn normalized_filter_values(values: &[String]) -> Vec<String> {
@@ -358,6 +376,44 @@ mod tests {
             ops.len(),
             0,
             "clean vault must produce 0 operations, got: {ops:?}"
+        );
+        assert!(
+            !out.has_diagnostic_errors,
+            "a clean vault must not carry an error-severity diagnostic"
+        );
+    }
+
+    /// NRN-231: `has_diagnostic_errors` mirrors `norn repair --plan`'s exit-code
+    /// signal — true whenever ANY document in the vault carries an
+    /// error-severity diagnostic, independent of the triage filters applied to
+    /// the plan itself (an unreadable file need not have any repairable finding
+    /// to still flip this bit).
+    #[test]
+    fn handle_diagnostic_error_vault_sets_bit() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-repair-plan-diag-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            root.join("good.md"),
+            "---\ntype: note\ntitle: Good\n---\nbody\n",
+        )
+        .unwrap();
+        // Invalid UTF-8 with a .md extension trips read_to_string, surfaced as a
+        // Severity::Error diagnostic (code "read-failed") — same fixture shape as
+        // `find::route`'s exit-code isomorphism test.
+        std::fs::write(
+            root.join("bad-utf8.md").as_std_path(),
+            b"\xff\xfe\xfd\xfc invalid utf-8 here",
+        )
+        .unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let out = handle(&ctx, RepairParams::default()).expect("handle should succeed");
+        assert!(
+            out.has_diagnostic_errors,
+            "a vault with an error-severity diagnostic must set the bit"
         );
     }
 

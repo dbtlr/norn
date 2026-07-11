@@ -5,7 +5,7 @@ use crate::standards::{
     parse_config_compiled, CompiledConfig, RepairConfig, ValidateConfig, VaultConfig,
 };
 use anyhow::Result;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 pub struct LoadedConfig {
     pub index_options: IndexOptions,
@@ -73,9 +73,9 @@ pub fn effective_cwd(cwd: Option<&Utf8PathBuf>) -> Result<Utf8PathBuf> {
     Ok(ground_relative(requested, &current_dir))
 }
 
-pub fn resolve_path(cwd: &Utf8PathBuf, path: &Utf8PathBuf) -> Utf8PathBuf {
+pub fn resolve_path(cwd: &Utf8Path, path: &Utf8Path) -> Utf8PathBuf {
     if path.is_absolute() {
-        path.clone()
+        path.to_path_buf()
     } else {
         cwd.join(path)
     }

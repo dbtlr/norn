@@ -10,15 +10,16 @@
 //! - 1: runtime failure (at least one op failed during apply)
 //! - 2: pre-flight refusal (parse error, schema-version mismatch, expansion error)
 
+pub mod route;
+
 use crate::applier::{apply_migration_plan, ApplyContext};
 use crate::apply_report::ApplyReport;
-use crate::cache::state_dir_for;
 use crate::cli::{ApplyFormat, InputFormat};
 use crate::migration_plan::{MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
-use crate::mutation_lock::pending::{delete_pending_plan, save_pending_plan, sweep_pending};
+use crate::mutation_lock::pending::delete_pending_plan;
 use crate::mutation_lock::MutationLock;
 use anyhow::{Context, Result};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use std::io::{self, Read, Write};
 
 pub struct ApplyRunArgs {
@@ -40,40 +41,70 @@ pub const EXIT_PREFLIGHT: i32 = 2;
 /// Success exit code.
 pub const EXIT_OK: i32 = 0;
 
-pub fn run(
-    args: ApplyRunArgs,
-    cwd: &Utf8PathBuf,
-    no_cache_refresh: bool,
-    config_path: Option<&Utf8PathBuf>,
-    verbose: bool,
-) -> Result<i32> {
-    // ------------------------------------------------------------------
-    // 1. Read plan source
-    // ------------------------------------------------------------------
+/// The client-side preamble every `norn apply` invocation runs BEFORE the
+/// routing decision and BEFORE any mutation lock: read the plan source, detect
+/// its format, parse it, and validate `schema_version`. It is byte-identical to
+/// the direct arm's own preflight — a schema mismatch refuses (exit 2, prose on
+/// stderr) BEFORE any wire activity, and a parse failure propagates as an `Err`
+/// exactly as before — so a routed apply and a direct apply cannot diverge on
+/// preflight behavior.
+///
+/// Stdin can only be consumed once, so this MUST run a single time; both the
+/// routing seam ([`route::to_mcp_arguments`]) and the direct tail
+/// ([`run_direct`]) reuse the `raw` bytes and parsed `plan` it returns (the RAW
+/// bytes feed the lock-timeout stash path unchanged).
+pub enum Preamble {
+    /// The plan parsed and validated; carry the raw bytes (for the stash path)
+    /// and the parsed plan (for the wire value / the applier).
+    Ready { raw: String, plan: MigrationPlan },
+    /// A byte-identical preflight refusal already emitted its prose; the caller
+    /// returns this exit code without touching the wire or the lock.
+    Refused(i32),
+}
+
+/// Read + format-detect + parse + schema-check the plan source. See [`Preamble`].
+pub fn preamble(args: &ApplyRunArgs) -> Result<Preamble> {
+    // 1. Read plan source (file or stdin `-`), keeping the RAW bytes.
     let raw = read_plan_source(&args.plan_path)
         .with_context(|| format!("failed to read migration plan from '{}'", args.plan_path))?;
 
-    // ------------------------------------------------------------------
-    // 2. Determine input format (extension → YAML, else JSON, stdin default JSON)
-    // ------------------------------------------------------------------
+    // 2. Determine input format (extension → YAML, else JSON, stdin default JSON).
     let fmt = determine_input_format(&args.plan_path, args.input_format);
 
-    // ------------------------------------------------------------------
-    // 3. Parse plan
-    // ------------------------------------------------------------------
+    // 3. Parse plan (a parse failure propagates as Err, unchanged).
     let plan = parse_plan(&raw, fmt, &args.plan_path)?;
 
-    // ------------------------------------------------------------------
-    // 4. Validate schema version — exit 2 if mismatch
-    // ------------------------------------------------------------------
+    // 4. Validate schema version — exit 2 if mismatch, BEFORE any wire activity.
     if plan.schema_version != MIGRATION_PLAN_SCHEMA_VERSION {
         eprintln!(
             "error: unsupported plan schema_version {}; this norn build supports v{}",
             plan.schema_version, MIGRATION_PLAN_SCHEMA_VERSION
         );
-        return Ok(EXIT_PREFLIGHT);
+        return Ok(Preamble::Refused(EXIT_PREFLIGHT));
     }
 
+    Ok(Preamble::Ready { raw, plan })
+}
+
+/// The direct `norn apply` tail: acquire the local mutation lock, load the graph
+/// index, run the apply/dry-run ladder, and render — reached only when the
+/// routing seam returned `None` (no daemon / forced-Direct / interactive TTY).
+///
+/// The plan is pre-parsed and pre-validated by [`preamble`]; `raw` is the plan's
+/// RAW bytes (for the lock-timeout stdin stash) and `state_dir` is already
+/// resolved and swept by the caller (before routing), so this never re-reads
+/// stdin, re-resolves the state dir, or re-sweeps.
+#[allow(clippy::too_many_arguments)]
+pub fn run_direct(
+    args: &ApplyRunArgs,
+    plan: MigrationPlan,
+    raw: &str,
+    state_dir: &Utf8Path,
+    cwd: &Utf8PathBuf,
+    no_cache_refresh: bool,
+    config_path: Option<&Utf8PathBuf>,
+    verbose: bool,
+) -> Result<i32> {
     // ------------------------------------------------------------------
     // 4a. Acquire mutation lock (apply-only; dry-run is lock-free).
     //
@@ -85,38 +116,21 @@ pub fn run(
     // new/edit/move). A non-TTY json caller without --yes is an implicit
     // dry-run, not an apply.
     // ------------------------------------------------------------------
-    let (_, state_dir) =
-        state_dir_for(cwd).map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
-    // Best-effort sweep of stale pending plans before we do any work.
-    sweep_pending(&state_dir);
     let _mutation_lock = {
         use std::io::IsTerminal;
         let is_apply = !args.dry_run && (args.yes || std::io::stdin().is_terminal());
-        match MutationLock::acquire_if_mutating(&state_dir, is_apply) {
+        match MutationLock::acquire_if_mutating(state_dir, is_apply) {
             Ok(guard) => guard,
             Err(crate::cache::CacheError::MutationLockTimeout) => {
-                if args.plan_path == "-" {
-                    match save_pending_plan(&state_dir, &raw) {
-                        Ok(pending_path) => {
-                            eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
-                            eprintln!("retry with: norn apply {pending_path}");
-                        }
-                        Err(save_err) => {
-                            eprintln!("error: another norn mutation is in progress against this vault (timed out after 5 s)");
-                            eprintln!("warning: could not save stdin plan for retry: {save_err}");
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "error: another norn mutation is in progress against this vault (timed out after 5 s)"
-                    );
-                }
-                return Ok(EXIT_PREFLIGHT);
+                // NRN-231 review F5: the stash prose + stdin-vs-file branch lives
+                // once, in `route::emit_lock_timeout_stash`; the direct arm calls
+                // straight into it so the two paths cannot drift.
+                return route::emit_lock_timeout_stash(&args.plan_path, raw, state_dir);
             }
             Err(e) => return Err(anyhow::anyhow!("mutation lock error: {e}")),
         }
     };
-    // `_mutation_lock` is Option<MutationLock> held at function scope until run() returns.
+    // `_mutation_lock` is Option<MutationLock> held at function scope until run_direct() returns.
 
     // ------------------------------------------------------------------
     // 5. Build GraphIndex
@@ -212,15 +226,25 @@ pub fn run(
     // ------------------------------------------------------------------
     render_report(&report, args.format, args.out.as_deref())?;
 
-    // Delete the pending plan on successful retry so it self-cleans.
-    if exit == EXIT_OK {
-        let path = camino::Utf8Path::new(&args.plan_path);
-        if path.as_str().contains("/pending/") && path.as_str().ends_with(".plan.json") {
-            delete_pending_plan(path);
-        }
-    }
+    // Delete the pending plan on successful retry so it self-cleans (shared with
+    // the routed emit).
+    self_clean_pending_plan(exit, &args.plan_path);
 
     Ok(exit)
+}
+
+/// Delete the pending plan on a successful `/pending/` retry so it self-cleans.
+/// Shared by the direct tail ([`run_direct`]) and the routed emit
+/// ([`route::emit`]) so the `/pending/`-path check exists exactly once (NRN-231
+/// review F4). A no-op unless the applied plan came from a stashed pending file.
+pub(crate) fn self_clean_pending_plan(exit: i32, plan_path: &str) {
+    if exit != EXIT_OK {
+        return;
+    }
+    let path = camino::Utf8Path::new(plan_path);
+    if path.as_str().contains("/pending/") && path.as_str().ends_with(".plan.json") {
+        delete_pending_plan(path);
+    }
 }
 
 /// Read plan content from a file path or stdin (`-`).

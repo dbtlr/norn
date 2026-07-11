@@ -184,11 +184,12 @@ fn stdin_carries_redirected_payload() -> bool {
 /// `--config` / `--no-cache-refresh` force Direct up front (see
 /// [`routing_forced_direct`]).
 ///
-/// **Routing coverage.** `count` (NRN-94), `find` and `get` (NRN-222) route
-/// today. Each command's MCP tool returns a `structuredContent` payload that the
-/// client rebuilds into the command's native result type and renders through the
-/// SAME renderers the direct path uses, so routed and direct output are
-/// byte-identical (the load-bearing isomorphism, ADR 0005):
+/// **Routing coverage.** `count` (NRN-94), `find` and `get` (NRN-222), and
+/// `repair --plan` (NRN-231) route today. Each command's MCP tool returns a
+/// `structuredContent` payload that the client rebuilds into the command's
+/// native result type and renders through the SAME renderers the direct path
+/// uses, so routed and direct output are byte-identical (the load-bearing
+/// isomorphism, ADR 0005):
 ///
 /// - `count` — `vault.count`'s `CountEnvelope` losslessly re-encodes `CountOutput`.
 /// - `find` — `vault.find` carries the `total`/`returned`/`truncated`/`starts_at`
@@ -199,6 +200,12 @@ fn stdin_carries_redirected_payload() -> bool {
 ///   (NRN-214); the client rebuilds a `ShowReport` and renders via `show::emit`,
 ///   applying the CLI's client-side `--col` narrowing. `--format markdown` and
 ///   `--section` stay Direct (see `route_get`).
+/// - `repair --plan` — `vault.repair` carries the full `MigrationPlan` (byte-equal
+///   to `serde_json::to_value(&plan)`) plus `has_diagnostic_errors` (the exit-1
+///   signal); the client rebuilds the `MigrationPlan` and renders/writes it via
+///   the SAME `repair::emit_plan` the direct path uses (report / json / paths,
+///   `--out`). Bare `repair` (summary mode) has no wire analogue and stays
+///   Direct (see `route_repair`).
 ///
 /// **byte-identical output outranks routing coverage** — routing a read whose
 /// output would differ is worse than not routing it. Any daemon-side failure
@@ -242,6 +249,7 @@ fn try_route_read(
             Command::Count(args) => route_count(args, cwd, verbose, dynamic_keys),
             Command::Find(args) => route_find(args, cwd, color, verbose, dynamic_keys),
             Command::Get(args) => route_get(args, cwd, verbose),
+            Command::Repair(args) => route_repair(args, cwd, verbose),
             _ => None,
         }
     }
@@ -653,6 +661,40 @@ fn route_get(
         },
         |structured| crate::show::route::reconstruct(structured, args),
         |report| crate::show::emit(&report, args),
+    )
+}
+
+/// Route a `repair --plan` to the warm daemon, or `None` to run Direct.
+///
+/// Only `--plan` shapes route: bare `norn repair` (summary mode) has no wire
+/// analogue (`vault.repair` only ever returns a `MigrationPlan`), so it
+/// returns `None` up front and always runs Direct.
+#[cfg(unix)]
+fn route_repair(
+    args: &crate::cli::RepairArgs,
+    cwd: &camino::Utf8Path,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    if !args.plan {
+        return None;
+    }
+    route_read(
+        cwd,
+        CallSpec {
+            tool: "vault.repair",
+            arguments: crate::repair::route::to_mcp_arguments(args),
+            on_tool_error: crate::service::OnToolError::FallBackDirect,
+            verbose,
+        },
+        crate::repair::route::reconstruct,
+        |routed| {
+            // `--out` writes and stdout rendering run through the SAME
+            // `emit_plan` the direct path calls, so a routed `--out` write is
+            // byte-identical to the direct `fs::write`, and the exit code
+            // (1 if the vault carries any error-severity diagnostic) matches
+            // `crate::exit_code_for(&index)` on the direct path (NRN-231).
+            crate::repair::emit_plan(&routed.plan, args, cwd, routed.has_diagnostic_errors)
+        },
     )
 }
 
@@ -1202,6 +1244,116 @@ fn try_route_rewrite_wikilink(
     None
 }
 
+/// Attempt to route a `norn apply` to the warm daemon (NRN-231), or return `None`
+/// to run the direct path.
+///
+/// **The plan crosses as the PARSED value, never a path.** The caller has already
+/// run [`crate::apply_cmd::preamble`] (read + parse + schema-check, byte-identical
+/// to Direct — a schema mismatch refuses exit 2 BEFORE this is reached), so the
+/// wire only ever carries a valid, correctly-versioned [`MigrationPlan`],
+/// re-serialized into the `vault.apply` `plan` argument. YAML input routes the
+/// same way — the daemon applies the identical struct. `raw` (the plan's RAW
+/// bytes) and `state_dir` (already resolved + swept before routing) are threaded
+/// in for the CLI-owned lock-timeout stash (see `apply_cmd::route::emit`).
+///
+/// **Routing runs BEFORE the direct arm's local mutation lock** (same reason as
+/// `set`/`delete`): the daemon acquires the SAME per-vault lock in-process, so a
+/// CLI holding it while routing would deadlock the routed apply.
+///
+/// **Mode mapping** (mirrors the direct arm's ladder via [`routed_confirm`]):
+/// `--dry-run` → routed dry-run (`confirm: false`, `Fallback`); `--yes` → routed
+/// apply (`confirm: true`, `Commit`: a post-send failure surfaces
+/// `post-send-uncertain`, never a double-applying retry); `--format json` without
+/// `--yes` → routed implicit dry-run; interactive TTY without `--yes` → NOT routed
+/// (the preview→prompt→apply conversation holds the lock across the prompt);
+/// non-TTY without `--yes` → routed implicit dry-run. `--config` /
+/// `--no-cache-refresh` force Direct via the shared [`routing_forced_direct`]
+/// guard.
+///
+/// `AcceptWithPayload` lets a coded refusal (NRN-220 — including the daemon's
+/// `mutation-lock-timeout`) cross as `isError: true` carrying the structured
+/// report, which `reconstruct_wire_report` rebuilds and `emit` renders as the
+/// byte-identical exit-2 refusal (or, for the lock-timeout code, the CLI-owned
+/// stash branch).
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn try_route_apply(
+    args: &crate::apply_cmd::ApplyRunArgs,
+    plan: &crate::migration_plan::MigrationPlan,
+    raw: &str,
+    state_dir: &camino::Utf8Path,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    if routing_forced_direct(explicit_config, no_cache_refresh) {
+        return None;
+    }
+
+    let confirm = routed_confirm(
+        args.dry_run,
+        args.yes,
+        matches!(args.format, crate::cli::ApplyFormat::Json),
+    )?;
+    let dry_run = !confirm;
+
+    // The emit closure runs after the wire round-trip, so it needs owned copies of
+    // the small fields it reads (format is Copy; the rest are cloned).
+    let format = args.format;
+    let out = args.out.clone();
+    let plan_path = args.plan_path.clone();
+    let raw = raw.to_string();
+    let state_dir = state_dir.to_owned();
+    route_call(
+        cwd,
+        CallSpec {
+            tool: "vault.apply",
+            arguments: crate::apply_cmd::route::to_mcp_arguments(plan, confirm, args.parents),
+            on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+            verbose,
+        },
+        dry_run,
+        crate::apply_report::reconstruct_wire_report,
+        move |report| {
+            crate::apply_cmd::route::emit(
+                report,
+                format,
+                out.as_deref(),
+                &plan_path,
+                &raw,
+                &state_dir,
+            )
+        },
+    )
+}
+
+/// Non-Unix build: `apply` always runs Direct (the daemon rides Unix sockets).
+#[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
+fn try_route_apply(
+    args: &crate::apply_cmd::ApplyRunArgs,
+    plan: &crate::migration_plan::MigrationPlan,
+    raw: &str,
+    state_dir: &camino::Utf8Path,
+    cwd: &camino::Utf8Path,
+    explicit_config: bool,
+    no_cache_refresh: bool,
+    verbose: bool,
+) -> Option<Result<i32>> {
+    let _ = (
+        args,
+        plan,
+        raw,
+        state_dir,
+        cwd,
+        explicit_config,
+        no_cache_refresh,
+        verbose,
+    );
+    None
+}
+
 fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     let Cli {
         cwd,
@@ -1293,13 +1445,56 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 parents: args.parents,
                 out: args.out,
             };
-            apply_cmd::run(
-                run_args,
-                &cwd,
-                no_cache_refresh,
-                config_path.as_ref(),
-                verbose,
-            )
+
+            // Shared preamble (read + parse + schema-check) runs ONCE, before the
+            // routing decision and before any lock — stdin can only be consumed
+            // once, so both the routing seam and the direct tail reuse its `raw`
+            // bytes + parsed plan. A schema mismatch already refused (exit 2, prose
+            // on stderr) byte-identically to Direct, BEFORE any wire activity; a
+            // parse failure propagates as the `Err` arm (outcome → lazy_sweep runs
+            // exactly as today).
+            match apply_cmd::preamble(&run_args) {
+                Err(e) => Err(e),
+                Ok(apply_cmd::Preamble::Refused(code)) => Ok(code),
+                Ok(apply_cmd::Preamble::Ready { raw, plan }) => {
+                    // Resolve the state dir and sweep stale pending plans BEFORE
+                    // routing (design: the sweep runs exactly as it did before
+                    // Direct); the state dir also feeds the CLI-owned lock-timeout
+                    // stash on a routed apply.
+                    let (_, state_dir) = crate::cache::state_dir_for(&cwd)
+                        .map_err(|e| anyhow::anyhow!("could not resolve state dir: {e}"))?;
+                    crate::mutation_lock::pending::sweep_pending(&state_dir);
+
+                    // NRN-231 routing seam: serve from a warm daemon BEFORE the
+                    // direct tail takes the local mutation lock (the daemon takes
+                    // the SAME per-vault lock in-process; holding it here would
+                    // deadlock a routed apply). `None` => no daemon, forced-Direct
+                    // flags, or the interactive TTY path => the direct tail below.
+                    if let Some(result) = try_route_apply(
+                        &run_args,
+                        &plan,
+                        &raw,
+                        &state_dir,
+                        &cwd,
+                        config_path.is_some(),
+                        no_cache_refresh,
+                        verbose,
+                    ) {
+                        return result;
+                    }
+
+                    apply_cmd::run_direct(
+                        &run_args,
+                        plan,
+                        &raw,
+                        &state_dir,
+                        &cwd,
+                        no_cache_refresh,
+                        config_path.as_ref(),
+                        verbose,
+                    )
+                }
+            }
         }
         Command::RewriteWikilink(args) => {
             let run_args = RewriteWikilinkRunArgs {
