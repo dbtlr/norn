@@ -275,7 +275,7 @@ Exit codes: 0 success or dry-run, 1 runtime failure, 2 pre-flight refusal."
             `norn serve` is ONE persistent foreground process (Unix only) that serves the full \
             MCP toolset for any vault on this host over a single well-known Unix-domain socket \
             (`<XDG_CACHE_HOME>/norn/run/norn.sock`). It runs in the foreground — run it under a \
-            process supervisor; supervision verbs (`norn service start/stop/status`) arrive later. \
+            process supervisor, or let `norn service install` manage it (see `norn service --help`). \
             At most one instance runs per user (guarded by a lifetime advisory lock next to the \
             socket); a second `norn serve` refuses.\n\n\
             Vaults are named per-connection, so `--cwd` is not used for data and `--config` is not \
