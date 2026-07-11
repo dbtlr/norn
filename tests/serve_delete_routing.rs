@@ -3,10 +3,11 @@
 //! (`--rewrite-to`, which redirects a backlink across a second file). Copies the
 //! `serve_move_routing` template.
 //!
-//! `delete --format records` is only routable when NEITHER `--rewrite-to` nor
-//! `--allow-broken-links` is set (its renderer otherwise needs index-derived
-//! incoming-link data absent from the wire report); those records shapes are
-//! gated to Direct and asserted to NOT route. `--format json` routes always.
+//! Since NRN-237 `delete --format records` routes for ALL flag combinations —
+//! the renderer's index-derived incoming-link data (count / files / resolved
+//! redirect target) rides the wire report as the delete op's `link_impact`, so
+//! the `--rewrite-to` and `--allow-broken-links` records shapes reproduce Direct
+//! byte-for-byte. Only a non-`.md`/stem target (NRN-239) stays gated to Direct.
 
 #![cfg(unix)]
 
@@ -169,19 +170,22 @@ fn shape_matrix() -> Vec<(&'static str, Vec<&'static str>, i32, bool)> {
             2,
             true,
         ),
-        // GATED to Direct: records + --rewrite-to (renderer needs index data).
+        // NRN-237: records + --rewrite-to now ROUTES — the renderer's index data
+        // (incoming count / files / resolved redirect) rides the wire report's
+        // link_impact, so routed reproduces direct byte-for-byte.
         (
-            "records rewrite-to (gated Direct)",
+            "records rewrite-to (routed)",
             vec!["doc.md", "--rewrite-to", "alt", "--yes"],
             0,
-            false,
+            true,
         ),
-        // GATED to Direct: records + --allow-broken-links.
+        // NRN-237: records + --allow-broken-links now ROUTES (link_impact carries
+        // the incoming count/files the "⚠ N links now broken" line needs).
         (
-            "records allow-broken (gated Direct)",
+            "records allow-broken (routed)",
             vec!["doc.md", "--allow-broken-links", "--yes"],
             0,
-            false,
+            true,
         ),
         // unknown-target refusal: no doc on disk → gated Direct.
         (
