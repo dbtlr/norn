@@ -35,12 +35,17 @@ pub enum LaunchdState {
 }
 
 /// The probed inputs feeding [`assemble_status`]: the launchd verdict plus
-/// whatever the live control-ping returned (`running_version` / `uptime_secs`
-/// / `pong_pid` are `None` when nothing answered the socket).
+/// whatever the live control-ping returned (`running_version` / `running_build`
+/// / `uptime_secs` / `pong_pid` are `None` when nothing answered the socket).
 #[derive(Debug, Clone)]
 pub struct ProbedState {
     pub launchd: LaunchdState,
     pub running_version: Option<String>,
+    /// The build fingerprint the pong self-reported (NRN-247). `None` when
+    /// nothing answered OR when the answering daemon's pong predates the field
+    /// (an old daemon) — either way it can't match the on-disk build, so a
+    /// running daemon with `None` here reads as restart-pending.
+    pub running_build: Option<String>,
     pub uptime_secs: Option<u64>,
     /// The pid the pong self-reported — used when launchd can't supply one.
     pub pong_pid: Option<u32>,
@@ -57,8 +62,9 @@ pub struct ServicePaths {
 /// The assembled `service status` report. `loaded`/`running` are `None` when
 /// the launchd probe failed (`launchd_error` then carries why); the pong
 /// fields are absent when nothing answered the control socket;
-/// `restart_pending` is set when a running version is known and differs from
-/// the on-disk build the plist would launch.
+/// `restart_pending` is set when a running daemon's version OR build
+/// fingerprint (NRN-247) differs from the on-disk binary the plist would
+/// launch — so a same-version rebuild surfaces as restart-pending too.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ServiceStatus {
     pub loaded: Option<bool>,
@@ -68,6 +74,11 @@ pub struct ServiceStatus {
     pub pid: Option<u32>,
     pub running_version: Option<String>,
     pub on_disk_version: String,
+    /// The build fingerprint the running daemon reported (NRN-247); `None` when
+    /// nothing answered or the daemon predates the field.
+    pub running_build: Option<String>,
+    /// The on-disk binary's build fingerprint (this process's `NORN_BUILD_ID`).
+    pub on_disk_build: String,
     pub restart_pending: bool,
     pub uptime_secs: Option<u64>,
     pub plist: String,
@@ -76,18 +87,22 @@ pub struct ServiceStatus {
 }
 
 /// Fold the probed inputs into a [`ServiceStatus`]. `restart_pending` is true
-/// iff a running version is known and differs from `on_disk_version` — the
-/// operator's cue that the supervised process predates the installed binary and
-/// a `norn service restart` would pick up the new build.
+/// iff a daemon answered (a running version is known) and its version OR its
+/// build fingerprint differs from the on-disk binary — the operator's cue that
+/// the supervised process predates the installed binary and a
+/// `norn service restart` would pick up the new build. Gating on the build too
+/// (NRN-247) makes a same-version rebuild — where the version alone matches —
+/// surface as restart-pending; a daemon whose pong predates the field
+/// (`running_build` == `None`) can't match and reads as pending as well.
 pub fn assemble_status(
     probed: ProbedState,
     on_disk_version: &str,
+    on_disk_build: &str,
     paths: ServicePaths,
 ) -> ServiceStatus {
-    let restart_pending = probed
-        .running_version
-        .as_deref()
-        .is_some_and(|v| v != on_disk_version);
+    let restart_pending = probed.running_version.is_some()
+        && (probed.running_version.as_deref() != Some(on_disk_version)
+            || probed.running_build.as_deref() != Some(on_disk_build));
     let (loaded, running, pid, launchd_error) = match probed.launchd {
         LaunchdState::Loaded { running, pid } => {
             (Some(true), Some(running), pid.or(probed.pong_pid), None)
@@ -102,6 +117,8 @@ pub fn assemble_status(
         pid,
         running_version: probed.running_version,
         on_disk_version: on_disk_version.to_string(),
+        running_build: probed.running_build,
+        on_disk_build: on_disk_build.to_string(),
         restart_pending,
         uptime_secs: probed.uptime_secs,
         plist: paths.plist,
@@ -154,8 +171,16 @@ pub fn render_text(status: &ServiceStatus, out: &mut impl Write) -> std::io::Res
 
     match &status.running_version {
         Some(running) => {
+            // A same-version rebuild (NRN-247) is restart-pending while the two
+            // version strings match, which reads oddly on its own — call out
+            // that the BUILD changed so the operator isn't left comparing two
+            // identical version numbers.
             let pending = if status.restart_pending {
-                " — restart pending"
+                if *running == status.on_disk_version {
+                    " — restart pending (rebuilt)"
+                } else {
+                    " — restart pending"
+                }
             } else {
                 ""
             };
@@ -211,6 +236,9 @@ mod tests {
         }
     }
 
+    /// A running daemon whose build fingerprint MATCHES the on-disk build, so
+    /// only the version drives `restart_pending`. Build-skew cases below pass
+    /// their own mismatched build explicitly.
     fn base(running_version: Option<&str>) -> ServiceStatus {
         assemble_status(
             ProbedState {
@@ -219,10 +247,12 @@ mod tests {
                     pid: Some(4242),
                 },
                 running_version: running_version.map(str::to_string),
+                running_build: Some("build-match".into()),
                 uptime_secs: Some(3725),
                 pong_pid: None,
             },
             "0.45.1",
+            "build-match",
             paths(),
         )
     }
@@ -249,6 +279,61 @@ mod tests {
         );
     }
 
+    /// NRN-247: a same-version rebuild — identical version strings but a
+    /// different build fingerprint — is restart-pending, and the text calls out
+    /// that the build (not the version) changed so two identical version
+    /// numbers don't read as a spurious "restart pending".
+    #[test]
+    fn a_same_version_rebuild_is_restart_pending() {
+        let s = assemble_status(
+            ProbedState {
+                launchd: LaunchdState::Loaded {
+                    running: true,
+                    pid: Some(4242),
+                },
+                running_version: Some("0.45.1".into()),
+                running_build: Some("build-old".into()),
+                uptime_secs: Some(10),
+                pong_pid: None,
+            },
+            "0.45.1",
+            "build-new",
+            paths(),
+        );
+        assert!(s.restart_pending, "same version, different build must pend");
+        let text = text_of(&s);
+        assert!(
+            text.contains("running v0.45.1 · on-disk v0.45.1 — restart pending (rebuilt)"),
+            "{text}"
+        );
+    }
+
+    /// A daemon whose pong predates the build fingerprint (`running_build` ==
+    /// `None`) can't match the on-disk build, so a same-version old daemon
+    /// still reads as restart-pending (NRN-247).
+    #[test]
+    fn a_running_daemon_without_a_build_field_is_restart_pending() {
+        let s = assemble_status(
+            ProbedState {
+                launchd: LaunchdState::Loaded {
+                    running: true,
+                    pid: Some(4242),
+                },
+                running_version: Some("0.45.1".into()),
+                running_build: None,
+                uptime_secs: Some(10),
+                pong_pid: None,
+            },
+            "0.45.1",
+            "build-new",
+            paths(),
+        );
+        assert!(
+            s.restart_pending,
+            "an unidentifiable build can't match on-disk; must pend"
+        );
+    }
+
     #[test]
     fn no_pong_reports_no_answer_and_is_never_restart_pending() {
         let s = assemble_status(
@@ -258,10 +343,12 @@ mod tests {
                     pid: None,
                 },
                 running_version: None,
+                running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
             },
             "0.45.1",
+            "build-match",
             paths(),
         );
         assert!(!s.restart_pending);
@@ -276,10 +363,12 @@ mod tests {
             ProbedState {
                 launchd: LaunchdState::NotLoaded,
                 running_version: None,
+                running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
             },
             "0.45.1",
+            "build-match",
             paths(),
         );
         assert!(text_of(&s).starts_with("serve: not loaded"));
@@ -297,10 +386,12 @@ mod tests {
                     error: "launchctl print failed (64): could not determine".into(),
                 },
                 running_version: Some("0.44.0".into()),
+                running_build: Some("build-stale".into()),
                 uptime_secs: Some(42),
                 pong_pid: Some(777),
             },
             "0.45.1",
+            "build-match",
             paths(),
         );
         assert_eq!(s.loaded, None);
@@ -342,10 +433,12 @@ mod tests {
                     error: "could not determine the service's state".into(),
                 },
                 running_version: None,
+                running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
             },
             "0.45.1",
+            "build-match",
             paths(),
         );
         assert_eq!(exit_code(&degraded), 1, "unknown supervision state gates");
@@ -362,10 +455,12 @@ mod tests {
             ProbedState {
                 launchd: LaunchdState::NotLoaded,
                 running_version: None,
+                running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
             },
             "0.45.1",
+            "build-match",
             paths(),
         );
         assert_eq!(
@@ -389,10 +484,12 @@ mod tests {
                     error: usage_dump.into(),
                 },
                 running_version: None,
+                running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
             },
             "0.45.1",
+            "build-match",
             paths(),
         );
         let text = text_of(&s);
@@ -425,10 +522,12 @@ mod tests {
                     error: "could not determine the service's state".into(),
                 },
                 running_version: None,
+                running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
             },
             "0.45.1",
+            "build-match",
             paths(),
         );
         let text = text_of(&s);

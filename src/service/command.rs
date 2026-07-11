@@ -523,19 +523,21 @@ fn status_cmd(
     // reading as dead.
     let pong =
         crate::service::probe_status_socket(socket_path, crate::service::handshake_timeout());
-    let (running_version, uptime_secs, pong_pid) = match pong {
-        Some(p) => (Some(p.version), p.uptime_secs, p.pid),
-        None => (None, None, None),
+    let (running_version, running_build, uptime_secs, pong_pid) = match pong {
+        Some(p) => (Some(p.version), p.build, p.uptime_secs, p.pid),
+        None => (None, None, None, None),
     };
 
     let report = status::assemble_status(
         status::ProbedState {
             launchd,
             running_version,
+            running_build,
             uptime_secs,
             pong_pid,
         },
         env!("CARGO_PKG_VERSION"),
+        env!("NORN_BUILD_ID"),
         status::ServicePaths {
             plist: plist_path.to_string(),
             log: log_path.to_string(),
@@ -902,10 +904,12 @@ mod tests {
                         pid: Some(42),
                     },
                     running_version: Some("0.45.1".into()),
+                    running_build: Some("build-abc".into()),
                     uptime_secs: Some(9),
                     pong_pid: None,
                 },
                 "0.45.1",
+                "build-abc",
                 status::ServicePaths {
                     plist: "/p".into(),
                     log: "/l".into(),

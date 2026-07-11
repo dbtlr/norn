@@ -71,6 +71,10 @@ pub(crate) async fn handle_connection(
             let pong = ControlFrame::Pong {
                 protocol: CONTROL_PROTOCOL,
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                // NRN-247: the source-content fingerprint the routing gate
+                // requires an exact match on. A rebuild of the same version
+                // mints a new id, so a stale daemon fails the gate.
+                build: Some(env!("NORN_BUILD_ID").to_string()),
                 pid: Some(std::process::id()),
                 uptime_secs: Some(start.elapsed().as_secs()),
             };
@@ -241,11 +245,15 @@ mod tests {
             ControlFrame::Pong {
                 protocol,
                 version,
+                build,
                 pid,
                 ..
             } => {
                 assert_eq!(protocol, CONTROL_PROTOCOL);
                 assert_eq!(version, env!("CARGO_PKG_VERSION"));
+                // NRN-247: the daemon stamps its build fingerprint so the
+                // routing gate can require an exact match.
+                assert_eq!(build.as_deref(), Some(env!("NORN_BUILD_ID")));
                 assert_eq!(pid, Some(std::process::id()));
             }
             other => panic!("expected pong, got {other:?}"),

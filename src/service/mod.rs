@@ -98,7 +98,7 @@ pub const CONTROL_PROTOCOL: u32 = 1;
 ///
 /// Wire shapes (exactly, one JSON object per line):
 /// - ping:  `{"norn_control":"ping","protocol":1}`
-/// - pong:  `{"norn_control":"pong","protocol":1,"version":"<semver>","pid":<u32>,"uptime_secs":<u64>}`
+/// - pong:  `{"norn_control":"pong","protocol":1,"version":"<semver>","build":"<hex>","pid":<u32>,"uptime_secs":<u64>}`
 /// - hello: `{"norn_control":"hello","protocol":1,"vault_root":"<canonical abs path>"}`
 /// - ready: `{"norn_control":"ready","protocol":1,"version":"<semver>"}`
 /// - error: `{"norn_control":"error","protocol":1,"message":"..."}`
@@ -110,13 +110,22 @@ pub enum ControlFrame {
     /// Daemon -> client: proof of life plus enough to decide whether to
     /// route. `pid`/`uptime_secs` are informational (useful for `norn service
     /// status`-style diagnostics later); the client today only reads
-    /// `version` to gate routing, so they parse as `Option` and a pong
-    /// missing them is still a valid, routable pong. `version` is NOT
-    /// optional: a pong missing it is a malformed frame (silent Direct), not
-    /// a version skew.
+    /// `version` and `build` to gate routing, so `pid`/`uptime_secs` parse as
+    /// `Option` and a pong missing them is still a valid, routable pong.
+    /// `version` is NOT optional: a pong missing it is a malformed frame
+    /// (silent Direct), not a version skew.
+    ///
+    /// `build` (NRN-247) is the source-content fingerprint (`NORN_BUILD_ID`).
+    /// It is serde-defaulted so an OLD daemon's pong — which predates the
+    /// field — still parses; the resulting `None` then FAILS the build gate
+    /// (a build we can't identify is treated as skewed), which is the intended
+    /// old-daemon behavior. Optional on the wire keeps `CONTROL_PROTOCOL`
+    /// untouched: both sides still parse the frame.
     Pong {
         protocol: u32,
         version: String,
+        #[serde(default)]
+        build: Option<String>,
         #[serde(default)]
         pid: Option<u32>,
         #[serde(default)]
@@ -167,8 +176,26 @@ pub enum ControlFrame {
 #[derive(Debug)]
 enum HandshakeError {
     /// The daemon answered with a well-formed pong at the right protocol
-    /// version, but its build version doesn't match this client's.
+    /// version, but its `CARGO_PKG_VERSION` doesn't match this client's.
     VersionSkew { server: String, client: String },
+    /// The daemon's version matches, but its build fingerprint
+    /// (`NORN_BUILD_ID`) doesn't — a same-version rebuild (NRN-247). This is
+    /// the same-version dev-build skew hole `VersionSkew` couldn't see: two
+    /// builds of one `0.x` version can carry different wire schemas.
+    /// `server_build` is `None` when the pong lacks the field entirely (an old
+    /// daemon predating the fingerprint) — an unidentifiable build is treated
+    /// as skewed, not routed. `version` is the shared version, carried for the
+    /// operator note.
+    BuildSkew {
+        version: String,
+        // Read by the handshake unit tests (which assert the exact skew the
+        // gate reports) and kept for future `-v` diagnostics, like
+        // `Other`'s wrapped error; the operator note only needs `version`.
+        #[allow(dead_code)]
+        server_build: Option<String>,
+        #[allow(dead_code)]
+        client_build: String,
+    },
     /// Anything else: timeout, I/O error, protocol mismatch, wrong frame
     /// kind, or a pong missing `version`. The wrapped error is never read
     /// today — callers only distinguish this variant from `VersionSkew`,
@@ -324,11 +351,14 @@ pub fn probe(timeout: std::time::Duration) -> RouteDecision {
 
 /// The live daemon's pong details, kept for `norn service status` (NRN-115).
 /// Unlike [`probe`] — which discards everything but the routing decision — this
-/// preserves `version`/`pid`/`uptime_secs` so status can render running-vs-on-disk.
+/// preserves `version`/`build`/`pid`/`uptime_secs` so status can render
+/// running-vs-on-disk. `build` (NRN-247) is `None` for a daemon whose pong
+/// predates the fingerprint field; status still surfaces it as restart-pending.
 #[cfg(unix)]
 #[derive(Debug, Clone)]
 pub struct ServicePong {
     pub version: String,
+    pub build: Option<String>,
     pub pid: Option<u32>,
     pub uptime_secs: Option<u64>,
 }
@@ -377,6 +407,17 @@ fn warn_version_skew(server: &str, client: &str) {
     eprintln!("norn: service is v{server}, client is v{client} — restart the norn serve daemon");
 }
 
+/// The build-skew sibling of [`warn_version_skew`] (NRN-247): the daemon's
+/// version matches but its build fingerprint doesn't — a same-version rebuild
+/// (or an older daemon whose pong predates the fingerprint). Same one-line,
+/// once-per-invocation treatment version skew gets, but distinguishable so the
+/// operator knows the fix is a restart of a same-version daemon, not a version
+/// upgrade.
+#[cfg(unix)]
+fn warn_build_skew(version: &str) {
+    eprintln!("norn: service is a different build of v{version} — restart the norn serve daemon");
+}
+
 /// Upper bound on the control-frame response size. The pong is a few dozen
 /// bytes; this cap turns a peer that streams bytes without a newline into a
 /// bounded `Err` (→ Direct) instead of an unbounded buffer growth.
@@ -421,6 +462,13 @@ pub fn probe_socket(socket_path: &Utf8Path, timeout: std::time::Duration) -> Rou
         // one line, then fall back like every other failure.
         Err(HandshakeError::VersionSkew { server, client }) => {
             warn_version_skew(&server, &client);
+            RouteDecision::Direct
+        }
+        // Same version, different build (NRN-247) — same treatment as version
+        // skew: one distinguishable operator line, then fall back to Direct.
+        // Closes the same-version dev-build skew hole version skew can't see.
+        Err(HandshakeError::BuildSkew { version, .. }) => {
+            warn_build_skew(&version);
             RouteDecision::Direct
         }
         // Hung (timeout), refused mid-handshake, protocol mismatch, or
@@ -642,12 +690,17 @@ fn handshake(
 ) -> Result<(), HandshakeError> {
     let (protocol, pong) = handshake_pong(stream, timeout).map_err(HandshakeError::Other)?;
     let client_version = env!("CARGO_PKG_VERSION");
+    let client_build = env!("NORN_BUILD_ID");
 
-    // FIX-8: compare the VERSION first. A well-formed pong at a *different*
-    // version is a VersionSkew regardless of protocol — otherwise a future
-    // `CONTROL_PROTOCOL` bump would short-circuit on the protocol check and
-    // silently map an old daemon to Direct, hiding exactly the skew the stderr
-    // note exists to report. Routing still requires BOTH to match.
+    // FIX-8 (extended for NRN-247): the gate order is VERSION, then BUILD, then
+    // PROTOCOL — each mismatch that is actionable is reported before the silent
+    // protocol check can swallow it.
+    //
+    // Version first: a well-formed pong at a *different* version is a
+    // VersionSkew regardless of protocol — otherwise a future `CONTROL_PROTOCOL`
+    // bump would short-circuit on the protocol check and silently map an old
+    // daemon to Direct, hiding exactly the skew the stderr note exists to
+    // report.
     if pong.version != client_version {
         return Err(HandshakeError::VersionSkew {
             server: pong.version,
@@ -655,9 +708,25 @@ fn handshake(
         });
     }
 
-    // Same version but a different protocol is something weirder than staleness
-    // (a same-build daemon speaking a different wire) — fall back to Direct
-    // silently, as before.
+    // Build second (NRN-247): version alone doesn't pin the wire schema — two
+    // builds of one `0.x` version can differ (an additive `ApplyReport` field a
+    // stale daemon renders as zeros). Require an exact build-fingerprint match;
+    // a mismatch — INCLUDING a pong with no `build` field at all (an old daemon
+    // predating the fingerprint) — is a BuildSkew, reported with its own
+    // distinguishable one-line note. Compared before protocol for the same
+    // reason version is: a same-version rebuild that also bumped the protocol
+    // must still surface as the actionable skew, not a silent Direct.
+    if pong.build.as_deref() != Some(client_build) {
+        return Err(HandshakeError::BuildSkew {
+            version: pong.version,
+            server_build: pong.build,
+            client_build: client_build.to_string(),
+        });
+    }
+
+    // Same version AND build but a different protocol is something weirder than
+    // staleness (a same-build daemon speaking a different wire) — fall back to
+    // Direct silently, as before.
     if protocol != CONTROL_PROTOCOL {
         return Err(HandshakeError::Other(anyhow::anyhow!(
             "control protocol mismatch: service spoke {protocol}, client wants {CONTROL_PROTOCOL}"
@@ -720,12 +789,14 @@ fn handshake_pong(
         ControlFrame::Pong {
             protocol,
             version,
+            build,
             pid,
             uptime_secs,
         } => Ok((
             protocol,
             ServicePong {
                 version,
+                build,
                 pid,
                 uptime_secs,
             },
@@ -1803,12 +1874,13 @@ mod tests {
             let mut reader = BufReader::new(conn.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            // Answer with a matching-protocol, matching-version pong,
-            // including the informational pid/uptime fields a real daemon
-            // sends.
+            // Answer with a matching-protocol, matching-version, matching-build
+            // pong, including the informational pid/uptime fields a real daemon
+            // sends. All three must match for a Route (NRN-247).
             let pong = ControlFrame::Pong {
                 protocol: CONTROL_PROTOCOL,
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                build: Some(env!("NORN_BUILD_ID").to_string()),
                 pid: Some(std::process::id()),
                 uptime_secs: Some(42),
             };
@@ -1875,11 +1947,13 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
             let mut w = conn;
-            // Version matches (so the protocol check, not a version-skew
-            // check, is what's under test) but the protocol number doesn't.
+            // Version AND build match (so the protocol check, not a version- or
+            // build-skew check, is what's under test) but the protocol number
+            // doesn't.
             let pong = ControlFrame::Pong {
                 protocol: 9999,
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                build: Some(env!("NORN_BUILD_ID").to_string()),
                 pid: None,
                 uptime_secs: None,
             };
@@ -1913,6 +1987,7 @@ mod tests {
             let pong = ControlFrame::Pong {
                 protocol: CONTROL_PROTOCOL,
                 version: "0.0.1".to_string(),
+                build: None,
                 pid: Some(1),
                 uptime_secs: Some(1),
             };
@@ -1946,6 +2021,7 @@ mod tests {
             let pong = ControlFrame::Pong {
                 protocol: CONTROL_PROTOCOL,
                 version: "0.0.1".to_string(),
+                build: None,
                 pid: None,
                 uptime_secs: None,
             };
@@ -1960,7 +2036,7 @@ mod tests {
                 assert_eq!(server, "0.0.1");
                 assert_eq!(client, env!("CARGO_PKG_VERSION"));
             }
-            HandshakeError::Other(e) => panic!("expected VersionSkew, got Other({e:?})"),
+            other => panic!("expected VersionSkew, got {other:?}"),
         }
         server.join().unwrap();
     }
@@ -1982,10 +2058,12 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
             let mut w = conn;
-            // Different protocol AND different version.
+            // Different protocol AND different version (build irrelevant —
+            // version is gated first).
             let pong = ControlFrame::Pong {
                 protocol: 9999,
                 version: "0.0.1".to_string(),
+                build: None,
                 pid: None,
                 uptime_secs: None,
             };
@@ -2020,10 +2098,13 @@ mod tests {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
                 let mut w = conn;
-                // Same version as this build, but a mismatched protocol.
+                // Same version AND build as this client, but a mismatched
+                // protocol — so the protocol check (not build skew) is what
+                // routes this to Direct.
                 let pong = ControlFrame::Pong {
                     protocol: 9999,
                     version: env!("CARGO_PKG_VERSION").to_string(),
+                    build: Some(env!("NORN_BUILD_ID").to_string()),
                     pid: None,
                     uptime_secs: None,
                 };
@@ -2093,6 +2174,141 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// NRN-247: same version, DIFFERENT build fingerprint => Direct at
+    /// `probe_socket`, and specifically `HandshakeError::BuildSkew` (carrying
+    /// the shared version and both build ids) at the `handshake` level — the
+    /// same-version dev-build skew the version gate cannot see.
+    #[test]
+    fn build_skew_is_direct_and_reports_build_skew() {
+        fn stub(path: &Utf8PathBuf) -> thread::JoinHandle<()> {
+            let listener = UnixListener::bind(path).unwrap();
+            thread::spawn(move || {
+                let (conn, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut w = conn;
+                // Matching version, but a build id that is NOT this client's.
+                let pong = ControlFrame::Pong {
+                    protocol: CONTROL_PROTOCOL,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    build: Some("a-different-build".to_string()),
+                    pid: None,
+                    uptime_secs: None,
+                };
+                writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
+                w.flush().unwrap();
+            })
+        }
+
+        // probe_socket() must fall back to Direct.
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let server = stub(&path);
+        assert!(
+            matches!(
+                probe_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT),
+                RouteDecision::Direct
+            ),
+            "same version + different build must route to Direct"
+        );
+        server.join().unwrap();
+
+        // The underlying handshake() error must be BuildSkew, carrying the
+        // shared version and both build ids.
+        let dir2 = tempfile::tempdir().unwrap();
+        let path2 = Utf8PathBuf::from_path_buf(dir2.path().join("service.sock")).unwrap();
+        let server2 = stub(&path2);
+        let stream = connect_control(&path2, DEFAULT_HANDSHAKE_TIMEOUT).unwrap();
+        let err = handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT).expect_err("expected BuildSkew");
+        match err {
+            HandshakeError::BuildSkew {
+                version,
+                server_build,
+                client_build,
+            } => {
+                assert_eq!(version, env!("CARGO_PKG_VERSION"));
+                assert_eq!(server_build.as_deref(), Some("a-different-build"));
+                assert_eq!(client_build, env!("NORN_BUILD_ID"));
+            }
+            other => panic!("expected BuildSkew, got {other:?}"),
+        }
+        server2.join().unwrap();
+    }
+
+    /// NRN-247 old-daemon case: a matching-version pong that lacks the `build`
+    /// field entirely (a daemon predating the fingerprint) is a BuildSkew with
+    /// `server_build == None` — an unidentifiable build is treated as skewed,
+    /// not routed.
+    #[test]
+    fn pong_missing_build_is_build_skew() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut w = conn;
+            // Hand-written: matching version + protocol, but NO `build` field.
+            writeln!(
+                w,
+                "{{\"norn_control\":\"pong\",\"protocol\":{CONTROL_PROTOCOL},\"version\":\"{}\"}}",
+                env!("CARGO_PKG_VERSION")
+            )
+            .unwrap();
+            w.flush().unwrap();
+        });
+
+        let stream = connect_control(&path, DEFAULT_HANDSHAKE_TIMEOUT).unwrap();
+        let err = handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT).expect_err("expected BuildSkew");
+        match err {
+            HandshakeError::BuildSkew { server_build, .. } => {
+                assert_eq!(server_build, None, "an old daemon's pong carries no build");
+            }
+            other => panic!("expected BuildSkew for a build-less pong, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
+    /// NRN-247 ordering: when BOTH the version and the build differ, VERSION
+    /// wins — the gate reports VersionSkew (the version-upgrade note), never
+    /// BuildSkew. Guards the version-before-build ordering in `handshake`.
+    #[test]
+    fn version_skew_beats_build_skew() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut w = conn;
+            // Different version AND a build that isn't this client's.
+            let pong = ControlFrame::Pong {
+                protocol: CONTROL_PROTOCOL,
+                version: "0.0.1".to_string(),
+                build: Some("a-different-build".to_string()),
+                pid: None,
+                uptime_secs: None,
+            };
+            writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
+            w.flush().unwrap();
+        });
+
+        let stream = connect_control(&path, DEFAULT_HANDSHAKE_TIMEOUT).unwrap();
+        let err = handshake(&stream, DEFAULT_HANDSHAKE_TIMEOUT).expect_err("expected VersionSkew");
+        assert!(
+            matches!(err, HandshakeError::VersionSkew { .. }),
+            "different version + different build must be VersionSkew (version first), got {err:?}"
+        );
+        server.join().unwrap();
+    }
+
     /// Each control-frame variant serializes to exactly the documented wire
     /// shape — the newline-delimited JSON contract shared by client and
     /// daemon. Asserted via `serde_json::Value` equality so field order in
@@ -2110,6 +2326,7 @@ mod tests {
         let pong = ControlFrame::Pong {
             protocol: CONTROL_PROTOCOL,
             version: "1.2.3".to_string(),
+            build: Some("deadbeef".to_string()),
             pid: Some(4321),
             uptime_secs: Some(99),
         };
@@ -2119,6 +2336,7 @@ mod tests {
                 "norn_control": "pong",
                 "protocol": 1,
                 "version": "1.2.3",
+                "build": "deadbeef",
                 "pid": 4321,
                 "uptime_secs": 99,
             })
@@ -2373,6 +2591,7 @@ mod tests {
                 "norn_control": "pong",
                 "protocol": CONTROL_PROTOCOL,
                 "version": "0.0.1-stale",
+                "build": "build-stale",
                 "pid": 777,
                 "uptime_secs": 42,
             }),
@@ -2380,6 +2599,9 @@ mod tests {
         let pong = probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT)
             .expect("a protocol-matching pong must come through regardless of version");
         assert_eq!(pong.version, "0.0.1-stale");
+        // The build fingerprint (NRN-247) is preserved for status too, so it can
+        // compute restart-pending on a same-version rebuild.
+        assert_eq!(pong.build.as_deref(), Some("build-stale"));
         assert_eq!(pong.pid, Some(777));
         assert_eq!(pong.uptime_secs, Some(42));
         server.join().unwrap();
