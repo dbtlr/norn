@@ -239,6 +239,18 @@ impl IndexIdentity {
             ignore: opts.ignore.clone(),
         }
     }
+
+    /// Field-by-field equality against a live config's resolved index options —
+    /// exactly the fields `from_config` would clone into a new `IndexIdentity`,
+    /// compared in place. Used on the per-request freshness hot path
+    /// (`generation_is_fresh`, run on every warm read), which only needs a `==`
+    /// and has no use for an owned copy.
+    fn matches_config(&self, config: &LoadedConfig) -> bool {
+        let opts = &config.index_options;
+        self.index_set_hash == opts.resolved_index_set_hash
+            && self.alias_field == opts.alias_field
+            && self.ignore == opts.ignore
+    }
 }
 
 /// An immutable warm-cache generation (ADR 0013). Once opened, the
@@ -300,6 +312,17 @@ struct WarmSlot {
     /// Total generation opens performed (cold start + every reopen). Test-only
     /// coalescing/single-flight assertion counter; incremented on every open.
     open_count: AtomicU64,
+    /// The generation number the CURRENT request bound via `ensure_current`
+    /// (0 = none bound yet this request). Set once, right after
+    /// `ensure_current` returns in `query_cache_warm`; reset to 0 at the start
+    /// of every request in `begin_request`, mirroring `operator_notes`. Read by
+    /// [`note_tool_error`](VaultContext::note_tool_error) so a corruption error
+    /// invalidates the generation the failing request actually used, not
+    /// whichever generation happens to be `current` by the time the error
+    /// surfaces — under `call_lock` serialization today those coincide, but a
+    /// concurrent read pool (NRN-253) can advance `current` while an older
+    /// generation is still draining.
+    bound_generation: AtomicU64,
 }
 
 /// Cold (stdio) vs warm (daemon) behavior for `query_cache`.
@@ -385,6 +408,7 @@ impl VaultContext {
                 open: Mutex::new(1),
                 floor: Arc::new(AtomicU64::new(0)),
                 open_count: AtomicU64::new(0),
+                bound_generation: AtomicU64::new(0),
             }),
             operator_notes: Mutex::new(Vec::new()),
         })
@@ -415,6 +439,12 @@ impl VaultContext {
         let Mode::Warm(slot) = &self.mode else {
             return Ok(());
         };
+
+        // Clear the prior request's generation attribution FIRST, same
+        // reasoning as the operator-notes clear above: if this request never
+        // reaches `query_cache_warm` (or fails before it), `note_tool_error`
+        // must see "none bound" rather than misattribute to a stale request.
+        slot.bound_generation.store(0, Ordering::Release);
 
         // Step 0 — root liveness. A gone root is a typed, downcast-matchable
         // error so the daemon can evict this whole context.
@@ -454,18 +484,22 @@ impl VaultContext {
     /// *surfaces as errors*, and this error-evict-reverify loop re-establishes
     /// trust on the next request. Silent wrong-data corruption that raises no
     /// error is outside SQLite's own detection model too, so it is not in scope.
+    ///
+    /// Invalidation keys off `slot.bound_generation` — the generation THIS
+    /// request bound in `query_cache_warm` — NOT `slot.current`. Under today's
+    /// `call_lock` serialization the two coincide, but a corruption error on
+    /// generation N must never invalidate a healthy generation N+1 that has
+    /// since become current (NRN-253's concurrent read pool makes that
+    /// observable): mirrors how `WarmGuard::Drop` bumps the floor off its OWN
+    /// generation's number rather than off whatever is current at drop time.
     pub(crate) fn note_tool_error(&self, err: &anyhow::Error) {
         let Mode::Warm(slot) = &self.mode else {
             return;
         };
         if is_sqlite_corruption(err) {
-            if let Some(gen) = slot
-                .current
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .as_ref()
-            {
-                slot.floor.fetch_max(gen.number + 1, Ordering::AcqRel);
+            let bound = slot.bound_generation.load(Ordering::Acquire);
+            if bound != 0 {
+                slot.floor.fetch_max(bound + 1, Ordering::AcqRel);
             }
         }
     }
@@ -585,6 +619,14 @@ impl VaultContext {
         // request binds for its whole body.
         let generation = self.ensure_current(slot)?;
 
+        // Record which generation THIS request bound, before doing any further
+        // work that could fail (the freshness refresh below, or the tool body
+        // after this returns) — so a corruption error noted anywhere downstream
+        // attributes to the generation this request actually used, not whatever
+        // is current by the time `note_tool_error` runs.
+        slot.bound_generation
+            .store(generation.number, Ordering::Release);
+
         // Take an OWNED lock on the bound generation's connection, held across the
         // whole (sync) tool body. It outlives a concurrent generation swap of the
         // slot pointer because the guard owns its own `Arc<Mutex<Cache>>` and the
@@ -679,7 +721,7 @@ impl VaultContext {
     ) -> bool {
         generation.number >= slot.floor.load(Ordering::Acquire)
             && current_db_identity(&self.vault_root) == Some(generation.db_identity)
-            && generation.index_identity == IndexIdentity::from_config(config)
+            && generation.index_identity.matches_config(config)
     }
 
     /// Step 1 body. On a config-file change, re-parses and swaps the stored config
@@ -739,6 +781,19 @@ impl VaultContext {
         match &self.mode {
             Mode::Warm(slot) => slot.open_count.load(Ordering::Relaxed),
             Mode::Cold => 0,
+        }
+    }
+
+    /// Test-only: run `ensure_current` WITHOUT binding `bound_generation`,
+    /// unlike `query_cache`. Models a request (or, under NRN-253, a concurrent
+    /// reader) that advances `slot.current` to a newer generation while a
+    /// DIFFERENT, already-in-flight request's `bound_generation` still points at
+    /// an older one — the scenario `note_tool_error` must not misattribute.
+    #[cfg(test)]
+    pub(crate) fn force_reopen_without_binding(&self) -> Result<()> {
+        match &self.mode {
+            Mode::Warm(slot) => self.ensure_current(slot).map(|_| ()),
+            Mode::Cold => Ok(()),
         }
     }
 }
@@ -1962,6 +2017,62 @@ mod tests {
         assert!(
             ctx.warm_db_identity().is_some(),
             "a non-corruption error must not evict the warm state"
+        );
+    }
+
+    /// FIX-3 (bound-generation attribution, NRN-251 review): a corruption error
+    /// attributed to an OLDER generation N must not invalidate a healthy,
+    /// newer `current` generation N+1. Models the NRN-253 concurrent-read-pool
+    /// scenario the eager `slot.current`-keyed floor bump got wrong: a request
+    /// bound to generation 1 fails after generation 2 has already become
+    /// current (e.g. another request's ground-shift reopen raced ahead of it).
+    /// The next request must still reuse generation 2 — no spurious reopen.
+    #[test]
+    fn warm_corruption_error_does_not_invalidate_a_newer_current_generation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Request 1 binds generation 1.
+        ctx.begin_request().expect("begin_request 1");
+        {
+            let _c = ctx.query_cache().expect("first warm query_cache");
+        }
+        assert_eq!(ctx.current_generation().expect("generation 1").number, 1);
+
+        // Advance `current` to generation 2 WITHOUT rebinding — models a
+        // different request opening N+1 while request 1's failure is still
+        // attributed to N.
+        let (_canonical, cache_dir) = cache_dir_for(&root).expect("cache_dir_for");
+        std::fs::remove_dir_all(cache_dir.as_std_path()).expect("remove cache dir");
+        ctx.force_reopen_without_binding()
+            .expect("force reopen to generation 2");
+        assert_eq!(ctx.current_generation().expect("generation 2").number, 2);
+        assert_eq!(ctx.generation_opens(), 2);
+
+        // Request 1's corruption error surfaces now, still bound to generation 1.
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+
+        // Generation 2 must survive: the next request reuses it (no reopen),
+        // proving the floor bump targeted generation 1, not `slot.current`.
+        ctx.begin_request().expect("begin_request after error");
+        {
+            let _c = ctx.query_cache().expect("query_cache after error");
+        }
+        assert_eq!(
+            ctx.current_generation()
+                .expect("generation still held")
+                .number,
+            2,
+            "a corruption error bound to generation 1 must not evict generation 2"
+        );
+        assert_eq!(
+            ctx.generation_opens(),
+            2,
+            "no additional reopen — the floor bump must not reach past the errored generation"
         );
     }
 
