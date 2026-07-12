@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Changed
+
+- **The `norn serve` daemon now binds each request to an immutable per-generation vault context (NRN-251, ADR 0013).** A request Arc-binds its cache generation and config at the request boundary and holds both to completion, so it never observes a swap mid-flight. Every re-open trigger — first touch, an out-of-band `cache clear`/`prune`/`rm` (ground-shift), cache corruption, or an index-relevant config change — now flows through one single-flight open path that produces the next generation and swaps the current pointer; concurrent stale requests coalesce to exactly one open, and the retired generation's connection and file handle release only once its last in-flight request finishes draining on it. A non-index config change swaps the config for future requests without opening a new generation. No operator-visible behavior change (self-heal, freshness, and config semantics are unchanged); this is the concurrency-model groundwork for the forthcoming writer queue and read pool.
+
 ## v0.47.0 - 2026-07-11
 
 This release closes the CLI→daemon routing arc: every read and every mutation now routes through a live `norn serve` daemon byte-identically to direct execution, the routing gate is future-proofed with an exact build-fingerprint match, refusal codes converge on one vocabulary across `validate`/`set`/`new` and the cascade tools, and `self-update` no longer orphans a loaded daemon. The `norn service` supervisor and the operator routing contract are documented in `docs/service.md`.

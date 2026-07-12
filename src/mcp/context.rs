@@ -26,6 +26,40 @@
 //! self-heal pipeline, upholding the ADR-0005 trust invariant: reading through
 //! norn must always feel like touching the actual files.
 //!
+//! ### Generational contexts (ADR 0013, NRN-251)
+//!
+//! The held cache state is an **immutable [`Generation`]**: once opened, the
+//! `(cache identity, index set it was opened under, sentinel)` it carries never
+//! mutates. (The DB *content* still changes — a generation's connection runs the
+//! per-request incremental refresh and mutation tools write through it — but the
+//! *binding* is fixed.) Every request binds the current `Arc<Generation>` (and
+//! the current config `Arc`) at its boundary and holds both to completion, so no
+//! request ever observes a swap mid-flight.
+//!
+//! Every evict/re-open trigger — cold start / first touch, ground-shift
+//! (out-of-band `cache clear` / `prune` / `rm`), cache-identity change /
+//! corruption, and an index-relevant config change — routes through the ONE
+//! single-flight path [`VaultContext::ensure_current`], which opens generation
+//! N+1 and swaps the slot's current pointer. Concurrent stale observers of
+//! generation N coalesce to exactly one open (the open guard + a re-check of the
+//! current pointer under it). In-flight requests keep serving on N; N drops with
+//! its last `Arc`, closing its connection and sentinel fd via `Drop`. There are
+//! no in-place "null the slot" eviction sites: a trigger either changes what
+//! `ensure_current` observes (identity / config mismatch) or bumps the slot's
+//! monotonic invalidation floor (corruption; a panic unwinding through a cache
+//! guard) so the next request reopens through the same path.
+//!
+//! A **non-index config change** swaps the stored config `Arc` for future
+//! requests without opening a new generation — the generation's index identity
+//! still matches, so `ensure_current` reuses it; in-flight requests keep the
+//! config they bound.
+//!
+//! **Named non-goal (ADR 0013):** any future streaming / subscription surface
+//! must be generation-aware from birth — its source of truth can be swapped under
+//! it mid-stream. Nothing here accommodates streams.
+//!
+//! ### The per-request pipeline
+//!
 //! The pipeline is split across two entry points so it runs ONCE per request in
 //! a fixed order, no matter which tool is calling. [`VaultContext::begin_request`]
 //! runs steps 0–1 at the per-request seam (the server calls it before every tool
@@ -34,12 +68,11 @@
 //! running a `query_cache` filter (validate, repair, set, edit, delete, move,
 //! rewrite, apply, new) go through [`VaultContext::load_graph_index`], a thin
 //! composition over `query_cache` plus the cache reader — so in warm mode those
-//! tools run the SAME steps 2–4 against the held-open connection and are served
-//! verify-once too, not cold-opened per request (NRN-130). Putting
-//! root-liveness + config-freshness in `begin_request`
-//! means *every* tool — query-cache and graph-index alike — gets them, and config
-//! stays STABLE for the whole request (no mid-request swap, so one request can
-//! never mix an old-config graph index with a new-config cache).
+//! tools bind the SAME generation and are served verify-once too, not cold-opened
+//! per request (NRN-130). Putting root-liveness + config-freshness in
+//! `begin_request` means *every* tool — query-cache and graph-index alike — gets
+//! them, and config stays STABLE for the whole request (no mid-request swap, so
+//! one request can never mix an old-config graph index with a new-config cache).
 //!
 //! 0. **Root liveness** (`begin_request`)**.** Canonicalize `vault_root`; if it is
 //!    gone, return a typed [`WarmContextError::RootGone`] the daemon can downcast
@@ -48,22 +81,25 @@
 //!    and compare a content-hash fingerprint (blake3 of the file bytes, plus
 //!    `exists`). An existing-but-unreadable config (e.g. `chmod 000`) fails
 //!    *this* request too, distinctly from "absent" — see [`fingerprint_config`].
-//!    Unchanged → proceed. Changed → re-parse: a parse error fails
-//!    *this* request (mirroring a direct CLI invocation) and leaves the
-//!    fingerprint stale so the next request retries. On a successful re-parse, if
-//!    the resolved index-set hash, `alias_field`, or `files.ignore` changed (the
-//!    inputs to `Cache::open_with_index` that determine cache content) the warm
-//!    cache state is dropped so step 3 fully reopens (re-paying `integrity_check`
-//!    — deliberate); otherwise only the stored config `Arc` is hot-swapped (no
-//!    reopen).
-//! 2. **Ground-shift** (`query_cache`)**.** If warm state is present, stat `<cache_dir>/cache.db` and
-//!    compare its `(dev, ino)` against the identity captured at open. On a missing
-//!    file or a mismatch the warm state is dropped. This catches an out-of-band
-//!    `norn cache clear` / `prune` / manual `rm` under a live daemon: POSIX keeps
-//!    an unlinked file alive through the held connection, so without this check a
-//!    daemon would serve a ghost database forever.
-//! 3. **(Re)open if absent.** Open the warm cache. See the sentinel-discipline
-//!    notes on `open_warm_state` for the ordering that keeps identity honest.
+//!    Unchanged → proceed. Changed → re-parse: a parse error fails *this* request
+//!    (mirroring a direct CLI invocation) and leaves the fingerprint stale so the
+//!    next request retries. On a successful re-parse the stored config `Arc` is
+//!    swapped unconditionally; whether the change is index-relevant (and so needs
+//!    a new generation) is decided in step 3 by comparing the bound generation's
+//!    index identity against the new config — begin_request drops no state.
+//! 2. **Ground-shift** (`ensure_current`, via `query_cache`)**.** Stat
+//!    `<cache_dir>/cache.db` and compare its `(dev, ino)` against the identity the
+//!    current generation captured at open. A missing file or a mismatch makes the
+//!    generation stale. This catches an out-of-band `norn cache clear` / `prune` /
+//!    manual `rm` under a live daemon: POSIX keeps an unlinked file alive through
+//!    the held connection, so without this check a daemon would serve a ghost
+//!    database forever.
+//! 3. **(Re)open if stale** (`ensure_current`)**.** If the current generation is
+//!    absent, invalidated (below the floor), ground-shifted, or opened under a
+//!    now-different index identity, single-flight open generation N+1. See the
+//!    sentinel-discipline notes on `open_generation` for the ordering that keeps
+//!    identity honest. This is the ONLY place `integrity_check` is paid in warm
+//!    mode.
 //! 4. **Freshness.** Run the same lock-timeout-tolerant `index_incremental`
 //!    refresh cold mode gets, so vault edits between calls are reflected.
 //!
@@ -73,10 +109,12 @@
 
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
+use parking_lot::{ArcMutexGuard, Mutex as CacheMutex};
 
 use crate::cache::{cache_dir_for, Cache, CacheError, ChangeDetectOptions};
 use crate::cache_cmd::open_for_query;
@@ -178,34 +216,90 @@ fn current_db_identity(vault_root: &Utf8Path) -> Option<(u64, u64)> {
     Some(device_inode(&meta))
 }
 
-/// Warm cache state: the held-open connection plus the identity we verify it
-/// against on every subsequent request. Wrapped in `Option` in the context so
-/// self-heal can evict it in place.
-struct WarmState {
-    cache: Cache,
-    /// Held-open handle to `cache.db` captured at open. Holding it keeps the
-    /// inode meaningful for the state's lifetime; its fstat produced
-    /// `db_identity`. Never read again — the ground-shift check re-stats the
-    /// path fresh — so it is named `_sentinel` to document intent and suppress
-    /// dead-field lints.
-    _sentinel: File,
-    /// `(dev, ino)` of `cache.db` at open; compared per-request in step 2.
-    db_identity: (u64, u64),
+/// The index-relevant inputs to `Cache::open_with_index` that determine cache
+/// CONTENT. A generation records the identity it was opened under; a config
+/// change whose new identity differs (resolved index-set hash, `alias_field`, or
+/// `files.ignore`) is index-relevant and forces a new generation, while any
+/// other config change is just a config `Arc` swap (the generation is reused).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct IndexIdentity {
+    /// The resolved index-set hash — a function of the whole resolved set, so
+    /// comparing it covers the entire field set.
+    index_set_hash: String,
+    alias_field: Option<String>,
+    ignore: Vec<String>,
 }
 
-/// Warm-only mutable state, guarded by a single `std::sync::Mutex` (NOT tokio):
-/// the pipeline never holds the guard across an `.await` (tool bodies are sync)
-/// and callers are already serialized by the server's `call_lock`, so this lock
-/// is uncontended in practice but still correct.
+impl IndexIdentity {
+    fn from_config(config: &LoadedConfig) -> Self {
+        let opts = &config.index_options;
+        Self {
+            index_set_hash: opts.resolved_index_set_hash.clone(),
+            alias_field: opts.alias_field.clone(),
+            ignore: opts.ignore.clone(),
+        }
+    }
+}
+
+/// An immutable warm-cache generation (ADR 0013). Once opened, the
+/// `(cache identity, index identity, sentinel)` binding never mutates; a request
+/// binds the current `Arc<Generation>` at its boundary and holds it to
+/// completion. The DB *content* still changes — the per-request incremental
+/// refresh and mutation tools write through the connection — which is why the
+/// `Cache` sits behind an owned-lockable mutex; everything else is fixed for the
+/// generation's life. Dropping the last `Arc` closes the connection and the
+/// sentinel fd via `Drop`, so an evicted generation releases exactly when its
+/// last in-flight request finishes draining on it.
+pub(crate) struct Generation {
+    /// Monotonic generation number (1 for the first open, incremented per
+    /// reopen). Used to coalesce concurrent opens and to gate corruption/panic
+    /// invalidation against the slot's floor.
+    number: u64,
+    /// `(dev, ino)` of `cache.db` at open; compared per-request for ground-shift.
+    db_identity: (u64, u64),
+    /// The index identity this generation was opened under; compared against the
+    /// live config per-request to detect an index-relevant change.
+    index_identity: IndexIdentity,
+    /// Held-open handle to `cache.db` captured at open. Holding it keeps the
+    /// inode meaningful for the generation's life (its fstat produced
+    /// `db_identity`); never read again, so `_sentinel` documents intent and
+    /// suppresses dead-field lints.
+    _sentinel: File,
+    /// The held-open connection. `Arc<Mutex>` so a request can take an OWNED lock
+    /// (`lock_arc`) held across the whole sync tool body, outliving a concurrent
+    /// generation swap of the slot's current pointer. `parking_lot` (not `std`):
+    /// its `ArcMutexGuard` is a safe owned guard, and a panic while a tool holds
+    /// it is handled precisely by the handle's `Drop` (invalidation floor bump),
+    /// not by std-mutex poisoning.
+    cache: Arc<CacheMutex<Cache>>,
+}
+
+/// Warm-mode per-vault slot. The small fields are guarded by `std::sync::Mutex`
+/// (NOT tokio), locked only briefly and NEVER across an `.await` (tool bodies are
+/// sync); the cache connection's own lock lives inside [`Generation`].
 struct WarmSlot {
-    /// `None` when no cache is currently held (initial, or after a self-heal
-    /// eviction); the acquisition path in `query_cache` guarantees it is `Some`
-    /// before a `WarmGuard` is handed out.
-    state: Mutex<Option<WarmState>>,
-    /// Fingerprint of the config file; lives outside `WarmState` because it must
-    /// survive a `WarmState` eviction (config tracking is independent of cache
-    /// identity).
+    /// The current generation, `None` only before the first open. Never nulled in
+    /// place afterward: a reopen swaps this pointer to N+1 and the old N drops
+    /// with its last in-flight `Arc`.
+    current: Mutex<Option<Arc<Generation>>>,
+    /// Fingerprint of the config file; independent of any generation, so it
+    /// survives reopens.
     config_fp: Mutex<ConfigFingerprint>,
+    /// Single-flight generation-open guard. Held only for the open critical
+    /// section (probe re-check → open → swap), so concurrent stale observers of
+    /// generation N coalesce to exactly ONE open of N+1. Also owns the monotonic
+    /// generation counter.
+    open: Mutex<u64>,
+    /// Monotonic invalidation floor: a generation whose `number` is BELOW this is
+    /// stale and must be reopened. Bumped by corruption ([`note_tool_error`]) and
+    /// by a panic unwinding through a live cache guard — the two triggers with no
+    /// filesystem/config signal for `ensure_current` to observe. An atomic so the
+    /// per-request freshness probe reads it without taking the open lock; shared
+    /// with each handed-out cache guard so its panic-`Drop` can bump it.
+    floor: Arc<AtomicU64>,
+    /// Total generation opens performed (cold start + every reopen). Test-only
+    /// coalescing/single-flight assertion counter; incremented on every open.
+    open_count: AtomicU64,
 }
 
 /// Cold (stdio) vs warm (daemon) behavior for `query_cache`.
@@ -222,15 +316,17 @@ enum Mode {
 
 /// Vault context for the MCP servers.
 ///
-/// Holds a parsed [`LoadedConfig`] behind interior mutability (warm mode
-/// hot-swaps it on a config edit; cold mode never mutates it) and a [`Mode`] that
-/// selects the per-call cache strategy. See the module docs for the full design.
+/// Holds a parsed [`LoadedConfig`] behind a `Mutex<Arc<..>>` (warm mode swaps in
+/// a re-parsed config on a config edit; cold mode never mutates it) and a
+/// [`Mode`] that selects the per-call cache strategy. In warm mode the cache
+/// binding itself is NOT interior-mutable — it is an immutable `Arc<Generation>`
+/// swapped as a whole. See the module docs for the full design.
 pub(crate) struct VaultContext {
     /// Absolute path to the vault root, as passed via `--cwd`.
     pub(crate) vault_root: Utf8PathBuf,
     /// Parsed and compiled config. Behind a `Mutex<Arc<..>>` so warm mode can
     /// atomically swap in a re-parsed config without disturbing readers holding
-    /// a cloned `Arc`.
+    /// a cloned `Arc`. This is the config `Arc` a request binds at its boundary.
     config: Mutex<Arc<LoadedConfig>>,
     mode: Mode,
     /// Operator notes generated while serving the CURRENT request — e.g. the
@@ -283,8 +379,12 @@ impl VaultContext {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
             mode: Mode::Warm(WarmSlot {
-                state: Mutex::new(None),
+                current: Mutex::new(None),
                 config_fp: Mutex::new(config_fp),
+                // Generation numbers start at 1, so the counter's next value is 1.
+                open: Mutex::new(1),
+                floor: Arc::new(AtomicU64::new(0)),
+                open_count: AtomicU64::new(0),
             }),
             operator_notes: Mutex::new(Vec::new()),
         })
@@ -325,23 +425,29 @@ impl VaultContext {
             })
         })?;
 
-        // Step 1 — config freshness. An index-relevant change drops the warm
-        // state here so the next `query_cache` fully reopens against the new
-        // config (re-paying integrity_check — deliberate).
-        if self.refresh_config_warm(slot)? {
-            let mut guard = lock_warm_state(slot);
-            *guard = None;
-        }
+        // Step 1 — config freshness. Swaps the stored config `Arc` on a change and
+        // advances the fingerprint; a parse error fails this request without
+        // advancing it. begin_request drops NO generation state: whether the
+        // change is index-relevant (and so needs a new generation) is decided in
+        // `ensure_current` by comparing the bound generation's index identity to
+        // the new config, so a single path owns every reopen.
+        self.refresh_config_warm(slot)?;
         Ok(())
     }
 
     /// Corruption-eviction seam (FIX-3): inspect a failed tool's error chain and,
-    /// in warm mode, evict the held cache state when the failure is a SQLite
-    /// corruption-class error (`DatabaseCorrupt` / `NotADatabase`). The next
-    /// request then fully reopens via the cold-open machinery
-    /// (integrity_check → detect → rebuild) — the same self-heal a one-shot CLI
-    /// gets for free. No-op in cold mode (each call already opens + verifies a
-    /// fresh cache).
+    /// in warm mode, invalidate the current generation when the failure is a
+    /// SQLite corruption-class error (`DatabaseCorrupt` / `NotADatabase`). The
+    /// next request then reopens through the single-flight
+    /// [`ensure_current`](Self::ensure_current) path (integrity_check → detect →
+    /// rebuild) — the same self-heal a one-shot CLI gets for free. No-op in cold
+    /// mode (each call already opens + verifies a fresh cache).
+    ///
+    /// Invalidation bumps the slot's monotonic floor above the current
+    /// generation's number rather than nulling the pointer in place, so eviction
+    /// and reopen both flow through the one open path and any request still
+    /// draining on the corrupt generation is undisturbed (it drops with its last
+    /// `Arc`).
     ///
     /// Trust framing (ADR 0005): warm mode verifies integrity once and never
     /// re-runs integrity_check by design. That holds because corruption
@@ -353,8 +459,14 @@ impl VaultContext {
             return;
         };
         if is_sqlite_corruption(err) {
-            let mut guard = lock_warm_state(slot);
-            *guard = None;
+            if let Some(gen) = slot
+                .current
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
+                slot.floor.fetch_max(gen.number + 1, Ordering::AcqRel);
+            }
         }
     }
 
@@ -401,8 +513,8 @@ impl VaultContext {
     /// - Cold: opens a fresh [`Cache`] via `open_for_query` (integrity_check +
     ///   incremental refresh every call), exactly as before.
     /// - Warm: runs the verify-once + per-request self-heal pipeline (see module
-    ///   docs) and hands out a guard into the held-open connection.
-    pub(crate) fn query_cache(&self) -> Result<CacheHandle<'_>> {
+    ///   docs) and hands out an owned guard into the bound generation's connection.
+    pub(crate) fn query_cache(&self) -> Result<CacheHandle> {
         match &self.mode {
             Mode::Cold => {
                 let config = self.config();
@@ -446,9 +558,10 @@ impl VaultContext {
     /// feeds mutation *planning*: `integrity_check` is paid at open (and on
     /// every self-heal reopen), not per call, so in-place same-inode corruption
     /// of `cache.db` is detected by open-time verification plus error-time
-    /// eviction ([`note_tool_error`](Self::note_tool_error) drops the warm state
-    /// on any SQLite corruption-class error, and the next request fully reopens
-    /// and re-verifies), NOT by a per-call recheck the way a cold open would.
+    /// eviction ([`note_tool_error`](Self::note_tool_error) invalidates the
+    /// current generation on any SQLite corruption-class error, and the next
+    /// request reopens and re-verifies), NOT by a per-call recheck the way a cold
+    /// open would.
     /// The source of truth remains the Markdown files: a plan built from a
     /// corrupt index is caught by the apply-time snapshot checks or surfaces as
     /// an error that triggers the eviction path. Direct (non-daemon) invocations
@@ -462,89 +575,131 @@ impl VaultContext {
         Ok(cache.load_graph_index()?)
     }
 
-    /// The warm per-request pipeline. See the module-level docs for the ordered
-    /// rationale of each step.
-    fn query_cache_warm<'a>(&'a self, slot: &'a WarmSlot) -> Result<CacheHandle<'a>> {
-        // Steps 0–1 (root-liveness + config-freshness, with the index-relevant
-        // warm-state drop) already ran in `begin_request` at the per-request
-        // seam, so config is stable here for the whole request. This runs steps
-        // 2–4 under the state lock. The lock is uncontended (callers are
-        // serialized by the server's call_lock) but must be correct; the guard
-        // is never held across an `.await`. A poisoned lock self-heals (FIX-6).
-        let mut guard = lock_warm_state(slot);
+    /// The warm per-request pipeline (steps 2–4). See the module-level docs for
+    /// the ordered rationale of each step.
+    fn query_cache_warm(&self, slot: &WarmSlot) -> Result<CacheHandle> {
+        // Steps 0–1 (root-liveness + config-freshness) already ran in
+        // `begin_request` at the per-request seam, so config is stable here for
+        // the whole request. Steps 2–3 (ground-shift + reopen-if-stale) are the
+        // single-flight `ensure_current`, which returns the generation this
+        // request binds for its whole body.
+        let generation = self.ensure_current(slot)?;
 
-        // Step 2 — ground-shift: drop the held state if cache.db was cleared,
-        // pruned, or rm'd out from under us (identity changed or file gone).
-        if let Some(state) = guard.as_ref() {
-            if current_db_identity(&self.vault_root) != Some(state.db_identity) {
-                *guard = None;
-            }
-        }
-
-        // Step 3 — (re)open if absent. This is the ONLY place the integrity_check
-        // is paid in warm mode; a stable connection is reused across requests.
-        if guard.is_none() {
-            let config = self.config();
-            *guard = Some(open_warm_state(&self.vault_root, &config)?);
-        }
+        // Take an OWNED lock on the bound generation's connection, held across the
+        // whole (sync) tool body. It outlives a concurrent generation swap of the
+        // slot pointer because the guard owns its own `Arc<Mutex<Cache>>` and the
+        // handle also holds the `Arc<Generation>` (keeping the sentinel alive).
+        let mut guard = generation.cache.lock_arc();
 
         // Step 4 — freshness. Same lock-timeout tolerance as `open_for_query`.
+        match guard.index_incremental(&self.vault_root, &ChangeDetectOptions::default()) {
+            Ok(_) => {}
+            Err(CacheError::LockTimeout) => {
+                // BOTH surfaces (NRN-215): the daemon's own stderr is its
+                // operational log — an operator tailing `norn serve` (or a
+                // log pipeline) keeps the contention signal, alongside the
+                // served markers — AND the per-request note buffer carries
+                // it to the caller: `run_wrapped` forwards it in the tool
+                // envelope and the routed CLI re-emits it on ITS stderr,
+                // byte-identical to a direct run.
+                eprintln!("{}", crate::cache::LOCK_CONTENTION_NOTE);
+                self.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        Ok(CacheHandle::Warm(WarmGuard {
+            number: generation.number,
+            floor: Arc::clone(&slot.floor),
+            _generation: generation,
+            guard,
+        }))
+    }
+
+    /// The ONE single-flight generation-open path (steps 2–3). Returns the
+    /// current generation, opening N+1 when the current one is absent, ground-
+    /// shifted, invalidated (below the floor), or opened under a now-different
+    /// index identity. Concurrent stale observers coalesce to exactly one open:
+    /// the `open` guard serializes them and a re-check of the current pointer
+    /// under it lets a late arrival adopt the generation an earlier one just
+    /// produced.
+    fn ensure_current(&self, slot: &WarmSlot) -> Result<Arc<Generation>> {
+        let config = self.config();
+
+        // Fast path: probe the current generation off the open lock.
         {
-            let state = guard
-                .as_mut()
-                .expect("warm state present after (re)open in step 3");
-            match state
-                .cache
-                .index_incremental(&self.vault_root, &ChangeDetectOptions::default())
-            {
-                Ok(_) => {}
-                Err(CacheError::LockTimeout) => {
-                    // BOTH surfaces (NRN-215): the daemon's own stderr is its
-                    // operational log — an operator tailing `norn serve` (or a
-                    // log pipeline) keeps the contention signal, alongside the
-                    // served markers — AND the per-request note buffer carries
-                    // it to the caller: `run_wrapped` forwards it in the tool
-                    // envelope and the routed CLI re-emits it on ITS stderr,
-                    // byte-identical to a direct run.
-                    eprintln!("{}", crate::cache::LOCK_CONTENTION_NOTE);
-                    self.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
+            let snapshot = slot
+                .current
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(generation) = &snapshot {
+                if self.generation_is_fresh(generation, slot, &config) {
+                    return Ok(Arc::clone(generation));
                 }
-                Err(error) => return Err(error.into()),
             }
         }
 
-        Ok(CacheHandle::Warm(WarmGuard { guard }))
+        // Stale or cold → single-flight open. Holding `open` coalesces concurrent
+        // openers; the FIRST performs the open, the rest re-check below and adopt.
+        let mut counter = slot.open.lock().unwrap_or_else(|p| p.into_inner());
+        {
+            let snapshot = slot
+                .current
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(generation) = &snapshot {
+                if self.generation_is_fresh(generation, slot, &config) {
+                    return Ok(Arc::clone(generation));
+                }
+            }
+        }
+
+        // Step 3 — open generation N+1. This is the ONLY place integrity_check is
+        // paid in warm mode; a stable connection is reused across requests.
+        let number = *counter;
+        *counter += 1;
+        let generation = Arc::new(open_generation(&self.vault_root, &config, number)?);
+        slot.open_count.fetch_add(1, Ordering::Relaxed);
+        *slot.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&generation));
+        Ok(generation)
     }
 
-    /// Step 1 body. Returns whether an index-relevant config change requires a
-    /// full cache reopen (paying integrity_check). On no change returns `false`
-    /// and touches nothing; on a parse error returns `Err` WITHOUT advancing the
-    /// fingerprint (so the next request retries). On a successful non-index
-    /// change, hot-swaps the stored config `Arc` and returns `false`.
-    fn refresh_config_warm(&self, slot: &WarmSlot) -> Result<bool> {
+    /// Is `generation` still fresh for the current world? False when it has been
+    /// invalidated (corruption / panic bumped the floor past it), when its
+    /// `cache.db` identity no longer matches the live file (ground-shift), or when
+    /// the live config's index identity differs from the one it was opened under
+    /// (an index-relevant config change).
+    fn generation_is_fresh(
+        &self,
+        generation: &Generation,
+        slot: &WarmSlot,
+        config: &LoadedConfig,
+    ) -> bool {
+        generation.number >= slot.floor.load(Ordering::Acquire)
+            && current_db_identity(&self.vault_root) == Some(generation.db_identity)
+            && generation.index_identity == IndexIdentity::from_config(config)
+    }
+
+    /// Step 1 body. On a config-file change, re-parses and swaps the stored config
+    /// `Arc` (advancing the fingerprint); an index-relevant change is NOT acted on
+    /// here — `ensure_current` reopens when the bound generation's index identity
+    /// no longer matches. On no change, touches nothing. On a parse error, returns
+    /// `Err` WITHOUT advancing the fingerprint (so the next request retries),
+    /// mirroring a direct CLI invocation.
+    fn refresh_config_warm(&self, slot: &WarmSlot) -> Result<()> {
         let config_path = config_yaml_path(&self.vault_root);
         let new_fp = fingerprint_config(&config_path)?;
 
         let mut fp_guard = slot.config_fp.lock().unwrap_or_else(|p| p.into_inner());
         if *fp_guard == new_fp {
-            return Ok(false);
+            return Ok(());
         }
 
         // Changed — re-parse. A parse error propagates and the fingerprint stays
         // stale, mirroring what a direct CLI invocation would do on this vault.
         let new_config = load_config(&self.vault_root.to_path_buf(), None)?;
-
-        // Index-relevant = the fields that feed `Cache::open_with_index` and so
-        // determine cache CONTENT: the resolved index-set hash, the alias field,
-        // and `files.ignore` — a files.ignore change adds/removes which documents
-        // are in the graph, so the warm cache must reopen to re-apply it, not
-        // just hot-swap the config (NRN-117). (The hash is a function of the
-        // resolved set, so comparing it covers the whole set.)
-        let old = self.config();
-        let index_relevant_changed = old.index_options.resolved_index_set_hash
-            != new_config.index_options.resolved_index_set_hash
-            || old.index_options.alias_field != new_config.index_options.alias_field
-            || old.index_options.ignore != new_config.index_options.ignore;
 
         {
             let mut cfg = self.config.lock().unwrap_or_else(|p| p.into_inner());
@@ -552,17 +707,38 @@ impl VaultContext {
         }
         *fp_guard = new_fp;
 
-        Ok(index_relevant_changed)
+        Ok(())
     }
 
-    /// Test-only accessor for the identity of the currently-held warm cache
-    /// (`None` in cold mode or when no state is held). Call only when no
-    /// `CacheHandle` is live, since it acquires the state lock.
+    /// Test-only accessor for the identity of the current warm generation's cache
+    /// (`None` in cold mode or before the first open).
     #[cfg(test)]
     pub(crate) fn warm_db_identity(&self) -> Option<(u64, u64)> {
+        self.current_generation().map(|g| g.db_identity)
+    }
+
+    /// Test-only accessor: a clone of the current generation `Arc` (`None` in cold
+    /// mode or before the first open). Lets a test hold a generation to model an
+    /// in-flight request and prove drain-and-drop.
+    #[cfg(test)]
+    pub(crate) fn current_generation(&self) -> Option<Arc<Generation>> {
         match &self.mode {
-            Mode::Warm(slot) => lock_warm_state(slot).as_ref().map(|s| s.db_identity),
+            Mode::Warm(slot) => slot
+                .current
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone(),
             Mode::Cold => None,
+        }
+    }
+
+    /// Test-only accessor: total generation opens (cold start + every reopen).
+    /// Drives the single-flight / coalescing assertions.
+    #[cfg(test)]
+    pub(crate) fn generation_opens(&self) -> u64 {
+        match &self.mode {
+            Mode::Warm(slot) => slot.open_count.load(Ordering::Relaxed),
+            Mode::Cold => 0,
         }
     }
 }
@@ -570,31 +746,6 @@ impl VaultContext {
 /// Path to a vault's default config file, `<vault_root>/.norn/config.yaml`.
 fn config_yaml_path(vault_root: &Utf8Path) -> Utf8PathBuf {
     vault_root.join(".norn/config.yaml")
-}
-
-/// Lock the warm state, healing a poisoned mutex once (FIX-6).
-///
-/// A panic in a tool body while holding the warm guard poisons this lock; the
-/// poisoned state may be mid-mutation, so on recovery we EVICT it (set to
-/// `None`) so the next `query_cache` fully reopens with a fresh integrity
-/// check — the warm-state invariant's own recovery path, re-establishing trust
-/// rather than papering over the panic. We then clear the poison flag on the
-/// mutex itself, so this is a ONE-TIME heal: the very next lock takes the
-/// ordinary `Ok` branch and warm mode resumes normal (non-evicting) operation.
-/// Without the `clear_poison()` call the flag stays sticky and every
-/// subsequent request — for the lifetime of the daemon — would take this
-/// recovery branch and re-evict, re-paying `integrity_check` per request
-/// instead of the intended verify-once.
-fn lock_warm_state(slot: &WarmSlot) -> std::sync::MutexGuard<'_, Option<WarmState>> {
-    match slot.state.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = None;
-            slot.state.clear_poison();
-            guard
-        }
-    }
 }
 
 /// Does this error chain carry a SQLite corruption-class failure
@@ -615,8 +766,10 @@ fn is_sqlite_corruption(err: &anyhow::Error) -> bool {
     })
 }
 
-/// Open a fresh [`WarmState`]: the held-open cache connection plus the `(dev,
-/// ino)` identity we will verify it against on later requests.
+/// Open a fresh [`Generation`]: the held-open cache connection plus the `(dev,
+/// ino)` identity and index identity we will verify it against on later
+/// requests. Called only from [`VaultContext::ensure_current`] under the slot's
+/// single-flight `open` guard.
 ///
 /// # Sentinel discipline (load-bearing)
 ///
@@ -648,7 +801,11 @@ fn is_sqlite_corruption(err: &anyhow::Error) -> bool {
 ///   between create and capture, on a just-created cache — self-heals via a later
 ///   ground-shift and is accepted as negligible (a brand-new cache is not a clear
 ///   target in practice).
-fn open_warm_state(vault_root: &Utf8Path, config: &LoadedConfig) -> Result<WarmState> {
+fn open_generation(
+    vault_root: &Utf8Path,
+    config: &LoadedConfig,
+    number: u64,
+) -> Result<Generation> {
     let (_canonical, cache_dir) = cache_dir_for(vault_root)?;
     ensure_cache_dir(&cache_dir)?;
     let db_path = cache_dir.join("cache.db");
@@ -682,10 +839,12 @@ fn open_warm_state(vault_root: &Utf8Path, config: &LoadedConfig) -> Result<WarmS
     };
 
     let db_identity = device_inode(&sentinel.metadata()?);
-    Ok(WarmState {
-        cache,
-        _sentinel: sentinel,
+    Ok(Generation {
+        number,
         db_identity,
+        index_identity: IndexIdentity::from_config(config),
+        _sentinel: sentinel,
+        cache: Arc::new(CacheMutex::new(cache)),
     })
 }
 
@@ -711,14 +870,14 @@ fn ensure_cache_dir(cache_dir: &Utf8Path) -> Result<()> {
 // guard; a `CacheHandle` is a short-lived per-call stack value, never stored in
 // bulk, so the variant-size gap does not matter here.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum CacheHandle<'a> {
+pub(crate) enum CacheHandle {
     /// Cold mode: an owned, freshly-opened cache (dropped at end of the call).
     Owned(Cache),
-    /// Warm mode: a guard into the held-open connection.
-    Warm(WarmGuard<'a>),
+    /// Warm mode: an owned guard into the bound generation's connection.
+    Warm(WarmGuard),
 }
 
-impl std::fmt::Debug for CacheHandle<'_> {
+impl std::fmt::Debug for CacheHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CacheHandle::Owned(_) => f.write_str("CacheHandle::Owned(..)"),
@@ -727,7 +886,7 @@ impl std::fmt::Debug for CacheHandle<'_> {
     }
 }
 
-impl Deref for CacheHandle<'_> {
+impl Deref for CacheHandle {
     type Target = Cache;
     fn deref(&self) -> &Cache {
         match self {
@@ -737,7 +896,7 @@ impl Deref for CacheHandle<'_> {
     }
 }
 
-impl DerefMut for CacheHandle<'_> {
+impl DerefMut for CacheHandle {
     fn deref_mut(&mut self) -> &mut Cache {
         match self {
             CacheHandle::Owned(cache) => cache,
@@ -746,32 +905,53 @@ impl DerefMut for CacheHandle<'_> {
     }
 }
 
-/// A guard into the warm-mode held-open `Cache`. Wraps the `MutexGuard` over the
-/// `Option<WarmState>` and derefs into the `Cache` inside it. The acquisition
-/// path in `query_cache_warm` guarantees the `Option` is `Some` before this is
-/// constructed, so the `expect`s below are unreachable in practice.
-pub(crate) struct WarmGuard<'a> {
-    guard: std::sync::MutexGuard<'a, Option<WarmState>>,
+/// An owned guard into the warm-mode bound generation's held-open `Cache`.
+///
+/// It keeps the whole `Arc<Generation>` alive (so the sentinel fd + connection
+/// stay open for the request even if a concurrent open swaps the slot's current
+/// pointer to a newer generation) and holds an owned `parking_lot` lock into that
+/// generation's connection across the entire (sync) tool body.
+///
+/// `Drop` carries the generational replacement for std-mutex poison recovery: if
+/// the guard is dropped while the thread is PANICKING (a tool body panicked
+/// mid-work, possibly mid-mutation), it bumps the slot's invalidation floor above
+/// this generation's number, so the next request reopens through
+/// [`ensure_current`](VaultContext::ensure_current) and re-verifies integrity —
+/// exactly the trust-restoring self-heal the old poison-evict path gave, now
+/// routed through the one open path. On a normal drop it does nothing.
+pub(crate) struct WarmGuard {
+    /// This generation's number, compared against `floor` on a panic-drop.
+    number: u64,
+    /// Shared handle to the slot's invalidation floor, bumped on a panic-drop.
+    floor: Arc<AtomicU64>,
+    /// Owned lock into the generation's connection, held across the tool body.
+    /// It owns its own clone of the generation's `Arc<Mutex<Cache>>`, so the
+    /// connection stays alive independently of `_generation`.
+    guard: ArcMutexGuard<parking_lot::RawMutex, Cache>,
+    /// Keeps the bound generation (sentinel fd + identity) alive for the whole
+    /// request, so a concurrent open swapping the slot's current pointer to a
+    /// newer generation cannot close this request's sentinel out from under it.
+    _generation: Arc<Generation>,
 }
 
-impl Deref for WarmGuard<'_> {
-    type Target = Cache;
-    fn deref(&self) -> &Cache {
-        &self
-            .guard
-            .as_ref()
-            .expect("WarmGuard invariant: warm state is Some")
-            .cache
+impl Drop for WarmGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.floor.fetch_max(self.number + 1, Ordering::AcqRel);
+        }
     }
 }
 
-impl DerefMut for WarmGuard<'_> {
+impl Deref for WarmGuard {
+    type Target = Cache;
+    fn deref(&self) -> &Cache {
+        &self.guard
+    }
+}
+
+impl DerefMut for WarmGuard {
     fn deref_mut(&mut self) -> &mut Cache {
-        &mut self
-            .guard
-            .as_mut()
-            .expect("WarmGuard invariant: warm state is Some")
-            .cache
+        &mut self.guard
     }
 }
 
@@ -1597,8 +1777,8 @@ mod tests {
 
     /// A `files.ignore` change is index-relevant, so the NEXT warm
     /// `load_graph_index` must reflect it (the newly-ignored doc absent) — the
-    /// full self-heal pipeline (config-drop → reopen) flows through the graph
-    /// build, not just through `query_cache`.
+    /// full self-heal pipeline (config swap → index-identity mismatch → reopen)
+    /// flows through the graph build, not just through `query_cache`.
     #[test]
     fn warm_load_graph_index_honors_files_ignore_change() {
         let (_tmp, root) = make_seeded_vault();
@@ -1639,12 +1819,13 @@ mod tests {
 
     /// FIX-1 (split-brain): within ONE request the config the tool reads and the
     /// cache `query_cache` opens must be the SAME generation. The `begin_request`
-    /// seam refreshes config + drops index-relevant warm state BEFORE the tool
-    /// body reads `config()` or opens the cache, so an index-relevant change
-    /// (alias_field) can't leave one request mixing an old-config graph index
-    /// with a new-config cache. Pre-fix, the config swap happened inside
-    /// `query_cache` (after a tool already read `config()`), so `config()` read
-    /// before `query_cache` returned the stale alias.
+    /// seam swaps the config `Arc` BEFORE the tool body reads `config()` or opens
+    /// the cache; `ensure_current` then sees the bound generation's index identity
+    /// no longer matches and reopens — so an index-relevant change (alias_field)
+    /// can't leave one request mixing an old-config graph index with a new-config
+    /// cache. Pre-fix, the config swap happened inside `query_cache` (after a tool
+    /// already read `config()`), so `config()` read before `query_cache` returned
+    /// the stale alias.
     #[test]
     fn warm_begin_request_makes_config_and_cache_same_generation() {
         let (_tmp, root) = make_seeded_vault();
@@ -1721,7 +1902,8 @@ mod tests {
     }
 
     /// FIX-3 (corruption self-heal): a corruption-class rusqlite error fed to the
-    /// eviction seam drops the warm state, so the next request fully reopens.
+    /// eviction seam invalidates the current generation, so the next request
+    /// reopens a NEW generation through the single-flight path.
     #[test]
     fn warm_evicts_state_on_sqlite_corruption_error() {
         let (_tmp, root) = make_seeded_vault();
@@ -1732,10 +1914,10 @@ mod tests {
             let cache = ctx.query_cache().expect("first warm query_cache");
             create_marker(&cache);
         }
-        assert!(
-            ctx.warm_db_identity().is_some(),
-            "warm state held after first call"
-        );
+        let gen1 = ctx
+            .current_generation()
+            .expect("warm generation held after first call");
+        assert_eq!(gen1.number, 1);
 
         // Synthesize a SQLITE_CORRUPT failure and feed it to the seam.
         let corrupt = rusqlite::Error::SqliteFailure(
@@ -1745,12 +1927,8 @@ mod tests {
         let err = anyhow::Error::new(corrupt).context("tool body failed");
         ctx.note_tool_error(&err);
 
-        assert!(
-            ctx.warm_db_identity().is_none(),
-            "a corruption-class error must evict the warm state"
-        );
-
-        // Next request rebuilds cleanly (marker gone).
+        // Next request reopens a NEW generation (marker gone) — the corruption
+        // bumped the invalidation floor past generation 1.
         ctx.begin_request().expect("begin_request after eviction");
         let cache = ctx.query_cache().expect("query_cache after eviction");
         assert!(
@@ -1758,6 +1936,14 @@ mod tests {
             "state must be rebuilt after corruption eviction"
         );
         assert_eq!(doc_count(&cache), 3);
+        drop(cache);
+        assert_eq!(
+            ctx.current_generation()
+                .expect("generation after reopen")
+                .number,
+            2,
+            "a corruption-class error must force a new generation on the next request"
+        );
     }
 
     /// FIX-3 (negative): a non-corruption error must NOT evict the warm state.
@@ -1779,12 +1965,14 @@ mod tests {
         );
     }
 
-    /// FIX-6 (poisoned-mutex recovery): a panic while holding the warm guard
-    /// poisons the state mutex. The next request must still succeed with a
-    /// rebuilt state (the poisoned, possibly-mid-mutation state is evicted, then
-    /// reopened), not panic forever.
+    /// Panic-recovery (the generational replacement for FIX-6's poison recovery):
+    /// a panic while a tool holds the warm cache guard invalidates that
+    /// generation via the guard's `Drop` (a floor bump), NOT std-mutex poisoning
+    /// (`parking_lot` does not poison). The next request must recover with a
+    /// rebuilt generation (marker gone), and the request AFTER must reuse it — the
+    /// invalidation is one-shot, not sticky.
     #[test]
-    fn warm_recovers_from_poisoned_state_mutex() {
+    fn warm_recovers_from_panic_holding_the_cache_guard() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
 
@@ -1794,45 +1982,180 @@ mod tests {
             create_marker(&cache);
         }
 
-        // Poison the state mutex: panic on another thread while holding the guard.
+        // Panic on another thread WHILE holding the cache guard: its `Drop` runs
+        // during unwind and bumps the slot's invalidation floor past this
+        // generation.
         let ctx2 = Arc::clone(&ctx);
         let handle = std::thread::spawn(move || {
-            ctx2.begin_request()
-                .expect("begin_request on poison thread");
-            let _cache = ctx2.query_cache().expect("query_cache on poison thread");
+            ctx2.begin_request().expect("begin_request on panic thread");
+            let _cache = ctx2.query_cache().expect("query_cache on panic thread");
             panic!("intentional panic while holding the warm guard");
         });
         assert!(
             handle.join().is_err(),
-            "the spawned thread must have panicked (poisoning the mutex)"
+            "the spawned thread must have panicked while holding the guard"
         );
 
-        // The first post-poison request (request 2) must recover: rebuilt
-        // state, marker gone. Plant a fresh marker here so request 3 below can
-        // prove the connection this request opened is REUSED, not re-evicted.
-        ctx.begin_request().expect("begin_request after poison");
+        // The first post-panic request (request 2) must recover: rebuilt
+        // generation, marker gone. Plant a fresh marker here so request 3 below
+        // can prove the connection this request opened is REUSED, not re-evicted.
+        ctx.begin_request().expect("begin_request after panic");
         {
             let cache = ctx
                 .query_cache()
-                .expect("query_cache must recover from a poisoned mutex, not panic");
+                .expect("query_cache must recover from a panic-invalidated generation");
             assert!(
                 !marker_present(&cache),
-                "warm state must be rebuilt after poison recovery"
+                "warm state must be rebuilt after panic recovery"
             );
             assert_eq!(doc_count(&cache), 3);
             create_marker(&cache);
         }
 
-        // The poison flag must be cleared by the recovery above, not sticky:
-        // request 3 must reuse the SAME connection request 2 rebuilt (marker
-        // still present), proving the recovery branch does not keep evicting
-        // on every subsequent request.
+        // The floor bump must be one-shot, not sticky: request 3 must reuse the
+        // SAME connection request 2 rebuilt (marker still present), proving the
+        // recovery does not keep re-evicting on every subsequent request.
         ctx.begin_request().expect("begin_request request 3");
         let cache = ctx.query_cache().expect("query_cache request 3");
         assert!(
             marker_present(&cache),
-            "a second post-poison request must reuse the recovered connection, \
-             not evict it again — the poison flag must be cleared, not sticky"
+            "a second post-panic request must reuse the recovered connection, \
+             not evict it again — the invalidation must be one-shot, not sticky"
+        );
+    }
+
+    /// Coalescing / single-flight for a RE-open (ADR 0013, NRN-251; the reopen
+    /// analog of the NRN-55 cold-start regression): after the current generation
+    /// is invalidated, N concurrent requests must produce EXACTLY ONE reopen —
+    /// every late arrival adopts the generation the first opener produced, so the
+    /// counter advances by one, not N.
+    ///
+    /// The trigger is a corruption invalidation (floor bump): unlike an index-
+    /// relevant config change — which itself rebuilds `cache.db` and shifts its
+    /// inode, provoking a second, legitimately-distinct ground-shift reopen — a
+    /// floor bump reopens the SAME on-disk cache with no rebuild, so a clean
+    /// single reopen is the whole story and the count is unambiguous.
+    #[test]
+    fn warm_concurrent_reopen_coalesces_to_one_open() {
+        use std::sync::Barrier;
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+
+        // First request opens generation 1.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        assert_eq!(ctx.generation_opens(), 1, "cold start is one open");
+
+        // Invalidate generation 1 for EVERY thread (corruption-class error →
+        // floor bump). No config change, no rebuild, no inode shift.
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+
+        const N: usize = 8;
+        let barrier = Arc::new(Barrier::new(N));
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let ctx = Arc::clone(&ctx);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                ctx.begin_request().expect("begin_request");
+                let cache = ctx.query_cache().expect("query_cache");
+                doc_count(&cache)
+            }));
+        }
+        for h in handles {
+            assert_eq!(h.join().expect("worker panicked"), 3);
+        }
+
+        assert_eq!(
+            ctx.generation_opens(),
+            2,
+            "exactly ONE reopen across N concurrent stale requests (cold start + 1)"
+        );
+        assert_eq!(
+            ctx.current_generation().expect("generation held").number,
+            2,
+            "the generation counter advanced by exactly one"
+        );
+    }
+
+    /// Drain-and-drop (ADR 0013, NRN-251): a request in flight on generation N
+    /// keeps serving on N while N+1 opens; N's resources (connection + sentinel
+    /// fd) release only when its LAST `Arc` drops. Modeled by holding the
+    /// generation `Arc` across a reopen: the slot releases its reference (leaving
+    /// ours the sole owner) yet N still serves its own snapshot, and the whole
+    /// generation is freed exactly when we drop it.
+    #[test]
+    fn warm_reopen_drains_and_drops_prior_generation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let gen1 = ctx.current_generation().expect("generation 1 held");
+        assert_eq!(gen1.number, 1);
+        let weak = Arc::downgrade(&gen1);
+
+        // Trigger a reopen via ground-shift: remove the cache dir out from under
+        // the live context. gen1's held connection keeps the unlinked db alive
+        // (POSIX ghost), so it can still serve its snapshot after this.
+        let (_canonical, cache_dir) = cache_dir_for(&root).expect("cache_dir_for");
+        std::fs::remove_dir_all(cache_dir.as_std_path()).expect("remove cache dir");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("second warm query_cache");
+            assert_eq!(
+                doc_count(&cache),
+                3,
+                "the reopened generation serves the vault"
+            );
+        }
+        let gen2 = ctx.current_generation().expect("generation 2 held");
+        assert_eq!(gen2.number, 2, "reopen advanced the generation number");
+
+        // gen1 drained on N: its still-open connection serves its own snapshot,
+        // even though the file was unlinked.
+        let gen1_docs: i64 = gen1
+            .cache
+            .lock()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .expect("gen1 connection still usable");
+        assert_eq!(
+            gen1_docs, 3,
+            "the drained generation still serves its snapshot"
+        );
+
+        // The slot swapped to gen2 and released its gen1 reference — ours is now
+        // the sole owner.
+        assert_eq!(
+            Arc::strong_count(&gen1),
+            1,
+            "the slot dropped its reference to the prior generation on reopen"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "generation 1 is still alive while held"
+        );
+
+        // Dropping the last `Arc` releases N entirely (connection + sentinel fd
+        // close via Drop) — the Weak going dead is the observable Drop-side effect.
+        drop(gen1);
+        assert!(
+            weak.upgrade().is_none(),
+            "generation N is fully dropped — connection + sentinel fd released — with its last Arc"
         );
     }
 }

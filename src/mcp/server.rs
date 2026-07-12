@@ -97,21 +97,23 @@ pub struct McpServer {
     /// Warm vault context: config held for the server lifetime; cache opened
     /// fresh per tool call via `self.ctx.query_cache()`.
     pub(crate) ctx: Arc<VaultContext>,
-    /// In-process serialization lock for tool calls (NRN-55).
+    /// In-process serialization lock for tool bodies.
     ///
     /// The MCP server is one long-lived process serving many `tools/call`
-    /// requests on a multi-thread tokio runtime. The tool handlers open the
-    /// cache and run blocking SQLite work inline. Two concurrent calls on two
-    /// worker threads can race the cold-start cache open/DDL window (upstream of
-    /// the `flock`-based `WriteLock`), yielding "database is locked". The CLI is
-    /// immune because it is one process per invocation; the server is not.
+    /// requests on a multi-thread tokio runtime; the tool handlers run blocking
+    /// SQLite work on `spawn_blocking` threads. This async mutex serializes every
+    /// tool body so vault work runs one-operation-at-a-time within the process.
     ///
-    /// We serialize every tool call through this async mutex so vault work runs
-    /// single-flight within the process — correctness over concurrent-read
-    /// throughput, which the one-vault-one-server model does not need in v1. The
-    /// guard is held across the inline blocking SQLite work on purpose: that is
-    /// exactly "one vault operation at a time". (`spawn_blocking` is a possible
-    /// v2 optimization, deliberately out of scope here.)
+    /// Its remaining job is exactly that **tool-body serialization**, pending the
+    /// per-generation read pool (NRN-253) that will let independent reads run
+    /// concurrently. It is NO LONGER the cold-open-race guard it was introduced as
+    /// (NRN-55): under warm mode every cache open — cold start, ground-shift,
+    /// corruption, index-relevant config change — now flows through the
+    /// generational single-flight path (`VaultContext::ensure_current`, ADR 0013,
+    /// NRN-251), which coalesces concurrent opens by construction, so open safety
+    /// no longer depends on this lock. (Cold stdio `norn mcp` still opens a fresh
+    /// cache per call, and this lock still serializes those cold-start DDL windows
+    /// for that transport — see `concurrent_cold_start_calls_all_succeed`.)
     call_lock: Arc<tokio::sync::Mutex<()>>,
     /// When true, every served tool call emits a per-call
     /// `norn serve: served <tool>` marker on stderr (NRN-94 review F6 — the

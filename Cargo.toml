@@ -34,6 +34,12 @@ clap_complete_nushell = "4.5"
 clap_mangen = "0.3"
 fs2 = "0.4"
 globset = "0.4"
+# Owned mutex guard (`Arc<Mutex<Cache>>::lock_arc`, the `arc_lock` feature) for
+# the generational warm context: a request binds an immutable `Arc<Generation>`
+# and holds a lock into its cache connection across the whole (sync) tool body,
+# outliving any concurrent generation swap. Already in the tree via tokio; made
+# a direct dependency here so the seam can name the owned-guard API.
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 pulldown-cmark = "0.13"
 regex = "1.10"
 rmcp = { version = "2.1.0", features = ["server", "transport-io", "macros"] }
