@@ -1076,6 +1076,7 @@ dependencies = [
  "globset",
  "libc",
  "mockito",
+ "parking_lot",
  "pulldown-cmark",
  "regex",
  "rmcp",
