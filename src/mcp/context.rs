@@ -322,6 +322,13 @@ struct WarmSlot {
     /// surfaces — under `call_lock` serialization today those coincide, but a
     /// concurrent read pool (NRN-253) can advance `current` while an older
     /// generation is still draining.
+    ///
+    /// This cell is itself `call_lock`-dependent: one slot-level value can
+    /// only attribute errors correctly while at most one request runs per
+    /// vault. When NRN-253 retires `call_lock`, this attribution must move
+    /// into per-request scope (e.g. carried by the request's read handle) —
+    /// concurrent requests would otherwise overwrite each other's binding
+    /// and reintroduce the misattribution this field exists to prevent.
     bound_generation: AtomicU64,
 }
 
