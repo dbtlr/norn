@@ -141,7 +141,7 @@ $ norn service status --format json
 
 A scoped text report adds three lines without changing the host-level fields:
 
-```
+```text
 $ norn service status --vault ~/vaults/atlas
 serve: loaded, running (pid 73414)
   running v0.48.0 · on-disk v0.48.0
