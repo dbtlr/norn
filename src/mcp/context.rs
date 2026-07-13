@@ -40,9 +40,13 @@
 //! (out-of-band `cache clear` / `prune` / `rm`), cache-identity change /
 //! corruption, and an index-relevant config change — routes through the ONE
 //! single-flight path [`VaultContext::ensure_current`], which opens generation
-//! N+1 and swaps the slot's current pointer. Concurrent stale observers of
-//! generation N coalesce to exactly one open (the open guard + a re-check of the
-//! current pointer under it). In-flight requests keep serving on N; N drops with
+//! N+1 and swaps the slot's current pointer. The open itself is a **writer-queue
+//! liveness op** (ADR 0013 Phase 2, NRN-252): a stale `ensure_current` submits a
+//! generation-open op and blocks on it, and the per-vault writer thread runs opens
+//! one at a time. Serialization by that thread — not a mutex guard — is what
+//! coalesces concurrent opens now: N stale observers of generation N submit N ops;
+//! the first opens N+1 and swaps, the rest re-check the current pointer, find it
+//! fresh, and adopt it. In-flight requests keep serving on N; N drops with
 //! its last `Arc`, closing its connection and sentinel fd via `Drop`. There are
 //! no in-place "null the slot" eviction sites: a trigger either changes what
 //! `ensure_current` observes (identity / config mismatch) or bumps the slot's
@@ -96,10 +100,11 @@
 //!    database forever.
 //! 3. **(Re)open if stale** (`ensure_current`)**.** If the current generation is
 //!    absent, invalidated (below the floor), ground-shifted, or opened under a
-//!    now-different index identity, single-flight open generation N+1. See the
-//!    sentinel-discipline notes on `open_generation` for the ordering that keeps
-//!    identity honest. This is the ONLY place `integrity_check` is paid in warm
-//!    mode.
+//!    now-different index identity, submit a generation-open writer-queue liveness
+//!    op and block on it; the serialized op opens generation N+1 (or adopts one a
+//!    concurrent op just produced). See the sentinel-discipline notes on
+//!    `open_generation` for the ordering that keeps identity honest. This is the
+//!    ONLY place `integrity_check` is paid in warm mode.
 //! 4. **Freshness.** Run the same lock-timeout-tolerant `index_incremental`
 //!    refresh cold mode gets, so vault edits between calls are reflected.
 //!
@@ -119,6 +124,7 @@ use parking_lot::{ArcMutexGuard, Mutex as CacheMutex};
 use crate::cache::{cache_dir_for, Cache, CacheError, ChangeDetectOptions};
 use crate::cache_cmd::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
+use crate::mcp::writer_queue::{Handle, Outcome, WriterQueue};
 
 /// A typed error the warm daemon can downcast to decide whether to evict the
 /// whole `VaultContext`. Kept intentionally small and `anyhow`-downcastable.
@@ -286,32 +292,52 @@ pub(crate) struct Generation {
     cache: Arc<CacheMutex<Cache>>,
 }
 
-/// Warm-mode per-vault slot. The small fields are guarded by `std::sync::Mutex`
-/// (NOT tokio), locked only briefly and NEVER across an `.await` (tool bodies are
-/// sync); the cache connection's own lock lives inside [`Generation`].
-struct WarmSlot {
+/// The slice of warm-slot state a writer-queue generation-open op touches. It
+/// lives behind an `Arc` shared by the [`WarmSlot`] and every submitted open op,
+/// because the op runs `'static` on the writer thread and cannot borrow the slot
+/// (NRN-252). Serialization by the queue — not a mutex guard — is what coalesces
+/// concurrent opens now, so these fields only need interior mutability for the
+/// reads and the single swap the serialized op performs.
+struct SharedSlot {
     /// The current generation, `None` only before the first open. Never nulled in
     /// place afterward: a reopen swaps this pointer to N+1 and the old N drops
     /// with its last in-flight `Arc`.
     current: Mutex<Option<Arc<Generation>>>,
-    /// Fingerprint of the config file; independent of any generation, so it
-    /// survives reopens.
-    config_fp: Mutex<ConfigFingerprint>,
-    /// Single-flight generation-open guard. Held only for the open critical
-    /// section (probe re-check → open → swap), so concurrent stale observers of
-    /// generation N coalesce to exactly ONE open of N+1. Also owns the monotonic
-    /// generation counter.
-    open: Mutex<u64>,
     /// Monotonic invalidation floor: a generation whose `number` is BELOW this is
     /// stale and must be reopened. Bumped by corruption ([`note_tool_error`]) and
     /// by a panic unwinding through a live cache guard — the two triggers with no
     /// filesystem/config signal for `ensure_current` to observe. An atomic so the
-    /// per-request freshness probe reads it without taking the open lock; shared
-    /// with each handed-out cache guard so its panic-`Drop` can bump it.
+    /// per-request freshness probe reads it without taking any lock; a separate
+    /// `Arc` (not just the enclosing `Arc<SharedSlot>`) so each handed-out cache
+    /// guard can hold a lightweight handle whose panic-`Drop` bumps it.
     floor: Arc<AtomicU64>,
+    /// Next generation number to assign (1 for the first open). Mutated only by the
+    /// serialized open op, so queue serialization alone keeps it single-flight —
+    /// the former `open` guard's coalescing role is now the writer thread's.
+    next_number: Mutex<u64>,
     /// Total generation opens performed (cold start + every reopen). Test-only
     /// coalescing/single-flight assertion counter; incremented on every open.
     open_count: AtomicU64,
+}
+
+/// Warm-mode per-vault slot. The small fields are guarded by `std::sync::Mutex`
+/// (NOT tokio), locked only briefly and NEVER across an `.await` (tool bodies are
+/// sync); the cache connection's own lock lives inside [`Generation`].
+struct WarmSlot {
+    /// Generation-open state shared with the writer-queue open ops (see
+    /// [`SharedSlot`]) — `current`, the invalidation `floor`, the generation
+    /// counter, and the open count.
+    shared: Arc<SharedSlot>,
+    /// Fingerprint of the config file; independent of any generation, so it
+    /// survives reopens.
+    config_fp: Mutex<ConfigFingerprint>,
+    /// The per-vault writer queue: the single serialization point for generation
+    /// opens (this commit) — subsuming the former `open` single-flight mutex — and,
+    /// in later commits, freshness refreshes and apply increments (ADR 0013,
+    /// NRN-252). A stale [`ensure_current`](VaultContext::ensure_current) submits a
+    /// generation-open LIVENESS op and blocks on it; the queue runs opens one at a
+    /// time, so N concurrent stale callers coalesce to one open and the rest adopt.
+    queue: WriterQueue,
     /// The generation number the CURRENT request bound via `ensure_current`
     /// (0 = none bound yet this request). Set once, right after
     /// `ensure_current` returns in `query_cache_warm`; reset to 0 at the start
@@ -409,12 +435,16 @@ impl VaultContext {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
             mode: Mode::Warm(WarmSlot {
-                current: Mutex::new(None),
+                shared: Arc::new(SharedSlot {
+                    current: Mutex::new(None),
+                    floor: Arc::new(AtomicU64::new(0)),
+                    // Generation numbers start at 1, so the counter's next value is 1.
+                    next_number: Mutex::new(1),
+                    open_count: AtomicU64::new(0),
+                }),
                 config_fp: Mutex::new(config_fp),
-                // Generation numbers start at 1, so the counter's next value is 1.
-                open: Mutex::new(1),
-                floor: Arc::new(AtomicU64::new(0)),
-                open_count: AtomicU64::new(0),
+                // Label the writer thread with the vault root for debuggability.
+                queue: WriterQueue::spawn(cwd.as_str()),
                 bound_generation: AtomicU64::new(0),
             }),
             operator_notes: Mutex::new(Vec::new()),
@@ -506,7 +536,7 @@ impl VaultContext {
         if is_sqlite_corruption(err) {
             let bound = slot.bound_generation.load(Ordering::Acquire);
             if bound != 0 {
-                slot.floor.fetch_max(bound + 1, Ordering::AcqRel);
+                slot.shared.floor.fetch_max(bound + 1, Ordering::AcqRel);
             }
         }
     }
@@ -659,7 +689,7 @@ impl VaultContext {
 
         Ok(CacheHandle::Warm(WarmGuard {
             number: generation.number,
-            floor: Arc::clone(&slot.floor),
+            floor: Arc::clone(&slot.shared.floor),
             _generation: generation,
             guard,
         }))
@@ -668,67 +698,52 @@ impl VaultContext {
     /// The ONE single-flight generation-open path (steps 2–3). Returns the
     /// current generation, opening N+1 when the current one is absent, ground-
     /// shifted, invalidated (below the floor), or opened under a now-different
-    /// index identity. Concurrent stale observers coalesce to exactly one open:
-    /// the `open` guard serializes them and a re-check of the current pointer
-    /// under it lets a late arrival adopt the generation an earlier one just
-    /// produced.
+    /// index identity.
+    ///
+    /// The lock-free fresh fast path returns without touching the queue. On stale,
+    /// it submits a generation-open **liveness op** and blocks on it (callers run
+    /// inside `spawn_blocking` tool bodies, so a blocking wait is correct). The
+    /// writer thread runs opens one at a time, so concurrent stale observers
+    /// coalesce to exactly one open: the op re-checks the current pointer first, so
+    /// a late arrival adopts the generation an earlier op just produced (NRN-252).
+    /// A dropped op (queue shutting down) or a panicked op surfaces as a
+    /// descriptive error rather than a hang — see [`map_open_outcome`].
     fn ensure_current(&self, slot: &WarmSlot) -> Result<Arc<Generation>> {
         let config = self.config();
 
-        // Fast path: probe the current generation off the open lock.
+        // Fast path: probe the current generation off any lock.
         {
             let snapshot = slot
+                .shared
                 .current
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .clone();
             if let Some(generation) = &snapshot {
-                if self.generation_is_fresh(generation, slot, &config) {
+                if generation_is_fresh(generation, &slot.shared.floor, &self.vault_root, &config) {
                     return Ok(Arc::clone(generation));
                 }
             }
         }
 
-        // Stale or cold → single-flight open. Holding `open` coalesces concurrent
-        // openers; the FIRST performs the open, the rest re-check below and adopt.
-        let mut counter = slot.open.lock().unwrap_or_else(|p| p.into_inner());
-        {
-            let snapshot = slot
-                .current
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            if let Some(generation) = &snapshot {
-                if self.generation_is_fresh(generation, slot, &config) {
-                    return Ok(Arc::clone(generation));
-                }
-            }
-        }
-
-        // Step 3 — open generation N+1. This is the ONLY place integrity_check is
-        // paid in warm mode; a stable connection is reused across requests.
-        let number = *counter;
-        *counter += 1;
-        let generation = Arc::new(open_generation(&self.vault_root, &config, number)?);
-        slot.open_count.fetch_add(1, Ordering::Relaxed);
-        *slot.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&generation));
-        Ok(generation)
+        // Stale or cold → queue a generation-open op and block on its outcome.
+        map_open_outcome(self.spawn_generation_open(slot, config).wait())
     }
 
-    /// Is `generation` still fresh for the current world? False when it has been
-    /// invalidated (corruption / panic bumped the floor past it), when its
-    /// `cache.db` identity no longer matches the live file (ground-shift), or when
-    /// the live config's index identity differs from the one it was opened under
-    /// (an index-relevant config change).
-    fn generation_is_fresh(
+    /// Submit the generation-open liveness op `ensure_current` blocks on. Split out
+    /// so the op's captured state is assembled in one place (and so a test can
+    /// model a caller blocked on the handle across a queue shutdown). The op runs
+    /// `'static` on the writer thread, so it captures owned / `Arc` state — never
+    /// `&self` or `&slot`.
+    fn spawn_generation_open(
         &self,
-        generation: &Generation,
         slot: &WarmSlot,
-        config: &LoadedConfig,
-    ) -> bool {
-        generation.number >= slot.floor.load(Ordering::Acquire)
-            && current_db_identity(&self.vault_root) == Some(generation.db_identity)
-            && generation.index_identity.matches_config(config)
+        config: Arc<LoadedConfig>,
+    ) -> Handle<Result<Arc<Generation>>> {
+        let shared = Arc::clone(&slot.shared);
+        let vault_root = self.vault_root.clone();
+        slot.queue
+            .submit_liveness(move || open_or_adopt(&shared, &vault_root, &config))
     }
 
     /// Step 1 body. On a config-file change, re-parses and swaps the stored config
@@ -773,6 +788,7 @@ impl VaultContext {
     pub(crate) fn current_generation(&self) -> Option<Arc<Generation>> {
         match &self.mode {
             Mode::Warm(slot) => slot
+                .shared
                 .current
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -786,8 +802,30 @@ impl VaultContext {
     #[cfg(test)]
     pub(crate) fn generation_opens(&self) -> u64 {
         match &self.mode {
-            Mode::Warm(slot) => slot.open_count.load(Ordering::Relaxed),
+            Mode::Warm(slot) => slot.shared.open_count.load(Ordering::Relaxed),
             Mode::Cold => 0,
+        }
+    }
+
+    /// Test-only: the warm slot's writer queue (panics off warm mode). Lets a test
+    /// occupy the writer thread with a blocker so a later generation-open op stays
+    /// queued.
+    #[cfg(test)]
+    fn warm_writer_queue(&self) -> &WriterQueue {
+        match &self.mode {
+            Mode::Warm(slot) => &slot.queue,
+            Mode::Cold => panic!("warm_writer_queue called on a cold context"),
+        }
+    }
+
+    /// Test-only: submit a generation-open op exactly as `ensure_current` does,
+    /// returning the raw queue handle (not the mapped `Result`), so a test can
+    /// model a caller blocked on the op while the queue shuts down under it.
+    #[cfg(test)]
+    fn submit_generation_open(&self) -> Handle<Result<Arc<Generation>>> {
+        match &self.mode {
+            Mode::Warm(slot) => self.spawn_generation_open(slot, self.config()),
+            Mode::Cold => panic!("submit_generation_open called on a cold context"),
         }
     }
 
@@ -828,10 +866,89 @@ fn is_sqlite_corruption(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Is `generation` still fresh for the current world? False when it has been
+/// invalidated (corruption / panic bumped the floor past it), when its `cache.db`
+/// identity no longer matches the live file (ground-shift), or when the live
+/// config's index identity differs from the one it was opened under (an
+/// index-relevant config change).
+///
+/// A free function (not a `&self` method) so the writer-queue open op, which runs
+/// `'static` on the writer thread, can call it with the same inputs the
+/// per-request fast path uses (NRN-252).
+fn generation_is_fresh(
+    generation: &Generation,
+    floor: &AtomicU64,
+    vault_root: &Utf8Path,
+    config: &LoadedConfig,
+) -> bool {
+    generation.number >= floor.load(Ordering::Acquire)
+        && current_db_identity(vault_root) == Some(generation.db_identity)
+        && generation.index_identity.matches_config(config)
+}
+
+/// The body of a generation-open liveness op, run serialized on the writer thread.
+///
+/// It re-checks the current generation's freshness FIRST — the coalescing seam:
+/// N concurrent stale callers each submit an op, the first opens N+1 and swaps the
+/// `current` pointer, and the remaining ops find `current` fresh and adopt it,
+/// so the counter advances by one, not N (NRN-252). Only if still stale does it
+/// open generation N+1. This is the ONLY place `integrity_check` is paid in warm
+/// mode; a stable connection is reused across requests.
+///
+/// Runs `'static`, so it takes owned / `Arc` state rather than `&self` / `&slot`.
+fn open_or_adopt(
+    shared: &SharedSlot,
+    vault_root: &Utf8Path,
+    config: &LoadedConfig,
+) -> Result<Arc<Generation>> {
+    // Late-arrival adoption: now that we are serialized behind the queue, a
+    // generation an earlier op opened may already satisfy us.
+    {
+        let snapshot = shared
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(generation) = &snapshot {
+            if generation_is_fresh(generation, &shared.floor, vault_root, config) {
+                return Ok(Arc::clone(generation));
+            }
+        }
+    }
+
+    // Still stale — open generation N+1 and swap it in.
+    let number = {
+        let mut next = shared.next_number.lock().unwrap_or_else(|p| p.into_inner());
+        let number = *next;
+        *next += 1;
+        number
+    };
+    let generation = Arc::new(open_generation(vault_root, config, number)?);
+    shared.open_count.fetch_add(1, Ordering::Relaxed);
+    *shared.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&generation));
+    Ok(generation)
+}
+
+/// Map a generation-open op's [`Outcome`] to a `Result`. A dropped op (the queue
+/// was shutting down) or a panicked op becomes a descriptive error rather than a
+/// hang or an `unwrap` — an `ensure_current` caller always gets a value or an
+/// error, never a wedged request (NRN-252).
+fn map_open_outcome(outcome: Outcome<Result<Arc<Generation>>>) -> Result<Arc<Generation>> {
+    match outcome {
+        Outcome::Done(result) => result,
+        Outcome::Dropped => Err(anyhow::anyhow!(
+            "warm writer queue is shutting down; generation open abandoned"
+        )),
+        Outcome::Panicked => Err(anyhow::anyhow!(
+            "warm writer queue panicked while opening a generation"
+        )),
+    }
+}
+
 /// Open a fresh [`Generation`]: the held-open cache connection plus the `(dev,
 /// ino)` identity and index identity we will verify it against on later
-/// requests. Called only from [`VaultContext::ensure_current`] under the slot's
-/// single-flight `open` guard.
+/// requests. Called only from the writer-queue generation-open op
+/// ([`open_or_adopt`]), serialized on the per-vault writer thread.
 ///
 /// # Sentinel discipline (load-bearing)
 ///
@@ -1021,6 +1138,7 @@ impl DerefMut for WarmGuard {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
+    use std::sync::mpsc;
     use tempfile::TempDir;
 
     /// Build a minimal temp vault with a few seeded docs.
@@ -2275,5 +2393,133 @@ mod tests {
             weak.upgrade().is_none(),
             "generation N is fully dropped — connection + sentinel fd released — with its last Arc"
         );
+    }
+
+    // ---- Writer-queue generation opens (NRN-252) ----------------------------
+
+    /// Non-`Done` op outcomes map to errors, never a hang or an `unwrap`: a
+    /// generation open abandoned by a queue shutdown (`Dropped`) or crashed by a
+    /// panic (`Panicked`) surfaces to the `ensure_current` caller as `Err`.
+    #[test]
+    fn generation_open_non_done_outcomes_map_to_errors() {
+        assert!(
+            map_open_outcome(Outcome::<Result<Arc<Generation>>>::Dropped).is_err(),
+            "a dropped generation-open op must surface as an error"
+        );
+        assert!(
+            map_open_outcome(Outcome::<Result<Arc<Generation>>>::Panicked).is_err(),
+            "a panicked generation-open op must surface as an error"
+        );
+    }
+
+    /// Coalescing THROUGH THE QUEUE, adoption-by-later-queued-op: two open ops are
+    /// queued behind a blocker so they run in FIFO on the writer thread. The first
+    /// opens generation 2; the SECOND, running after the swap, re-checks `current`,
+    /// finds generation 2 fresh, and ADOPTS it — no second open. Complements the
+    /// racy 8-thread coalescing test by pinning the exact adoption ordering the
+    /// queue's serialization guarantees.
+    #[test]
+    fn warm_later_queued_open_op_adopts_first_ops_generation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Cold start opens generation 1.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        assert_eq!(ctx.generation_opens(), 1, "cold start is one open");
+
+        // Invalidate generation 1 (floor bump): same on-disk cache, one clean
+        // reopen — so the open count is unambiguous.
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+
+        // Occupy the writer so BOTH open ops queue behind the blocker and then run
+        // strictly FIFO — deterministic, no sleeps.
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _blocker = ctx.warm_writer_queue().submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        running_rx.recv().unwrap();
+
+        let h1 = ctx.submit_generation_open();
+        let h2 = ctx.submit_generation_open();
+        release_tx.send(()).unwrap();
+
+        let g1 = map_open_outcome(h1.wait()).expect("first op opens");
+        let g2 = map_open_outcome(h2.wait()).expect("second op adopts");
+        assert_eq!(g1.number, 2, "the first queued op opens generation 2");
+        assert_eq!(
+            g2.number, 2,
+            "the later queued op adopts generation 2 rather than opening a third"
+        );
+        assert_eq!(
+            ctx.generation_opens(),
+            2,
+            "exactly one reopen despite two queued open ops (cold start + 1)"
+        );
+    }
+
+    /// Shutdown safety: a caller blocked on a generation-open op while the writer
+    /// queue shuts down gets an ERROR, never a hang. The op is queued behind a
+    /// blocker; dropping the context tears the queue down, so the writer's next
+    /// pick observes shutdown and drops the queued op, resolving its handle to
+    /// `Dropped` → mapped to `Err`. Deterministic via a shutdown watch (no sleeps).
+    #[test]
+    fn warm_generation_open_errors_when_queue_shuts_down() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Establish generation 1 so the slot is warm.
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache().expect("first warm query_cache");
+        }
+
+        // A watch over the queue's shutdown flag — holds its own `Arc`, so it
+        // survives the context drop and lets us order the release after shutdown.
+        let watch = ctx.warm_writer_queue().shutdown_watch();
+
+        // Occupy the writer with a blocker so the generation-open op stays QUEUED.
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _blocker = ctx.warm_writer_queue().submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        running_rx.recv().unwrap();
+
+        // Queue the generation-open op behind the blocker.
+        let handle = ctx.submit_generation_open();
+
+        // The blocked caller holds ONLY the handle (not the context), so dropping
+        // the context can tear the queue down under it.
+        let waiter = std::thread::spawn(move || map_open_outcome(handle.wait()));
+
+        // Drop the context from another thread — sets shutdown, then joins on the
+        // still-running blocker (mirrors the daemon dropping the vault context).
+        let dropper = std::thread::spawn(move || drop(ctx));
+
+        // Once shutdown is committed, release the blocker; the writer's next pick
+        // then observes shutdown and DROPS the queued open op. Guaranteed to
+        // terminate: the dropper sets the flag.
+        while !watch.is_shutting_down() {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+
+        let result = waiter.join().expect("waiter thread panicked");
+        assert!(
+            result.is_err(),
+            "a generation open abandoned by queue shutdown must be an error, not a hang"
+        );
+        dropper.join().expect("dropper thread panicked");
     }
 }

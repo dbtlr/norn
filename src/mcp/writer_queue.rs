@@ -79,6 +79,14 @@ use std::thread::JoinHandle;
 
 /// A validity predicate for a bulk op, re-checked at every chunk boundary. Named
 /// as an alias to keep the [`WriterQueue::submit_bulk`] signature legible.
+// Bulk-op machinery (this alias, [`ChunkOutcome`], [`BulkClosure`],
+// [`WriterQueue::submit_bulk`]) is landed but not yet wired to a production
+// caller — freshness refreshes and apply increments route through it in later
+// NRN-252 commits — so it is dead in a non-test build until then. The liveness
+// half is live (warm-mode generation opens). The bulk *scheduler* itself
+// (`worker_loop` → `run_bulk`, the `bulk` deque, `BulkJob`) is statically
+// reachable and needs no allow.
+#[allow(dead_code)]
 type ValidityGuard = Box<dyn Fn() -> bool + Send>;
 
 /// A type-erased liveness op: the caller's `FnOnce() -> R` wrapped so it captures
@@ -90,6 +98,8 @@ type LivenessJob = Box<dyn FnOnce() + Send>;
 /// The op returns [`More`](ChunkOutcome::More) while it has further work — the
 /// queue will re-invoke it after draining any pending liveness — or
 /// [`Done`](ChunkOutcome::Done) with the final result on the last chunk.
+// Bulk-op machinery, not yet wired to a production caller — see `ValidityGuard`.
+#[allow(dead_code)]
 pub enum ChunkOutcome<R> {
     /// Further chunks remain; the queue re-invokes the op after a preemption check.
     More,
@@ -192,6 +202,8 @@ trait BulkJob: Send {
 }
 
 /// The concrete [`BulkJob`] backing a [`WriterQueue::submit_bulk`] call.
+// Bulk-op machinery, not yet wired to a production caller — see `ValidityGuard`.
+#[allow(dead_code)]
 struct BulkClosure<R, F> {
     step: F,
     still_valid: Option<ValidityGuard>,
@@ -324,6 +336,8 @@ impl WriterQueue {
     /// drains all pending liveness. `still_valid`, if given, is checked before the
     /// first chunk and before every subsequent chunk; when it turns false the op
     /// is dropped and its [`Handle`] resolves to [`Outcome::Dropped`].
+    // Bulk-op machinery, not yet wired to a production caller — see `ValidityGuard`.
+    #[allow(dead_code)]
     pub fn submit_bulk<R, F>(&self, step: F, still_valid: Option<ValidityGuard>) -> Handle<R>
     where
         F: FnMut() -> ChunkOutcome<R> + Send + 'static,
@@ -349,6 +363,31 @@ impl WriterQueue {
             self.inner.signal.notify_one();
         }
         Handle { rx }
+    }
+}
+
+#[cfg(test)]
+impl WriterQueue {
+    /// Test-only cross-module shutdown observer. Hands back a cheap handle that
+    /// holds its own `Arc` to the shared state, so it stays valid after the
+    /// `WriterQueue` (and whatever owns it) has been dropped — letting a test
+    /// release a writer-occupying op only once shutdown has been committed, making
+    /// a queued op's drop deterministic.
+    pub(crate) fn shutdown_watch(&self) -> ShutdownWatch {
+        ShutdownWatch(Arc::clone(&self.inner))
+    }
+}
+
+/// Test-only opaque observer over a queue's shutdown flag (see
+/// [`WriterQueue::shutdown_watch`]).
+#[cfg(test)]
+pub(crate) struct ShutdownWatch(Arc<Inner>);
+
+#[cfg(test)]
+impl ShutdownWatch {
+    /// Has the owning [`WriterQueue`] begun (or completed) shutting down?
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.0.shutdown.load(Ordering::Acquire)
     }
 }
 
