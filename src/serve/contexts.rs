@@ -18,9 +18,9 @@
 //!   [`tokio::task::spawn_blocking`], so opening a big vault never stalls pings,
 //!   accepts, or other vaults.
 //! - **(b) Concurrent first-touch for the same vault opens once.** A per-entry
-//!   [`tokio::sync::OnceCell`] serializes initialization: the second concurrent
-//!   `hello` for the same vault awaits (and shares) the first's result rather
-//!   than opening a second context.
+//!   shared attempt serializes initialization: the second concurrent `hello`
+//!   awaits (and shares) the first's result rather than opening a second context;
+//!   [`tokio::sync::OnceCell`] retains the successfully published server.
 //! - **(non-poisoning) A failed open retries.** `get_or_try_init` leaves the
 //!   cell empty on error, so the next `hello` for that vault attempts the open
 //!   again.
@@ -279,6 +279,11 @@ where
 
     let mut receiver = {
         let mut attempt = entry.attempt.lock().unwrap_or_else(|e| e.into_inner());
+        // Close the cell/attempt TOCTOU: publication sets the cell before it
+        // clears `attempt`, and both clearing and this recheck use this lock.
+        if let Some(server) = entry.cell.get() {
+            return Ok(server.clone());
+        }
         if let Some(receiver) = attempt.as_ref() {
             receiver.clone()
         } else {
@@ -315,8 +320,8 @@ where
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .take();
-                let _ = sender.send(Some(result));
                 drop(opening);
+                let _ = sender.send(Some(result));
             });
 
             receiver
