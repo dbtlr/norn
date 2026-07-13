@@ -62,7 +62,10 @@ struct ContextEntry {
     cell: OnceCell<McpServer>,
     opening: Arc<AtomicUsize>,
     progress: Arc<WriterProgressState>,
+    attempt: StdMutex<Option<tokio::sync::watch::Receiver<Option<OpenResult>>>>,
 }
+
+type OpenResult = Result<McpServer, String>;
 
 impl ContextEntry {
     fn new(progress: Arc<WriterProgressState>) -> Self {
@@ -70,6 +73,7 @@ impl ContextEntry {
             cell: OnceCell::new(),
             opening: Arc::new(AtomicUsize::new(0)),
             progress,
+            attempt: StdMutex::new(None),
         }
     }
 }
@@ -258,10 +262,9 @@ impl Contexts {
     }
 }
 
-/// Initialize one entry from a detached async task. Dropping a resolver's
-/// future drops only its join handle; the task keeps `OnceCell`'s initializer
-/// permit until the blocking open publishes or fails, so a second resolver
-/// waits instead of starting a duplicate open.
+/// Join or start the one detached open attempt for an entry. A resolver owns
+/// only a result receiver, so canceling an initializer or waiter cannot cancel
+/// work, retain an orphan retry, or create a duplicate open.
 async fn initialize_entry<F>(
     entry: Arc<ContextEntry>,
     canonical: camino::Utf8PathBuf,
@@ -270,31 +273,65 @@ async fn initialize_entry<F>(
 where
     F: FnOnce(&Utf8Path, Arc<WriterProgressState>) -> anyhow::Result<McpServer> + Send + 'static,
 {
-    let initializer = tokio::spawn(async move {
-        let opening = OpeningGuard::new(Arc::clone(&entry.opening));
-        let server = entry
-            .cell
-            .get_or_try_init(|| {
-                let progress = Arc::clone(&entry.progress);
-                let blocking_opening = opening.clone();
-                async move {
-                    // Requirement (a): first-touch config parsing (and later
-                    // generation work) must not run on an async worker.
-                    tokio::task::spawn_blocking(move || {
-                        let _opening = blocking_opening;
-                        opener(&canonical, progress)
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("vault open task failed: {e}"))?
-                }
-            })
-            .await?;
-        Ok::<McpServer, anyhow::Error>(server.clone())
-    });
+    if let Some(server) = entry.cell.get() {
+        return Ok(server.clone());
+    }
 
-    initializer
-        .await
-        .map_err(|e| anyhow::anyhow!("vault initializer task failed: {e}"))?
+    let mut receiver = {
+        let mut attempt = entry.attempt.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(receiver) = attempt.as_ref() {
+            receiver.clone()
+        } else {
+            let (sender, receiver) = tokio::sync::watch::channel(None);
+            *attempt = Some(receiver.clone());
+
+            let task_entry = Arc::clone(&entry);
+            tokio::spawn(async move {
+                let opening = OpeningGuard::new(Arc::clone(&task_entry.opening));
+                let blocking_opening = opening.clone();
+                let progress = Arc::clone(&task_entry.progress);
+                let opened = tokio::task::spawn_blocking(move || {
+                    let _opening = blocking_opening;
+                    opener(&canonical, progress)
+                })
+                .await
+                .map_err(|error| format!("vault open task failed: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+
+                let result = match opened {
+                    Ok(server) => {
+                        let _ = task_entry.cell.set(server);
+                        Ok(task_entry
+                            .cell
+                            .get()
+                            .expect("successful open must publish the server")
+                            .clone())
+                    }
+                    Err(error) => Err(error),
+                };
+
+                task_entry
+                    .attempt
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                let _ = sender.send(Some(result));
+                drop(opening);
+            });
+
+            receiver
+        }
+    };
+
+    loop {
+        if let Some(result) = receiver.borrow().clone() {
+            return result.map_err(anyhow::Error::msg);
+        }
+        receiver
+            .changed()
+            .await
+            .map_err(|_| anyhow::anyhow!("vault initializer stopped before publishing a result"))?;
+    }
 }
 
 fn service_progress(progress: crate::mcp::writer_queue::WriterProgress) -> WriterProgress {
@@ -533,6 +570,68 @@ mod tests {
             ServingState::Ready,
             "the waiting resolver receives the detached initializer's server"
         );
+    }
+
+    /// A canceled waiter owns no retry. If the shared attempt fails, the entry
+    /// stays cold until a later resolver explicitly starts the next attempt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceled_waiter_does_not_retry_failed_open() {
+        let (_tmp, root) = seeded_vault();
+        let (canonical, _) = crate::cache::vault_identity(&root).unwrap();
+        let entry = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
+        let open_count = Arc::new(AtomicUsize::new(0));
+        let (running_tx, running_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let first_count = Arc::clone(&open_count);
+        let first = tokio::spawn(initialize_entry(
+            Arc::clone(&entry),
+            canonical.clone(),
+            move |_, _| {
+                first_count.fetch_add(1, Ordering::SeqCst);
+                running_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(anyhow::anyhow!("intentional first-open failure"))
+            },
+        ));
+        running_rx.recv().unwrap();
+
+        let waiter_count = Arc::clone(&open_count);
+        let waiter = tokio::spawn(initialize_entry(
+            Arc::clone(&entry),
+            canonical.clone(),
+            move |_, _| {
+                waiter_count.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("canceled waiter must never open"))
+            },
+        ));
+        tokio::task::yield_now().await;
+        waiter.abort();
+        match waiter.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("aborted waiter unexpectedly completed"),
+        }
+
+        release_tx.send(()).unwrap();
+        match first.await.unwrap() {
+            Err(error) => assert!(error.to_string().contains("intentional first-open failure")),
+            Ok(_) => panic!("intentional first open unexpectedly succeeded"),
+        }
+        while entry.opening.load(Ordering::Acquire) != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(open_count.load(Ordering::SeqCst), 1);
+        assert!(entry.cell.get().is_none());
+
+        let retry_count = Arc::clone(&open_count);
+        initialize_entry(Arc::clone(&entry), canonical, move |canonical, progress| {
+            retry_count.fetch_add(1, Ordering::SeqCst);
+            open_server(canonical, progress)
+        })
+        .await
+        .unwrap();
+        assert_eq!(open_count.load(Ordering::SeqCst), 2);
+        assert!(entry.cell.get().is_some());
     }
 
     /// The sequence belongs to the vault for the daemon lifetime, not to one
