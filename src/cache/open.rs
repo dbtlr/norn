@@ -159,6 +159,22 @@ impl crate::cache::Cache {
             index_authoritative: true,
         })
     }
+
+    /// Mark this connection read-only for its remaining life via
+    /// `PRAGMA query_only = ON`: any `CREATE` / `INSERT` / `UPDATE` / `DELETE` /
+    /// `DROP` through it then fails with a `SQLITE_READONLY`-class error. Applied
+    /// to every connection that enters a warm generation's read POOL (the seeded
+    /// primary and each lazily-grown one — NRN-253) once open-time
+    /// verification/rebuild/reshred are complete, so the "request connection never
+    /// writes" invariant is ENFORCED, not merely conventional. Preferred over an
+    /// OS-level read-only open flag, which complicates WAL/SHM setup; the pragma is
+    /// the low-risk shape. Reads (including the freshness probe and
+    /// `load_graph_index`) are unaffected, and cross-connection WAL visibility
+    /// still lets a query_only reader observe the writer connection's commits.
+    pub(crate) fn set_query_only(&self) -> Result<(), CacheError> {
+        self.conn.pragma_update(None, "query_only", "ON")?;
+        Ok(())
+    }
 }
 
 /// The config-derived identity a `Cache` carries: the fields threaded from the

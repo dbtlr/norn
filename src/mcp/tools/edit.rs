@@ -13,7 +13,7 @@
 
 use crate::edit::ops::EditOp;
 use crate::edit::report::EditReport;
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 use anyhow::Result;
 use camino::Utf8PathBuf;
@@ -75,13 +75,17 @@ impl EditOutput {
 /// Build the MCP output envelope for `vault.edit`: run the pure handler, then
 /// project the report into the typed [`EditOutput`]. The single function the
 /// `#[tool]` wrapper calls.
-pub fn handle_output(ctx: &VaultContext, p: EditParams) -> Result<MutationResult<EditOutput>> {
+pub fn handle_output(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: EditParams,
+) -> Result<MutationResult<EditOutput>> {
     let dry_run = !p.confirm;
     let target = p.target.clone();
     // Capture a coded refusal (NRN-220): the `expected_hash` CAS drift and the
     // anchor family (`anchor-not-found`, …) become a structured `refused` report
     // + `isError:true` instead of a bare MCP `Err`. Others still propagate.
-    let report = match handle(ctx, p) {
+    let report = match handle(ctx, scope, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
             // Prefer the error's resolved path (present for a `stale-document-hash`
@@ -116,7 +120,7 @@ pub fn handle_output(ctx: &VaultContext, p: EditParams) -> Result<MutationResult
 /// **Safety invariant:** when `!confirm`, this acquires NO lock and never calls
 /// the applier — it returns `build_report(.., applied = false, ..)` and leaves
 /// the file untouched.
-pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
+pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: EditParams) -> Result<EditReport> {
     let cwd = ctx.vault_root.clone();
 
     if p.edits.is_empty() {
@@ -136,8 +140,8 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
     // same handle used for target resolution, so the pipeline (ground-shift,
     // freshness refresh) runs once and index + cache are one consistent snapshot.
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
-    let config = ctx.config();
-    let cache = ctx.query_cache()?;
+    let config = scope.config();
+    let cache = ctx.query_cache(scope)?;
     let index = cache.load_graph_index()?;
     let vault_cfg = &config.vault_config;
 
@@ -164,7 +168,7 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
     // Open a REAL, file-backed event sink on the apply path — the same audit
     // trail `norn edit` writes. The sink also owns the trace id stamped into the
     // report.
-    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
+    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx, scope);
     crate::emit_invocation_started(
         &mut sink,
         "edit",
@@ -191,7 +195,7 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
 
     // Warm mode: commit the apply's cache increments (awaited) so the next read
     // stays cheap; a no-op in cold mode (NRN-252 / NRN-158).
-    ctx.commit_apply_increments(&apply_report.touched_paths());
+    ctx.commit_apply_increments(scope, &apply_report.touched_paths());
 
     Ok(crate::edit::report::build_report(
         &pre.outcome,
@@ -204,6 +208,10 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle_output(EditParams) -> crate::mcp::mutation_result::MutationResult<EditOutput>;
+    }
     use crate::edit::ops::EditOp;
     use rmcp::handler::server::tool::IntoCallToolResult;
     use tempfile::TempDir;

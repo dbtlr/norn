@@ -33,7 +33,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.delete`.
@@ -101,7 +101,11 @@ impl DeleteOutput {
 }
 
 /// Build the MCP output envelope for `vault.delete`.
-pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<MutationResult<DeleteOutput>> {
+pub fn handle_output(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: DeleteParams,
+) -> Result<MutationResult<DeleteOutput>> {
     let dry_run = !p.confirm;
     let vault_root = ctx.vault_root.to_string();
     // Capture a coded refusal (NRN-220/229): a recognized preflight refusal
@@ -109,7 +113,7 @@ pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<MutationResu
     // mutation-lock timeout becomes a structured `refused` report + `isError` (on
     // confirm) instead of a bare MCP `Err` with the code laundered to prose.
     // Others still propagate.
-    let report = match handle(ctx, p) {
+    let report = match handle(ctx, scope, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
             Some(err) => crate::apply_report::ApplyReport::refused(
@@ -141,7 +145,11 @@ pub fn handle_output(ctx: &VaultContext, p: DeleteParams) -> Result<MutationResu
 /// CONFIRM (`confirm`): acquire the mutation lock FIRST — before the index load
 /// and preflight — then run the same plan, open a real event sink, and apply
 /// with `dry_run = false`.
-pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report::ApplyReport> {
+pub fn handle(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: DeleteParams,
+) -> Result<crate::apply_report::ApplyReport> {
     use crate::applier::{apply_migration_plan, ApplyContext};
     use crate::migration_plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 
@@ -160,7 +168,7 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
 
     // Load the graph index honoring files.ignore, exactly like the CLI delete path.
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
-    let index = ctx.load_graph_index()?;
+    let index = ctx.load_graph_index(scope)?;
 
     // Preflight: resolve the doc + enforce the backlinks policy. Refuse early
     // (the CLI exits 2): incoming-links-present without --rewrite-to /
@@ -236,7 +244,7 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
     // Open a real, file-backed event sink — the same audit trail `norn delete`
     // writes via `open_event_sink`. `apply_migration_plan` emits the per-op
     // spans + `action` events itself; we frame it with the lifecycle events.
-    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
+    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx, scope);
     crate::emit_invocation_started(
         &mut sink,
         "delete",
@@ -253,7 +261,7 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
     // Warm mode: commit the delete's cache increments (the removed doc + backlink
     // cascade) as a chunked writer-queue op, awaited; no-op in cold mode
     // (NRN-252 / NRN-158).
-    ctx.commit_apply_increments(&report.touched_paths);
+    ctx.commit_apply_increments(scope, &report.touched_paths);
 
     Ok(report)
 }
@@ -261,6 +269,11 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle(DeleteParams) -> crate::apply_report::ApplyReport;
+        fn handle_output(DeleteParams) -> crate::mcp::mutation_result::MutationResult<DeleteOutput>;
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 

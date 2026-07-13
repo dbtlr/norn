@@ -55,7 +55,7 @@ use anyhow::Result;
 
 use crate::describe::DescribeOutput;
 use crate::filter_args::FilterArgs;
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 
 /// Parameters for `vault.describe`.
 ///
@@ -175,15 +175,23 @@ fn params_to_filter_args(params: &DescribeParams) -> FilterArgs {
 /// Pure handler for `vault.describe`. Delegates to `handle_with`; kept as a
 /// distinct entry point so the server registration and the tests both read
 /// as calling "the" handler.
-pub fn handle(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
-    handle_with(ctx, params)
+pub fn handle(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    params: &DescribeParams,
+) -> Result<DescribeOutput> {
+    handle_with(ctx, scope, params)
 }
 
 /// Builds a `DataOptions` + `FilterArgs` from `params` and calls the shared
 /// [`crate::describe::describe`] core — the same call the CLI makes for
 /// `norn describe --data`, so the MCP `data` section cannot drift from it.
-pub fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> Result<DescribeOutput> {
-    let cache = ctx.query_cache()?;
+pub fn handle_with(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    params: &DescribeParams,
+) -> Result<DescribeOutput> {
+    let cache = ctx.query_cache(scope)?;
 
     // Normalize `by` via the SHARED `normalize_by` helper — the same helper
     // the CLI arm uses — so the `want_data` gate below and the mode-selection
@@ -204,13 +212,18 @@ pub fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> Result<Descri
     });
 
     let filters = params_to_filter_args(params);
-    let config = ctx.config();
+    let config = scope.config();
     crate::describe::describe(&cache, &config, &filters, data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle(&DescribeParams) -> DescribeOutput;
+        fn handle_with(&DescribeParams) -> DescribeOutput;
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
@@ -493,7 +506,7 @@ mod tests {
         let data = out.data.expect("data present");
 
         // Direct core path
-        let cache = ctx.query_cache().unwrap();
+        let cache = ctx.query_cache_unscoped().unwrap();
         let docs = cache
             .documents_matching(
                 &crate::filter_args::build_document_query(
@@ -533,7 +546,7 @@ mod tests {
         let data = out.data.expect("data present");
 
         // Direct core path with the SAME eq filter.
-        let cache = ctx.query_cache().unwrap();
+        let cache = ctx.query_cache_unscoped().unwrap();
         let filters = crate::filter_args::FilterArgs {
             eq: vec!["type:note".into()],
             ..Default::default()

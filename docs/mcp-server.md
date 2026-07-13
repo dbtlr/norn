@@ -141,8 +141,8 @@ Like every mutation tool, `vault.new` is dry-run by default; pass `confirm: true
 
 ## Operational notes
 
-- **Build the cache before heavy use.** The server holds the cache warm, but a cold concurrent start can race the first cache rebuild. In-process tool calls are serialized for safety (so concurrent cold-start calls can't collide into "database is locked"), but that means concurrent calls queue behind the first call's rebuild. For heavy use, build the cache first with `norn cache rebuild` (or any prior CLI run against the vault) so the first MCP call is already warm.
-- **Await each response before the next call.** Tool calls are serialized in-process but not guaranteed FIFO under request pipelining. A client should await each tool response before issuing the next call — especially for mutations, where ordering matters. This is standard MCP client behavior.
+- **Warm reads run concurrently; stdio cold calls stay serialized.** Under the warm daemon (`norn serve`), read tool calls verified fresh at their request boundary run in parallel over a per-generation pool of read-only connections; stale reads coalesce onto one shared refresh, and reads during a daemon-side write serve the last committed WAL snapshot. The stdio server (`norn mcp`) opens a fresh cache per call and still serializes calls in-process (concurrent cold-start calls can't collide into "database is locked"), so concurrent stdio calls queue behind the first call's rebuild. For heavy stdio use, build the cache first with `norn cache rebuild` (or any prior CLI run against the vault) so the first MCP call is already warm.
+- **Await each mutation's response before the next call.** Mutations serialize on the per-vault mutation lock and their ordering matters — a client should await each mutation's response before issuing the next. Reads may be pipelined freely against the warm daemon; each is independently freshness-verified at its own request boundary.
 
 ## Known limitations (v1)
 

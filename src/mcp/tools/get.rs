@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{GetArgs, GetFormat, SortPaginateArgs};
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 use crate::show::{SectionFailure, ShowReport};
 
@@ -176,8 +176,12 @@ pub(crate) fn record_to_wire_json(record: &crate::show::ShowRecord) -> Result<se
 /// did not resolve (or an all-missed `--section`) maps to `isError: true` while
 /// still returning every good target's records + the diagnostics. This is the
 /// single function the `#[tool]` wrapper calls.
-pub fn handle_output(ctx: &VaultContext, p: GetParams) -> Result<MutationResult<GetOutput>> {
-    let report = handle(ctx, p)?;
+pub fn handle_output(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: GetParams,
+) -> Result<MutationResult<GetOutput>> {
+    let report = handle(ctx, scope, p)?;
     let is_error = report.has_error();
     let output = GetOutput::from_report(&report)?;
     Ok(MutationResult::from_flag(output, is_error))
@@ -185,7 +189,7 @@ pub fn handle_output(ctx: &VaultContext, p: GetParams) -> Result<MutationResult<
 
 /// Pure handler for `vault.get`. Opens a fresh query cache (per-call freshness),
 /// constructs [`GetArgs`] with `norn get`'s defaults, and runs the show path.
-pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
+pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: GetParams) -> Result<ShowReport> {
     // The per-call served marker (routing proofs) is emitted by the server
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
@@ -198,7 +202,7 @@ pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
         anyhow::bail!("--limit and --no-limit are mutually exclusive");
     }
 
-    let cache = ctx.query_cache()?;
+    let cache = ctx.query_cache(scope)?;
 
     // Mirror `norn get --col`'s parsing: the CLI uses `value_delimiter = ','`, so
     // each comma-separated token becomes one element of the `Vec<String>` that
@@ -257,6 +261,11 @@ pub fn handle(ctx: &VaultContext, p: GetParams) -> Result<ShowReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle(GetParams) -> ShowReport;
+        fn handle_output(GetParams) -> crate::mcp::mutation_result::MutationResult<GetOutput>;
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
@@ -467,7 +476,7 @@ mod tests {
 
         // Build the CLI seam directly (fresh cache) and render --format json, then
         // compare the sections object — proves MCP == CLI at the object level.
-        let cache = ctx.query_cache().unwrap();
+        let cache = ctx.query_cache_unscoped().unwrap();
         let cli_args = GetArgs {
             targets: vec!["doc".into()],
             paging: SortPaginateArgs {

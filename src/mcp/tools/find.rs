@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{FindArgs, SortPaginateArgs};
 use crate::filter_args::FilterArgs;
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 
 /// Parameters for `vault.find`.
 ///
@@ -201,11 +201,11 @@ pub struct FindOutput {
 /// Pure handler for `vault.find`. Opens a fresh query cache (per-call freshness),
 /// constructs [`FindArgs`] with `norn find`'s exact defaults (notably `limit`
 /// → 10 when omitted), and runs the shared `find::query` seam.
-pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
+pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: FindParams) -> Result<FindOutput> {
     // The per-call served marker (routing proofs) is emitted by the server
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
-    let cache = ctx.query_cache()?;
+    let cache = ctx.query_cache(scope)?;
 
     // NRN-218: run the ADR 0010 field-universe gate against the warm cache BEFORE
     // querying, exactly where the direct path gates (`find::run`). A refused
@@ -214,7 +214,7 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
     // (the canonical / off-filesystem case), so it costs the happy path nothing.
     if let Some(refusal) = crate::grammar::gate_dynamic_refusal(
         &cache,
-        &ctx.config(),
+        &scope.config(),
         &p.dynamic_keys,
         crate::grammar::QueryCmd::Find,
     )? {
@@ -294,6 +294,10 @@ pub fn handle(ctx: &VaultContext, p: FindParams) -> Result<FindOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle(FindParams) -> FindOutput;
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 

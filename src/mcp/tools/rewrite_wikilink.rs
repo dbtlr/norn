@@ -33,7 +33,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.rewrite_wikilink`.
@@ -84,6 +84,7 @@ impl RewriteWikilinkOutput {
 /// Build the MCP output envelope for `vault.rewrite_wikilink`.
 pub fn handle_output(
     ctx: &VaultContext,
+    scope: &RequestScope,
     p: RewriteWikilinkParams,
 ) -> Result<MutationResult<RewriteWikilinkOutput>> {
     let dry_run = !p.confirm;
@@ -92,7 +93,7 @@ pub fn handle_output(
     // refusal (`target-not-found`) or a mutation-lock timeout becomes a structured
     // `refused` report + `isError` (on confirm) instead of a bare MCP `Err` with
     // the code laundered to `internal-error`. Others still propagate.
-    let report = match handle(ctx, p) {
+    let report = match handle(ctx, scope, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
             Some(err) => crate::apply_report::ApplyReport::refused(
@@ -127,6 +128,7 @@ pub fn handle_output(
 /// `dry_run = false`.
 pub fn handle(
     ctx: &VaultContext,
+    scope: &RequestScope,
     p: RewriteWikilinkParams,
 ) -> Result<crate::apply_report::ApplyReport> {
     use crate::applier::{apply_migration_plan, ApplyContext};
@@ -144,7 +146,7 @@ pub fn handle(
 
     // Load the graph index honoring files.ignore, exactly like the CLI path.
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
-    let index = ctx.load_graph_index()?;
+    let index = ctx.load_graph_index(scope)?;
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.
     let plan = MigrationPlan {
@@ -192,7 +194,7 @@ pub fn handle(
     // Open a real, file-backed event sink — the same audit trail
     // `norn rewrite-wikilink` writes via `open_event_sink`. `apply_migration_plan`
     // emits the per-op spans + `action` events itself.
-    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
+    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx, scope);
     crate::emit_invocation_started(
         &mut sink,
         "rewrite-wikilink",
@@ -208,7 +210,7 @@ pub fn handle(
 
     // Warm mode: commit the rewritten backlink files' cache increments as a
     // chunked writer-queue op, awaited; no-op in cold mode (NRN-252 / NRN-158).
-    ctx.commit_apply_increments(&report.touched_paths);
+    ctx.commit_apply_increments(scope, &report.touched_paths);
 
     Ok(report)
 }
@@ -216,6 +218,11 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle(RewriteWikilinkParams) -> crate::apply_report::ApplyReport;
+        fn handle_output(RewriteWikilinkParams) -> crate::mcp::mutation_result::MutationResult<RewriteWikilinkOutput>;
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 

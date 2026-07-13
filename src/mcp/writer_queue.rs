@@ -36,9 +36,9 @@
 //! liveness queue before resuming the bulk op, so a burst of refreshes all clear
 //! ahead of the next chunk rather than one-per-boundary. Chunk *sizing* (the
 //! ~50ms-per-chunk target that bounds preemption latency) is the op's concern and
-//! lands with the op implementations in a later commit — the queue only decides
-//! *when* to check for pending liveness work (after every chunk), never how big a
-//! chunk is.
+//! lives with the op implementations (the post-apply increment commit, NRN-252) —
+//! the queue only decides *when* to check for pending liveness work (after every
+//! chunk), never how big a chunk is.
 //!
 //! # Drop-on-generation-death guard
 //!
@@ -48,9 +48,9 @@
 //! `still_valid` predicate, checked before the first chunk and before every
 //! subsequent chunk. When it turns false the op is **dropped without further
 //! chunks** and its handle resolves to [`Outcome::Dropped`], distinct from a
-//! completed result. This is the seam a later commit uses to abandon a
-//! mutation aimed at a superseded generation instead of writing through a stale
-//! connection.
+//! completed result. This is the seam `commit_apply_increments` uses (NRN-252) to
+//! abandon a mutation increment aimed at a superseded generation instead of
+//! writing through a stale connection.
 //!
 //! # Shutdown
 //!

@@ -13,9 +13,10 @@
 //! [`Noted<R>`] carries those notes alongside ANY tool's structured output. It is
 //! produced in one place — the shared tool funnel
 //! [`McpServer::run_wrapped`](crate::mcp::server) — which drains the request's
-//! notes off the [`VaultContext`](crate::mcp::context::VaultContext) (under the
-//! process-wide `call_lock`, so notes never leak across the serialized requests of
-//! concurrent connections) and wraps the tool's own result. On serialization it
+//! notes off its own [`RequestScope`](crate::mcp::context::RequestScope) (NRN-253:
+//! a fresh per-request note buffer, so notes are structurally bound to the request
+//! that produced them and cannot leak across concurrent requests — no shared
+//! context buffer to clear) and wraps the tool's own result. On serialization it
 //! adds an `operator_notes` array as a SIBLING key inside the tool's
 //! `structuredContent` object — additive, so a tool whose run produced no notes
 //! serializes byte-for-byte as before (the key is omitted entirely). The routed

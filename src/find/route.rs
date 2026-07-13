@@ -655,8 +655,10 @@ mod tests {
 
         // Daemon side: the REAL tool projection.
         let ctx = crate::mcp::context::VaultContext::open(&root, None).unwrap();
+        let scope = ctx.begin_request().unwrap();
         let out = crate::mcp::tools::find::handle(
             &ctx,
+            &scope,
             serde_json::from_value(json!({ "eq": ["type:note"] })).unwrap(),
         )
         .unwrap();

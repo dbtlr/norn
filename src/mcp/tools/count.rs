@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::cli::{CountArgs, CountFormat};
 use crate::count::CountOutput;
 use crate::filter_args::FilterArgs;
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 
 /// Parameters for `vault.count`.
 ///
@@ -225,11 +225,11 @@ impl CountEnvelope {
 
 /// Pure handler for `vault.count`. Opens a fresh query cache (per-call freshness),
 /// constructs [`CountArgs`] with `norn count`'s defaults, and runs the count path.
-pub fn handle(ctx: &VaultContext, p: CountParams) -> Result<CountEnvelope> {
+pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: CountParams) -> Result<CountEnvelope> {
     // The per-call served marker (NRN-94 review F6) is emitted by the server
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
-    let cache = ctx.query_cache()?;
+    let cache = ctx.query_cache(scope)?;
 
     // NRN-218: run the ADR 0010 field-universe gate against the warm cache BEFORE
     // counting, exactly where the direct path gates (`run`'s Count arm). A refused
@@ -237,7 +237,7 @@ pub fn handle(ctx: &VaultContext, p: CountParams) -> Result<CountEnvelope> {
     // byte-identically; a no-op when the CLI sent no `dynamic_keys`.
     if let Some(refusal) = crate::grammar::gate_dynamic_refusal(
         &cache,
-        &ctx.config(),
+        &scope.config(),
         &p.dynamic_keys,
         crate::grammar::QueryCmd::Count,
     )? {
@@ -282,6 +282,10 @@ pub fn handle(ctx: &VaultContext, p: CountParams) -> Result<CountEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle(CountParams) -> CountEnvelope;
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 

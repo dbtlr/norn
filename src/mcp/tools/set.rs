@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use camino::Utf8PathBuf;
 
 use crate::cli::{SetArgs, SetFormat};
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 use crate::set::report::{build_report, SetReport};
 
@@ -135,13 +135,17 @@ impl SetOutput {
 /// Build the MCP output envelope for `vault.set`: run the pure handler, then
 /// project the report into the typed [`SetOutput`]. The single function the
 /// `#[tool]` wrapper calls.
-pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<SetOutput>> {
+pub fn handle_output(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: SetParams,
+) -> Result<MutationResult<SetOutput>> {
     let dry_run = !p.confirm;
     let target = p.target.clone();
     // Capture a coded refusal (NRN-220): a recognized precondition/CAS refusal
     // becomes a structured `refused` report + `isError:true`, not a bare MCP
     // `Err` with the code laundered to prose. Unrecognized errors still propagate.
-    let report = match handle(ctx, p) {
+    let report = match handle(ctx, scope, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
             // Prefer the error's resolved vault-relative path so `report.target`
@@ -177,7 +181,7 @@ pub fn handle_output(ctx: &VaultContext, p: SetParams) -> Result<MutationResult<
 /// **Safety invariant:** when `!confirm`, this acquires NO lock and never calls
 /// the applier — it returns `build_report(.., applied = false, ..)` and leaves
 /// the file untouched.
-pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
+pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
     // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
@@ -193,8 +197,8 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     // resolution come from the same snapshot — the pipeline (ground-shift,
     // freshness refresh) runs once per request. Warm-connection reuse under the
     // daemon; fresh open in cold mode (NRN-130).
-    let config = ctx.config();
-    let cache = ctx.query_cache()?;
+    let config = scope.config();
+    let cache = ctx.query_cache(scope)?;
     let index = cache.load_graph_index()?;
 
     let vault_cfg = &config.vault_config;
@@ -258,7 +262,7 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     // mutation would. Best-effort by contract (falls back to discard if the file
     // can't be opened), so telemetry never blocks the mutation. The sink also
     // owns the trace id stamped into the report.
-    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
+    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx, scope);
     crate::emit_invocation_started(
         &mut sink,
         "set",
@@ -291,7 +295,7 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     // chunked writer-queue op (awaited) — the next read then finds the cache
     // current instead of paying a detect scan + rebuild (NRN-252 / NRN-158). A
     // no-op in cold mode.
-    ctx.commit_apply_increments(&apply_report.touched_paths());
+    ctx.commit_apply_increments(scope, &apply_report.touched_paths());
 
     Ok(build_report(&outcome, true, &trace_id))
 }
@@ -299,6 +303,10 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    crate::mcp::tools::scoped_shim! {
+        fn handle(SetParams) -> SetReport;
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 

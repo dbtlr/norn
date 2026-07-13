@@ -36,11 +36,14 @@
 //! config `Arc`) at its boundary and holds both to completion, so no request ever
 //! observes a swap mid-flight.
 //!
-//! Each generation holds TWO connections to its `cache.db`: a request-facing
-//! READ connection and a writer-thread-only WRITE connection. After NRN-252 the
-//! request path never writes through the read connection — the freshness refresh
-//! moved onto the write connection — so the read connection is **read-only in
-//! practice**, which is the precondition NRN-253 pools it under.
+//! Each generation holds a POOL of request-facing READ connections plus one
+//! writer-thread-only WRITE connection (ADR 0013: "N read connections + 1 write
+//! connection per generation"). After NRN-252 the request path never writes
+//! through a read connection — the freshness refresh moved onto the write
+//! connection — so the read side is **read-only in practice**; NRN-253 both pools
+//! it (so concurrent reads no longer serialize on a single connection's mutex once
+//! `call_lock` retires) and ENFORCES the read-only invariant with
+//! `PRAGMA query_only = ON` on every pooled connection.
 //!
 //! Every evict/re-open trigger — cold start / first touch, ground-shift
 //! (out-of-band `cache clear` / `prune` / `rm`), cache-identity change /
@@ -111,19 +114,32 @@
 //!    concurrent op just produced). See the sentinel-discipline notes on
 //!    `open_generation` for the ordering that keeps identity honest. This is the
 //!    ONLY place `integrity_check` is paid in warm mode.
-//! 4. **Freshness** (`query_cache_warm`)**.** Run the same lock-timeout-tolerant
-//!    `index_incremental` refresh cold mode gets, so vault edits between calls
-//!    are reflected — but as a **coalesced liveness op on the per-vault writer
-//!    queue** (ADR 0013 Phase 2, NRN-252), executed on the generation's WRITE
-//!    connection and awaited before the read connection is handed back. Arriving
-//!    requesters that share a not-yet-started refresh coalesce onto one execution
-//!    via a per-generation ticket; a requester is only ever satisfied by a
-//!    refresh whose scan STARTED at or after its arrival. `LockTimeout` still
+//! 4. **Freshness** (`query_cache_warm`)**.** Split into a request-thread PROBE
+//!    and, only when it fails, a REFRESH (ADR 0013 Phase 2, NRN-253). The request
+//!    takes the bound generation's READ guard and runs a
+//!    [`FreshnessProbe`](crate::cache::FreshnessProbe) — today the read-only
+//!    stat-sweep (`crate::cache::freshness`) — against it. **Fresh** → serve on
+//!    that same guard, touching neither the writer queue nor the write
+//!    connection, so a concurrent read of an unchanged vault costs one stat sweep,
+//!    not a refresh op (before NRN-253 every request submitted one). **Stale** →
+//!    drop the read guard and run the same lock-timeout-tolerant
+//!    `index_incremental` refresh cold mode gets, as a **coalesced liveness op on
+//!    the per-vault writer queue** (NRN-252), executed on the generation's WRITE
+//!    connection and awaited before the read guard is re-taken and handed back.
+//!    Arriving requesters that share a not-yet-started refresh coalesce onto one
+//!    execution via a per-generation ticket; a requester is only ever satisfied by
+//!    a refresh whose scan STARTED at or after its arrival. No re-probe follows
+//!    the refresh — an arrival-correct refresh IS the freshness proof, the same
+//!    trust semantics the always-refresh pipeline carried. `LockTimeout` still
 //!    serves anyway with the NRN-215 both-surfaces note; any other error
 //!    propagates with its concrete type intact (so corruption stays classifiable
-//!    by [`note_tool_error`](VaultContext::note_tool_error)). `call_lock` still
-//!    serializes tool bodies, so this coalescing is not yet observable through the
-//!    MCP surface — it is real and unit-tested directly against `VaultContext`.
+//!    by [`note_tool_error`](VaultContext::note_tool_error)). The probe is the
+//!    named interface a Phase 3 watcher-events impl slots behind; the stat sweep
+//!    remains the permanent demoted-mode fallback. Warm mode RETIRES `call_lock`
+//!    (NRN-253): tool bodies no longer serialize, so this probe/refresh
+//!    concurrency is LIVE at the MCP surface — concurrent verified-fresh reads
+//!    overlap on the read pool, and stale readers coalesce onto one refresh.
+//!    (Cold stdio `norn mcp` keeps the lock as the NRN-55 cold-open guard.)
 //!
 //! ### Post-apply increment commit (NRN-252 / NRN-158)
 //!
@@ -147,6 +163,8 @@
 //! daemon wire never carries a custom `--config` path, so `open_warm` takes only
 //! `cwd` and hard-codes `config_path = None`.
 
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -154,9 +172,11 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::{ArcMutexGuard, Mutex as CacheMutex};
 
-use crate::cache::{cache_dir_for, Cache, CacheError, ChangeDetectOptions};
+use crate::cache::{
+    cache_dir_for, Cache, CacheError, ChangeDetectOptions, Freshness, FreshnessProbe,
+    StatSweepProbe,
+};
 use crate::cache_cmd::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
 use crate::mcp::writer_queue::{ChunkOutcome, Handle, Outcome, ValidityGuard, WriterQueue};
@@ -299,23 +319,27 @@ impl IndexIdentity {
 /// binds the current `Arc<Generation>` at its boundary and holds it to
 /// completion. The DB *content* still changes — the writer-queue freshness
 /// refresh writes through the generation's WRITE connection — which is why the
-/// caches sit behind mutexes; everything else is fixed for the generation's life.
-/// Dropping the last `Arc` closes both connections and the sentinel fd via
-/// `Drop`, so an evicted generation releases exactly when its last in-flight
-/// request finishes draining on it.
+/// read pool and write connection sit behind their own synchronization;
+/// everything else is fixed for the generation's life. Dropping the last `Arc`
+/// closes every connection (the whole read pool + the write connection) and the
+/// sentinel fd via `Drop`, so an evicted generation releases exactly when its last
+/// in-flight request finishes draining on it.
 ///
-/// # Two connections, one read-only (NRN-252)
+/// # N read connections + 1 write connection (ADR 0013, NRN-253)
 ///
-/// A generation holds TWO connections to the same `cache.db`:
+/// A generation holds a read POOL plus one write connection to the same
+/// `cache.db`:
 ///
-/// - [`cache`](Self::cache) — the request-facing READ connection. After NRN-252
-///   the request path never writes through it (the freshness refresh moved off
-///   it); it only serves reads. This read-only-in-practice invariant is the
-///   precondition NRN-253 pools it under.
+/// - [`read_pool`](Self::read_pool) — the request-facing READ connections. A
+///   request checks one out for its whole (sync) body and returns it on drop; the
+///   pool lazily grows to a small cap under concurrent load. After NRN-252 the
+///   request path never writes through a read connection (the freshness refresh
+///   moved off it), and NRN-253 additionally stamps `PRAGMA query_only = ON` on
+///   every pooled connection, so read-only is ENFORCED. See [`ReadPool`].
 /// - [`write_cache`](Self::write_cache) — the WRITE connection, touched ONLY by
 ///   the writer thread's ops: the freshness-refresh op and the post-apply
-///   cache-increment commit (NRN-252 / NRN-158). WAL mode makes the read
-///   connection observe its committed rows across the connection boundary, so a
+///   cache-increment commit (NRN-252 / NRN-158). WAL mode makes the pooled read
+///   connections observe its committed rows across the connection boundary, so a
 ///   refresh (or increment) awaited before a read hands back fresh data.
 pub(crate) struct Generation {
     /// Monotonic generation number (1 for the first open, incremented per
@@ -332,14 +356,16 @@ pub(crate) struct Generation {
     /// `db_identity`); never read again, so `_sentinel` documents intent and
     /// suppresses dead-field lints.
     _sentinel: File,
-    /// The request-facing READ connection. `Arc<Mutex>` so a request can take an
-    /// OWNED lock (`lock_arc`) held across the whole sync tool body, outliving a
-    /// concurrent generation swap of the slot's current pointer. `parking_lot`
-    /// (not `std`): its `ArcMutexGuard` is a safe owned guard, and a panic while a
-    /// tool holds it is handled precisely by the handle's `Drop` (invalidation
-    /// floor bump), not by std-mutex poisoning. Read-only in practice after
-    /// NRN-252 — the freshness refresh writes through `write_cache` instead.
-    cache: Arc<CacheMutex<Cache>>,
+    /// The request-facing READ connection POOL (NRN-253). A request checks out an
+    /// owned [`PooledConn`] for its whole (sync) tool body and returns it on drop;
+    /// the checkout keeps this generation's `Arc` alive (via the [`WarmGuard`]) so a
+    /// concurrent generation swap of the slot's current pointer cannot close the
+    /// connection out from under an in-flight request. Every pooled connection is
+    /// `query_only`, so read-only is enforced; a panic while a tool holds a checkout
+    /// is handled by [`WarmGuard::drop`] (invalidation floor bump), independent of
+    /// the pool. Behind an `Arc` so an outstanding checkout can return itself even
+    /// while the generation is mid-drop.
+    read_pool: Arc<ReadPool>,
     /// The WRITE connection, a second connection to the same `cache.db` opened
     /// via the verification-skipping companion path (see
     /// `Cache::open_companion_verified`). Written through ONLY by the writer-queue
@@ -360,11 +386,24 @@ pub(crate) struct Generation {
     /// arrival-correctness assertions (exactly-one-execution counts).
     #[cfg(test)]
     refresh_exec_count: AtomicU64,
+    /// Test-only: total requesters that arrived at this generation's coalesced
+    /// refresh (submitted OR joined), bumped at the top of `arrive_refresh`. Lets a
+    /// full-pipeline concurrency test wait deterministically until BOTH stale
+    /// readers have arrived before releasing a writer-queue blocker, so their
+    /// coalescing onto one refresh is observable end-to-end (NRN-253).
+    #[cfg(test)]
+    refresh_arrivals: AtomicU64,
     /// Test-only: a one-shot error the next refresh op returns INSTEAD of running
     /// `index_incremental`, so a test can drive a corruption-class refresh failure
     /// through the ticket and prove `note_tool_error` still classifies it.
     #[cfg(test)]
     inject_refresh_error: Mutex<Option<CacheError>>,
+    /// Test-only: a one-shot error the next increment-commit chunk returns INSTEAD
+    /// of committing, so a test can drive a corruption-class increment failure
+    /// deterministically and prove the eviction targets the generation the
+    /// increment ran on (NRN-253 review).
+    #[cfg(test)]
+    inject_increment_error: Mutex<Option<CacheError>>,
     /// Test-only: a one-shot gate the next refresh op waits on AFTER its start
     /// transition (started flag set, pending cleared) and BEFORE its scan, so a
     /// test can hold a refresh "in flight" while a new requester arrives.
@@ -382,6 +421,335 @@ pub(crate) struct Generation {
     /// generation stale mid-commit — all without sleeps.
     #[cfg(test)]
     increment_gate: Mutex<Option<TestGate>>,
+}
+
+impl Generation {
+    /// Check out a read-only connection from this generation's pool for the life of
+    /// one request. Infallible: a saturated pool (or a failed lazy grow) makes a
+    /// reader WAIT for a checkin, never fail — the pre-NRN-253 exclusive-guard
+    /// semantics. See [`ReadPool`].
+    fn checkout_read(&self) -> PooledConn {
+        self.read_pool.checkout()
+    }
+
+    /// Test-only: check out a read connection from this generation's pool. Lets a
+    /// test inspect a pooled connection directly the way it used to `lock()` the
+    /// single mutex.
+    #[cfg(test)]
+    fn test_read_conn(&self) -> PooledConn {
+        self.read_pool.checkout()
+    }
+}
+
+/// Hard ceiling on the number of READ connections a single generation's
+/// [`ReadPool`] may open, before clamping to the host's available parallelism —
+/// see [`read_pool_cap`]. A small fixed cap: enough concurrency for realistic
+/// read fan-out without unbounded connection growth against one `cache.db`.
+const READ_POOL_MAX: usize = 8;
+
+/// Debug/test-only override for [`read_pool_cap`] (read via
+/// [`debug_env_usize`](crate::cache::debug_env_usize), so release builds ignore it
+/// entirely). Lets a test force a tiny cap to prove wait-at-cap behavior
+/// deterministically.
+const READ_POOL_CAP_ENV: &str = "NORN_READ_POOL_CAP";
+
+/// The per-generation read-connection cap: `min(READ_POOL_MAX, available
+/// parallelism)`, floored at 1. Now that warm mode has retired `call_lock`
+/// (NRN-253), concurrent warm reads run in parallel and the pool lazily grows up
+/// to this cap under real read fan-out. Debug builds honor the
+/// `NORN_READ_POOL_CAP` override so a test can pin the cap.
+fn read_pool_cap() -> usize {
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let default = parallelism.min(READ_POOL_MAX);
+    crate::cache::debug_env_usize(READ_POOL_CAP_ENV, default).max(1)
+}
+
+/// Test-only: pin the process-global `NORN_READ_POOL_CAP` override for the guard's
+/// life, serialized on a shared lock so cap-sensitive tests in this module AND the
+/// `server` concurrency suite never clobber each other's cap mid-open (the env var
+/// is process-global). The override is removed on drop. Held across `.await` is
+/// fine — a `#[tokio::test]` future runs via `block_on`, which imposes no `Send`
+/// bound, so a non-`Send` guard in the test frame does not constrain it.
+#[cfg(test)]
+pub(crate) struct ReadPoolCapGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl ReadPoolCapGuard {
+    pub(crate) fn pin(cap: usize) -> Self {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var(READ_POOL_CAP_ENV, cap.to_string());
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReadPoolCapGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(READ_POOL_CAP_ENV);
+    }
+}
+
+/// A per-generation POOL of read-only connections to `cache.db` (ADR 0013 /
+/// NRN-253). Replaces the pre-NRN-253 single `Arc<Mutex<Cache>>` handed out as one
+/// exclusive owned guard per request — which, once `call_lock` retired (NRN-253),
+/// would have serialized every warm read on that mutex — with a small set of
+/// interchangeable `query_only` connections to the same database.
+///
+/// - **Checkout** ([`checkout`](Self::checkout)) pops an idle connection (LIFO —
+///   warmest first) and hands back an owned [`PooledConn`]; the connection leaves
+///   the pool for the request's life and returns on drop, so there is no
+///   per-request connection churn.
+/// - **Lazy grow.** When no connection is idle and the pool is under [`cap`], one
+///   more connection is opened via [`open_companion_on_inode`] — the same inode
+///   reconciliation guard the write connection uses — and stamped `query_only`.
+///   A grow FAILURE never fails the checkout: it degrades to waiting for a
+///   checkin (the pool is seeded, so a holder always exists), because handing
+///   out a read guard was infallible pre-pool and an inode-swap race mid-`cache
+///   clear` must keep succeeding the way the single seed connection does.
+/// - **Wait at cap.** At cap with none idle, checkout blocks on
+///   [`available`](Self::available) until a checkin, then retries. The wait is
+///   unfair/barging — a newly-arriving checkout can pop an idle connection ahead
+///   of a woken waiter — exactly like the `parking_lot` mutex it replaced (which
+///   is also barging, not FIFO).
+/// - **Read-only by construction.** Every pooled connection is `query_only`, so a
+///   write through it errors; the writer thread's WRITE connection lives on
+///   [`Generation`] outside the pool and is the only connection that writes.
+///
+/// The pool (and its connections) drop with the generation; an outstanding
+/// [`PooledConn`] holds an `Arc<ReadPool>` so it can still check itself back in
+/// even while the generation is mid-drop.
+struct ReadPool {
+    /// Idle connections + the total-connection count, together under one lock so
+    /// the "grow vs wait" decision is atomic.
+    inner: Mutex<ReadPoolInner>,
+    /// Signalled on every checkin, waking a checkout blocked at cap.
+    available: Condvar,
+    /// Maximum live connections (idle + checked-out). See [`read_pool_cap`].
+    cap: usize,
+    /// How to open (and inode-verify) an additional read connection on grow.
+    grow: GrowParams,
+    /// Test-only: connections opened via lazy-grow (NOT counting the seed).
+    /// Proves checkout reuse (stays 0 across sequential checkout/drop/checkout) and
+    /// growth (increments when a second concurrent checkout materializes one).
+    #[cfg(test)]
+    grow_opens: AtomicU64,
+}
+
+/// The mutable interior of a [`ReadPool`], guarded as a unit.
+struct ReadPoolInner {
+    /// Connections available for immediate checkout (LIFO).
+    idle: Vec<Cache>,
+    /// Total connections owned by the pool (idle + checked-out). Gates growth
+    /// against [`ReadPool::cap`]; a reserved (incremented) slot during an in-flight
+    /// grow prevents the pool overshooting the cap.
+    total: usize,
+}
+
+/// The inputs to open one additional read connection on lazy grow: the index
+/// identity the seed connection was opened under (embedded as the generation's
+/// own [`IndexIdentity`], so a future identity field cannot be added there and
+/// missed here — a lazily-grown connection opening under a stale identity is
+/// exactly the drift this guards), the resolved index set backing that
+/// identity's hash, plus the live `cache.db` inode the seed landed on. A grown
+/// companion MUST land on that same inode (an out-of-band `cache clear`
+/// swapping the file mid-request is caught here), mirroring the write
+/// connection's reconciliation. Owned (cloned from config at open) so the pool
+/// is self-contained and needs no `&LoadedConfig` at grow time.
+struct GrowParams {
+    vault_root: Utf8PathBuf,
+    /// The index identity every grown connection must open under — the SAME
+    /// value stored on the owning [`Generation`].
+    identity: IndexIdentity,
+    /// The resolved index set whose hash is `identity.index_set_hash`; the
+    /// companion open needs the concrete set, not just its hash.
+    index_set: BTreeSet<String>,
+    expected_identity: (u64, u64),
+}
+
+impl GrowParams {
+    /// Open one additional read connection and stamp it `query_only`.
+    fn open(&self) -> Result<Cache> {
+        let cache = open_companion_on_inode(
+            &self.vault_root,
+            self.identity.alias_field.as_deref(),
+            &self.identity.ignore,
+            &self.index_set,
+            &self.identity.index_set_hash,
+            self.expected_identity,
+        )?;
+        cache.set_query_only()?;
+        Ok(cache)
+    }
+}
+
+impl ReadPool {
+    /// Seed the pool with the generation's already-opened-and-verified primary read
+    /// connection (do NOT open it twice). `query_only` is applied to the primary
+    /// HERE — as it enters the pool, after all open-time verification / rebuild /
+    /// reshred are complete.
+    fn seed(primary: Cache, grow: GrowParams, cap: usize) -> Result<Arc<Self>> {
+        primary.set_query_only()?;
+        Ok(Arc::new(ReadPool {
+            inner: Mutex::new(ReadPoolInner {
+                idle: vec![primary],
+                total: 1,
+            }),
+            available: Condvar::new(),
+            cap,
+            grow,
+            #[cfg(test)]
+            grow_opens: AtomicU64::new(0),
+        }))
+    }
+
+    /// Check out a connection: reuse an idle one, else lazily grow while under cap,
+    /// else block until a checkin frees one. Grows OUTSIDE the lock (reserving the
+    /// slot first) so a slow open never blocks a concurrent checkin. Infallible: a
+    /// grow FAILURE releases its reserved slot and degrades this checkout to
+    /// waiting for a checkin instead of failing the read — always live, because
+    /// the pool is seeded (total >= 1) so some holder will check its connection
+    /// back in. The wait is unfair/barging (see the type docs).
+    fn checkout(self: &Arc<Self>) -> PooledConn {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        // Cleared after a failed grow: this checkout then only waits for a
+        // checkin rather than re-attempting an open that just failed (a
+        // concurrent `cache clear` inode swap resolves via the next generation,
+        // not by retrying here).
+        let mut try_grow = true;
+        loop {
+            if let Some(cache) = inner.idle.pop() {
+                return PooledConn {
+                    cache: Some(cache),
+                    pool: Arc::clone(self),
+                };
+            }
+            if try_grow && inner.total < self.cap {
+                // Reserve the slot, then open with the lock released.
+                inner.total += 1;
+                drop(inner);
+                match self.grow.open() {
+                    Ok(cache) => {
+                        #[cfg(test)]
+                        self.grow_opens.fetch_add(1, Ordering::Relaxed);
+                        return PooledConn {
+                            cache: Some(cache),
+                            pool: Arc::clone(self),
+                        };
+                    }
+                    Err(error) => {
+                        // Degrade, never fail: surface the failure on the
+                        // daemon's stderr, release the reserved slot, wake a
+                        // waiter that may now grow into it, and fall through to
+                        // wait for a checkin ourselves.
+                        eprintln!(
+                            "norn serve: read-pool grow failed ({error:#}); \
+                             waiting for an idle connection instead"
+                        );
+                        try_grow = false;
+                        inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+                        inner.total -= 1;
+                        self.available.notify_one();
+                        continue;
+                    }
+                }
+            }
+            // At cap (or grow degraded), none idle → wait for a checkin, then
+            // re-evaluate.
+            inner = self
+                .available
+                .wait(inner)
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    /// Return a connection to the idle set and wake one waiter. Called by
+    /// [`PooledConn::drop`].
+    fn checkin(&self, cache: Cache) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.idle.push(cache);
+        drop(inner);
+        self.available.notify_one();
+    }
+}
+
+/// An owned, checked-out read-only connection from a generation's [`ReadPool`]
+/// (NRN-253). Derefs to the underlying [`Cache`]; on drop it returns the
+/// connection to its pool (no per-request connection churn). Holds an
+/// `Arc<ReadPool>` so an outstanding checkout can always check itself back in, even
+/// if the generation is dropping concurrently.
+pub(crate) struct PooledConn {
+    /// The checked-out connection. `Option` so `Drop` can move it back into the
+    /// pool; always `Some` until then.
+    cache: Option<Cache>,
+    pool: Arc<ReadPool>,
+}
+
+impl Deref for PooledConn {
+    type Target = Cache;
+    fn deref(&self) -> &Cache {
+        self.cache
+            .as_ref()
+            .expect("pooled connection present until drop")
+    }
+}
+
+impl DerefMut for PooledConn {
+    fn deref_mut(&mut self) -> &mut Cache {
+        self.cache
+            .as_mut()
+            .expect("pooled connection present until drop")
+    }
+}
+
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        if let Some(cache) = self.cache.take() {
+            self.pool.checkin(cache);
+        }
+    }
+}
+
+/// Open an additional connection to `<cache_dir>/cache.db` via the
+/// verification-skipping companion path ([`Cache::open_companion_verified`]) and
+/// RECONCILE its inode against `expected`. The primary open already verified the
+/// bytes under the held sentinel, but an fd pins the inode, NOT the PATH — so an
+/// external unlink+recreate (`cache clear`) between opens could bind this by-path
+/// open to a DIFFERENT inode. On mismatch the open fails so the caller retries
+/// against one consistent inode; a swap AFTER this check is caught by the next
+/// request's ground-shift check. Shared by the generation's WRITE connection and
+/// every lazily-grown READ connection (NRN-252 / NRN-253), so the reconciliation
+/// lives in exactly one place.
+fn open_companion_on_inode(
+    vault_root: &Utf8Path,
+    alias_field: Option<&str>,
+    files_ignore: &[String],
+    index_set: &BTreeSet<String>,
+    index_set_hash: &str,
+    expected: (u64, u64),
+) -> Result<Cache> {
+    let (_canonical, cache_dir) = cache_dir_for(vault_root)?;
+    let db_path = cache_dir.join("cache.db");
+    let cache = Cache::open_companion_verified(
+        vault_root,
+        alias_field,
+        files_ignore,
+        index_set,
+        index_set_hash,
+    )?;
+    let identity = device_inode(&std::fs::metadata(db_path.as_std_path())?);
+    if identity != expected {
+        anyhow::bail!(
+            "cache.db at {db_path} was swapped between companion opens \
+             (identity {expected:?} → {identity:?}); failing so the caller retries \
+             on a consistent inode"
+        );
+    }
+    Ok(cache)
 }
 
 /// Marker strings a refresh ticket resolves to when its op never produced a
@@ -725,6 +1093,20 @@ fn run_increment_chunk(
     driver: &mut crate::cache::IncrementCommit,
     budget: std::time::Duration,
 ) -> ChunkOutcome<Result<(), CacheError>> {
+    // Test-only: fail this chunk with an injected error instead of committing,
+    // to drive an increment failure (e.g. corruption) deterministically.
+    #[cfg(test)]
+    {
+        let injected = generation
+            .inject_increment_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(err) = injected {
+            return ChunkOutcome::Done(Err(err));
+        }
+    }
+
     let mut write_cache = generation
         .write_cache
         .lock()
@@ -804,24 +1186,103 @@ struct WarmSlot {
     /// The per-request freshness refresh is likewise a LIVENESS op on this queue,
     /// executed on the generation's write connection and coalesced per generation.
     queue: WriterQueue,
-    /// The generation number the CURRENT request bound via `ensure_current`
-    /// (0 = none bound yet this request). Set once, right after
-    /// `ensure_current` returns in `query_cache_warm`; reset to 0 at the start
-    /// of every request in `begin_request`, mirroring `operator_notes`. Read by
-    /// [`note_tool_error`](VaultContext::note_tool_error) so a corruption error
-    /// invalidates the generation the failing request actually used, not
-    /// whichever generation happens to be `current` by the time the error
-    /// surfaces — under `call_lock` serialization today those coincide, but a
-    /// concurrent read pool (NRN-253) can advance `current` while an older
-    /// generation is still draining.
-    ///
-    /// This cell is itself `call_lock`-dependent: one slot-level value can
-    /// only attribute errors correctly while at most one request runs per
-    /// vault. When NRN-253 retires `call_lock`, this attribution must move
-    /// into per-request scope (e.g. carried by the request's read handle) —
-    /// concurrent requests would otherwise overwrite each other's binding
-    /// and reintroduce the misattribution this field exists to prevent.
-    bound_generation: AtomicU64,
+}
+
+/// Per-request scope (NRN-253): the state that must be private to ONE in-flight
+/// request once the daemon no longer serializes tool bodies with `call_lock`.
+///
+/// Three things previously lived context-global (or slot-global) and were only
+/// safe because `call_lock` guaranteed at most one request per vault ran at a
+/// time; NRN-253 moves each into this per-request value, threaded explicitly to
+/// the tool body alongside `&VaultContext`:
+///
+/// - **The bound config** (`config`). A request binds the current
+///   `Arc<LoadedConfig>` at its boundary ([`VaultContext::begin_request`]) and
+///   reads it via [`RequestScope::config`] for its whole life, so a concurrent
+///   request's `begin_request` swapping the stored config cannot split-brain this
+///   one between two reads (NRN-251's `(generation, config)` binding, now
+///   structural).
+/// - **The operator-note buffer** (`notes`). Notes a request produces (e.g. the
+///   write-lock contention note) accumulate here and are drained by
+///   `run_wrapped` into exactly this request's tool envelope — concurrent
+///   requests can no longer interleave notes into each other's envelopes.
+/// - **The bound generation** (`bound_generation`). Stamped by
+///   [`query_cache_warm`](VaultContext::query_cache_warm) when the request binds
+///   its generation, read by [`note_tool_error`](VaultContext::note_tool_error)
+///   to key corruption invalidation off the generation THIS request used — not
+///   whichever generation happens to be `current` when the error surfaces. Warm-
+///   only; inert (stays 0) in cold mode. `0` means "no generation bound yet".
+///
+/// The scope's whole lifecycle — create → tool body → error attribution → note
+/// drain — runs on the ONE `spawn_blocking` thread `run_wrapped` dispatches (it
+/// never crosses an `.await`, and no other thread ever holds a reference to it),
+/// so single-threaded interior mutability (`RefCell` / `Cell`) suffices. The
+/// type stays `Send` — a scope may be MOVED to another thread whole — but
+/// nothing requires `Sync`, and keeping it `!Sync` documents that a scope is
+/// never SHARED across threads.
+pub(crate) struct RequestScope {
+    /// The `Arc<LoadedConfig>` bound at the request boundary; held for the whole
+    /// request so config is stable across every read within it.
+    config: Arc<LoadedConfig>,
+    /// This request's operator notes, drained by `run_wrapped` into its envelope.
+    notes: RefCell<Vec<String>>,
+    /// The generation number this request bound in `query_cache_warm`
+    /// (`0` = none bound). Read by `note_tool_error` for corruption attribution.
+    bound_generation: Cell<u64>,
+}
+
+// `LoadedConfig` is not `Debug`, so derive is out; a manual impl lets a request
+// scope appear in test `Result` messages (e.g. `begin_request().expect_err(..)`)
+// without printing the whole resolved config.
+impl std::fmt::Debug for RequestScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestScope")
+            .field("notes", &self.notes)
+            .field("bound_generation", &self.bound_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RequestScope {
+    /// Build a scope bound to `config`, with an empty note buffer and no
+    /// generation bound yet.
+    fn new(config: Arc<LoadedConfig>) -> Self {
+        Self {
+            config,
+            notes: RefCell::new(Vec::new()),
+            bound_generation: Cell::new(0),
+        }
+    }
+
+    /// The config bound at this request's boundary. Tool bodies read config
+    /// through here (not `VaultContext::config`) so it stays request-stable.
+    pub(crate) fn config(&self) -> Arc<LoadedConfig> {
+        Arc::clone(&self.config)
+    }
+
+    /// Record an operator note for this request. Drained by `run_wrapped` into
+    /// the tool envelope's `operator_notes` (NRN-215).
+    pub(crate) fn push_operator_note(&self, note: impl Into<String>) {
+        self.notes.borrow_mut().push(note.into());
+    }
+
+    /// Drain and return the notes accumulated for this request. Called by
+    /// `run_wrapped` immediately after the tool body, so the returned notes
+    /// belong to exactly this request.
+    pub(crate) fn take_operator_notes(&self) -> Vec<String> {
+        self.notes.take()
+    }
+
+    /// Stamp the generation this request bound (warm mode). Written once, right
+    /// after `ensure_current` returns in `query_cache_warm`.
+    fn bind_generation(&self, number: u64) {
+        self.bound_generation.set(number);
+    }
+
+    /// The generation this request bound (`0` = none). Read by `note_tool_error`.
+    fn bound_generation(&self) -> u64 {
+        self.bound_generation.get()
+    }
 }
 
 /// Cold (stdio) vs warm (daemon) behavior for `query_cache`.
@@ -851,18 +1312,6 @@ pub(crate) struct VaultContext {
     /// a cloned `Arc`. This is the config `Arc` a request binds at its boundary.
     config: Mutex<Arc<LoadedConfig>>,
     mode: Mode,
-    /// Operator notes generated while serving the CURRENT request — e.g. the
-    /// lock-contention note `query_cache_warm` produces when the implicit
-    /// refresh times out on the write lock. The tool funnel
-    /// ([`McpServer::run_wrapped`](crate::mcp::server::McpServer)) clears this at
-    /// the per-request seam ([`begin_request`](Self::begin_request)) and drains
-    /// it into the tool's `structuredContent.operator_notes` after the body runs,
-    /// both under the process-wide `call_lock` — so notes cannot leak across the
-    /// serialized requests of concurrent connections (NRN-215). On the direct
-    /// (non-daemon) path these notes still go straight to the CLI's stderr; this
-    /// buffer only exists so the DAEMON path can forward them to the routed CLI
-    /// instead of losing them on the daemon's own stderr.
-    operator_notes: Mutex<Vec<String>>,
 }
 
 impl VaultContext {
@@ -878,7 +1327,6 @@ impl VaultContext {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
             mode: Mode::Cold,
-            operator_notes: Mutex::new(Vec::new()),
         })
     }
 
@@ -911,9 +1359,7 @@ impl VaultContext {
                 config_fp: Mutex::new(config_fp),
                 // Label the writer thread with the vault root for debuggability.
                 queue: WriterQueue::spawn(cwd.as_str()),
-                bound_generation: AtomicU64::new(0),
             }),
-            operator_notes: Mutex::new(Vec::new()),
         })
     }
 
@@ -929,25 +1375,19 @@ impl VaultContext {
     /// closing the split-brain window where one request could mix an old-config
     /// graph index with a new-config cache. A gone root surfaces here as the
     /// typed [`WarmContextError::RootGone`] the daemon downcasts to evict.
-    pub(crate) fn begin_request(&self) -> Result<()> {
-        // Clear any operator notes left from a prior request FIRST (both modes),
-        // so this request starts with an empty buffer. Combined with the drain in
-        // `run_wrapped` — both under the process-wide `call_lock` — this bounds
-        // every note to the single request that produced it (NRN-215).
-        self.operator_notes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
-
+    ///
+    /// Returns the request's [`RequestScope`] (NRN-253): a fresh, empty note
+    /// buffer, no generation bound yet, and the config `Arc` bound at this
+    /// boundary — the tool body threads it and `run_wrapped` drains its notes.
+    /// A fresh scope per request is what makes per-request isolation structural:
+    /// there is no shared buffer or slot cell to clear, so a prior request's
+    /// notes / generation attribution cannot leak into this one.
+    pub(crate) fn begin_request(&self) -> Result<RequestScope> {
         let Mode::Warm(slot) = &self.mode else {
-            return Ok(());
+            // Cold mode: config is fixed for the process lifetime, so the bound
+            // config is simply the current one. No liveness/freshness steps.
+            return Ok(RequestScope::new(self.config()));
         };
-
-        // Clear the prior request's generation attribution FIRST, same
-        // reasoning as the operator-notes clear above: if this request never
-        // reaches `query_cache_warm` (or fails before it), `note_tool_error`
-        // must see "none bound" rather than misattribute to a stale request.
-        slot.bound_generation.store(0, Ordering::Release);
 
         // Step 0 — root liveness. A gone root is a typed, downcast-matchable
         // error so the daemon can evict this whole context.
@@ -965,7 +1405,11 @@ impl VaultContext {
         // `ensure_current` by comparing the bound generation's index identity to
         // the new config, so a single path owns every reopen.
         self.refresh_config_warm(slot)?;
-        Ok(())
+
+        // Bind the now-current config into the request scope, AFTER the freshness
+        // swap, so the whole request reads one stable config `Arc` even if a later
+        // concurrent request swaps the stored config out from under it (NRN-251).
+        Ok(RequestScope::new(self.config()))
     }
 
     /// Corruption-eviction seam (FIX-3): inspect a failed tool's error chain and,
@@ -988,59 +1432,73 @@ impl VaultContext {
     /// trust on the next request. Silent wrong-data corruption that raises no
     /// error is outside SQLite's own detection model too, so it is not in scope.
     ///
-    /// Invalidation keys off `slot.bound_generation` — the generation THIS
-    /// request bound in `query_cache_warm` — NOT `slot.current`. Under today's
-    /// `call_lock` serialization the two coincide, but a corruption error on
-    /// generation N must never invalidate a healthy generation N+1 that has
-    /// since become current (NRN-253's concurrent read pool makes that
-    /// observable): mirrors how `WarmGuard::Drop` bumps the floor off its OWN
-    /// generation's number rather than off whatever is current at drop time.
-    pub(crate) fn note_tool_error(&self, err: &anyhow::Error) {
+    /// Invalidation keys off the SCOPE's bound generation — the generation THIS
+    /// request bound in `query_cache_warm` — NOT `slot.current` (NRN-253). Before
+    /// `call_lock` retired the two coincided, but a corruption
+    /// error on generation N must never invalidate a healthy generation N+1 that
+    /// has since become current (the concurrent read pool makes that observable):
+    /// mirrors how `WarmGuard::Drop` bumps the floor off its OWN generation's
+    /// number rather than off whatever is current at drop time.
+    ///
+    /// The bound generation is the right key for TOOL-BODY errors only — the tool
+    /// body reads through the connection the scope bound. An error from work that
+    /// ran on a DIFFERENT generation (the post-apply increment commit binds
+    /// `slot.current`, which can be newer than the scope's binding) must instead
+    /// evict the generation it actually ran on, via the shared
+    /// [`evict_generation_on_corruption`](Self::evict_generation_on_corruption)
+    /// this method delegates to.
+    pub(crate) fn note_tool_error(&self, scope: &RequestScope, err: &anyhow::Error) {
+        self.evict_generation_on_corruption(scope.bound_generation(), err);
+    }
+
+    /// The ONE corruption-classification + eviction seam: when `err`'s chain
+    /// carries a SQLite corruption-class failure (`DatabaseCorrupt` /
+    /// `NotADatabase`), bump the warm slot's invalidation floor past generation
+    /// `number`, so the next request reopens (integrity_check → detect → rebuild)
+    /// through the single-flight `ensure_current` path. `number == 0` ("no
+    /// generation") and cold mode are no-ops, as is a non-corruption error.
+    ///
+    /// Callers differ ONLY in which generation they key the eviction off:
+    /// [`note_tool_error`](Self::note_tool_error) passes the scope's bound
+    /// generation (tool-body attribution), while the post-apply increment path
+    /// passes the generation the increment actually ran on. Sharing the
+    /// classification here keeps the two from diverging while keeping their keys
+    /// distinct.
+    fn evict_generation_on_corruption(&self, number: u64, err: &anyhow::Error) {
         let Mode::Warm(slot) = &self.mode else {
             return;
         };
-        if is_sqlite_corruption(err) {
-            let bound = slot.bound_generation.load(Ordering::Acquire);
-            if bound != 0 {
-                slot.shared.floor.fetch_max(bound + 1, Ordering::AcqRel);
-            }
+        if number != 0 && is_sqlite_corruption(err) {
+            slot.shared.floor.fetch_max(number + 1, Ordering::AcqRel);
         }
     }
 
-    /// Record an operator note for the current request. Called from the read
-    /// pipeline (e.g. [`query_cache_warm`](Self::query_cache_warm) on a write-lock
-    /// timeout); drained by `run_wrapped` into the tool envelope's
-    /// `operator_notes` (NRN-215). A poisoned lock is recovered in place — a lost
-    /// note is a strictly better failure mode than panicking the request.
-    pub(crate) fn push_operator_note(&self, note: impl Into<String>) {
-        self.operator_notes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(note.into());
-    }
-
-    /// Drain and return the operator notes accumulated for the current request.
-    /// The tool funnel calls this under `call_lock` immediately after the tool
-    /// body, so the returned notes belong to exactly this request.
-    pub(crate) fn take_operator_notes(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .operator_notes
-                .lock()
-                .unwrap_or_else(|p| p.into_inner()),
-        )
-    }
-
-    /// The current config. Locks briefly, clones the `Arc`, and releases — so a
-    /// warm config hot-swap can proceed independently of callers still reading
-    /// through an earlier `Arc`. A poisoned lock is recovered in place (the value
-    /// is an immutable `Arc` snapshot, so there is nothing to evict) rather than
-    /// panicking on every subsequent request.
+    /// The current STORED config. Locks briefly, clones the `Arc`, and releases —
+    /// so a warm config hot-swap can proceed independently of callers still
+    /// reading through an earlier `Arc`. A poisoned lock is recovered in place
+    /// (the value is an immutable `Arc` snapshot, so there is nothing to evict)
+    /// rather than panicking on every subsequent request.
+    ///
+    /// Tool bodies do NOT read config through here — they read the request's
+    /// bound config via [`RequestScope::config`], so a concurrent request's
+    /// config swap cannot split-brain them (NRN-253). This method is the internal
+    /// snapshot seam `begin_request` binds into the scope, plus a test accessor
+    /// for asserting the live stored config after a request.
     pub(crate) fn config(&self) -> Arc<LoadedConfig> {
         self.config
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// Whether this is a COLD (stdio `norn mcp`) context. Cold mode still needs the
+    /// server's `call_lock` to serialize its per-call cold cache opens (the NRN-55
+    /// cold-open DDL-race guard); warm mode retired that lock (NRN-253) because
+    /// every per-request dependency is now per-request state or structurally
+    /// synchronized. The server (`mcp::server`) branches on this to acquire the lock
+    /// only when cold.
+    pub(crate) fn is_cold(&self) -> bool {
+        matches!(self.mode, Mode::Cold)
     }
 
     /// Open a query cache for one tool call. Serves both modes with the same call
@@ -1051,14 +1509,14 @@ impl VaultContext {
     ///   incremental refresh every call), exactly as before.
     /// - Warm: runs the verify-once + per-request self-heal pipeline (see module
     ///   docs) and hands out an owned guard into the bound generation's connection.
-    pub(crate) fn query_cache(&self) -> Result<CacheHandle> {
+    pub(crate) fn query_cache(&self, scope: &RequestScope) -> Result<CacheHandle> {
         match &self.mode {
             Mode::Cold => {
-                let config = self.config();
+                let config = scope.config();
                 let cache = open_for_query(&self.vault_root, &config.index_options, false)?;
                 Ok(CacheHandle::Owned(cache))
             }
-            Mode::Warm(slot) => self.query_cache_warm(slot),
+            Mode::Warm(slot) => self.query_cache_warm(slot, scope),
         }
     }
 
@@ -1107,63 +1565,85 @@ impl VaultContext {
     /// Config freshness / root-liveness (steps 0–1) already ran in
     /// [`begin_request`](Self::begin_request) at the per-request seam, exactly as
     /// for `query_cache`, so config is stable for the whole request.
-    pub(crate) fn load_graph_index(&self) -> Result<crate::core::GraphIndex> {
-        let cache = self.query_cache()?;
+    pub(crate) fn load_graph_index(&self, scope: &RequestScope) -> Result<crate::core::GraphIndex> {
+        let cache = self.query_cache(scope)?;
         Ok(cache.load_graph_index()?)
     }
 
     /// The warm per-request pipeline (steps 2–4). See the module-level docs for
     /// the ordered rationale of each step.
-    fn query_cache_warm(&self, slot: &WarmSlot) -> Result<CacheHandle> {
+    fn query_cache_warm(&self, slot: &WarmSlot, scope: &RequestScope) -> Result<CacheHandle> {
         // Steps 0–1 (root-liveness + config-freshness) already ran in
         // `begin_request` at the per-request seam, so config is stable here for
         // the whole request. Steps 2–3 (ground-shift + reopen-if-stale) are the
         // single-flight `ensure_current`, which returns the generation this
         // request binds for its whole body.
-        let generation = self.ensure_current(slot)?;
+        let generation = self.ensure_current(slot, scope)?;
 
-        // Record which generation THIS request bound, before doing any further
-        // work that could fail (the freshness refresh below, or the tool body
-        // after this returns) — so a corruption error noted anywhere downstream
-        // attributes to the generation this request actually used, not whatever
-        // is current by the time `note_tool_error` runs.
-        slot.bound_generation
-            .store(generation.number, Ordering::Release);
+        // Record which generation THIS request bound into its OWN scope, before
+        // doing any further work that could fail (the freshness refresh below, or
+        // the tool body after this returns) — so a corruption error noted anywhere
+        // downstream attributes to the generation this request actually used, not
+        // whatever is current by the time `note_tool_error` runs (NRN-253).
+        scope.bind_generation(generation.number);
 
-        // Step 4 — freshness, as a COALESCED writer-queue liveness op on the
-        // generation's WRITE connection, awaited before we hand back the read
-        // connection (NRN-252). The request-facing `cache` below is never written
-        // through — that read-only-in-practice invariant is NRN-253's precondition.
-        match self.refresh_generation(slot, &generation) {
-            RefreshOutcome::Served => {}
-            RefreshOutcome::LockContention => {
-                // BOTH surfaces (NRN-215): the daemon's own stderr is its
-                // operational log — an operator tailing `norn serve` (or a
-                // log pipeline) keeps the contention signal, alongside the
-                // served markers — AND the per-request note buffer carries
-                // it to the caller: `run_wrapped` forwards it in the tool
-                // envelope and the routed CLI re-emits it on ITS stderr,
-                // byte-identical to a direct run.
-                self.note_both_surfaces(crate::cache::LOCK_CONTENTION_NOTE);
+        // Step 4 — freshness, split into PROBE then (only if stale) REFRESH
+        // (NRN-253). Check out an owned READ connection from the bound generation's
+        // pool, held across the whole (sync) tool body. It outlives a concurrent
+        // generation swap of the slot pointer because the checkout owns its own
+        // `Arc<ReadPool>` and the handle also holds the `Arc<Generation>` (keeping
+        // the sentinel alive). Every pooled connection is `query_only`, so this
+        // connection cannot write; the freshness refresh writes through the WRITE
+        // connection instead.
+        let read_conn = generation.checkout_read();
+
+        // Probe on THIS request thread against the pooled connection. Fresh → serve
+        // on this very connection, touching neither the writer queue nor the write
+        // connection: a concurrent read of an unchanged vault costs one stat
+        // sweep, not a refresh op. Stale (or a probe error — treated
+        // conservatively as stale, since the refresh is authoritative and would
+        // re-surface any real fault) → route through the coalesced refresh. No
+        // re-probe after: an arrival-correct refresh IS the freshness proof, the
+        // same trust semantics the always-refresh pipeline carried.
+        let fresh = matches!(
+            StatSweepProbe.probe(&self.vault_root, &read_conn),
+            Ok(Freshness::Fresh)
+        );
+
+        if !fresh {
+            // HOLD the pooled connection across the refresh wait (NRN-253), rather
+            // than releasing and re-checking-out. It is sound and simpler: the
+            // refresh runs on the generation's WRITE connection, so a held READ
+            // connection never contends with it (WAL makes the refresh's committed
+            // rows visible to this connection's next query — the probe finalized its
+            // statement, so this connection holds no read transaction pinning an
+            // older snapshot); and because reads come from a POOL, holding one
+            // connection does not serialize other concurrent readers the way holding
+            // the pre-NRN-253 single mutex would have.
+            match self.refresh_generation(slot, &generation) {
+                RefreshOutcome::Served => {}
+                RefreshOutcome::LockContention => {
+                    // BOTH surfaces (NRN-215): the daemon's own stderr is its
+                    // operational log — an operator tailing `norn serve` (or a
+                    // log pipeline) keeps the contention signal, alongside the
+                    // served markers — AND the per-request note buffer carries
+                    // it to the caller: `run_wrapped` forwards it in the tool
+                    // envelope and the routed CLI re-emits it on ITS stderr,
+                    // byte-identical to a direct run.
+                    self.note_both_surfaces(scope, crate::cache::LOCK_CONTENTION_NOTE);
+                }
+                // The concrete `CacheError` survives the ticket, so a
+                // corruption-class failure remains classifiable by
+                // `note_tool_error` downstream.
+                RefreshOutcome::Failed(error) => return Err(error.into()),
+                RefreshOutcome::Abandoned(msg) => return Err(anyhow::anyhow!(msg)),
             }
-            // The concrete `CacheError` survives the ticket, so a corruption-class
-            // failure remains classifiable by `note_tool_error` downstream.
-            RefreshOutcome::Failed(error) => return Err(error.into()),
-            RefreshOutcome::Abandoned(msg) => return Err(anyhow::anyhow!(msg)),
         }
 
-        // Take an OWNED lock on the bound generation's READ connection, held
-        // across the whole (sync) tool body. It outlives a concurrent generation
-        // swap of the slot pointer because the guard owns its own
-        // `Arc<Mutex<Cache>>` and the handle also holds the `Arc<Generation>`
-        // (keeping the sentinel alive). Read-only after NRN-252.
-        let guard = generation.cache.lock_arc();
-
         Ok(CacheHandle::Warm(WarmGuard {
-            number: generation.number,
             floor: Arc::clone(&slot.shared.floor),
-            _generation: generation,
-            guard,
+            generation,
+            conn: read_conn,
         }))
     }
 
@@ -1187,6 +1667,14 @@ impl VaultContext {
                 .refresh_pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
+            // Test-only: count this arrival UNDER the pending lock, so it reflects a
+            // FINALIZED join-or-submit decision. A full-pipeline test waits until
+            // BOTH stale readers have arrived (still under a writer-queue blocker, so
+            // neither op has started) before releasing them — with the count taken
+            // here, `arrivals == 2` guarantees the second reader has already joined
+            // the first's ticket and cannot instead submit a second op (NRN-253).
+            #[cfg(test)]
+            generation.refresh_arrivals.fetch_add(1, Ordering::Relaxed);
             // Join only a pending refresh that has NOT started: its eventual scan
             // is then necessarily after this arrival. (An already-started op has
             // cleared itself from the slot, so this normally sees `None` there;
@@ -1244,17 +1732,29 @@ impl VaultContext {
     /// cache update was deferred — the next read's refresh detects the change and
     /// heals it, with the files still the source of truth (trust preserved). The
     /// degrade emits the both-surfaces operator note; a corruption-class error
-    /// still feeds [`note_tool_error`](Self::note_tool_error) so the generation is
-    /// evicted and re-verified on the next request.
-    pub(crate) fn commit_apply_increments(&self, changed_paths: &[Utf8PathBuf]) {
+    /// still evicts + re-verifies on the next request via
+    /// [`evict_generation_on_corruption`](Self::evict_generation_on_corruption),
+    /// keyed off the generation the increment RAN ON (the `slot.current` this
+    /// method binds below) — NOT the scope's bound generation, which can lag it
+    /// by a concurrent reopen and would leave the actually-corrupt newer
+    /// generation serving.
+    pub(crate) fn commit_apply_increments(
+        &self,
+        scope: &RequestScope,
+        changed_paths: &[Utf8PathBuf],
+    ) {
         let Mode::Warm(slot) = &self.mode else {
             return; // cold: no queue, nothing to commit
         };
         if changed_paths.is_empty() {
             return;
         }
-        // The generation this request bound (== current under `call_lock`). If
-        // none is current, there is nothing to update — the next open covers it.
+        // The generation the request is committing against. Read from the slot's
+        // current pointer; a concurrent reopen only ever swaps it forward, and the
+        // bulk op's `still_valid` guard drops the commit if this generation dies
+        // mid-flight, so binding to `current` here is safe post-`call_lock`
+        // (NRN-253). If none is current, there is nothing to update — the next open
+        // covers it.
         let Some(generation) = slot
             .shared
             .current
@@ -1284,10 +1784,11 @@ impl VaultContext {
                 // The parse failed, but the mutation ALREADY landed on disk — so
                 // degrade rather than fail the tool: the next read's refresh heals
                 // the cache. A corruption-class parse error still evicts +
-                // re-verifies the generation via `note_tool_error`.
+                // re-verifies — keyed off the generation this commit targets, the
+                // same key the post-run arm below uses.
                 let err: anyhow::Error = error.into();
-                self.note_tool_error(&err);
-                self.note_both_surfaces(INCREMENT_FAILED_NOTE);
+                self.evict_generation_on_corruption(generation.number, &err);
+                self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
                 return;
             }
         };
@@ -1298,15 +1799,19 @@ impl VaultContext {
         match outcome {
             Outcome::Done(Ok(())) => {}
             Outcome::Done(Err(error)) => {
-                // A corruption-class error must still evict + re-verify the
-                // generation on the next request, exactly as a corruption error
-                // surfaced from a tool body does (keys off the bound generation).
+                // A corruption-class error must still evict + re-verify on the
+                // next request — keyed off the generation the increment RAN ON
+                // (`generation`, bound from `slot.current` above), NOT the
+                // scope's bound generation: after a concurrent reopen the scope
+                // can still point at older N while this increment corrupted on
+                // N+1, and a bound-keyed bump (floor = N+1) would leave the
+                // corrupt N+1 satisfying the floor and serving (NRN-253 review).
                 let err: anyhow::Error = error.into();
-                self.note_tool_error(&err);
-                self.note_both_surfaces(INCREMENT_FAILED_NOTE);
+                self.evict_generation_on_corruption(generation.number, &err);
+                self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
             }
-            Outcome::Dropped => self.note_both_surfaces(INCREMENT_DROPPED_NOTE),
-            Outcome::Panicked => self.note_both_surfaces(INCREMENT_PANICKED_NOTE),
+            Outcome::Dropped => self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE),
+            Outcome::Panicked => self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE),
         }
     }
 
@@ -1316,9 +1821,9 @@ impl VaultContext {
     /// `run_wrapped` and re-emitted on the routed CLI's stderr). The ONE shared
     /// shape for every both-surfaces note — the post-apply increment-deferred
     /// degrade notes and the freshness-refresh lock-contention note alike.
-    fn note_both_surfaces(&self, note: &str) {
+    fn note_both_surfaces(&self, scope: &RequestScope, note: &str) {
         eprintln!("{note}");
-        self.push_operator_note(note);
+        scope.push_operator_note(note);
     }
 
     /// Submit the increment-commit bulk op for `generation`, driving the ALREADY
@@ -1358,8 +1863,11 @@ impl VaultContext {
     /// a late arrival adopts the generation an earlier op just produced (NRN-252).
     /// A dropped op (queue shutting down) or a panicked op surfaces as a
     /// descriptive error rather than a hang — see [`map_open_outcome`].
-    fn ensure_current(&self, slot: &WarmSlot) -> Result<Arc<Generation>> {
-        let config = self.config();
+    fn ensure_current(&self, slot: &WarmSlot, scope: &RequestScope) -> Result<Arc<Generation>> {
+        // The request's bound config (NRN-253) — the whole reopen decision uses
+        // ONE config `Arc` for the request, so a concurrent config swap cannot
+        // race this generation-open.
+        let config = scope.config();
 
         // Fast path: probe the current generation off any lock.
         {
@@ -1457,11 +1965,43 @@ impl VaultContext {
         }
     }
 
-    /// Test-only: the warm slot's writer queue (panics off warm mode). Lets a test
-    /// occupy the writer thread with a blocker so a later generation-open op stays
-    /// queued.
+    /// Test-only: freshness-refresh executions on the CURRENT generation (`0` if
+    /// none). The `server`-module coalescing proof reads its delta to assert two
+    /// concurrent stale readers shared EXACTLY ONE refresh execution (NRN-253).
     #[cfg(test)]
-    fn warm_writer_queue(&self) -> &WriterQueue {
+    pub(crate) fn current_refresh_exec_count(&self) -> u64 {
+        self.current_generation()
+            .map(|g| g.refresh_exec_count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Test-only: arrivals at the CURRENT generation's coalesced refresh (`0` if
+    /// none). Lets a full-pipeline test wait until both stale readers have arrived
+    /// before releasing the writer-queue blocker they coalesce behind (NRN-253).
+    #[cfg(test)]
+    pub(crate) fn current_refresh_arrivals(&self) -> u64 {
+        self.current_generation()
+            .map(|g| g.refresh_arrivals.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Test-only: read connections the CURRENT generation's pool has lazily grown
+    /// BEYOND its seed (`0` if none / cold). A value `> 0` proves concurrent warm
+    /// reads genuinely overlapped on distinct pooled connections rather than
+    /// accidentally serializing (NRN-253).
+    #[cfg(test)]
+    pub(crate) fn current_read_pool_grow_opens(&self) -> u64 {
+        self.current_generation()
+            .map(|g| g.read_pool.grow_opens.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Test-only: the warm slot's writer queue (panics off warm mode). Lets a test
+    /// occupy the writer thread with a blocker so a later generation-open or refresh
+    /// op stays queued — used by both this module's and the `server` module's
+    /// concurrency proofs.
+    #[cfg(test)]
+    pub(crate) fn warm_writer_queue(&self) -> &WriterQueue {
         match &self.mode {
             Mode::Warm(slot) => &slot.queue,
             Mode::Cold => panic!("warm_writer_queue called on a cold context"),
@@ -1487,9 +2027,36 @@ impl VaultContext {
     #[cfg(test)]
     pub(crate) fn force_reopen_without_binding(&self) -> Result<()> {
         match &self.mode {
-            Mode::Warm(slot) => self.ensure_current(slot).map(|_| ()),
+            // A throwaway scope carries only the bound config `ensure_current`
+            // needs; it is NOT the caller's scope, so no `bound_generation` is
+            // stamped anywhere — modeling a reopen that advances `current`
+            // without binding it to the errored request.
+            Mode::Warm(slot) => {
+                let scope = RequestScope::new(self.config());
+                self.ensure_current(slot, &scope).map(|_| ())
+            }
             Mode::Cold => Ok(()),
         }
+    }
+
+    /// Test convenience: open a query cache under a fresh, single-use
+    /// [`RequestScope`]. Production threads the request's scope from
+    /// `begin_request` (so notes land in the request's envelope and the bound
+    /// generation drives corruption attribution); unit tests that only inspect
+    /// the returned cache don't need to hold that scope, so this hides the
+    /// boilerplate. Tests that DO assert scope-bound behavior (note isolation,
+    /// corruption attribution) thread an explicit scope instead.
+    #[cfg(test)]
+    pub(crate) fn query_cache_unscoped(&self) -> Result<CacheHandle> {
+        let scope = RequestScope::new(self.config());
+        self.query_cache(&scope)
+    }
+
+    /// Test convenience: the graph-index twin of [`query_cache_unscoped`].
+    #[cfg(test)]
+    pub(crate) fn load_graph_index_unscoped(&self) -> Result<crate::core::GraphIndex> {
+        let scope = RequestScope::new(self.config());
+        self.load_graph_index(&scope)
     }
 
     /// Test-only: arrive at `generation`'s coalesced refresh WITHOUT blocking,
@@ -1529,7 +2096,7 @@ impl VaultContext {
     #[cfg(test)]
     pub(crate) fn detect_change_count(&self) -> usize {
         let generation = self.current_generation().expect("a current generation");
-        let cache = generation.cache.lock();
+        let cache = generation.test_read_conn();
         cache.detect_change_count(&self.vault_root)
     }
 
@@ -1820,52 +2387,57 @@ fn open_generation(
 
     // Open the WRITE connection: a second connection to the SAME cache.db the
     // primary open just verified under the now-held sentinel, skipping the
-    // O(db-size) integrity_check (see `Cache::open_companion_verified`). Only the
-    // writer thread's freshness refresh writes through it; the request-facing
-    // `cache` above stays read-only (NRN-252).
-    let write_cache = Cache::open_companion_verified(
+    // O(db-size) integrity_check (see `Cache::open_companion_verified`), and
+    // RECONCILED against the live post-primary inode (`open_companion_on_inode`).
+    // Only the writer thread's freshness refresh writes through it; the pooled read
+    // connections stay read-only (NRN-252). This is NOT made `query_only` — it is
+    // the one connection that writes.
+    let write_cache = open_companion_on_inode(
         vault_root,
         opts.alias_field.as_deref(),
         &opts.ignore,
         &opts.resolved_index_set,
         &opts.resolved_index_set_hash,
+        read_identity,
     )?;
 
-    // Companion inode reconciliation (NRN-252 review). The sentinel pins the
-    // primary inode from being FREED, but an fd does not pin the PATH from being
-    // REPLACED. The companion above opened BY PATH, so an external unlink+recreate
-    // (`cache clear`) in the window between the primary open and this open would
-    // bind the write connection to a DIFFERENT inode than the read connection: a
-    // split-brain generation whose writes land on an inode reads never see, healed
-    // only on the NEXT request's ground-shift check. Stat the path now and compare
-    // against the live post-primary inode; on mismatch, fail the generation open
-    // so the single-flight caller errors and the next request retries fresh
-    // against one consistent inode. (Comparing against the live `read_identity`,
-    // NOT the sentinel `db_identity`, is what keeps an ordinary rebuild-on-open —
-    // which moves the inode legitimately, read and write both landing on the new
-    // one — from tripping a false positive.) A swap AFTER this check is caught by
-    // the per-request ground-shift check, exactly as today.
-    let companion_identity = device_inode(&std::fs::metadata(db_path.as_std_path())?);
-    if companion_identity != read_identity {
-        anyhow::bail!(
-            "cache.db at {db_path} was swapped between the read and write connection \
-             opens (identity {read_identity:?} → {companion_identity:?}); failing this \
-             generation open so the next request retries on a consistent inode"
-        );
-    }
+    // Seed the read pool with the primary READ connection this call already opened
+    // and verified (do NOT open it twice). `ReadPool::seed` stamps `query_only` on
+    // it as it enters the pool — now, after all open-time verification / rebuild /
+    // reshred are complete. The pool lazily grows additional read connections via
+    // the SAME `open_companion_on_inode` reconciliation guard, comparing against the
+    // live `read_identity` the primary landed on.
+    // Derive the index identity ONCE and share it between the generation and its
+    // pool's grow params, so every lazily-grown connection provably opens under
+    // the exact identity the generation records.
+    let index_identity = IndexIdentity::from_config(config);
+    let read_pool = ReadPool::seed(
+        cache,
+        GrowParams {
+            vault_root: vault_root.to_owned(),
+            identity: index_identity.clone(),
+            index_set: opts.resolved_index_set.clone(),
+            expected_identity: read_identity,
+        },
+        read_pool_cap(),
+    )?;
 
     Ok(Generation {
         number,
         db_identity,
-        index_identity: IndexIdentity::from_config(config),
+        index_identity,
         _sentinel: sentinel,
-        cache: Arc::new(CacheMutex::new(cache)),
+        read_pool,
         write_cache: Mutex::new(write_cache),
         refresh_pending: Mutex::new(None),
         #[cfg(test)]
         refresh_exec_count: AtomicU64::new(0),
         #[cfg(test)]
+        refresh_arrivals: AtomicU64::new(0),
+        #[cfg(test)]
         inject_refresh_error: Mutex::new(None),
+        #[cfg(test)]
+        inject_increment_error: Mutex::new(None),
         #[cfg(test)]
         refresh_gate: Mutex::new(None),
         #[cfg(test)]
@@ -1932,12 +2504,14 @@ impl DerefMut for CacheHandle {
     }
 }
 
-/// An owned guard into the warm-mode bound generation's held-open `Cache`.
+/// An owned handle onto the warm-mode bound generation's held-open cache for one
+/// request.
 ///
-/// It keeps the whole `Arc<Generation>` alive (so the sentinel fd + connection
-/// stay open for the request even if a concurrent open swaps the slot's current
-/// pointer to a newer generation) and holds an owned `parking_lot` lock into that
-/// generation's connection across the entire (sync) tool body.
+/// It keeps the whole `Arc<Generation>` alive (so the sentinel fd + pooled
+/// connections stay open for the request even if a concurrent open swaps the
+/// slot's current pointer to a newer generation) and holds a [`PooledConn`] — one
+/// read-only connection checked out of the generation's [`ReadPool`] — across the
+/// entire (sync) tool body, returned to the pool when this guard drops.
 ///
 /// `Drop` carries the generational replacement for std-mutex poison recovery: if
 /// the guard is dropped while the thread is PANICKING (a tool body panicked
@@ -1945,26 +2519,28 @@ impl DerefMut for CacheHandle {
 /// this generation's number, so the next request reopens through
 /// [`ensure_current`](VaultContext::ensure_current) and re-verifies integrity —
 /// exactly the trust-restoring self-heal the old poison-evict path gave, now
-/// routed through the one open path. On a normal drop it does nothing.
+/// routed through the one open path. On a normal drop it does nothing (the pooled
+/// connection is returned by [`PooledConn::drop`] regardless).
 pub(crate) struct WarmGuard {
-    /// This generation's number, compared against `floor` on a panic-drop.
-    number: u64,
     /// Shared handle to the slot's invalidation floor, bumped on a panic-drop.
     floor: Arc<AtomicU64>,
-    /// Owned lock into the generation's connection, held across the tool body.
-    /// It owns its own clone of the generation's `Arc<Mutex<Cache>>`, so the
-    /// connection stays alive independently of `_generation`.
-    guard: ArcMutexGuard<parking_lot::RawMutex, Cache>,
+    /// The read-only connection checked out of the generation's pool, held across
+    /// the tool body and returned to the pool on drop. It owns its own
+    /// `Arc<ReadPool>`, so the connection can be checked back in independently of
+    /// `generation`.
+    conn: PooledConn,
     /// Keeps the bound generation (sentinel fd + identity) alive for the whole
     /// request, so a concurrent open swapping the slot's current pointer to a
     /// newer generation cannot close this request's sentinel out from under it.
-    _generation: Arc<Generation>,
+    /// Also names the generation a panic-drop invalidates (its `number`).
+    generation: Arc<Generation>,
 }
 
 impl Drop for WarmGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            self.floor.fetch_max(self.number + 1, Ordering::AcqRel);
+            self.floor
+                .fetch_max(self.generation.number + 1, Ordering::AcqRel);
         }
     }
 }
@@ -1972,13 +2548,13 @@ impl Drop for WarmGuard {
 impl Deref for WarmGuard {
     type Target = Cache;
     fn deref(&self) -> &Cache {
-        &self.guard
+        &self.conn
     }
 }
 
 impl DerefMut for WarmGuard {
     fn deref_mut(&mut self) -> &mut Cache {
-        &mut self.guard
+        &mut self.conn
     }
 }
 
@@ -2016,26 +2592,39 @@ mod tests {
         (tmp, root)
     }
 
-    /// Does a `warm_marker` TEMP TABLE exist on the handed-out connection? TEMP
-    /// tables are per-connection, so this is a same-connection probe: present
-    /// ⇒ the connection was reused; gone ⇒ it was reopened.
-    fn marker_present(cache: &Cache) -> bool {
-        let n: i64 = cache
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_temp_master WHERE type='table' AND name='warm_marker'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        n == 1
+    /// The current warm generation number (`0` if none) — a monotonic reopen
+    /// probe. Replaces the pre-NRN-253 `warm_marker` TEMP-table probe: pooled read
+    /// connections are `query_only`, so `CREATE TEMP TABLE` no longer works as a
+    /// same-connection marker. Same number across two requests ⇒ the generation
+    /// (and its pooled connections) was reused; a higher number ⇒ it was reopened.
+    /// Monotonic generation numbers can't false-positive the way a recycled
+    /// connection pointer could, so this is a strictly more robust reopen proof.
+    fn gen_number(ctx: &VaultContext) -> u64 {
+        ctx.current_generation().map(|g| g.number).unwrap_or(0)
     }
 
-    fn create_marker(cache: &Cache) {
-        cache
-            .conn()
-            .execute("CREATE TEMP TABLE warm_marker (x INTEGER)", [])
-            .unwrap();
+    /// The raw `sqlite3*` pointer behind a cache's connection — a per-connection
+    /// identity used to prove two checkouts are DISTINCT connections and that a
+    /// sequential checkout REUSES one. Safe here: the pointer is only compared as an
+    /// integer, never dereferenced, and the connections it names are kept alive for
+    /// the comparison.
+    fn conn_ptr(cache: &Cache) -> usize {
+        // SAFETY: `handle()` returns the live `sqlite3*`; we only read it as an
+        // address for identity comparison and never dereference it.
+        (unsafe { cache.conn().handle() }) as usize
+    }
+
+    /// Plant per-connection TEMP objects (a read-shadow view / triggers) on a
+    /// pooled connection for the verify-once proofs below. Pooled connections are
+    /// `query_only` (NRN-253), which blocks `CREATE TEMP …`, so this briefly toggles
+    /// query_only OFF to create the TEMP objects and restores it — the objects
+    /// persist on the connection regardless of query_only, and reads through them
+    /// are unaffected. This preserves the pre-NRN-253 shadow mechanism exactly; only
+    /// the planting gains the toggle (the assertions are unchanged).
+    fn plant_temp_on_pooled(cache: &Cache, batch: &str) {
+        cache.conn().execute_batch("PRAGMA query_only=OFF").unwrap();
+        cache.conn().execute_batch(batch).unwrap();
+        cache.conn().execute_batch("PRAGMA query_only=ON").unwrap();
     }
 
     fn doc_count(cache: &Cache) -> i64 {
@@ -2097,7 +2686,9 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open should succeed");
 
-        let cache = ctx.query_cache().expect("query_cache should return Ok");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache should return Ok");
 
         // Count documents via direct SQL — the cache must have indexed the
         // 3 seeded docs during the per-call freshness check inside open_for_query.
@@ -2117,7 +2708,7 @@ mod tests {
         // First call — 3 docs.
         {
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("first query_cache call should succeed");
             assert_eq!(doc_count(&cache), 3, "initial count should be 3");
         }
@@ -2132,7 +2723,7 @@ mod tests {
         // Second call — per-call freshness check must pick up the new doc.
         {
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second query_cache call should succeed");
             assert_eq!(
                 doc_count(&cache),
@@ -2144,31 +2735,33 @@ mod tests {
 
     // ---- Warm-mode tests ----------------------------------------------------
 
-    /// Warm reuse / verify-once: two sequential warm calls share one connection.
-    /// A TEMP TABLE created through the first guard is still visible through the
-    /// second (TEMP tables are per-connection), and the captured `(dev, ino)`
-    /// identity is unchanged.
+    /// Warm reuse / verify-once: two sequential warm calls share one pooled
+    /// connection. The first call's checkout is returned to the pool on drop, so the
+    /// second call pops the SAME connection — proven by an unchanged `sqlite3*`
+    /// pointer (the seed is never freed, so the address can't be recycled) — and the
+    /// captured `(dev, ino)` identity is unchanged.
     #[test]
     fn warm_reuses_one_connection_across_calls() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
 
-        {
+        let ptr1 = {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
-        }
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
+            conn_ptr(&cache)
+        };
         let id1 = ctx.warm_db_identity();
         assert!(id1.is_some(), "warm state should be held after first call");
 
-        {
+        let ptr2 = {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("second warm query_cache");
-            assert!(
-                marker_present(&cache),
-                "TEMP table must survive ⇒ same connection reused (verify-once)"
-            );
-        }
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+            conn_ptr(&cache)
+        };
+        assert_eq!(
+            ptr1, ptr2,
+            "the same pooled connection must be reused across warm calls (verify-once)"
+        );
         let id2 = ctx.warm_db_identity();
         assert_eq!(id1, id2, "cache identity must be stable across warm calls");
     }
@@ -2181,7 +2774,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3, "initial count should be 3");
         }
 
@@ -2193,7 +2786,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("second warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
             assert_eq!(
                 doc_count(&cache),
                 4,
@@ -2203,7 +2796,7 @@ mod tests {
     }
 
     /// Ground-shift: deleting the cache dir out from under a live warm context
-    /// forces a reopen — the TEMP-table marker is gone, the identity changed, and
+    /// forces a reopen — the generation number advances, the identity changed, and
     /// the rebuilt cache still serves the vault.
     #[test]
     fn warm_self_heals_when_cache_db_disappears() {
@@ -2212,10 +2805,10 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
+        let g1 = gen_number(&ctx);
         let _id1 = ctx.warm_db_identity().expect("state held after first call");
 
         // Simulate `norn cache clear` / manual rm under a live daemon: remove the
@@ -2227,11 +2820,11 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second warm query_cache after clear");
             assert!(
-                !marker_present(&cache),
-                "TEMP table must be gone ⇒ the connection was reopened"
+                gen_number(&ctx) > g1,
+                "generation number must advance ⇒ the connection was reopened"
             );
             assert_eq!(
                 doc_count(&cache),
@@ -2246,7 +2839,7 @@ mod tests {
         // recycling never defeats detection in production: while the old file
         // is still *held*, its inode stays allocated, so a recreated file
         // cannot collide until after the ground-shift check has already fired.
-        // The TEMP-table assertion above is the reopen proof.
+        // The generation-number advance above is the reopen proof.
         let _id2 = ctx.warm_db_identity().expect("state held after reopen");
     }
 
@@ -2266,7 +2859,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 1);
         }
 
@@ -2313,24 +2906,24 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(
                 archived_count(&cache),
                 1,
                 "archived doc indexed before ignore"
             );
         }
+        let g1 = gen_number(&ctx);
 
         write_config(&root, "files:\n  ignore:\n    - \"Archive/**\"\n");
 
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second warm query_cache after files.ignore change");
             assert!(
-                !marker_present(&cache),
+                gen_number(&ctx) > g1,
                 "files.ignore change must reopen the cache"
             );
             assert_eq!(
@@ -2357,19 +2950,20 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
 
         write_config(&root, "validate:\n  ignore:\n    - \"logs/**\"\n");
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx
-                .query_cache()
+            let _cache = ctx
+                .query_cache_unscoped()
                 .expect("second warm query_cache after non-index config change");
-            assert!(
-                marker_present(&cache),
+            assert_eq!(
+                gen_number(&ctx),
+                g1,
                 "non-index config change must NOT reopen the cache"
             );
         }
@@ -2390,9 +2984,9 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
         assert!(ctx.config().index_options.alias_field.is_none());
 
         // Index-relevant: alias_field feeds Cache::open_with_index.
@@ -2400,11 +2994,11 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx
-                .query_cache()
+            let _cache = ctx
+                .query_cache_unscoped()
                 .expect("second warm query_cache after index-relevant config change");
             assert!(
-                !marker_present(&cache),
+                gen_number(&ctx) > g1,
                 "index-relevant config change must reopen the cache"
             );
         }
@@ -2426,7 +3020,7 @@ mod tests {
         // First call — clean, no config file yet.
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
 
@@ -2448,7 +3042,7 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("query_cache must succeed once the config is valid again");
             assert_eq!(doc_count(&cache), 3);
         }
@@ -2584,7 +3178,9 @@ mod tests {
         // Warm: through the daemon context, reusing the held connection.
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
-        let warm = ctx.load_graph_index().expect("warm load_graph_index");
+        let warm = ctx
+            .load_graph_index_unscoped()
+            .expect("warm load_graph_index");
 
         assert_eq!(
             index_json(&warm),
@@ -2628,23 +3224,27 @@ mod tests {
 
         // Establish the warm connection.
         ctx.begin_request().expect("begin_request");
-        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        let idx1 = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert_eq!(alpha_headings(&idx1), 1, "alpha's heading is indexed");
 
         // Shadow the real `headings` table with an empty view on the held
         // connection only. The vault is not touched afterwards, so the next
         // request's incremental refresh detects no changes and writes nothing.
         {
-            let cache = ctx.query_cache().expect("query_cache to plant shadow");
-            cache
-                .conn()
-                .execute_batch("CREATE TEMP VIEW headings AS SELECT * FROM main.headings WHERE 0")
-                .unwrap();
+            let cache = ctx
+                .query_cache_unscoped()
+                .expect("query_cache to plant shadow");
+            plant_temp_on_pooled(
+                &cache,
+                "CREATE TEMP VIEW headings AS SELECT * FROM main.headings WHERE 0",
+            );
         }
 
         ctx.begin_request().expect("begin_request");
         let idx2 = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("second warm load_graph_index");
         assert_eq!(
             alpha_headings(&idx2),
@@ -2674,7 +3274,9 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
-        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        let idx1 = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert_eq!(idx1.documents.len(), 3, "three seeded docs");
 
         std::fs::write(
@@ -2685,7 +3287,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         let idx2 = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("second warm load_graph_index");
         assert_eq!(
             idx2.documents.len(),
@@ -2731,18 +3333,21 @@ mod tests {
 
         // Establish the warm connection.
         ctx.begin_request().expect("begin_request");
-        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        let idx1 = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert_eq!(idx1.documents.len(), 3, "three seeded docs");
         assert_eq!(alpha_headings(&idx1), 1, "alpha's heading is indexed");
 
         // Shadow `headings` on the held connection: reads omit alpha's rows,
         // writes forward to the real table so the refresh's DML succeeds.
         {
-            let cache = ctx.query_cache().expect("query_cache to plant shadow");
-            cache
-                .conn()
-                .execute_batch(
-                    "CREATE TEMP VIEW headings AS
+            let cache = ctx
+                .query_cache_unscoped()
+                .expect("query_cache to plant shadow");
+            plant_temp_on_pooled(
+                &cache,
+                "CREATE TEMP VIEW headings AS
                        SELECT * FROM main.headings WHERE doc_path <> 'alpha.md';
                      CREATE TEMP TRIGGER headings_shadow_insert
                        INSTEAD OF INSERT ON headings BEGIN
@@ -2758,8 +3363,7 @@ mod tests {
                        DELETE FROM main.headings
                          WHERE doc_path = OLD.doc_path AND slug = OLD.slug;
                      END;",
-                )
-                .unwrap();
+            );
         }
 
         // Add a doc WITH a heading, so the next request's incremental refresh
@@ -2772,7 +3376,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         let idx2 = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("warm load_graph_index across a writing refresh");
         // (a) The refresh happened: the new doc (and its heading) is indexed.
         assert_eq!(idx2.documents.len(), 4, "the writing refresh indexed delta");
@@ -2819,7 +3423,9 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
-        let before = ctx.load_graph_index().expect("first warm load_graph_index");
+        let before = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert!(
             before
                 .documents
@@ -2832,7 +3438,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         let after = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("second warm load_graph_index");
         assert!(
             !after
@@ -2862,9 +3468,9 @@ mod tests {
         // Establish warm state with no alias.
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
         assert!(ctx.config().index_options.alias_field.is_none());
 
         // Index-relevant change.
@@ -2875,7 +3481,9 @@ mod tests {
         ctx.begin_request()
             .expect("begin_request after config change");
         let config_alias = ctx.config().index_options.alias_field.clone();
-        let cache = ctx.query_cache().expect("query_cache after config change");
+        let _cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after config change");
         assert_eq!(
             config_alias.as_deref(),
             Some("aliases"),
@@ -2884,7 +3492,7 @@ mod tests {
         // The index-relevant drop happened in begin_request, so the cache was
         // reopened this request — proving config and cache are one generation.
         assert!(
-            !marker_present(&cache),
+            gen_number(&ctx) > g1,
             "index-relevant change must reopen the cache in the same request"
         );
     }
@@ -2901,7 +3509,7 @@ mod tests {
         write_config(&root, "links:\n  alias_field: aaaaaa\n");
         ctx.begin_request().expect("begin_request A");
         {
-            let _c = ctx.query_cache().expect("query_cache A");
+            let _c = ctx.query_cache_unscoped().expect("query_cache A");
         }
         assert_eq!(
             ctx.config().index_options.alias_field.as_deref(),
@@ -2920,7 +3528,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request B");
         {
-            let _c = ctx.query_cache().expect("query_cache B");
+            let _c = ctx.query_cache_unscoped().expect("query_cache B");
         }
         assert_eq!(
             ctx.config().index_options.alias_field.as_deref(),
@@ -2937,10 +3545,11 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        ctx.begin_request().expect("begin_request");
+        // Hold this request's scope: it binds generation 1, and the corruption
+        // seam keys the floor bump off the SCOPE's bound generation (NRN-253).
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache(&scope).expect("first warm query_cache");
         }
         let gen1 = ctx
             .current_generation()
@@ -2953,14 +3562,16 @@ mod tests {
             Some("database disk image is malformed".to_string()),
         );
         let err = anyhow::Error::new(corrupt).context("tool body failed");
-        ctx.note_tool_error(&err);
+        ctx.note_tool_error(&scope, &err);
 
-        // Next request reopens a NEW generation (marker gone) — the corruption
-        // bumped the invalidation floor past generation 1.
+        // Next request reopens a NEW generation — the corruption bumped the
+        // invalidation floor past generation 1.
         ctx.begin_request().expect("begin_request after eviction");
-        let cache = ctx.query_cache().expect("query_cache after eviction");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after eviction");
         assert!(
-            !marker_present(&cache),
+            gen_number(&ctx) > gen1.number,
             "state must be rebuilt after corruption eviction"
         );
         assert_eq!(doc_count(&cache), 3);
@@ -2979,42 +3590,44 @@ mod tests {
     fn warm_keeps_state_on_non_corruption_error() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
-        ctx.begin_request().expect("begin_request");
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache(&scope).expect("first warm query_cache");
         }
         assert!(ctx.warm_db_identity().is_some());
 
         let err = anyhow::anyhow!("some ordinary tool error");
-        ctx.note_tool_error(&err);
+        ctx.note_tool_error(&scope, &err);
         assert!(
             ctx.warm_db_identity().is_some(),
             "a non-corruption error must not evict the warm state"
         );
     }
 
-    /// FIX-3 (bound-generation attribution, NRN-251 review): a corruption error
-    /// attributed to an OLDER generation N must not invalidate a healthy,
-    /// newer `current` generation N+1. Models the NRN-253 concurrent-read-pool
-    /// scenario the eager `slot.current`-keyed floor bump got wrong: a request
-    /// bound to generation 1 fails after generation 2 has already become
-    /// current (e.g. another request's ground-shift reopen raced ahead of it).
-    /// The next request must still reuse generation 2 — no spurious reopen.
+    /// FIX-3 (bound-generation attribution, NRN-253): a corruption error
+    /// attributed via a request's SCOPE to an OLDER generation N must not
+    /// invalidate a healthy, newer `current` generation N+1. Models the concurrent-
+    /// read-pool scenario the eager `slot.current`-keyed floor bump got wrong: a
+    /// request whose scope bound generation 1 fails after generation 2 has already
+    /// become current (e.g. another request's ground-shift reopen raced ahead of
+    /// it). Keying the floor bump off `scope.bound_generation()` — NOT
+    /// `slot.current` — is what keeps generation 2 alive; the next request reuses
+    /// it with no spurious reopen.
     #[test]
     fn warm_corruption_error_does_not_invalidate_a_newer_current_generation() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        // Request 1 binds generation 1.
-        ctx.begin_request().expect("begin_request 1");
+        // Request 1's scope binds generation 1 — and is HELD to completion, exactly
+        // as an in-flight request would hold it while draining.
+        let scope1 = ctx.begin_request().expect("begin_request 1");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache(&scope1).expect("first warm query_cache");
         }
         assert_eq!(ctx.current_generation().expect("generation 1").number, 1);
 
-        // Advance `current` to generation 2 WITHOUT rebinding — models a
-        // different request opening N+1 while request 1's failure is still
-        // attributed to N.
+        // Advance `current` to generation 2 WITHOUT binding it into scope1 — models
+        // a DIFFERENT request opening N+1 while request 1's scope still points at N.
         let (_canonical, cache_dir) = cache_dir_for(&root).expect("cache_dir_for");
         std::fs::remove_dir_all(cache_dir.as_std_path()).expect("remove cache dir");
         ctx.force_reopen_without_binding()
@@ -3022,18 +3635,23 @@ mod tests {
         assert_eq!(ctx.current_generation().expect("generation 2").number, 2);
         assert_eq!(ctx.generation_opens(), 2);
 
-        // Request 1's corruption error surfaces now, still bound to generation 1.
+        // Request 1's corruption error surfaces now, attributed via scope1 (which
+        // bound generation 1), NOT via whatever is `current` (generation 2).
         let corrupt = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
             Some("database disk image is malformed".to_string()),
         );
-        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+        ctx.note_tool_error(
+            &scope1,
+            &anyhow::Error::new(corrupt).context("tool body failed"),
+        );
 
         // Generation 2 must survive: the next request reuses it (no reopen),
-        // proving the floor bump targeted generation 1, not `slot.current`.
+        // proving the floor bump targeted generation 1 (scope1's bound generation),
+        // not `slot.current`.
         ctx.begin_request().expect("begin_request after error");
         {
-            let _c = ctx.query_cache().expect("query_cache after error");
+            let _c = ctx.query_cache_unscoped().expect("query_cache after error");
         }
         assert_eq!(
             ctx.current_generation()
@@ -3046,6 +3664,44 @@ mod tests {
             ctx.generation_opens(),
             2,
             "no additional reopen — the floor bump must not reach past the errored generation"
+        );
+    }
+
+    /// NRN-253 per-request note isolation: two request scopes alive on ONE context
+    /// simultaneously (the concurrent-read-pool shape, modeled by creating both
+    /// scopes directly) each own a PRIVATE note buffer — a note pushed to one lands
+    /// only in that scope's drain, never the other's. This is what makes note
+    /// forwarding safe once `call_lock` no longer serializes tool bodies: there is
+    /// no shared context buffer for concurrent requests to interleave into, so
+    /// `run_wrapped`'s drain of one request's scope can never carry another's note.
+    #[test]
+    fn request_scopes_isolate_operator_notes() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Two requests' scopes alive at the same time on one context.
+        let scope_a = ctx.begin_request().expect("begin_request A");
+        let scope_b = ctx.begin_request().expect("begin_request B");
+
+        scope_a.push_operator_note("a-first");
+        scope_b.push_operator_note("b-first");
+        scope_a.push_operator_note("a-second");
+
+        // Each scope drains ONLY its own notes, in push order — no cross-leak.
+        assert_eq!(
+            scope_a.take_operator_notes(),
+            vec!["a-first".to_string(), "a-second".to_string()],
+            "scope A drains only its own notes, in order"
+        );
+        assert_eq!(
+            scope_b.take_operator_notes(),
+            vec!["b-first".to_string()],
+            "scope B drains only its own note — nothing from A leaked in"
+        );
+        // A drained scope is empty on a second drain (no residue left behind).
+        assert!(
+            scope_a.take_operator_notes().is_empty(),
+            "a drained scope holds no residual notes"
         );
     }
 
@@ -3062,9 +3718,9 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
 
         // Panic on another thread WHILE holding the cache guard: its `Drop` runs
         // during unwind and bumps the slot's invalidation floor past this
@@ -3072,7 +3728,9 @@ mod tests {
         let ctx2 = Arc::clone(&ctx);
         let handle = std::thread::spawn(move || {
             ctx2.begin_request().expect("begin_request on panic thread");
-            let _cache = ctx2.query_cache().expect("query_cache on panic thread");
+            let _cache = ctx2
+                .query_cache_unscoped()
+                .expect("query_cache on panic thread");
             panic!("intentional panic while holding the warm guard");
         });
         assert!(
@@ -3080,30 +3738,31 @@ mod tests {
             "the spawned thread must have panicked while holding the guard"
         );
 
-        // The first post-panic request (request 2) must recover: rebuilt
-        // generation, marker gone. Plant a fresh marker here so request 3 below
-        // can prove the connection this request opened is REUSED, not re-evicted.
+        // The first post-panic request (request 2) must recover: a rebuilt
+        // generation (number advanced past g1). Capture it so request 3 below can
+        // prove the generation this request opened is REUSED, not re-evicted.
         ctx.begin_request().expect("begin_request after panic");
         {
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("query_cache must recover from a panic-invalidated generation");
             assert!(
-                !marker_present(&cache),
+                gen_number(&ctx) > g1,
                 "warm state must be rebuilt after panic recovery"
             );
             assert_eq!(doc_count(&cache), 3);
-            create_marker(&cache);
         }
+        let g2 = gen_number(&ctx);
 
         // The floor bump must be one-shot, not sticky: request 3 must reuse the
-        // SAME connection request 2 rebuilt (marker still present), proving the
+        // SAME generation request 2 rebuilt (number unchanged), proving the
         // recovery does not keep re-evicting on every subsequent request.
         ctx.begin_request().expect("begin_request request 3");
-        let cache = ctx.query_cache().expect("query_cache request 3");
-        assert!(
-            marker_present(&cache),
-            "a second post-panic request must reuse the recovered connection, \
+        let _cache = ctx.query_cache_unscoped().expect("query_cache request 3");
+        assert_eq!(
+            gen_number(&ctx),
+            g2,
+            "a second post-panic request must reuse the recovered generation, \
              not evict it again — the invalidation must be one-shot, not sticky"
         );
     }
@@ -3126,10 +3785,11 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
 
-        // First request opens generation 1.
-        ctx.begin_request().expect("begin_request");
+        // First request opens generation 1; hold its scope to attribute the
+        // corruption below to the generation it bound.
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache(&scope).expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         assert_eq!(ctx.generation_opens(), 1, "cold start is one open");
@@ -3140,7 +3800,10 @@ mod tests {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
             Some("database disk image is malformed".to_string()),
         );
-        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+        ctx.note_tool_error(
+            &scope,
+            &anyhow::Error::new(corrupt).context("tool body failed"),
+        );
 
         const N: usize = 8;
         let barrier = Arc::new(Barrier::new(N));
@@ -3151,7 +3814,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
                 ctx.begin_request().expect("begin_request");
-                let cache = ctx.query_cache().expect("query_cache");
+                let cache = ctx.query_cache_unscoped().expect("query_cache");
                 doc_count(&cache)
             }));
         }
@@ -3184,7 +3847,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let gen1 = ctx.current_generation().expect("generation 1 held");
@@ -3199,7 +3862,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("second warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
             assert_eq!(
                 doc_count(&cache),
                 3,
@@ -3209,11 +3872,10 @@ mod tests {
         let gen2 = ctx.current_generation().expect("generation 2 held");
         assert_eq!(gen2.number, 2, "reopen advanced the generation number");
 
-        // gen1 drained on N: its still-open connection serves its own snapshot,
-        // even though the file was unlinked.
+        // gen1 drained on N: its still-open pooled connection serves its own
+        // snapshot, even though the file was unlinked.
         let gen1_docs: i64 = gen1
-            .cache
-            .lock()
+            .test_read_conn()
             .conn()
             .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
             .expect("gen1 connection still usable");
@@ -3241,6 +3903,202 @@ mod tests {
             weak.upgrade().is_none(),
             "generation N is fully dropped — connection + sentinel fd released — with its last Arc"
         );
+    }
+
+    // ---- Read pool (NRN-253) ------------------------------------------------
+
+    /// Two concurrently-held checkouts are DISTINCT connections: the first pops the
+    /// seed, the second lazily grows a second connection (proven by distinct
+    /// `sqlite3*` pointers and a grow-open count of exactly 1).
+    #[test]
+    fn two_concurrent_checkouts_are_distinct_connections() {
+        // Force a cap of at least 2 so growth is possible even on a single-core
+        // host (default cap = min(8, parallelism) could be 1 there). The shared
+        // guard serializes the cap override against the `server` suite too.
+        let _cap = ReadPoolCapGuard::pin(8);
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache_unscoped().expect("warm up");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+
+        // Hold BOTH checkouts at once: the pool cannot hand the same connection
+        // twice, so it must grow a second.
+        let c1 = gen.test_read_conn();
+        let c2 = gen.test_read_conn();
+        assert_ne!(
+            conn_ptr(&c1),
+            conn_ptr(&c2),
+            "two concurrently-held checkouts must be distinct connections"
+        );
+        assert_eq!(
+            gen.read_pool.grow_opens.load(Ordering::Relaxed),
+            1,
+            "exactly one connection was lazily grown beyond the seed"
+        );
+    }
+
+    /// Sequential checkout/drop/checkout REUSES the pooled connection: the seed
+    /// returns to the pool on drop and is popped again — same `sqlite3*` pointer, no
+    /// lazy-grow open.
+    #[test]
+    fn sequential_checkout_reuses_pooled_connection() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache_unscoped().expect("warm up");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        assert_eq!(
+            gen.read_pool.grow_opens.load(Ordering::Relaxed),
+            0,
+            "only the seed exists before any concurrent checkout"
+        );
+
+        let ptr1 = {
+            let c = gen.test_read_conn();
+            conn_ptr(&c)
+        };
+        let ptr2 = {
+            let c = gen.test_read_conn();
+            conn_ptr(&c)
+        };
+        assert_eq!(
+            ptr1, ptr2,
+            "sequential checkout/drop/checkout must reuse the same pooled connection"
+        );
+        assert_eq!(
+            gen.read_pool.grow_opens.load(Ordering::Relaxed),
+            0,
+            "reuse must not lazily grow a new connection"
+        );
+    }
+
+    /// Wait-at-cap: with the cap forced to 1, a second checkout BLOCKS while the
+    /// only connection is held, then proceeds once it is returned. Channel-gated,
+    /// no sleeps in the success path.
+    #[test]
+    fn checkout_waits_at_cap_until_a_connection_returns() {
+        let _cap = ReadPoolCapGuard::pin(1);
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache_unscoped().expect("warm up");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+
+        // Hold the ONLY connection (cap == 1).
+        let held = gen.test_read_conn();
+
+        let gen_waiter = Arc::clone(&gen);
+        let (got_tx, got_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let c = gen_waiter.test_read_conn(); // blocks until `held` returns
+            got_tx.send(()).unwrap();
+            drop(c);
+        });
+
+        // The waiter must be blocked: it cannot have acquired a connection while
+        // the only one is still held.
+        assert!(
+            got_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "second checkout must block while the only connection is held"
+        );
+
+        // Return the held connection; the waiter now proceeds.
+        drop(held);
+        got_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("blocked checkout must proceed once a connection is returned");
+        waiter.join().expect("waiter thread panicked");
+    }
+
+    /// A grow FAILURE degrades to waiting, never fails the read (NRN-253 review):
+    /// with the seed checked out and growth broken (grow params pointing at a
+    /// nonexistent vault), a second checkout blocks — where it previously returned
+    /// the grow error, failing a read that succeeded pre-pool (e.g. the inode-swap
+    /// bail during an external `cache clear`) — and proceeds, error-free, once the
+    /// seed checks back in.
+    #[test]
+    fn checkout_grow_failure_degrades_to_waiting_for_a_checkin() {
+        let (_tmp, root) = make_seeded_vault();
+        let seed = Cache::open(&root).expect("seed cache");
+        // Broken on purpose: a lazy grow against a nonexistent root always fails.
+        let grow = GrowParams {
+            vault_root: root.join("does-not-exist"),
+            identity: IndexIdentity {
+                index_set_hash: String::new(),
+                alias_field: None,
+                ignore: Vec::new(),
+            },
+            index_set: BTreeSet::new(),
+            expected_identity: (0, 0),
+        };
+        let pool = ReadPool::seed(seed, grow, 2).expect("seed pool");
+
+        // Hold the seed. Capacity remains (cap 2, total 1), so the concurrent
+        // checkout below attempts — and fails — the lazy grow.
+        let held = pool.checkout();
+
+        let pool_waiter = Arc::clone(&pool);
+        let (got_tx, got_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let c = pool_waiter.checkout(); // grow fails → degrades to waiting
+            got_tx.send(()).unwrap();
+            drop(c);
+        });
+
+        // The grower must be BLOCKED (not errored): nothing is idle yet.
+        assert!(
+            got_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "a failed grow must degrade the checkout to waiting, not fail it"
+        );
+
+        // Check the seed back in; the degraded waiter now proceeds, no error
+        // surfaced anywhere.
+        drop(held);
+        got_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the degraded checkout must proceed once the seed checks in");
+        waiter.join().expect("waiter thread panicked");
+        assert_eq!(
+            pool.grow_opens.load(Ordering::Relaxed),
+            0,
+            "no connection was ever grown through the broken params"
+        );
+    }
+
+    /// query_only enforcement: a write attempted through a pooled connection fails
+    /// with a `SQLITE_READONLY`-class error.
+    #[test]
+    fn pooled_connection_is_query_only() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("query_cache");
+
+        let err = cache
+            .conn()
+            .execute("CREATE TABLE nope (x INTEGER)", [])
+            .expect_err("a write through a query_only pooled connection must fail");
+        match err {
+            rusqlite::Error::SqliteFailure(e, _) => assert_eq!(
+                e.code,
+                rusqlite::ErrorCode::ReadOnly,
+                "expected SQLITE_READONLY, got {e:?}"
+            ),
+            other => panic!("expected a SqliteFailure/ReadOnly error, got {other:?}"),
+        }
     }
 
     // ---- Writer-queue generation opens (NRN-252) ----------------------------
@@ -3271,10 +4129,10 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        // Cold start opens generation 1.
-        ctx.begin_request().expect("begin_request");
+        // Cold start opens generation 1; hold its scope for the corruption below.
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache(&scope).expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         assert_eq!(ctx.generation_opens(), 1, "cold start is one open");
@@ -3285,7 +4143,10 @@ mod tests {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
             Some("database disk image is malformed".to_string()),
         );
-        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+        ctx.note_tool_error(
+            &scope,
+            &anyhow::Error::new(corrupt).context("tool body failed"),
+        );
 
         // Occupy the writer so BOTH open ops queue behind the blocker and then run
         // strictly FIFO — deterministic, no sleeps.
@@ -3328,7 +4189,7 @@ mod tests {
         // Establish generation 1 so the slot is warm.
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
 
         // A watch over the queue's shutdown flag — holds its own `Arc`, so it
@@ -3371,13 +4232,136 @@ mod tests {
         dropper.join().expect("dropper thread panicked");
     }
 
+    // ---- Request-boundary freshness probe (NRN-253) -------------------------
+
+    /// The observable NRN-253 change: on a vault the probe judges FRESH, a warm
+    /// read runs ZERO refresh ops (before NRN-253 every request submitted one).
+    /// The first request rebuilds the unbuilt cache via exactly one refresh; a
+    /// second request over the unchanged vault probes Fresh and adds none.
+    #[test]
+    fn warm_fresh_vault_probe_runs_no_refresh() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // First request: the cache is unbuilt, so the probe reports Stale and one
+        // refresh (the rebuild) runs.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let after_build = gen.refresh_exec_count.load(Ordering::Relaxed);
+        assert_eq!(
+            after_build, 1,
+            "the first request rebuilds the unbuilt cache via exactly one refresh"
+        );
+
+        // Second request, unchanged vault: probe Fresh ⇒ no further refresh.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            after_build,
+            "a fresh vault must run NO refresh op — the probe served the read directly"
+        );
+    }
+
+    /// A stale vault (a doc ADDED between calls) runs EXACTLY ONE refresh and the
+    /// request sees the change.
+    #[test]
+    fn warm_added_file_runs_exactly_one_refresh_and_is_seen() {
+        let (tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            ctx.query_cache_unscoped().expect("first warm query_cache");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let base = gen.refresh_exec_count.load(Ordering::Relaxed);
+
+        std::fs::write(
+            tmp.path().join("delta.md"),
+            "---\ntype: note\nstatus: active\n---\nDelta body\n",
+        )
+        .unwrap();
+
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+        assert_eq!(doc_count(&cache), 4, "the request sees the added doc");
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            base + 1,
+            "a stale (added) vault runs exactly one refresh"
+        );
+    }
+
+    /// The easy miss: a DELETION-only change (no add, no modify) is caught by the
+    /// probe (whole-walk file-count shortfall), runs exactly one refresh, and the
+    /// request sees the doc purged.
+    #[test]
+    fn warm_deletion_only_change_detected_by_probe() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let base = gen.refresh_exec_count.load(Ordering::Relaxed);
+
+        std::fs::remove_file(root.join("gamma.md").as_std_path()).unwrap();
+
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+        assert_eq!(
+            doc_count(&cache),
+            2,
+            "the deletion-only change must be detected and the doc purged"
+        );
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            base + 1,
+            "a deletion-only stale vault runs exactly one refresh"
+        );
+    }
+
+    /// First-touch: a brand-new warm context whose cache has NEVER been built must
+    /// still build — the probe reports Stale(NeverBuilt) so the rebuild runs and
+    /// the seeded docs are indexed on the very first request.
+    #[test]
+    fn warm_first_touch_unbuilt_cache_still_builds() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
+        assert_eq!(
+            doc_count(&cache),
+            3,
+            "the first request over an unbuilt cache must build and index the vault"
+        );
+        let gen = ctx.current_generation().expect("generation held");
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            1,
+            "the unbuilt cache is rebuilt via exactly one refresh on first touch"
+        );
+    }
+
     // ---- Writer-queue freshness refresh (NRN-252) ---------------------------
 
     /// Separate-connection proof: the freshness refresh runs on the generation's
     /// WRITE connection on the writer thread, so a directly-submitted refresh
-    /// completes even while a thread holds the request-facing READ connection's
-    /// owned guard. If the refresh still touched the read connection it would
-    /// block on the held guard forever (deadlock) and the timeout would fire.
+    /// completes even while a thread holds a checked-out pooled READ connection. If
+    /// the refresh still touched the read connection it would block on the held
+    /// checkout forever (deadlock) and the timeout would fire.
     #[test]
     fn refresh_runs_on_write_connection_not_the_held_read_guard() {
         let (_tmp, root) = make_seeded_vault();
@@ -3386,13 +4370,13 @@ mod tests {
         // Establish generation 1 (its cold-start refresh already ran).
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let gen = ctx.current_generation().expect("generation held");
 
-        // Hold the request-facing READ connection's owned guard on THIS thread.
-        let read_guard = gen.cache.lock_arc();
+        // Hold a checked-out pooled READ connection on THIS thread.
+        let read_guard = gen.test_read_conn();
 
         // A refresh submitted now must complete against the WRITE connection,
         // never blocking on the read guard we hold.
@@ -3423,7 +4407,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen = ctx.current_generation().expect("generation held");
         let baseline = gen.refresh_exec_count.load(Ordering::Relaxed);
@@ -3477,7 +4461,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let gen = ctx.current_generation().expect("generation held");
@@ -3539,7 +4523,9 @@ mod tests {
 
         // And the edit that landed mid-flight is visible afterward.
         ctx.begin_request().expect("begin_request");
-        let cache = ctx.query_cache().expect("query_cache after refreshes");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after refreshes");
         assert_eq!(
             doc_count(&cache),
             4,
@@ -3554,13 +4540,12 @@ mod tests {
     /// routed through the queue-refresh path.
     #[test]
     fn refresh_corruption_error_survives_ticket_and_evicts_generation() {
-        let (_tmp, root) = make_seeded_vault();
+        let (tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen1 = ctx.current_generation().expect("generation 1 held");
         assert_eq!(gen1.number, 1);
@@ -3572,11 +4557,24 @@ mod tests {
         );
         *gen1.inject_refresh_error.lock().unwrap() = Some(CacheError::Sqlite(corrupt));
 
+        // Dirty the vault so the NRN-253 probe reports Stale and routes the request
+        // through the refresh — where the injected corruption fires. (Before
+        // NRN-253 the refresh ran unconditionally; now an unchanged vault would
+        // probe Fresh and never reach the refresh, so the failure must be staged
+        // behind a real change.)
+        std::fs::write(
+            tmp.path().join("delta.md"),
+            "---\ntype: note\n---\nDelta body\n",
+        )
+        .unwrap();
+
         // The next request's refresh fails; the concrete error must propagate out
-        // of query_cache still classifiable as corruption.
-        ctx.begin_request().expect("begin_request");
+        // of query_cache still classifiable as corruption. `query_cache` binds the
+        // generation into the scope BEFORE the refresh runs, so the scope carries
+        // the bound generation even though the call returns Err.
+        let scope = ctx.begin_request().expect("begin_request");
         let err = ctx
-            .query_cache()
+            .query_cache(&scope)
             .expect_err("a corruption refresh error must propagate out of query_cache");
         assert!(
             is_sqlite_corruption(&err),
@@ -3584,16 +4582,20 @@ mod tests {
         );
 
         // Feed it to the eviction seam exactly as `run_wrapped` does.
-        ctx.note_tool_error(&err);
+        ctx.note_tool_error(&scope, &err);
 
-        // The next request reopens a NEW generation (marker gone, number bumped).
+        // The next request reopens a NEW generation (number bumped).
         ctx.begin_request().expect("begin_request after eviction");
-        let cache = ctx.query_cache().expect("query_cache after eviction");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after eviction");
         assert!(
-            !marker_present(&cache),
+            gen_number(&ctx) > gen1.number,
             "state must be rebuilt after the ticket-routed corruption eviction"
         );
-        assert_eq!(doc_count(&cache), 3);
+        // 4, not 3: the reopened generation rebuilds against the live vault, which
+        // now carries the `delta.md` staged above to force the stale-probe refresh.
+        assert_eq!(doc_count(&cache), 4);
         drop(cache);
         assert_eq!(
             ctx.current_generation()
@@ -3656,7 +4658,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen = ctx.current_generation().expect("generation held");
 
@@ -3690,7 +4692,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen = ctx.current_generation().expect("generation held");
 
@@ -3747,14 +4749,15 @@ mod tests {
         // Open the generation and build the cache (3 seeded docs).
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
 
         // Warm mutation (confirm): applies on disk AND commits its increment.
-        ctx.begin_request().expect("begin_request");
+        let scope = ctx.begin_request().expect("begin_request");
         let report = crate::mcp::tools::set::handle(
             &ctx,
+            &scope,
             crate::mcp::tools::set::SetParams {
                 target: "beta".into(),
                 field_json: vec![r#"status="active""#.into()],
@@ -3797,7 +4800,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let generation = ctx.current_generation().expect("a current generation");
@@ -3817,7 +4820,7 @@ mod tests {
         // Boundary 1: alpha's chunk committed; delta's has NOT started.
         reached.recv().expect("boundary 1");
         {
-            let cache = generation.cache.lock();
+            let cache = generation.test_read_conn();
             assert!(
                 body_of(&cache, "alpha.md")
                     .as_deref()
@@ -3834,7 +4837,7 @@ mod tests {
         // Boundary 2: delta's chunk committed.
         reached.recv().expect("boundary 2");
         {
-            let cache = generation.cache.lock();
+            let cache = generation.test_read_conn();
             assert!(
                 doc_present(&cache, "delta.md"),
                 "delta present after its own chunk commits"
@@ -3863,7 +4866,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let generation = ctx.current_generation().expect("a current generation");
@@ -3910,9 +4913,9 @@ mod tests {
 
         let (_tmp, root) = make_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
-        ctx.begin_request().expect("begin_request");
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache(&scope).expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let generation = ctx.current_generation().expect("a current generation");
@@ -3924,11 +4927,14 @@ mod tests {
         let (reached, release) = ctx.install_increment_gate(&generation);
 
         // Drive the REAL tool seam (which awaits) on a worker thread so this thread
-        // can evict the generation mid-commit.
+        // can evict the generation mid-commit. The request's scope moves onto the
+        // worker (the increment op pushes its degrade note into it — NRN-253); the
+        // worker returns the drained notes back for assertion.
         let ctx_worker = Arc::clone(&ctx);
         let changed_worker = changed.clone();
         let worker = std::thread::spawn(move || {
-            ctx_worker.commit_apply_increments(&changed_worker);
+            ctx_worker.commit_apply_increments(&scope, &changed_worker);
+            scope.take_operator_notes()
         });
 
         // First chunk (delta) committed; op parked at boundary 1.
@@ -3939,14 +4945,15 @@ mod tests {
         // before the next chunk (epsilon) runs.
         release.send(()).unwrap();
 
-        // The tool seam returns normally (never fails) despite the drop.
-        worker
+        // The tool seam returns normally (never fails) despite the drop, and hands
+        // back its scope's drained notes.
+        let notes = worker
             .join()
             .expect("commit_apply_increments must not panic");
 
         // The remaining chunk never ran — only delta committed.
         {
-            let cache = generation.cache.lock();
+            let cache = generation.test_read_conn();
             assert!(
                 doc_present(&cache, "delta.md"),
                 "delta (committed before the death) is present"
@@ -3957,11 +4964,68 @@ mod tests {
             );
         }
 
-        // The degrade left the both-surfaces operator note.
-        let notes = ctx.take_operator_notes();
+        // The degrade left the both-surfaces operator note (drained above).
         assert!(
             notes.iter().any(|n| n.contains("abandoned")),
             "a dropped increment must leave the deferred operator note, got {notes:?}"
+        );
+    }
+
+    /// Eviction targeting (NRN-253 review): a corruption-class increment failure
+    /// must evict the generation the increment RAN ON (`slot.current` at commit
+    /// time), not the request's bound generation. The scope binds generation 1, a
+    /// concurrent-style reopen advances the slot to generation 2, and the
+    /// corrupting increment runs on 2 — so the floor must exclude 2 (a fresh
+    /// request opens 3). Keying the bump off the scope's bound generation would
+    /// set the floor to only 2, leaving the actually-corrupt generation 2
+    /// satisfying it and serving.
+    #[test]
+    fn increment_corruption_evicts_generation_it_ran_on_not_bound_generation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Bind a request scope on generation 1.
+        let scope = ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx
+                .query_cache(&scope)
+                .expect("query_cache on generation 1");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        assert_eq!(scope.bound_generation(), 1, "scope bound generation 1");
+
+        // Force a reopen: invalidate generation 1 and open generation 2 while
+        // this request's scope stays bound to 1 (models a concurrent reopen
+        // landing mid-request).
+        ctx.test_invalidate_current_generation();
+        {
+            let _c = ctx.query_cache_unscoped().expect("reopen generation 2");
+        }
+        let gen2 = ctx.current_generation().expect("generation 2 current");
+        assert_eq!(gen2.number, 2, "the reopen produced generation 2");
+
+        // Inject a SQLITE_CORRUPT failure into generation 2's increment commit.
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        *gen2.inject_increment_error.lock().unwrap() = Some(CacheError::Sqlite(corrupt));
+
+        // A real changed file so the commit has work to submit; the increment
+        // runs on generation 2 and fails with the injected corruption.
+        std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta\n").unwrap();
+        ctx.commit_apply_increments(&scope, &["delta.md".into()]);
+
+        // The floor must now exclude generation 2: a fresh request reopens to 3.
+        ctx.begin_request().expect("begin_request after eviction");
+        let _c = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after eviction");
+        assert_eq!(
+            gen_number(&ctx),
+            3,
+            "the eviction must target the generation the increment ran on (2), \
+             not the scope's bound generation (1)"
         );
     }
 }
