@@ -21,9 +21,9 @@
 //!   shared attempt serializes initialization: the second concurrent `hello`
 //!   awaits (and shares) the first's result rather than opening a second context;
 //!   [`tokio::sync::OnceCell`] retains the successfully published server.
-//! - **(non-poisoning) A failed open retries.** `get_or_try_init` leaves the
-//!   cell empty on error, so the next `hello` for that vault attempts the open
-//!   again.
+//! - **(non-poisoning) A failed open retries.** The failed shared attempt clears
+//!   itself while the `OnceCell` remains unset, so the next `hello` for that
+//!   vault starts a fresh attempt.
 //!
 //! The identity hash is derived by the daemon itself from the `hello`'s
 //! `vault_root` via [`crate::cache::vault_identity`] — a client-supplied hash is
