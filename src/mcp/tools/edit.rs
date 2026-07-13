@@ -209,15 +209,8 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: EditParams) -> Result
 mod tests {
     use super::*;
 
-    // NRN-253 test shim: thread a fresh single-use RequestScope so the existing
-    // `handle_output(&ctx, p)` call sites compile unchanged (production threads
-    // the request's scope from `run_wrapped`).
-    fn handle_output(
-        ctx: &VaultContext,
-        p: EditParams,
-    ) -> anyhow::Result<crate::mcp::mutation_result::MutationResult<EditOutput>> {
-        let scope = ctx.begin_request()?;
-        super::handle_output(ctx, &scope, p)
+    crate::mcp::tools::scoped_shim! {
+        fn handle_output(EditParams) -> crate::mcp::mutation_result::MutationResult<EditOutput>;
     }
     use crate::edit::ops::EditOp;
     use rmcp::handler::server::tool::IntoCallToolResult;

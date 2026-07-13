@@ -453,19 +453,9 @@ pub fn handle(
 mod tests {
     use super::*;
 
-    // NRN-253 test shims: thread a fresh single-use RequestScope so the existing
-    // `handle(&ctx, p)` / `handle_output(&ctx, p)` call sites compile unchanged
-    // (production threads the request's scope from `run_wrapped`).
-    fn handle(ctx: &VaultContext, p: NewParams) -> anyhow::Result<crate::new::report::NewReport> {
-        let scope = ctx.begin_request()?;
-        super::handle(ctx, &scope, p)
-    }
-    fn handle_output(
-        ctx: &VaultContext,
-        p: NewParams,
-    ) -> anyhow::Result<crate::mcp::mutation_result::MutationResult<NewOutput>> {
-        let scope = ctx.begin_request()?;
-        super::handle_output(ctx, &scope, p)
+    crate::mcp::tools::scoped_shim! {
+        fn handle(NewParams) -> crate::new::report::NewReport;
+        fn handle_output(NewParams) -> crate::mcp::mutation_result::MutationResult<NewOutput>;
     }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;

@@ -220,16 +220,9 @@ pub fn handle_with(
 mod tests {
     use super::*;
 
-    // NRN-253 test shims: thread a fresh single-use RequestScope so the existing
-    // `handle(&ctx, p)` / `handle_with(&ctx, p)` call sites compile unchanged
-    // (production threads the request's scope from `run_wrapped`).
-    fn handle(ctx: &VaultContext, params: &DescribeParams) -> anyhow::Result<DescribeOutput> {
-        let scope = ctx.begin_request()?;
-        super::handle(ctx, &scope, params)
-    }
-    fn handle_with(ctx: &VaultContext, params: &DescribeParams) -> anyhow::Result<DescribeOutput> {
-        let scope = ctx.begin_request()?;
-        super::handle_with(ctx, &scope, params)
+    crate::mcp::tools::scoped_shim! {
+        fn handle(&DescribeParams) -> DescribeOutput;
+        fn handle_with(&DescribeParams) -> DescribeOutput;
     }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;

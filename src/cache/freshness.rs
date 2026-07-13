@@ -14,12 +14,11 @@
 //! the watcher is unavailable or still warming up, so it is not throwaway
 //! scaffolding.
 
-use std::collections::HashMap;
 use std::ops::ControlFlow;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::cache::change_detection::walk_markdown_files;
+use crate::cache::change_detection::{load_cached_metadata, walk_markdown_files};
 use crate::cache::error::CacheError;
 use crate::cache::Cache;
 
@@ -30,13 +29,18 @@ pub(crate) enum Freshness {
     /// directly, with no refresh.
     Fresh,
     /// The cache is behind the filesystem; the request must run a refresh before
-    /// serving. The reason names the first divergence for logging and tests.
+    /// serving. The reason names the first divergence found.
     Stale(StaleReason),
 }
 
 /// Why a probe judged the cache stale. The first divergence found — kept because
 /// it is cheap: the walk short-circuits at the first added/modified file, and a
 /// deletion falls out of a whole-walk file-count shortfall against the baseline.
+///
+/// Production discards the reason today (a Stale verdict routes to the refresh
+/// regardless of why); its consumers are the probe's tests. It stays on the
+/// verdict because it costs nothing to carry, and a diagnostics consumer — e.g.
+/// Phase 3 shadow-verify or stale-probe logging — is plausible future work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StaleReason {
     /// The cache has never been fully built (no `last_full_rebuild_ts` meta row).
@@ -96,10 +100,13 @@ impl FreshnessProbe for StatSweepProbe {
             return Ok(Freshness::Stale(StaleReason::NeverBuilt));
         }
 
-        // Baseline in ONE query off the read connection. Same rows and same
-        // cheap-check columns `detect` compares against (minus the hash the probe
-        // never uses).
-        let baseline = load_baseline(&cache.conn)?;
+        // Baseline in ONE query off the read connection — `change_detection`'s
+        // own loader, so the probe reads exactly the rows `detect` would compare
+        // against (it simply never looks at the hash: a stat divergence goes
+        // straight to Stale rather than hash-verifying). Sharing the loader means
+        // a future `documents`-table change cannot silently diverge the probe's
+        // Fresh verdict from `detect`'s.
+        let baseline = load_cached_metadata(&cache.conn)?;
 
         // Walk with the SAME ignore rules `detect` uses, short-circuiting at the
         // first divergence. `seen` counts baseline hits so a clean walk shorter
@@ -109,8 +116,8 @@ impl FreshnessProbe for StatSweepProbe {
             vault_root,
             &cache.files_ignore,
             &mut |rel: &Utf8Path, mtime_ns: i64, size_bytes: i64| match baseline.get(rel) {
-                Some(&(base_mtime, base_size)) => {
-                    if mtime_ns == base_mtime && size_bytes == base_size {
+                Some(meta) => {
+                    if mtime_ns == meta.mtime_ns && size_bytes == meta.size_bytes {
                         seen += 1;
                         ControlFlow::Continue(())
                     } else {
@@ -134,29 +141,6 @@ impl FreshnessProbe for StatSweepProbe {
 
         Ok(Freshness::Fresh)
     }
-}
-
-/// Load the cheap-check baseline — `path -> (mtime_ns, size_bytes)` — from the
-/// cache's `documents` table. The same source rows `change_detection::detect`
-/// reads via `load_cached_metadata`, minus the `hash` column the probe never
-/// needs (a stat divergence goes straight to Stale rather than hash-verifying).
-fn load_baseline(
-    conn: &rusqlite::Connection,
-) -> Result<HashMap<Utf8PathBuf, (i64, i64)>, CacheError> {
-    let mut stmt = conn.prepare("SELECT path, mtime_ns, size_bytes FROM documents")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    })?;
-    let mut out = HashMap::new();
-    for r in rows {
-        let (path, mtime_ns, size_bytes) = r?;
-        out.insert(Utf8PathBuf::from(path), (mtime_ns, size_bytes));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

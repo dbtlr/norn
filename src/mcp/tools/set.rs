@@ -304,12 +304,8 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: SetParams) -> Result<
 mod tests {
     use super::*;
 
-    // NRN-253 test shim: thread a fresh single-use RequestScope so the existing
-    // `handle(&ctx, p)` call sites compile unchanged (production threads the
-    // request's scope from `run_wrapped`).
-    fn handle(ctx: &VaultContext, p: SetParams) -> anyhow::Result<SetReport> {
-        let scope = ctx.begin_request()?;
-        super::handle(ctx, &scope, p)
+    crate::mcp::tools::scoped_shim! {
+        fn handle(SetParams) -> SetReport;
     }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;

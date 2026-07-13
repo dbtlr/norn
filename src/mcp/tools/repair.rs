@@ -242,12 +242,8 @@ fn normalized_filter_values(values: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // NRN-253 test shim: thread a fresh single-use RequestScope so the existing
-    // `handle(&ctx, p)` call sites compile unchanged (production threads the
-    // request's scope from `run_wrapped`).
-    fn handle(ctx: &VaultContext, p: RepairParams) -> anyhow::Result<RepairOutput> {
-        let scope = ctx.begin_request()?;
-        super::handle(ctx, &scope, p)
+    crate::mcp::tools::scoped_shim! {
+        fn handle(RepairParams) -> RepairOutput;
     }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;

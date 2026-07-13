@@ -74,13 +74,21 @@ pub fn detect(
     Ok(changes)
 }
 
-struct FileMeta {
-    mtime_ns: i64,
-    size_bytes: i64,
+/// Per-file metadata cached in the `documents` table. `pub(crate)` (with
+/// [`load_cached_metadata`]) so the NRN-253 freshness probe consumes the SAME
+/// loader `detect` does — the probe ignores `hash` (a stat divergence goes
+/// straight to Stale), but sharing the query keeps a future `documents`-table
+/// change from silently diverging the probe's Fresh verdict from `detect`'s.
+pub(crate) struct FileMeta {
+    pub(crate) mtime_ns: i64,
+    pub(crate) size_bytes: i64,
     hash: String,
 }
 
-fn load_cached_metadata(
+/// Load the cheap-check baseline — `path -> FileMeta` — from the cache's
+/// `documents` table. The one loader shared by `detect` and the freshness
+/// probe (see [`FileMeta`]).
+pub(crate) fn load_cached_metadata(
     conn: &rusqlite::Connection,
 ) -> Result<HashMap<Utf8PathBuf, FileMeta>, CacheError> {
     let mut stmt = conn.prepare("SELECT path, mtime_ns, size_bytes, hash FROM documents")?;
@@ -182,8 +190,12 @@ fn walk_visit<B>(
                 return Ok(ControlFlow::Break(b));
             }
         } else if ft.is_file() && path.extension() == Some("md") {
-            let rel = path.strip_prefix(base).unwrap_or(&path).to_owned();
-            if crate::graph::is_ignored(&rel, ignore) {
+            // Pass the borrow straight through: `strip_prefix` already yields a
+            // `&Utf8Path`, and every visitor takes one — so the common walk path
+            // allocates nothing per file (the probe's Fresh sweep is hot), and a
+            // collecting visitor clones exactly once at its own insert.
+            let rel = path.strip_prefix(base).unwrap_or(&path);
+            if crate::graph::is_ignored(rel, ignore) {
                 continue;
             }
             let meta = entry.metadata().map_err(|e| CacheError::Io {
@@ -197,7 +209,7 @@ fn walk_visit<B>(
                 .map(|d| d.as_nanos() as i64)
                 .unwrap_or(0);
             let size_bytes = meta.len() as i64;
-            if let ControlFlow::Break(b) = visit(&rel, mtime_ns, size_bytes) {
+            if let ControlFlow::Break(b) = visit(rel, mtime_ns, size_bytes) {
                 return Ok(ControlFlow::Break(b));
             }
         }

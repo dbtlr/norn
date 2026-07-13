@@ -295,12 +295,8 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: FindParams) -> Result
 mod tests {
     use super::*;
 
-    // NRN-253 test shim: thread a fresh single-use RequestScope so the existing
-    // `handle(&ctx, p)` call sites compile unchanged (production threads the
-    // request's scope from `run_wrapped`).
-    fn handle(ctx: &VaultContext, p: FindParams) -> anyhow::Result<FindOutput> {
-        let scope = ctx.begin_request()?;
-        super::handle(ctx, &scope, p)
+    crate::mcp::tools::scoped_shim! {
+        fn handle(FindParams) -> FindOutput;
     }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;

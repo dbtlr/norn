@@ -15,6 +15,32 @@
 //!
 //! `vault.get` (this module) establishes the pattern the later read tools copy.
 
+/// NRN-253 test-shim seam: generate scope-threading wrappers for a tool's
+/// handlers, so existing two-arg test call sites (`handle(&ctx, p)`) compile
+/// unchanged while production threads the request's [`RequestScope`] from
+/// `run_wrapped`. Each generated `fn $name(ctx, p)` opens a fresh single-use
+/// scope via `begin_request` and forwards to the module's real `super::$name(ctx,
+/// &scope, p)`. ONE definition instead of a hand-rolled copy per tool test
+/// module (the `query_cache_unscoped` precedent, applied to handlers).
+///
+/// [`RequestScope`]: crate::mcp::context::RequestScope
+#[cfg(test)]
+macro_rules! scoped_shim {
+    ($(fn $name:ident($params:ty) -> $ret:ty;)+) => {
+        $(
+            fn $name(
+                ctx: &$crate::mcp::context::VaultContext,
+                p: $params,
+            ) -> anyhow::Result<$ret> {
+                let scope = ctx.begin_request()?;
+                super::$name(ctx, &scope, p)
+            }
+        )+
+    };
+}
+#[cfg(test)]
+pub(crate) use scoped_shim;
+
 pub mod apply;
 pub mod audit;
 pub mod count;
