@@ -43,6 +43,9 @@ pub(crate) use identity::{
     cache_dir_for, cache_tree_root, events_dir_for, hex_lower, state_dir_for, state_tree_root,
     vault_identity, vault_identity_hash, xdg_cache_home_env,
 };
+#[cfg(test)]
+pub(crate) use writer::IndexReport;
+pub(crate) use writer::{increment_chunk_budget, IncrementCommit};
 
 /// Resolve a vault's on-disk cache directory under an EXPLICIT cache home,
 /// with the SAME identity mapping production opens use (`identity::cache_dir_in`,

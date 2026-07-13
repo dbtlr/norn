@@ -246,9 +246,14 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
         &["delete".to_string(), p.target.clone()],
     );
 
-    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
+    let report = crate::applier::apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
 
     crate::emit_invocation_finished(&mut sink, "delete", report.exit_code(), &report);
+
+    // Warm mode: commit the delete's cache increments (the removed doc + backlink
+    // cascade) as a chunked writer-queue op, awaited; no-op in cold mode
+    // (NRN-252 / NRN-158).
+    ctx.commit_apply_increments(&report.touched_paths);
 
     Ok(report)
 }

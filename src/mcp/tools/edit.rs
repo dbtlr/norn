@@ -187,7 +187,11 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
     let trace_id = sink.trace_id().to_string();
     let exit = if apply_outcome.is_ok() { 0 } else { 2 };
     crate::emit_single_op_finished(&mut sink, "edit", exit, apply_outcome.is_ok());
-    apply_outcome?;
+    let apply_report = apply_outcome?;
+
+    // Warm mode: commit the apply's cache increments (awaited) so the next read
+    // stays cheap; a no-op in cold mode (NRN-252 / NRN-158).
+    ctx.commit_apply_increments(&apply_report.touched_paths());
 
     Ok(crate::edit::report::build_report(
         &pre.outcome,

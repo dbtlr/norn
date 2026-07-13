@@ -12,6 +12,11 @@
 //! honor `telemetry.location`, prune/size-cap before opening, and fall back to a
 //! `discard` sink if anything about opening the file fails — telemetry must
 //! never block or fail a mutation.
+//!
+//! The post-apply cache-increment commit is NOT wrapped here: every warm
+//! mutation tool calls [`VaultContext::commit_apply_increments`] directly with
+//! the apply report's touched-path set (NRN-252 / NRN-158), so there is no
+//! one-line passthrough to keep in sync.
 
 use crate::mcp::context::VaultContext;
 use crate::mutation_lock::MutationLock;

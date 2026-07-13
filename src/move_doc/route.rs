@@ -211,6 +211,7 @@ mod tests {
             }],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
+            touched_paths: Vec::new(),
         }
     }
 

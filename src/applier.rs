@@ -96,6 +96,13 @@ pub(crate) struct ApplyContext {
 ///
 /// The `RepairApplyReport` is converted to an `ApplyReport` with per-op status,
 /// provenance (`from`), footnote propagation, and summary lines.
+/// On a clean COMMIT, the returned [`ApplyReport`] carries the changed-file set
+/// on its `touched_paths` field (NRN-252 / NRN-158) — populated from
+/// `RepairApplyReport::touched_paths`. The MCP warm mutation tools (`move` /
+/// `delete` / `rewrite_wikilink` / `apply`) feed it to their cache-increment
+/// commit; the CLI ignores it (and it is `#[serde(skip)]`, so it never touches
+/// the wire report). A refusal writes nothing (empty set) and a partial failure
+/// leaves the next read's `detect` to heal the cache (also empty).
 pub(crate) fn apply_migration_plan(
     plan: &MigrationPlan,
     index: &GraphIndex,
@@ -304,6 +311,10 @@ pub(crate) fn apply_migration_plan(
         }
     };
 
+    // The apply COMMITTED cleanly — capture the touched-file set to carry on the
+    // projected report for the caller's increment commit (NRN-252 / NRN-158).
+    let touched_paths = apply_result.touched_paths();
+
     // ------------------------------------------------------------------
     // Phase 4: convert RepairApplyReport → ApplyReport
     // ------------------------------------------------------------------
@@ -399,6 +410,7 @@ pub(crate) fn apply_migration_plan(
         operations: ops,
         warnings,
         outcome,
+        touched_paths,
     })
 }
 
@@ -484,6 +496,8 @@ fn build_refusal_report(
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Refused,
+        // A refusal writes nothing, so no cache increment is needed.
+        touched_paths: Vec::new(),
     }
 }
 
@@ -544,6 +558,8 @@ fn build_plan_refusal_report(
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Refused,
+        // A refusal writes nothing, so no cache increment is needed.
+        touched_paths: Vec::new(),
     }
 }
 
@@ -666,6 +682,8 @@ fn build_partial_failure_report(
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Failed,
+        // A partial failure leaves the next read's `detect` to heal the cache.
+        touched_paths: Vec::new(),
     }
 }
 

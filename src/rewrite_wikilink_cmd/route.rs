@@ -145,6 +145,7 @@ mod tests {
             operations: vec![],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
+            touched_paths: Vec::new(),
         };
         let mut args = base_args();
         args.out = Some(out_path.to_string_lossy().into_owned());
@@ -171,6 +172,7 @@ mod tests {
             operations: vec![],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
+            touched_paths: Vec::new(),
         };
         let wire = json!({ "report": serde_json::to_value(&report).unwrap() });
         let rebuilt = crate::apply_report::reconstruct_wire_report(&wire).unwrap();

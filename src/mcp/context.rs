@@ -30,19 +30,29 @@
 //!
 //! The held cache state is an **immutable [`Generation`]**: once opened, the
 //! `(cache identity, index set it was opened under, sentinel)` it carries never
-//! mutates. (The DB *content* still changes — a generation's connection runs the
-//! per-request incremental refresh and mutation tools write through it — but the
-//! *binding* is fixed.) Every request binds the current `Arc<Generation>` (and
-//! the current config `Arc`) at its boundary and holds both to completion, so no
-//! request ever observes a swap mid-flight.
+//! mutates. (The DB *content* still changes — the writer-queue freshness refresh
+//! writes through the generation's dedicated WRITE connection — but the *binding*
+//! is fixed.) Every request binds the current `Arc<Generation>` (and the current
+//! config `Arc`) at its boundary and holds both to completion, so no request ever
+//! observes a swap mid-flight.
+//!
+//! Each generation holds TWO connections to its `cache.db`: a request-facing
+//! READ connection and a writer-thread-only WRITE connection. After NRN-252 the
+//! request path never writes through the read connection — the freshness refresh
+//! moved onto the write connection — so the read connection is **read-only in
+//! practice**, which is the precondition NRN-253 pools it under.
 //!
 //! Every evict/re-open trigger — cold start / first touch, ground-shift
 //! (out-of-band `cache clear` / `prune` / `rm`), cache-identity change /
 //! corruption, and an index-relevant config change — routes through the ONE
 //! single-flight path [`VaultContext::ensure_current`], which opens generation
-//! N+1 and swaps the slot's current pointer. Concurrent stale observers of
-//! generation N coalesce to exactly one open (the open guard + a re-check of the
-//! current pointer under it). In-flight requests keep serving on N; N drops with
+//! N+1 and swaps the slot's current pointer. The open itself is a **writer-queue
+//! liveness op** (ADR 0013 Phase 2, NRN-252): a stale `ensure_current` submits a
+//! generation-open op and blocks on it, and the per-vault writer thread runs opens
+//! one at a time. Serialization by that thread — not a mutex guard — is what
+//! coalesces concurrent opens now: N stale observers of generation N submit N ops;
+//! the first opens N+1 and swaps, the rest re-check the current pointer, find it
+//! fresh, and adopt it. In-flight requests keep serving on N; N drops with
 //! its last `Arc`, closing its connection and sentinel fd via `Drop`. There are
 //! no in-place "null the slot" eviction sites: a trigger either changes what
 //! `ensure_current` observes (identity / config mismatch) or bumps the slot's
@@ -96,12 +106,42 @@
 //!    database forever.
 //! 3. **(Re)open if stale** (`ensure_current`)**.** If the current generation is
 //!    absent, invalidated (below the floor), ground-shifted, or opened under a
-//!    now-different index identity, single-flight open generation N+1. See the
-//!    sentinel-discipline notes on `open_generation` for the ordering that keeps
-//!    identity honest. This is the ONLY place `integrity_check` is paid in warm
-//!    mode.
-//! 4. **Freshness.** Run the same lock-timeout-tolerant `index_incremental`
-//!    refresh cold mode gets, so vault edits between calls are reflected.
+//!    now-different index identity, submit a generation-open writer-queue liveness
+//!    op and block on it; the serialized op opens generation N+1 (or adopts one a
+//!    concurrent op just produced). See the sentinel-discipline notes on
+//!    `open_generation` for the ordering that keeps identity honest. This is the
+//!    ONLY place `integrity_check` is paid in warm mode.
+//! 4. **Freshness** (`query_cache_warm`)**.** Run the same lock-timeout-tolerant
+//!    `index_incremental` refresh cold mode gets, so vault edits between calls
+//!    are reflected — but as a **coalesced liveness op on the per-vault writer
+//!    queue** (ADR 0013 Phase 2, NRN-252), executed on the generation's WRITE
+//!    connection and awaited before the read connection is handed back. Arriving
+//!    requesters that share a not-yet-started refresh coalesce onto one execution
+//!    via a per-generation ticket; a requester is only ever satisfied by a
+//!    refresh whose scan STARTED at or after its arrival. `LockTimeout` still
+//!    serves anyway with the NRN-215 both-surfaces note; any other error
+//!    propagates with its concrete type intact (so corruption stays classifiable
+//!    by [`note_tool_error`](VaultContext::note_tool_error)). `call_lock` still
+//!    serializes tool bodies, so this coalescing is not yet observable through the
+//!    MCP surface — it is real and unit-tested directly against `VaultContext`.
+//!
+//! ### Post-apply increment commit (NRN-252 / NRN-158)
+//!
+//! A warm MUTATION additionally commits its OWN cache increments after applying.
+//! Each mutation tool feeds the changed-file set to
+//! [`VaultContext::commit_apply_increments`], which parses the whole vault ONCE
+//! **on the request thread** (no lock, off the writer thread — NRN-252 review)
+//! into an `IncrementCommit`, then runs the commit as ONE **bulk** op on the
+//! per-vault writer queue — a chunked closure that only commits row updates in
+//! file-coherent chunks (~50ms each, WriteLock per chunk) and a final global
+//! links rewrite, guarded by a `still_valid` predicate that drops the op if the
+//! generation dies. Doing the parse on the request thread keeps every writer-queue
+//! chunk bounded, so a liveness refresh queued behind the commit is not stalled
+//! O(parse). The tool AWAITS it, so the report returns with the cache current.
+//! Without this, the next read's freshness refresh would pay a full detect scan
+//! AND a whole-vault rebuild (changes exist); with it, that refresh finds zero
+//! changes. Failure is degraded, never propagated — the mutation already landed
+//! on disk, so a deferred increment is healed by the next read (files are truth).
 //!
 //! Warm mode is only ever constructed with the default config location; the
 //! daemon wire never carries a custom `--config` path, so `open_warm` takes only
@@ -110,7 +150,7 @@
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -119,6 +159,7 @@ use parking_lot::{ArcMutexGuard, Mutex as CacheMutex};
 use crate::cache::{cache_dir_for, Cache, CacheError, ChangeDetectOptions};
 use crate::cache_cmd::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
+use crate::mcp::writer_queue::{ChunkOutcome, Handle, Outcome, ValidityGuard, WriterQueue};
 
 /// A typed error the warm daemon can downcast to decide whether to evict the
 /// whole `VaultContext`. Kept intentionally small and `anyhow`-downcastable.
@@ -256,12 +297,26 @@ impl IndexIdentity {
 /// An immutable warm-cache generation (ADR 0013). Once opened, the
 /// `(cache identity, index identity, sentinel)` binding never mutates; a request
 /// binds the current `Arc<Generation>` at its boundary and holds it to
-/// completion. The DB *content* still changes — the per-request incremental
-/// refresh and mutation tools write through the connection — which is why the
-/// `Cache` sits behind an owned-lockable mutex; everything else is fixed for the
-/// generation's life. Dropping the last `Arc` closes the connection and the
-/// sentinel fd via `Drop`, so an evicted generation releases exactly when its
-/// last in-flight request finishes draining on it.
+/// completion. The DB *content* still changes — the writer-queue freshness
+/// refresh writes through the generation's WRITE connection — which is why the
+/// caches sit behind mutexes; everything else is fixed for the generation's life.
+/// Dropping the last `Arc` closes both connections and the sentinel fd via
+/// `Drop`, so an evicted generation releases exactly when its last in-flight
+/// request finishes draining on it.
+///
+/// # Two connections, one read-only (NRN-252)
+///
+/// A generation holds TWO connections to the same `cache.db`:
+///
+/// - [`cache`](Self::cache) — the request-facing READ connection. After NRN-252
+///   the request path never writes through it (the freshness refresh moved off
+///   it); it only serves reads. This read-only-in-practice invariant is the
+///   precondition NRN-253 pools it under.
+/// - [`write_cache`](Self::write_cache) — the WRITE connection, touched ONLY by
+///   the writer thread's ops: the freshness-refresh op and the post-apply
+///   cache-increment commit (NRN-252 / NRN-158). WAL mode makes the read
+///   connection observe its committed rows across the connection boundary, so a
+///   refresh (or increment) awaited before a read hands back fresh data.
 pub(crate) struct Generation {
     /// Monotonic generation number (1 for the first open, incremented per
     /// reopen). Used to coalesce concurrent opens and to gate corruption/panic
@@ -277,41 +332,478 @@ pub(crate) struct Generation {
     /// `db_identity`); never read again, so `_sentinel` documents intent and
     /// suppresses dead-field lints.
     _sentinel: File,
-    /// The held-open connection. `Arc<Mutex>` so a request can take an OWNED lock
-    /// (`lock_arc`) held across the whole sync tool body, outliving a concurrent
-    /// generation swap of the slot's current pointer. `parking_lot` (not `std`):
-    /// its `ArcMutexGuard` is a safe owned guard, and a panic while a tool holds
-    /// it is handled precisely by the handle's `Drop` (invalidation floor bump),
-    /// not by std-mutex poisoning.
+    /// The request-facing READ connection. `Arc<Mutex>` so a request can take an
+    /// OWNED lock (`lock_arc`) held across the whole sync tool body, outliving a
+    /// concurrent generation swap of the slot's current pointer. `parking_lot`
+    /// (not `std`): its `ArcMutexGuard` is a safe owned guard, and a panic while a
+    /// tool holds it is handled precisely by the handle's `Drop` (invalidation
+    /// floor bump), not by std-mutex poisoning. Read-only in practice after
+    /// NRN-252 — the freshness refresh writes through `write_cache` instead.
     cache: Arc<CacheMutex<Cache>>,
+    /// The WRITE connection, a second connection to the same `cache.db` opened
+    /// via the verification-skipping companion path (see
+    /// `Cache::open_companion_verified`). Written through ONLY by the writer-queue
+    /// ops — the freshness-refresh op ([`run_refresh_op`]) and the post-apply
+    /// increment commit ([`run_increment_op`], NRN-252 / NRN-158) — which run
+    /// serialized on the per-vault writer thread, so a plain `std::sync::Mutex` is
+    /// always uncontended here; it exists only to satisfy `&mut` through the
+    /// shared `Arc<Generation>`.
+    write_cache: Mutex<Cache>,
+    /// Coalescing state for freshness refreshes on this generation (NRN-252).
+    /// Holds the single in-flight-or-queued [`RefreshTicket`] that arriving
+    /// requesters may join, or `None` when no refresh is pending (or the pending
+    /// one has already started its scan). Guarded so the join decision is atomic
+    /// against an op's start transition — see [`arrive_refresh`](VaultContext::arrive_refresh).
+    refresh_pending: Mutex<Option<Arc<RefreshTicket>>>,
+    /// Test-only: total freshness-refresh executions that actually reached
+    /// `index_incremental` on this generation. Drives the coalescing /
+    /// arrival-correctness assertions (exactly-one-execution counts).
+    #[cfg(test)]
+    refresh_exec_count: AtomicU64,
+    /// Test-only: a one-shot error the next refresh op returns INSTEAD of running
+    /// `index_incremental`, so a test can drive a corruption-class refresh failure
+    /// through the ticket and prove `note_tool_error` still classifies it.
+    #[cfg(test)]
+    inject_refresh_error: Mutex<Option<CacheError>>,
+    /// Test-only: a one-shot gate the next refresh op waits on AFTER its start
+    /// transition (started flag set, pending cleared) and BEFORE its scan, so a
+    /// test can hold a refresh "in flight" while a new requester arrives.
+    #[cfg(test)]
+    refresh_gate: Mutex<Option<TestGate>>,
+    /// Test-only: the `IndexReport` the most recent freshness refresh produced,
+    /// captured so the NRN-158 acceptance test can assert an empty report (zero
+    /// changes ⇒ no whole-vault rebuild) after a warm mutation committed its
+    /// increment.
+    #[cfg(test)]
+    last_refresh_report: Mutex<Option<crate::cache::IndexReport>>,
+    /// Test-only: a reusable gate the increment-commit op signals + waits on at
+    /// EACH chunk boundary (after a chunk commits, before the next), so a test can
+    /// observe intermediate committed state, interleave a liveness op, or turn the
+    /// generation stale mid-commit — all without sleeps.
+    #[cfg(test)]
+    increment_gate: Mutex<Option<TestGate>>,
+}
+
+/// Marker strings a refresh ticket resolves to when its op never produced a
+/// result — the queue dropped it on shutdown, or it panicked. Every waiter
+/// surfaces these as an error (never a hang).
+const REFRESH_QUEUE_SHUTDOWN: &str =
+    "warm writer queue is shutting down; freshness refresh abandoned";
+const REFRESH_PANICKED: &str = "warm writer queue panicked while running a freshness refresh";
+
+/// Operator notes for a DEGRADED post-apply increment commit (NRN-252 / NRN-158).
+/// The mutation already succeeded on disk, so these never fail the tool call —
+/// they announce that the cache update was deferred and the next read's freshness
+/// refresh will heal it (files remain the source of truth). Emitted on BOTH
+/// surfaces: the daemon's own stderr and the per-request note buffer.
+const INCREMENT_FAILED_NOTE: &str = "norn serve: post-apply cache increment failed; the cache update was deferred and the next read's refresh will heal it";
+const INCREMENT_DROPPED_NOTE: &str = "norn serve: post-apply cache increment abandoned (generation evicted or queue shutdown); the next read's refresh will heal the cache";
+const INCREMENT_PANICKED_NOTE: &str =
+    "norn serve: post-apply cache increment panicked; the next read's refresh will heal the cache";
+
+/// A coalescing ticket for ONE freshness-refresh execution on a generation's
+/// write connection (NRN-252). Requesters that arrive before the refresh op
+/// starts share one ticket — and thus one `index_incremental` execution —
+/// blocking here on the condvar rather than each queuing a redundant refresh.
+///
+/// The ticket resolves on EVERY path — success, `LockTimeout`, other error, and
+/// (via the submitter's backstop) queue-drop / panic — so a waiter never hangs.
+/// Every waiter observes the true outcome CLASS: a failed refresh is `Failed`
+/// for all of them (the first takes the concrete `CacheError`, later waiters
+/// synthesize one), a `LockTimeout` is `LockContention` for all of them, and a
+/// clean refresh is `Served` for all of them — no coalesced waiter ever mistakes
+/// a failed or contended refresh for a served one.
+struct RefreshTicket {
+    state: Mutex<RefreshTicketState>,
+    resolved: Condvar,
+}
+
+/// How a refresh op resolved, held on the shared ticket so EVERY coalesced
+/// waiter reads the same outcome class. Making illegal states unrepresentable
+/// (no `resolved` bool + `Option` result + `Option` reason triple) is what
+/// prevents a later waiter from silently reading a failed refresh as served.
+enum Resolution {
+    /// No outcome delivered yet; waiters block on the condvar.
+    Pending,
+    /// The op never produced a result (queue drop / panic) — every waiter fails.
+    Abandoned(&'static str),
+    /// The op ran and delivered a terminal class — every waiter sees this class.
+    Done(DoneClass),
+}
+
+/// The terminal class of a completed refresh, shared across all coalesced
+/// waiters.
+enum DoneClass {
+    /// Clean refresh (or no changes) — `Served` for everyone.
+    Ok,
+    /// Timed out on the cache write lock — `LockContention` for everyone (each
+    /// waiter emits its own both-surfaces note at its call site).
+    LockTimeout,
+    /// Non-timeout failure — `Failed` for everyone. The concrete `CacheError` is
+    /// moved out by the FIRST waiter (so `note_tool_error` keeps classifying
+    /// corruption on the untouched type); every later waiter synthesizes a
+    /// [`CacheError::CoalescedRefreshFailed`] — it need not re-trigger corruption
+    /// eviction, since the first waiter's propagation already bumped the floor
+    /// and eviction is idempotent.
+    Failed(Option<CacheError>),
+}
+
+struct RefreshTicketState {
+    /// Flipped true (under the generation's `refresh_pending` lock, so an
+    /// arriving requester's started-check and join are atomic against it) when
+    /// the op begins on the writer thread. A started refresh may have begun
+    /// before a later arrival, so late arrivals never join it — they submit a
+    /// fresh op whose scan is guaranteed to start after their arrival.
+    started: bool,
+    /// The single source of truth for this ticket's outcome. `Pending` until the
+    /// op (or the submitter's drop/panic backstop) resolves it; the transition
+    /// out of `Pending` happens once and is idempotent, and every waiter then
+    /// reads the SAME class off it.
+    resolution: Resolution,
+}
+
+impl RefreshTicket {
+    fn new() -> Arc<Self> {
+        Arc::new(RefreshTicket {
+            state: Mutex::new(RefreshTicketState {
+                started: false,
+                resolution: Resolution::Pending,
+            }),
+            resolved: Condvar::new(),
+        })
+    }
+
+    /// Deliver the op's `index_incremental` result. Idempotent: the first
+    /// delivery wins (a later backstop resolve is a no-op). The concrete result
+    /// is classified ONCE here into a [`DoneClass`] every waiter shares.
+    fn resolve_completed(&self, result: Result<(), CacheError>) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !matches!(st.resolution, Resolution::Pending) {
+            return;
+        }
+        let class = match result {
+            Ok(()) => DoneClass::Ok,
+            Err(CacheError::LockTimeout) => DoneClass::LockTimeout,
+            Err(other) => DoneClass::Failed(Some(other)),
+        };
+        st.resolution = Resolution::Done(class);
+        self.resolved.notify_all();
+    }
+
+    /// Resolve the ticket as abandoned (queue drop / panic). Idempotent.
+    fn resolve_abandoned(&self, why: &'static str) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !matches!(st.resolution, Resolution::Pending) {
+            return;
+        }
+        st.resolution = Resolution::Abandoned(why);
+        self.resolved.notify_all();
+    }
+
+    /// Block until resolved, then classify the outcome for the requester. Every
+    /// waiter observes the same CLASS: `Ok` → `Served`, `LockTimeout` →
+    /// `LockContention`, `Failed` → `Failed` (first waiter gets the concrete
+    /// error, later waiters a synthesized one), `Abandoned` → `Abandoned`.
+    fn wait(&self) -> RefreshOutcome {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        while matches!(st.resolution, Resolution::Pending) {
+            st = self.resolved.wait(st).unwrap_or_else(|p| p.into_inner());
+        }
+        match &mut st.resolution {
+            Resolution::Pending => unreachable!("loop exits only once resolved"),
+            Resolution::Abandoned(why) => RefreshOutcome::Abandoned(why),
+            Resolution::Done(DoneClass::Ok) => RefreshOutcome::Served,
+            Resolution::Done(DoneClass::LockTimeout) => RefreshOutcome::LockContention,
+            // First waiter takes the concrete error (corruption stays
+            // classifiable); every later coalesced waiter still fails, with a
+            // synthesized error — none ever reads this as served.
+            Resolution::Done(DoneClass::Failed(err)) => {
+                RefreshOutcome::Failed(err.take().unwrap_or(CacheError::CoalescedRefreshFailed))
+            }
+        }
+    }
+
+    fn is_started(&self) -> bool {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).started
+    }
+
+    fn mark_started(&self) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).started = true;
+    }
+}
+
+/// How a coalesced freshness refresh resolved, as seen by a requester.
+enum RefreshOutcome {
+    /// The refresh completed cleanly (or nothing changed) — serve the read.
+    Served,
+    /// The refresh timed out on the cache write lock. Serve anyway, emitting the
+    /// NRN-215 both-surfaces contention note.
+    LockContention,
+    /// The refresh failed with a non-timeout error; propagate it (its concrete
+    /// `CacheError` is intact for corruption classification).
+    Failed(CacheError),
+    /// The op was dropped (queue shutdown) or panicked; fail this request.
+    Abandoned(&'static str),
+}
+
+/// The result of arriving at a generation's coalesced refresh: either this
+/// caller SUBMITTED the op (and holds the queue handle that backstops
+/// drop/panic) or it JOINED an already-pending, not-yet-started op.
+enum RefreshArrival {
+    Submitted {
+        ticket: Arc<RefreshTicket>,
+        handle: Handle<()>,
+    },
+    Joined {
+        ticket: Arc<RefreshTicket>,
+    },
+}
+
+impl RefreshArrival {
+    /// Block until the refresh resolves. The submitter waits on the queue handle
+    /// first — so a dropped (shutdown) or panicked op still resolves the ticket
+    /// rather than hanging every joined waiter — then reads the ticket; a joiner
+    /// simply blocks on the shared ticket.
+    fn wait(self, generation: &Generation) -> RefreshOutcome {
+        match self {
+            RefreshArrival::Joined { ticket } => ticket.wait(),
+            RefreshArrival::Submitted { ticket, handle } => {
+                match handle.wait() {
+                    Outcome::Done(()) => {}
+                    Outcome::Dropped => {
+                        ticket.resolve_abandoned(REFRESH_QUEUE_SHUTDOWN);
+                        clear_pending_if(generation, &ticket);
+                    }
+                    Outcome::Panicked => {
+                        ticket.resolve_abandoned(REFRESH_PANICKED);
+                        clear_pending_if(generation, &ticket);
+                    }
+                }
+                ticket.wait()
+            }
+        }
+    }
+
+    /// Test accessor: the ticket this arrival is bound to.
+    #[cfg(test)]
+    fn ticket(&self) -> &Arc<RefreshTicket> {
+        match self {
+            RefreshArrival::Submitted { ticket, .. } | RefreshArrival::Joined { ticket } => ticket,
+        }
+    }
+}
+
+/// Test-only handshake gate installed on a generation to hold a writer-queue op
+/// at a control point under test control (no sleeps). One shape serves both uses:
+///
+/// - the freshness-refresh gate (`refresh_gate`) is ONE-SHOT — the refresh op
+///   waits on it once, AFTER its start transition (started flag set, pending
+///   cleared) and BEFORE its scan, so a test can hold a refresh "in flight" while
+///   a new requester arrives;
+/// - the increment-commit gate (`increment_gate`) is REUSABLE — the commit op
+///   hits it at EVERY chunk boundary (after a chunk commits, before the next), so
+///   a test can step a multi-chunk commit one boundary at a time.
+///
+/// In both: `reached.recv()` unblocks when the op reaches the gate; the test
+/// inspects state, then `release.send(())` lets the op proceed.
+#[cfg(test)]
+struct TestGate {
+    /// Signalled by the op once it reaches the gate.
+    reached: std::sync::mpsc::Sender<()>,
+    /// The op blocks receiving here until the test releases it.
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+/// Clear a generation's pending-refresh slot IFF it still points at `ticket`.
+/// Used by the submitter's drop/panic backstop so a superseded ticket never
+/// lingers in the slot.
+fn clear_pending_if(generation: &Generation, ticket: &Arc<RefreshTicket>) {
+    let mut pending = generation
+        .refresh_pending
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if pending.as_ref().is_some_and(|p| Arc::ptr_eq(p, ticket)) {
+        *pending = None;
+    }
+}
+
+/// The body of a freshness-refresh liveness op, run serialized on the writer
+/// thread against the generation's WRITE connection (NRN-252).
+///
+/// It first performs the START TRANSITION under the generation's
+/// `refresh_pending` lock — marking the ticket started and removing it from the
+/// pending slot — so a concurrently-arriving requester either joins this ticket
+/// BEFORE the transition (its arrival precedes this scan) or, seeing the slot
+/// cleared, submits a fresh op AFTER (its arrival precedes THAT scan). Either
+/// way a requester is only ever served by a refresh whose scan starts at or
+/// after its arrival. It then runs `index_incremental` and resolves the ticket
+/// with the concrete result.
+fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<RefreshTicket>) {
+    // Start transition: mark started and clear the pending slot atomically under
+    // the pending lock (lock order: pending → ticket state, matching the arrival
+    // path, so the join decision cannot straddle it).
+    {
+        let mut pending = generation
+            .refresh_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        ticket.mark_started();
+        if pending.as_ref().is_some_and(|p| Arc::ptr_eq(p, ticket)) {
+            *pending = None;
+        }
+    }
+
+    // Test-only: block "in flight" between the start transition and the scan.
+    #[cfg(test)]
+    {
+        let gate = generation
+            .refresh_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.release.recv();
+        }
+    }
+
+    // Test-only: return an injected error instead of scanning, to drive a
+    // refresh failure (e.g. corruption) through the ticket deterministically.
+    #[cfg(test)]
+    {
+        let injected = generation
+            .inject_refresh_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(err) = injected {
+            ticket.resolve_completed(Err(err));
+            return;
+        }
+    }
+
+    #[cfg(test)]
+    generation
+        .refresh_exec_count
+        .fetch_add(1, Ordering::Relaxed);
+
+    let result = {
+        let mut write_cache = generation
+            .write_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let report = write_cache.index_incremental(vault_root, &ChangeDetectOptions::default());
+        // Test-only: capture the report so the NRN-158 acceptance test can assert
+        // it is empty (zero changes ⇒ no whole-vault rebuild) after an increment.
+        #[cfg(test)]
+        if let Ok(r) = &report {
+            *generation
+                .last_refresh_report
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(r.clone());
+        }
+        report.map(|_report| ())
+    };
+    ticket.resolve_completed(result);
+}
+
+/// The body of a post-apply cache-increment commit BULK op, run serialized on the
+/// writer thread against the generation's WRITE connection (ADR 0013 Phase 2,
+/// NRN-252 / NRN-158).
+///
+/// It is a chunked closure driving an ALREADY-PARSED [`IncrementCommit`] (the
+/// whole-vault parse ran on the caller thread, off the writer thread — NRN-252
+/// review): each invocation commits ONE file-coherent chunk (or the final global
+/// links rewrite). Each chunk acquires and releases the WriteLock around its own
+/// transaction, so external CLI processes and this daemon's liveness ops
+/// interleave at boundaries. Returns [`ChunkOutcome::More`] while work remains,
+/// [`ChunkOutcome::Done`] with the terminal `Result` on completion or the first
+/// chunk error.
+fn run_increment_chunk(
+    generation: &Generation,
+    vault_root: &Utf8Path,
+    driver: &mut crate::cache::IncrementCommit,
+    budget: std::time::Duration,
+) -> ChunkOutcome<Result<(), CacheError>> {
+    let mut write_cache = generation
+        .write_cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+
+    let outcome = match write_cache.commit_increment_chunk(vault_root, driver, budget) {
+        Ok(true) => ChunkOutcome::More,
+        Ok(false) => ChunkOutcome::Done(Ok(())),
+        Err(e) => ChunkOutcome::Done(Err(e)),
+    };
+    // Release the write connection BEFORE hitting the test gate, so a test can
+    // inspect the read connection while the op is parked at the boundary.
+    drop(write_cache);
+
+    // Test-only: park at each chunk boundary (a chunk just committed) so a test
+    // can step the commit deterministically. Never fires when no gate installed.
+    #[cfg(test)]
+    if matches!(outcome, ChunkOutcome::More) {
+        let gate = generation
+            .increment_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(g) = gate.as_ref() {
+            let _ = g.reached.send(());
+            let _ = g.release.recv();
+        }
+    }
+
+    outcome
+}
+
+/// The slice of warm-slot state a writer-queue generation-open op touches. It
+/// lives behind an `Arc` shared by the [`WarmSlot`] and every submitted open op,
+/// because the op runs `'static` on the writer thread and cannot borrow the slot
+/// (NRN-252). Serialization by the queue — not a mutex guard — is what coalesces
+/// concurrent opens now, so these fields only need interior mutability for the
+/// reads and the single swap the serialized op performs.
+struct SharedSlot {
+    /// The current generation, `None` only before the first open. Never nulled in
+    /// place afterward: a reopen swaps this pointer to N+1 and the old N drops
+    /// with its last in-flight `Arc`.
+    current: Mutex<Option<Arc<Generation>>>,
+    /// Monotonic invalidation floor: a generation whose `number` is BELOW this is
+    /// stale and must be reopened. Bumped by corruption ([`note_tool_error`]) and
+    /// by a panic unwinding through a live cache guard — the two triggers with no
+    /// filesystem/config signal for `ensure_current` to observe. An atomic so the
+    /// per-request freshness probe reads it without taking any lock; a separate
+    /// `Arc` (not just the enclosing `Arc<SharedSlot>`) so each handed-out cache
+    /// guard can hold a lightweight handle whose panic-`Drop` bumps it.
+    floor: Arc<AtomicU64>,
+    /// Next generation number to assign (1 for the first open). Mutated only by the
+    /// serialized open op, so queue serialization alone keeps it single-flight —
+    /// the former `open` guard's coalescing role is now the writer thread's.
+    next_number: Mutex<u64>,
+    /// Total generation opens performed (cold start + every reopen). Test-only
+    /// coalescing/single-flight assertion counter; incremented on every open.
+    open_count: AtomicU64,
 }
 
 /// Warm-mode per-vault slot. The small fields are guarded by `std::sync::Mutex`
 /// (NOT tokio), locked only briefly and NEVER across an `.await` (tool bodies are
 /// sync); the cache connection's own lock lives inside [`Generation`].
 struct WarmSlot {
-    /// The current generation, `None` only before the first open. Never nulled in
-    /// place afterward: a reopen swaps this pointer to N+1 and the old N drops
-    /// with its last in-flight `Arc`.
-    current: Mutex<Option<Arc<Generation>>>,
+    /// Generation-open state shared with the writer-queue open ops (see
+    /// [`SharedSlot`]) — `current`, the invalidation `floor`, the generation
+    /// counter, and the open count.
+    shared: Arc<SharedSlot>,
     /// Fingerprint of the config file; independent of any generation, so it
     /// survives reopens.
     config_fp: Mutex<ConfigFingerprint>,
-    /// Single-flight generation-open guard. Held only for the open critical
-    /// section (probe re-check → open → swap), so concurrent stale observers of
-    /// generation N coalesce to exactly ONE open of N+1. Also owns the monotonic
-    /// generation counter.
-    open: Mutex<u64>,
-    /// Monotonic invalidation floor: a generation whose `number` is BELOW this is
-    /// stale and must be reopened. Bumped by corruption ([`note_tool_error`]) and
-    /// by a panic unwinding through a live cache guard — the two triggers with no
-    /// filesystem/config signal for `ensure_current` to observe. An atomic so the
-    /// per-request freshness probe reads it without taking the open lock; shared
-    /// with each handed-out cache guard so its panic-`Drop` can bump it.
-    floor: Arc<AtomicU64>,
-    /// Total generation opens performed (cold start + every reopen). Test-only
-    /// coalescing/single-flight assertion counter; incremented on every open.
-    open_count: AtomicU64,
+    /// The per-vault writer queue: the single serialization point for generation
+    /// opens and freshness refreshes — subsuming the former `open` single-flight
+    /// mutex — and, in a later commit, apply increments (ADR 0013, NRN-252). A
+    /// stale [`ensure_current`](VaultContext::ensure_current) submits a
+    /// generation-open LIVENESS op and blocks on it; the queue runs opens one at a
+    /// time, so N concurrent stale callers coalesce to one open and the rest adopt.
+    /// The per-request freshness refresh is likewise a LIVENESS op on this queue,
+    /// executed on the generation's write connection and coalesced per generation.
+    queue: WriterQueue,
     /// The generation number the CURRENT request bound via `ensure_current`
     /// (0 = none bound yet this request). Set once, right after
     /// `ensure_current` returns in `query_cache_warm`; reset to 0 at the start
@@ -409,12 +901,16 @@ impl VaultContext {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
             mode: Mode::Warm(WarmSlot {
-                current: Mutex::new(None),
+                shared: Arc::new(SharedSlot {
+                    current: Mutex::new(None),
+                    floor: Arc::new(AtomicU64::new(0)),
+                    // Generation numbers start at 1, so the counter's next value is 1.
+                    next_number: Mutex::new(1),
+                    open_count: AtomicU64::new(0),
+                }),
                 config_fp: Mutex::new(config_fp),
-                // Generation numbers start at 1, so the counter's next value is 1.
-                open: Mutex::new(1),
-                floor: Arc::new(AtomicU64::new(0)),
-                open_count: AtomicU64::new(0),
+                // Label the writer thread with the vault root for debuggability.
+                queue: WriterQueue::spawn(cwd.as_str()),
                 bound_generation: AtomicU64::new(0),
             }),
             operator_notes: Mutex::new(Vec::new()),
@@ -506,7 +1002,7 @@ impl VaultContext {
         if is_sqlite_corruption(err) {
             let bound = slot.bound_generation.load(Ordering::Acquire);
             if bound != 0 {
-                slot.floor.fetch_max(bound + 1, Ordering::AcqRel);
+                slot.shared.floor.fetch_max(bound + 1, Ordering::AcqRel);
             }
         }
     }
@@ -634,16 +1130,13 @@ impl VaultContext {
         slot.bound_generation
             .store(generation.number, Ordering::Release);
 
-        // Take an OWNED lock on the bound generation's connection, held across the
-        // whole (sync) tool body. It outlives a concurrent generation swap of the
-        // slot pointer because the guard owns its own `Arc<Mutex<Cache>>` and the
-        // handle also holds the `Arc<Generation>` (keeping the sentinel alive).
-        let mut guard = generation.cache.lock_arc();
-
-        // Step 4 — freshness. Same lock-timeout tolerance as `open_for_query`.
-        match guard.index_incremental(&self.vault_root, &ChangeDetectOptions::default()) {
-            Ok(_) => {}
-            Err(CacheError::LockTimeout) => {
+        // Step 4 — freshness, as a COALESCED writer-queue liveness op on the
+        // generation's WRITE connection, awaited before we hand back the read
+        // connection (NRN-252). The request-facing `cache` below is never written
+        // through — that read-only-in-practice invariant is NRN-253's precondition.
+        match self.refresh_generation(slot, &generation) {
+            RefreshOutcome::Served => {}
+            RefreshOutcome::LockContention => {
                 // BOTH surfaces (NRN-215): the daemon's own stderr is its
                 // operational log — an operator tailing `norn serve` (or a
                 // log pipeline) keeps the contention signal, alongside the
@@ -651,84 +1144,256 @@ impl VaultContext {
                 // it to the caller: `run_wrapped` forwards it in the tool
                 // envelope and the routed CLI re-emits it on ITS stderr,
                 // byte-identical to a direct run.
-                eprintln!("{}", crate::cache::LOCK_CONTENTION_NOTE);
-                self.push_operator_note(crate::cache::LOCK_CONTENTION_NOTE);
+                self.note_both_surfaces(crate::cache::LOCK_CONTENTION_NOTE);
             }
-            Err(error) => return Err(error.into()),
+            // The concrete `CacheError` survives the ticket, so a corruption-class
+            // failure remains classifiable by `note_tool_error` downstream.
+            RefreshOutcome::Failed(error) => return Err(error.into()),
+            RefreshOutcome::Abandoned(msg) => return Err(anyhow::anyhow!(msg)),
         }
+
+        // Take an OWNED lock on the bound generation's READ connection, held
+        // across the whole (sync) tool body. It outlives a concurrent generation
+        // swap of the slot pointer because the guard owns its own
+        // `Arc<Mutex<Cache>>` and the handle also holds the `Arc<Generation>`
+        // (keeping the sentinel alive). Read-only after NRN-252.
+        let guard = generation.cache.lock_arc();
 
         Ok(CacheHandle::Warm(WarmGuard {
             number: generation.number,
-            floor: Arc::clone(&slot.floor),
+            floor: Arc::clone(&slot.shared.floor),
             _generation: generation,
             guard,
         }))
     }
 
+    /// Run the coalesced freshness refresh for `generation` and block on its
+    /// outcome (NRN-252). A thin composition: [`arrive_refresh`](Self::arrive_refresh)
+    /// decides join-or-submit, then [`RefreshArrival::wait`] blocks with the
+    /// drop/panic backstop.
+    fn refresh_generation(&self, slot: &WarmSlot, generation: &Arc<Generation>) -> RefreshOutcome {
+        self.arrive_refresh(slot, generation).wait(generation)
+    }
+
+    /// Arrive at `generation`'s coalesced refresh WITHOUT blocking. Under the
+    /// generation's `refresh_pending` lock (so the started-check and the join are
+    /// atomic against an op's start transition), either join a pending,
+    /// not-yet-started refresh or submit a fresh writer-queue liveness op and
+    /// install it as the pending one. Returns the [`RefreshArrival`] the caller
+    /// then blocks on.
+    fn arrive_refresh(&self, slot: &WarmSlot, generation: &Arc<Generation>) -> RefreshArrival {
+        let decision = {
+            let mut pending = generation
+                .refresh_pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            // Join only a pending refresh that has NOT started: its eventual scan
+            // is then necessarily after this arrival. (An already-started op has
+            // cleared itself from the slot, so this normally sees `None` there;
+            // the started re-check is a belt-and-suspenders guard on the race.)
+            let joinable = pending.as_ref().and_then(|t| {
+                if t.is_started() {
+                    None
+                } else {
+                    Some(Arc::clone(t))
+                }
+            });
+            match joinable {
+                Some(ticket) => Some(ticket),
+                None => {
+                    let ticket = RefreshTicket::new();
+                    *pending = Some(Arc::clone(&ticket));
+                    // Signal "submit" by returning None here and building the op
+                    // below with this freshly-installed ticket.
+                    return self.submit_refresh(slot, generation, ticket);
+                }
+            }
+        };
+        RefreshArrival::Joined {
+            ticket: decision.expect("join path returns Some"),
+        }
+    }
+
+    /// Build and submit a freshness-refresh liveness op for `ticket`, returning
+    /// the [`RefreshArrival::Submitted`] handle. The op runs `'static` on the
+    /// writer thread, so it captures owned / `Arc` state — never `&self`/`&slot`.
+    fn submit_refresh(
+        &self,
+        slot: &WarmSlot,
+        generation: &Arc<Generation>,
+        ticket: Arc<RefreshTicket>,
+    ) -> RefreshArrival {
+        let gen_op = Arc::clone(generation);
+        let ticket_op = Arc::clone(&ticket);
+        let vault_root = self.vault_root.clone();
+        let handle = slot
+            .queue
+            .submit_liveness(move || run_refresh_op(&gen_op, &vault_root, &ticket_op));
+        RefreshArrival::Submitted { ticket, handle }
+    }
+
+    /// Commit the changed-file set from a just-succeeded WARM mutation as a
+    /// CHUNKED cache-increment bulk op on the per-vault writer queue, AWAITED
+    /// before returning (ADR 0013 Phase 2, NRN-252 / NRN-158). The tool returns
+    /// with the cache already current, so the NEXT read's freshness refresh finds
+    /// zero changes and pays neither a full detect scan nor a whole-vault rebuild.
+    /// No-op in cold mode (no queue) and for an empty set.
+    ///
+    /// **Failure is degraded, never propagated.** The mutation ALREADY succeeded
+    /// on disk, so an increment `Err` / `Dropped` / `Panicked` only means the
+    /// cache update was deferred — the next read's refresh detects the change and
+    /// heals it, with the files still the source of truth (trust preserved). The
+    /// degrade emits the both-surfaces operator note; a corruption-class error
+    /// still feeds [`note_tool_error`](Self::note_tool_error) so the generation is
+    /// evicted and re-verified on the next request.
+    pub(crate) fn commit_apply_increments(&self, changed_paths: &[Utf8PathBuf]) {
+        let Mode::Warm(slot) = &self.mode else {
+            return; // cold: no queue, nothing to commit
+        };
+        if changed_paths.is_empty() {
+            return;
+        }
+        // The generation this request bound (== current under `call_lock`). If
+        // none is current, there is nothing to update — the next open covers it.
+        let Some(generation) = slot
+            .shared
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        else {
+            return;
+        };
+
+        // Build the whole-vault parse (the IncrementCommit driver) HERE, on the
+        // request's spawn_blocking thread (post-apply, under the mutation lock),
+        // NOT on the writer thread (NRN-252 review). The parse is O(vault) and
+        // was previously the bulk op's unbounded, non-preemptible first "chunk" —
+        // defeating the ~50ms preemption bound a liveness refresh queued behind it
+        // relies on. It is read-only over post-apply disk state and needs only the
+        // generation's index config (alias_field / files.ignore), no cache
+        // connection, so it belongs off the writer thread.
+        let commit = match crate::cache::Cache::begin_increment_commit(
+            &self.vault_root,
+            changed_paths,
+            generation.index_identity.alias_field.as_deref(),
+            &generation.index_identity.ignore,
+        ) {
+            Ok(commit) => commit,
+            Err(error) => {
+                // The parse failed, but the mutation ALREADY landed on disk — so
+                // degrade rather than fail the tool: the next read's refresh heals
+                // the cache. A corruption-class parse error still evicts +
+                // re-verifies the generation via `note_tool_error`.
+                let err: anyhow::Error = error.into();
+                self.note_tool_error(&err);
+                self.note_both_surfaces(INCREMENT_FAILED_NOTE);
+                return;
+            }
+        };
+
+        let outcome = self
+            .submit_increment_commit(slot, &generation, commit)
+            .wait();
+        match outcome {
+            Outcome::Done(Ok(())) => {}
+            Outcome::Done(Err(error)) => {
+                // A corruption-class error must still evict + re-verify the
+                // generation on the next request, exactly as a corruption error
+                // surfaced from a tool body does (keys off the bound generation).
+                let err: anyhow::Error = error.into();
+                self.note_tool_error(&err);
+                self.note_both_surfaces(INCREMENT_FAILED_NOTE);
+            }
+            Outcome::Dropped => self.note_both_surfaces(INCREMENT_DROPPED_NOTE),
+            Outcome::Panicked => self.note_both_surfaces(INCREMENT_PANICKED_NOTE),
+        }
+    }
+
+    /// Emit an operator note on BOTH surfaces (NRN-215 pattern): the daemon's own
+    /// stderr keeps the signal for an operator tailing `norn serve`, and the
+    /// per-request note buffer carries it to the caller (forwarded by
+    /// `run_wrapped` and re-emitted on the routed CLI's stderr). The ONE shared
+    /// shape for every both-surfaces note — the post-apply increment-deferred
+    /// degrade notes and the freshness-refresh lock-contention note alike.
+    fn note_both_surfaces(&self, note: &str) {
+        eprintln!("{note}");
+        self.push_operator_note(note);
+    }
+
+    /// Submit the increment-commit bulk op for `generation`, driving the ALREADY
+    /// PARSED `commit` chunk by chunk, and return its queue handle. The op runs
+    /// `'static` on the writer thread, so it captures owned / `Arc` state; the
+    /// whole-vault parse already happened on the caller thread (NRN-252 review),
+    /// so the op only ever commits file-coherent chunks (each: lock → tx →
+    /// commit) plus the final links rewrite — every chunk bounded, preemptible by
+    /// a liveness op at its boundary.
+    fn submit_increment_commit(
+        &self,
+        slot: &WarmSlot,
+        generation: &Arc<Generation>,
+        commit: crate::cache::IncrementCommit,
+    ) -> Handle<Result<(), CacheError>> {
+        let gen_op = Arc::clone(generation);
+        let vault_root = self.vault_root.clone();
+        let budget = crate::cache::increment_chunk_budget();
+        // The prebuilt chunk-driver, moved into the op and advanced one chunk per
+        // invocation.
+        let mut driver = commit;
+        let step = move || run_increment_chunk(&gen_op, &vault_root, &mut driver, budget);
+        let still_valid = generation_still_current_guard(&slot.shared, generation.number);
+        slot.queue.submit_bulk(step, Some(still_valid))
+    }
+
     /// The ONE single-flight generation-open path (steps 2–3). Returns the
     /// current generation, opening N+1 when the current one is absent, ground-
     /// shifted, invalidated (below the floor), or opened under a now-different
-    /// index identity. Concurrent stale observers coalesce to exactly one open:
-    /// the `open` guard serializes them and a re-check of the current pointer
-    /// under it lets a late arrival adopt the generation an earlier one just
-    /// produced.
+    /// index identity.
+    ///
+    /// The lock-free fresh fast path returns without touching the queue. On stale,
+    /// it submits a generation-open **liveness op** and blocks on it (callers run
+    /// inside `spawn_blocking` tool bodies, so a blocking wait is correct). The
+    /// writer thread runs opens one at a time, so concurrent stale observers
+    /// coalesce to exactly one open: the op re-checks the current pointer first, so
+    /// a late arrival adopts the generation an earlier op just produced (NRN-252).
+    /// A dropped op (queue shutting down) or a panicked op surfaces as a
+    /// descriptive error rather than a hang — see [`map_open_outcome`].
     fn ensure_current(&self, slot: &WarmSlot) -> Result<Arc<Generation>> {
         let config = self.config();
 
-        // Fast path: probe the current generation off the open lock.
+        // Fast path: probe the current generation off any lock.
         {
             let snapshot = slot
+                .shared
                 .current
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .clone();
             if let Some(generation) = &snapshot {
-                if self.generation_is_fresh(generation, slot, &config) {
+                if generation_is_fresh(generation, &slot.shared.floor, &self.vault_root, &config) {
                     return Ok(Arc::clone(generation));
                 }
             }
         }
 
-        // Stale or cold → single-flight open. Holding `open` coalesces concurrent
-        // openers; the FIRST performs the open, the rest re-check below and adopt.
-        let mut counter = slot.open.lock().unwrap_or_else(|p| p.into_inner());
-        {
-            let snapshot = slot
-                .current
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            if let Some(generation) = &snapshot {
-                if self.generation_is_fresh(generation, slot, &config) {
-                    return Ok(Arc::clone(generation));
-                }
-            }
-        }
-
-        // Step 3 — open generation N+1. This is the ONLY place integrity_check is
-        // paid in warm mode; a stable connection is reused across requests.
-        let number = *counter;
-        *counter += 1;
-        let generation = Arc::new(open_generation(&self.vault_root, &config, number)?);
-        slot.open_count.fetch_add(1, Ordering::Relaxed);
-        *slot.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&generation));
-        Ok(generation)
+        // Stale or cold → queue a generation-open op and block on its outcome.
+        map_open_outcome(self.spawn_generation_open(slot, config).wait())
     }
 
-    /// Is `generation` still fresh for the current world? False when it has been
-    /// invalidated (corruption / panic bumped the floor past it), when its
-    /// `cache.db` identity no longer matches the live file (ground-shift), or when
-    /// the live config's index identity differs from the one it was opened under
-    /// (an index-relevant config change).
-    fn generation_is_fresh(
+    /// Submit the generation-open liveness op `ensure_current` blocks on. Split out
+    /// so the op's captured state is assembled in one place (and so a test can
+    /// model a caller blocked on the handle across a queue shutdown). The op runs
+    /// `'static` on the writer thread, so it captures owned / `Arc` state — never
+    /// `&self` or `&slot`.
+    fn spawn_generation_open(
         &self,
-        generation: &Generation,
         slot: &WarmSlot,
-        config: &LoadedConfig,
-    ) -> bool {
-        generation.number >= slot.floor.load(Ordering::Acquire)
-            && current_db_identity(&self.vault_root) == Some(generation.db_identity)
-            && generation.index_identity.matches_config(config)
+        config: Arc<LoadedConfig>,
+    ) -> Handle<Result<Arc<Generation>>> {
+        let shared = Arc::clone(&slot.shared);
+        let vault_root = self.vault_root.clone();
+        slot.queue
+            .submit_liveness(move || open_or_adopt(&shared, &vault_root, &config))
     }
 
     /// Step 1 body. On a config-file change, re-parses and swaps the stored config
@@ -773,6 +1438,7 @@ impl VaultContext {
     pub(crate) fn current_generation(&self) -> Option<Arc<Generation>> {
         match &self.mode {
             Mode::Warm(slot) => slot
+                .shared
                 .current
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -786,8 +1452,30 @@ impl VaultContext {
     #[cfg(test)]
     pub(crate) fn generation_opens(&self) -> u64 {
         match &self.mode {
-            Mode::Warm(slot) => slot.open_count.load(Ordering::Relaxed),
+            Mode::Warm(slot) => slot.shared.open_count.load(Ordering::Relaxed),
             Mode::Cold => 0,
+        }
+    }
+
+    /// Test-only: the warm slot's writer queue (panics off warm mode). Lets a test
+    /// occupy the writer thread with a blocker so a later generation-open op stays
+    /// queued.
+    #[cfg(test)]
+    fn warm_writer_queue(&self) -> &WriterQueue {
+        match &self.mode {
+            Mode::Warm(slot) => &slot.queue,
+            Mode::Cold => panic!("warm_writer_queue called on a cold context"),
+        }
+    }
+
+    /// Test-only: submit a generation-open op exactly as `ensure_current` does,
+    /// returning the raw queue handle (not the mapped `Result`), so a test can
+    /// model a caller blocked on the op while the queue shuts down under it.
+    #[cfg(test)]
+    fn submit_generation_open(&self) -> Handle<Result<Arc<Generation>>> {
+        match &self.mode {
+            Mode::Warm(slot) => self.spawn_generation_open(slot, self.config()),
+            Mode::Cold => panic!("submit_generation_open called on a cold context"),
         }
     }
 
@@ -801,6 +1489,126 @@ impl VaultContext {
         match &self.mode {
             Mode::Warm(slot) => self.ensure_current(slot).map(|_| ()),
             Mode::Cold => Ok(()),
+        }
+    }
+
+    /// Test-only: arrive at `generation`'s coalesced refresh WITHOUT blocking,
+    /// so a test can sequence multiple arrivals against a blocked writer and
+    /// inspect the resulting join-or-submit decision.
+    #[cfg(test)]
+    fn test_arrive_refresh(&self, generation: &Arc<Generation>) -> RefreshArrival {
+        match &self.mode {
+            Mode::Warm(slot) => self.arrive_refresh(slot, generation),
+            Mode::Cold => panic!("test_arrive_refresh called on a cold context"),
+        }
+    }
+
+    /// Test-only: run one coalesced freshness refresh against the CURRENT
+    /// generation and block on its outcome — the full arrive-then-wait path.
+    #[cfg(test)]
+    fn test_refresh_current(&self) -> RefreshOutcome {
+        match &self.mode {
+            Mode::Warm(slot) => {
+                let generation = slot
+                    .shared
+                    .current
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                    .expect("a current generation");
+                self.refresh_generation(slot, &generation)
+            }
+            Mode::Cold => panic!("test_refresh_current called on a cold context"),
+        }
+    }
+
+    /// Test-only: how many changes a `detect` scan reports against the CURRENT
+    /// generation's READ connection. The NRN-158 acceptance test asserts 0 after a
+    /// warm mutation committed its increment (⇒ the next refresh does no
+    /// whole-vault rebuild).
+    #[cfg(test)]
+    pub(crate) fn detect_change_count(&self) -> usize {
+        let generation = self.current_generation().expect("a current generation");
+        let cache = generation.cache.lock();
+        cache.detect_change_count(&self.vault_root)
+    }
+
+    /// Test-only: the `IndexReport` the current generation's most recent freshness
+    /// refresh produced (`None` if none has run). An empty report (all-zero
+    /// counts) means the refresh detected zero changes and did not rebuild.
+    #[cfg(test)]
+    pub(crate) fn last_refresh_report(&self) -> Option<crate::cache::IndexReport> {
+        self.current_generation().and_then(|g| {
+            g.last_refresh_report
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        })
+    }
+
+    /// Test-only: install a per-chunk gate on `generation`'s increment op and hand
+    /// back the test's `(reached_rx, release_tx)` ends. The op signals `reached`
+    /// after each chunk commits and blocks on `release`, so a test steps a
+    /// multi-chunk commit one boundary at a time.
+    #[cfg(test)]
+    pub(crate) fn install_increment_gate(
+        &self,
+        generation: &Arc<Generation>,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *generation
+            .increment_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(TestGate {
+            reached: reached_tx,
+            release: release_rx,
+        });
+        (reached_rx, release_tx)
+    }
+
+    /// Test-only: submit an increment-commit bulk op for `generation` exactly as
+    /// [`commit_apply_increments`](Self::commit_apply_increments) does, returning
+    /// the raw queue handle (not awaited), so a test can drive the gate and
+    /// inspect intermediate state before the op resolves.
+    #[cfg(test)]
+    pub(crate) fn test_submit_increment_commit(
+        &self,
+        generation: &Arc<Generation>,
+        changed_paths: &[Utf8PathBuf],
+    ) -> Handle<Result<(), CacheError>> {
+        match &self.mode {
+            Mode::Warm(slot) => {
+                // Mirror `commit_apply_increments`: parse on THIS (test) thread,
+                // then submit the prebuilt driver.
+                let commit = crate::cache::Cache::begin_increment_commit(
+                    &self.vault_root,
+                    changed_paths,
+                    generation.index_identity.alias_field.as_deref(),
+                    &generation.index_identity.ignore,
+                )
+                .expect("test increment parse should succeed");
+                self.submit_increment_commit(slot, generation, commit)
+            }
+            Mode::Cold => panic!("test_submit_increment_commit called on a cold context"),
+        }
+    }
+
+    /// Test-only: bump the invalidation floor above the current generation, making
+    /// it stale — the [`generation_still_current_guard`] then reads false. Models
+    /// an out-of-band eviction (corruption / `cache clear`) mid-commit.
+    #[cfg(test)]
+    pub(crate) fn test_invalidate_current_generation(&self) {
+        if let Mode::Warm(slot) = &self.mode {
+            if let Some(g) = slot
+                .shared
+                .current
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+            {
+                slot.shared.floor.fetch_max(g.number + 1, Ordering::AcqRel);
+            }
         }
     }
 }
@@ -828,10 +1636,109 @@ fn is_sqlite_corruption(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Is `generation` still fresh for the current world? False when it has been
+/// invalidated (corruption / panic bumped the floor past it), when its `cache.db`
+/// identity no longer matches the live file (ground-shift), or when the live
+/// config's index identity differs from the one it was opened under (an
+/// index-relevant config change).
+///
+/// A free function (not a `&self` method) so the writer-queue open op, which runs
+/// `'static` on the writer thread, can call it with the same inputs the
+/// per-request fast path uses (NRN-252).
+fn generation_is_fresh(
+    generation: &Generation,
+    floor: &AtomicU64,
+    vault_root: &Utf8Path,
+    config: &LoadedConfig,
+) -> bool {
+    generation.number >= floor.load(Ordering::Acquire)
+        && current_db_identity(vault_root) == Some(generation.db_identity)
+        && generation.index_identity.matches_config(config)
+}
+
+/// A `still_valid` guard for the increment-commit bulk op: the target generation
+/// (identified by `number`) is STILL the slot's current generation and at/above
+/// the invalidation floor (NRN-252). Re-checked at every chunk boundary; when it
+/// turns false — an out-of-band `cache clear`, a corruption/panic floor bump, or
+/// a newer generation swapped in — the remaining chunks are dropped without
+/// running, because the next generation's open-scan re-derives everything and a
+/// dead generation's write connection must not be touched further.
+fn generation_still_current_guard(shared: &Arc<SharedSlot>, number: u64) -> ValidityGuard {
+    let shared = Arc::clone(shared);
+    Box::new(move || {
+        number >= shared.floor.load(Ordering::Acquire)
+            && shared
+                .current
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(|g| g.number == number)
+    })
+}
+
+/// The body of a generation-open liveness op, run serialized on the writer thread.
+///
+/// It re-checks the current generation's freshness FIRST — the coalescing seam:
+/// N concurrent stale callers each submit an op, the first opens N+1 and swaps the
+/// `current` pointer, and the remaining ops find `current` fresh and adopt it,
+/// so the counter advances by one, not N (NRN-252). Only if still stale does it
+/// open generation N+1. This is the ONLY place `integrity_check` is paid in warm
+/// mode; a stable connection is reused across requests.
+///
+/// Runs `'static`, so it takes owned / `Arc` state rather than `&self` / `&slot`.
+fn open_or_adopt(
+    shared: &SharedSlot,
+    vault_root: &Utf8Path,
+    config: &LoadedConfig,
+) -> Result<Arc<Generation>> {
+    // Late-arrival adoption: now that we are serialized behind the queue, a
+    // generation an earlier op opened may already satisfy us.
+    {
+        let snapshot = shared
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(generation) = &snapshot {
+            if generation_is_fresh(generation, &shared.floor, vault_root, config) {
+                return Ok(Arc::clone(generation));
+            }
+        }
+    }
+
+    // Still stale — open generation N+1 and swap it in.
+    let number = {
+        let mut next = shared.next_number.lock().unwrap_or_else(|p| p.into_inner());
+        let number = *next;
+        *next += 1;
+        number
+    };
+    let generation = Arc::new(open_generation(vault_root, config, number)?);
+    shared.open_count.fetch_add(1, Ordering::Relaxed);
+    *shared.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&generation));
+    Ok(generation)
+}
+
+/// Map a generation-open op's [`Outcome`] to a `Result`. A dropped op (the queue
+/// was shutting down) or a panicked op becomes a descriptive error rather than a
+/// hang or an `unwrap` — an `ensure_current` caller always gets a value or an
+/// error, never a wedged request (NRN-252).
+fn map_open_outcome(outcome: Outcome<Result<Arc<Generation>>>) -> Result<Arc<Generation>> {
+    match outcome {
+        Outcome::Done(result) => result,
+        Outcome::Dropped => Err(anyhow::anyhow!(
+            "warm writer queue is shutting down; generation open abandoned"
+        )),
+        Outcome::Panicked => Err(anyhow::anyhow!(
+            "warm writer queue panicked while opening a generation"
+        )),
+    }
+}
+
 /// Open a fresh [`Generation`]: the held-open cache connection plus the `(dev,
 /// ino)` identity and index identity we will verify it against on later
-/// requests. Called only from [`VaultContext::ensure_current`] under the slot's
-/// single-flight `open` guard.
+/// requests. Called only from the writer-queue generation-open op
+/// ([`open_or_adopt`]), serialized on the per-vault writer thread.
 ///
 /// # Sentinel discipline (load-bearing)
 ///
@@ -901,12 +1808,70 @@ fn open_generation(
     };
 
     let db_identity = device_inode(&sentinel.metadata()?);
+
+    // The inode the primary READ connection actually ended on — the LIVE path
+    // inode right after the primary open. This is NOT necessarily `db_identity`:
+    // the sentinel is opened BEFORE the primary open (ghost-safe ordering), so a
+    // rebuild-on-open (alias / schema / identity drift → delete+recreate) leaves
+    // `db_identity` on the pre-rebuild inode while the read connection — and the
+    // live path — moved to the post-rebuild inode. It is this live inode the
+    // companion must match to share one generation with the read connection.
+    let read_identity = device_inode(&std::fs::metadata(db_path.as_std_path())?);
+
+    // Open the WRITE connection: a second connection to the SAME cache.db the
+    // primary open just verified under the now-held sentinel, skipping the
+    // O(db-size) integrity_check (see `Cache::open_companion_verified`). Only the
+    // writer thread's freshness refresh writes through it; the request-facing
+    // `cache` above stays read-only (NRN-252).
+    let write_cache = Cache::open_companion_verified(
+        vault_root,
+        opts.alias_field.as_deref(),
+        &opts.ignore,
+        &opts.resolved_index_set,
+        &opts.resolved_index_set_hash,
+    )?;
+
+    // Companion inode reconciliation (NRN-252 review). The sentinel pins the
+    // primary inode from being FREED, but an fd does not pin the PATH from being
+    // REPLACED. The companion above opened BY PATH, so an external unlink+recreate
+    // (`cache clear`) in the window between the primary open and this open would
+    // bind the write connection to a DIFFERENT inode than the read connection: a
+    // split-brain generation whose writes land on an inode reads never see, healed
+    // only on the NEXT request's ground-shift check. Stat the path now and compare
+    // against the live post-primary inode; on mismatch, fail the generation open
+    // so the single-flight caller errors and the next request retries fresh
+    // against one consistent inode. (Comparing against the live `read_identity`,
+    // NOT the sentinel `db_identity`, is what keeps an ordinary rebuild-on-open —
+    // which moves the inode legitimately, read and write both landing on the new
+    // one — from tripping a false positive.) A swap AFTER this check is caught by
+    // the per-request ground-shift check, exactly as today.
+    let companion_identity = device_inode(&std::fs::metadata(db_path.as_std_path())?);
+    if companion_identity != read_identity {
+        anyhow::bail!(
+            "cache.db at {db_path} was swapped between the read and write connection \
+             opens (identity {read_identity:?} → {companion_identity:?}); failing this \
+             generation open so the next request retries on a consistent inode"
+        );
+    }
+
     Ok(Generation {
         number,
         db_identity,
         index_identity: IndexIdentity::from_config(config),
         _sentinel: sentinel,
         cache: Arc::new(CacheMutex::new(cache)),
+        write_cache: Mutex::new(write_cache),
+        refresh_pending: Mutex::new(None),
+        #[cfg(test)]
+        refresh_exec_count: AtomicU64::new(0),
+        #[cfg(test)]
+        inject_refresh_error: Mutex::new(None),
+        #[cfg(test)]
+        refresh_gate: Mutex::new(None),
+        #[cfg(test)]
+        last_refresh_report: Mutex::new(None),
+        #[cfg(test)]
+        increment_gate: Mutex::new(None),
     })
 }
 
@@ -1021,6 +1986,7 @@ impl DerefMut for WarmGuard {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
+    use std::sync::mpsc;
     use tempfile::TempDir;
 
     /// Build a minimal temp vault with a few seeded docs.
@@ -2274,6 +3240,728 @@ mod tests {
         assert!(
             weak.upgrade().is_none(),
             "generation N is fully dropped — connection + sentinel fd released — with its last Arc"
+        );
+    }
+
+    // ---- Writer-queue generation opens (NRN-252) ----------------------------
+
+    /// Non-`Done` op outcomes map to errors, never a hang or an `unwrap`: a
+    /// generation open abandoned by a queue shutdown (`Dropped`) or crashed by a
+    /// panic (`Panicked`) surfaces to the `ensure_current` caller as `Err`.
+    #[test]
+    fn generation_open_non_done_outcomes_map_to_errors() {
+        assert!(
+            map_open_outcome(Outcome::<Result<Arc<Generation>>>::Dropped).is_err(),
+            "a dropped generation-open op must surface as an error"
+        );
+        assert!(
+            map_open_outcome(Outcome::<Result<Arc<Generation>>>::Panicked).is_err(),
+            "a panicked generation-open op must surface as an error"
+        );
+    }
+
+    /// Coalescing THROUGH THE QUEUE, adoption-by-later-queued-op: two open ops are
+    /// queued behind a blocker so they run in FIFO on the writer thread. The first
+    /// opens generation 2; the SECOND, running after the swap, re-checks `current`,
+    /// finds generation 2 fresh, and ADOPTS it — no second open. Complements the
+    /// racy 8-thread coalescing test by pinning the exact adoption ordering the
+    /// queue's serialization guarantees.
+    #[test]
+    fn warm_later_queued_open_op_adopts_first_ops_generation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Cold start opens generation 1.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        assert_eq!(ctx.generation_opens(), 1, "cold start is one open");
+
+        // Invalidate generation 1 (floor bump): same on-disk cache, one clean
+        // reopen — so the open count is unambiguous.
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+
+        // Occupy the writer so BOTH open ops queue behind the blocker and then run
+        // strictly FIFO — deterministic, no sleeps.
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _blocker = ctx.warm_writer_queue().submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        running_rx.recv().unwrap();
+
+        let h1 = ctx.submit_generation_open();
+        let h2 = ctx.submit_generation_open();
+        release_tx.send(()).unwrap();
+
+        let g1 = map_open_outcome(h1.wait()).expect("first op opens");
+        let g2 = map_open_outcome(h2.wait()).expect("second op adopts");
+        assert_eq!(g1.number, 2, "the first queued op opens generation 2");
+        assert_eq!(
+            g2.number, 2,
+            "the later queued op adopts generation 2 rather than opening a third"
+        );
+        assert_eq!(
+            ctx.generation_opens(),
+            2,
+            "exactly one reopen despite two queued open ops (cold start + 1)"
+        );
+    }
+
+    /// Shutdown safety: a caller blocked on a generation-open op while the writer
+    /// queue shuts down gets an ERROR, never a hang. The op is queued behind a
+    /// blocker; dropping the context tears the queue down, so the writer's next
+    /// pick observes shutdown and drops the queued op, resolving its handle to
+    /// `Dropped` → mapped to `Err`. Deterministic via a shutdown watch (no sleeps).
+    #[test]
+    fn warm_generation_open_errors_when_queue_shuts_down() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Establish generation 1 so the slot is warm.
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache().expect("first warm query_cache");
+        }
+
+        // A watch over the queue's shutdown flag — holds its own `Arc`, so it
+        // survives the context drop and lets us order the release after shutdown.
+        let watch = ctx.warm_writer_queue().shutdown_watch();
+
+        // Occupy the writer with a blocker so the generation-open op stays QUEUED.
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _blocker = ctx.warm_writer_queue().submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        running_rx.recv().unwrap();
+
+        // Queue the generation-open op behind the blocker.
+        let handle = ctx.submit_generation_open();
+
+        // The blocked caller holds ONLY the handle (not the context), so dropping
+        // the context can tear the queue down under it.
+        let waiter = std::thread::spawn(move || map_open_outcome(handle.wait()));
+
+        // Drop the context from another thread — sets shutdown, then joins on the
+        // still-running blocker (mirrors the daemon dropping the vault context).
+        let dropper = std::thread::spawn(move || drop(ctx));
+
+        // Once shutdown is committed, release the blocker; the writer's next pick
+        // then observes shutdown and DROPS the queued open op. Guaranteed to
+        // terminate: the dropper sets the flag.
+        while !watch.is_shutting_down() {
+            std::thread::yield_now();
+        }
+        release_tx.send(()).unwrap();
+
+        let result = waiter.join().expect("waiter thread panicked");
+        assert!(
+            result.is_err(),
+            "a generation open abandoned by queue shutdown must be an error, not a hang"
+        );
+        dropper.join().expect("dropper thread panicked");
+    }
+
+    // ---- Writer-queue freshness refresh (NRN-252) ---------------------------
+
+    /// Separate-connection proof: the freshness refresh runs on the generation's
+    /// WRITE connection on the writer thread, so a directly-submitted refresh
+    /// completes even while a thread holds the request-facing READ connection's
+    /// owned guard. If the refresh still touched the read connection it would
+    /// block on the held guard forever (deadlock) and the timeout would fire.
+    #[test]
+    fn refresh_runs_on_write_connection_not_the_held_read_guard() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+
+        // Establish generation 1 (its cold-start refresh already ran).
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let gen = ctx.current_generation().expect("generation held");
+
+        // Hold the request-facing READ connection's owned guard on THIS thread.
+        let read_guard = gen.cache.lock_arc();
+
+        // A refresh submitted now must complete against the WRITE connection,
+        // never blocking on the read guard we hold.
+        let ctx_refresh = Arc::clone(&ctx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let refresher = std::thread::spawn(move || {
+            let served = matches!(ctx_refresh.test_refresh_current(), RefreshOutcome::Served);
+            done_tx.send(served).unwrap();
+        });
+
+        let served = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("refresh must complete without blocking on the held read guard");
+        assert!(served, "the refresh should serve cleanly");
+        refresher.join().unwrap();
+
+        // The read guard was held for the whole refresh — proof of no contention.
+        drop(read_guard);
+    }
+
+    /// Coalescing: two requesters that arrive while one refresh op is
+    /// queued-but-not-started share ONE execution. The first submits, the second
+    /// joins the same ticket, and exactly one `index_incremental` runs.
+    #[test]
+    fn concurrent_refresh_requesters_coalesce_to_one_execution() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache().expect("first warm query_cache");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let baseline = gen.refresh_exec_count.load(Ordering::Relaxed);
+
+        // Occupy the writer thread so a submitted refresh op stays QUEUED (not
+        // started), leaving a window for a second requester to join it.
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _blocker = ctx.warm_writer_queue().submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        running_rx.recv().unwrap();
+
+        // Two arrivals while the refresh is queued-not-started.
+        let a1 = ctx.test_arrive_refresh(&gen);
+        let a2 = ctx.test_arrive_refresh(&gen);
+        assert!(
+            matches!(a1, RefreshArrival::Submitted { .. }),
+            "the first arrival submits the refresh op"
+        );
+        assert!(
+            matches!(a2, RefreshArrival::Joined { .. }),
+            "the second arrival joins the pending, not-yet-started refresh"
+        );
+        assert!(
+            Arc::ptr_eq(a1.ticket(), a2.ticket()),
+            "both requesters share one refresh ticket"
+        );
+
+        // Release the writer; the single queued op runs and serves both.
+        release_tx.send(()).unwrap();
+        assert!(matches!(a1.wait(&gen), RefreshOutcome::Served));
+        assert!(matches!(a2.wait(&gen), RefreshOutcome::Served));
+
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            baseline + 1,
+            "exactly one refresh execution served both coalesced requesters"
+        );
+    }
+
+    /// Arrival-correctness: a requester that arrives while a refresh R is already
+    /// in flight (started, past its pending slot) must NOT be satisfied by R —
+    /// R's scan may predate the requester's world. It must trigger a fresh
+    /// refresh and see an edit that landed while R ran.
+    #[test]
+    fn requester_arriving_during_a_started_refresh_gets_its_own_refresh() {
+        let (tmp, root) = make_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let baseline = gen.refresh_exec_count.load(Ordering::Relaxed);
+
+        // Arm the one-shot gate: the NEXT refresh op pauses AFTER its start
+        // transition (started flag set, pending cleared) and BEFORE its scan.
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *gen.refresh_gate.lock().unwrap() = Some(TestGate {
+            reached: reached_tx,
+            release: release_rx,
+        });
+
+        // Submit refresh R and drive its blocking wait on a side thread; it will
+        // start and then pause at the gate.
+        let arrival_r = ctx.test_arrive_refresh(&gen);
+        let r_ticket = Arc::clone(arrival_r.ticket());
+        let gen_r = Arc::clone(&gen);
+        let r_thread =
+            std::thread::spawn(move || matches!(arrival_r.wait(&gen_r), RefreshOutcome::Served));
+
+        // R has started: it reached the gate, so it flipped `started` and cleared
+        // itself from the pending slot.
+        reached_rx.recv().expect("refresh R reaches the gate");
+        assert!(r_ticket.is_started(), "R marked itself started");
+
+        // An external edit lands while R is in flight.
+        std::fs::write(
+            tmp.path().join("delta.md"),
+            "---\ntype: note\n---\nDelta body\n",
+        )
+        .unwrap();
+
+        // A new requester arrives now. R has started (pending cleared), so this
+        // requester must submit a FRESH op — never join R.
+        let arrival_new = ctx.test_arrive_refresh(&gen);
+        assert!(
+            matches!(arrival_new, RefreshArrival::Submitted { .. }),
+            "a requester arriving after R started must submit a fresh refresh, not join R"
+        );
+        assert!(
+            !Arc::ptr_eq(arrival_new.ticket(), &r_ticket),
+            "the new requester's ticket differs from R's"
+        );
+
+        // Release R; R finishes, then the new op runs behind it.
+        release_tx.send(()).unwrap();
+        assert!(r_thread.join().unwrap(), "R served");
+        assert!(matches!(arrival_new.wait(&gen), RefreshOutcome::Served));
+
+        // Two distinct executions ran after the baseline (R + the new one): the
+        // arriving requester was served by its OWN refresh, not R's.
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            baseline + 2,
+            "the arriving requester triggered a second, distinct refresh execution"
+        );
+
+        // And the edit that landed mid-flight is visible afterward.
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache().expect("query_cache after refreshes");
+        assert_eq!(
+            doc_count(&cache),
+            4,
+            "the requester's own refresh reflects the external edit"
+        );
+    }
+
+    /// Corruption classification survives the ticket: a corruption-class error
+    /// raised by the refresh travels through the coalescing ticket with its
+    /// concrete `rusqlite` code intact, so `note_tool_error` still evicts the
+    /// generation. Mirrors `warm_evicts_state_on_sqlite_corruption_error`, now
+    /// routed through the queue-refresh path.
+    #[test]
+    fn refresh_corruption_error_survives_ticket_and_evicts_generation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("first warm query_cache");
+            create_marker(&cache);
+        }
+        let gen1 = ctx.current_generation().expect("generation 1 held");
+        assert_eq!(gen1.number, 1);
+
+        // Inject a SQLITE_CORRUPT failure into gen1's NEXT refresh.
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        *gen1.inject_refresh_error.lock().unwrap() = Some(CacheError::Sqlite(corrupt));
+
+        // The next request's refresh fails; the concrete error must propagate out
+        // of query_cache still classifiable as corruption.
+        ctx.begin_request().expect("begin_request");
+        let err = ctx
+            .query_cache()
+            .expect_err("a corruption refresh error must propagate out of query_cache");
+        assert!(
+            is_sqlite_corruption(&err),
+            "the concrete CacheError survived the ticket and is still classifiable"
+        );
+
+        // Feed it to the eviction seam exactly as `run_wrapped` does.
+        ctx.note_tool_error(&err);
+
+        // The next request reopens a NEW generation (marker gone, number bumped).
+        ctx.begin_request().expect("begin_request after eviction");
+        let cache = ctx.query_cache().expect("query_cache after eviction");
+        assert!(
+            !marker_present(&cache),
+            "state must be rebuilt after the ticket-routed corruption eviction"
+        );
+        assert_eq!(doc_count(&cache), 3);
+        drop(cache);
+        assert_eq!(
+            ctx.current_generation()
+                .expect("generation after reopen")
+                .number,
+            2,
+            "a corruption refresh error routed through the ticket must force a new generation"
+        );
+    }
+
+    /// Set up two coalesced refresh requesters onto ONE not-yet-started refresh
+    /// op whose execution returns `inject`, returning both un-waited arrivals.
+    /// The writer is occupied by a blocker until `release` is signalled so both
+    /// arrivals land before the op starts and share one ticket.
+    #[cfg(test)]
+    fn two_coalesced_arrivals_over_injected_refresh(
+        ctx: &VaultContext,
+        gen: &Arc<Generation>,
+        inject: CacheError,
+    ) -> (RefreshArrival, RefreshArrival, mpsc::Sender<()>) {
+        *gen.inject_refresh_error.lock().unwrap() = Some(inject);
+
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        // Dropping the blocker's Handle does not stop the op — the writer thread
+        // owns the running closure — so the writer stays occupied until release,
+        // holding the coalescing window open. The op's result channel simply
+        // disconnects when it finishes, which the test never reads.
+        let _ = ctx.warm_writer_queue().submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        running_rx.recv().unwrap();
+
+        let a1 = ctx.test_arrive_refresh(gen);
+        let a2 = ctx.test_arrive_refresh(gen);
+        assert!(
+            matches!(a1, RefreshArrival::Submitted { .. }),
+            "the first arrival submits the refresh op"
+        );
+        assert!(
+            matches!(a2, RefreshArrival::Joined { .. }),
+            "the second arrival joins the pending, not-yet-started op"
+        );
+        assert!(
+            Arc::ptr_eq(a1.ticket(), a2.ticket()),
+            "both requesters share one refresh ticket"
+        );
+        (a1, a2, release_tx)
+    }
+
+    /// FIX-1 (outcome fan-out): two requesters coalesced onto ONE refresh that
+    /// FAILS must BOTH observe a failure — no coalesced waiter may read a failed
+    /// refresh as `Served`. Pre-fix, the first waiter took the `Result` and every
+    /// later coalesced waiter hit `None => Served`, silently masking the failure
+    /// (corruption-class included) for all but the first.
+    #[test]
+    fn coalesced_waiters_on_a_failed_refresh_all_observe_failure() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache().expect("first warm query_cache");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some("database disk image is malformed".to_string()),
+        );
+        let (a1, a2, release) =
+            two_coalesced_arrivals_over_injected_refresh(&ctx, &gen, CacheError::Sqlite(corrupt));
+
+        release.send(()).unwrap();
+
+        let o1 = a1.wait(&gen);
+        let o2 = a2.wait(&gen);
+        assert!(
+            matches!(o1, RefreshOutcome::Failed(_)),
+            "the submitting waiter must observe the failure, got a non-Failed outcome"
+        );
+        assert!(
+            matches!(o2, RefreshOutcome::Failed(_)),
+            "the coalesced waiter must observe a failure, NOT Served (the take()-masking bug)"
+        );
+    }
+
+    /// FIX-1 (outcome fan-out): two requesters coalesced onto ONE refresh that
+    /// times out on the write lock must BOTH observe `LockContention` — so each
+    /// emits its own NRN-215 both-surfaces note — never `Served`.
+    #[test]
+    fn coalesced_waiters_on_a_locktimeout_refresh_all_observe_contention() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache().expect("first warm query_cache");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+
+        let (a1, a2, release) =
+            two_coalesced_arrivals_over_injected_refresh(&ctx, &gen, CacheError::LockTimeout);
+
+        release.send(()).unwrap();
+
+        let o1 = a1.wait(&gen);
+        let o2 = a2.wait(&gen);
+        assert!(
+            matches!(o1, RefreshOutcome::LockContention),
+            "the submitting waiter must observe LockContention"
+        );
+        assert!(
+            matches!(o2, RefreshOutcome::LockContention),
+            "the coalesced waiter must observe LockContention, NOT Served"
+        );
+    }
+
+    // ---- Post-apply increment commit (NRN-252 / NRN-158) --------------------
+
+    fn doc_present(cache: &Cache, path: &str) -> bool {
+        let n: i64 = cache
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = ?",
+                [path],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 1
+    }
+
+    fn body_of(cache: &Cache, path: &str) -> Option<String> {
+        cache
+            .conn()
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = ?",
+                [path],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+
+    /// THE NRN-158 acceptance test: a warm mutation via the `set` tool commits its
+    /// own cache increment, so the FOLLOWING read's refresh detects zero changes
+    /// and runs no whole-vault rebuild.
+    #[test]
+    fn warm_mutation_commits_increment_so_next_read_sees_no_changes() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Open the generation and build the cache (3 seeded docs).
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+
+        // Warm mutation (confirm): applies on disk AND commits its increment.
+        ctx.begin_request().expect("begin_request");
+        let report = crate::mcp::tools::set::handle(
+            &ctx,
+            crate::mcp::tools::set::SetParams {
+                target: "beta".into(),
+                field_json: vec![r#"status="active""#.into()],
+                confirm: true,
+                ..Default::default()
+            },
+        )
+        .expect("set confirm should apply");
+        assert!(report.applied, "the set must apply");
+
+        // The point of NRN-158: the next read's detect scan finds NOTHING.
+        assert_eq!(
+            ctx.detect_change_count(),
+            0,
+            "the committed increment must leave detect with no work"
+        );
+
+        // And an actual freshness refresh produces an EMPTY report — proof it did
+        // not re-run the whole-vault rebuild.
+        ctx.begin_request().expect("begin_request");
+        assert!(matches!(ctx.test_refresh_current(), RefreshOutcome::Served));
+        let refresh = ctx.last_refresh_report().expect("a refresh ran");
+        assert_eq!(
+            (refresh.doc_count, refresh.file_count, refresh.link_count),
+            (0, 0, 0),
+            "the post-increment refresh must detect zero changes (no rebuild)"
+        );
+    }
+
+    /// File coherence: with a 0ms budget forcing one file per chunk, a file
+    /// present mid-stream carries its new content in full, and a not-yet-committed
+    /// file is entirely absent — never a mix.
+    #[test]
+    fn increment_commits_files_coherently_across_chunks() {
+        // 0ms budget ⇒ one whole file per chunk. Process-global but inert: it only
+        // makes other increments chunk more finely, never changes correctness.
+        std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let generation = ctx.current_generation().expect("a current generation");
+
+        // Modify alpha's body; create delta. Sorted order commits alpha first.
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntype: note\nstatus: active\n---\nAlpha REVISED body\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta body\n").unwrap();
+        let changed: Vec<Utf8PathBuf> = vec!["alpha.md".into(), "delta.md".into()];
+
+        let (reached, release) = ctx.install_increment_gate(&generation);
+        let handle = ctx.test_submit_increment_commit(&generation, &changed);
+
+        // Boundary 1: alpha's chunk committed; delta's has NOT started.
+        reached.recv().expect("boundary 1");
+        {
+            let cache = generation.cache.lock();
+            assert!(
+                body_of(&cache, "alpha.md")
+                    .as_deref()
+                    .is_some_and(|b| b.contains("REVISED")),
+                "alpha must be fully swapped to its new body at boundary 1"
+            );
+            assert!(
+                !doc_present(&cache, "delta.md"),
+                "delta must be ABSENT until its own chunk commits (file coherence)"
+            );
+        }
+        release.send(()).unwrap();
+
+        // Boundary 2: delta's chunk committed.
+        reached.recv().expect("boundary 2");
+        {
+            let cache = generation.cache.lock();
+            assert!(
+                doc_present(&cache, "delta.md"),
+                "delta present after its own chunk commits"
+            );
+        }
+        release.send(()).unwrap();
+
+        assert!(
+            matches!(handle.wait(), Outcome::Done(Ok(()))),
+            "the increment commit must complete cleanly"
+        );
+        assert_eq!(
+            ctx.detect_change_count(),
+            0,
+            "a completed increment leaves detect empty"
+        );
+    }
+
+    /// Preemption: a liveness op submitted while a multi-chunk increment is in
+    /// flight runs BETWEEN two increment chunks, not after all of them.
+    #[test]
+    fn liveness_op_preempts_increment_between_chunks() {
+        std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let generation = ctx.current_generation().expect("a current generation");
+
+        std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta\n").unwrap();
+        std::fs::write(root.join("epsilon.md"), "---\ntype: note\n---\nEpsilon\n").unwrap();
+        let changed: Vec<Utf8PathBuf> = vec!["delta.md".into(), "epsilon.md".into()];
+
+        let (reached, release) = ctx.install_increment_gate(&generation);
+        let inc = ctx.test_submit_increment_commit(&generation, &changed);
+
+        // First chunk committed; the bulk op is parked at boundary 1.
+        reached.recv().expect("boundary 1");
+
+        // Submit a liveness op while the increment is mid-flight.
+        let live = ctx.warm_writer_queue().submit_liveness(|| 42u8);
+
+        // Release the boundary: the queue must drain the liveness op BEFORE the
+        // next increment chunk.
+        release.send(()).unwrap();
+        assert_eq!(
+            live.wait(),
+            Outcome::Done(42),
+            "the liveness op must run once the boundary clears"
+        );
+
+        // A LATER increment boundary still arrives — proof the liveness op ran
+        // BETWEEN two chunks, not after the whole op.
+        reached.recv().expect("boundary 2 after the liveness op");
+        release.send(()).unwrap();
+
+        assert!(
+            matches!(inc.wait(), Outcome::Done(Ok(()))),
+            "the increment still completes after being preempted"
+        );
+    }
+
+    /// Drop-on-generation-death: turning the generation stale mid-commit drops the
+    /// remaining chunks WITHOUT running them, and the tool seam still returns
+    /// (never fails) with the deferred operator note.
+    #[test]
+    fn increment_dropped_on_generation_death_tool_still_succeeds() {
+        std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache().expect("query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let generation = ctx.current_generation().expect("a current generation");
+
+        std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta\n").unwrap();
+        std::fs::write(root.join("epsilon.md"), "---\ntype: note\n---\nEpsilon\n").unwrap();
+        let changed: Vec<Utf8PathBuf> = vec!["delta.md".into(), "epsilon.md".into()];
+
+        let (reached, release) = ctx.install_increment_gate(&generation);
+
+        // Drive the REAL tool seam (which awaits) on a worker thread so this thread
+        // can evict the generation mid-commit.
+        let ctx_worker = Arc::clone(&ctx);
+        let changed_worker = changed.clone();
+        let worker = std::thread::spawn(move || {
+            ctx_worker.commit_apply_increments(&changed_worker);
+        });
+
+        // First chunk (delta) committed; op parked at boundary 1.
+        reached.recv().expect("boundary 1");
+        // Evict the generation: bump the invalidation floor past it.
+        ctx.test_invalidate_current_generation();
+        // Release: the still_valid guard now reads false, so the op is DROPPED
+        // before the next chunk (epsilon) runs.
+        release.send(()).unwrap();
+
+        // The tool seam returns normally (never fails) despite the drop.
+        worker
+            .join()
+            .expect("commit_apply_increments must not panic");
+
+        // The remaining chunk never ran — only delta committed.
+        {
+            let cache = generation.cache.lock();
+            assert!(
+                doc_present(&cache, "delta.md"),
+                "delta (committed before the death) is present"
+            );
+            assert!(
+                !doc_present(&cache, "epsilon.md"),
+                "epsilon's chunk must NOT run after the generation died"
+            );
+        }
+
+        // The degrade left the both-surfaces operator note.
+        let notes = ctx.take_operator_notes();
+        assert!(
+            notes.iter().any(|n| n.contains("abandoned")),
+            "a dropped increment must leave the deferred operator note, got {notes:?}"
         );
     }
 }

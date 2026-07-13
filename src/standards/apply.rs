@@ -512,6 +512,55 @@ impl RepairApplyReport {
             verification: None,
         }
     }
+
+    /// Every vault-relative path this apply TOUCHED on disk, de-duplicated — the
+    /// changed-file set an MCP warm mutation feeds to its cache increment commit
+    /// (NRN-252 / NRN-158). Supersets `changed_files`: a move touches both its
+    /// source and destination, a delete removes a path, a create adds one, and a
+    /// backlink cascade rewrites other files' bodies — all of which change (or
+    /// vacate) cache rows that a plain `changed_files` scan would miss.
+    ///
+    /// Disk is truth downstream: the increment commit stats each path (present ⇒
+    /// upsert, gone ⇒ drop), so over-including a path that ended up unchanged is
+    /// harmless. Only completeness matters here — a missed path would leave the
+    /// next read's `detect` seeing it as changed and paying the rebuild NRN-158
+    /// exists to avoid.
+    pub fn touched_paths(&self) -> Vec<Utf8PathBuf> {
+        let mut out: Vec<Utf8PathBuf> = Vec::new();
+        // First-occurrence-order dedup via a HashSet insert-check (the
+        // `dedup_preserve_order` house shape), not an O(n²) `out.iter().any`.
+        let mut seen: std::collections::HashSet<Utf8PathBuf> = std::collections::HashSet::new();
+        let mut push = |p: &Utf8Path| {
+            if seen.insert(p.to_path_buf()) {
+                out.push(p.to_path_buf());
+            }
+        };
+        for p in &self.changed_files {
+            push(p);
+        }
+        for m in &self.moved_files {
+            push(&m.from);
+            push(&m.to);
+        }
+        for d in &self.deleted_documents {
+            push(&d.path);
+        }
+        for c in &self.created_documents {
+            push(&c.path);
+        }
+        for p in &self.replaced_bodies {
+            push(p);
+        }
+        for r in &self.rewritten_links {
+            push(&r.file);
+        }
+        for cascade in &self.cascades {
+            for r in &cascade.rewritten {
+                push(&r.file);
+            }
+        }
+        out
+    }
 }
 
 pub fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &RepairPlan) -> Result<(), ApplyError> {
