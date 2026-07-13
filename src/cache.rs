@@ -41,9 +41,11 @@ mod writer;
 
 pub(crate) use change_detection::ChangeDetectOptions;
 pub(crate) use freshness::{Freshness, FreshnessProbe, StatSweepProbe};
+#[cfg(unix)]
+pub(crate) use identity::canonical_vault_identity_hash;
 pub(crate) use identity::{
-    cache_dir_for, cache_tree_root, canonical_vault_identity_hash, events_dir_for, hex_lower,
-    state_dir_for, state_tree_root, vault_identity, vault_identity_hash, xdg_cache_home_env,
+    cache_dir_for, cache_tree_root, events_dir_for, hex_lower, state_dir_for, state_tree_root,
+    vault_identity, vault_identity_hash, xdg_cache_home_env,
 };
 #[cfg(test)]
 pub(crate) use writer::IndexReport;

@@ -8,12 +8,12 @@
 //!
 //! # Map shape and why
 //!
-//! `Mutex<HashMap<hash, Arc<OnceCell<McpServer>>>>` — the simplest shape that
+//! `Mutex<HashMap<hash, Arc<ContextEntry>>>` — the simplest shape that
 //! satisfies the three hard requirements:
 //!
 //! - **(a) First-touch open is off the map lock and off the async workers.** The
 //!   map `Mutex` is held only long enough to look up / insert the per-entry
-//!   `Arc<OnceCell>`; it is released *before* the cell is initialized. The
+//!   `Arc<ContextEntry>`; it is released *before* the cell is initialized. The
 //!   initializer runs the (potentially seconds-long) vault open inside
 //!   [`tokio::task::spawn_blocking`], so opening a big vault never stalls pings,
 //!   accepts, or other vaults.
@@ -47,24 +47,62 @@
 //! re-insert is never clobbered. There is no background reaper.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use camino::Utf8Path;
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::mcp::context::VaultContext;
 use crate::mcp::server::McpServer;
+use crate::mcp::writer_queue::WriterProgressState;
 use crate::service::{ServingState, WriterProgress};
+
+struct ContextEntry {
+    cell: OnceCell<McpServer>,
+    opening: AtomicUsize,
+    progress: Arc<WriterProgressState>,
+}
+
+impl ContextEntry {
+    fn new(progress: Arc<WriterProgressState>) -> Self {
+        Self {
+            cell: OnceCell::new(),
+            opening: AtomicUsize::new(0),
+            progress,
+        }
+    }
+}
+
+struct OpeningGuard<'a>(&'a AtomicUsize);
+
+impl<'a> OpeningGuard<'a> {
+    fn new(opening: &'a AtomicUsize) -> Self {
+        opening.fetch_add(1, Ordering::AcqRel);
+        Self(opening)
+    }
+}
+
+impl Drop for OpeningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// The lazy per-vault warm-context map. Cloneable via `Arc` at the call site.
 pub(crate) struct Contexts {
-    map: Mutex<HashMap<String, Arc<OnceCell<McpServer>>>>,
+    map: Mutex<HashMap<String, Arc<ContextEntry>>>,
+    /// Progress belongs to a canonical vault for the daemon lifetime, not to a
+    /// disposable context entry. Retaining this tiny record prevents sequence
+    /// regression when an evicted vault is later recreated.
+    progress: StdMutex<HashMap<String, Arc<WriterProgressState>>>,
 }
 
 impl Contexts {
     pub(crate) fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
+            progress: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -104,22 +142,32 @@ impl Contexts {
         // implies the same canonical root that just canonicalized successfully
         // above, so the stored entry's root is live — and that re-check did
         // blocking `std::fs::canonicalize` WHILE HOLDING the async map lock.
-        let cell = {
+        let progress = {
+            let mut registry = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+            registry
+                .entry(hash.clone())
+                .or_insert_with(|| Arc::new(WriterProgressState::default()))
+                .clone()
+        };
+        let entry = {
             let mut map = self.map.lock().await;
             map.entry(hash)
-                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .or_insert_with(|| Arc::new(ContextEntry::new(progress)))
                 .clone()
         };
         // Map lock released — the (possibly slow) open below runs unguarded.
 
-        let server = cell
+        let _opening = OpeningGuard::new(&entry.opening);
+        let server = entry
+            .cell
             .get_or_try_init(|| {
                 let canonical = canonical.clone();
+                let progress = Arc::clone(&entry.progress);
                 async move {
                     // Requirement (a): the first-touch open (config parse now;
                     // integrity check + index build on the first query) must not
                     // run on an async worker.
-                    tokio::task::spawn_blocking(move || open_server(&canonical))
+                    tokio::task::spawn_blocking(move || open_server(&canonical, progress))
                         .await
                         .map_err(|e| anyhow::anyhow!("vault open task failed: {e}"))?
                 }
@@ -133,32 +181,39 @@ impl Contexts {
     /// it or touching the filesystem. `service status --vault` canonicalizes on
     /// the client side; hashing that path here reaches the same map entry as
     /// [`resolve`] while keeping the daemon's control path bounded to one brief
-    /// map lookup plus lock-free atomics.
+    /// map lookup plus one coherent progress snapshot.
     pub(crate) async fn control_state(
         &self,
         canonical_root: &Utf8Path,
     ) -> (ServingState, WriterProgress) {
         let hash = crate::cache::canonical_vault_identity_hash(canonical_root);
-        let cell = {
+        let entry = {
             let map = self.map.lock().await;
             map.get(&hash).cloned()
         };
 
-        match cell {
-            None => (ServingState::Cold, WriterProgress::default()),
-            Some(cell) => match cell.get() {
-                None => (ServingState::Opening, WriterProgress::default()),
-                Some(server) => {
-                    let progress = server.ctx.writer_progress();
-                    (
-                        ServingState::Ready,
-                        WriterProgress {
-                            busy: progress.busy,
-                            sequence: progress.sequence,
-                        },
-                    )
-                }
-            },
+        match entry {
+            None => {
+                let progress = self
+                    .progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&hash)
+                    .map_or_else(WriterProgress::default, |state| {
+                        service_progress(state.snapshot())
+                    });
+                (ServingState::Cold, progress)
+            }
+            Some(entry) => {
+                let serving = if entry.cell.get().is_some() {
+                    ServingState::Ready
+                } else if entry.opening.load(Ordering::Acquire) > 0 {
+                    ServingState::Opening
+                } else {
+                    ServingState::Cold
+                };
+                (serving, service_progress(entry.progress.snapshot()))
+            }
         }
     }
 
@@ -171,11 +226,12 @@ impl Contexts {
         // Snapshot (hash, cell, stored root) for INITIALIZED entries under a
         // brief lock. Uninitialized (mid-init) cells have no root yet and can't
         // be dead, so they are skipped.
-        let snapshot: Vec<(String, Arc<OnceCell<McpServer>>, camino::Utf8PathBuf)> = {
+        let snapshot: Vec<(String, Arc<ContextEntry>, camino::Utf8PathBuf)> = {
             let map = self.map.lock().await;
             map.iter()
                 .filter_map(|(hash, cell)| {
-                    cell.get()
+                    cell.cell
+                        .get()
                         .map(|server| (hash.clone(), cell.clone(), server.ctx.vault_root.clone()))
                 })
                 .collect()
@@ -185,16 +241,15 @@ impl Contexts {
         }
 
         // Stat each stored root off the lock.
-        let dead: Vec<(String, Arc<OnceCell<McpServer>>)> =
-            tokio::task::spawn_blocking(move || {
-                snapshot
-                    .into_iter()
-                    .filter(|(_, _, root)| std::fs::canonicalize(root.as_std_path()).is_err())
-                    .map(|(hash, cell, _)| (hash, cell))
-                    .collect()
-            })
-            .await
-            .unwrap_or_default();
+        let dead: Vec<(String, Arc<ContextEntry>)> = tokio::task::spawn_blocking(move || {
+            snapshot
+                .into_iter()
+                .filter(|(_, _, root)| std::fs::canonicalize(root.as_std_path()).is_err())
+                .map(|(hash, cell, _)| (hash, cell))
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
         if dead.is_empty() {
             return;
         }
@@ -211,6 +266,13 @@ impl Contexts {
     }
 }
 
+fn service_progress(progress: crate::mcp::writer_queue::WriterProgress) -> WriterProgress {
+    WriterProgress {
+        busy: progress.busy,
+        sequence: progress.sequence,
+    }
+}
+
 /// Remove entries in `dead` from `map`, but only when the stored `Arc` for
 /// that hash is STILL the same one that was snapshotted as dead — a
 /// concurrent re-insert under the same hash (a fresh open racing the sweep)
@@ -219,8 +281,8 @@ impl Contexts {
 /// testable without going through the async sweep/resolve machinery; no
 /// behavior change.
 fn remove_if_same_arc(
-    map: &mut HashMap<String, Arc<OnceCell<McpServer>>>,
-    dead: Vec<(String, Arc<OnceCell<McpServer>>)>,
+    map: &mut HashMap<String, Arc<ContextEntry>>,
+    dead: Vec<(String, Arc<ContextEntry>)>,
 ) {
     for (hash, cell) in dead {
         if let Some(existing) = map.get(&hash) {
@@ -234,8 +296,11 @@ fn remove_if_same_arc(
 /// Build one warm [`McpServer`] for `canonical` with the FULL toolset — write
 /// safety remains the existing WriteLock flock + WAL. Logs one stderr line on
 /// first-touch open.
-fn open_server(canonical: &Utf8Path) -> anyhow::Result<McpServer> {
-    let ctx = VaultContext::open_warm(canonical)?;
+fn open_server(
+    canonical: &Utf8Path,
+    progress: Arc<WriterProgressState>,
+) -> anyhow::Result<McpServer> {
+    let ctx = VaultContext::open_warm_with_progress(canonical, progress)?;
     eprintln!("norn serve: opened vault {canonical}");
     // `new_daemon`: the daemon path emits the per-call served markers the
     // routing proofs count; a stdio `norn mcp` (plain `new`) never does.
@@ -304,21 +369,28 @@ mod tests {
             (ServingState::Cold, WriterProgress::default())
         );
 
-        let cell = Arc::new(OnceCell::new());
-        contexts.map.lock().await.insert(hash, Arc::clone(&cell));
+        let progress = Arc::new(WriterProgressState::default());
+        let entry = Arc::new(ContextEntry::new(Arc::clone(&progress)));
+        contexts.map.lock().await.insert(hash, Arc::clone(&entry));
+        let opening = OpeningGuard::new(&entry.opening);
         assert_eq!(
             contexts.control_state(&canonical).await,
             (ServingState::Opening, WriterProgress::default())
         );
 
-        assert!(cell.set(open_server(&canonical).unwrap()).is_ok());
+        assert!(entry
+            .cell
+            .set(open_server(&canonical, progress).unwrap())
+            .is_ok());
+        drop(opening);
         let (serving, idle) = contexts.control_state(&canonical).await;
         assert_eq!(serving, ServingState::Ready);
         assert!(!idle.busy);
 
         let (running_tx, running_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let handle = cell
+        let handle = entry
+            .cell
             .get()
             .unwrap()
             .ctx
@@ -339,15 +411,71 @@ mod tests {
 
         release_tx.send(()).unwrap();
         assert_eq!(handle.wait(), crate::mcp::writer_queue::Outcome::Done(()));
-        let terminal = loop {
-            let (_, progress) = contexts.control_state(&canonical).await;
-            if !progress.busy {
-                break progress;
-            }
-            tokio::task::yield_now().await;
-        };
+        let (_, terminal) = contexts.control_state(&canonical).await;
         assert!(!terminal.busy);
         assert!(terminal.sequence > busy.sequence);
+    }
+
+    /// A failed `get_or_try_init` leaves its cell empty for a future retry, but
+    /// with no initializer still running that state is cold, not opening.
+    #[tokio::test]
+    async fn failed_open_returns_to_cold_instead_of_sticking_opening() {
+        let (_tmp, root) = seeded_vault();
+        std::fs::create_dir_all(root.join(".norn")).unwrap();
+        std::fs::write(root.join(".norn/config.yaml"), "validate: [not-a-map]").unwrap();
+        let (canonical, _) = crate::cache::vault_identity(&root).unwrap();
+        let contexts = Contexts::new();
+
+        assert!(contexts.resolve(root.as_str()).await.is_err());
+        let (serving, progress) = contexts.control_state(&canonical).await;
+        assert_eq!(serving, ServingState::Cold);
+        assert!(!progress.busy);
+
+        std::fs::remove_file(root.join(".norn/config.yaml")).unwrap();
+        contexts.resolve(root.as_str()).await.unwrap();
+        assert_eq!(
+            contexts.control_state(&canonical).await.0,
+            ServingState::Ready,
+            "the cold retained entry must remain retryable"
+        );
+    }
+
+    /// The sequence belongs to the vault for the daemon lifetime, not to one
+    /// disposable warm context. Evicting and reopening the same canonical root
+    /// must never make a later observation regress.
+    #[tokio::test]
+    async fn writer_sequence_survives_context_eviction_and_recreation() {
+        let (_tmp, root) = seeded_vault();
+        let (canonical, hash) = crate::cache::vault_identity(&root).unwrap();
+        let contexts = Contexts::new();
+        contexts.resolve(root.as_str()).await.unwrap();
+
+        let entry = contexts.map.lock().await.get(&hash).unwrap().clone();
+        let handle = entry
+            .cell
+            .get()
+            .unwrap()
+            .ctx
+            .warm_writer_queue()
+            .submit_liveness(|| ());
+        assert_eq!(handle.wait(), crate::mcp::writer_queue::Outcome::Done(()));
+        let (_, before) = contexts.control_state(&canonical).await;
+        assert!(before.sequence > 0);
+
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(contexts.resolve(root.as_str()).await.is_err());
+        assert_eq!(contexts.len().await, 0, "dead context must be evicted");
+
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("alpha.md"), "# Alpha\n").unwrap();
+        contexts.resolve(root.as_str()).await.unwrap();
+        let (_, after) = contexts.control_state(&canonical).await;
+        assert!(
+            after.sequence >= before.sequence,
+            "same-daemon sequence regressed {} -> {}",
+            before.sequence,
+            after.sequence
+        );
     }
 
     /// FIX-4: a later hello whose OWN root has vanished sweeps the map, evicting
@@ -392,8 +520,8 @@ mod tests {
     /// racing the sweep would be silently clobbered.
     #[test]
     fn remove_if_same_arc_keeps_reinserted_entry() {
-        let mut map: HashMap<String, Arc<OnceCell<McpServer>>> = HashMap::new();
-        let original: Arc<OnceCell<McpServer>> = Arc::new(OnceCell::new());
+        let mut map: HashMap<String, Arc<ContextEntry>> = HashMap::new();
+        let original = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
         map.insert("vault-hash".to_string(), original.clone());
 
         // Snapshot the entry as "dead" (as `sweep_dead_roots` would after a
@@ -403,7 +531,7 @@ mod tests {
         // ...but before removal runs, a concurrent re-insert replaces the map
         // entry with a NEW `Arc` for the same hash (e.g. the root came back
         // and a fresh open raced the sweep).
-        let replacement: Arc<OnceCell<McpServer>> = Arc::new(OnceCell::new());
+        let replacement = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
         map.insert("vault-hash".to_string(), replacement.clone());
 
         remove_if_same_arc(&mut map, dead);
