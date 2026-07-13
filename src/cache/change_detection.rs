@@ -2,6 +2,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 use crate::cache::error::CacheError;
 
@@ -116,16 +117,46 @@ fn scan_filesystem(
     ignore: &[String],
 ) -> Result<HashMap<Utf8PathBuf, LiveMeta>, CacheError> {
     let mut out = HashMap::new();
-    walk(root, root, ignore, &mut out)?;
+    let _ = walk_markdown_files(root, ignore, &mut |rel: &Utf8Path, mtime_ns, size_bytes| {
+        out.insert(
+            rel.to_owned(),
+            LiveMeta {
+                mtime_ns,
+                size_bytes,
+            },
+        );
+        ControlFlow::<()>::Continue(())
+    })?;
     Ok(out)
 }
 
-fn walk(
+/// Walk `root`'s markdown files — applying the SAME hidden-path skip and
+/// `files.ignore` rules `detect`'s full scan uses — invoking `visit` with each
+/// file's vault-relative path and cheap-check stat `(mtime_ns, size_bytes)`.
+/// `visit` returns [`ControlFlow::Break`] to stop the walk early and propagate a
+/// value out; [`ControlFlow::Continue`] keeps walking.
+///
+/// Factored out so `detect`'s full scan and the NRN-253 request-boundary
+/// freshness probe (`crate::cache::freshness`) share ONE walk. The probe MUST see
+/// the same files, with the same ignore semantics and the same `(mtime_ns,
+/// size_bytes)` extraction, that a subsequent `detect`/refresh would — otherwise
+/// a Fresh verdict and the refresh could disagree about what "changed" means.
+/// `scan_filesystem` always continues (collecting the full map); the probe breaks
+/// at the first divergence.
+pub(crate) fn walk_markdown_files<B>(
+    root: &Utf8Path,
+    ignore: &[String],
+    visit: &mut impl FnMut(&Utf8Path, i64, i64) -> ControlFlow<B>,
+) -> Result<ControlFlow<B>, CacheError> {
+    walk_visit(root, root, ignore, visit)
+}
+
+fn walk_visit<B>(
     base: &Utf8Path,
     dir: &Utf8Path,
     ignore: &[String],
-    out: &mut HashMap<Utf8PathBuf, LiveMeta>,
-) -> Result<(), CacheError> {
+    visit: &mut impl FnMut(&Utf8Path, i64, i64) -> ControlFlow<B>,
+) -> Result<ControlFlow<B>, CacheError> {
     for entry in std::fs::read_dir(dir.as_std_path()).map_err(|e| CacheError::Io {
         path: dir.to_owned(),
         source: e,
@@ -147,7 +178,9 @@ fn walk(
             source: e,
         })?;
         if ft.is_dir() {
-            walk(base, &path, ignore, out)?;
+            if let ControlFlow::Break(b) = walk_visit(base, &path, ignore, visit)? {
+                return Ok(ControlFlow::Break(b));
+            }
         } else if ft.is_file() && path.extension() == Some("md") {
             let rel = path.strip_prefix(base).unwrap_or(&path).to_owned();
             if crate::graph::is_ignored(&rel, ignore) {
@@ -163,16 +196,13 @@ fn walk(
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_nanos() as i64)
                 .unwrap_or(0);
-            out.insert(
-                rel,
-                LiveMeta {
-                    mtime_ns,
-                    size_bytes: meta.len() as i64,
-                },
-            );
+            let size_bytes = meta.len() as i64;
+            if let ControlFlow::Break(b) = visit(&rel, mtime_ns, size_bytes) {
+                return Ok(ControlFlow::Break(b));
+            }
         }
     }
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 fn hash_file(path: &Utf8Path) -> Result<String, CacheError> {

@@ -111,19 +111,30 @@
 //!    concurrent op just produced). See the sentinel-discipline notes on
 //!    `open_generation` for the ordering that keeps identity honest. This is the
 //!    ONLY place `integrity_check` is paid in warm mode.
-//! 4. **Freshness** (`query_cache_warm`)**.** Run the same lock-timeout-tolerant
-//!    `index_incremental` refresh cold mode gets, so vault edits between calls
-//!    are reflected — but as a **coalesced liveness op on the per-vault writer
-//!    queue** (ADR 0013 Phase 2, NRN-252), executed on the generation's WRITE
-//!    connection and awaited before the read connection is handed back. Arriving
-//!    requesters that share a not-yet-started refresh coalesce onto one execution
-//!    via a per-generation ticket; a requester is only ever satisfied by a
-//!    refresh whose scan STARTED at or after its arrival. `LockTimeout` still
+//! 4. **Freshness** (`query_cache_warm`)**.** Split into a request-thread PROBE
+//!    and, only when it fails, a REFRESH (ADR 0013 Phase 2, NRN-253). The request
+//!    takes the bound generation's READ guard and runs a
+//!    [`FreshnessProbe`](crate::cache::FreshnessProbe) — today the read-only
+//!    stat-sweep (`crate::cache::freshness`) — against it. **Fresh** → serve on
+//!    that same guard, touching neither the writer queue nor the write
+//!    connection, so a concurrent read of an unchanged vault costs one stat sweep,
+//!    not a refresh op (before NRN-253 every request submitted one). **Stale** →
+//!    drop the read guard and run the same lock-timeout-tolerant
+//!    `index_incremental` refresh cold mode gets, as a **coalesced liveness op on
+//!    the per-vault writer queue** (NRN-252), executed on the generation's WRITE
+//!    connection and awaited before the read guard is re-taken and handed back.
+//!    Arriving requesters that share a not-yet-started refresh coalesce onto one
+//!    execution via a per-generation ticket; a requester is only ever satisfied by
+//!    a refresh whose scan STARTED at or after its arrival. No re-probe follows
+//!    the refresh — an arrival-correct refresh IS the freshness proof, the same
+//!    trust semantics the always-refresh pipeline carried. `LockTimeout` still
 //!    serves anyway with the NRN-215 both-surfaces note; any other error
 //!    propagates with its concrete type intact (so corruption stays classifiable
-//!    by [`note_tool_error`](VaultContext::note_tool_error)). `call_lock` still
-//!    serializes tool bodies, so this coalescing is not yet observable through the
-//!    MCP surface — it is real and unit-tested directly against `VaultContext`.
+//!    by [`note_tool_error`](VaultContext::note_tool_error)). The probe is the
+//!    named interface a Phase 3 watcher-events impl slots behind; the stat sweep
+//!    remains the permanent demoted-mode fallback. `call_lock` still serializes
+//!    tool bodies, so this concurrency is not yet observable through the MCP
+//!    surface — it is real and unit-tested directly against `VaultContext`.
 //!
 //! ### Post-apply increment commit (NRN-252 / NRN-158)
 //!
@@ -156,7 +167,10 @@ use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::{ArcMutexGuard, Mutex as CacheMutex};
 
-use crate::cache::{cache_dir_for, Cache, CacheError, ChangeDetectOptions};
+use crate::cache::{
+    cache_dir_for, Cache, CacheError, ChangeDetectOptions, Freshness, FreshnessProbe,
+    StatSweepProbe,
+};
 use crate::cache_cmd::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
 use crate::mcp::writer_queue::{ChunkOutcome, Handle, Outcome, ValidityGuard, WriterQueue};
@@ -1174,34 +1188,57 @@ impl VaultContext {
         // whatever is current by the time `note_tool_error` runs (NRN-253).
         scope.bind_generation(generation.number);
 
-        // Step 4 — freshness, as a COALESCED writer-queue liveness op on the
-        // generation's WRITE connection, awaited before we hand back the read
-        // connection (NRN-252). The request-facing `cache` below is never written
-        // through — that read-only-in-practice invariant is NRN-253's precondition.
-        match self.refresh_generation(slot, &generation) {
-            RefreshOutcome::Served => {}
-            RefreshOutcome::LockContention => {
-                // BOTH surfaces (NRN-215): the daemon's own stderr is its
-                // operational log — an operator tailing `norn serve` (or a
-                // log pipeline) keeps the contention signal, alongside the
-                // served markers — AND the per-request note buffer carries
-                // it to the caller: `run_wrapped` forwards it in the tool
-                // envelope and the routed CLI re-emits it on ITS stderr,
-                // byte-identical to a direct run.
-                self.note_both_surfaces(scope, crate::cache::LOCK_CONTENTION_NOTE);
-            }
-            // The concrete `CacheError` survives the ticket, so a corruption-class
-            // failure remains classifiable by `note_tool_error` downstream.
-            RefreshOutcome::Failed(error) => return Err(error.into()),
-            RefreshOutcome::Abandoned(msg) => return Err(anyhow::anyhow!(msg)),
-        }
-
-        // Take an OWNED lock on the bound generation's READ connection, held
-        // across the whole (sync) tool body. It outlives a concurrent generation
-        // swap of the slot pointer because the guard owns its own
+        // Step 4 — freshness, split into PROBE then (only if stale) REFRESH
+        // (NRN-253). Take an OWNED lock on the bound generation's READ connection,
+        // held across the whole (sync) tool body. It outlives a concurrent
+        // generation swap of the slot pointer because the guard owns its own
         // `Arc<Mutex<Cache>>` and the handle also holds the `Arc<Generation>`
         // (keeping the sentinel alive). Read-only after NRN-252.
-        let guard = generation.cache.lock_arc();
+        let read_guard = generation.cache.lock_arc();
+
+        // Probe on THIS request thread against the read connection. Fresh → serve
+        // on this very guard, touching neither the writer queue nor the write
+        // connection: a concurrent read of an unchanged vault costs one stat
+        // sweep, not a refresh op. Stale (or a probe error — treated
+        // conservatively as stale, since the refresh is authoritative and would
+        // re-surface any real fault) → route through the coalesced refresh. No
+        // re-probe after: an arrival-correct refresh IS the freshness proof, the
+        // same trust semantics the always-refresh pipeline carried.
+        let fresh = matches!(
+            StatSweepProbe.probe(&self.vault_root, &read_guard),
+            Ok(Freshness::Fresh)
+        );
+
+        let guard = if fresh {
+            read_guard
+        } else {
+            // Drop the read guard before refreshing: the refresh writes through
+            // the generation's WRITE connection (WAL makes its committed rows
+            // visible across the connection boundary), and releasing the read lock
+            // keeps this request off the read connection while it waits — the
+            // read-only-in-practice invariant NRN-253 pools under.
+            drop(read_guard);
+            match self.refresh_generation(slot, &generation) {
+                RefreshOutcome::Served => {}
+                RefreshOutcome::LockContention => {
+                    // BOTH surfaces (NRN-215): the daemon's own stderr is its
+                    // operational log — an operator tailing `norn serve` (or a
+                    // log pipeline) keeps the contention signal, alongside the
+                    // served markers — AND the per-request note buffer carries
+                    // it to the caller: `run_wrapped` forwards it in the tool
+                    // envelope and the routed CLI re-emits it on ITS stderr,
+                    // byte-identical to a direct run.
+                    self.note_both_surfaces(scope, crate::cache::LOCK_CONTENTION_NOTE);
+                }
+                // The concrete `CacheError` survives the ticket, so a
+                // corruption-class failure remains classifiable by
+                // `note_tool_error` downstream.
+                RefreshOutcome::Failed(error) => return Err(error.into()),
+                RefreshOutcome::Abandoned(msg) => return Err(anyhow::anyhow!(msg)),
+            }
+            // Re-take the read guard for the tool body now the refresh has landed.
+            generation.cache.lock_arc()
+        };
 
         Ok(CacheHandle::Warm(WarmGuard {
             number: generation.number,
@@ -3525,6 +3562,129 @@ mod tests {
         dropper.join().expect("dropper thread panicked");
     }
 
+    // ---- Request-boundary freshness probe (NRN-253) -------------------------
+
+    /// The observable NRN-253 change: on a vault the probe judges FRESH, a warm
+    /// read runs ZERO refresh ops (before NRN-253 every request submitted one).
+    /// The first request rebuilds the unbuilt cache via exactly one refresh; a
+    /// second request over the unchanged vault probes Fresh and adds none.
+    #[test]
+    fn warm_fresh_vault_probe_runs_no_refresh() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // First request: the cache is unbuilt, so the probe reports Stale and one
+        // refresh (the rebuild) runs.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let after_build = gen.refresh_exec_count.load(Ordering::Relaxed);
+        assert_eq!(
+            after_build, 1,
+            "the first request rebuilds the unbuilt cache via exactly one refresh"
+        );
+
+        // Second request, unchanged vault: probe Fresh ⇒ no further refresh.
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            after_build,
+            "a fresh vault must run NO refresh op — the probe served the read directly"
+        );
+    }
+
+    /// A stale vault (a doc ADDED between calls) runs EXACTLY ONE refresh and the
+    /// request sees the change.
+    #[test]
+    fn warm_added_file_runs_exactly_one_refresh_and_is_seen() {
+        let (tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            ctx.query_cache_unscoped().expect("first warm query_cache");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let base = gen.refresh_exec_count.load(Ordering::Relaxed);
+
+        std::fs::write(
+            tmp.path().join("delta.md"),
+            "---\ntype: note\nstatus: active\n---\nDelta body\n",
+        )
+        .unwrap();
+
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+        assert_eq!(doc_count(&cache), 4, "the request sees the added doc");
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            base + 1,
+            "a stale (added) vault runs exactly one refresh"
+        );
+    }
+
+    /// The easy miss: a DELETION-only change (no add, no modify) is caught by the
+    /// probe (whole-walk file-count shortfall), runs exactly one refresh, and the
+    /// request sees the doc purged.
+    #[test]
+    fn warm_deletion_only_change_detected_by_probe() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        let base = gen.refresh_exec_count.load(Ordering::Relaxed);
+
+        std::fs::remove_file(root.join("gamma.md").as_std_path()).unwrap();
+
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+        assert_eq!(
+            doc_count(&cache),
+            2,
+            "the deletion-only change must be detected and the doc purged"
+        );
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            base + 1,
+            "a deletion-only stale vault runs exactly one refresh"
+        );
+    }
+
+    /// First-touch: a brand-new warm context whose cache has NEVER been built must
+    /// still build — the probe reports Stale(NeverBuilt) so the rebuild runs and
+    /// the seeded docs are indexed on the very first request.
+    #[test]
+    fn warm_first_touch_unbuilt_cache_still_builds() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
+        assert_eq!(
+            doc_count(&cache),
+            3,
+            "the first request over an unbuilt cache must build and index the vault"
+        );
+        let gen = ctx.current_generation().expect("generation held");
+        assert_eq!(
+            gen.refresh_exec_count.load(Ordering::Relaxed),
+            1,
+            "the unbuilt cache is rebuilt via exactly one refresh on first touch"
+        );
+    }
+
     // ---- Writer-queue freshness refresh (NRN-252) ---------------------------
 
     /// Separate-connection proof: the freshness refresh runs on the generation's
@@ -3710,7 +3870,7 @@ mod tests {
     /// routed through the queue-refresh path.
     #[test]
     fn refresh_corruption_error_survives_ticket_and_evicts_generation() {
-        let (_tmp, root) = make_seeded_vault();
+        let (tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
@@ -3727,6 +3887,17 @@ mod tests {
             Some("database disk image is malformed".to_string()),
         );
         *gen1.inject_refresh_error.lock().unwrap() = Some(CacheError::Sqlite(corrupt));
+
+        // Dirty the vault so the NRN-253 probe reports Stale and routes the request
+        // through the refresh — where the injected corruption fires. (Before
+        // NRN-253 the refresh ran unconditionally; now an unchanged vault would
+        // probe Fresh and never reach the refresh, so the failure must be staged
+        // behind a real change.)
+        std::fs::write(
+            tmp.path().join("delta.md"),
+            "---\ntype: note\n---\nDelta body\n",
+        )
+        .unwrap();
 
         // The next request's refresh fails; the concrete error must propagate out
         // of query_cache still classifiable as corruption. `query_cache` binds the
@@ -3753,7 +3924,9 @@ mod tests {
             !marker_present(&cache),
             "state must be rebuilt after the ticket-routed corruption eviction"
         );
-        assert_eq!(doc_count(&cache), 3);
+        // 4, not 3: the reopened generation rebuilds against the live vault, which
+        // now carries the `delta.md` staged above to force the stale-probe refresh.
+        assert_eq!(doc_count(&cache), 4);
         drop(cache);
         assert_eq!(
             ctx.current_generation()

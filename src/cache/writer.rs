@@ -30,7 +30,11 @@ impl crate::cache::Cache {
     /// Returns true if a full rebuild has ever stamped this cache (a
     /// `last_full_rebuild_ts` meta row exists). Fresh caches and caches that
     /// have only seen schema/meta init return false.
-    fn has_been_built(&self) -> Result<bool, CacheError> {
+    ///
+    /// `pub(crate)` so the NRN-253 freshness probe can report an unbuilt cache as
+    /// Stale (routing it through the refresh/rebuild path), mirroring how
+    /// `index_incremental` defers to `rebuild` in exactly that case.
+    pub(crate) fn has_been_built(&self) -> Result<bool, CacheError> {
         let row: Option<String> = self
             .conn
             .query_row(
