@@ -166,31 +166,7 @@ impl Contexts {
         };
         // Map lock released — the (possibly slow) open below runs unguarded.
 
-        // The async initializer and its non-cancelable blocking task share one
-        // opening lease. If `resolve` is aborted, the blocking clone keeps
-        // `serving=opening` truthful until the detached open actually stops.
-        let opening = OpeningGuard::new(Arc::clone(&entry.opening));
-        let server = entry
-            .cell
-            .get_or_try_init(|| {
-                let canonical = canonical.clone();
-                let progress = Arc::clone(&entry.progress);
-                let blocking_opening = opening.clone();
-                async move {
-                    // Requirement (a): the first-touch open (config parse now;
-                    // integrity check + index build on the first query) must not
-                    // run on an async worker.
-                    tokio::task::spawn_blocking(move || {
-                        let _opening = blocking_opening;
-                        open_server(&canonical, progress)
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("vault open task failed: {e}"))?
-                }
-            })
-            .await?;
-
-        Ok(server.clone())
+        initialize_entry(entry, canonical, open_server).await
     }
 
     /// Observe one canonical vault's serving and writer state without opening
@@ -280,6 +256,45 @@ impl Contexts {
     pub(crate) async fn len(&self) -> usize {
         self.map.lock().await.len()
     }
+}
+
+/// Initialize one entry from a detached async task. Dropping a resolver's
+/// future drops only its join handle; the task keeps `OnceCell`'s initializer
+/// permit until the blocking open publishes or fails, so a second resolver
+/// waits instead of starting a duplicate open.
+async fn initialize_entry<F>(
+    entry: Arc<ContextEntry>,
+    canonical: camino::Utf8PathBuf,
+    opener: F,
+) -> anyhow::Result<McpServer>
+where
+    F: FnOnce(&Utf8Path, Arc<WriterProgressState>) -> anyhow::Result<McpServer> + Send + 'static,
+{
+    let initializer = tokio::spawn(async move {
+        let opening = OpeningGuard::new(Arc::clone(&entry.opening));
+        let server = entry
+            .cell
+            .get_or_try_init(|| {
+                let progress = Arc::clone(&entry.progress);
+                let blocking_opening = opening.clone();
+                async move {
+                    // Requirement (a): first-touch config parsing (and later
+                    // generation work) must not run on an async worker.
+                    tokio::task::spawn_blocking(move || {
+                        let _opening = blocking_opening;
+                        opener(&canonical, progress)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("vault open task failed: {e}"))?
+                }
+            })
+            .await?;
+        Ok::<McpServer, anyhow::Error>(server.clone())
+    });
+
+    initializer
+        .await
+        .map_err(|e| anyhow::anyhow!("vault initializer task failed: {e}"))?
 }
 
 fn service_progress(progress: crate::mcp::writer_queue::WriterProgress) -> WriterProgress {
@@ -457,48 +472,66 @@ mod tests {
         );
     }
 
-    /// Canceling the async initializer cannot cancel `spawn_blocking`; its
-    /// shared lease must keep status opening until the detached task exits.
+    /// Canceling a resolver detaches (rather than cancels) the cell initializer:
+    /// status stays opening and a second resolver shares the same single open.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn canceled_initializer_keeps_opening_until_blocking_open_exits() {
+    async fn canceled_resolver_keeps_single_flight_initializer_alive() {
         let (_tmp, root) = seeded_vault();
         let (canonical, hash) = crate::cache::vault_identity(&root).unwrap();
         let contexts = Contexts::new();
         let entry = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
         contexts.map.lock().await.insert(hash, Arc::clone(&entry));
 
-        let opening = OpeningGuard::new(Arc::clone(&entry.opening));
-        let blocking_opening = opening.clone();
+        let open_count = Arc::new(AtomicUsize::new(0));
         let (running_tx, running_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let initializer = tokio::spawn(async move {
-            let _opening = opening;
-            tokio::task::spawn_blocking(move || {
-                let _opening = blocking_opening;
+        let first_count = Arc::clone(&open_count);
+        let first = tokio::spawn(initialize_entry(
+            Arc::clone(&entry),
+            canonical.clone(),
+            move |canonical, progress| {
+                first_count.fetch_add(1, Ordering::SeqCst);
                 running_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
-            })
-            .await
-            .unwrap();
-        });
+                open_server(canonical, progress)
+            },
+        ));
 
         running_rx.recv().unwrap();
-        initializer.abort();
-        assert!(initializer.await.unwrap_err().is_cancelled());
+        first.abort();
+        match first.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("aborted resolver unexpectedly completed"),
+        }
+
+        let second_count = Arc::clone(&open_count);
+        let second = tokio::spawn(initialize_entry(
+            Arc::clone(&entry),
+            canonical.clone(),
+            move |canonical, progress| {
+                second_count.fetch_add(1, Ordering::SeqCst);
+                open_server(canonical, progress)
+            },
+        ));
+        tokio::task::yield_now().await;
         assert_eq!(
             contexts.control_state(&canonical).await.0,
             ServingState::Opening,
-            "the non-cancelable blocking open still owns the lease"
+            "the detached initializer still owns the cell permit"
+        );
+        assert_eq!(
+            open_count.load(Ordering::SeqCst),
+            1,
+            "the waiting resolver must not start a duplicate open"
         );
 
         release_tx.send(()).unwrap();
-        while entry.opening.load(Ordering::Acquire) != 0 {
-            tokio::task::yield_now().await;
-        }
+        second.await.unwrap().unwrap();
+        assert_eq!(open_count.load(Ordering::SeqCst), 1);
         assert_eq!(
             contexts.control_state(&canonical).await.0,
-            ServingState::Cold,
-            "once the detached open exits, the empty entry is cold"
+            ServingState::Ready,
+            "the waiting resolver receives the detached initializer's server"
         );
     }
 
