@@ -15,6 +15,11 @@ pub mod mutation_result;
 pub mod notes;
 pub mod server;
 pub mod tools;
+/// Per-vault writer queue (ADR 0013 Phase 2, NRN-252). Commit 1 lands the queue
+/// core; generation opens, freshness refreshes, and apply increments gain their
+/// production callers — and exercise these items — in later commits.
+#[allow(dead_code)]
+pub mod writer_queue;
 
 /// CLI↔MCP surface-parity forcing function (NRN-178). A `#[cfg(test)]` gate that
 /// fails the build when a CLI flag has no MCP twin (or vice versa) without a
