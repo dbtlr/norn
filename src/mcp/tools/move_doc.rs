@@ -294,14 +294,8 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
         &["move".to_string(), p.from.clone(), p.to.clone()],
     );
 
-    let mut touched: Vec<camino::Utf8PathBuf> = Vec::new();
-    let report = crate::applier::apply_migration_plan_collecting_touched(
-        &migration_plan,
-        &index,
-        apply_ctx,
-        &mut sink,
-        Some(&mut touched),
-    )?;
+    let report =
+        crate::applier::apply_migration_plan(&migration_plan, &index, apply_ctx, &mut sink)?;
 
     crate::emit_invocation_finished(&mut sink, "move", report.exit_code(), &report);
 
@@ -314,7 +308,7 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     // Warm mode: commit the move's cache increments (source + destination +
     // backlink cascade) as a chunked writer-queue op, awaited; no-op in cold mode
     // (NRN-252 / NRN-158).
-    crate::mcp::mutate::commit_apply_increments(ctx, &touched);
+    ctx.commit_apply_increments(&report.touched_paths);
 
     Ok(report)
 }

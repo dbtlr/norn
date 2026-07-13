@@ -112,10 +112,16 @@ impl crate::cache::Cache {
     /// # Why skipping verification is sound
     ///
     /// The caller opens this companion microseconds after the primary
-    /// connection, against the SAME `cache.db` inode, while holding the warm
-    /// generation's sentinel `File` open on that inode (so it cannot be
-    /// unlinked and swapped underneath us — see `open_generation` in
-    /// `crate::mcp::context`). The primary `open_with_index` already ran
+    /// connection, against the SAME `cache.db` path, while holding the warm
+    /// generation's sentinel `File` open on the primary inode. The held fd pins
+    /// that inode from being freed — but an fd does NOT pin the PATH from being
+    /// replaced, so a racing `cache clear` could still unlink+recreate `cache.db`
+    /// and bind this by-path open to a DIFFERENT inode. The caller closes that
+    /// hole itself: after this open, `open_generation` (in `crate::mcp::context`)
+    /// stats the path and fails the generation open if the companion's `(dev,
+    /// ino)` differs from the sentinel-captured identity, so a split-brain
+    /// generation never escapes; a swap after that check is caught by the next
+    /// request's ground-shift check. The primary `open_with_index` already ran
     /// `PRAGMA integrity_check`, reconciled schema version / vault identity /
     /// alias-field drift, and rebuilt if needed — so the bytes this companion
     /// attaches to are known-good under the held sentinel. Re-running the

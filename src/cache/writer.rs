@@ -173,41 +173,38 @@ impl crate::cache::Cache {
 pub(crate) const INCREMENT_CHUNK_BUDGET: Duration = Duration::from_millis(50);
 
 /// Test-only override for [`INCREMENT_CHUNK_BUDGET`], in milliseconds. DEBUG
-/// BUILDS ONLY — the env read is compiled out of release builds (see
-/// [`increment_chunk_budget`]), exactly like
-/// [`crate::cache::lock::write_lock_timeout`]'s `NORN_CACHE_LOCK_TIMEOUT_MS`, so
+/// BUILDS ONLY — the env read is compiled out of release builds (via the shared
+/// [`crate::cache::lock::debug_env_duration_ms`], exactly like
+/// [`crate::cache::lock::write_lock_timeout`]'s `NORN_CACHE_LOCK_TIMEOUT_MS`), so
 /// no production environment can shrink the budget. A tiny value (including `0`)
 /// forces one-file-per-chunk so tests can observe multi-chunk, file-coherent
 /// commits deterministically.
-#[cfg(debug_assertions)]
 const INCREMENT_CHUNK_BUDGET_ENV: &str = "NORN_CACHE_INCREMENT_BUDGET_MS";
 
 /// The increment-commit chunk budget (see [`INCREMENT_CHUNK_BUDGET`]).
 ///
-/// **Release builds always return the 50ms const** — the env read below is
-/// `#[cfg(debug_assertions)]`, compiled out entirely. Debug builds honor
-/// `NORN_CACHE_INCREMENT_BUDGET_MS` when it parses to an integer (`0` yields
-/// after every single file), read at every call so a test scopes its own
-/// override.
+/// **Release builds always return the 50ms const** — the env read is compiled
+/// out. Debug builds honor `NORN_CACHE_INCREMENT_BUDGET_MS` when it parses to an
+/// integer; unlike the write-lock timeout this ACCEPTS `0` (yield after every
+/// single file), so it passes `accept_zero = true` to the shared reader.
 pub(crate) fn increment_chunk_budget() -> Duration {
-    #[cfg(debug_assertions)]
-    if let Ok(raw) = std::env::var(INCREMENT_CHUNK_BUDGET_ENV) {
-        if let Ok(ms) = raw.parse::<u64>() {
-            return Duration::from_millis(ms);
-        }
-    }
-    INCREMENT_CHUNK_BUDGET
+    crate::cache::lock::debug_env_duration_ms(
+        INCREMENT_CHUNK_BUDGET_ENV,
+        INCREMENT_CHUNK_BUDGET,
+        /* accept_zero = */ true,
+    )
 }
 
 /// The phase a chunked [`IncrementCommit`] is in. Document-row work (per-file,
-/// file-coherent) drains first; then ONE global link-resolution rewrite; then
-/// done.
+/// file-coherent) drains first; when `pending` empties, the SAME
+/// [`commit_increment_chunk`](Cache::commit_increment_chunk) entry runs the ONE
+/// global link-resolution rewrite inline and finishes — so there is no resting
+/// "links" phase to bounce through (the empty-pending `Files` entry IS the links
+/// chunk, still preemptible at the boundary before it).
 enum IncrementPhase {
-    /// Committing per-file document rows in file-coherent chunks.
+    /// Committing per-file document rows in file-coherent chunks; when `pending`
+    /// empties, this entry also runs the final global links rewrite inline.
     Files,
-    /// The single global links-table rewrite (link resolution is global, so this
-    /// is what keeps the committed increment identical to a full rebuild).
-    Links,
     /// All work committed.
     Done,
 }
@@ -235,17 +232,24 @@ impl crate::cache::Cache {
     /// invalidation" authority `index_incremental` uses — but holds NO WriteLock
     /// during the parse (scoped parsing is out of scope, tracked as NRN-154).
     ///
-    /// The returned [`IncrementCommit`] is then driven by
+    /// An ASSOCIATED function (no `&self`): the parse is read-only over the
+    /// filesystem and needs only the operator's `alias_field` / `files_ignore`
+    /// config, NOT a cache connection. Taking the options explicitly lets the
+    /// warm daemon build the [`IncrementCommit`] on the REQUEST thread (off the
+    /// writer thread) so the O(parse) whole-vault walk never runs as one
+    /// unbounded, non-preemptible writer-queue chunk (NRN-252 review). The
+    /// returned commit is then driven by
     /// [`commit_increment_chunk`](Self::commit_increment_chunk); no rows are
     /// written here.
     pub(crate) fn begin_increment_commit(
-        &self,
         vault_root: &Utf8Path,
         changed_paths: &[Utf8PathBuf],
+        alias_field: Option<&str>,
+        files_ignore: &[String],
     ) -> Result<IncrementCommit, CacheError> {
         let options = crate::graph::IndexOptions {
-            ignore: self.files_ignore.clone(),
-            alias_field: self.alias_field.clone(),
+            ignore: files_ignore.to_vec(),
+            alias_field: alias_field.map(|s| s.to_string()),
             ..Default::default()
         };
         let fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
@@ -293,31 +297,25 @@ impl crate::cache::Cache {
     ) -> Result<bool, CacheError> {
         match commit.phase {
             IncrementPhase::Files => {
-                if commit.pending.is_empty() {
-                    commit.phase = IncrementPhase::Links;
-                    return Ok(true);
-                }
-                let _lock = crate::cache::lock::WriteLock::acquire(
-                    &self.cache_dir,
-                    crate::cache::lock::write_lock_timeout(),
-                )?;
-                let tx = self.conn.transaction()?;
-                let start = Instant::now();
-                // Discarded: the increment's row counts feed no report — the whole
-                // point is a silent, self-committed cache update.
-                let mut report = IndexReport::default();
-                while let Some(path) = commit.pending.pop_front() {
-                    // Disk is truth: stat the path. Present ⇒ re-insert from the
-                    // authoritative parse (a gone-then-recreated or ignored-now file
-                    // that is absent from `fresh_docs` stays dropped); gone ⇒ leave
-                    // it dropped. Never trust the caller's change classification.
-                    let on_disk = vault_root
-                        .join(&path)
-                        .as_std_path()
-                        .try_exists()
-                        .unwrap_or(false);
-                    crate::cache::invalidation::drop_document(&tx, &path)?;
-                    if on_disk {
+                if !commit.pending.is_empty() {
+                    let _lock = crate::cache::lock::WriteLock::acquire(
+                        &self.cache_dir,
+                        crate::cache::lock::write_lock_timeout(),
+                    )?;
+                    let tx = self.conn.transaction()?;
+                    let start = Instant::now();
+                    // Discarded: the increment's row counts feed no report — the
+                    // whole point is a silent, self-committed cache update.
+                    let mut report = IndexReport::default();
+                    while let Some(path) = commit.pending.pop_front() {
+                        // `fresh_docs` (the authoritative whole-vault parse) is the
+                        // sole arbiter — exactly as the sibling `index_incremental`
+                        // branch is: a path ABSENT from it is gone OR now-ignored
+                        // (both drop-only); PRESENT ⇒ re-insert from the parse. No
+                        // separate on-disk stat is needed (an absent entry already
+                        // covers both drop cases), and the caller's change
+                        // classification is never trusted.
+                        crate::cache::invalidation::drop_document(&tx, &path)?;
                         if let Some(&i) = commit.fresh_docs.get(&path) {
                             insert_document(
                                 &tx,
@@ -327,30 +325,42 @@ impl crate::cache::Cache {
                                 &self.index_set,
                             )?;
                         }
+                        if start.elapsed() >= budget {
+                            break;
+                        }
                     }
-                    if start.elapsed() >= budget {
-                        break;
-                    }
+                    tx.commit()?;
+                    // Return `More` once even when this chunk just drained
+                    // `pending`, so a liveness op can preempt before the
+                    // whole-vault links rewrite; the next entry finds pending
+                    // empty and falls through to the links phase inline (no wasted
+                    // empty-transition round-trip).
+                    return Ok(true);
                 }
-                tx.commit()?;
-                if commit.pending.is_empty() {
-                    commit.phase = IncrementPhase::Links;
-                }
-                Ok(true)
-            }
-            IncrementPhase::Links => {
-                let _lock = crate::cache::lock::WriteLock::acquire(
-                    &self.cache_dir,
-                    crate::cache::lock::write_lock_timeout(),
-                )?;
-                let tx = self.conn.transaction()?;
-                rerun_link_resolution(&tx, &commit.fresh_index)?;
-                tx.commit()?;
-                commit.phase = IncrementPhase::Done;
+                // Pending exhausted — run the single global links rewrite inline
+                // and finish (no extra empty-transition round-trip).
+                self.commit_links_phase(commit)?;
                 Ok(false)
             }
             IncrementPhase::Done => Ok(false),
         }
+    }
+
+    /// Commit the single global links-table rewrite (link resolution is a
+    /// whole-vault function, so it is one atomic chunk), then mark the commit
+    /// [`IncrementPhase::Done`]. Its own WriteLock + transaction, so it
+    /// interleaves with external writers at the boundary before it, like every
+    /// other chunk.
+    fn commit_links_phase(&mut self, commit: &mut IncrementCommit) -> Result<(), CacheError> {
+        let _lock = crate::cache::lock::WriteLock::acquire(
+            &self.cache_dir,
+            crate::cache::lock::write_lock_timeout(),
+        )?;
+        let tx = self.conn.transaction()?;
+        rerun_link_resolution(&tx, &commit.fresh_index)?;
+        tx.commit()?;
+        commit.phase = IncrementPhase::Done;
+        Ok(())
     }
 
     /// Test-only: how many changes a `detect` scan reports for `vault_root`
@@ -575,32 +585,37 @@ fn insert_link(tx: &rusqlite::Transaction, link: &Link) -> Result<(), CacheError
         // parses with serde_json; failure round-trips as an empty list.
         Some(serde_json::to_string(&link.candidates).unwrap_or_default())
     };
-    tx.execute(
+    // `prepare_cached`, not `tx.execute`: link insertion is a hot per-link loop
+    // (`rerun_link_resolution` rewrites the WHOLE links table every increment
+    // commit), so recompiling this INSERT per row is wasted work. The cached
+    // statement is reused across every call on this connection; both callers
+    // (`insert_document`'s per-doc loop and the global rewrite) benefit.
+    let mut stmt = tx.prepare_cached(
         "INSERT INTO links
            (source_path, raw, kind, target_raw, resolved_path, anchor, block_ref,
             label, source_span_start, source_span_end, source_span_line, source_span_column,
             source_context, source_context_property, status, unresolved_reason, candidates_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![
-            link.source_path.as_str(),
-            link.raw,
-            kind,
-            link.target,
-            resolved,
-            link.anchor,
-            link.block_ref,
-            link.label,
-            span_start,
-            span_end,
-            span_line,
-            span_column,
-            source_context,
-            source_context_property,
-            status,
-            unresolved_reason,
-            candidates_json,
-        ],
     )?;
+    stmt.execute(params![
+        link.source_path.as_str(),
+        link.raw,
+        kind,
+        link.target,
+        resolved,
+        link.anchor,
+        link.block_ref,
+        link.label,
+        span_start,
+        span_end,
+        span_line,
+        span_column,
+        source_context,
+        source_context_property,
+        status,
+        unresolved_reason,
+        candidates_json,
+    ])?;
     Ok(())
 }
 
@@ -1257,7 +1272,13 @@ mod tests {
         std::fs::remove_file(root.join("other.md").as_std_path()).unwrap();
 
         let changed: Vec<Utf8PathBuf> = vec!["doc.md".into(), "new.md".into(), "other.md".into()];
-        let mut commit = cache.begin_increment_commit(&root, &changed).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &changed,
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+        )
+        .unwrap();
         let mut chunks = 0usize;
         loop {
             let more = cache
@@ -1338,7 +1359,13 @@ mod tests {
         .unwrap();
 
         let changed: Vec<Utf8PathBuf> = vec!["b.md".into()];
-        let mut commit = cache.begin_increment_commit(&root, &changed).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &changed,
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+        )
+        .unwrap();
         while cache
             .commit_increment_chunk(&root, &mut commit, increment_chunk_budget())
             .unwrap()

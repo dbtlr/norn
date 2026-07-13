@@ -527,8 +527,11 @@ impl RepairApplyReport {
     /// exists to avoid.
     pub fn touched_paths(&self) -> Vec<Utf8PathBuf> {
         let mut out: Vec<Utf8PathBuf> = Vec::new();
+        // First-occurrence-order dedup via a HashSet insert-check (the
+        // `dedup_preserve_order` house shape), not an O(n²) `out.iter().any`.
+        let mut seen: std::collections::HashSet<Utf8PathBuf> = std::collections::HashSet::new();
         let mut push = |p: &Utf8Path| {
-            if !out.iter().any(|q| q.as_path() == p) {
+            if seen.insert(p.to_path_buf()) {
                 out.push(p.to_path_buf());
             }
         };

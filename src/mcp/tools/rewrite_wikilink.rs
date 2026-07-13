@@ -202,20 +202,13 @@ pub fn handle(
         &["rewrite-wikilink".to_string(), p.from.clone(), p.to.clone()],
     );
 
-    let mut touched: Vec<camino::Utf8PathBuf> = Vec::new();
-    let report = crate::applier::apply_migration_plan_collecting_touched(
-        &plan,
-        &index,
-        apply_ctx,
-        &mut sink,
-        Some(&mut touched),
-    )?;
+    let report = crate::applier::apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
 
     crate::emit_invocation_finished(&mut sink, "rewrite-wikilink", report.exit_code(), &report);
 
     // Warm mode: commit the rewritten backlink files' cache increments as a
     // chunked writer-queue op, awaited; no-op in cold mode (NRN-252 / NRN-158).
-    crate::mcp::mutate::commit_apply_increments(ctx, &touched);
+    ctx.commit_apply_increments(&report.touched_paths);
 
     Ok(report)
 }

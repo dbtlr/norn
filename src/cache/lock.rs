@@ -20,30 +20,49 @@ pub(crate) const DEFAULT_WRITE_LOCK_TIMEOUT: std::time::Duration =
 /// Lets contention tests hit `CacheError::LockTimeout` in ~100–200ms instead
 /// of stalling the suite the full 5s per contended acquire. DEBUG BUILDS ONLY:
 /// the env read is compiled out of release builds (see
-/// [`write_lock_timeout`]), so an inherited value in a production environment
+/// [`debug_env_duration_ms`]), so an inherited value in a production environment
 /// (a dev shell, a baked plist env) can never shrink the real 5s budget.
-#[cfg(debug_assertions)]
 const WRITE_LOCK_TIMEOUT_ENV: &str = "NORN_CACHE_LOCK_TIMEOUT_MS";
 
-/// The write-lock acquire timeout used by the cache write paths.
+/// Shared debug-only `env → Duration` override reader for the cache write paths.
 ///
-/// **Release builds always return [`DEFAULT_WRITE_LOCK_TIMEOUT`] (5s)** — the
-/// env read below is `#[cfg(debug_assertions)]`, compiled out entirely, so no
-/// environment can alter the production timeout. Debug builds (what
-/// `cargo test` builds and what its integration tests spawn) honor
-/// `NORN_CACHE_LOCK_TIMEOUT_MS` when it parses to a positive integer, read at
-/// every acquire (not cached) so a test child process scopes the override to
-/// its own environment.
-pub(crate) fn write_lock_timeout() -> std::time::Duration {
+/// **Release builds always return `default`** — the env read is
+/// `#[cfg(debug_assertions)]`, compiled out entirely, so no environment can alter
+/// a production timeout/budget. Debug builds (what `cargo test` builds and its
+/// integration tests spawn) honor `var` when it parses to an integer, read at
+/// every call (not cached) so a test child process scopes the override to itself.
+///
+/// `accept_zero` parameterizes the ONE behavioral difference between the two call
+/// sites: the write-lock timeout REJECTS `0` (a zero-length acquire budget is
+/// nonsensical — fall back to the real 5s), while the increment-chunk budget
+/// ACCEPTS `0` (0ms deliberately forces one-file-per-chunk in tests).
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+pub(crate) fn debug_env_duration_ms(
+    var: &str,
+    default: std::time::Duration,
+    accept_zero: bool,
+) -> std::time::Duration {
     #[cfg(debug_assertions)]
-    if let Ok(raw) = std::env::var(WRITE_LOCK_TIMEOUT_ENV) {
+    if let Ok(raw) = std::env::var(var) {
         if let Ok(ms) = raw.parse::<u64>() {
-            if ms > 0 {
+            if accept_zero || ms > 0 {
                 return std::time::Duration::from_millis(ms);
             }
         }
     }
-    DEFAULT_WRITE_LOCK_TIMEOUT
+    default
+}
+
+/// The write-lock acquire timeout used by the cache write paths. Release builds
+/// always return [`DEFAULT_WRITE_LOCK_TIMEOUT`] (5s); debug builds honor
+/// `NORN_CACHE_LOCK_TIMEOUT_MS` when it parses to a POSITIVE integer (zero is
+/// rejected — see [`debug_env_duration_ms`]).
+pub(crate) fn write_lock_timeout() -> std::time::Duration {
+    debug_env_duration_ms(
+        WRITE_LOCK_TIMEOUT_ENV,
+        DEFAULT_WRITE_LOCK_TIMEOUT,
+        /* accept_zero = */ false,
+    )
 }
 
 /// Open (creating if absent) the lock file at `lock_path` and acquire an

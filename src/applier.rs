@@ -96,28 +96,18 @@ pub(crate) struct ApplyContext {
 ///
 /// The `RepairApplyReport` is converted to an `ApplyReport` with per-op status,
 /// provenance (`from`), footnote propagation, and summary lines.
+/// On a clean COMMIT, the returned [`ApplyReport`] carries the changed-file set
+/// on its `touched_paths` field (NRN-252 / NRN-158) — populated from
+/// `RepairApplyReport::touched_paths`. The MCP warm mutation tools (`move` /
+/// `delete` / `rewrite_wikilink` / `apply`) feed it to their cache-increment
+/// commit; the CLI ignores it (and it is `#[serde(skip)]`, so it never touches
+/// the wire report). A refusal writes nothing (empty set) and a partial failure
+/// leaves the next read's `detect` to heal the cache (also empty).
 pub(crate) fn apply_migration_plan(
     plan: &MigrationPlan,
     index: &GraphIndex,
     ctx: ApplyContext,
     sink: &mut crate::telemetry::EventSink,
-) -> Result<ApplyReport> {
-    apply_migration_plan_collecting_touched(plan, index, ctx, sink, None)
-}
-
-/// As [`apply_migration_plan`], but also collects the changed-file set into
-/// `touched_out` when the apply COMMITS cleanly (NRN-252 / NRN-158). The MCP
-/// warm mutation tools (`move` / `delete` / `rewrite_wikilink` / `apply`) pass
-/// `Some(&mut Vec)` and feed it to their cache-increment commit; the CLI and
-/// tests pass `None`. Populated only on the clean-commit path — a refusal writes
-/// nothing (no increment needed) and a partial failure leaves the next read's
-/// `detect` to heal the cache.
-pub(crate) fn apply_migration_plan_collecting_touched(
-    plan: &MigrationPlan,
-    index: &GraphIndex,
-    ctx: ApplyContext,
-    sink: &mut crate::telemetry::EventSink,
-    touched_out: Option<&mut Vec<Utf8PathBuf>>,
 ) -> Result<ApplyReport> {
     // ------------------------------------------------------------------
     // Phase 1: expansion + provenance tracking
@@ -321,11 +311,9 @@ pub(crate) fn apply_migration_plan_collecting_touched(
         }
     };
 
-    // The apply COMMITTED cleanly — hand the touched-file set to the caller's
-    // increment-commit sink (NRN-252 / NRN-158) before the report is projected.
-    if let Some(out) = touched_out {
-        out.extend(apply_result.touched_paths());
-    }
+    // The apply COMMITTED cleanly — capture the touched-file set to carry on the
+    // projected report for the caller's increment commit (NRN-252 / NRN-158).
+    let touched_paths = apply_result.touched_paths();
 
     // ------------------------------------------------------------------
     // Phase 4: convert RepairApplyReport → ApplyReport
@@ -422,6 +410,7 @@ pub(crate) fn apply_migration_plan_collecting_touched(
         operations: ops,
         warnings,
         outcome,
+        touched_paths,
     })
 }
 
@@ -507,6 +496,8 @@ fn build_refusal_report(
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Refused,
+        // A refusal writes nothing, so no cache increment is needed.
+        touched_paths: Vec::new(),
     }
 }
 
@@ -567,6 +558,8 @@ fn build_plan_refusal_report(
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Refused,
+        // A refusal writes nothing, so no cache increment is needed.
+        touched_paths: Vec::new(),
     }
 }
 
@@ -689,6 +682,8 @@ fn build_partial_failure_report(
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Failed,
+        // A partial failure leaves the next read's `detect` to heal the cache.
+        touched_paths: Vec::new(),
     }
 }
 

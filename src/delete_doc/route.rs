@@ -204,6 +204,7 @@ mod tests {
             }],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
+            touched_paths: Vec::new(),
         };
         let wire = json!({ "report": serde_json::to_value(&report).unwrap() });
         let rebuilt = crate::apply_report::reconstruct_wire_report(&wire).unwrap();

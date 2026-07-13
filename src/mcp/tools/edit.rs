@@ -191,7 +191,7 @@ pub fn handle(ctx: &VaultContext, p: EditParams) -> Result<EditReport> {
 
     // Warm mode: commit the apply's cache increments (awaited) so the next read
     // stays cheap; a no-op in cold mode (NRN-252 / NRN-158).
-    crate::mcp::mutate::commit_apply_increments(ctx, &apply_report.touched_paths());
+    ctx.commit_apply_increments(&apply_report.touched_paths());
 
     Ok(crate::edit::report::build_report(
         &pre.outcome,

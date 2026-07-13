@@ -15,10 +15,10 @@ pub mod mutation_result;
 pub mod notes;
 pub mod server;
 pub mod tools;
-/// Per-vault writer queue (ADR 0013 Phase 2, NRN-252). Warm-mode generation opens
-/// route through it as liveness ops (this commit); the bulk-op half (freshness
-/// refreshes, apply increments) gains its production callers in later commits and
-/// carries a narrowed `#[allow(dead_code)]` in the module itself until then.
+/// Per-vault writer queue (ADR 0013 Phase 2, NRN-252). All warm-mode write work
+/// routes through it: generation opens and the per-request freshness refresh as
+/// LIVENESS ops (latency-critical, a reader is blocked on them), and the
+/// post-apply cache-increment commit as a chunked BULK op.
 pub mod writer_queue;
 
 /// CLI↔MCP surface-parity forcing function (NRN-178). A `#[cfg(test)]` gate that

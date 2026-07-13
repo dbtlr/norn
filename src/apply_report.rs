@@ -3,6 +3,7 @@
 //!
 //! Replaces MoveReport, DeleteReport, RepairApplyReport.
 
+use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const APPLY_REPORT_SCHEMA_VERSION: u32 = 2;
@@ -32,6 +33,15 @@ pub struct ApplyReport {
     /// backward-compatible deserialization of pre-NRN-183 reports.
     #[serde(default)]
     pub outcome: ApplyOutcome,
+    /// Every vault-relative path this apply TOUCHED on disk, populated only on the
+    /// clean-commit path (NRN-252 / NRN-158) from `RepairApplyReport::touched_paths`.
+    /// The warm MCP mutation tools feed it to the cache-increment commit so the
+    /// next read stays cheap; the CLI ignores it. NOT part of the wire contract —
+    /// `#[serde(skip)]` keeps it out of `--format json` / MCP `structuredContent`
+    /// and defaults it to empty on deserialize, so a refusal / partial-failure
+    /// report (which never sets it) carries no paths.
+    #[serde(skip)]
+    pub touched_paths: Vec<Utf8PathBuf>,
 }
 
 /// The machine-readable outcome of an apply (NRN-183) — the shared vocabulary
@@ -117,6 +127,8 @@ impl ApplyReport {
             }],
             warnings: Vec::new(),
             outcome: ApplyOutcome::Refused,
+            // A refusal writes nothing — no touched paths.
+            touched_paths: Vec::new(),
         }
     }
 }
@@ -563,6 +575,7 @@ mod tests {
             }],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
+            touched_paths: Vec::new(),
         };
         let json = serde_json::to_string(&report).unwrap();
         let back: ApplyReport = serde_json::from_str(&json).unwrap();

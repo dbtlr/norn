@@ -297,6 +297,7 @@ mod tests {
             }],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
+            touched_paths: Vec::new(),
         };
         let out = out_path.to_str().unwrap();
         let code = emit(

@@ -215,20 +215,13 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
 
     // Propagate the original error (see the dry-run branch) so the structured
     // envelope survives to `to_mcp_error`.
-    let mut touched: Vec<camino::Utf8PathBuf> = Vec::new();
-    let report = crate::applier::apply_migration_plan_collecting_touched(
-        &plan,
-        &index,
-        apply_ctx,
-        &mut sink,
-        Some(&mut touched),
-    )?;
+    let report = crate::applier::apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
 
     crate::emit_invocation_finished(&mut sink, "apply", report.exit_code(), &report);
 
     // Warm mode: commit the plan's cache increments (every touched path) as a
     // chunked writer-queue op, awaited; no-op in cold mode (NRN-252 / NRN-158).
-    crate::mcp::mutate::commit_apply_increments(ctx, &touched);
+    ctx.commit_apply_increments(&report.touched_paths);
 
     Ok(report)
 }

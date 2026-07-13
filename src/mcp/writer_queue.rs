@@ -454,14 +454,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
-    impl WriterQueue {
-        /// Test-only lockless view of the shutdown flag, so a test can spin until
-        /// a concurrent `drop` has committed shutdown before releasing a blocked op.
-        fn shutdown_probe(&self) -> Arc<Inner> {
-            Arc::clone(&self.inner)
-        }
-    }
-
     /// A liveness op returns its result and ops run FIFO.
     #[test]
     fn liveness_runs_fifo_and_returns_results() {
@@ -671,7 +663,7 @@ mod tests {
     #[test]
     fn shutdown_drops_queued_ops_without_hanging() {
         let queue = WriterQueue::spawn("shutdown");
-        let probe = queue.shutdown_probe();
+        let probe = queue.shutdown_watch();
 
         let (running_tx, running_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -708,7 +700,7 @@ mod tests {
         // Wait until shutdown is committed, THEN release the blocker, so the
         // writer's next pick observes shutdown and drops the queued ops rather
         // than running them. Guaranteed to terminate: the dropper sets it.
-        while !probe.shutdown.load(Ordering::Acquire) {
+        while !probe.is_shutting_down() {
             std::thread::yield_now();
         }
         release_tx.send(()).unwrap();
