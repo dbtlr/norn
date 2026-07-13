@@ -285,7 +285,13 @@ pub fn handle(ctx: &VaultContext, p: SetParams) -> Result<SetReport> {
     let trace_id = sink.trace_id().to_string();
     let exit = if apply_outcome.is_ok() { 0 } else { 2 };
     crate::emit_single_op_finished(&mut sink, "set", exit, apply_outcome.is_ok());
-    apply_outcome?;
+    let apply_report = apply_outcome?;
+
+    // Warm mode: the apply committed on disk, so commit its cache increments as a
+    // chunked writer-queue op (awaited) — the next read then finds the cache
+    // current instead of paying a detect scan + rebuild (NRN-252 / NRN-158). A
+    // no-op in cold mode.
+    crate::mcp::mutate::commit_apply_increments(ctx, &apply_report.touched_paths());
 
     Ok(build_report(&outcome, true, &trace_id))
 }

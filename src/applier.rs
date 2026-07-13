@@ -102,6 +102,23 @@ pub(crate) fn apply_migration_plan(
     ctx: ApplyContext,
     sink: &mut crate::telemetry::EventSink,
 ) -> Result<ApplyReport> {
+    apply_migration_plan_collecting_touched(plan, index, ctx, sink, None)
+}
+
+/// As [`apply_migration_plan`], but also collects the changed-file set into
+/// `touched_out` when the apply COMMITS cleanly (NRN-252 / NRN-158). The MCP
+/// warm mutation tools (`move` / `delete` / `rewrite_wikilink` / `apply`) pass
+/// `Some(&mut Vec)` and feed it to their cache-increment commit; the CLI and
+/// tests pass `None`. Populated only on the clean-commit path — a refusal writes
+/// nothing (no increment needed) and a partial failure leaves the next read's
+/// `detect` to heal the cache.
+pub(crate) fn apply_migration_plan_collecting_touched(
+    plan: &MigrationPlan,
+    index: &GraphIndex,
+    ctx: ApplyContext,
+    sink: &mut crate::telemetry::EventSink,
+    touched_out: Option<&mut Vec<Utf8PathBuf>>,
+) -> Result<ApplyReport> {
     // ------------------------------------------------------------------
     // Phase 1: expansion + provenance tracking
     // ------------------------------------------------------------------
@@ -303,6 +320,12 @@ pub(crate) fn apply_migration_plan(
             return Err(e);
         }
     };
+
+    // The apply COMMITTED cleanly — hand the touched-file set to the caller's
+    // increment-commit sink (NRN-252 / NRN-158) before the report is projected.
+    if let Some(out) = touched_out {
+        out.extend(apply_result.touched_paths());
+    }
 
     // ------------------------------------------------------------------
     // Phase 4: convert RepairApplyReport → ApplyReport

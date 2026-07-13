@@ -403,6 +403,10 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<crate::new::report::Ne
     crate::emit_single_op_finished(&mut sink, "new", exit_code, apply_outcome.is_ok());
     let apply_report = apply_outcome?;
 
+    // Warm mode: commit the created document's cache increment (awaited) so the
+    // next read stays cheap; a no-op in cold mode (NRN-252 / NRN-158).
+    crate::mcp::mutate::commit_apply_increments(ctx, &apply_report.touched_paths());
+
     // NRN-101: an incremental `{{seq}}` target is resolved at apply time inside
     // the applier (under the lock). Render + post-create validate against the
     // path actually written, not the unresolved `{{seq}}` template — the CLI

@@ -12,11 +12,17 @@
 //! honor `telemetry.location`, prune/size-cap before opening, and fall back to a
 //! `discard` sink if anything about opening the file fails — telemetry must
 //! never block or fail a mutation.
+//!
+//! It also owns [`commit_apply_increments`], the second shared post-apply seam:
+//! after a WARM mutation applies, every tool feeds the changed-file set here so
+//! the applier commits its OWN cache increments (chunked, on the writer queue) —
+//! the next read then finds the cache already current instead of paying a full
+//! detect scan plus whole-vault rebuild (NRN-252 / NRN-158).
 
 use crate::mcp::context::VaultContext;
 use crate::mutation_lock::MutationLock;
 use crate::telemetry::{Clock, EventSink, IdGen};
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 
 /// Acquire the per-vault mutation lock on an MCP mutation's CONFIRM/apply path.
 ///
@@ -246,6 +252,25 @@ pub(crate) fn open_mutation_event_sink(ctx: &VaultContext) -> EventSink {
     } else {
         EventSink::discard(ids, clock)
     }
+}
+
+/// Commit a just-succeeded WARM mutation's changed-file set into the cache as a
+/// chunked writer-queue increment, AWAITED before the tool returns (ADR 0013
+/// Phase 2, NRN-252 / NRN-158).
+///
+/// This is the one seam every warm mutation tool calls AFTER its apply succeeds,
+/// feeding the paths the apply touched (the apply report's changed/created/
+/// deleted/moved set). It makes the cache current in-band, so the NEXT read's
+/// freshness refresh finds zero changes and pays neither a full detect scan nor a
+/// whole-vault rebuild — the exact per-read cost NRN-158 removes.
+///
+/// Delegates to [`VaultContext::commit_apply_increments`]: a no-op in cold mode
+/// (the CLI direct path and cold `norn mcp` have no writer queue) and for an
+/// empty set. It NEVER fails the tool — the mutation already succeeded on disk,
+/// so an increment failure degrades to an operator note and the next read heals
+/// the cache (files remain the source of truth).
+pub(crate) fn commit_apply_increments(ctx: &VaultContext, changed_paths: &[Utf8PathBuf]) {
+    ctx.commit_apply_increments(changed_paths);
 }
 
 #[cfg(test)]

@@ -1,7 +1,10 @@
-//! Cache writer: full rebuild and (later) incremental update.
+//! Cache writer: full rebuild, incremental update, and explicit increment commit.
+
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use crate::core::{Document, GraphIndex, Link, VaultFile};
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use rusqlite::{params, Transaction};
 
 use crate::cache::change_detection::{detect, ChangeDetectOptions, FileChange};
@@ -159,6 +162,205 @@ impl crate::cache::Cache {
 
         report.duration_ms = start.elapsed().as_millis();
         Ok(report)
+    }
+}
+
+/// The wall-time budget one increment-commit chunk aims to stay within before
+/// yielding to the writer queue's liveness class (ADR 0013 Phase 2, NRN-252,
+/// NRN-158). A chunk always commits at least one WHOLE file, then stops once this
+/// budget is spent — so a chunk never splits a document's rows and preemption
+/// latency stays bounded to roughly one chunk. 50ms in production.
+pub(crate) const INCREMENT_CHUNK_BUDGET: Duration = Duration::from_millis(50);
+
+/// Test-only override for [`INCREMENT_CHUNK_BUDGET`], in milliseconds. DEBUG
+/// BUILDS ONLY — the env read is compiled out of release builds (see
+/// [`increment_chunk_budget`]), exactly like
+/// [`crate::cache::lock::write_lock_timeout`]'s `NORN_CACHE_LOCK_TIMEOUT_MS`, so
+/// no production environment can shrink the budget. A tiny value (including `0`)
+/// forces one-file-per-chunk so tests can observe multi-chunk, file-coherent
+/// commits deterministically.
+#[cfg(debug_assertions)]
+const INCREMENT_CHUNK_BUDGET_ENV: &str = "NORN_CACHE_INCREMENT_BUDGET_MS";
+
+/// The increment-commit chunk budget (see [`INCREMENT_CHUNK_BUDGET`]).
+///
+/// **Release builds always return the 50ms const** — the env read below is
+/// `#[cfg(debug_assertions)]`, compiled out entirely. Debug builds honor
+/// `NORN_CACHE_INCREMENT_BUDGET_MS` when it parses to an integer (`0` yields
+/// after every single file), read at every call so a test scopes its own
+/// override.
+pub(crate) fn increment_chunk_budget() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var(INCREMENT_CHUNK_BUDGET_ENV) {
+        if let Ok(ms) = raw.parse::<u64>() {
+            return Duration::from_millis(ms);
+        }
+    }
+    INCREMENT_CHUNK_BUDGET
+}
+
+/// The phase a chunked [`IncrementCommit`] is in. Document-row work (per-file,
+/// file-coherent) drains first; then ONE global link-resolution rewrite; then
+/// done.
+enum IncrementPhase {
+    /// Committing per-file document rows in file-coherent chunks.
+    Files,
+    /// The single global links-table rewrite (link resolution is global, so this
+    /// is what keeps the committed increment identical to a full rebuild).
+    Links,
+    /// All work committed.
+    Done,
+}
+
+/// Driver state for a chunked increment commit (ADR 0013 Phase 2, NRN-252,
+/// NRN-158). Built once at op start by [`Cache::begin_increment_commit`] — which
+/// performs the whole-vault parse WITHOUT holding the WriteLock — then advanced
+/// one chunk at a time by [`Cache::commit_increment_chunk`].
+///
+/// The parse (`fresh_index`) is the authority: disk is truth, so a changed path
+/// still present is re-parsed and upserted while a gone path is dropped,
+/// regardless of what the caller believed the change was. `fresh_docs` maps a
+/// vault-relative path to its index in `fresh_index.documents` for O(1) lookup.
+pub(crate) struct IncrementCommit {
+    fresh_index: GraphIndex,
+    fresh_docs: HashMap<Utf8PathBuf, usize>,
+    pending: VecDeque<Utf8PathBuf>,
+    phase: IncrementPhase,
+}
+
+impl crate::cache::Cache {
+    /// Begin a chunked increment commit for an explicit set of changed vault-
+    /// relative paths, WITHOUT a detect scan (NRN-158). Performs the whole-vault
+    /// `build_index_with_options` parse in memory — the same "aggressive
+    /// invalidation" authority `index_incremental` uses — but holds NO WriteLock
+    /// during the parse (scoped parsing is out of scope, tracked as NRN-154).
+    ///
+    /// The returned [`IncrementCommit`] is then driven by
+    /// [`commit_increment_chunk`](Self::commit_increment_chunk); no rows are
+    /// written here.
+    pub(crate) fn begin_increment_commit(
+        &self,
+        vault_root: &Utf8Path,
+        changed_paths: &[Utf8PathBuf],
+    ) -> Result<IncrementCommit, CacheError> {
+        let options = crate::graph::IndexOptions {
+            ignore: self.files_ignore.clone(),
+            alias_field: self.alias_field.clone(),
+            ..Default::default()
+        };
+        let fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
+        let fresh_docs = fresh_index
+            .documents
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.path.clone(), i))
+            .collect();
+        // Sort + dedup so chunk boundaries are deterministic and a path is never
+        // committed twice.
+        let mut pending: Vec<Utf8PathBuf> = changed_paths.to_vec();
+        pending.sort();
+        pending.dedup();
+        Ok(IncrementCommit {
+            fresh_index,
+            fresh_docs,
+            pending: pending.into_iter().collect(),
+            phase: IncrementPhase::Files,
+        })
+    }
+
+    /// Commit ONE chunk of an increment. Each chunk acquires the WriteLock,
+    /// opens a transaction, commits its work, and releases the lock — so external
+    /// CLI processes and this daemon's liveness ops can interleave at chunk
+    /// boundaries. Returns `Ok(true)` when more chunks remain (the caller should
+    /// re-invoke after yielding), `Ok(false)` when the commit is complete.
+    ///
+    /// - **Files phase:** add WHOLE files to the transaction until the wall-time
+    ///   `budget` is spent (always at least one file, so a chunk never splits a
+    ///   document's rows). Disk is truth: a path still present is dropped and
+    ///   re-inserted from the parse; a gone path is dropped. `insert_document`
+    ///   stores the same `(mtime, size, hash)` bookkeeping a full rebuild stores,
+    ///   so a later `detect` reports every committed file as UNCHANGED — the whole
+    ///   point of committing the increment (NRN-158).
+    /// - **Links phase:** ONE global links-table rewrite from the parse. Link
+    ///   resolution is a global function of the whole document set (NRN-126), so
+    ///   this is what makes the committed increment identical to a full rebuild
+    ///   (an alias/path/stem change re-resolves links in unchanged files too).
+    pub(crate) fn commit_increment_chunk(
+        &mut self,
+        vault_root: &Utf8Path,
+        commit: &mut IncrementCommit,
+        budget: Duration,
+    ) -> Result<bool, CacheError> {
+        match commit.phase {
+            IncrementPhase::Files => {
+                if commit.pending.is_empty() {
+                    commit.phase = IncrementPhase::Links;
+                    return Ok(true);
+                }
+                let _lock = crate::cache::lock::WriteLock::acquire(
+                    &self.cache_dir,
+                    crate::cache::lock::write_lock_timeout(),
+                )?;
+                let tx = self.conn.transaction()?;
+                let start = Instant::now();
+                // Discarded: the increment's row counts feed no report — the whole
+                // point is a silent, self-committed cache update.
+                let mut report = IndexReport::default();
+                while let Some(path) = commit.pending.pop_front() {
+                    // Disk is truth: stat the path. Present ⇒ re-insert from the
+                    // authoritative parse (a gone-then-recreated or ignored-now file
+                    // that is absent from `fresh_docs` stays dropped); gone ⇒ leave
+                    // it dropped. Never trust the caller's change classification.
+                    let on_disk = vault_root
+                        .join(&path)
+                        .as_std_path()
+                        .try_exists()
+                        .unwrap_or(false);
+                    crate::cache::invalidation::drop_document(&tx, &path)?;
+                    if on_disk {
+                        if let Some(&i) = commit.fresh_docs.get(&path) {
+                            insert_document(
+                                &tx,
+                                vault_root,
+                                &commit.fresh_index.documents[i],
+                                &mut report,
+                                &self.index_set,
+                            )?;
+                        }
+                    }
+                    if start.elapsed() >= budget {
+                        break;
+                    }
+                }
+                tx.commit()?;
+                if commit.pending.is_empty() {
+                    commit.phase = IncrementPhase::Links;
+                }
+                Ok(true)
+            }
+            IncrementPhase::Links => {
+                let _lock = crate::cache::lock::WriteLock::acquire(
+                    &self.cache_dir,
+                    crate::cache::lock::write_lock_timeout(),
+                )?;
+                let tx = self.conn.transaction()?;
+                rerun_link_resolution(&tx, &commit.fresh_index)?;
+                tx.commit()?;
+                commit.phase = IncrementPhase::Done;
+                Ok(false)
+            }
+            IncrementPhase::Done => Ok(false),
+        }
+    }
+
+    /// Test-only: how many changes a `detect` scan reports for `vault_root`
+    /// against this connection's cached state. Drives the NRN-158 assertion that
+    /// a committed increment leaves the next refresh with zero work.
+    #[cfg(test)]
+    pub(crate) fn detect_change_count(&self, vault_root: &Utf8Path) -> usize {
+        detect(vault_root, self, &ChangeDetectOptions::default())
+            .expect("detect")
+            .len()
     }
 }
 
@@ -475,6 +677,7 @@ fn size_bytes(path: &Utf8Path) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
@@ -977,5 +1180,182 @@ mod tests {
         let r2 = handle2.join().unwrap();
         assert!(r1.is_ok(), "first rebuild failed: {r1:?}");
         assert!(r2.is_ok(), "second rebuild failed: {r2:?}");
+    }
+
+    // ---- Increment-commit primitive (NRN-252 / NRN-158) ---------------------
+
+    type DocRow = (String, String, String); // (path, hash, body_text)
+    type LinkRow = (String, String, Option<String>, String); // (src, target, resolved, status)
+
+    fn snapshot_docs(cache: &crate::cache::Cache) -> Vec<DocRow> {
+        let mut stmt = cache
+            .conn
+            .prepare("SELECT path, hash, body_text FROM documents ORDER BY path")
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    fn snapshot_links(cache: &crate::cache::Cache) -> Vec<LinkRow> {
+        let mut stmt = cache
+            .conn
+            .prepare(
+                "SELECT source_path, target_raw, resolved_path, status \
+                 FROM links ORDER BY source_path, target_raw, resolved_path",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn increment_chunk_budget_defaults_to_fifty_ms() {
+        assert_eq!(INCREMENT_CHUNK_BUDGET, Duration::from_millis(50));
+        #[cfg(debug_assertions)]
+        if std::env::var(INCREMENT_CHUNK_BUDGET_ENV).is_ok() {
+            return;
+        }
+        assert_eq!(increment_chunk_budget(), INCREMENT_CHUNK_BUDGET);
+    }
+
+    /// The full NRN-158 correctness contract: an increment commit fed the three
+    /// change kinds (modified, created, deleted) leaves the cache byte-identical
+    /// to a full rebuild of the same disk state, AND a subsequent `detect`
+    /// reports zero changes (so the next refresh does no whole-vault rebuild). A
+    /// tiny budget forces the file-coherent, multi-chunk path.
+    #[test]
+    fn increment_commit_matches_rebuild_for_all_change_kinds() {
+        let (_tmp, root) = make_vault_with_one_doc(); // doc.md -> other.md, other.md
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        // Modified (doc.md, now links [[new]]), created (new.md), deleted (other.md).
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(
+            root.join("doc.md").as_std_path(),
+            "---\ntitle: Doc2\n---\n# H2\n\nbody [[new]]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("new.md").as_std_path(), "---\ntitle: New\n---\n").unwrap();
+        std::fs::remove_file(root.join("other.md").as_std_path()).unwrap();
+
+        let changed: Vec<Utf8PathBuf> = vec!["doc.md".into(), "new.md".into(), "other.md".into()];
+        let mut commit = cache.begin_increment_commit(&root, &changed).unwrap();
+        let mut chunks = 0usize;
+        loop {
+            let more = cache
+                .commit_increment_chunk(&root, &mut commit, Duration::from_millis(0))
+                .unwrap();
+            chunks += 1;
+            if !more {
+                break;
+            }
+        }
+        assert!(
+            chunks >= 4,
+            "a 0ms budget must force one-file-per-chunk plus the link phase (>=4), got {chunks}"
+        );
+
+        // The point of NRN-158: a subsequent detect finds NOTHING, so the next
+        // refresh skips the whole-vault rebuild.
+        let after = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
+        assert!(
+            after.is_empty(),
+            "increment commit must leave detect empty, got {after:?}"
+        );
+
+        let inc_docs = snapshot_docs(&cache);
+        let inc_links = snapshot_links(&cache);
+
+        // Oracle: a full rebuild of the identical disk state.
+        cache.rebuild(&root).unwrap();
+        assert_eq!(
+            inc_docs,
+            snapshot_docs(&cache),
+            "increment-committed document rows must equal a full rebuild"
+        );
+        assert_eq!(
+            inc_links,
+            snapshot_links(&cache),
+            "increment-committed link rows must equal a full rebuild (global resolution)"
+        );
+    }
+
+    /// Increment commit re-resolves a link in an UNCHANGED file when a changed
+    /// file's alias newly matches it — the global links rewrite, proving the
+    /// commit is not merely a per-file row swap.
+    #[test]
+    fn increment_commit_reresolves_links_in_unchanged_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        // a.md (never in the changed set) links [[foo]], initially unresolved.
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntitle: A\n---\n\nsee [[foo]]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\n---\n\nbody\n",
+        )
+        .unwrap();
+        let mut cache = crate::cache::Cache::open_with_index(
+            &root,
+            Some("aliases"),
+            &[],
+            &std::collections::BTreeSet::new(),
+            "hash",
+        )
+        .unwrap();
+        cache.rebuild(&root).unwrap();
+
+        // Add alias `foo` to b.md — only b.md is in the changed set.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\naliases:\n  - foo\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let changed: Vec<Utf8PathBuf> = vec!["b.md".into()];
+        let mut commit = cache.begin_increment_commit(&root, &changed).unwrap();
+        while cache
+            .commit_increment_chunk(&root, &mut commit, increment_chunk_budget())
+            .unwrap()
+        {}
+
+        let a_resolved: Option<String> = cache
+            .conn
+            .query_row(
+                "SELECT resolved_path FROM links WHERE source_path = 'a.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            a_resolved.as_deref(),
+            Some("b.md"),
+            "[[foo]] in the UNCHANGED a.md must re-resolve via b.md's new alias"
+        );
     }
 }

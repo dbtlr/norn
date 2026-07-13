@@ -294,7 +294,14 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
         &["move".to_string(), p.from.clone(), p.to.clone()],
     );
 
-    let report = apply_migration_plan(&migration_plan, &index, apply_ctx, &mut sink)?;
+    let mut touched: Vec<camino::Utf8PathBuf> = Vec::new();
+    let report = crate::applier::apply_migration_plan_collecting_touched(
+        &migration_plan,
+        &index,
+        apply_ctx,
+        &mut sink,
+        Some(&mut touched),
+    )?;
 
     crate::emit_invocation_finished(&mut sink, "move", report.exit_code(), &report);
 
@@ -303,6 +310,11 @@ pub fn handle(ctx: &VaultContext, p: MoveParams) -> Result<crate::apply_report::
     if is_folder && report.exit_code() == 0 {
         crate::remove_empty_dirs(src_full.as_std_path());
     }
+
+    // Warm mode: commit the move's cache increments (source + destination +
+    // backlink cascade) as a chunked writer-queue op, awaited; no-op in cold mode
+    // (NRN-252 / NRN-158).
+    crate::mcp::mutate::commit_apply_increments(ctx, &touched);
 
     Ok(report)
 }

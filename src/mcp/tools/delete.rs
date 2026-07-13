@@ -246,9 +246,21 @@ pub fn handle(ctx: &VaultContext, p: DeleteParams) -> Result<crate::apply_report
         &["delete".to_string(), p.target.clone()],
     );
 
-    let report = apply_migration_plan(&plan, &index, apply_ctx, &mut sink)?;
+    let mut touched: Vec<camino::Utf8PathBuf> = Vec::new();
+    let report = crate::applier::apply_migration_plan_collecting_touched(
+        &plan,
+        &index,
+        apply_ctx,
+        &mut sink,
+        Some(&mut touched),
+    )?;
 
     crate::emit_invocation_finished(&mut sink, "delete", report.exit_code(), &report);
+
+    // Warm mode: commit the delete's cache increments (the removed doc + backlink
+    // cascade) as a chunked writer-queue op, awaited; no-op in cold mode
+    // (NRN-252 / NRN-158).
+    crate::mcp::mutate::commit_apply_increments(ctx, &touched);
 
     Ok(report)
 }

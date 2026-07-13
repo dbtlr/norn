@@ -13,9 +13,9 @@
 //! both: **one** dedicated OS thread per vault owns all write work, and a
 //! two-class schedule keeps latency-critical work ahead of throughput work.
 //!
-//! This module is the queue *core* only. Routing the real generation opens,
-//! freshness refreshes, and apply increments through it lands in later commits;
-//! here the ops are synthetic and exercised by the unit tests.
+//! All three production consumers now route through it: generation opens and the
+//! per-request freshness refresh (liveness), and the post-apply cache-increment
+//! commit (bulk, NRN-252 / NRN-158).
 //!
 //! # Two submission classes
 //!
@@ -79,15 +79,7 @@ use std::thread::JoinHandle;
 
 /// A validity predicate for a bulk op, re-checked at every chunk boundary. Named
 /// as an alias to keep the [`WriterQueue::submit_bulk`] signature legible.
-// Bulk-op machinery (this alias, [`ChunkOutcome`], [`BulkClosure`],
-// [`WriterQueue::submit_bulk`]) is landed but not yet wired to a production
-// caller — apply increments route through it in a later NRN-252 commit — so it
-// is dead in a non-test build until then. The liveness half is live (warm-mode
-// generation opens and the per-request freshness refresh, NRN-252). The bulk
-// *scheduler* itself (`worker_loop` → `run_bulk`, the `bulk` deque, `BulkJob`)
-// is statically reachable and needs no allow.
-#[allow(dead_code)]
-type ValidityGuard = Box<dyn Fn() -> bool + Send>;
+pub(crate) type ValidityGuard = Box<dyn Fn() -> bool + Send>;
 
 /// A type-erased liveness op: the caller's `FnOnce() -> R` wrapped so it captures
 /// its own result sender and swallows nothing observable to the queue thread.
@@ -98,8 +90,6 @@ type LivenessJob = Box<dyn FnOnce() + Send>;
 /// The op returns [`More`](ChunkOutcome::More) while it has further work — the
 /// queue will re-invoke it after draining any pending liveness — or
 /// [`Done`](ChunkOutcome::Done) with the final result on the last chunk.
-// Bulk-op machinery, not yet wired to a production caller — see `ValidityGuard`.
-#[allow(dead_code)]
 pub enum ChunkOutcome<R> {
     /// Further chunks remain; the queue re-invokes the op after a preemption check.
     More,
@@ -202,8 +192,6 @@ trait BulkJob: Send {
 }
 
 /// The concrete [`BulkJob`] backing a [`WriterQueue::submit_bulk`] call.
-// Bulk-op machinery, not yet wired to a production caller — see `ValidityGuard`.
-#[allow(dead_code)]
 struct BulkClosure<R, F> {
     step: F,
     still_valid: Option<ValidityGuard>,
@@ -336,8 +324,6 @@ impl WriterQueue {
     /// drains all pending liveness. `still_valid`, if given, is checked before the
     /// first chunk and before every subsequent chunk; when it turns false the op
     /// is dropped and its [`Handle`] resolves to [`Outcome::Dropped`].
-    // Bulk-op machinery, not yet wired to a production caller — see `ValidityGuard`.
-    #[allow(dead_code)]
     pub fn submit_bulk<R, F>(&self, step: F, still_valid: Option<ValidityGuard>) -> Handle<R>
     where
         F: FnMut() -> ChunkOutcome<R> + Send + 'static,
