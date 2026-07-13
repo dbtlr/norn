@@ -103,6 +103,56 @@ impl crate::cache::Cache {
             /* authoritative */ true,
         )
     }
+
+    /// Open a SECOND connection to a cache database that a primary
+    /// [`open_with_index`](Cache::open_with_index) call has JUST opened and
+    /// verified — skipping the `PRAGMA integrity_check` (and the schema /
+    /// identity / alias-field inspection) the primary open already paid.
+    ///
+    /// # Why skipping verification is sound
+    ///
+    /// The caller opens this companion microseconds after the primary
+    /// connection, against the SAME `cache.db` inode, while holding the warm
+    /// generation's sentinel `File` open on that inode (so it cannot be
+    /// unlinked and swapped underneath us — see `open_generation` in
+    /// `crate::mcp::context`). The primary `open_with_index` already ran
+    /// `PRAGMA integrity_check`, reconciled schema version / vault identity /
+    /// alias-field drift, and rebuilt if needed — so the bytes this companion
+    /// attaches to are known-good under the held sentinel. Re-running the
+    /// O(db-size) integrity check on the same file would verify nothing new.
+    /// The companion still applies the operational pragmas every connection
+    /// needs (WAL journal mode, busy timeout, foreign keys) — those are
+    /// per-connection, not per-file.
+    ///
+    /// Used only by the warm daemon's per-generation WRITE connection
+    /// (NRN-252): the request-facing connection stays read-only and this
+    /// companion is the one the writer-queue freshness refresh writes through.
+    /// Authoritative, matching the primary open, so a deferred first-touch
+    /// `index_incremental` → `rebuild` stamps `index_set_hash` consistently.
+    pub(crate) fn open_companion_verified(
+        vault_root: &Utf8Path,
+        alias_field: Option<&str>,
+        files_ignore: &[String],
+        index_set: &BTreeSet<String>,
+        index_set_hash: &str,
+    ) -> Result<Self, CacheError> {
+        let (canonical, cache_dir) = cache_dir_for(vault_root)?;
+        let db_path = cache_dir.join("cache.db");
+        let conn = Connection::open(db_path.as_std_path())?;
+        conn.busy_timeout(CACHE_BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(crate::cache::Cache {
+            conn,
+            vault_root: canonical,
+            cache_dir,
+            alias_field: alias_field.map(|s| s.to_string()),
+            files_ignore: files_ignore.to_vec(),
+            index_set: index_set.clone(),
+            index_set_hash: index_set_hash.to_string(),
+            index_authoritative: true,
+        })
+    }
 }
 
 /// The config-derived identity a `Cache` carries: the fields threaded from the

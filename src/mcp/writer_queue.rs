@@ -81,11 +81,11 @@ use std::thread::JoinHandle;
 /// as an alias to keep the [`WriterQueue::submit_bulk`] signature legible.
 // Bulk-op machinery (this alias, [`ChunkOutcome`], [`BulkClosure`],
 // [`WriterQueue::submit_bulk`]) is landed but not yet wired to a production
-// caller — freshness refreshes and apply increments route through it in later
-// NRN-252 commits — so it is dead in a non-test build until then. The liveness
-// half is live (warm-mode generation opens). The bulk *scheduler* itself
-// (`worker_loop` → `run_bulk`, the `bulk` deque, `BulkJob`) is statically
-// reachable and needs no allow.
+// caller — apply increments route through it in a later NRN-252 commit — so it
+// is dead in a non-test build until then. The liveness half is live (warm-mode
+// generation opens and the per-request freshness refresh, NRN-252). The bulk
+// *scheduler* itself (`worker_loop` → `run_bulk`, the `bulk` deque, `BulkJob`)
+// is statically reachable and needs no allow.
 #[allow(dead_code)]
 type ValidityGuard = Box<dyn Fn() -> bool + Send>;
 
