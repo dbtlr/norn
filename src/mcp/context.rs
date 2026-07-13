@@ -179,7 +179,9 @@ use crate::cache::{
 };
 use crate::cache_cmd::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
-use crate::mcp::writer_queue::{ChunkOutcome, Handle, Outcome, ValidityGuard, WriterQueue};
+use crate::mcp::writer_queue::{
+    ChunkOutcome, Handle, Outcome, ValidityGuard, WriterProgressState, WriterQueue,
+};
 
 /// A typed error the warm daemon can downcast to decide whether to evict the
 /// whole `VaultContext`. Kept intentionally small and `anyhow`-downcastable.
@@ -1341,8 +1343,18 @@ impl VaultContext {
     /// against `<vault_root>/.norn/config.yaml` accordingly.
     // Used by the unix-only `norn serve` daemon (`src/serve/`); dead on non-unix
     // builds where the daemon can't run.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn open_warm(cwd: &Utf8Path) -> Result<Self> {
+        Self::open_warm_with_progress(cwd, Arc::new(WriterProgressState::default()))
+    }
+
+    /// Daemon constructor that binds the queue to progress retained across
+    /// context eviction and recreation for this vault.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn open_warm_with_progress(
+        cwd: &Utf8Path,
+        progress: Arc<WriterProgressState>,
+    ) -> Result<Self> {
         let config = load_config(&cwd.to_path_buf(), None)?;
         let config_fp = fingerprint_config(&config_yaml_path(cwd))?;
         Ok(Self {
@@ -1358,7 +1370,7 @@ impl VaultContext {
                 }),
                 config_fp: Mutex::new(config_fp),
                 // Label the writer thread with the vault root for debuggability.
-                queue: WriterQueue::spawn(cwd.as_str()),
+                queue: WriterQueue::spawn_with_progress(cwd.as_str(), progress),
             }),
         })
     }

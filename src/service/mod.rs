@@ -97,8 +97,8 @@ pub const CONTROL_PROTOCOL: u32 = 1;
 /// of letting the daemon task invent its own ad hoc framing.
 ///
 /// Wire shapes (exactly, one JSON object per line):
-/// - ping:  `{"norn_control":"ping","protocol":1}`
-/// - pong:  `{"norn_control":"pong","protocol":1,"version":"<semver>","build":"<hex>","pid":<u32>,"uptime_secs":<u64>}`
+/// - ping:  `{"norn_control":"ping","protocol":1,"vault_root":"<optional canonical abs path>"}`
+/// - pong:  `{"norn_control":"pong","protocol":1,"version":"<semver>","build":"<hex>","pid":<u32>,"uptime_secs":<u64>,"serving":"ready","writer_progress":{"busy":false,"sequence":4}}`
 /// - hello: `{"norn_control":"hello","protocol":1,"vault_root":"<canonical abs path>"}`
 /// - ready: `{"norn_control":"ready","protocol":1,"version":"<semver>"}`
 /// - error: `{"norn_control":"error","protocol":1,"message":"..."}`
@@ -106,7 +106,13 @@ pub const CONTROL_PROTOCOL: u32 = 1;
 #[serde(tag = "norn_control", rename_all = "lowercase")]
 pub enum ControlFrame {
     /// Client -> daemon: "are you alive, and do we speak the same protocol?"
-    Ping { protocol: u32 },
+    Ping {
+        protocol: u32,
+        /// Optional canonical vault root for a vault-scoped status observation.
+        /// Ordinary routing probes omit it and remain host-global/O(1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vault_root: Option<String>,
+    },
     /// Daemon -> client: proof of life plus enough to decide whether to
     /// route. `pid`/`uptime_secs` are informational (useful for `norn service
     /// status`-style diagnostics later); the client today only reads
@@ -130,6 +136,12 @@ pub enum ControlFrame {
         pid: Option<u32>,
         #[serde(default)]
         uptime_secs: Option<u64>,
+        /// Per-vault serving state, present only when the ping named a vault.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        serving: Option<ServingState>,
+        /// Per-vault writer progress, present only when the ping named a vault.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writer_progress: Option<WriterProgress>,
     },
     /// Client -> daemon, after the control handshake: names the vault this
     /// connection is for. The daemon derives vault identity from this path
@@ -150,6 +162,23 @@ pub enum ControlFrame {
     // Constructed by the unix-only `norn serve` daemon; dead on non-unix builds.
     #[cfg_attr(not(unix), allow(dead_code))]
     Error { protocol: u32, message: String },
+}
+
+/// Whether a vault has no map entry, is being opened, or has a ready warm
+/// context. This is per-vault state; the host-global ping omits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServingState {
+    Cold,
+    Opening,
+    Ready,
+}
+
+/// Opaque per-vault writer progress carried by a scoped pong.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WriterProgress {
+    pub busy: bool,
+    pub sequence: u64,
 }
 
 /// A handshake outcome that distinguishes version skew from every other
@@ -361,6 +390,8 @@ pub struct ServicePong {
     pub build: Option<String>,
     pub pid: Option<u32>,
     pub uptime_secs: Option<u64>,
+    pub serving: Option<ServingState>,
+    pub writer_progress: Option<WriterProgress>,
 }
 
 /// Control-ping a specific socket for `norn service status`: connect and run
@@ -382,6 +413,7 @@ pub struct ServicePong {
 pub fn probe_status_socket(
     socket_path: &Utf8Path,
     timeout: std::time::Duration,
+    vault_root: Option<&Utf8Path>,
 ) -> Option<ServicePong> {
     if !socket_path.exists() {
         return None;
@@ -390,7 +422,7 @@ pub fn probe_status_socket(
     let deadline = std::time::Instant::now() + timeout;
     let stream = connect_control(socket_path, timeout).ok()?;
     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    let (protocol, pong) = handshake_pong(&stream, remaining).ok()?;
+    let (protocol, pong) = handshake_pong(&stream, remaining, vault_root).ok()?;
     if protocol != CONTROL_PROTOCOL {
         return None;
     }
@@ -688,7 +720,7 @@ fn handshake(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
 ) -> Result<(), HandshakeError> {
-    let (protocol, pong) = handshake_pong(stream, timeout).map_err(HandshakeError::Other)?;
+    let (protocol, pong) = handshake_pong(stream, timeout, None).map_err(HandshakeError::Other)?;
     let client_version = env!("CARGO_PKG_VERSION");
     let client_build = env!("NORN_BUILD_ID");
 
@@ -749,6 +781,7 @@ fn handshake(
 fn handshake_pong(
     stream: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
+    vault_root: Option<&Utf8Path>,
 ) -> anyhow::Result<(u32, ServicePong)> {
     use std::io::BufReader;
 
@@ -768,6 +801,7 @@ fn handshake_pong(
     // and ONE writer ([`write_json_line`]) — see NRN-94 review F2.
     let ping = ControlFrame::Ping {
         protocol: CONTROL_PROTOCOL,
+        vault_root: vault_root.map(ToString::to_string),
     };
     write_json_line(stream, &ping)?;
 
@@ -792,6 +826,8 @@ fn handshake_pong(
             build,
             pid,
             uptime_secs,
+            serving,
+            writer_progress,
         } => Ok((
             protocol,
             ServicePong {
@@ -799,6 +835,8 @@ fn handshake_pong(
                 build,
                 pid,
                 uptime_secs,
+                serving,
+                writer_progress,
             },
         )),
         other => anyhow::bail!("unexpected control frame: {other:?}"),
@@ -1883,6 +1921,8 @@ mod tests {
                 build: Some(env!("NORN_BUILD_ID").to_string()),
                 pid: Some(std::process::id()),
                 uptime_secs: Some(42),
+                serving: None,
+                writer_progress: None,
             };
             let mut w = conn;
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
@@ -1956,6 +1996,8 @@ mod tests {
                 build: Some(env!("NORN_BUILD_ID").to_string()),
                 pid: None,
                 uptime_secs: None,
+                serving: None,
+                writer_progress: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -1990,6 +2032,8 @@ mod tests {
                 build: None,
                 pid: Some(1),
                 uptime_secs: Some(1),
+                serving: None,
+                writer_progress: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2024,6 +2068,8 @@ mod tests {
                 build: None,
                 pid: None,
                 uptime_secs: None,
+                serving: None,
+                writer_progress: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2066,6 +2112,8 @@ mod tests {
                 build: None,
                 pid: None,
                 uptime_secs: None,
+                serving: None,
+                writer_progress: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2107,6 +2155,8 @@ mod tests {
                     build: Some(env!("NORN_BUILD_ID").to_string()),
                     pid: None,
                     uptime_secs: None,
+                    serving: None,
+                    writer_progress: None,
                 };
                 writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
                 w.flush().unwrap();
@@ -2195,6 +2245,8 @@ mod tests {
                     build: Some("a-different-build".to_string()),
                     pid: None,
                     uptime_secs: None,
+                    serving: None,
+                    writer_progress: None,
                 };
                 writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
                 w.flush().unwrap();
@@ -2295,6 +2347,8 @@ mod tests {
                 build: Some("a-different-build".to_string()),
                 pid: None,
                 uptime_secs: None,
+                serving: None,
+                writer_progress: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2317,10 +2371,24 @@ mod tests {
     fn control_frame_wire_shapes() {
         let ping = ControlFrame::Ping {
             protocol: CONTROL_PROTOCOL,
+            vault_root: None,
         };
         assert_eq!(
             serde_json::to_value(&ping).unwrap(),
             serde_json::json!({"norn_control": "ping", "protocol": 1})
+        );
+
+        let scoped_ping = ControlFrame::Ping {
+            protocol: CONTROL_PROTOCOL,
+            vault_root: Some("/canonical/vault".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&scoped_ping).unwrap(),
+            serde_json::json!({
+                "norn_control": "ping",
+                "protocol": 1,
+                "vault_root": "/canonical/vault",
+            })
         );
 
         let pong = ControlFrame::Pong {
@@ -2329,6 +2397,11 @@ mod tests {
             build: Some("deadbeef".to_string()),
             pid: Some(4321),
             uptime_secs: Some(99),
+            serving: Some(ServingState::Ready),
+            writer_progress: Some(WriterProgress {
+                busy: true,
+                sequence: 7,
+            }),
         };
         assert_eq!(
             serde_json::to_value(&pong).unwrap(),
@@ -2339,6 +2412,8 @@ mod tests {
                 "build": "deadbeef",
                 "pid": 4321,
                 "uptime_secs": 99,
+                "serving": "ready",
+                "writer_progress": {"busy": true, "sequence": 7},
             })
         );
 
@@ -2596,7 +2671,7 @@ mod tests {
                 "uptime_secs": 42,
             }),
         );
-        let pong = probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT)
+        let pong = probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT, None)
             .expect("a protocol-matching pong must come through regardless of version");
         assert_eq!(pong.version, "0.0.1-stale");
         // The build fingerprint (NRN-247) is preserved for status too, so it can
@@ -2625,7 +2700,7 @@ mod tests {
             }),
         );
         assert!(
-            probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT).is_none(),
+            probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT, None).is_none(),
             "a same-version pong at a foreign protocol must be None (unhealthy)"
         );
         server.join().unwrap();
@@ -2636,6 +2711,6 @@ mod tests {
     fn probe_status_no_socket_is_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("absent.sock")).unwrap();
-        assert!(probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT).is_none());
+        assert!(probe_status_socket(&path, DEFAULT_HANDSHAKE_TIMEOUT, None).is_none());
     }
 }

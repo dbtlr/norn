@@ -21,10 +21,19 @@ pub fn vault_identity(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, String), Ca
             format!("canonical path is not valid UTF-8: {}", p.display()),
         ),
     })?;
+    let hash = canonical_vault_identity_hash(&canonical);
+    Ok((canonical, hash))
+}
+
+/// Hash an already-canonical vault root using the same identity mapping as
+/// [`vault_identity`], without touching the filesystem. The service control
+/// path uses this for a client-canonicalized `service status --vault` ping so
+/// reporting state never performs a blocking canonicalize on the daemon's
+/// async accept path.
+pub(crate) fn canonical_vault_identity_hash(canonical: &Utf8Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_str().as_bytes());
-    let hash = hex_lower(hasher.finalize().as_ref());
-    Ok((canonical, hash))
+    hex_lower(hasher.finalize().as_ref())
 }
 
 /// Best-effort identity hash for a vault root; None when the root cannot

@@ -359,14 +359,26 @@ pub enum ServiceSubcommand {
     Restart(ServiceActionArgs),
     #[command(
         disable_help_flag = true,
-        about = "Show launchd load/run state plus a live control-ping (running vs on-disk version)"
+        about = "Show host service health; optionally include one vault's serving/writer state"
     )]
-    Status(ServiceActionArgs),
+    Status(ServiceStatusArgs),
 }
 
 /// Flags shared by every `service` verb. One knob today: the output format.
 #[derive(Debug, clap::Args)]
 pub struct ServiceActionArgs {
+    /// Output format. Default text; `json` emits a machine-readable object.
+    #[arg(long, value_enum, default_value_t = ServiceFormat::Text, help_heading = "Output")]
+    pub format: ServiceFormat,
+}
+
+/// `service status` keeps host supervision as its default view and adds an
+/// explicit vault scope for the daemon's per-vault serving/writer state.
+#[derive(Debug, clap::Args)]
+pub struct ServiceStatusArgs {
+    /// Canonicalize and report this vault's serving and writer-progress state.
+    #[arg(long, value_name = "PATH")]
+    pub vault: Option<Utf8PathBuf>,
     /// Output format. Default text; `json` emits a machine-readable object.
     #[arg(long, value_enum, default_value_t = ServiceFormat::Text, help_heading = "Output")]
     pub format: ServiceFormat,
