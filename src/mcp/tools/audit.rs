@@ -1,6 +1,6 @@
 //! `vault.audit` — read the per-vault mutation event stream over MCP.
 
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::telemetry::read::{self, Filter};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,11 @@ pub struct AuditOutput {
     pub events: Vec<serde_json::Value>,
 }
 
-pub fn handle_output(ctx: &VaultContext, p: AuditParams) -> Result<AuditOutput> {
+pub fn handle_output(
+    ctx: &VaultContext,
+    _scope: &RequestScope,
+    p: AuditParams,
+) -> Result<AuditOutput> {
     let since = match &p.since {
         Some(s) => Some(read::parse_since(s).map_err(|e| anyhow::anyhow!(e))?),
         None => None,

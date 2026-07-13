@@ -804,24 +804,104 @@ struct WarmSlot {
     /// The per-request freshness refresh is likewise a LIVENESS op on this queue,
     /// executed on the generation's write connection and coalesced per generation.
     queue: WriterQueue,
-    /// The generation number the CURRENT request bound via `ensure_current`
-    /// (0 = none bound yet this request). Set once, right after
-    /// `ensure_current` returns in `query_cache_warm`; reset to 0 at the start
-    /// of every request in `begin_request`, mirroring `operator_notes`. Read by
-    /// [`note_tool_error`](VaultContext::note_tool_error) so a corruption error
-    /// invalidates the generation the failing request actually used, not
-    /// whichever generation happens to be `current` by the time the error
-    /// surfaces — under `call_lock` serialization today those coincide, but a
-    /// concurrent read pool (NRN-253) can advance `current` while an older
-    /// generation is still draining.
-    ///
-    /// This cell is itself `call_lock`-dependent: one slot-level value can
-    /// only attribute errors correctly while at most one request runs per
-    /// vault. When NRN-253 retires `call_lock`, this attribution must move
-    /// into per-request scope (e.g. carried by the request's read handle) —
-    /// concurrent requests would otherwise overwrite each other's binding
-    /// and reintroduce the misattribution this field exists to prevent.
+}
+
+/// Per-request scope (NRN-253): the state that must be private to ONE in-flight
+/// request once the daemon no longer serializes tool bodies with `call_lock`.
+///
+/// Three things previously lived context-global (or slot-global) and were only
+/// safe because `call_lock` guaranteed at most one request per vault ran at a
+/// time; NRN-253 moves each into this per-request value, threaded explicitly to
+/// the tool body alongside `&VaultContext`:
+///
+/// - **The bound config** (`config`). A request binds the current
+///   `Arc<LoadedConfig>` at its boundary ([`VaultContext::begin_request`]) and
+///   reads it via [`RequestScope::config`] for its whole life, so a concurrent
+///   request's `begin_request` swapping the stored config cannot split-brain this
+///   one between two reads (NRN-251's `(generation, config)` binding, now
+///   structural).
+/// - **The operator-note buffer** (`notes`). Notes a request produces (e.g. the
+///   write-lock contention note) accumulate here and are drained by
+///   `run_wrapped` into exactly this request's tool envelope — concurrent
+///   requests can no longer interleave notes into each other's envelopes.
+/// - **The bound generation** (`bound_generation`). Stamped by
+///   [`query_cache_warm`](VaultContext::query_cache_warm) when the request binds
+///   its generation, read by [`note_tool_error`](VaultContext::note_tool_error)
+///   to key corruption invalidation off the generation THIS request used — not
+///   whichever generation happens to be `current` when the error surfaces. Warm-
+///   only; inert (stays 0) in cold mode. `0` means "no generation bound yet".
+///
+/// Created on the request's `spawn_blocking` thread but built with `Send`-safe
+/// interior mutability (`Mutex` / `AtomicU64`) so nothing here constrains where
+/// the scope may be constructed or handed across threads.
+pub(crate) struct RequestScope {
+    /// The `Arc<LoadedConfig>` bound at the request boundary; held for the whole
+    /// request so config is stable across every read within it.
+    config: Arc<LoadedConfig>,
+    /// This request's operator notes, drained by `run_wrapped` into its envelope.
+    notes: Mutex<Vec<String>>,
+    /// The generation number this request bound in `query_cache_warm`
+    /// (`0` = none bound). Read by `note_tool_error` for corruption attribution.
     bound_generation: AtomicU64,
+}
+
+// `LoadedConfig` is not `Debug`, so derive is out; a manual impl lets a request
+// scope appear in test `Result` messages (e.g. `begin_request().expect_err(..)`)
+// without printing the whole resolved config.
+impl std::fmt::Debug for RequestScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestScope")
+            .field("notes", &self.notes)
+            .field("bound_generation", &self.bound_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RequestScope {
+    /// Build a scope bound to `config`, with an empty note buffer and no
+    /// generation bound yet.
+    fn new(config: Arc<LoadedConfig>) -> Self {
+        Self {
+            config,
+            notes: Mutex::new(Vec::new()),
+            bound_generation: AtomicU64::new(0),
+        }
+    }
+
+    /// The config bound at this request's boundary. Tool bodies read config
+    /// through here (not `VaultContext::config`) so it stays request-stable.
+    pub(crate) fn config(&self) -> Arc<LoadedConfig> {
+        Arc::clone(&self.config)
+    }
+
+    /// Record an operator note for this request. Drained by `run_wrapped` into
+    /// the tool envelope's `operator_notes` (NRN-215). A poisoned lock is
+    /// recovered in place — a lost note is a strictly better failure mode than
+    /// panicking the request.
+    pub(crate) fn push_operator_note(&self, note: impl Into<String>) {
+        self.notes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(note.into());
+    }
+
+    /// Drain and return the notes accumulated for this request. Called by
+    /// `run_wrapped` immediately after the tool body, so the returned notes
+    /// belong to exactly this request.
+    pub(crate) fn take_operator_notes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notes.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// Stamp the generation this request bound (warm mode). Written once, right
+    /// after `ensure_current` returns in `query_cache_warm`.
+    fn bind_generation(&self, number: u64) {
+        self.bound_generation.store(number, Ordering::Release);
+    }
+
+    /// The generation this request bound (`0` = none). Read by `note_tool_error`.
+    fn bound_generation(&self) -> u64 {
+        self.bound_generation.load(Ordering::Acquire)
+    }
 }
 
 /// Cold (stdio) vs warm (daemon) behavior for `query_cache`.
@@ -851,18 +931,6 @@ pub(crate) struct VaultContext {
     /// a cloned `Arc`. This is the config `Arc` a request binds at its boundary.
     config: Mutex<Arc<LoadedConfig>>,
     mode: Mode,
-    /// Operator notes generated while serving the CURRENT request — e.g. the
-    /// lock-contention note `query_cache_warm` produces when the implicit
-    /// refresh times out on the write lock. The tool funnel
-    /// ([`McpServer::run_wrapped`](crate::mcp::server::McpServer)) clears this at
-    /// the per-request seam ([`begin_request`](Self::begin_request)) and drains
-    /// it into the tool's `structuredContent.operator_notes` after the body runs,
-    /// both under the process-wide `call_lock` — so notes cannot leak across the
-    /// serialized requests of concurrent connections (NRN-215). On the direct
-    /// (non-daemon) path these notes still go straight to the CLI's stderr; this
-    /// buffer only exists so the DAEMON path can forward them to the routed CLI
-    /// instead of losing them on the daemon's own stderr.
-    operator_notes: Mutex<Vec<String>>,
 }
 
 impl VaultContext {
@@ -878,7 +946,6 @@ impl VaultContext {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
             mode: Mode::Cold,
-            operator_notes: Mutex::new(Vec::new()),
         })
     }
 
@@ -911,9 +978,7 @@ impl VaultContext {
                 config_fp: Mutex::new(config_fp),
                 // Label the writer thread with the vault root for debuggability.
                 queue: WriterQueue::spawn(cwd.as_str()),
-                bound_generation: AtomicU64::new(0),
             }),
-            operator_notes: Mutex::new(Vec::new()),
         })
     }
 
@@ -929,25 +994,19 @@ impl VaultContext {
     /// closing the split-brain window where one request could mix an old-config
     /// graph index with a new-config cache. A gone root surfaces here as the
     /// typed [`WarmContextError::RootGone`] the daemon downcasts to evict.
-    pub(crate) fn begin_request(&self) -> Result<()> {
-        // Clear any operator notes left from a prior request FIRST (both modes),
-        // so this request starts with an empty buffer. Combined with the drain in
-        // `run_wrapped` — both under the process-wide `call_lock` — this bounds
-        // every note to the single request that produced it (NRN-215).
-        self.operator_notes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
-
+    ///
+    /// Returns the request's [`RequestScope`] (NRN-253): a fresh, empty note
+    /// buffer, no generation bound yet, and the config `Arc` bound at this
+    /// boundary — the tool body threads it and `run_wrapped` drains its notes.
+    /// A fresh scope per request is what makes per-request isolation structural:
+    /// there is no shared buffer or slot cell to clear, so a prior request's
+    /// notes / generation attribution cannot leak into this one.
+    pub(crate) fn begin_request(&self) -> Result<RequestScope> {
         let Mode::Warm(slot) = &self.mode else {
-            return Ok(());
+            // Cold mode: config is fixed for the process lifetime, so the bound
+            // config is simply the current one. No liveness/freshness steps.
+            return Ok(RequestScope::new(self.config()));
         };
-
-        // Clear the prior request's generation attribution FIRST, same
-        // reasoning as the operator-notes clear above: if this request never
-        // reaches `query_cache_warm` (or fails before it), `note_tool_error`
-        // must see "none bound" rather than misattribute to a stale request.
-        slot.bound_generation.store(0, Ordering::Release);
 
         // Step 0 — root liveness. A gone root is a typed, downcast-matchable
         // error so the daemon can evict this whole context.
@@ -965,7 +1024,11 @@ impl VaultContext {
         // `ensure_current` by comparing the bound generation's index identity to
         // the new config, so a single path owns every reopen.
         self.refresh_config_warm(slot)?;
-        Ok(())
+
+        // Bind the now-current config into the request scope, AFTER the freshness
+        // swap, so the whole request reads one stable config `Arc` even if a later
+        // concurrent request swaps the stored config out from under it (NRN-251).
+        Ok(RequestScope::new(self.config()))
     }
 
     /// Corruption-eviction seam (FIX-3): inspect a failed tool's error chain and,
@@ -988,54 +1051,36 @@ impl VaultContext {
     /// trust on the next request. Silent wrong-data corruption that raises no
     /// error is outside SQLite's own detection model too, so it is not in scope.
     ///
-    /// Invalidation keys off `slot.bound_generation` — the generation THIS
-    /// request bound in `query_cache_warm` — NOT `slot.current`. Under today's
-    /// `call_lock` serialization the two coincide, but a corruption error on
-    /// generation N must never invalidate a healthy generation N+1 that has
-    /// since become current (NRN-253's concurrent read pool makes that
-    /// observable): mirrors how `WarmGuard::Drop` bumps the floor off its OWN
-    /// generation's number rather than off whatever is current at drop time.
-    pub(crate) fn note_tool_error(&self, err: &anyhow::Error) {
+    /// Invalidation keys off the SCOPE's bound generation — the generation THIS
+    /// request bound in `query_cache_warm` — NOT `slot.current` (NRN-253). Under
+    /// the retiring `call_lock` serialization the two coincide, but a corruption
+    /// error on generation N must never invalidate a healthy generation N+1 that
+    /// has since become current (the concurrent read pool makes that observable):
+    /// mirrors how `WarmGuard::Drop` bumps the floor off its OWN generation's
+    /// number rather than off whatever is current at drop time.
+    pub(crate) fn note_tool_error(&self, scope: &RequestScope, err: &anyhow::Error) {
         let Mode::Warm(slot) = &self.mode else {
             return;
         };
         if is_sqlite_corruption(err) {
-            let bound = slot.bound_generation.load(Ordering::Acquire);
+            let bound = scope.bound_generation();
             if bound != 0 {
                 slot.shared.floor.fetch_max(bound + 1, Ordering::AcqRel);
             }
         }
     }
 
-    /// Record an operator note for the current request. Called from the read
-    /// pipeline (e.g. [`query_cache_warm`](Self::query_cache_warm) on a write-lock
-    /// timeout); drained by `run_wrapped` into the tool envelope's
-    /// `operator_notes` (NRN-215). A poisoned lock is recovered in place — a lost
-    /// note is a strictly better failure mode than panicking the request.
-    pub(crate) fn push_operator_note(&self, note: impl Into<String>) {
-        self.operator_notes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(note.into());
-    }
-
-    /// Drain and return the operator notes accumulated for the current request.
-    /// The tool funnel calls this under `call_lock` immediately after the tool
-    /// body, so the returned notes belong to exactly this request.
-    pub(crate) fn take_operator_notes(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .operator_notes
-                .lock()
-                .unwrap_or_else(|p| p.into_inner()),
-        )
-    }
-
-    /// The current config. Locks briefly, clones the `Arc`, and releases — so a
-    /// warm config hot-swap can proceed independently of callers still reading
-    /// through an earlier `Arc`. A poisoned lock is recovered in place (the value
-    /// is an immutable `Arc` snapshot, so there is nothing to evict) rather than
-    /// panicking on every subsequent request.
+    /// The current STORED config. Locks briefly, clones the `Arc`, and releases —
+    /// so a warm config hot-swap can proceed independently of callers still
+    /// reading through an earlier `Arc`. A poisoned lock is recovered in place
+    /// (the value is an immutable `Arc` snapshot, so there is nothing to evict)
+    /// rather than panicking on every subsequent request.
+    ///
+    /// Tool bodies do NOT read config through here — they read the request's
+    /// bound config via [`RequestScope::config`], so a concurrent request's
+    /// config swap cannot split-brain them (NRN-253). This method is the internal
+    /// snapshot seam `begin_request` binds into the scope, plus a test accessor
+    /// for asserting the live stored config after a request.
     pub(crate) fn config(&self) -> Arc<LoadedConfig> {
         self.config
             .lock()
@@ -1051,14 +1096,14 @@ impl VaultContext {
     ///   incremental refresh every call), exactly as before.
     /// - Warm: runs the verify-once + per-request self-heal pipeline (see module
     ///   docs) and hands out an owned guard into the bound generation's connection.
-    pub(crate) fn query_cache(&self) -> Result<CacheHandle> {
+    pub(crate) fn query_cache(&self, scope: &RequestScope) -> Result<CacheHandle> {
         match &self.mode {
             Mode::Cold => {
-                let config = self.config();
+                let config = scope.config();
                 let cache = open_for_query(&self.vault_root, &config.index_options, false)?;
                 Ok(CacheHandle::Owned(cache))
             }
-            Mode::Warm(slot) => self.query_cache_warm(slot),
+            Mode::Warm(slot) => self.query_cache_warm(slot, scope),
         }
     }
 
@@ -1107,28 +1152,27 @@ impl VaultContext {
     /// Config freshness / root-liveness (steps 0–1) already ran in
     /// [`begin_request`](Self::begin_request) at the per-request seam, exactly as
     /// for `query_cache`, so config is stable for the whole request.
-    pub(crate) fn load_graph_index(&self) -> Result<crate::core::GraphIndex> {
-        let cache = self.query_cache()?;
+    pub(crate) fn load_graph_index(&self, scope: &RequestScope) -> Result<crate::core::GraphIndex> {
+        let cache = self.query_cache(scope)?;
         Ok(cache.load_graph_index()?)
     }
 
     /// The warm per-request pipeline (steps 2–4). See the module-level docs for
     /// the ordered rationale of each step.
-    fn query_cache_warm(&self, slot: &WarmSlot) -> Result<CacheHandle> {
+    fn query_cache_warm(&self, slot: &WarmSlot, scope: &RequestScope) -> Result<CacheHandle> {
         // Steps 0–1 (root-liveness + config-freshness) already ran in
         // `begin_request` at the per-request seam, so config is stable here for
         // the whole request. Steps 2–3 (ground-shift + reopen-if-stale) are the
         // single-flight `ensure_current`, which returns the generation this
         // request binds for its whole body.
-        let generation = self.ensure_current(slot)?;
+        let generation = self.ensure_current(slot, scope)?;
 
-        // Record which generation THIS request bound, before doing any further
-        // work that could fail (the freshness refresh below, or the tool body
-        // after this returns) — so a corruption error noted anywhere downstream
-        // attributes to the generation this request actually used, not whatever
-        // is current by the time `note_tool_error` runs.
-        slot.bound_generation
-            .store(generation.number, Ordering::Release);
+        // Record which generation THIS request bound into its OWN scope, before
+        // doing any further work that could fail (the freshness refresh below, or
+        // the tool body after this returns) — so a corruption error noted anywhere
+        // downstream attributes to the generation this request actually used, not
+        // whatever is current by the time `note_tool_error` runs (NRN-253).
+        scope.bind_generation(generation.number);
 
         // Step 4 — freshness, as a COALESCED writer-queue liveness op on the
         // generation's WRITE connection, awaited before we hand back the read
@@ -1144,7 +1188,7 @@ impl VaultContext {
                 // it to the caller: `run_wrapped` forwards it in the tool
                 // envelope and the routed CLI re-emits it on ITS stderr,
                 // byte-identical to a direct run.
-                self.note_both_surfaces(crate::cache::LOCK_CONTENTION_NOTE);
+                self.note_both_surfaces(scope, crate::cache::LOCK_CONTENTION_NOTE);
             }
             // The concrete `CacheError` survives the ticket, so a corruption-class
             // failure remains classifiable by `note_tool_error` downstream.
@@ -1246,7 +1290,11 @@ impl VaultContext {
     /// degrade emits the both-surfaces operator note; a corruption-class error
     /// still feeds [`note_tool_error`](Self::note_tool_error) so the generation is
     /// evicted and re-verified on the next request.
-    pub(crate) fn commit_apply_increments(&self, changed_paths: &[Utf8PathBuf]) {
+    pub(crate) fn commit_apply_increments(
+        &self,
+        scope: &RequestScope,
+        changed_paths: &[Utf8PathBuf],
+    ) {
         let Mode::Warm(slot) = &self.mode else {
             return; // cold: no queue, nothing to commit
         };
@@ -1286,8 +1334,8 @@ impl VaultContext {
                 // the cache. A corruption-class parse error still evicts +
                 // re-verifies the generation via `note_tool_error`.
                 let err: anyhow::Error = error.into();
-                self.note_tool_error(&err);
-                self.note_both_surfaces(INCREMENT_FAILED_NOTE);
+                self.note_tool_error(scope, &err);
+                self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
                 return;
             }
         };
@@ -1302,11 +1350,11 @@ impl VaultContext {
                 // generation on the next request, exactly as a corruption error
                 // surfaced from a tool body does (keys off the bound generation).
                 let err: anyhow::Error = error.into();
-                self.note_tool_error(&err);
-                self.note_both_surfaces(INCREMENT_FAILED_NOTE);
+                self.note_tool_error(scope, &err);
+                self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
             }
-            Outcome::Dropped => self.note_both_surfaces(INCREMENT_DROPPED_NOTE),
-            Outcome::Panicked => self.note_both_surfaces(INCREMENT_PANICKED_NOTE),
+            Outcome::Dropped => self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE),
+            Outcome::Panicked => self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE),
         }
     }
 
@@ -1316,9 +1364,9 @@ impl VaultContext {
     /// `run_wrapped` and re-emitted on the routed CLI's stderr). The ONE shared
     /// shape for every both-surfaces note — the post-apply increment-deferred
     /// degrade notes and the freshness-refresh lock-contention note alike.
-    fn note_both_surfaces(&self, note: &str) {
+    fn note_both_surfaces(&self, scope: &RequestScope, note: &str) {
         eprintln!("{note}");
-        self.push_operator_note(note);
+        scope.push_operator_note(note);
     }
 
     /// Submit the increment-commit bulk op for `generation`, driving the ALREADY
@@ -1358,8 +1406,11 @@ impl VaultContext {
     /// a late arrival adopts the generation an earlier op just produced (NRN-252).
     /// A dropped op (queue shutting down) or a panicked op surfaces as a
     /// descriptive error rather than a hang — see [`map_open_outcome`].
-    fn ensure_current(&self, slot: &WarmSlot) -> Result<Arc<Generation>> {
-        let config = self.config();
+    fn ensure_current(&self, slot: &WarmSlot, scope: &RequestScope) -> Result<Arc<Generation>> {
+        // The request's bound config (NRN-253) — the whole reopen decision uses
+        // ONE config `Arc` for the request, so a concurrent config swap cannot
+        // race this generation-open.
+        let config = scope.config();
 
         // Fast path: probe the current generation off any lock.
         {
@@ -1487,9 +1538,36 @@ impl VaultContext {
     #[cfg(test)]
     pub(crate) fn force_reopen_without_binding(&self) -> Result<()> {
         match &self.mode {
-            Mode::Warm(slot) => self.ensure_current(slot).map(|_| ()),
+            // A throwaway scope carries only the bound config `ensure_current`
+            // needs; it is NOT the caller's scope, so no `bound_generation` is
+            // stamped anywhere — modeling a reopen that advances `current`
+            // without binding it to the errored request.
+            Mode::Warm(slot) => {
+                let scope = RequestScope::new(self.config());
+                self.ensure_current(slot, &scope).map(|_| ())
+            }
             Mode::Cold => Ok(()),
         }
+    }
+
+    /// Test convenience: open a query cache under a fresh, single-use
+    /// [`RequestScope`]. Production threads the request's scope from
+    /// `begin_request` (so notes land in the request's envelope and the bound
+    /// generation drives corruption attribution); unit tests that only inspect
+    /// the returned cache don't need to hold that scope, so this hides the
+    /// boilerplate. Tests that DO assert scope-bound behavior (note isolation,
+    /// corruption attribution) thread an explicit scope instead.
+    #[cfg(test)]
+    pub(crate) fn query_cache_unscoped(&self) -> Result<CacheHandle> {
+        let scope = RequestScope::new(self.config());
+        self.query_cache(&scope)
+    }
+
+    /// Test convenience: the graph-index twin of [`query_cache_unscoped`].
+    #[cfg(test)]
+    pub(crate) fn load_graph_index_unscoped(&self) -> Result<crate::core::GraphIndex> {
+        let scope = RequestScope::new(self.config());
+        self.load_graph_index(&scope)
     }
 
     /// Test-only: arrive at `generation`'s coalesced refresh WITHOUT blocking,
@@ -2097,7 +2175,9 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open(&root, None).expect("open should succeed");
 
-        let cache = ctx.query_cache().expect("query_cache should return Ok");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache should return Ok");
 
         // Count documents via direct SQL — the cache must have indexed the
         // 3 seeded docs during the per-call freshness check inside open_for_query.
@@ -2117,7 +2197,7 @@ mod tests {
         // First call — 3 docs.
         {
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("first query_cache call should succeed");
             assert_eq!(doc_count(&cache), 3, "initial count should be 3");
         }
@@ -2132,7 +2212,7 @@ mod tests {
         // Second call — per-call freshness check must pick up the new doc.
         {
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second query_cache call should succeed");
             assert_eq!(
                 doc_count(&cache),
@@ -2155,7 +2235,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
         }
         let id1 = ctx.warm_db_identity();
@@ -2163,7 +2243,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("second warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
             assert!(
                 marker_present(&cache),
                 "TEMP table must survive ⇒ same connection reused (verify-once)"
@@ -2181,7 +2261,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3, "initial count should be 3");
         }
 
@@ -2193,7 +2273,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("second warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
             assert_eq!(
                 doc_count(&cache),
                 4,
@@ -2212,7 +2292,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
             assert_eq!(doc_count(&cache), 3);
         }
@@ -2227,7 +2307,7 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second warm query_cache after clear");
             assert!(
                 !marker_present(&cache),
@@ -2266,7 +2346,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 1);
         }
 
@@ -2313,7 +2393,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
             assert_eq!(
                 archived_count(&cache),
@@ -2327,7 +2407,7 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second warm query_cache after files.ignore change");
             assert!(
                 !marker_present(&cache),
@@ -2357,7 +2437,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
         }
 
@@ -2366,7 +2446,7 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second warm query_cache after non-index config change");
             assert!(
                 marker_present(&cache),
@@ -2390,7 +2470,7 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
         }
         assert!(ctx.config().index_options.alias_field.is_none());
@@ -2401,7 +2481,7 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("second warm query_cache after index-relevant config change");
             assert!(
                 !marker_present(&cache),
@@ -2426,7 +2506,7 @@ mod tests {
         // First call — clean, no config file yet.
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
 
@@ -2448,7 +2528,7 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("query_cache must succeed once the config is valid again");
             assert_eq!(doc_count(&cache), 3);
         }
@@ -2584,7 +2664,9 @@ mod tests {
         // Warm: through the daemon context, reusing the held connection.
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
-        let warm = ctx.load_graph_index().expect("warm load_graph_index");
+        let warm = ctx
+            .load_graph_index_unscoped()
+            .expect("warm load_graph_index");
 
         assert_eq!(
             index_json(&warm),
@@ -2628,14 +2710,18 @@ mod tests {
 
         // Establish the warm connection.
         ctx.begin_request().expect("begin_request");
-        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        let idx1 = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert_eq!(alpha_headings(&idx1), 1, "alpha's heading is indexed");
 
         // Shadow the real `headings` table with an empty view on the held
         // connection only. The vault is not touched afterwards, so the next
         // request's incremental refresh detects no changes and writes nothing.
         {
-            let cache = ctx.query_cache().expect("query_cache to plant shadow");
+            let cache = ctx
+                .query_cache_unscoped()
+                .expect("query_cache to plant shadow");
             cache
                 .conn()
                 .execute_batch("CREATE TEMP VIEW headings AS SELECT * FROM main.headings WHERE 0")
@@ -2644,7 +2730,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         let idx2 = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("second warm load_graph_index");
         assert_eq!(
             alpha_headings(&idx2),
@@ -2674,7 +2760,9 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
-        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        let idx1 = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert_eq!(idx1.documents.len(), 3, "three seeded docs");
 
         std::fs::write(
@@ -2685,7 +2773,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         let idx2 = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("second warm load_graph_index");
         assert_eq!(
             idx2.documents.len(),
@@ -2731,14 +2819,18 @@ mod tests {
 
         // Establish the warm connection.
         ctx.begin_request().expect("begin_request");
-        let idx1 = ctx.load_graph_index().expect("first warm load_graph_index");
+        let idx1 = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert_eq!(idx1.documents.len(), 3, "three seeded docs");
         assert_eq!(alpha_headings(&idx1), 1, "alpha's heading is indexed");
 
         // Shadow `headings` on the held connection: reads omit alpha's rows,
         // writes forward to the real table so the refresh's DML succeeds.
         {
-            let cache = ctx.query_cache().expect("query_cache to plant shadow");
+            let cache = ctx
+                .query_cache_unscoped()
+                .expect("query_cache to plant shadow");
             cache
                 .conn()
                 .execute_batch(
@@ -2772,7 +2864,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         let idx2 = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("warm load_graph_index across a writing refresh");
         // (a) The refresh happened: the new doc (and its heading) is indexed.
         assert_eq!(idx2.documents.len(), 4, "the writing refresh indexed delta");
@@ -2819,7 +2911,9 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
-        let before = ctx.load_graph_index().expect("first warm load_graph_index");
+        let before = ctx
+            .load_graph_index_unscoped()
+            .expect("first warm load_graph_index");
         assert!(
             before
                 .documents
@@ -2832,7 +2926,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         let after = ctx
-            .load_graph_index()
+            .load_graph_index_unscoped()
             .expect("second warm load_graph_index");
         assert!(
             !after
@@ -2862,7 +2956,7 @@ mod tests {
         // Establish warm state with no alias.
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
         }
         assert!(ctx.config().index_options.alias_field.is_none());
@@ -2875,7 +2969,9 @@ mod tests {
         ctx.begin_request()
             .expect("begin_request after config change");
         let config_alias = ctx.config().index_options.alias_field.clone();
-        let cache = ctx.query_cache().expect("query_cache after config change");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after config change");
         assert_eq!(
             config_alias.as_deref(),
             Some("aliases"),
@@ -2901,7 +2997,7 @@ mod tests {
         write_config(&root, "links:\n  alias_field: aaaaaa\n");
         ctx.begin_request().expect("begin_request A");
         {
-            let _c = ctx.query_cache().expect("query_cache A");
+            let _c = ctx.query_cache_unscoped().expect("query_cache A");
         }
         assert_eq!(
             ctx.config().index_options.alias_field.as_deref(),
@@ -2920,7 +3016,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request B");
         {
-            let _c = ctx.query_cache().expect("query_cache B");
+            let _c = ctx.query_cache_unscoped().expect("query_cache B");
         }
         assert_eq!(
             ctx.config().index_options.alias_field.as_deref(),
@@ -2937,9 +3033,11 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        ctx.begin_request().expect("begin_request");
+        // Hold this request's scope: it binds generation 1, and the corruption
+        // seam keys the floor bump off the SCOPE's bound generation (NRN-253).
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache(&scope).expect("first warm query_cache");
             create_marker(&cache);
         }
         let gen1 = ctx
@@ -2953,12 +3051,14 @@ mod tests {
             Some("database disk image is malformed".to_string()),
         );
         let err = anyhow::Error::new(corrupt).context("tool body failed");
-        ctx.note_tool_error(&err);
+        ctx.note_tool_error(&scope, &err);
 
         // Next request reopens a NEW generation (marker gone) — the corruption
         // bumped the invalidation floor past generation 1.
         ctx.begin_request().expect("begin_request after eviction");
-        let cache = ctx.query_cache().expect("query_cache after eviction");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after eviction");
         assert!(
             !marker_present(&cache),
             "state must be rebuilt after corruption eviction"
@@ -2979,42 +3079,44 @@ mod tests {
     fn warm_keeps_state_on_non_corruption_error() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
-        ctx.begin_request().expect("begin_request");
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache(&scope).expect("first warm query_cache");
         }
         assert!(ctx.warm_db_identity().is_some());
 
         let err = anyhow::anyhow!("some ordinary tool error");
-        ctx.note_tool_error(&err);
+        ctx.note_tool_error(&scope, &err);
         assert!(
             ctx.warm_db_identity().is_some(),
             "a non-corruption error must not evict the warm state"
         );
     }
 
-    /// FIX-3 (bound-generation attribution, NRN-251 review): a corruption error
-    /// attributed to an OLDER generation N must not invalidate a healthy,
-    /// newer `current` generation N+1. Models the NRN-253 concurrent-read-pool
-    /// scenario the eager `slot.current`-keyed floor bump got wrong: a request
-    /// bound to generation 1 fails after generation 2 has already become
-    /// current (e.g. another request's ground-shift reopen raced ahead of it).
-    /// The next request must still reuse generation 2 — no spurious reopen.
+    /// FIX-3 (bound-generation attribution, NRN-253): a corruption error
+    /// attributed via a request's SCOPE to an OLDER generation N must not
+    /// invalidate a healthy, newer `current` generation N+1. Models the concurrent-
+    /// read-pool scenario the eager `slot.current`-keyed floor bump got wrong: a
+    /// request whose scope bound generation 1 fails after generation 2 has already
+    /// become current (e.g. another request's ground-shift reopen raced ahead of
+    /// it). Keying the floor bump off `scope.bound_generation()` — NOT
+    /// `slot.current` — is what keeps generation 2 alive; the next request reuses
+    /// it with no spurious reopen.
     #[test]
     fn warm_corruption_error_does_not_invalidate_a_newer_current_generation() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        // Request 1 binds generation 1.
-        ctx.begin_request().expect("begin_request 1");
+        // Request 1's scope binds generation 1 — and is HELD to completion, exactly
+        // as an in-flight request would hold it while draining.
+        let scope1 = ctx.begin_request().expect("begin_request 1");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache(&scope1).expect("first warm query_cache");
         }
         assert_eq!(ctx.current_generation().expect("generation 1").number, 1);
 
-        // Advance `current` to generation 2 WITHOUT rebinding — models a
-        // different request opening N+1 while request 1's failure is still
-        // attributed to N.
+        // Advance `current` to generation 2 WITHOUT binding it into scope1 — models
+        // a DIFFERENT request opening N+1 while request 1's scope still points at N.
         let (_canonical, cache_dir) = cache_dir_for(&root).expect("cache_dir_for");
         std::fs::remove_dir_all(cache_dir.as_std_path()).expect("remove cache dir");
         ctx.force_reopen_without_binding()
@@ -3022,18 +3124,23 @@ mod tests {
         assert_eq!(ctx.current_generation().expect("generation 2").number, 2);
         assert_eq!(ctx.generation_opens(), 2);
 
-        // Request 1's corruption error surfaces now, still bound to generation 1.
+        // Request 1's corruption error surfaces now, attributed via scope1 (which
+        // bound generation 1), NOT via whatever is `current` (generation 2).
         let corrupt = rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
             Some("database disk image is malformed".to_string()),
         );
-        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+        ctx.note_tool_error(
+            &scope1,
+            &anyhow::Error::new(corrupt).context("tool body failed"),
+        );
 
         // Generation 2 must survive: the next request reuses it (no reopen),
-        // proving the floor bump targeted generation 1, not `slot.current`.
+        // proving the floor bump targeted generation 1 (scope1's bound generation),
+        // not `slot.current`.
         ctx.begin_request().expect("begin_request after error");
         {
-            let _c = ctx.query_cache().expect("query_cache after error");
+            let _c = ctx.query_cache_unscoped().expect("query_cache after error");
         }
         assert_eq!(
             ctx.current_generation()
@@ -3046,6 +3153,44 @@ mod tests {
             ctx.generation_opens(),
             2,
             "no additional reopen — the floor bump must not reach past the errored generation"
+        );
+    }
+
+    /// NRN-253 per-request note isolation: two request scopes alive on ONE context
+    /// simultaneously (the concurrent-read-pool shape, modeled by creating both
+    /// scopes directly) each own a PRIVATE note buffer — a note pushed to one lands
+    /// only in that scope's drain, never the other's. This is what makes note
+    /// forwarding safe once `call_lock` no longer serializes tool bodies: there is
+    /// no shared context buffer for concurrent requests to interleave into, so
+    /// `run_wrapped`'s drain of one request's scope can never carry another's note.
+    #[test]
+    fn request_scopes_isolate_operator_notes() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Two requests' scopes alive at the same time on one context.
+        let scope_a = ctx.begin_request().expect("begin_request A");
+        let scope_b = ctx.begin_request().expect("begin_request B");
+
+        scope_a.push_operator_note("a-first");
+        scope_b.push_operator_note("b-first");
+        scope_a.push_operator_note("a-second");
+
+        // Each scope drains ONLY its own notes, in push order — no cross-leak.
+        assert_eq!(
+            scope_a.take_operator_notes(),
+            vec!["a-first".to_string(), "a-second".to_string()],
+            "scope A drains only its own notes, in order"
+        );
+        assert_eq!(
+            scope_b.take_operator_notes(),
+            vec!["b-first".to_string()],
+            "scope B drains only its own note — nothing from A leaked in"
+        );
+        // A drained scope is empty on a second drain (no residue left behind).
+        assert!(
+            scope_a.take_operator_notes().is_empty(),
+            "a drained scope holds no residual notes"
         );
     }
 
@@ -3062,7 +3207,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
         }
 
@@ -3072,7 +3217,9 @@ mod tests {
         let ctx2 = Arc::clone(&ctx);
         let handle = std::thread::spawn(move || {
             ctx2.begin_request().expect("begin_request on panic thread");
-            let _cache = ctx2.query_cache().expect("query_cache on panic thread");
+            let _cache = ctx2
+                .query_cache_unscoped()
+                .expect("query_cache on panic thread");
             panic!("intentional panic while holding the warm guard");
         });
         assert!(
@@ -3086,7 +3233,7 @@ mod tests {
         ctx.begin_request().expect("begin_request after panic");
         {
             let cache = ctx
-                .query_cache()
+                .query_cache_unscoped()
                 .expect("query_cache must recover from a panic-invalidated generation");
             assert!(
                 !marker_present(&cache),
@@ -3100,7 +3247,7 @@ mod tests {
         // SAME connection request 2 rebuilt (marker still present), proving the
         // recovery does not keep re-evicting on every subsequent request.
         ctx.begin_request().expect("begin_request request 3");
-        let cache = ctx.query_cache().expect("query_cache request 3");
+        let cache = ctx.query_cache_unscoped().expect("query_cache request 3");
         assert!(
             marker_present(&cache),
             "a second post-panic request must reuse the recovered connection, \
@@ -3126,10 +3273,11 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
 
-        // First request opens generation 1.
-        ctx.begin_request().expect("begin_request");
+        // First request opens generation 1; hold its scope to attribute the
+        // corruption below to the generation it bound.
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache(&scope).expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         assert_eq!(ctx.generation_opens(), 1, "cold start is one open");
@@ -3140,7 +3288,10 @@ mod tests {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
             Some("database disk image is malformed".to_string()),
         );
-        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+        ctx.note_tool_error(
+            &scope,
+            &anyhow::Error::new(corrupt).context("tool body failed"),
+        );
 
         const N: usize = 8;
         let barrier = Arc::new(Barrier::new(N));
@@ -3151,7 +3302,7 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
                 ctx.begin_request().expect("begin_request");
-                let cache = ctx.query_cache().expect("query_cache");
+                let cache = ctx.query_cache_unscoped().expect("query_cache");
                 doc_count(&cache)
             }));
         }
@@ -3184,7 +3335,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let gen1 = ctx.current_generation().expect("generation 1 held");
@@ -3199,7 +3350,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("second warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
             assert_eq!(
                 doc_count(&cache),
                 3,
@@ -3271,10 +3422,10 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        // Cold start opens generation 1.
-        ctx.begin_request().expect("begin_request");
+        // Cold start opens generation 1; hold its scope for the corruption below.
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache(&scope).expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         assert_eq!(ctx.generation_opens(), 1, "cold start is one open");
@@ -3285,7 +3436,10 @@ mod tests {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
             Some("database disk image is malformed".to_string()),
         );
-        ctx.note_tool_error(&anyhow::Error::new(corrupt).context("tool body failed"));
+        ctx.note_tool_error(
+            &scope,
+            &anyhow::Error::new(corrupt).context("tool body failed"),
+        );
 
         // Occupy the writer so BOTH open ops queue behind the blocker and then run
         // strictly FIFO — deterministic, no sleeps.
@@ -3328,7 +3482,7 @@ mod tests {
         // Establish generation 1 so the slot is warm.
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
 
         // A watch over the queue's shutdown flag — holds its own `Arc`, so it
@@ -3386,7 +3540,7 @@ mod tests {
         // Establish generation 1 (its cold-start refresh already ran).
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let gen = ctx.current_generation().expect("generation held");
@@ -3423,7 +3577,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen = ctx.current_generation().expect("generation held");
         let baseline = gen.refresh_exec_count.load(Ordering::Relaxed);
@@ -3477,7 +3631,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let gen = ctx.current_generation().expect("generation held");
@@ -3539,7 +3693,9 @@ mod tests {
 
         // And the edit that landed mid-flight is visible afterward.
         ctx.begin_request().expect("begin_request");
-        let cache = ctx.query_cache().expect("query_cache after refreshes");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after refreshes");
         assert_eq!(
             doc_count(&cache),
             4,
@@ -3559,7 +3715,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("first warm query_cache");
+            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
             create_marker(&cache);
         }
         let gen1 = ctx.current_generation().expect("generation 1 held");
@@ -3573,10 +3729,12 @@ mod tests {
         *gen1.inject_refresh_error.lock().unwrap() = Some(CacheError::Sqlite(corrupt));
 
         // The next request's refresh fails; the concrete error must propagate out
-        // of query_cache still classifiable as corruption.
-        ctx.begin_request().expect("begin_request");
+        // of query_cache still classifiable as corruption. `query_cache` binds the
+        // generation into the scope BEFORE the refresh runs, so the scope carries
+        // the bound generation even though the call returns Err.
+        let scope = ctx.begin_request().expect("begin_request");
         let err = ctx
-            .query_cache()
+            .query_cache(&scope)
             .expect_err("a corruption refresh error must propagate out of query_cache");
         assert!(
             is_sqlite_corruption(&err),
@@ -3584,11 +3742,13 @@ mod tests {
         );
 
         // Feed it to the eviction seam exactly as `run_wrapped` does.
-        ctx.note_tool_error(&err);
+        ctx.note_tool_error(&scope, &err);
 
         // The next request reopens a NEW generation (marker gone, number bumped).
         ctx.begin_request().expect("begin_request after eviction");
-        let cache = ctx.query_cache().expect("query_cache after eviction");
+        let cache = ctx
+            .query_cache_unscoped()
+            .expect("query_cache after eviction");
         assert!(
             !marker_present(&cache),
             "state must be rebuilt after the ticket-routed corruption eviction"
@@ -3656,7 +3816,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen = ctx.current_generation().expect("generation held");
 
@@ -3690,7 +3850,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let _c = ctx.query_cache().expect("first warm query_cache");
+            let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen = ctx.current_generation().expect("generation held");
 
@@ -3747,14 +3907,15 @@ mod tests {
         // Open the generation and build the cache (3 seeded docs).
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
 
         // Warm mutation (confirm): applies on disk AND commits its increment.
-        ctx.begin_request().expect("begin_request");
+        let scope = ctx.begin_request().expect("begin_request");
         let report = crate::mcp::tools::set::handle(
             &ctx,
+            &scope,
             crate::mcp::tools::set::SetParams {
                 target: "beta".into(),
                 field_json: vec![r#"status="active""#.into()],
@@ -3797,7 +3958,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let generation = ctx.current_generation().expect("a current generation");
@@ -3863,7 +4024,7 @@ mod tests {
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let generation = ctx.current_generation().expect("a current generation");
@@ -3910,9 +4071,9 @@ mod tests {
 
         let (_tmp, root) = make_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
-        ctx.begin_request().expect("begin_request");
+        let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache().expect("query_cache");
+            let cache = ctx.query_cache(&scope).expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
         }
         let generation = ctx.current_generation().expect("a current generation");
@@ -3924,11 +4085,14 @@ mod tests {
         let (reached, release) = ctx.install_increment_gate(&generation);
 
         // Drive the REAL tool seam (which awaits) on a worker thread so this thread
-        // can evict the generation mid-commit.
+        // can evict the generation mid-commit. The request's scope moves onto the
+        // worker (the increment op pushes its degrade note into it — NRN-253); the
+        // worker returns the drained notes back for assertion.
         let ctx_worker = Arc::clone(&ctx);
         let changed_worker = changed.clone();
         let worker = std::thread::spawn(move || {
-            ctx_worker.commit_apply_increments(&changed_worker);
+            ctx_worker.commit_apply_increments(&scope, &changed_worker);
+            scope.take_operator_notes()
         });
 
         // First chunk (delta) committed; op parked at boundary 1.
@@ -3939,8 +4103,9 @@ mod tests {
         // before the next chunk (epsilon) runs.
         release.send(()).unwrap();
 
-        // The tool seam returns normally (never fails) despite the drop.
-        worker
+        // The tool seam returns normally (never fails) despite the drop, and hands
+        // back its scope's drained notes.
+        let notes = worker
             .join()
             .expect("commit_apply_increments must not panic");
 
@@ -3957,8 +4122,7 @@ mod tests {
             );
         }
 
-        // The degrade left the both-surfaces operator note.
-        let notes = ctx.take_operator_notes();
+        // The degrade left the both-surfaces operator note (drained above).
         assert!(
             notes.iter().any(|n| n.contains("abandoned")),
             "a dropped increment must leave the deferred operator note, got {notes:?}"

@@ -31,7 +31,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::standards::engine::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 
@@ -116,17 +116,22 @@ pub struct ValidateOutput {
 /// at cache-build time (`Cache::open_with_index`, NRN-117), so the loaded index
 /// is already filtered — consistent with `norn validate` on vaults that
 /// configure `files.ignore`.
-pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
+pub fn handle(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: ValidateParams,
+) -> Result<ValidateOutput> {
     // Route through VaultContext::load_graph_index — the graph-index entry point
     // for daemon-served tools. It reuses the warm connection when served by the
     // daemon (verify-once) and opens fresh in cold mode, but applies `files.ignore`
     // via `Cache::open_with_index` in both, so the index is filtered identically
     // to `norn validate` (NRN-130).
-    let config = ctx.config();
-    let index = ctx.load_graph_index()?;
+    let config = scope.config();
+    let index = ctx.load_graph_index(scope)?;
 
-    // Run validation using the context's current config (`ctx.config()`;
-    // hot-swapped in warm mode) — same config path as `norn validate`.
+    // Run validation using the request's bound config (`scope.config()`;
+    // hot-swapped in warm mode, bound at the request boundary — NRN-253) — same
+    // config path as `norn validate`.
     let findings = validate_with_compiled(
         &index,
         &config.validate,
@@ -176,6 +181,14 @@ pub fn handle(ctx: &VaultContext, p: ValidateParams) -> Result<ValidateOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // NRN-253 test shim: thread a fresh single-use RequestScope so the existing
+    // `handle(&ctx, p)` call sites compile unchanged (production threads the
+    // request's scope from `run_wrapped`).
+    fn handle(ctx: &VaultContext, p: ValidateParams) -> anyhow::Result<ValidateOutput> {
+        let scope = ctx.begin_request()?;
+        super::handle(ctx, &scope, p)
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 

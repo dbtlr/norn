@@ -40,7 +40,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 use crate::migration_plan::MIGRATION_PLAN_SCHEMA_VERSION;
 
@@ -94,7 +94,11 @@ impl ApplyOutput {
 }
 
 /// Build the MCP output envelope for `vault.apply`.
-pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<MutationResult<ApplyOutput>> {
+pub fn handle_output(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: ApplyParams,
+) -> Result<MutationResult<ApplyOutput>> {
     let dry_run = !p.confirm;
     let vault_root = ctx.vault_root.to_string();
     // NRN-229: a mutation-lock timeout (the one refusal `apply` raises before the
@@ -103,7 +107,7 @@ pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<MutationResul
     // protocol error — the same idiom every mutation tool shares. A malformed /
     // wrong-schema plan is NOT a coded refusal and still propagates as a bare
     // `Err` (unrecognized → `None`).
-    let report = match handle(ctx, p) {
+    let report = match handle(ctx, scope, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
             Some(err) => {
@@ -137,7 +141,11 @@ pub fn handle_output(ctx: &VaultContext, p: ApplyParams) -> Result<MutationResul
 /// **CONFIRM (`confirm`):** acquire the mutation lock BEFORE loading the graph
 /// index, open a real event sink, apply with `dry_run = false` — the same
 /// path `norn apply --yes` takes.
-pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report::ApplyReport> {
+pub fn handle(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: ApplyParams,
+) -> Result<crate::apply_report::ApplyReport> {
     use crate::applier::{apply_migration_plan, ApplyContext};
     use crate::migration_plan::MigrationPlan;
 
@@ -174,7 +182,7 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
 
     // ── Step 3: load graph index (same entry point apply uses) ────────────────
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
-    let index = ctx.load_graph_index()?;
+    let index = ctx.load_graph_index(scope)?;
 
     let apply_ctx = ApplyContext {
         dry_run,
@@ -203,7 +211,7 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
     // Open a real, file-backed event sink — the same audit trail `norn apply`
     // writes. `apply_migration_plan` emits the per-op spans and action events
     // itself; we frame them with `invocation_started` / `invocation_finished`.
-    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
+    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx, scope);
     crate::emit_invocation_started(
         &mut sink,
         "apply",
@@ -221,7 +229,7 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
 
     // Warm mode: commit the plan's cache increments (every touched path) as a
     // chunked writer-queue op, awaited; no-op in cold mode (NRN-252 / NRN-158).
-    ctx.commit_apply_increments(&report.touched_paths);
+    ctx.commit_apply_increments(scope, &report.touched_paths);
 
     Ok(report)
 }
@@ -229,6 +237,24 @@ pub fn handle(ctx: &VaultContext, p: ApplyParams) -> Result<crate::apply_report:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // NRN-253 test shims: thread a fresh single-use RequestScope so the existing
+    // `handle(&ctx, p)` / `handle_output(&ctx, p)` call sites compile unchanged
+    // (production threads the request's scope from `run_wrapped`).
+    fn handle(
+        ctx: &VaultContext,
+        p: ApplyParams,
+    ) -> anyhow::Result<crate::apply_report::ApplyReport> {
+        let scope = ctx.begin_request()?;
+        super::handle(ctx, &scope, p)
+    }
+    fn handle_output(
+        ctx: &VaultContext,
+        p: ApplyParams,
+    ) -> anyhow::Result<crate::mcp::mutation_result::MutationResult<ApplyOutput>> {
+        let scope = ctx.begin_request()?;
+        super::handle_output(ctx, &scope, p)
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
@@ -267,8 +293,12 @@ mod tests {
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
         // Produce a real MigrationPlan via the repair handler.
-        let repair_out =
-            crate::mcp::tools::repair::handle(&ctx, Default::default()).expect("repair");
+        let repair_out = crate::mcp::tools::repair::handle(
+            &ctx,
+            &ctx.begin_request().unwrap(),
+            Default::default(),
+        )
+        .expect("repair");
         let plan_value = repair_out.plan;
 
         // The plan must have ≥1 operation (sanity check — mirrors repair's tests).
@@ -323,8 +353,12 @@ mod tests {
         let ctx = VaultContext::open(&root, None).expect("open ctx");
 
         // Produce the plan.
-        let repair_out =
-            crate::mcp::tools::repair::handle(&ctx, Default::default()).expect("repair");
+        let repair_out = crate::mcp::tools::repair::handle(
+            &ctx,
+            &ctx.begin_request().unwrap(),
+            Default::default(),
+        )
+        .expect("repair");
         let plan_value = repair_out.plan;
 
         // Apply with confirm:true → the rewrite is executed.
@@ -672,9 +706,13 @@ mod tests {
 
         let (_tmp, root) = vault_with_fixable_link();
         let ctx = VaultContext::open(&root, None).expect("open ctx");
-        let plan_value = crate::mcp::tools::repair::handle(&ctx, Default::default())
-            .expect("repair")
-            .plan;
+        let plan_value = crate::mcp::tools::repair::handle(
+            &ctx,
+            &ctx.begin_request().unwrap(),
+            Default::default(),
+        )
+        .expect("repair")
+        .plan;
 
         let mr = handle_output(
             &ctx,

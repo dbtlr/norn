@@ -30,7 +30,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{ConfidenceArg, RepairArgs, ValidateTriageArgs};
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::planner::findings::plan_from_findings;
 use crate::repair::skip_reasons::code_matches_any;
 use crate::standards::{validate_with_compiled, ConfidenceFilter, RepairPlanFilters};
@@ -127,13 +127,14 @@ pub struct RepairOutput {
 /// reuse under the daemon, fresh open in cold mode). `files.ignore` is enforced
 /// at cache-build time (`Cache::open_with_index`, NRN-117), so the index is
 /// already filtered, matching the CLI's `norn repair` behaviour.
-pub fn handle(ctx: &VaultContext, p: RepairParams) -> Result<RepairOutput> {
+pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: RepairParams) -> Result<RepairOutput> {
     // Load the graph index via the daemon-served entry point: warm-connection
     // reuse (verify-once) under the daemon, fresh open in cold mode, with
     // `files.ignore` applied identically — matching `norn repair` (NRN-130).
-    // Use the context's current config (`ctx.config()`; hot-swapped in warm mode).
-    let config = ctx.config();
-    let index = ctx.load_graph_index()?;
+    // Use the request's bound config (`scope.config()`; hot-swapped in warm
+    // mode, bound at the request boundary — NRN-253).
+    let config = scope.config();
+    let index = ctx.load_graph_index(scope)?;
 
     // The CLI's exit-code signal (any error-severity diagnostic anywhere in the
     // vault), computed off the FULL index BEFORE triage filtering — same as
@@ -240,6 +241,14 @@ fn normalized_filter_values(values: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // NRN-253 test shim: thread a fresh single-use RequestScope so the existing
+    // `handle(&ctx, p)` call sites compile unchanged (production threads the
+    // request's scope from `run_wrapped`).
+    fn handle(ctx: &VaultContext, p: RepairParams) -> anyhow::Result<RepairOutput> {
+        let scope = ctx.begin_request()?;
+        super::handle(ctx, &scope, p)
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 

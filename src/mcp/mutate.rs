@@ -18,7 +18,7 @@
 //! the apply report's touched-path set (NRN-252 / NRN-158), so there is no
 //! one-line passthrough to keep in sync.
 
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mutation_lock::MutationLock;
 use crate::telemetry::{Clock, EventSink, IdGen};
 use camino::Utf8Path;
@@ -219,12 +219,13 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
 /// Use this ONLY on the confirm/apply path. Dry-run must keep `EventSink::discard`
 /// directly (the CLI's dry-run branch does the same) so a plan-only call persists
 /// nothing.
-pub(crate) fn open_mutation_event_sink(ctx: &VaultContext) -> EventSink {
+pub(crate) fn open_mutation_event_sink(ctx: &VaultContext, scope: &RequestScope) -> EventSink {
     let ids = IdGen::new();
     let clock = Clock::System;
     let start_ts = clock.now_rfc3339();
 
-    let config = ctx.config();
+    // Read the request's bound config (NRN-253), not the live stored one.
+    let config = scope.config();
     let telemetry = config.vault_config.telemetry.as_ref();
     let dir = telemetry
         .and_then(|t| t.location.clone())
@@ -338,6 +339,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     crate::mcp::tools::set::handle(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::set::SetParams {
                             target: "bogus-target".into(),
                             field_json: vec![r#"status="active""#.into()],
@@ -353,6 +355,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     crate::mcp::tools::edit::handle(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::edit::EditParams {
                             target: "bogus-target".into(),
                             edits: vec![crate::edit::ops::EditOp::StrReplace {
@@ -372,6 +375,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     crate::mcp::tools::delete::handle(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::delete::DeleteParams {
                             target: "bogus-target.md".into(),
                             rewrite_to: None,
@@ -387,6 +391,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     crate::mcp::tools::move_doc::handle(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::move_doc::MoveParams {
                             from: "bogus-target.md".into(),
                             to: "dst.md".into(),
@@ -402,6 +407,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     crate::mcp::tools::new::handle(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::new::NewParams {
                             // Missing parent dir without `parents` — a
                             // preflight-first ordering refuses on this path.
@@ -419,6 +425,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     crate::mcp::tools::rewrite_wikilink::handle(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams {
                             from: "bogus-target".into(),
                             to: "doc".into(),
@@ -441,6 +448,7 @@ mod lock_ordering_tests {
                     });
                     crate::mcp::tools::apply::handle(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::apply::ApplyParams {
                             plan,
                             confirm: true,
@@ -493,6 +501,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     let r = crate::mcp::tools::set::handle_output(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::set::SetParams {
                             target: "doc.md".into(),
                             field_json: vec![r#"status="active""#.into()],
@@ -509,6 +518,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     let r = crate::mcp::tools::edit::handle_output(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::edit::EditParams {
                             target: "doc.md".into(),
                             edits: vec![crate::edit::ops::EditOp::StrReplace {
@@ -529,6 +539,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     let r = crate::mcp::tools::new::handle_output(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::new::NewParams {
                             path: Some("fresh.md".to_string()),
                             confirm: true,
@@ -544,6 +555,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     let r = crate::mcp::tools::move_doc::handle_output(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::move_doc::MoveParams {
                             from: "doc.md".into(),
                             to: "dst.md".into(),
@@ -560,6 +572,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     let r = crate::mcp::tools::delete::handle_output(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::delete::DeleteParams {
                             target: "doc.md".into(),
                             rewrite_to: None,
@@ -576,6 +589,7 @@ mod lock_ordering_tests {
                 Box::new(|ctx| {
                     let r = crate::mcp::tools::rewrite_wikilink::handle_output(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::rewrite_wikilink::RewriteWikilinkParams {
                             from: "doc".into(),
                             to: "renamed".into(),
@@ -599,6 +613,7 @@ mod lock_ordering_tests {
                     });
                     let r = crate::mcp::tools::apply::handle_output(
                         ctx,
+                        &ctx.begin_request().unwrap(),
                         crate::mcp::tools::apply::ApplyParams {
                             plan,
                             confirm: true,

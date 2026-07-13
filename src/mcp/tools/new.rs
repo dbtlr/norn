@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::{NewArgs, NewFormat};
-use crate::mcp::context::VaultContext;
+use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.new`.
@@ -153,12 +153,16 @@ impl NewOutput {
 }
 
 /// Build the MCP output envelope for `vault.new`.
-pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<NewOutput>> {
+pub fn handle_output(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: NewParams,
+) -> Result<MutationResult<NewOutput>> {
     let dry_run = !p.confirm;
     // Capture a coded refusal (NRN-220): a recognized preflight refusal
     // (`destination-exists`, containment, …) becomes a structured `refused`
     // report + `isError:true` instead of a bare MCP `Err`. Others propagate.
-    let report = match handle(ctx, p) {
+    let report = match handle(ctx, scope, p) {
         Ok(report) => report,
         Err(e) => match crate::mcp::mutate::refusal_from_error(&e) {
             Some(err) => crate::new::report::NewReport::refused(err),
@@ -198,7 +202,11 @@ pub fn handle_output(ctx: &VaultContext, p: NewParams) -> Result<MutationResult<
 ///   4. Open real event sink via `open_mutation_event_sink`, emit lifecycle events.
 ///   5. Build single-change `RepairPlan`, apply via `apply_repair_plan_with_context`.
 ///   6. `build_report(plan, applied=true, trace_id)`.
-pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<crate::new::report::NewReport> {
+pub fn handle(
+    ctx: &VaultContext,
+    scope: &RequestScope,
+    p: NewParams,
+) -> Result<crate::new::report::NewReport> {
     let cwd = ctx.vault_root.clone();
 
     // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
@@ -212,12 +220,13 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<crate::new::report::Ne
     // ── Step 1: Load config + graph index ─────────────────────────────────────
     // `preflight_and_plan` does this internally; we replicate it so we can
     // short-circuit at preflight without a real sink and without touching stdin.
-    // Config comes from the context (`ctx.config()`; refreshed per request by
-    // `begin_request` in warm mode) — NOT re-read from disk, so the whole request
-    // sees one config generation. The graph index goes through the context too:
-    // warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
-    let loaded_config = ctx.config();
-    let index = ctx.load_graph_index()?;
+    // Config comes from the request scope (`scope.config()`; bound at the request
+    // boundary by `begin_request` in warm mode — NRN-253) — NOT re-read from disk,
+    // so the whole request sees one config generation. The graph index goes
+    // through the context too: warm-connection reuse under the daemon; fresh open
+    // in cold mode (NRN-130).
+    let loaded_config = scope.config();
+    let index = ctx.load_graph_index(scope)?;
 
     // ── Step 2: Three-mode path resolution via the shared `resolve_target` fn ─
     // Mirrors the CLI's `preflight_and_plan` mode resolution (NRN-56).
@@ -349,7 +358,7 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<crate::new::report::Ne
     // `open_mutation_event_sink`, which mirrors the real-apply branch of
     // `open_event_sink`. Best-effort: falls back to discard on error, so telemetry
     // never blocks the creation.
-    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx);
+    let mut sink = crate::mcp::mutate::open_mutation_event_sink(ctx, scope);
     crate::emit_invocation_started(
         &mut sink,
         "new",
@@ -405,7 +414,7 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<crate::new::report::Ne
 
     // Warm mode: commit the created document's cache increment (awaited) so the
     // next read stays cheap; a no-op in cold mode (NRN-252 / NRN-158).
-    ctx.commit_apply_increments(&apply_report.touched_paths());
+    ctx.commit_apply_increments(scope, &apply_report.touched_paths());
 
     // NRN-101: an incremental `{{seq}}` target is resolved at apply time inside
     // the applier (under the lock). Render + post-create validate against the
@@ -443,6 +452,21 @@ pub fn handle(ctx: &VaultContext, p: NewParams) -> Result<crate::new::report::Ne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // NRN-253 test shims: thread a fresh single-use RequestScope so the existing
+    // `handle(&ctx, p)` / `handle_output(&ctx, p)` call sites compile unchanged
+    // (production threads the request's scope from `run_wrapped`).
+    fn handle(ctx: &VaultContext, p: NewParams) -> anyhow::Result<crate::new::report::NewReport> {
+        let scope = ctx.begin_request()?;
+        super::handle(ctx, &scope, p)
+    }
+    fn handle_output(
+        ctx: &VaultContext,
+        p: NewParams,
+    ) -> anyhow::Result<crate::mcp::mutation_result::MutationResult<NewOutput>> {
+        let scope = ctx.begin_request()?;
+        super::handle_output(ctx, &scope, p)
+    }
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
