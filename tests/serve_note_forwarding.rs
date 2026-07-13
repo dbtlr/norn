@@ -116,11 +116,39 @@ fn hold_cache_lock(cache_home: &Path) -> File {
     file
 }
 
+/// Rewrite `task1.md` with a body of a DIFFERENT length so the next read sees
+/// the vault as STALE (a size change is detected regardless of mtime
+/// granularity).
+///
+/// Staging staleness before each contended run is REQUIRED post-NRN-253: the
+/// warm daemon's read pipeline now runs a read-only freshness PROBE first and
+/// only touches the write path (`index_incremental`, which acquires the
+/// WriteLock) when the probe reports stale — a FRESH routed read never contends
+/// the held flock and would emit no note. The direct CLI path still acquires
+/// the WriteLock unconditionally (`open_for_query` → `index_incremental` locks
+/// before change detection), so a fresh DIRECT read notes contention while a
+/// fresh ROUTED read does not; that fresh-read direct/routed divergence is
+/// tracked separately as NRN-260. Staging a real change on BOTH sides keeps
+/// this test on the common ground: both sides genuinely attempt a refresh, both
+/// time out on the held flock, and the note-parity assertions stay byte-exact.
+///
+/// The mutated doc is the `task` (not a `note`), so the asserted
+/// `count --eq type:note` stdout is unchanged whether or not a refresh lands —
+/// the staged change perturbs freshness, never the counted set.
+fn stage_staleness(vault: &Path, marker: &str) {
+    std::fs::write(
+        vault.join("task1.md"),
+        format!("---\ntype: task\nstatus: backlog\n---\nbody task {marker}\n"),
+    )
+    .unwrap();
+}
+
 /// A routed read under genuine daemon-side lock contention produces the SAME
 /// (stdout, stderr, exit) triple as a direct read under the same contention —
 /// the forwarded note included — and the note also lands in the daemon's own
-/// stderr log (both surfaces, NRN-215). Debug-profile only — see the crate-level
-/// `cfg(debug_assertions)` gate above.
+/// stderr log (both surfaces, NRN-215). Each contended run is staged against a
+/// STALE vault (see [`stage_staleness`] — required post-NRN-253, cf. NRN-260).
+/// Debug-profile only — see the crate-level `cfg(debug_assertions)` gate above.
 #[test]
 fn routed_contended_read_forwards_the_note_byte_identically() {
     let vault = seed_vault();
@@ -140,8 +168,11 @@ fn routed_contended_read_forwards_the_note_byte_identically() {
         String::from_utf8_lossy(&warm_stderr)
     );
 
-    // Contended run: hold the cache write lock; the refresh times out and the
-    // command proceeds against current cache state with the stderr note.
+    // Contended run: stage staleness (so the refresh is a genuine attempt, not a
+    // no-change pass — see stage_staleness), then hold the cache write lock; the
+    // refresh times out and the command proceeds against current cache state
+    // with the stderr note.
+    stage_staleness(vault.path(), "staged for the direct contended run");
     let held_direct = hold_cache_lock(direct_cache.path());
     let (d_stdout, d_stderr, d_code) =
         run_norn(direct_cache.path(), direct_state.path(), vault.path(), args);
@@ -200,10 +231,14 @@ fn routed_contended_read_forwards_the_note_byte_identically() {
         read_to_string(&stderr_path)
     );
 
-    // Contended routed run: hold the DAEMON's cache write lock. The daemon's
+    // Contended routed run: stage staleness AGAIN (the routed warm-up indexed the
+    // previous staging; without a fresh change the warm probe reports Fresh and
+    // the daemon never touches the WriteLock — NRN-253/NRN-260, see
+    // stage_staleness), then hold the DAEMON's cache write lock. The daemon's
     // warm refresh times out, captures the note, forwards it in the envelope,
     // and the routed CLI re-emits it — the full (stdout, stderr, exit) triple
     // must equal the contended DIRECT triple, byte for byte.
+    stage_staleness(vault.path(), "restaged for the routed contended run");
     let held_daemon = hold_cache_lock(&cache_home);
     let (r_stdout, r_stderr, r_code) = run_norn(&cache_home, &state_home, vault.path(), args);
     drop(held_daemon);
