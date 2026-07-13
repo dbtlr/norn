@@ -135,9 +135,11 @@
 //!    propagates with its concrete type intact (so corruption stays classifiable
 //!    by [`note_tool_error`](VaultContext::note_tool_error)). The probe is the
 //!    named interface a Phase 3 watcher-events impl slots behind; the stat sweep
-//!    remains the permanent demoted-mode fallback. `call_lock` still serializes
-//!    tool bodies, so this concurrency is not yet observable through the MCP
-//!    surface — it is real and unit-tested directly against `VaultContext`.
+//!    remains the permanent demoted-mode fallback. Warm mode RETIRES `call_lock`
+//!    (NRN-253): tool bodies no longer serialize, so this probe/refresh
+//!    concurrency is LIVE at the MCP surface — concurrent verified-fresh reads
+//!    overlap on the read pool, and stale readers coalesce onto one refresh.
+//!    (Cold stdio `norn mcp` keeps the lock as the NRN-55 cold-open guard.)
 //!
 //! ### Post-apply increment commit (NRN-252 / NRN-158)
 //!
@@ -383,6 +385,13 @@ pub(crate) struct Generation {
     /// arrival-correctness assertions (exactly-one-execution counts).
     #[cfg(test)]
     refresh_exec_count: AtomicU64,
+    /// Test-only: total requesters that arrived at this generation's coalesced
+    /// refresh (submitted OR joined), bumped at the top of `arrive_refresh`. Lets a
+    /// full-pipeline concurrency test wait deterministically until BOTH stale
+    /// readers have arrived before releasing a writer-queue blocker, so their
+    /// coalescing onto one refresh is observable end-to-end (NRN-253).
+    #[cfg(test)]
+    refresh_arrivals: AtomicU64,
     /// Test-only: a one-shot error the next refresh op returns INSTEAD of running
     /// `index_incremental`, so a test can drive a corruption-class refresh failure
     /// through the ticket and prove `note_tool_error` still classifies it.
@@ -438,9 +447,9 @@ const READ_POOL_MAX: usize = 8;
 const READ_POOL_CAP_ENV: &str = "NORN_READ_POOL_CAP";
 
 /// The per-generation read-connection cap: `min(READ_POOL_MAX, available
-/// parallelism)`, floored at 1. Under the still-present `call_lock` the pool never
-/// grows past its seed in production (at most one request per vault runs at a
-/// time); this cap governs the post-`call_lock` world. Debug builds honor the
+/// parallelism)`, floored at 1. Now that warm mode has retired `call_lock`
+/// (NRN-253), concurrent warm reads run in parallel and the pool lazily grows up
+/// to this cap under real read fan-out. Debug builds honor the
 /// `NORN_READ_POOL_CAP` override so a test can pin the cap.
 fn read_pool_cap() -> usize {
     let parallelism = std::thread::available_parallelism()
@@ -450,11 +459,39 @@ fn read_pool_cap() -> usize {
     crate::cache::debug_env_usize(READ_POOL_CAP_ENV, default).max(1)
 }
 
+/// Test-only: pin the process-global `NORN_READ_POOL_CAP` override for the guard's
+/// life, serialized on a shared lock so cap-sensitive tests in this module AND the
+/// `server` concurrency suite never clobber each other's cap mid-open (the env var
+/// is process-global). The override is removed on drop. Held across `.await` is
+/// fine — a `#[tokio::test]` future runs via `block_on`, which imposes no `Send`
+/// bound, so a non-`Send` guard in the test frame does not constrain it.
+#[cfg(test)]
+pub(crate) struct ReadPoolCapGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl ReadPoolCapGuard {
+    pub(crate) fn pin(cap: usize) -> Self {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var(READ_POOL_CAP_ENV, cap.to_string());
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReadPoolCapGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(READ_POOL_CAP_ENV);
+    }
+}
+
 /// A per-generation POOL of read-only connections to `cache.db` (ADR 0013 /
 /// NRN-253). Replaces the pre-NRN-253 single `Arc<Mutex<Cache>>` handed out as one
-/// exclusive owned guard per request — which serialized every warm read on that
-/// mutex once `call_lock` retires — with a small set of interchangeable
-/// `query_only` connections to the same database.
+/// exclusive owned guard per request — which, once `call_lock` retired (NRN-253),
+/// would have serialized every warm read on that mutex — with a small set of
+/// interchangeable `query_only` connections to the same database.
 ///
 /// - **Checkout** ([`checkout`](Self::checkout)) pops an idle connection (LIFO —
 ///   warmest first) and hands back an owned [`PooledConn`]; the connection leaves
@@ -1348,8 +1385,8 @@ impl VaultContext {
     /// error is outside SQLite's own detection model too, so it is not in scope.
     ///
     /// Invalidation keys off the SCOPE's bound generation — the generation THIS
-    /// request bound in `query_cache_warm` — NOT `slot.current` (NRN-253). Under
-    /// the retiring `call_lock` serialization the two coincide, but a corruption
+    /// request bound in `query_cache_warm` — NOT `slot.current` (NRN-253). Before
+    /// `call_lock` retired the two coincided, but a corruption
     /// error on generation N must never invalidate a healthy generation N+1 that
     /// has since become current (the concurrent read pool makes that observable):
     /// mirrors how `WarmGuard::Drop` bumps the floor off its OWN generation's
@@ -1382,6 +1419,16 @@ impl VaultContext {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// Whether this is a COLD (stdio `norn mcp`) context. Cold mode still needs the
+    /// server's `call_lock` to serialize its per-call cold cache opens (the NRN-55
+    /// cold-open DDL-race guard); warm mode retired that lock (NRN-253) because
+    /// every per-request dependency is now per-request state or structurally
+    /// synchronized. The server (`mcp::server`) branches on this to acquire the lock
+    /// only when cold.
+    pub(crate) fn is_cold(&self) -> bool {
+        matches!(self.mode, Mode::Cold)
     }
 
     /// Open a query cache for one tool call. Serves both modes with the same call
@@ -1551,6 +1598,14 @@ impl VaultContext {
                 .refresh_pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
+            // Test-only: count this arrival UNDER the pending lock, so it reflects a
+            // FINALIZED join-or-submit decision. A full-pipeline test waits until
+            // BOTH stale readers have arrived (still under a writer-queue blocker, so
+            // neither op has started) before releasing them — with the count taken
+            // here, `arrivals == 2` guarantees the second reader has already joined
+            // the first's ticket and cannot instead submit a second op (NRN-253).
+            #[cfg(test)]
+            generation.refresh_arrivals.fetch_add(1, Ordering::Relaxed);
             // Join only a pending refresh that has NOT started: its eventual scan
             // is then necessarily after this arrival. (An already-started op has
             // cleared itself from the slot, so this normally sees `None` there;
@@ -1621,8 +1676,12 @@ impl VaultContext {
         if changed_paths.is_empty() {
             return;
         }
-        // The generation this request bound (== current under `call_lock`). If
-        // none is current, there is nothing to update — the next open covers it.
+        // The generation the request is committing against. Read from the slot's
+        // current pointer; a concurrent reopen only ever swaps it forward, and the
+        // bulk op's `still_valid` guard drops the commit if this generation dies
+        // mid-flight, so binding to `current` here is safe post-`call_lock`
+        // (NRN-253). If none is current, there is nothing to update — the next open
+        // covers it.
         let Some(generation) = slot
             .shared
             .current
@@ -1828,11 +1887,43 @@ impl VaultContext {
         }
     }
 
-    /// Test-only: the warm slot's writer queue (panics off warm mode). Lets a test
-    /// occupy the writer thread with a blocker so a later generation-open op stays
-    /// queued.
+    /// Test-only: freshness-refresh executions on the CURRENT generation (`0` if
+    /// none). The `server`-module coalescing proof reads its delta to assert two
+    /// concurrent stale readers shared EXACTLY ONE refresh execution (NRN-253).
     #[cfg(test)]
-    fn warm_writer_queue(&self) -> &WriterQueue {
+    pub(crate) fn current_refresh_exec_count(&self) -> u64 {
+        self.current_generation()
+            .map(|g| g.refresh_exec_count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Test-only: arrivals at the CURRENT generation's coalesced refresh (`0` if
+    /// none). Lets a full-pipeline test wait until both stale readers have arrived
+    /// before releasing the writer-queue blocker they coalesce behind (NRN-253).
+    #[cfg(test)]
+    pub(crate) fn current_refresh_arrivals(&self) -> u64 {
+        self.current_generation()
+            .map(|g| g.refresh_arrivals.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Test-only: read connections the CURRENT generation's pool has lazily grown
+    /// BEYOND its seed (`0` if none / cold). A value `> 0` proves concurrent warm
+    /// reads genuinely overlapped on distinct pooled connections rather than
+    /// accidentally serializing (NRN-253).
+    #[cfg(test)]
+    pub(crate) fn current_read_pool_grow_opens(&self) -> u64 {
+        self.current_generation()
+            .map(|g| g.read_pool.grow_opens.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Test-only: the warm slot's writer queue (panics off warm mode). Lets a test
+    /// occupy the writer thread with a blocker so a later generation-open or refresh
+    /// op stays queued — used by both this module's and the `server` module's
+    /// concurrency proofs.
+    #[cfg(test)]
+    pub(crate) fn warm_writer_queue(&self) -> &WriterQueue {
         match &self.mode {
             Mode::Warm(slot) => &slot.queue,
             Mode::Cold => panic!("warm_writer_queue called on a cold context"),
@@ -2261,6 +2352,8 @@ fn open_generation(
         refresh_pending: Mutex::new(None),
         #[cfg(test)]
         refresh_exec_count: AtomicU64::new(0),
+        #[cfg(test)]
+        refresh_arrivals: AtomicU64::new(0),
         #[cfg(test)]
         inject_refresh_error: Mutex::new(None),
         #[cfg(test)]
@@ -3732,21 +3825,15 @@ mod tests {
 
     // ---- Read pool (NRN-253) ------------------------------------------------
 
-    /// Serializes the two cap-sensitive tests below: both drive generation opens
-    /// through the process-global `NORN_READ_POOL_CAP` env override, so they must
-    /// not overlap each other (an unrelated test capturing the override is
-    /// harmless — none does two concurrent read checkouts on one generation).
-    static CAP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Two concurrently-held checkouts are DISTINCT connections: the first pops the
     /// seed, the second lazily grows a second connection (proven by distinct
     /// `sqlite3*` pointers and a grow-open count of exactly 1).
     #[test]
     fn two_concurrent_checkouts_are_distinct_connections() {
-        let _lk = CAP_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Force a cap of at least 2 so growth is possible even on a single-core
-        // host (default cap = min(8, parallelism) could be 1 there).
-        std::env::set_var("NORN_READ_POOL_CAP", "8");
+        // host (default cap = min(8, parallelism) could be 1 there). The shared
+        // guard serializes the cap override against the `server` suite too.
+        let _cap = ReadPoolCapGuard::pin(8);
 
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
@@ -3770,8 +3857,6 @@ mod tests {
             1,
             "exactly one connection was lazily grown beyond the seed"
         );
-
-        std::env::remove_var("NORN_READ_POOL_CAP");
     }
 
     /// Sequential checkout/drop/checkout REUSES the pooled connection: the seed
@@ -3816,8 +3901,7 @@ mod tests {
     /// no sleeps in the success path.
     #[test]
     fn checkout_waits_at_cap_until_a_connection_returns() {
-        let _lk = CAP_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("NORN_READ_POOL_CAP", "1");
+        let _cap = ReadPoolCapGuard::pin(1);
 
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
@@ -3853,8 +3937,6 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("blocked checkout must proceed once a connection is returned");
         waiter.join().expect("waiter thread panicked");
-
-        std::env::remove_var("NORN_READ_POOL_CAP");
     }
 
     /// query_only enforcement: a write attempted through a pooled connection fails

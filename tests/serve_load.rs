@@ -14,6 +14,7 @@ mod serve_util;
 
 use std::time::{Duration, Instant};
 
+use serde_json::json;
 use serve_util::*;
 use tempfile::TempDir;
 
@@ -143,4 +144,91 @@ fn concurrent_same_vault_first_touch() {
             "worker {i}: concurrent first-touch find must return all {DOCS} docs"
         );
     }
+}
+
+/// NRN-253 (read concurrency LIVE end-to-end): several clients hit ONE warm vault
+/// at once — most issuing reads, one issuing a mutation — and all succeed with
+/// correct results. Before this commit `call_lock` serialized every warm tool body
+/// one-at-a-time per vault; now warm reads run concurrently and a mutation
+/// interleaves with them. This is the daemon-level proof; the fine-grained overlap
+/// / coalescing seams are unit-tested against `VaultContext` (NRN-256 owns the
+/// benchmark, so this stays a handful of calls, not a load run).
+#[test]
+fn concurrent_reads_and_a_mutation_on_one_warm_vault_all_succeed() {
+    const READERS: usize = 4;
+    const READS_EACH: usize = 3;
+    const DOCS: usize = 20;
+
+    let daemon = spawn_ready_daemon();
+    let vault = seed_many_notes("norn-serve-rw-", DOCS);
+
+    // Warm the vault once so the concurrent phase runs against a live generation.
+    let mut warm = connect_and_hello(&daemon.socket_path, vault.path());
+    warm.initialize();
+    assert_eq!(
+        find_all_notes(&mut warm).len(),
+        DOCS,
+        "warm-up find must see all docs"
+    );
+
+    let socket = daemon.socket_path.clone();
+    let vault_path = vault.path().to_path_buf();
+
+    // READERS reader threads, each on its OWN connection to the same warm vault.
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let socket = socket.clone();
+            let vault_path = vault_path.clone();
+            std::thread::spawn(move || {
+                let mut c = connect_and_hello(&socket, &vault_path);
+                c.initialize();
+                let mut last = 0usize;
+                for _ in 0..READS_EACH {
+                    last = find_all_notes(&mut c).len();
+                }
+                last
+            })
+        })
+        .collect();
+
+    // One mutator thread, concurrent with the readers: set doc0000's title.
+    let mutator = {
+        let socket = socket.clone();
+        let vault_path = vault_path.clone();
+        std::thread::spawn(move || {
+            let mut c = connect_and_hello(&socket, &vault_path);
+            c.initialize();
+            let resp = c.call_tool(
+                "vault.set",
+                json!({
+                    "target": "doc0000",
+                    "field": ["title=Mutated Concurrently"],
+                    "confirm": true,
+                }),
+            );
+            assert!(
+                resp.get("error").is_none(),
+                "concurrent vault.set must not error: {resp}"
+            );
+            resp
+        })
+    };
+
+    // Every reader saw the full set (a title change never drops a doc), and the
+    // mutation succeeded.
+    for (i, r) in readers.into_iter().enumerate() {
+        let count = r.join().expect("reader thread panicked");
+        assert_eq!(
+            count, DOCS,
+            "reader {i}: every concurrent find must return all {DOCS} docs"
+        );
+    }
+    let _ = mutator.join().expect("mutator thread panicked");
+
+    // The mutation actually landed on disk (proof it was served, not a no-op).
+    let body = read_to_string(&vault_path.join("doc0000.md"));
+    assert!(
+        body.contains("Mutated Concurrently"),
+        "the concurrent vault.set must have written the new title, got:\n{body}"
+    );
 }

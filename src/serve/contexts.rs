@@ -28,7 +28,9 @@
 //! The identity hash is derived by the daemon itself from the `hello`'s
 //! `vault_root` via [`crate::cache::vault_identity`] — a client-supplied hash is
 //! never trusted. Distinct vaults hash to distinct keys, so their `McpServer`s
-//! (each with its own NRN-55 `call_lock`) never contend.
+//! (each its own warm [`VaultContext`]) never contend. Warm requests do not take
+//! the server's `call_lock` at all — it is the cold-only NRN-55 guard (NRN-253) —
+//! so even concurrent requests to the SAME warm vault run in parallel.
 //!
 //! # Eviction
 //!
