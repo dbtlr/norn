@@ -14,10 +14,11 @@
 //!   advisory lock next to the socket for its whole life, so a live handshake
 //!   proves exactly one authoritative warm cache is serving — never a race of N
 //!   daemons at the same socket.
-//! - **O(1) ping off the accept loop.** Every connection is a fresh task; the
-//!   ping path touches no vault and no map lock, so pings answer promptly even
-//!   under heavy query load. Long vault work runs on `spawn_blocking` threads
-//!   (see `mcp::server`), keeping the async workers free.
+//! - **O(1) ping off the accept loop.** Every connection is a fresh task. A
+//!   host-global routing ping touches no vault and takes no map lock; a scoped
+//!   status ping performs one bounded map lookup and coherent progress snapshot
+//!   without opening the vault or touching its filesystem. Long vault work runs
+//!   on `spawn_blocking` threads (see `mcp::server`), keeping async workers free.
 //! - **Verify-once per vault.** Each vault's warm [`crate::mcp::context::VaultContext`]
 //!   checks integrity once, then self-heals per request — so warm queries skip
 //!   the repeated integrity check the one-shot CLI pays.

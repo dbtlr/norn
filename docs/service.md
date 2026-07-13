@@ -41,7 +41,7 @@ The daemon listens at the same well-known path the CLI's routing probe targets: 
 
 Every accepted connection starts with one newline-delimited JSON control frame before anything else happens:
 
-- **`ping`** → the daemon answers one `pong` (protocol version, daemon version, pid, uptime) and closes. This is an O(1) liveness probe: it touches no vault and takes no lock, so it answers promptly even while the daemon is busy serving other vaults.
+- **`ping`** → the daemon answers one `pong` (protocol version, daemon version, pid, uptime) and closes. The ordinary host-global routing ping is an O(1) liveness probe that touches no vault and takes no map lock. A status ping carrying `vault_root` additionally performs one bounded context-map lookup and coherent progress snapshot; it does not open the vault or touch its filesystem.
 - **`hello`** → names the vault this connection is for (`vault_root`, a path). The daemon derives the vault's identity itself (never trusting a client-supplied hash), resolves or opens its warm context, and answers `ready`. From that point the rest of the connection is a normal MCP session — the daemon hands the (possibly already-pipelined) remaining bytes straight to the MCP server for that vault.
 - Anything else, or a protocol-version mismatch, gets a one-line `error` frame and the connection closes.
 

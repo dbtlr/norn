@@ -60,7 +60,7 @@ use crate::service::{ServingState, WriterProgress};
 
 struct ContextEntry {
     cell: OnceCell<McpServer>,
-    opening: AtomicUsize,
+    opening: Arc<AtomicUsize>,
     progress: Arc<WriterProgressState>,
 }
 
@@ -68,24 +68,33 @@ impl ContextEntry {
     fn new(progress: Arc<WriterProgressState>) -> Self {
         Self {
             cell: OnceCell::new(),
-            opening: AtomicUsize::new(0),
+            opening: Arc::new(AtomicUsize::new(0)),
             progress,
         }
     }
 }
 
-struct OpeningGuard<'a>(&'a AtomicUsize);
+#[derive(Clone)]
+struct OpeningGuard {
+    _inner: Arc<OpeningGuardInner>,
+}
 
-impl<'a> OpeningGuard<'a> {
-    fn new(opening: &'a AtomicUsize) -> Self {
+struct OpeningGuardInner {
+    opening: Arc<AtomicUsize>,
+}
+
+impl OpeningGuard {
+    fn new(opening: Arc<AtomicUsize>) -> Self {
         opening.fetch_add(1, Ordering::AcqRel);
-        Self(opening)
+        Self {
+            _inner: Arc::new(OpeningGuardInner { opening }),
+        }
     }
 }
 
-impl Drop for OpeningGuard<'_> {
+impl Drop for OpeningGuardInner {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.opening.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -157,19 +166,26 @@ impl Contexts {
         };
         // Map lock released — the (possibly slow) open below runs unguarded.
 
-        let _opening = OpeningGuard::new(&entry.opening);
+        // The async initializer and its non-cancelable blocking task share one
+        // opening lease. If `resolve` is aborted, the blocking clone keeps
+        // `serving=opening` truthful until the detached open actually stops.
+        let opening = OpeningGuard::new(Arc::clone(&entry.opening));
         let server = entry
             .cell
             .get_or_try_init(|| {
                 let canonical = canonical.clone();
                 let progress = Arc::clone(&entry.progress);
+                let blocking_opening = opening.clone();
                 async move {
                     // Requirement (a): the first-touch open (config parse now;
                     // integrity check + index build on the first query) must not
                     // run on an async worker.
-                    tokio::task::spawn_blocking(move || open_server(&canonical, progress))
-                        .await
-                        .map_err(|e| anyhow::anyhow!("vault open task failed: {e}"))?
+                    tokio::task::spawn_blocking(move || {
+                        let _opening = blocking_opening;
+                        open_server(&canonical, progress)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("vault open task failed: {e}"))?
                 }
             })
             .await?;
@@ -356,7 +372,8 @@ mod tests {
     }
 
     /// The control plane reports the map lifecycle without opening the vault:
-    /// absent entry = cold, empty OnceCell = opening, initialized server = ready.
+    /// absent entry = cold; an empty cell is opening only while its opening
+    /// counter is nonzero, otherwise cold; an initialized server = ready.
     /// Once ready, writer progress comes from the live per-vault queue.
     #[tokio::test]
     async fn control_state_tracks_cold_opening_ready_and_writer_progress() {
@@ -372,7 +389,7 @@ mod tests {
         let progress = Arc::new(WriterProgressState::default());
         let entry = Arc::new(ContextEntry::new(Arc::clone(&progress)));
         contexts.map.lock().await.insert(hash, Arc::clone(&entry));
-        let opening = OpeningGuard::new(&entry.opening);
+        let opening = OpeningGuard::new(Arc::clone(&entry.opening));
         assert_eq!(
             contexts.control_state(&canonical).await,
             (ServingState::Opening, WriterProgress::default())
@@ -437,6 +454,51 @@ mod tests {
             contexts.control_state(&canonical).await.0,
             ServingState::Ready,
             "the cold retained entry must remain retryable"
+        );
+    }
+
+    /// Canceling the async initializer cannot cancel `spawn_blocking`; its
+    /// shared lease must keep status opening until the detached task exits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceled_initializer_keeps_opening_until_blocking_open_exits() {
+        let (_tmp, root) = seeded_vault();
+        let (canonical, hash) = crate::cache::vault_identity(&root).unwrap();
+        let contexts = Contexts::new();
+        let entry = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
+        contexts.map.lock().await.insert(hash, Arc::clone(&entry));
+
+        let opening = OpeningGuard::new(Arc::clone(&entry.opening));
+        let blocking_opening = opening.clone();
+        let (running_tx, running_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let initializer = tokio::spawn(async move {
+            let _opening = opening;
+            tokio::task::spawn_blocking(move || {
+                let _opening = blocking_opening;
+                running_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .await
+            .unwrap();
+        });
+
+        running_rx.recv().unwrap();
+        initializer.abort();
+        assert!(initializer.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            contexts.control_state(&canonical).await.0,
+            ServingState::Opening,
+            "the non-cancelable blocking open still owns the lease"
+        );
+
+        release_tx.send(()).unwrap();
+        while entry.opening.load(Ordering::Acquire) != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            contexts.control_state(&canonical).await.0,
+            ServingState::Cold,
+            "once the detached open exits, the empty entry is cold"
         );
     }
 
