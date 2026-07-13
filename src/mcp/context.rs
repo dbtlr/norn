@@ -36,11 +36,14 @@
 //! config `Arc`) at its boundary and holds both to completion, so no request ever
 //! observes a swap mid-flight.
 //!
-//! Each generation holds TWO connections to its `cache.db`: a request-facing
-//! READ connection and a writer-thread-only WRITE connection. After NRN-252 the
-//! request path never writes through the read connection — the freshness refresh
-//! moved onto the write connection — so the read connection is **read-only in
-//! practice**, which is the precondition NRN-253 pools it under.
+//! Each generation holds a POOL of request-facing READ connections plus one
+//! writer-thread-only WRITE connection (ADR 0013: "N read connections + 1 write
+//! connection per generation"). After NRN-252 the request path never writes
+//! through a read connection — the freshness refresh moved onto the write
+//! connection — so the read side is **read-only in practice**; NRN-253 both pools
+//! it (so concurrent reads no longer serialize on a single connection's mutex once
+//! `call_lock` retires) and ENFORCES the read-only invariant with
+//! `PRAGMA query_only = ON` on every pooled connection.
 //!
 //! Every evict/re-open trigger — cold start / first touch, ground-shift
 //! (out-of-band `cache clear` / `prune` / `rm`), cache-identity change /
@@ -158,6 +161,7 @@
 //! daemon wire never carries a custom `--config` path, so `open_warm` takes only
 //! `cwd` and hard-codes `config_path = None`.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -165,7 +169,6 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::{ArcMutexGuard, Mutex as CacheMutex};
 
 use crate::cache::{
     cache_dir_for, Cache, CacheError, ChangeDetectOptions, Freshness, FreshnessProbe,
@@ -313,23 +316,27 @@ impl IndexIdentity {
 /// binds the current `Arc<Generation>` at its boundary and holds it to
 /// completion. The DB *content* still changes — the writer-queue freshness
 /// refresh writes through the generation's WRITE connection — which is why the
-/// caches sit behind mutexes; everything else is fixed for the generation's life.
-/// Dropping the last `Arc` closes both connections and the sentinel fd via
-/// `Drop`, so an evicted generation releases exactly when its last in-flight
-/// request finishes draining on it.
+/// read pool and write connection sit behind their own synchronization;
+/// everything else is fixed for the generation's life. Dropping the last `Arc`
+/// closes every connection (the whole read pool + the write connection) and the
+/// sentinel fd via `Drop`, so an evicted generation releases exactly when its last
+/// in-flight request finishes draining on it.
 ///
-/// # Two connections, one read-only (NRN-252)
+/// # N read connections + 1 write connection (ADR 0013, NRN-253)
 ///
-/// A generation holds TWO connections to the same `cache.db`:
+/// A generation holds a read POOL plus one write connection to the same
+/// `cache.db`:
 ///
-/// - [`cache`](Self::cache) — the request-facing READ connection. After NRN-252
-///   the request path never writes through it (the freshness refresh moved off
-///   it); it only serves reads. This read-only-in-practice invariant is the
-///   precondition NRN-253 pools it under.
+/// - [`read_pool`](Self::read_pool) — the request-facing READ connections. A
+///   request checks one out for its whole (sync) body and returns it on drop; the
+///   pool lazily grows to a small cap under concurrent load. After NRN-252 the
+///   request path never writes through a read connection (the freshness refresh
+///   moved off it), and NRN-253 additionally stamps `PRAGMA query_only = ON` on
+///   every pooled connection, so read-only is ENFORCED. See [`ReadPool`].
 /// - [`write_cache`](Self::write_cache) — the WRITE connection, touched ONLY by
 ///   the writer thread's ops: the freshness-refresh op and the post-apply
-///   cache-increment commit (NRN-252 / NRN-158). WAL mode makes the read
-///   connection observe its committed rows across the connection boundary, so a
+///   cache-increment commit (NRN-252 / NRN-158). WAL mode makes the pooled read
+///   connections observe its committed rows across the connection boundary, so a
 ///   refresh (or increment) awaited before a read hands back fresh data.
 pub(crate) struct Generation {
     /// Monotonic generation number (1 for the first open, incremented per
@@ -346,14 +353,16 @@ pub(crate) struct Generation {
     /// `db_identity`); never read again, so `_sentinel` documents intent and
     /// suppresses dead-field lints.
     _sentinel: File,
-    /// The request-facing READ connection. `Arc<Mutex>` so a request can take an
-    /// OWNED lock (`lock_arc`) held across the whole sync tool body, outliving a
-    /// concurrent generation swap of the slot's current pointer. `parking_lot`
-    /// (not `std`): its `ArcMutexGuard` is a safe owned guard, and a panic while a
-    /// tool holds it is handled precisely by the handle's `Drop` (invalidation
-    /// floor bump), not by std-mutex poisoning. Read-only in practice after
-    /// NRN-252 — the freshness refresh writes through `write_cache` instead.
-    cache: Arc<CacheMutex<Cache>>,
+    /// The request-facing READ connection POOL (NRN-253). A request checks out an
+    /// owned [`PooledConn`] for its whole (sync) tool body and returns it on drop;
+    /// the checkout keeps this generation's `Arc` alive (via the [`WarmGuard`]) so a
+    /// concurrent generation swap of the slot's current pointer cannot close the
+    /// connection out from under an in-flight request. Every pooled connection is
+    /// `query_only`, so read-only is enforced; a panic while a tool holds a checkout
+    /// is handled by [`WarmGuard::drop`] (invalidation floor bump), independent of
+    /// the pool. Behind an `Arc` so an outstanding checkout can return itself even
+    /// while the generation is mid-drop.
+    read_pool: Arc<ReadPool>,
     /// The WRITE connection, a second connection to the same `cache.db` opened
     /// via the verification-skipping companion path (see
     /// `Cache::open_companion_verified`). Written through ONLY by the writer-queue
@@ -396,6 +405,279 @@ pub(crate) struct Generation {
     /// generation stale mid-commit — all without sleeps.
     #[cfg(test)]
     increment_gate: Mutex<Option<TestGate>>,
+}
+
+impl Generation {
+    /// Check out a read-only connection from this generation's pool for the life of
+    /// one request. Blocks indefinitely if the pool is saturated (all connections
+    /// busy at cap), matching the pre-NRN-253 exclusive-guard semantics — a
+    /// saturated generation makes a reader WAIT, never fail. See [`ReadPool`].
+    fn checkout_read(&self) -> Result<PooledConn> {
+        self.read_pool.checkout()
+    }
+
+    /// Test-only: check out a read connection from this generation's pool, panicking
+    /// on the (only mid-test-`cache clear`-race) error path. Lets a test inspect a
+    /// pooled connection directly the way it used to `lock()` the single mutex.
+    #[cfg(test)]
+    fn test_read_conn(&self) -> PooledConn {
+        self.read_pool.checkout().expect("read-pool checkout")
+    }
+}
+
+/// Hard ceiling on the number of READ connections a single generation's
+/// [`ReadPool`] may open, before clamping to the host's available parallelism —
+/// see [`read_pool_cap`]. A small fixed cap: enough concurrency for realistic
+/// read fan-out without unbounded connection growth against one `cache.db`.
+const READ_POOL_MAX: usize = 8;
+
+/// Debug/test-only override for [`read_pool_cap`] (read via
+/// [`debug_env_usize`](crate::cache::debug_env_usize), so release builds ignore it
+/// entirely). Lets a test force a tiny cap to prove wait-at-cap behavior
+/// deterministically.
+const READ_POOL_CAP_ENV: &str = "NORN_READ_POOL_CAP";
+
+/// The per-generation read-connection cap: `min(READ_POOL_MAX, available
+/// parallelism)`, floored at 1. Under the still-present `call_lock` the pool never
+/// grows past its seed in production (at most one request per vault runs at a
+/// time); this cap governs the post-`call_lock` world. Debug builds honor the
+/// `NORN_READ_POOL_CAP` override so a test can pin the cap.
+fn read_pool_cap() -> usize {
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let default = parallelism.min(READ_POOL_MAX);
+    crate::cache::debug_env_usize(READ_POOL_CAP_ENV, default).max(1)
+}
+
+/// A per-generation POOL of read-only connections to `cache.db` (ADR 0013 /
+/// NRN-253). Replaces the pre-NRN-253 single `Arc<Mutex<Cache>>` handed out as one
+/// exclusive owned guard per request — which serialized every warm read on that
+/// mutex once `call_lock` retires — with a small set of interchangeable
+/// `query_only` connections to the same database.
+///
+/// - **Checkout** ([`checkout`](Self::checkout)) pops an idle connection (LIFO —
+///   warmest first) and hands back an owned [`PooledConn`]; the connection leaves
+///   the pool for the request's life and returns on drop, so there is no
+///   per-request connection churn.
+/// - **Lazy grow.** When no connection is idle and the pool is under [`cap`], one
+///   more connection is opened via [`open_companion_on_inode`] — the same inode
+///   reconciliation guard the write connection uses — and stamped `query_only`.
+/// - **Wait at cap.** At cap with none idle, checkout blocks on
+///   [`available`](Self::available) until a checkin, then retries — an indefinite
+///   wait matching the pre-pool `lock_arc` semantics.
+/// - **Read-only by construction.** Every pooled connection is `query_only`, so a
+///   write through it errors; the writer thread's WRITE connection lives on
+///   [`Generation`] outside the pool and is the only connection that writes.
+///
+/// The pool (and its connections) drop with the generation; an outstanding
+/// [`PooledConn`] holds an `Arc<ReadPool>` so it can still check itself back in
+/// even while the generation is mid-drop.
+struct ReadPool {
+    /// Idle connections + the total-connection count, together under one lock so
+    /// the "grow vs wait" decision is atomic.
+    inner: Mutex<ReadPoolInner>,
+    /// Signalled on every checkin, waking a checkout blocked at cap.
+    available: Condvar,
+    /// Maximum live connections (idle + checked-out). See [`read_pool_cap`].
+    cap: usize,
+    /// How to open (and inode-verify) an additional read connection on grow.
+    grow: GrowParams,
+    /// Test-only: connections opened via lazy-grow (NOT counting the seed).
+    /// Proves checkout reuse (stays 0 across sequential checkout/drop/checkout) and
+    /// growth (increments when a second concurrent checkout materializes one).
+    #[cfg(test)]
+    grow_opens: AtomicU64,
+}
+
+/// The mutable interior of a [`ReadPool`], guarded as a unit.
+struct ReadPoolInner {
+    /// Connections available for immediate checkout (LIFO).
+    idle: Vec<Cache>,
+    /// Total connections owned by the pool (idle + checked-out). Gates growth
+    /// against [`ReadPool::cap`]; a reserved (incremented) slot during an in-flight
+    /// grow prevents the pool overshooting the cap.
+    total: usize,
+}
+
+/// The inputs to open one additional read connection on lazy grow: the index
+/// config the seed connection was opened under, plus the live `cache.db` inode the
+/// seed landed on. A grown companion MUST land on that same inode (an out-of-band
+/// `cache clear` swapping the file mid-request is caught here), mirroring the write
+/// connection's reconciliation. Owned (cloned from config at open) so the pool is
+/// self-contained and needs no `&LoadedConfig` at grow time.
+struct GrowParams {
+    vault_root: Utf8PathBuf,
+    alias_field: Option<String>,
+    files_ignore: Vec<String>,
+    index_set: BTreeSet<String>,
+    index_set_hash: String,
+    expected_identity: (u64, u64),
+}
+
+impl GrowParams {
+    /// Open one additional read connection and stamp it `query_only`.
+    fn open(&self) -> Result<Cache> {
+        let cache = open_companion_on_inode(
+            &self.vault_root,
+            self.alias_field.as_deref(),
+            &self.files_ignore,
+            &self.index_set,
+            &self.index_set_hash,
+            self.expected_identity,
+        )?;
+        cache.set_query_only()?;
+        Ok(cache)
+    }
+}
+
+impl ReadPool {
+    /// Seed the pool with the generation's already-opened-and-verified primary read
+    /// connection (do NOT open it twice). `query_only` is applied to the primary
+    /// HERE — as it enters the pool, after all open-time verification / rebuild /
+    /// reshred are complete.
+    fn seed(primary: Cache, grow: GrowParams, cap: usize) -> Result<Arc<Self>> {
+        primary.set_query_only()?;
+        Ok(Arc::new(ReadPool {
+            inner: Mutex::new(ReadPoolInner {
+                idle: vec![primary],
+                total: 1,
+            }),
+            available: Condvar::new(),
+            cap,
+            grow,
+            #[cfg(test)]
+            grow_opens: AtomicU64::new(0),
+        }))
+    }
+
+    /// Check out a connection: reuse an idle one, else lazily grow while under cap,
+    /// else block until a checkin frees one. Grows OUTSIDE the lock (reserving the
+    /// slot first) so a slow open never blocks a concurrent checkin.
+    fn checkout(self: &Arc<Self>) -> Result<PooledConn> {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if let Some(cache) = inner.idle.pop() {
+                return Ok(PooledConn {
+                    cache: Some(cache),
+                    pool: Arc::clone(self),
+                });
+            }
+            if inner.total < self.cap {
+                // Reserve the slot, then open with the lock released.
+                inner.total += 1;
+                drop(inner);
+                match self.grow.open() {
+                    Ok(cache) => {
+                        #[cfg(test)]
+                        self.grow_opens.fetch_add(1, Ordering::Relaxed);
+                        return Ok(PooledConn {
+                            cache: Some(cache),
+                            pool: Arc::clone(self),
+                        });
+                    }
+                    Err(error) => {
+                        // Release the reserved slot and wake a waiter that may now
+                        // be able to grow into it.
+                        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+                        inner.total -= 1;
+                        drop(inner);
+                        self.available.notify_one();
+                        return Err(error);
+                    }
+                }
+            }
+            // At cap, none idle → wait for a checkin, then re-evaluate.
+            inner = self
+                .available
+                .wait(inner)
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    /// Return a connection to the idle set and wake one waiter. Called by
+    /// [`PooledConn::drop`].
+    fn checkin(&self, cache: Cache) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.idle.push(cache);
+        drop(inner);
+        self.available.notify_one();
+    }
+}
+
+/// An owned, checked-out read-only connection from a generation's [`ReadPool`]
+/// (NRN-253). Derefs to the underlying [`Cache`]; on drop it returns the
+/// connection to its pool (no per-request connection churn). Holds an
+/// `Arc<ReadPool>` so an outstanding checkout can always check itself back in, even
+/// if the generation is dropping concurrently.
+pub(crate) struct PooledConn {
+    /// The checked-out connection. `Option` so `Drop` can move it back into the
+    /// pool; always `Some` until then.
+    cache: Option<Cache>,
+    pool: Arc<ReadPool>,
+}
+
+impl Deref for PooledConn {
+    type Target = Cache;
+    fn deref(&self) -> &Cache {
+        self.cache
+            .as_ref()
+            .expect("pooled connection present until drop")
+    }
+}
+
+impl DerefMut for PooledConn {
+    fn deref_mut(&mut self) -> &mut Cache {
+        self.cache
+            .as_mut()
+            .expect("pooled connection present until drop")
+    }
+}
+
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        if let Some(cache) = self.cache.take() {
+            self.pool.checkin(cache);
+        }
+    }
+}
+
+/// Open an additional connection to `<cache_dir>/cache.db` via the
+/// verification-skipping companion path ([`Cache::open_companion_verified`]) and
+/// RECONCILE its inode against `expected`. The primary open already verified the
+/// bytes under the held sentinel, but an fd pins the inode, NOT the PATH — so an
+/// external unlink+recreate (`cache clear`) between opens could bind this by-path
+/// open to a DIFFERENT inode. On mismatch the open fails so the caller retries
+/// against one consistent inode; a swap AFTER this check is caught by the next
+/// request's ground-shift check. Shared by the generation's WRITE connection and
+/// every lazily-grown READ connection (NRN-252 / NRN-253), so the reconciliation
+/// lives in exactly one place.
+fn open_companion_on_inode(
+    vault_root: &Utf8Path,
+    alias_field: Option<&str>,
+    files_ignore: &[String],
+    index_set: &BTreeSet<String>,
+    index_set_hash: &str,
+    expected: (u64, u64),
+) -> Result<Cache> {
+    let (_canonical, cache_dir) = cache_dir_for(vault_root)?;
+    let db_path = cache_dir.join("cache.db");
+    let cache = Cache::open_companion_verified(
+        vault_root,
+        alias_field,
+        files_ignore,
+        index_set,
+        index_set_hash,
+    )?;
+    let identity = device_inode(&std::fs::metadata(db_path.as_std_path())?);
+    if identity != expected {
+        anyhow::bail!(
+            "cache.db at {db_path} was swapped between companion opens \
+             (identity {expected:?} → {identity:?}); failing so the caller retries \
+             on a consistent inode"
+        );
+    }
+    Ok(cache)
 }
 
 /// Marker strings a refresh ticket resolves to when its op never produced a
@@ -1189,15 +1471,17 @@ impl VaultContext {
         scope.bind_generation(generation.number);
 
         // Step 4 — freshness, split into PROBE then (only if stale) REFRESH
-        // (NRN-253). Take an OWNED lock on the bound generation's READ connection,
-        // held across the whole (sync) tool body. It outlives a concurrent
-        // generation swap of the slot pointer because the guard owns its own
-        // `Arc<Mutex<Cache>>` and the handle also holds the `Arc<Generation>`
-        // (keeping the sentinel alive). Read-only after NRN-252.
-        let read_guard = generation.cache.lock_arc();
+        // (NRN-253). Check out an owned READ connection from the bound generation's
+        // pool, held across the whole (sync) tool body. It outlives a concurrent
+        // generation swap of the slot pointer because the checkout owns its own
+        // `Arc<ReadPool>` and the handle also holds the `Arc<Generation>` (keeping
+        // the sentinel alive). Every pooled connection is `query_only`, so this
+        // connection cannot write; the freshness refresh writes through the WRITE
+        // connection instead.
+        let read_conn = generation.checkout_read()?;
 
-        // Probe on THIS request thread against the read connection. Fresh → serve
-        // on this very guard, touching neither the writer queue nor the write
+        // Probe on THIS request thread against the pooled connection. Fresh → serve
+        // on this very connection, touching neither the writer queue nor the write
         // connection: a concurrent read of an unchanged vault costs one stat
         // sweep, not a refresh op. Stale (or a probe error — treated
         // conservatively as stale, since the refresh is authoritative and would
@@ -1205,19 +1489,20 @@ impl VaultContext {
         // re-probe after: an arrival-correct refresh IS the freshness proof, the
         // same trust semantics the always-refresh pipeline carried.
         let fresh = matches!(
-            StatSweepProbe.probe(&self.vault_root, &read_guard),
+            StatSweepProbe.probe(&self.vault_root, &read_conn),
             Ok(Freshness::Fresh)
         );
 
-        let guard = if fresh {
-            read_guard
-        } else {
-            // Drop the read guard before refreshing: the refresh writes through
-            // the generation's WRITE connection (WAL makes its committed rows
-            // visible across the connection boundary), and releasing the read lock
-            // keeps this request off the read connection while it waits — the
-            // read-only-in-practice invariant NRN-253 pools under.
-            drop(read_guard);
+        if !fresh {
+            // HOLD the pooled connection across the refresh wait (NRN-253), rather
+            // than releasing and re-checking-out. It is sound and simpler: the
+            // refresh runs on the generation's WRITE connection, so a held READ
+            // connection never contends with it (WAL makes the refresh's committed
+            // rows visible to this connection's next query — the probe finalized its
+            // statement, so this connection holds no read transaction pinning an
+            // older snapshot); and because reads come from a POOL, holding one
+            // connection does not serialize other concurrent readers the way holding
+            // the pre-NRN-253 single mutex would have.
             match self.refresh_generation(slot, &generation) {
                 RefreshOutcome::Served => {}
                 RefreshOutcome::LockContention => {
@@ -1236,15 +1521,13 @@ impl VaultContext {
                 RefreshOutcome::Failed(error) => return Err(error.into()),
                 RefreshOutcome::Abandoned(msg) => return Err(anyhow::anyhow!(msg)),
             }
-            // Re-take the read guard for the tool body now the refresh has landed.
-            generation.cache.lock_arc()
-        };
+        }
 
         Ok(CacheHandle::Warm(WarmGuard {
             number: generation.number,
             floor: Arc::clone(&slot.shared.floor),
             _generation: generation,
-            guard,
+            conn: read_conn,
         }))
     }
 
@@ -1644,7 +1927,7 @@ impl VaultContext {
     #[cfg(test)]
     pub(crate) fn detect_change_count(&self) -> usize {
         let generation = self.current_generation().expect("a current generation");
-        let cache = generation.cache.lock();
+        let cache = generation.test_read_conn();
         cache.detect_change_count(&self.vault_root)
     }
 
@@ -1935,46 +2218,45 @@ fn open_generation(
 
     // Open the WRITE connection: a second connection to the SAME cache.db the
     // primary open just verified under the now-held sentinel, skipping the
-    // O(db-size) integrity_check (see `Cache::open_companion_verified`). Only the
-    // writer thread's freshness refresh writes through it; the request-facing
-    // `cache` above stays read-only (NRN-252).
-    let write_cache = Cache::open_companion_verified(
+    // O(db-size) integrity_check (see `Cache::open_companion_verified`), and
+    // RECONCILED against the live post-primary inode (`open_companion_on_inode`).
+    // Only the writer thread's freshness refresh writes through it; the pooled read
+    // connections stay read-only (NRN-252). This is NOT made `query_only` — it is
+    // the one connection that writes.
+    let write_cache = open_companion_on_inode(
         vault_root,
         opts.alias_field.as_deref(),
         &opts.ignore,
         &opts.resolved_index_set,
         &opts.resolved_index_set_hash,
+        read_identity,
     )?;
 
-    // Companion inode reconciliation (NRN-252 review). The sentinel pins the
-    // primary inode from being FREED, but an fd does not pin the PATH from being
-    // REPLACED. The companion above opened BY PATH, so an external unlink+recreate
-    // (`cache clear`) in the window between the primary open and this open would
-    // bind the write connection to a DIFFERENT inode than the read connection: a
-    // split-brain generation whose writes land on an inode reads never see, healed
-    // only on the NEXT request's ground-shift check. Stat the path now and compare
-    // against the live post-primary inode; on mismatch, fail the generation open
-    // so the single-flight caller errors and the next request retries fresh
-    // against one consistent inode. (Comparing against the live `read_identity`,
-    // NOT the sentinel `db_identity`, is what keeps an ordinary rebuild-on-open —
-    // which moves the inode legitimately, read and write both landing on the new
-    // one — from tripping a false positive.) A swap AFTER this check is caught by
-    // the per-request ground-shift check, exactly as today.
-    let companion_identity = device_inode(&std::fs::metadata(db_path.as_std_path())?);
-    if companion_identity != read_identity {
-        anyhow::bail!(
-            "cache.db at {db_path} was swapped between the read and write connection \
-             opens (identity {read_identity:?} → {companion_identity:?}); failing this \
-             generation open so the next request retries on a consistent inode"
-        );
-    }
+    // Seed the read pool with the primary READ connection this call already opened
+    // and verified (do NOT open it twice). `ReadPool::seed` stamps `query_only` on
+    // it as it enters the pool — now, after all open-time verification / rebuild /
+    // reshred are complete. The pool lazily grows additional read connections via
+    // the SAME `open_companion_on_inode` reconciliation guard, comparing against the
+    // live `read_identity` the primary landed on.
+    let read_pool = ReadPool::seed(
+        cache,
+        GrowParams {
+            vault_root: vault_root.to_owned(),
+            alias_field: opts.alias_field.clone(),
+            files_ignore: opts.ignore.clone(),
+            index_set: opts.resolved_index_set.clone(),
+            index_set_hash: opts.resolved_index_set_hash.clone(),
+            expected_identity: read_identity,
+        },
+        read_pool_cap(),
+    )?;
 
     Ok(Generation {
         number,
         db_identity,
         index_identity: IndexIdentity::from_config(config),
         _sentinel: sentinel,
-        cache: Arc::new(CacheMutex::new(cache)),
+        read_pool,
         write_cache: Mutex::new(write_cache),
         refresh_pending: Mutex::new(None),
         #[cfg(test)]
@@ -2047,12 +2329,14 @@ impl DerefMut for CacheHandle {
     }
 }
 
-/// An owned guard into the warm-mode bound generation's held-open `Cache`.
+/// An owned handle onto the warm-mode bound generation's held-open cache for one
+/// request.
 ///
-/// It keeps the whole `Arc<Generation>` alive (so the sentinel fd + connection
-/// stay open for the request even if a concurrent open swaps the slot's current
-/// pointer to a newer generation) and holds an owned `parking_lot` lock into that
-/// generation's connection across the entire (sync) tool body.
+/// It keeps the whole `Arc<Generation>` alive (so the sentinel fd + pooled
+/// connections stay open for the request even if a concurrent open swaps the
+/// slot's current pointer to a newer generation) and holds a [`PooledConn`] — one
+/// read-only connection checked out of the generation's [`ReadPool`] — across the
+/// entire (sync) tool body, returned to the pool when this guard drops.
 ///
 /// `Drop` carries the generational replacement for std-mutex poison recovery: if
 /// the guard is dropped while the thread is PANICKING (a tool body panicked
@@ -2060,16 +2344,18 @@ impl DerefMut for CacheHandle {
 /// this generation's number, so the next request reopens through
 /// [`ensure_current`](VaultContext::ensure_current) and re-verifies integrity —
 /// exactly the trust-restoring self-heal the old poison-evict path gave, now
-/// routed through the one open path. On a normal drop it does nothing.
+/// routed through the one open path. On a normal drop it does nothing (the pooled
+/// connection is returned by [`PooledConn::drop`] regardless).
 pub(crate) struct WarmGuard {
     /// This generation's number, compared against `floor` on a panic-drop.
     number: u64,
     /// Shared handle to the slot's invalidation floor, bumped on a panic-drop.
     floor: Arc<AtomicU64>,
-    /// Owned lock into the generation's connection, held across the tool body.
-    /// It owns its own clone of the generation's `Arc<Mutex<Cache>>`, so the
-    /// connection stays alive independently of `_generation`.
-    guard: ArcMutexGuard<parking_lot::RawMutex, Cache>,
+    /// The read-only connection checked out of the generation's pool, held across
+    /// the tool body and returned to the pool on drop. It owns its own
+    /// `Arc<ReadPool>`, so the connection can be checked back in independently of
+    /// `_generation`.
+    conn: PooledConn,
     /// Keeps the bound generation (sentinel fd + identity) alive for the whole
     /// request, so a concurrent open swapping the slot's current pointer to a
     /// newer generation cannot close this request's sentinel out from under it.
@@ -2087,13 +2373,13 @@ impl Drop for WarmGuard {
 impl Deref for WarmGuard {
     type Target = Cache;
     fn deref(&self) -> &Cache {
-        &self.guard
+        &self.conn
     }
 }
 
 impl DerefMut for WarmGuard {
     fn deref_mut(&mut self) -> &mut Cache {
-        &mut self.guard
+        &mut self.conn
     }
 }
 
@@ -2131,26 +2417,39 @@ mod tests {
         (tmp, root)
     }
 
-    /// Does a `warm_marker` TEMP TABLE exist on the handed-out connection? TEMP
-    /// tables are per-connection, so this is a same-connection probe: present
-    /// ⇒ the connection was reused; gone ⇒ it was reopened.
-    fn marker_present(cache: &Cache) -> bool {
-        let n: i64 = cache
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_temp_master WHERE type='table' AND name='warm_marker'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        n == 1
+    /// The current warm generation number (`0` if none) — a monotonic reopen
+    /// probe. Replaces the pre-NRN-253 `warm_marker` TEMP-table probe: pooled read
+    /// connections are `query_only`, so `CREATE TEMP TABLE` no longer works as a
+    /// same-connection marker. Same number across two requests ⇒ the generation
+    /// (and its pooled connections) was reused; a higher number ⇒ it was reopened.
+    /// Monotonic generation numbers can't false-positive the way a recycled
+    /// connection pointer could, so this is a strictly more robust reopen proof.
+    fn gen_number(ctx: &VaultContext) -> u64 {
+        ctx.current_generation().map(|g| g.number).unwrap_or(0)
     }
 
-    fn create_marker(cache: &Cache) {
-        cache
-            .conn()
-            .execute("CREATE TEMP TABLE warm_marker (x INTEGER)", [])
-            .unwrap();
+    /// The raw `sqlite3*` pointer behind a cache's connection — a per-connection
+    /// identity used to prove two checkouts are DISTINCT connections and that a
+    /// sequential checkout REUSES one. Safe here: the pointer is only compared as an
+    /// integer, never dereferenced, and the connections it names are kept alive for
+    /// the comparison.
+    fn conn_ptr(cache: &Cache) -> usize {
+        // SAFETY: `handle()` returns the live `sqlite3*`; we only read it as an
+        // address for identity comparison and never dereference it.
+        (unsafe { cache.conn().handle() }) as usize
+    }
+
+    /// Plant per-connection TEMP objects (a read-shadow view / triggers) on a
+    /// pooled connection for the verify-once proofs below. Pooled connections are
+    /// `query_only` (NRN-253), which blocks `CREATE TEMP …`, so this briefly toggles
+    /// query_only OFF to create the TEMP objects and restores it — the objects
+    /// persist on the connection regardless of query_only, and reads through them
+    /// are unaffected. This preserves the pre-NRN-253 shadow mechanism exactly; only
+    /// the planting gains the toggle (the assertions are unchanged).
+    fn plant_temp_on_pooled(cache: &Cache, batch: &str) {
+        cache.conn().execute_batch("PRAGMA query_only=OFF").unwrap();
+        cache.conn().execute_batch(batch).unwrap();
+        cache.conn().execute_batch("PRAGMA query_only=ON").unwrap();
     }
 
     fn doc_count(cache: &Cache) -> i64 {
@@ -2261,31 +2560,33 @@ mod tests {
 
     // ---- Warm-mode tests ----------------------------------------------------
 
-    /// Warm reuse / verify-once: two sequential warm calls share one connection.
-    /// A TEMP TABLE created through the first guard is still visible through the
-    /// second (TEMP tables are per-connection), and the captured `(dev, ino)`
-    /// identity is unchanged.
+    /// Warm reuse / verify-once: two sequential warm calls share one pooled
+    /// connection. The first call's checkout is returned to the pool on drop, so the
+    /// second call pops the SAME connection — proven by an unchanged `sqlite3*`
+    /// pointer (the seed is never freed, so the address can't be recycled) — and the
+    /// captured `(dev, ino)` identity is unchanged.
     #[test]
     fn warm_reuses_one_connection_across_calls() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
 
-        {
+        let ptr1 = {
             ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
-        }
+            conn_ptr(&cache)
+        };
         let id1 = ctx.warm_db_identity();
         assert!(id1.is_some(), "warm state should be held after first call");
 
-        {
+        let ptr2 = {
             ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
-            assert!(
-                marker_present(&cache),
-                "TEMP table must survive ⇒ same connection reused (verify-once)"
-            );
-        }
+            conn_ptr(&cache)
+        };
+        assert_eq!(
+            ptr1, ptr2,
+            "the same pooled connection must be reused across warm calls (verify-once)"
+        );
         let id2 = ctx.warm_db_identity();
         assert_eq!(id1, id2, "cache identity must be stable across warm calls");
     }
@@ -2320,7 +2621,7 @@ mod tests {
     }
 
     /// Ground-shift: deleting the cache dir out from under a live warm context
-    /// forces a reopen — the TEMP-table marker is gone, the identity changed, and
+    /// forces a reopen — the generation number advances, the identity changed, and
     /// the rebuilt cache still serves the vault.
     #[test]
     fn warm_self_heals_when_cache_db_disappears() {
@@ -2330,9 +2631,9 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
             assert_eq!(doc_count(&cache), 3);
         }
+        let g1 = gen_number(&ctx);
         let _id1 = ctx.warm_db_identity().expect("state held after first call");
 
         // Simulate `norn cache clear` / manual rm under a live daemon: remove the
@@ -2347,8 +2648,8 @@ mod tests {
                 .query_cache_unscoped()
                 .expect("second warm query_cache after clear");
             assert!(
-                !marker_present(&cache),
-                "TEMP table must be gone ⇒ the connection was reopened"
+                gen_number(&ctx) > g1,
+                "generation number must advance ⇒ the connection was reopened"
             );
             assert_eq!(
                 doc_count(&cache),
@@ -2363,7 +2664,7 @@ mod tests {
         // recycling never defeats detection in production: while the old file
         // is still *held*, its inode stays allocated, so a recreated file
         // cannot collide until after the ground-shift check has already fired.
-        // The TEMP-table assertion above is the reopen proof.
+        // The generation-number advance above is the reopen proof.
         let _id2 = ctx.warm_db_identity().expect("state held after reopen");
     }
 
@@ -2431,13 +2732,13 @@ mod tests {
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
             assert_eq!(
                 archived_count(&cache),
                 1,
                 "archived doc indexed before ignore"
             );
         }
+        let g1 = gen_number(&ctx);
 
         write_config(&root, "files:\n  ignore:\n    - \"Archive/**\"\n");
 
@@ -2447,7 +2748,7 @@ mod tests {
                 .query_cache_unscoped()
                 .expect("second warm query_cache after files.ignore change");
             assert!(
-                !marker_present(&cache),
+                gen_number(&ctx) > g1,
                 "files.ignore change must reopen the cache"
             );
             assert_eq!(
@@ -2474,19 +2775,20 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
 
         write_config(&root, "validate:\n  ignore:\n    - \"logs/**\"\n");
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx
+            let _cache = ctx
                 .query_cache_unscoped()
                 .expect("second warm query_cache after non-index config change");
-            assert!(
-                marker_present(&cache),
+            assert_eq!(
+                gen_number(&ctx),
+                g1,
                 "non-index config change must NOT reopen the cache"
             );
         }
@@ -2507,9 +2809,9 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
         assert!(ctx.config().index_options.alias_field.is_none());
 
         // Index-relevant: alias_field feeds Cache::open_with_index.
@@ -2517,11 +2819,11 @@ mod tests {
 
         {
             ctx.begin_request().expect("begin_request");
-            let cache = ctx
+            let _cache = ctx
                 .query_cache_unscoped()
                 .expect("second warm query_cache after index-relevant config change");
             assert!(
-                !marker_present(&cache),
+                gen_number(&ctx) > g1,
                 "index-relevant config change must reopen the cache"
             );
         }
@@ -2759,10 +3061,10 @@ mod tests {
             let cache = ctx
                 .query_cache_unscoped()
                 .expect("query_cache to plant shadow");
-            cache
-                .conn()
-                .execute_batch("CREATE TEMP VIEW headings AS SELECT * FROM main.headings WHERE 0")
-                .unwrap();
+            plant_temp_on_pooled(
+                &cache,
+                "CREATE TEMP VIEW headings AS SELECT * FROM main.headings WHERE 0",
+            );
         }
 
         ctx.begin_request().expect("begin_request");
@@ -2868,10 +3170,9 @@ mod tests {
             let cache = ctx
                 .query_cache_unscoped()
                 .expect("query_cache to plant shadow");
-            cache
-                .conn()
-                .execute_batch(
-                    "CREATE TEMP VIEW headings AS
+            plant_temp_on_pooled(
+                &cache,
+                "CREATE TEMP VIEW headings AS
                        SELECT * FROM main.headings WHERE doc_path <> 'alpha.md';
                      CREATE TEMP TRIGGER headings_shadow_insert
                        INSTEAD OF INSERT ON headings BEGIN
@@ -2887,8 +3188,7 @@ mod tests {
                        DELETE FROM main.headings
                          WHERE doc_path = OLD.doc_path AND slug = OLD.slug;
                      END;",
-                )
-                .unwrap();
+            );
         }
 
         // Add a doc WITH a heading, so the next request's incremental refresh
@@ -2993,9 +3293,9 @@ mod tests {
         // Establish warm state with no alias.
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
         assert!(ctx.config().index_options.alias_field.is_none());
 
         // Index-relevant change.
@@ -3006,7 +3306,7 @@ mod tests {
         ctx.begin_request()
             .expect("begin_request after config change");
         let config_alias = ctx.config().index_options.alias_field.clone();
-        let cache = ctx
+        let _cache = ctx
             .query_cache_unscoped()
             .expect("query_cache after config change");
         assert_eq!(
@@ -3017,7 +3317,7 @@ mod tests {
         // The index-relevant drop happened in begin_request, so the cache was
         // reopened this request — proving config and cache are one generation.
         assert!(
-            !marker_present(&cache),
+            gen_number(&ctx) > g1,
             "index-relevant change must reopen the cache in the same request"
         );
     }
@@ -3074,8 +3374,7 @@ mod tests {
         // seam keys the floor bump off the SCOPE's bound generation (NRN-253).
         let scope = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache(&scope).expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache(&scope).expect("first warm query_cache");
         }
         let gen1 = ctx
             .current_generation()
@@ -3090,14 +3389,14 @@ mod tests {
         let err = anyhow::Error::new(corrupt).context("tool body failed");
         ctx.note_tool_error(&scope, &err);
 
-        // Next request reopens a NEW generation (marker gone) — the corruption
-        // bumped the invalidation floor past generation 1.
+        // Next request reopens a NEW generation — the corruption bumped the
+        // invalidation floor past generation 1.
         ctx.begin_request().expect("begin_request after eviction");
         let cache = ctx
             .query_cache_unscoped()
             .expect("query_cache after eviction");
         assert!(
-            !marker_present(&cache),
+            gen_number(&ctx) > gen1.number,
             "state must be rebuilt after corruption eviction"
         );
         assert_eq!(doc_count(&cache), 3);
@@ -3244,9 +3543,9 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
+        let g1 = gen_number(&ctx);
 
         // Panic on another thread WHILE holding the cache guard: its `Drop` runs
         // during unwind and bumps the slot's invalidation floor past this
@@ -3264,30 +3563,31 @@ mod tests {
             "the spawned thread must have panicked while holding the guard"
         );
 
-        // The first post-panic request (request 2) must recover: rebuilt
-        // generation, marker gone. Plant a fresh marker here so request 3 below
-        // can prove the connection this request opened is REUSED, not re-evicted.
+        // The first post-panic request (request 2) must recover: a rebuilt
+        // generation (number advanced past g1). Capture it so request 3 below can
+        // prove the generation this request opened is REUSED, not re-evicted.
         ctx.begin_request().expect("begin_request after panic");
         {
             let cache = ctx
                 .query_cache_unscoped()
                 .expect("query_cache must recover from a panic-invalidated generation");
             assert!(
-                !marker_present(&cache),
+                gen_number(&ctx) > g1,
                 "warm state must be rebuilt after panic recovery"
             );
             assert_eq!(doc_count(&cache), 3);
-            create_marker(&cache);
         }
+        let g2 = gen_number(&ctx);
 
         // The floor bump must be one-shot, not sticky: request 3 must reuse the
-        // SAME connection request 2 rebuilt (marker still present), proving the
+        // SAME generation request 2 rebuilt (number unchanged), proving the
         // recovery does not keep re-evicting on every subsequent request.
         ctx.begin_request().expect("begin_request request 3");
-        let cache = ctx.query_cache_unscoped().expect("query_cache request 3");
-        assert!(
-            marker_present(&cache),
-            "a second post-panic request must reuse the recovered connection, \
+        let _cache = ctx.query_cache_unscoped().expect("query_cache request 3");
+        assert_eq!(
+            gen_number(&ctx),
+            g2,
+            "a second post-panic request must reuse the recovered generation, \
              not evict it again — the invalidation must be one-shot, not sticky"
         );
     }
@@ -3397,11 +3697,10 @@ mod tests {
         let gen2 = ctx.current_generation().expect("generation 2 held");
         assert_eq!(gen2.number, 2, "reopen advanced the generation number");
 
-        // gen1 drained on N: its still-open connection serves its own snapshot,
-        // even though the file was unlinked.
+        // gen1 drained on N: its still-open pooled connection serves its own
+        // snapshot, even though the file was unlinked.
         let gen1_docs: i64 = gen1
-            .cache
-            .lock()
+            .test_read_conn()
             .conn()
             .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
             .expect("gen1 connection still usable");
@@ -3429,6 +3728,156 @@ mod tests {
             weak.upgrade().is_none(),
             "generation N is fully dropped — connection + sentinel fd released — with its last Arc"
         );
+    }
+
+    // ---- Read pool (NRN-253) ------------------------------------------------
+
+    /// Serializes the two cap-sensitive tests below: both drive generation opens
+    /// through the process-global `NORN_READ_POOL_CAP` env override, so they must
+    /// not overlap each other (an unrelated test capturing the override is
+    /// harmless — none does two concurrent read checkouts on one generation).
+    static CAP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Two concurrently-held checkouts are DISTINCT connections: the first pops the
+    /// seed, the second lazily grows a second connection (proven by distinct
+    /// `sqlite3*` pointers and a grow-open count of exactly 1).
+    #[test]
+    fn two_concurrent_checkouts_are_distinct_connections() {
+        let _lk = CAP_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Force a cap of at least 2 so growth is possible even on a single-core
+        // host (default cap = min(8, parallelism) could be 1 there).
+        std::env::set_var("NORN_READ_POOL_CAP", "8");
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache_unscoped().expect("warm up");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+
+        // Hold BOTH checkouts at once: the pool cannot hand the same connection
+        // twice, so it must grow a second.
+        let c1 = gen.test_read_conn();
+        let c2 = gen.test_read_conn();
+        assert_ne!(
+            conn_ptr(&c1),
+            conn_ptr(&c2),
+            "two concurrently-held checkouts must be distinct connections"
+        );
+        assert_eq!(
+            gen.read_pool.grow_opens.load(Ordering::Relaxed),
+            1,
+            "exactly one connection was lazily grown beyond the seed"
+        );
+
+        std::env::remove_var("NORN_READ_POOL_CAP");
+    }
+
+    /// Sequential checkout/drop/checkout REUSES the pooled connection: the seed
+    /// returns to the pool on drop and is popped again — same `sqlite3*` pointer, no
+    /// lazy-grow open.
+    #[test]
+    fn sequential_checkout_reuses_pooled_connection() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache_unscoped().expect("warm up");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+        assert_eq!(
+            gen.read_pool.grow_opens.load(Ordering::Relaxed),
+            0,
+            "only the seed exists before any concurrent checkout"
+        );
+
+        let ptr1 = {
+            let c = gen.test_read_conn();
+            conn_ptr(&c)
+        };
+        let ptr2 = {
+            let c = gen.test_read_conn();
+            conn_ptr(&c)
+        };
+        assert_eq!(
+            ptr1, ptr2,
+            "sequential checkout/drop/checkout must reuse the same pooled connection"
+        );
+        assert_eq!(
+            gen.read_pool.grow_opens.load(Ordering::Relaxed),
+            0,
+            "reuse must not lazily grow a new connection"
+        );
+    }
+
+    /// Wait-at-cap: with the cap forced to 1, a second checkout BLOCKS while the
+    /// only connection is held, then proceeds once it is returned. Channel-gated,
+    /// no sleeps in the success path.
+    #[test]
+    fn checkout_waits_at_cap_until_a_connection_returns() {
+        let _lk = CAP_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("NORN_READ_POOL_CAP", "1");
+
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let _c = ctx.query_cache_unscoped().expect("warm up");
+        }
+        let gen = ctx.current_generation().expect("generation held");
+
+        // Hold the ONLY connection (cap == 1).
+        let held = gen.test_read_conn();
+
+        let gen_waiter = Arc::clone(&gen);
+        let (got_tx, got_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let c = gen_waiter.test_read_conn(); // blocks until `held` returns
+            got_tx.send(()).unwrap();
+            drop(c);
+        });
+
+        // The waiter must be blocked: it cannot have acquired a connection while
+        // the only one is still held.
+        assert!(
+            got_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "second checkout must block while the only connection is held"
+        );
+
+        // Return the held connection; the waiter now proceeds.
+        drop(held);
+        got_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("blocked checkout must proceed once a connection is returned");
+        waiter.join().expect("waiter thread panicked");
+
+        std::env::remove_var("NORN_READ_POOL_CAP");
+    }
+
+    /// query_only enforcement: a write attempted through a pooled connection fails
+    /// with a `SQLITE_READONLY`-class error.
+    #[test]
+    fn pooled_connection_is_query_only() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        let cache = ctx.query_cache_unscoped().expect("query_cache");
+
+        let err = cache
+            .conn()
+            .execute("CREATE TABLE nope (x INTEGER)", [])
+            .expect_err("a write through a query_only pooled connection must fail");
+        match err {
+            rusqlite::Error::SqliteFailure(e, _) => assert_eq!(
+                e.code,
+                rusqlite::ErrorCode::ReadOnly,
+                "expected SQLITE_READONLY, got {e:?}"
+            ),
+            other => panic!("expected a SqliteFailure/ReadOnly error, got {other:?}"),
+        }
     }
 
     // ---- Writer-queue generation opens (NRN-252) ----------------------------
@@ -3689,9 +4138,9 @@ mod tests {
 
     /// Separate-connection proof: the freshness refresh runs on the generation's
     /// WRITE connection on the writer thread, so a directly-submitted refresh
-    /// completes even while a thread holds the request-facing READ connection's
-    /// owned guard. If the refresh still touched the read connection it would
-    /// block on the held guard forever (deadlock) and the timeout would fire.
+    /// completes even while a thread holds a checked-out pooled READ connection. If
+    /// the refresh still touched the read connection it would block on the held
+    /// checkout forever (deadlock) and the timeout would fire.
     #[test]
     fn refresh_runs_on_write_connection_not_the_held_read_guard() {
         let (_tmp, root) = make_seeded_vault();
@@ -3705,8 +4154,8 @@ mod tests {
         }
         let gen = ctx.current_generation().expect("generation held");
 
-        // Hold the request-facing READ connection's owned guard on THIS thread.
-        let read_guard = gen.cache.lock_arc();
+        // Hold a checked-out pooled READ connection on THIS thread.
+        let read_guard = gen.test_read_conn();
 
         // A refresh submitted now must complete against the WRITE connection,
         // never blocking on the read guard we hold.
@@ -3875,8 +4324,7 @@ mod tests {
 
         ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            create_marker(&cache);
+            let _cache = ctx.query_cache_unscoped().expect("first warm query_cache");
         }
         let gen1 = ctx.current_generation().expect("generation 1 held");
         assert_eq!(gen1.number, 1);
@@ -3915,13 +4363,13 @@ mod tests {
         // Feed it to the eviction seam exactly as `run_wrapped` does.
         ctx.note_tool_error(&scope, &err);
 
-        // The next request reopens a NEW generation (marker gone, number bumped).
+        // The next request reopens a NEW generation (number bumped).
         ctx.begin_request().expect("begin_request after eviction");
         let cache = ctx
             .query_cache_unscoped()
             .expect("query_cache after eviction");
         assert!(
-            !marker_present(&cache),
+            gen_number(&ctx) > gen1.number,
             "state must be rebuilt after the ticket-routed corruption eviction"
         );
         // 4, not 3: the reopened generation rebuilds against the live vault, which
@@ -4151,7 +4599,7 @@ mod tests {
         // Boundary 1: alpha's chunk committed; delta's has NOT started.
         reached.recv().expect("boundary 1");
         {
-            let cache = generation.cache.lock();
+            let cache = generation.test_read_conn();
             assert!(
                 body_of(&cache, "alpha.md")
                     .as_deref()
@@ -4168,7 +4616,7 @@ mod tests {
         // Boundary 2: delta's chunk committed.
         reached.recv().expect("boundary 2");
         {
-            let cache = generation.cache.lock();
+            let cache = generation.test_read_conn();
             assert!(
                 doc_present(&cache, "delta.md"),
                 "delta present after its own chunk commits"
@@ -4284,7 +4732,7 @@ mod tests {
 
         // The remaining chunk never ran — only delta committed.
         {
-            let cache = generation.cache.lock();
+            let cache = generation.test_read_conn();
             assert!(
                 doc_present(&cache, "delta.md"),
                 "delta (committed before the death) is present"

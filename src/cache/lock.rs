@@ -53,6 +53,25 @@ pub(crate) fn debug_env_duration_ms(
     default
 }
 
+/// Sibling of [`debug_env_duration_ms`] for a `usize` knob (debug builds only).
+///
+/// **Release builds always return `default`** — the env read is
+/// `#[cfg(debug_assertions)]`, compiled out entirely, so no production environment
+/// can alter the value. Debug builds (what `cargo test` builds) honor `var` when it
+/// parses to a `usize`, read at every call so a test scopes the override to itself.
+/// Used by the per-generation read-pool cap (`crate::mcp::context`): tests force a
+/// tiny cap to prove wait-at-cap behavior deterministically.
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+pub(crate) fn debug_env_usize(var: &str, default: usize) -> usize {
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var(var) {
+        if let Ok(value) = raw.parse::<usize>() {
+            return value;
+        }
+    }
+    default
+}
+
 /// The write-lock acquire timeout used by the cache write paths. Release builds
 /// always return [`DEFAULT_WRITE_LOCK_TIMEOUT`] (5s); debug builds honor
 /// `NORN_CACHE_LOCK_TIMEOUT_MS` when it parses to a POSITIVE integer (zero is

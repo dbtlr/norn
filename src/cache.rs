@@ -67,7 +67,7 @@ pub fn resolve_cache_dir_in(
         .map(|(_canonical, dir)| dir)
         .map_err(|e| e.to_string())
 }
-pub(crate) use lock::acquire_flock;
+pub(crate) use lock::{acquire_flock, debug_env_usize};
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 
 pub(crate) const SCHEMA_VERSION: u32 = 4;
