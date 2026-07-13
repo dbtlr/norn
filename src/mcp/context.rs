@@ -179,7 +179,9 @@ use crate::cache::{
 };
 use crate::cache_cmd::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
-use crate::mcp::writer_queue::{ChunkOutcome, Handle, Outcome, ValidityGuard, WriterQueue};
+use crate::mcp::writer_queue::{
+    ChunkOutcome, Handle, Outcome, ValidityGuard, WriterProgress, WriterQueue,
+};
 
 /// A typed error the warm daemon can downcast to decide whether to evict the
 /// whole `VaultContext`. Kept intentionally small and `anyhow`-downcastable.
@@ -1361,6 +1363,16 @@ impl VaultContext {
                 queue: WriterQueue::spawn(cwd.as_str()),
             }),
         })
+    }
+
+    /// Lock-free control-plane view of this vault's writer queue. Warm daemon
+    /// contexts always return the live queue snapshot; the cold stdio context
+    /// has no dedicated writer and therefore reports the idle origin.
+    pub(crate) fn writer_progress(&self) -> WriterProgress {
+        match &self.mode {
+            Mode::Warm(slot) => slot.queue.progress(),
+            Mode::Cold => WriterProgress::default(),
+        }
     }
 
     /// Per-request entry seam (FIX-1): runs the warm pipeline's root-liveness

@@ -67,7 +67,11 @@ pub(crate) async fn handle_connection(
         // Ping: answer promptly, touch nothing slow. A protocol mismatch still
         // gets our pong — the client decides whether to route (its gate checks
         // the pong's protocol).
-        ControlFrame::Ping { .. } => {
+        ControlFrame::Ping { vault_root, .. } => {
+            let vault_state = match vault_root.as_deref() {
+                Some(root) => Some(contexts.control_state(camino::Utf8Path::new(root)).await),
+                None => None,
+            };
             let pong = ControlFrame::Pong {
                 protocol: CONTROL_PROTOCOL,
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -77,6 +81,8 @@ pub(crate) async fn handle_connection(
                 build: Some(env!("NORN_BUILD_ID").to_string()),
                 pid: Some(std::process::id()),
                 uptime_secs: Some(start.elapsed().as_secs()),
+                serving: vault_state.map(|(serving, _)| serving),
+                writer_progress: vault_state.map(|(_, progress)| progress),
             };
             write_frame(&mut write_half, &pong).await?;
         }
@@ -262,6 +268,53 @@ mod tests {
         assert!(
             read_line(&mut client).await.is_none(),
             "expected EOF after pong"
+        );
+        handle.await.unwrap();
+    }
+
+    /// A vault-scoped ping reports that vault's map and writer state; it does
+    /// not open a cold vault as a side effect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scoped_ping_reports_cold_vault_without_opening_it() {
+        let (_tmp, root) = seeded_vault();
+        let (canonical, _) = crate::cache::vault_identity(&root).unwrap();
+        let (server, mut client) = tokio::net::UnixStream::pair().unwrap();
+        let contexts = Arc::new(Contexts::new());
+        let observed_contexts = Arc::clone(&contexts);
+        let handle = tokio::spawn(async move {
+            handle_connection(server, contexts, Instant::now())
+                .await
+                .unwrap();
+        });
+
+        let ping = ControlFrame::Ping {
+            protocol: CONTROL_PROTOCOL,
+            vault_root: Some(canonical.to_string()),
+        };
+        let mut bytes = serde_json::to_vec(&ping).unwrap();
+        bytes.push(b'\n');
+        client.write_all(&bytes).await.unwrap();
+
+        let line = read_line(&mut client).await.expect("expected a pong line");
+        let frame: ControlFrame = serde_json::from_str(line.trim()).unwrap();
+        match frame {
+            ControlFrame::Pong {
+                serving,
+                writer_progress,
+                ..
+            } => {
+                assert_eq!(serving, Some(crate::service::ServingState::Cold));
+                assert_eq!(
+                    writer_progress,
+                    Some(crate::service::WriterProgress::default())
+                );
+            }
+            other => panic!("expected pong, got {other:?}"),
+        }
+        assert_eq!(
+            observed_contexts.len().await,
+            0,
+            "status observation must not warm a cold vault"
         );
         handle.await.unwrap();
     }

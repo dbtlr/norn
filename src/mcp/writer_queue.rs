@@ -72,7 +72,7 @@
 
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -113,6 +113,17 @@ pub enum Outcome<R> {
     Panicked,
 }
 
+/// Lock-free control-plane snapshot of one per-vault writer queue.
+///
+/// `sequence` is deliberately opaque: callers only compare it with a previous
+/// observation to decide whether a busy writer is still making progress. It is
+/// monotonic (saturating at `u64::MAX`) and never encodes wall-clock time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WriterProgress {
+    pub(crate) busy: bool,
+    pub(crate) sequence: u64,
+}
+
 /// A blocking handle to a submitted op's eventual [`Outcome`].
 ///
 /// The async request path wraps [`wait`](Handle::wait) in `spawn_blocking`, so a
@@ -151,9 +162,43 @@ struct Inner {
     /// Set true (under the `state` lock, so the writer never misses the wakeup)
     /// when the handle drops. Read locklessly on the hot path.
     shutdown: AtomicBool,
+    /// True while the writer thread is executing queue work (including a
+    /// generation-open liveness op and liveness preemption inside bulk work).
+    busy: AtomicBool,
+    /// Opaque monotonic progress sequence observed by the service control path.
+    sequence: AtomicU64,
 }
 
 impl Inner {
+    fn advance_progress(&self) {
+        // Saturate instead of wrapping: the contract is monotonic even at the
+        // theoretical u64 limit.
+        let _ = self
+            .sequence
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_add(1))
+            });
+    }
+
+    fn begin_work(&self) {
+        self.advance_progress();
+        self.busy.store(true, Ordering::Release);
+    }
+
+    fn finish_work(&self) {
+        // Publish the terminal transition before publishing idle, so an observer
+        // that sees `busy == false` also sees the terminal sequence advance.
+        self.advance_progress();
+        self.busy.store(false, Ordering::Release);
+    }
+
+    fn progress(&self) -> WriterProgress {
+        WriterProgress {
+            busy: self.busy.load(Ordering::Acquire),
+            sequence: self.sequence.load(Ordering::Acquire),
+        }
+    }
+
     /// Run every currently-queued liveness op to completion, FIFO. Ops submitted
     /// *while* draining are picked up too — the loop exits only on an empty queue —
     /// so a burst all clears before the caller resumes bulk work. Stops early if
@@ -168,7 +213,15 @@ impl Inner {
                 state.liveness.pop_front()
             };
             match job {
-                Some(job) => job(),
+                Some(job) => {
+                    // The outer bulk op already keeps `busy` true. These two
+                    // advances expose the preempting liveness op's own
+                    // start/terminal transitions without toggling idle between
+                    // adjacent pieces of writer work.
+                    self.advance_progress();
+                    job();
+                    self.advance_progress();
+                }
                 None => return,
             }
         }
@@ -272,6 +325,8 @@ impl WriterQueue {
             }),
             signal: Condvar::new(),
             shutdown: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
+            sequence: AtomicU64::new(0),
         });
         let worker_inner = Arc::clone(&inner);
         let worker = std::thread::Builder::new()
@@ -282,6 +337,12 @@ impl WriterQueue {
             inner,
             worker: Some(worker),
         }
+    }
+
+    /// Read the queue's control-plane progress without taking its scheduling
+    /// mutex or touching the writer thread.
+    pub(crate) fn progress(&self) -> WriterProgress {
+        self.inner.progress()
     }
 
     /// Submit a liveness op — latency-critical work a reader is blocked on. Runs
@@ -417,10 +478,12 @@ fn worker_loop(inner: &Arc<Inner>) {
                 state = inner.signal.wait(state).unwrap_or_else(|e| e.into_inner());
             }
         };
+        inner.begin_work();
         match pick {
             Pick::Liveness(job) => job(),
             Pick::Bulk(job) => run_bulk(inner, job),
         }
+        inner.finish_work();
     }
 }
 
@@ -441,7 +504,11 @@ fn run_bulk(inner: &Arc<Inner>, mut job: Box<dyn BulkJob>) {
             job.deliver_dropped();
             return;
         }
-        if !job.run_chunk() {
+        let more = job.run_chunk();
+        // Every completed chunk is observable progress, including the final
+        // chunk and a panicking chunk (whose closure resolves `Panicked`).
+        inner.advance_progress();
+        if !more {
             // Finished (result delivered) or panicked (handle already resolved).
             return;
         }
@@ -731,5 +798,86 @@ mod tests {
 
         let follow = queue.submit_liveness(|| 5u8);
         assert_eq!(follow.wait(), Outcome::Done(5));
+    }
+
+    /// The control-plane observer distinguishes idle from an in-flight liveness
+    /// op and publishes a newer terminal sequence before returning to idle.
+    #[test]
+    fn progress_observes_liveness_busy_and_terminal_transitions() {
+        let queue = WriterQueue::spawn("progress-liveness");
+        assert_eq!(queue.progress(), WriterProgress::default());
+
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = queue.submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        running_rx.recv().unwrap();
+        let busy = queue.progress();
+        assert!(busy.busy, "an executing liveness op must report busy");
+        assert!(busy.sequence > 0, "work start must advance the sequence");
+
+        release_tx.send(()).unwrap();
+        assert_eq!(handle.wait(), Outcome::Done(()));
+        let idle = loop {
+            let progress = queue.progress();
+            if !progress.busy {
+                break progress;
+            }
+            std::thread::yield_now();
+        };
+        assert!(!idle.busy, "terminal completion must publish idle");
+        assert!(
+            idle.sequence > busy.sequence,
+            "terminal completion must advance progress"
+        );
+    }
+
+    /// Each completed bulk chunk advances the sequence while the writer remains
+    /// busy; terminal completion advances it again and publishes idle.
+    #[test]
+    fn progress_advances_at_bulk_chunk_boundaries() {
+        let queue = WriterQueue::spawn("progress-bulk");
+        let (first_tx, first_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let (release_second_tx, release_second_rx) = mpsc::channel();
+        let mut chunk = 0;
+        let handle = queue.submit_bulk(
+            move || {
+                if chunk == 0 {
+                    first_tx.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                    chunk += 1;
+                    ChunkOutcome::More
+                } else {
+                    second_tx.send(()).unwrap();
+                    release_second_rx.recv().unwrap();
+                    ChunkOutcome::Done(())
+                }
+            },
+            None,
+        );
+
+        first_rx.recv().unwrap();
+        let first = queue.progress();
+        assert!(first.busy);
+        release_first_tx.send(()).unwrap();
+
+        second_rx.recv().unwrap();
+        let second = queue.progress();
+        assert!(second.busy, "the bulk op stays busy between chunks");
+        assert!(
+            second.sequence > first.sequence,
+            "the first completed chunk must advance progress"
+        );
+        release_second_tx.send(()).unwrap();
+
+        assert_eq!(handle.wait(), Outcome::Done(()));
+        let terminal = queue.progress();
+        assert!(!terminal.busy);
+        assert!(terminal.sequence > second.sequence);
     }
 }

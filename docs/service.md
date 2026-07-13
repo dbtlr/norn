@@ -61,7 +61,8 @@ norn service uninstall   # unload and remove the plist; config and logs are kept
 norn service start       # load an installed-but-stopped daemon
 norn service stop        # unload the daemon (an honest stop — see below)
 norn service restart     # kill and rerun the loaded daemon
-norn service status      # launchd load/run state + a live control-ping
+norn service status      # host launchd state + a live control-ping
+norn service status --vault PATH  # also report one vault's serving/writer state
 ```
 
 Every verb accepts `--format text|json` (default `text`); `json` always emits a machine-readable object, even on failure. `norn service` is macOS-only today — on any other host every verb refuses with:
@@ -105,6 +106,8 @@ The three lifecycle verbs act **only on an installed unit** and follow one rule:
 
 `status` reports what it knows rather than failing: a `launchctl` probe failure renders as `launchd state unavailable` (carrying the probe's error text) instead of aborting, and if the live control socket still answers, the running version/build/uptime are shown regardless — a daemon that answers the socket never reads as dead just because `launchctl` hiccuped. `status`'s exit code is a health-gate signal distinct from the acting verbs: it is `0` for every *known* state (running, stopped, not installed) and `1` only when the launchd state itself is unknown, so `norn service status || alert` fires on genuinely unknown supervision state, not on a healthy stopped daemon.
 
+Plain `norn service status` stays host-level. Add `--vault PATH` when diagnosing one vault: the client canonicalizes the path and asks the daemon for that vault's `serving` state (`cold`, `opening`, or `ready`) plus `writer_progress` (`busy` and an opaque monotonic `sequence`). A cold status observation does not open the vault. The sequence is not a timestamp or work count; compare it with a later observation only. A busy writer whose sequence advances is making progress, while stall timing/classification is owned by the client wait policy rather than this status command.
+
 A real run against a daemon that predates a local rebuild:
 
 ```
@@ -135,6 +138,38 @@ $ norn service status --format json
   "socket": "~/.cache/norn/run/norn.sock"
 }
 ```
+
+A scoped text report adds three lines without changing the host-level fields:
+
+```
+$ norn service status --vault ~/vaults/atlas
+serve: loaded, running (pid 73414)
+  running v0.48.0 · on-disk v0.48.0
+  uptime 3m12s
+  vault  /Users/example/vaults/atlas
+  serving ready
+  writer  idle · sequence 17
+  socket ~/.cache/norn/run/norn.sock
+  plist  ~/Library/LaunchAgents/com.dbtlr.norn.serve.plist
+  log    ~/.cache/norn/log/serve.log
+```
+
+In JSON, those values are grouped under an additive `vault` object:
+
+```json
+{
+  "vault": {
+    "root": "/Users/example/vaults/atlas",
+    "serving": "ready",
+    "writer_progress": {
+      "busy": false,
+      "sequence": 17
+    }
+  }
+}
+```
+
+If the daemon does not answer with scoped state (for example, it is stopped or is an older build), `serving` and `writer_progress` are `null` and the text report renders them as unavailable. The canonical root is still shown so the diagnostic scope is explicit.
 
 The second line is the running-vs-on-disk reconciliation, and it renders differently depending on what's out of sync:
 

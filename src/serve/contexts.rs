@@ -54,6 +54,7 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::mcp::context::VaultContext;
 use crate::mcp::server::McpServer;
+use crate::service::{ServingState, WriterProgress};
 
 /// The lazy per-vault warm-context map. Cloneable via `Arc` at the call site.
 pub(crate) struct Contexts {
@@ -126,6 +127,39 @@ impl Contexts {
             .await?;
 
         Ok(server.clone())
+    }
+
+    /// Observe one canonical vault's serving and writer state without opening
+    /// it or touching the filesystem. `service status --vault` canonicalizes on
+    /// the client side; hashing that path here reaches the same map entry as
+    /// [`resolve`] while keeping the daemon's control path bounded to one brief
+    /// map lookup plus lock-free atomics.
+    pub(crate) async fn control_state(
+        &self,
+        canonical_root: &Utf8Path,
+    ) -> (ServingState, WriterProgress) {
+        let hash = crate::cache::canonical_vault_identity_hash(canonical_root);
+        let cell = {
+            let map = self.map.lock().await;
+            map.get(&hash).cloned()
+        };
+
+        match cell {
+            None => (ServingState::Cold, WriterProgress::default()),
+            Some(cell) => match cell.get() {
+                None => (ServingState::Opening, WriterProgress::default()),
+                Some(server) => {
+                    let progress = server.ctx.writer_progress();
+                    (
+                        ServingState::Ready,
+                        WriterProgress {
+                            busy: progress.busy,
+                            sequence: progress.sequence,
+                        },
+                    )
+                }
+            },
+        }
     }
 
     /// Sweep the map for initialized entries whose stored vault root has vanished
@@ -254,6 +288,66 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(contexts.len().await, 0);
+    }
+
+    /// The control plane reports the map lifecycle without opening the vault:
+    /// absent entry = cold, empty OnceCell = opening, initialized server = ready.
+    /// Once ready, writer progress comes from the live per-vault queue.
+    #[tokio::test]
+    async fn control_state_tracks_cold_opening_ready_and_writer_progress() {
+        let (_tmp, root) = seeded_vault();
+        let (canonical, hash) = crate::cache::vault_identity(&root).unwrap();
+        let contexts = Contexts::new();
+
+        assert_eq!(
+            contexts.control_state(&canonical).await,
+            (ServingState::Cold, WriterProgress::default())
+        );
+
+        let cell = Arc::new(OnceCell::new());
+        contexts.map.lock().await.insert(hash, Arc::clone(&cell));
+        assert_eq!(
+            contexts.control_state(&canonical).await,
+            (ServingState::Opening, WriterProgress::default())
+        );
+
+        assert!(cell.set(open_server(&canonical).unwrap()).is_ok());
+        let (serving, idle) = contexts.control_state(&canonical).await;
+        assert_eq!(serving, ServingState::Ready);
+        assert!(!idle.busy);
+
+        let (running_tx, running_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = cell
+            .get()
+            .unwrap()
+            .ctx
+            .warm_writer_queue()
+            .submit_liveness(move || {
+                running_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        running_rx.recv().unwrap();
+
+        let (serving, busy) = contexts.control_state(&canonical).await;
+        assert_eq!(serving, ServingState::Ready);
+        assert!(
+            busy.busy,
+            "generation/liveness work must report writer busy"
+        );
+        assert!(busy.sequence > idle.sequence);
+
+        release_tx.send(()).unwrap();
+        assert_eq!(handle.wait(), crate::mcp::writer_queue::Outcome::Done(()));
+        let terminal = loop {
+            let (_, progress) = contexts.control_state(&canonical).await;
+            if !progress.busy {
+                break progress;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(!terminal.busy);
+        assert!(terminal.sequence > busy.sequence);
     }
 
     /// FIX-4: a later hello whose OWN root has vanished sweeps the map, evicting

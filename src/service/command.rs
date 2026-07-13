@@ -141,7 +141,20 @@ fn dispatch_verb(sub: &ServiceSubcommand) -> anyhow::Result<i32> {
             lifecycle(&supervisor, &plist_path, Verb::Restart, a.format)
         }
         ServiceSubcommand::Status(a) => {
-            status_cmd(&supervisor, &plist_path, &log_path, &socket_path, a.format)
+            let canonical_vault = a
+                .vault
+                .as_deref()
+                .map(crate::cache::vault_identity)
+                .transpose()?
+                .map(|(canonical, _)| canonical);
+            status_cmd(
+                &supervisor,
+                &plist_path,
+                &log_path,
+                &socket_path,
+                canonical_vault.as_deref(),
+                a.format,
+            )
         }
     }
 }
@@ -504,6 +517,7 @@ fn status_cmd(
     plist_path: &camino::Utf8Path,
     log_path: &camino::Utf8Path,
     socket_path: &camino::Utf8Path,
+    vault_root: Option<&camino::Utf8Path>,
     format: ServiceFormat,
 ) -> anyhow::Result<i32> {
     // Status mutates nothing, so it reports what it knows: a launchd probe
@@ -522,12 +536,28 @@ fn status_cmd(
     // running outside launchd — or behind a failed launchctl probe — still
     // answers and should surface (running version / uptime), rather than
     // reading as dead.
-    let pong =
-        crate::service::probe_status_socket(socket_path, crate::service::handshake_timeout());
-    let (running_version, running_build, uptime_secs, pong_pid) = match pong {
-        Some(p) => (Some(p.version), p.build, p.uptime_secs, p.pid),
-        None => (None, None, None, None),
-    };
+    let pong = crate::service::probe_status_socket(
+        socket_path,
+        crate::service::handshake_timeout(),
+        vault_root,
+    );
+    let (running_version, running_build, uptime_secs, pong_pid, serving, writer_progress) =
+        match pong {
+            Some(p) => (
+                Some(p.version),
+                p.build,
+                p.uptime_secs,
+                p.pid,
+                p.serving,
+                p.writer_progress,
+            ),
+            None => (None, None, None, None, None, None),
+        };
+    let vault = vault_root.map(|root| status::VaultStatus {
+        root: root.to_string(),
+        serving,
+        writer_progress,
+    });
 
     let report = status::assemble_status(
         status::ProbedState {
@@ -536,6 +566,7 @@ fn status_cmd(
             running_build,
             uptime_secs,
             pong_pid,
+            vault,
         },
         env!("CARGO_PKG_VERSION"),
         env!("NORN_BUILD_ID"),
@@ -995,6 +1026,7 @@ mod tests {
                     running_build: Some("build-abc".into()),
                     uptime_secs: Some(9),
                     pong_pid: None,
+                    vault: None,
                 },
                 "0.45.1",
                 "build-abc",

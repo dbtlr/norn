@@ -19,6 +19,8 @@
 
 use std::io::Write;
 
+use super::{ServingState, WriterProgress};
+
 /// What the launchd probe said — or that it couldn't say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchdState {
@@ -49,6 +51,18 @@ pub struct ProbedState {
     pub uptime_secs: Option<u64>,
     /// The pid the pong self-reported — used when launchd can't supply one.
     pub pong_pid: Option<u32>,
+    /// Explicit per-vault observation requested by `service status --vault`.
+    /// `None` keeps the original host-level status shape.
+    pub vault: Option<VaultStatus>,
+}
+
+/// The scoped vault state rendered only when `--vault` was requested. Missing
+/// state fields mean the daemon did not answer with a compatible scoped pong.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VaultStatus {
+    pub root: String,
+    pub serving: Option<ServingState>,
+    pub writer_progress: Option<WriterProgress>,
 }
 
 /// The resolved on-disk paths `status` reports.
@@ -84,6 +98,8 @@ pub struct ServiceStatus {
     pub plist: String,
     pub log: String,
     pub socket: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault: Option<VaultStatus>,
 }
 
 /// Fold the probed inputs into a [`ServiceStatus`]. `restart_pending` is true
@@ -124,6 +140,7 @@ pub fn assemble_status(
         plist: paths.plist,
         log: paths.log,
         socket: paths.socket,
+        vault: probed.vault,
     }
 }
 
@@ -200,6 +217,31 @@ pub fn render_text(status: &ServiceStatus, out: &mut impl Write) -> std::io::Res
         )?,
     }
 
+    if let Some(vault) = &status.vault {
+        writeln!(out, "  vault  {}", vault.root)?;
+        match vault.serving {
+            Some(serving) => writeln!(
+                out,
+                "  serving {}",
+                match serving {
+                    ServingState::Cold => "cold",
+                    ServingState::Opening => "opening",
+                    ServingState::Ready => "ready",
+                }
+            )?,
+            None => writeln!(out, "  serving unavailable")?,
+        }
+        match vault.writer_progress {
+            Some(progress) => writeln!(
+                out,
+                "  writer  {} · sequence {}",
+                if progress.busy { "busy" } else { "idle" },
+                progress.sequence
+            )?,
+            None => writeln!(out, "  writer  unavailable")?,
+        }
+    }
+
     writeln!(out, "  socket {}", status.socket)?;
     writeln!(out, "  plist  {}", status.plist)?;
     writeln!(out, "  log    {}", status.log)?;
@@ -250,6 +292,7 @@ mod tests {
                 running_build: Some("build-match".into()),
                 uptime_secs: Some(3725),
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -295,6 +338,7 @@ mod tests {
                 running_build: Some("build-old".into()),
                 uptime_secs: Some(10),
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-new",
@@ -323,6 +367,7 @@ mod tests {
                 running_build: None,
                 uptime_secs: Some(10),
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-new",
@@ -346,6 +391,7 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -366,6 +412,7 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -389,6 +436,7 @@ mod tests {
                 running_build: Some("build-stale".into()),
                 uptime_secs: Some(42),
                 pong_pid: Some(777),
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -436,6 +484,7 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -458,6 +507,7 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -487,6 +537,7 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -525,6 +576,7 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                vault: None,
             },
             "0.45.1",
             "build-match",
@@ -551,6 +603,39 @@ mod tests {
         assert_eq!(v["restart_pending"], false);
         assert_eq!(v["launchd_error"], serde_json::Value::Null);
         assert_eq!(v["socket"], "/s/norn.sock");
+    }
+
+    #[test]
+    fn scoped_vault_state_renders_in_text_and_json() {
+        let mut s = base(Some("0.45.1"));
+        s.vault = Some(VaultStatus {
+            root: "/canonical/vault".into(),
+            serving: Some(ServingState::Ready),
+            writer_progress: Some(WriterProgress {
+                busy: true,
+                sequence: 17,
+            }),
+        });
+
+        let text = text_of(&s);
+        assert!(text.contains("vault  /canonical/vault"), "{text}");
+        assert!(text.contains("serving ready"), "{text}");
+        assert!(text.contains("writer  busy · sequence 17"), "{text}");
+
+        let value = serde_json::to_value(&s).unwrap();
+        assert_eq!(value["vault"]["root"], "/canonical/vault");
+        assert_eq!(value["vault"]["serving"], "ready");
+        assert_eq!(value["vault"]["writer_progress"]["busy"], true);
+        assert_eq!(value["vault"]["writer_progress"]["sequence"], 17);
+    }
+
+    #[test]
+    fn host_level_status_omits_vault_state_from_json() {
+        let value = serde_json::to_value(base(Some("0.45.1"))).unwrap();
+        assert!(
+            value.get("vault").is_none(),
+            "plain service status must stay host-level: {value}"
+        );
     }
 
     #[test]
