@@ -202,14 +202,28 @@ A few shapes are deliberately excluded from routing, by design, regardless of wh
 
 ### Reads
 
-A read (`count`/`find`/`get`/`repair --plan`) falls back to Direct **silently** on any daemon-side failure, at any point — a read is idempotent, so a lost connection, a timeout, or an unreadable response just means paying for a second, verified direct open instead of trusting the daemon's answer. A routed read never fails outright; at worst it's slower than the daemon path would have been. (Under `--verbose` the fallback does announce itself — a one-line `routed <tool> failed …; using direct execution` note on stderr — which is the intended way to check whether requests are being served warm.)
+A routed call has **no overall call timeout**. While its request socket is waiting for a response, the client heartbeats the vault-scoped control plane and interprets `writer_progress` on its own monotonic clock:
+
+- A responsive idle writer is healthy. Its sequence does not need to change.
+- A busy writer whose sequence advances is making progress, so the client waits indefinitely — a legitimate cold open or large mutation is not cut off by a fixed per-call deadline.
+- No compatible scoped pong for five seconds, or a busy writer whose sequence is unchanged for five seconds, classifies the service as stalled. This is the one service-level stall budget; sequence changes reset it.
+
+Non-writer tool-body progress is deliberately outside this signal. If scoped pongs stay healthy and the writer stays idle, the client continues waiting even though the tool body itself has no separate progress stamp.
+
+A read (`count`/`find`/`get`/`repair --plan`) still falls back to Direct on any daemon-side failure because it is safe to retry. Ordinary transport failures stay silent unless `--verbose`; a heartbeat-classified stall is always actionable and prints:
+
+```text
+norn: service stopped responding or making writer progress — run `norn service restart`; using direct execution
+```
+
+The command then pays for a verified Direct open instead of trusting a stalled daemon.
 
 ### Mutations: the send-commit policy
 
 A mutation can't retry as freely as a read, because retrying after the daemon may have already written would risk applying it twice. The CLI splits on **whether the request reached the daemon**:
 
-- **Before the daemon call is sent** (forced-Direct flags, no live daemon, a failed handshake) — falls back to a direct re-run, exactly like a read. The mutation never ran anywhere.
-- **After the request is sent, for a committing apply** (`--yes` — the only shape that commits over the wire; a non-interactive invocation without `--yes` is an implicit *preview*, covered below) — a failure here does **not** retry Direct. The CLI surfaces `post-send-uncertain` (exit 1, "verify vault state before retrying") because the daemon may already have applied the change; re-running blind could double-apply it. See [Error and outcome contract](errors.md) for the full exit-code and error-code contract.
+- **Before the daemon call is sent** (forced-Direct flags, no live daemon, a failed handshake, or a heartbeat-classified stall while waiting for `ready`/`initialize`) — falls back to a direct re-run, exactly like a read. The mutation never ran anywhere. A heartbeat-classified stall prints the restart note above.
+- **After the request is sent, for a committing apply** (`--yes` — the only shape that commits over the wire; a non-interactive invocation without `--yes` is an implicit *preview*, covered below) — any failure, including a heartbeat-classified stall, does **not** retry Direct. The CLI surfaces `post-send-uncertain` (exit 1, "verify vault state before retrying") because the daemon may already have applied the change; re-running blind could double-apply it. See [Error and outcome contract](errors.md) for the full exit-code and error-code contract.
 - **A clean daemon-side refusal** (a coded precondition failure — stale hash, unknown path, a schema refusal, a lock timeout, and so on) comes back as a normal, coded refusal and renders **exactly like the same refusal would on the direct path** — exit 2, nothing written. This is not the uncertainty case: a refusal is proof the daemon didn't write anything.
 - **Dry-runs and previews** (`--dry-run`, `--format json` without `--yes`, the non-TTY implicit-preview path) write nothing either way, so they route with the same full silent-fallback behavior as a read.
 
@@ -233,7 +247,7 @@ norn: service is a different build of v0.45.1 — restart the norn serve daemon
 
 ### Byte-identity promise
 
-Routed and direct output are byte-for-byte identical: stdout, stderr, exit code, and the on-disk result of a mutation — the telemetry `trace_id` aside, which is non-deterministic on the direct path too. There is no observable way to tell, from a command's output, whether it was served warm by the daemon or run direct; the daemon is purely a speed optimization over the same trust-verified path.
+Successful routed and direct execution remain byte-for-byte identical: stdout, stderr, exit code, and the on-disk result of a mutation — the telemetry `trace_id` aside, which is non-deterministic on the direct path too. Routing failures may add an operator-actionable stderr notice for version/build skew or a heartbeat-classified stall before falling back to the same trust-verified Direct path. A committing mutation that fails after send remains the deliberate `post-send-uncertain` exception described above.
 
 ## Relationship to `norn mcp`
 

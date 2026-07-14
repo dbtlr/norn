@@ -403,7 +403,9 @@ fn execute_routed_call<T>(
                     }
                     FallbackAfterSend::Fallback => {}
                 }
-                if verbose {
+                if error.is_service_stalled() {
+                    crate::service::warn_service_stalled();
+                } else if verbose {
                     eprintln!(
                         "norn: routed {tool} failed ({}); using direct execution",
                         error.source
