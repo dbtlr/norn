@@ -1201,6 +1201,84 @@ mod tests {
         );
     }
 
+    /// Arrival correctness is live at the public MCP surface: once refresh R has
+    /// started, a later `vault.count` request cannot join R. It schedules a second
+    /// refresh and observes an edit made while R was in flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn count_arriving_after_refresh_started_runs_later_refresh_and_sees_midflight_edit() {
+        let (tmp, ctx, server) = warm_server_ready().await;
+        let baseline = ctx.current_refresh_exec_count();
+        let arrivals_base = ctx.current_refresh_arrivals();
+
+        // Make the first public count stale so it starts refresh R.
+        std::fs::write(
+            tmp.path().join("zeta.md"),
+            "---\ntype: note\nstatus: active\n---\nZeta body\n",
+        )
+        .unwrap();
+        let (refresh_started, release_refresh) = ctx.install_current_refresh_gate();
+
+        let first_server = server.clone();
+        let first = tokio::spawn(async move {
+            first_server
+                .count(Parameters(crate::mcp::tools::count::CountParams::default()))
+                .await
+        });
+
+        // R has crossed its start transition and left the joinable pending slot.
+        refresh_started
+            .recv()
+            .expect("refresh R reaches start gate");
+
+        // This edit lands after R started but before the later request arrives.
+        std::fs::write(
+            tmp.path().join("eta.md"),
+            "---\ntype: task\nstatus: active\n---\nEta body\n",
+        )
+        .unwrap();
+
+        let late_server = server.clone();
+        let late = tokio::spawn(async move {
+            late_server
+                .count(Parameters(crate::mcp::tools::count::CountParams::default()))
+                .await
+        });
+
+        // Do not release R until the late request has made its distinct arrival
+        // decision. Because R already started, this arrival must submit another
+        // refresh behind it rather than join it.
+        let ctx_wait = Arc::clone(&ctx);
+        tokio::task::spawn_blocking(move || {
+            while ctx_wait.current_refresh_arrivals() < arrivals_base + 2 {
+                std::thread::yield_now();
+            }
+        })
+        .await
+        .unwrap();
+        release_refresh.send(()).unwrap();
+
+        let first = first
+            .await
+            .expect("first count task must not panic")
+            .expect("first count succeeds");
+        let late = late
+            .await
+            .expect("late count task must not panic")
+            .expect("late count succeeds");
+
+        assert_eq!(first.inner().0.total, 7);
+        assert_eq!(
+            late.inner().0.total,
+            7,
+            "the late public request observes the edit made while R was in flight"
+        );
+        assert_eq!(
+            ctx.current_refresh_exec_count(),
+            baseline + 2,
+            "the late public request triggers a later refresh instead of being satisfied by R"
+        );
+    }
+
     /// Read-during-write snapshot honesty: while a post-apply increment commit is
     /// parked mid-chunks (all file chunks committed, before the op resolves), a
     /// concurrent warm read through the server succeeds, sees a consistent committed

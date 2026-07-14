@@ -1997,6 +1997,27 @@ impl VaultContext {
             .unwrap_or(0)
     }
 
+    /// Test-only: gate the current generation's next freshness refresh after its
+    /// start transition but before its scan. Returns the test's
+    /// `(refresh_started_rx, release_refresh_tx)` ends so an MCP-surface proof can
+    /// deterministically introduce a later request while that refresh is in flight.
+    #[cfg(test)]
+    pub(crate) fn install_current_refresh_gate(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let generation = self.current_generation().expect("a current generation");
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *generation
+            .refresh_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(TestGate {
+            reached: reached_tx,
+            release: release_rx,
+        });
+        (reached_rx, release_tx)
+    }
+
     /// Test-only: read connections the CURRENT generation's pool has lazily grown
     /// BEYOND its seed (`0` if none / cold). A value `> 0` proves concurrent warm
     /// reads genuinely overlapped on distinct pooled connections rather than
