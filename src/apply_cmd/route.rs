@@ -149,6 +149,7 @@ mod tests {
             vault_root: "/vault".into(),
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "create_document".into(),
                 id: None,
@@ -282,6 +283,7 @@ mod tests {
             skipped: 0,
             failed: 0,
             remaining: 0,
+            preconditions: Vec::new(),
             operations: vec![ApplyReportOp {
                 op_id: "0".into(),
                 kind: "create_document".into(),

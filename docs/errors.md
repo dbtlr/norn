@@ -17,7 +17,7 @@ CHANGELOG):
 2. **The `outcome` field** — the same tri-state on the `ApplyReport`, exposed
    identically by the CLI (`--format json`) and the MCP `structuredContent`.
 3. **Error codes** — a stable kebab-case vocabulary on the failure envelope and
-   on a refused op's `error.code`.
+   on a refused operation or first-class precondition's `error.code`.
 
 ## Exit codes
 
@@ -50,7 +50,7 @@ Every `ApplyReport` carries a single `outcome` field:
 |---|---|---|
 | `applied` | 0 | ops `applied` / `skipped`; `failed == 0` |
 | `failed` | 1 | a write already landed, then an op failed — already-applied ops `applied`, the failing op `failed` with an `error`, the rest `not-run`; the vault is **partially mutated** |
-| `refused` | 2 | the offending op is `failed` with an `error`, the rest `not-run`; **nothing written**, vault byte-identical |
+| `refused` | 2 | an operation is `failed`, or a first-class precondition is `failed` while every operation is `not-run`; **nothing written**, vault byte-identical |
 | `rebased` | 0 | **reserved** for a future auto-rebase-on-drift (NRN-152); not produced today |
 
 `outcome` is the cross-surface signal, and the `failed`-vs-`refused` distinction is
@@ -66,8 +66,7 @@ transport `isError` flag would miss both.
 A **clean refusal** (nothing written) is returned to an MCP caller as the
 `ApplyReport`:
 
-- the offending op has `status: "failed"` and an `error` envelope,
-- every other op is `not-run`,
+- the offending operation has `status: "failed"` and an `error` envelope, or a first-class precondition has `status: "failed"` and an error while every operation is `not-run`,
 - `outcome` is `refused`,
 - the vault is byte-identical (nothing was written).
 
@@ -102,7 +101,7 @@ goes to stderr for `records`/TTY output):
 - `path` — the offending vault-relative path, when the failure is about one document.
 
 Over MCP the same `{ code, message, path? }` envelope is carried as the failing
-op's `error` inside the returned `ApplyReport` — for both a `refused` apply
+operation or precondition's `error` inside the returned `ApplyReport` — for both a `refused` apply
 (nothing written) and a `failed` apply (partial mutation). A structurally invalid
 request (an unparseable plan, a bad `schema_version`) still surfaces as a transport
 error carrying the envelope in the JSON-RPC error's `data` field.
@@ -130,6 +129,8 @@ CHANGELOG breaking change.
 | `conflicting-hashes` | two ops assert divergent document hashes for one path |
 | `unsupported-operation` | an unsupported repair operation for the target |
 | `content-op-after-vacate` | a content edit follows a delete/move of the same path in one plan |
+| `owner-set-mismatch` | the current paths owning a logical stem or exact frontmatter identity differ from the plan's expected set |
+| `owner-claim-conflict` | two creates in one plan claim the same operation-derived logical stem |
 
 ### Terminal — write-safety refusals
 

@@ -84,6 +84,7 @@ pub fn run(
         vault_root: vault_root.clone(),
         generator: None,
         generated_at: None,
+        preconditions: Vec::new(),
         operations: vec![MigrationOp {
             kind: "rewrite_wikilink".into(),
             id: None,
@@ -137,6 +138,7 @@ pub fn run(
         parents: false,
         verbose,
         refuse_as_report: false,
+        owner_index_options: Default::default(),
     };
 
     let argv: Vec<String> = std::env::args().collect();

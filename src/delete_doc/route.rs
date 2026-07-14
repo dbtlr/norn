@@ -185,6 +185,7 @@ mod tests {
             skipped: 0,
             failed: 0,
             remaining: 0,
+            preconditions: Vec::new(),
             operations: vec![ApplyReportOp {
                 op_id: "0".into(),
                 kind: "delete_document".into(),

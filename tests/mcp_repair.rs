@@ -220,8 +220,8 @@ fn lists_and_calls_vault_repair() {
 
     // ── Structural MigrationPlan checks (Task 12 readiness) ──
     assert_eq!(
-        plan["schema_version"], 1,
-        "plan must have schema_version=1, got: {:?}",
+        plan["schema_version"], 2,
+        "plan must have schema_version=2, got: {:?}",
         plan["schema_version"]
     );
     assert!(

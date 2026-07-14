@@ -1929,6 +1929,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 vault_root: cwd.to_string(),
                 generator: None,
                 generated_at: None,
+                preconditions: Vec::new(),
                 operations: vec![MigrationOp {
                     kind: op_kind.into(),
                     id: None,
@@ -1945,6 +1946,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 parents: args.parents,
                 verbose,
                 refuse_as_report: false,
+                owner_index_options: Default::default(),
             };
 
             let argv: Vec<String> = std::env::args().collect();
@@ -2129,6 +2131,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 vault_root: cwd.to_string(),
                 generator: None,
                 generated_at: None,
+                preconditions: Vec::new(),
                 operations: vec![MigrationOp {
                     kind: "delete_document".into(),
                     id: None,
@@ -2155,6 +2158,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 parents: false,
                 verbose,
                 refuse_as_report: false,
+                owner_index_options: Default::default(),
             };
 
             let argv: Vec<String> = std::env::args().collect();

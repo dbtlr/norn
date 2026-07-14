@@ -123,6 +123,7 @@ pub(crate) fn plan_from_findings(
         vault_root: vault_root.to_string(),
         generator: Some("norn-repair".to_string()),
         generated_at: Some(generated_at),
+        preconditions: Vec::new(),
         operations,
         skipped,
         plan_footnote: None,
@@ -214,7 +215,7 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.schema_version, MIGRATION_PLAN_SCHEMA_VERSION);
         assert_eq!(plan.generator.as_deref(), Some("norn-repair"));
         assert!(plan.generated_at.is_some());
         // Closest-match should produce exactly one op.
@@ -324,7 +325,7 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.schema_version, 1);
+        assert_eq!(plan.schema_version, MIGRATION_PLAN_SCHEMA_VERSION);
         assert_eq!(plan.generator.as_deref(), Some("norn-repair"));
         assert!(plan.generated_at.is_some());
         assert!(plan.operations.is_empty());

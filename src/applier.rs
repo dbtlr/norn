@@ -16,11 +16,12 @@
 //! - propagate the parent MigrationOp's `footnote` to each child ApplyReportOp
 
 use crate::apply_report::{
-    ApplyReport, ApplyReportOp, ApplyWarning, CascadeFailure, CascadeRewrite, CascadeSkip,
-    CascadeSummary, LinkImpact, OpStatus, APPLY_REPORT_SCHEMA_VERSION,
+    ApplyReport, ApplyReportOp, ApplyReportPrecondition, ApplyWarning, CascadeFailure,
+    CascadeRewrite, CascadeSkip, CascadeSummary, LinkImpact, OpStatus, PreconditionStatus,
+    APPLY_REPORT_SCHEMA_VERSION,
 };
 use crate::core::GraphIndex;
-use crate::migration_plan::{MigrationOp, MigrationPlan};
+use crate::migration_plan::{MigrationOp, MigrationPlan, OwnerSelector, PlanPrecondition};
 use crate::planner::intent::{expand, HIGH_LEVEL_KINDS};
 use crate::repair_apply::{apply_repair_plan_with_context, CreateApplyContext};
 use crate::standards::apply::CascadeRecord;
@@ -36,7 +37,7 @@ use crate::telemetry::event::{
 use crate::telemetry::Event;
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 /// Context for `apply_migration_plan`.
 #[derive(Default)]
@@ -63,6 +64,9 @@ pub(crate) struct ApplyContext {
     /// refused-vs-failed decision is the runtime write-state, never the
     /// per-variant `ApplyError::is_precondition()` flag.
     pub refuse_as_report: bool,
+    /// Index policy used for the fresh owner snapshot. Plans with no logical
+    /// preconditions do not pay for this second filesystem scan.
+    pub owner_index_options: crate::graph::IndexOptions,
 }
 
 /// Apply a `MigrationPlan` against an in-memory `GraphIndex`, delegating to the
@@ -144,6 +148,34 @@ pub(crate) fn apply_migration_plan(
             provenance.push(i);
             all_changes.push(c);
         }
+    }
+
+    // Resolve every create template before the single owner-set barrier. The
+    // concrete paths flow into the delegate, so allocation is performed once
+    // under the mutation lock and cannot drift between checking and writing.
+    let operation_stems = resolve_create_paths(plan, index, &mut all_changes, &provenance)?;
+    let owner_index = if plan.preconditions.is_empty() {
+        None
+    } else {
+        Some(crate::graph::build_index_with_options(
+            &index.root,
+            &ctx.owner_index_options,
+        )?)
+    };
+    let preconditions = evaluate_owner_preconditions(
+        plan,
+        owner_index.as_ref().unwrap_or(index),
+        &operation_stems,
+    )?;
+    if preconditions
+        .iter()
+        .any(|precondition| precondition.status == PreconditionStatus::Failed)
+    {
+        return Ok(build_owner_precondition_refusal_report(
+            plan,
+            ctx.dry_run,
+            preconditions,
+        ));
     }
 
     // Emit one `op_planned` per expanded change, collecting the returned span
@@ -273,6 +305,7 @@ pub(crate) fn apply_migration_plan(
                     envelope,
                     error_path.as_deref(),
                     &trace_id,
+                    preconditions.clone(),
                 ));
             }
             // CLEAN REFUSAL: nothing written yet (`wrote_any == false`), the vault
@@ -305,6 +338,7 @@ pub(crate) fn apply_migration_plan(
                     ctx.dry_run,
                     envelope,
                     error_path.as_deref(),
+                    preconditions.clone(),
                 ));
             }
             return Err(e);
@@ -407,11 +441,296 @@ pub(crate) fn apply_migration_plan(
         skipped,
         failed,
         remaining,
+        preconditions,
         operations: ops,
         warnings,
         outcome,
         touched_paths,
     })
+}
+
+fn evaluate_owner_preconditions(
+    plan: &MigrationPlan,
+    index: &GraphIndex,
+    operation_stems: &HashMap<String, String>,
+) -> Result<Vec<ApplyReportPrecondition>> {
+    let mut precondition_ids = BTreeSet::new();
+    for precondition in &plan.preconditions {
+        if !precondition_ids.insert(precondition.id()) {
+            anyhow::bail!(
+                "duplicate owner-set precondition id in MigrationPlan: {}",
+                precondition.id()
+            );
+        }
+    }
+
+    let mut results = plan
+        .preconditions
+        .iter()
+        .map(|precondition| -> Result<ApplyReportPrecondition> {
+            Ok(match precondition {
+                PlanPrecondition::OwnerSet {
+                    id,
+                    selector,
+                    expected_paths,
+                } => {
+                    let mut expected_paths = expected_paths.clone();
+                    expected_paths.sort();
+                    expected_paths.dedup();
+                    let mut actual_paths = match selector {
+                        OwnerSelector::Stem { stem } => {
+                            if stem.is_empty() {
+                                anyhow::bail!(
+                                    "owner-set precondition '{}' has an empty stem selector",
+                                    precondition.id()
+                                );
+                            }
+                            index
+                                .documents
+                                .iter()
+                                .filter(|document| document.stem.eq_ignore_ascii_case(stem))
+                                .map(|document| document.path.to_string())
+                                .collect::<Vec<_>>()
+                        }
+                        OwnerSelector::StemFromOperation {
+                            stem_from_operation,
+                        } => {
+                            let stem = operation_stems.get(stem_from_operation).ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "owner-set precondition '{}' references missing or non-create operation id '{}'",
+                                    precondition.id(),
+                                    stem_from_operation
+                                )
+                            })?;
+                            index
+                                .documents
+                                .iter()
+                                .filter(|document| document.stem.eq_ignore_ascii_case(stem))
+                                .map(|document| document.path.to_string())
+                                .collect::<Vec<_>>()
+                        }
+                        OwnerSelector::Eq { eq } => {
+                            if eq.is_empty() {
+                                anyhow::bail!(
+                                    "owner-set precondition '{}' has an empty eq selector",
+                                    precondition.id()
+                                );
+                            }
+                            index
+                                .documents
+                                .iter()
+                                .filter_map(|document| match document_matches_eq(document, eq) {
+                                    Ok(true) => Some(Ok(document.path.to_string())),
+                                    Ok(false) => None,
+                                    Err(error) => Some(Err(error)),
+                                })
+                                .collect::<Result<Vec<_>>>()?
+                        }
+                    };
+                    actual_paths.sort();
+                    actual_paths.dedup();
+                    let mismatch = expected_paths != actual_paths;
+                    ApplyReportPrecondition {
+                        id: id.clone(),
+                        status: if mismatch {
+                            PreconditionStatus::Failed
+                        } else {
+                            PreconditionStatus::Passed
+                        },
+                        expected_paths,
+                        actual_paths,
+                        error: mismatch.then(|| crate::apply_report::ApplyError {
+                            code: "owner-set-mismatch".to_string(),
+                            message: format!(
+                                "owner-set precondition '{}' did not match the current vault",
+                                precondition.id()
+                            ),
+                            path: None,
+                        }),
+                    }
+                }
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // A pair of creates that claim the same derived stem can both observe an
+    // empty on-disk owner set. Refuse that internally contradictory plan at the
+    // same barrier instead of letting operation order manufacture duplicates.
+    let mut claims_by_stem: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, precondition) in plan.preconditions.iter().enumerate() {
+        let PlanPrecondition::OwnerSet {
+            selector:
+                OwnerSelector::StemFromOperation {
+                    stem_from_operation,
+                },
+            ..
+        } = precondition
+        else {
+            continue;
+        };
+        if let Some(stem) = operation_stems.get(stem_from_operation) {
+            claims_by_stem
+                .entry(stem.to_ascii_lowercase())
+                .or_default()
+                .push(index);
+        }
+    }
+    for (stem, indexes) in claims_by_stem {
+        if indexes.len() < 2 {
+            continue;
+        }
+        for index in indexes {
+            let result = &mut results[index];
+            result.status = PreconditionStatus::Failed;
+            result.error = Some(crate::apply_report::ApplyError {
+                code: "owner-claim-conflict".to_string(),
+                message: format!(
+                    "owner-set precondition '{}' conflicts with another planned create for stem '{stem}'",
+                    result.id
+                ),
+                path: None,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
+fn document_matches_eq(document: &crate::core::Document, eq: &[String]) -> Result<bool> {
+    let Some(frontmatter) = document.frontmatter.as_ref() else {
+        return Ok(false);
+    };
+    for predicate in eq {
+        let (field, expected) = crate::filter_args::parse_field_value(predicate, "owner_set.eq")?;
+        let Some(actual) = frontmatter.get(&field) else {
+            return Ok(false);
+        };
+        let matches = match actual {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .any(|value| owner_eq_value_matches(value, &expected)),
+            value => owner_eq_value_matches(value, &expected),
+        };
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn owner_eq_value_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match (actual, expected) {
+        (serde_json::Value::String(actual), serde_json::Value::String(expected)) => {
+            strip_wikilink_brackets(actual) == strip_wikilink_brackets(expected)
+        }
+        (serde_json::Value::Number(actual), serde_json::Value::Number(expected)) => {
+            actual.as_f64() == expected.as_f64()
+        }
+        _ => actual == expected,
+    }
+}
+
+fn strip_wikilink_brackets(value: &str) -> String {
+    value.replace("[[", "").replace("]]", "")
+}
+
+fn resolve_create_paths(
+    plan: &MigrationPlan,
+    index: &GraphIndex,
+    changes: &mut [PlannedChange],
+    provenance: &[usize],
+) -> Result<HashMap<String, String>> {
+    let mut stems = HashMap::new();
+    let mut allocated_this_plan: Vec<Utf8PathBuf> = Vec::new();
+    let mut operation_ids = BTreeSet::new();
+    for operation in &plan.operations {
+        if let Some(id) = operation.id.as_ref() {
+            if !operation_ids.insert(id) {
+                anyhow::bail!("duplicate operation id in MigrationPlan: {id}");
+            }
+        }
+    }
+
+    for (change, parent_index) in changes.iter_mut().zip(provenance) {
+        if change.operation != "create_document" {
+            continue;
+        }
+        let path = change.path.clone();
+        let resolved = if crate::seq_alloc::has_seq(&path) {
+            let dir = index
+                .root
+                .join(path.parent().unwrap_or_else(|| Utf8Path::new("")));
+            let mut siblings = crate::seq_alloc::dir_file_names(&dir)?;
+            for prior in &allocated_this_plan {
+                if prior.parent() == path.parent() {
+                    if let Some(name) = prior.file_name() {
+                        siblings.push(name.to_string());
+                    }
+                }
+            }
+            let resolved = crate::seq_alloc::resolve_seq(&path, &siblings);
+            if crate::seq_alloc::has_seq(&resolved) {
+                anyhow::bail!(
+                    "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {path}"
+                );
+            }
+            resolved
+        } else {
+            path
+        };
+        allocated_this_plan.push(resolved.clone());
+        change.path = resolved.clone();
+
+        let stem = resolved
+            .file_stem()
+            .ok_or_else(|| anyhow::anyhow!("create_document path has no file stem: {resolved}"))?;
+        if let Some(id) = plan.operations[*parent_index].id.as_ref() {
+            stems.insert(id.clone(), stem.to_string());
+        }
+    }
+
+    Ok(stems)
+}
+
+fn build_owner_precondition_refusal_report(
+    plan: &MigrationPlan,
+    dry_run: bool,
+    preconditions: Vec<ApplyReportPrecondition>,
+) -> ApplyReport {
+    let operations = plan
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| ApplyReportOp {
+            op_id: index.to_string(),
+            kind: operation.kind.clone(),
+            status: OpStatus::NotRun,
+            from: None,
+            path: None,
+            stem: None,
+            summary: format!("would {} {}", operation.kind, op_display_path(operation)),
+            error: None,
+            footnote: operation.footnote.clone(),
+            cascade: None,
+            link_impact: None,
+        })
+        .collect::<Vec<_>>();
+    ApplyReport {
+        schema_version: APPLY_REPORT_SCHEMA_VERSION,
+        trace_id: String::new(),
+        plan_hash: plan.canonical_hash(),
+        vault_root: plan.vault_root.clone(),
+        dry_run,
+        applied: 0,
+        skipped: 0,
+        failed: 0,
+        remaining: operations.len(),
+        preconditions,
+        operations,
+        warnings: Vec::new(),
+        outcome: crate::apply_report::ApplyOutcome::Refused,
+        touched_paths: Vec::new(),
+    }
 }
 
 /// Build a return-report-on-refusal (NRN-150/MMR-202) from a PRE-WRITE refusal
@@ -436,6 +755,7 @@ fn build_refusal_report(
     dry_run: bool,
     envelope: crate::apply_report::ApplyError,
     error_path: Option<&Utf8Path>,
+    preconditions: Vec<ApplyReportPrecondition>,
 ) -> ApplyReport {
     use crate::apply_report::ApplyOutcome;
 
@@ -493,6 +813,7 @@ fn build_refusal_report(
         skipped: 0,
         failed,
         remaining,
+        preconditions,
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Refused,
@@ -555,6 +876,7 @@ fn build_plan_refusal_report(
         skipped: 0,
         failed,
         remaining,
+        preconditions: Vec::new(),
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Refused,
@@ -596,6 +918,7 @@ fn build_partial_failure_report(
     envelope: crate::apply_report::ApplyError,
     error_path: Option<&Utf8Path>,
     trace_id: &str,
+    preconditions: Vec<ApplyReportPrecondition>,
 ) -> ApplyReport {
     use crate::apply_report::ApplyOutcome;
 
@@ -679,6 +1002,7 @@ fn build_partial_failure_report(
         skipped: 0,
         failed,
         remaining,
+        preconditions,
         operations: ops,
         warnings: Vec::new(),
         outcome: ApplyOutcome::Failed,
@@ -1183,10 +1507,11 @@ mod tests {
         let (tmp, index) = synth_vault();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root: vault_root.clone(),
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "move_document".into(),
                 id: None,
@@ -1202,6 +1527,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         assert_eq!(report.schema_version, APPLY_REPORT_SCHEMA_VERSION);
@@ -1218,10 +1544,11 @@ mod tests {
         let (tmp, index) = synth_vault();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root: vault_root.clone(),
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "move_document".into(),
                 id: None,
@@ -1237,6 +1564,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         assert_eq!(report.applied, 1);
@@ -1278,10 +1606,11 @@ mod tests {
 
         let vault_root = root.to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root,
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "delete_document".into(),
                 id: None,
@@ -1301,6 +1630,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         let op = &report.operations[0];
@@ -1458,10 +1788,11 @@ mod tests {
 
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root,
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "move_folder".into(),
                 id: None,
@@ -1477,6 +1808,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         // Expanded ops should reference parent op_id 0
@@ -1496,10 +1828,11 @@ mod tests {
         let (tmp, index) = synth_vault();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root,
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "move_document".into(),
                 id: None,
@@ -1515,6 +1848,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         let op = report
@@ -1536,10 +1870,11 @@ mod tests {
         let (tmp, index) = synth_vault();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root,
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "move_document".into(),
                 id: None,
@@ -1555,6 +1890,7 @@ mod tests {
             parents: false,
             verbose: true,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
         let op = report
@@ -1589,10 +1925,11 @@ mod tests {
         let (tmp, index) = synth_vault();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root: vault_root.clone(),
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![
                 // op0: writes a.md in Phase A2 (type: note → task).
                 MigrationOp {
@@ -1625,6 +1962,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: true,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink())
             .expect("a partial apply must return a report, not Err");
@@ -1669,10 +2007,11 @@ mod tests {
         let original = std::fs::read_to_string(tmp.path().join("a.md")).unwrap();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root,
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "set_frontmatter".into(),
                 id: None,
@@ -1693,6 +2032,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: true,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink())
             .expect("a precondition refusal returns a report on the MCP surface");
@@ -1722,10 +2062,11 @@ mod tests {
         let before = std::fs::read_dir(tmp.path()).unwrap().count();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root,
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "create_document".into(),
                 id: None,
@@ -1747,6 +2088,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: true,
+            owner_index_options: Default::default(),
         };
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink())
             .expect("a bare pre-write refusal must return a report, not Err");
@@ -1781,10 +2123,11 @@ mod tests {
         let (tmp, index) = synth_vault();
         let vault_root = tmp.path().to_string_lossy().to_string();
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root,
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "no_such_kind".into(),
                 id: None,
@@ -1805,6 +2148,7 @@ mod tests {
                 parents: false,
                 verbose: false,
                 refuse_as_report: true,
+                owner_index_options: Default::default(),
             },
             &mut test_sink(),
         )
@@ -1830,6 +2174,7 @@ mod tests {
                 parents: false,
                 verbose: false,
                 refuse_as_report: false,
+                owner_index_options: Default::default(),
             },
             &mut test_sink(),
         )
@@ -1856,10 +2201,11 @@ mod tests {
         let index = crate::graph::build_index(Utf8Path::from_path(root).unwrap()).unwrap();
 
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root: root.to_string_lossy().to_string(),
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![MigrationOp {
                 kind: "add_frontmatter".into(),
                 id: None,
@@ -1877,6 +2223,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let result = apply_migration_plan(&plan, &index, ctx, &mut test_sink());
         assert!(
@@ -1919,10 +2266,11 @@ mod tests {
             footnote: None,
         };
         let plan = MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root: root.to_string_lossy().to_string(),
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![set_status("x"), set_status("longer-value")],
             skipped: vec![],
             plan_footnote: None,
@@ -1932,6 +2280,7 @@ mod tests {
             parents: false,
             verbose: false,
             refuse_as_report: false,
+            owner_index_options: Default::default(),
         };
         let result = apply_migration_plan(&plan, &index, ctx, &mut test_sink());
         let err = result.expect_err("duplicate-field plan must be refused up front");

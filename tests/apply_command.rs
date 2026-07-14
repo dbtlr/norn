@@ -38,7 +38,7 @@ fn apply_dry_run_returns_apply_report() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {}
 operations:
   - kind: move_document
@@ -66,7 +66,7 @@ operations:
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["dry_run"], true);
     assert_eq!(report["operations"][0]["kind"], "move_document");
     assert!(
@@ -87,7 +87,7 @@ fn apply_json_without_yes_is_implicit_dry_run_and_writes_nothing() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {}
 operations:
   - kind: move_document
@@ -139,7 +139,7 @@ fn apply_json_with_yes_applies() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {}
 operations:
   - kind: move_document
@@ -217,7 +217,7 @@ fn apply_json_failure_emits_structured_envelope_on_stdout() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault.to_str().unwrap(),
         "operations": [{
             "kind": "add_frontmatter",
@@ -271,7 +271,7 @@ fn apply_reads_plan_from_stdin() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan_json = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault.to_str().unwrap(),
         "operations": [{
             "kind": "move_document",
@@ -331,7 +331,7 @@ fn apply_dry_run_multiple_seq_creates_predict_distinct_ids() {
         })
     };
     let plan = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault.to_str().unwrap(),
         "operations": [mk("tasks/MMR-{{seq}}.md"), mk("tasks/MMR-{{seq}}.md")]
     });
@@ -380,7 +380,7 @@ fn apply_out_alone_writes_file_and_keeps_stdout_silent() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {}
 operations: []
 "#,
@@ -489,7 +489,7 @@ fn apply_per_op_cascade_attribution_multi_move() {
     .unwrap();
 
     let plan = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {}
 operations:
   - kind: move_document
@@ -586,7 +586,7 @@ fn apply_stdin_with_input_format_yaml_works() {
     let tmp = synth();
     let vault = tmp.path().join("vault");
     let plan_yaml = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {}
 operations:
   - kind: move_document
@@ -658,7 +658,7 @@ fn apply_composes_create_document_and_replace_body() {
     let a_hash = blake3_of_file(&a_path);
 
     let plan = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault.to_str().unwrap(),
         "operations": [
             {
@@ -720,7 +720,7 @@ fn apply_composed_create_and_replace_body_dry_run_does_not_mutate() {
     let a_hash = blake3_of_file(&a_path);
 
     let plan = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault.to_str().unwrap(),
         "operations": [
             {
@@ -785,7 +785,7 @@ fn apply_composed_stale_replace_body_hash_aborts_and_create_does_not_land() {
     let vault = tmp.path().join("vault");
 
     let plan = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault.to_str().unwrap(),
         "operations": [
             {

@@ -1,5 +1,5 @@
 //! Surface guards for the restructured `norn repair` command (Plan Tasks 18+19):
-//!   * `norn repair --plan` emits a MigrationPlan (schema_version 1).
+//!   * `norn repair --plan` emits a MigrationPlan (schema_version 2).
 //!   * bare `norn repair` prints a read-only findings summary.
 //!   * `norn repair plan` (old subcommand) is gone → non-zero exit.
 //!   * `norn repair apply` (old subcommand) is gone → non-zero exit.
@@ -80,8 +80,8 @@ fn repair_plan_json_emits_migration_plan() {
         serde_json::from_str(&stdout).expect("--plan --format json should emit valid JSON");
 
     assert_eq!(
-        plan["schema_version"], 1,
-        "repair --plan must emit MigrationPlan schema_version 1"
+        plan["schema_version"], 2,
+        "repair --plan must emit MigrationPlan schema_version 2"
     );
     assert_eq!(
         plan["generator"], "norn-repair",

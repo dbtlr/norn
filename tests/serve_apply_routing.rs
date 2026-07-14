@@ -70,19 +70,19 @@ enum PlanKind {
 fn plan_json(kind: PlanKind, vault_root: &str) -> String {
     match kind {
         PlanKind::CreateDoc => format!(
-            r##"{{"schema_version":1,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"new.md","new_value":{{"frontmatter":{{"type":"note"}},"body":"# New\n"}}}}}}]}}"##,
+            r##"{{"schema_version":2,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"new.md","new_value":{{"frontmatter":{{"type":"note"}},"body":"# New\n"}}}}}}]}}"##,
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::CreateSubDoc => format!(
-            r##"{{"schema_version":1,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"sub/dir/new.md","new_value":{{"frontmatter":{{"type":"note"}},"body":"# New\n"}}}}}}]}}"##,
+            r##"{{"schema_version":2,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"sub/dir/new.md","new_value":{{"frontmatter":{{"type":"note"}},"body":"# New\n"}}}}}}]}}"##,
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::StaleHash => format!(
-            r##"{{"schema_version":1,"vault_root":{root},"operations":[{{"kind":"add_frontmatter","fields":{{"path":"note.md","field":"status","new_value":"done","document_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}}}]}}"##,
+            r##"{{"schema_version":2,"vault_root":{root},"operations":[{{"kind":"add_frontmatter","fields":{{"path":"note.md","field":"status","new_value":"done","document_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}}}]}}"##,
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::MissingFrontmatter => format!(
-            r##"{{"schema_version":1,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"new.md","new_value":{{"body":"# New\n"}}}}}}]}}"##,
+            r##"{{"schema_version":2,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"new.md","new_value":{{"body":"# New\n"}}}}}}]}}"##,
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::BadVersion => format!(
@@ -95,7 +95,7 @@ fn plan_json(kind: PlanKind, vault_root: &str) -> String {
 /// YAML equivalent of `CreateDoc`, templated to `vault_root`.
 fn plan_yaml_create(vault_root: &str) -> String {
     format!(
-        "schema_version: 1\nvault_root: {root}\noperations:\n  - kind: create_document\n    fields:\n      path: new.md\n      new_value:\n        frontmatter:\n          type: note\n        body: \"# New\\n\"\n",
+        "schema_version: 2\nvault_root: {root}\noperations:\n  - kind: create_document\n    fields:\n      path: new.md\n      new_value:\n        frontmatter:\n          type: note\n        body: \"# New\\n\"\n",
         root = serde_json::to_string(vault_root).unwrap()
     )
 }

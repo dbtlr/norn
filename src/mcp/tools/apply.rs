@@ -52,7 +52,7 @@ use crate::migration_plan::MIGRATION_PLAN_SCHEMA_VERSION;
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct ApplyParams {
     /// The `MigrationPlan` JSON object to apply.  Must have
-    /// `schema_version: 1`.  The plan emitted by `vault.repair` satisfies
+    /// `schema_version: 2`.  The plan emitted by `vault.repair` satisfies
     /// this structure and can be fed here directly.
     pub plan: serde_json::Value,
 
@@ -189,6 +189,7 @@ pub fn handle(
         parents: p.parents,
         verbose: false,
         refuse_as_report: true,
+        owner_index_options: scope.config().index_options.clone(),
     };
 
     // ── DRY-RUN (default): no lock, discard sink, applier in dry-run mode ───────
@@ -400,7 +401,7 @@ mod tests {
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [{
                 "kind": "append_to_section",
@@ -448,7 +449,7 @@ mod tests {
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [
                 {
@@ -517,7 +518,7 @@ mod tests {
         // Non-empty WRONG document_hash: hydration only fills empty hashes, so
         // this survives to the CAS check and refuses with stale-document-hash.
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [{
                 "kind": "add_frontmatter",
@@ -562,6 +563,61 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), doc);
     }
 
+    #[test]
+    fn owner_set_refusal_returns_failed_precondition_and_not_run_ops() {
+        use crate::apply_report::{ApplyOutcome, OpStatus, PreconditionStatus};
+
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-owner-refusal-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::fs::write(root.join("a.md"), "---\nstatus: todo\n---\n# A\n").unwrap();
+        std::fs::write(root.join("other/a.md"), "# Other A\n").unwrap();
+        let before = std::fs::read(root.join("a.md")).unwrap();
+
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let plan = serde_json::json!({
+            "schema_version": 2,
+            "vault_root": root.to_string(),
+            "preconditions": [{
+                "id": "a-owner",
+                "kind": "owner_set",
+                "selector": {"stem": "a"},
+                "expected_paths": ["a.md"]
+            }],
+            "operations": [{
+                "kind": "set_frontmatter",
+                "fields": {
+                    "path": "a.md", "field": "status",
+                    "expected_old_value": "todo", "new_value": "done"
+                }
+            }]
+        });
+
+        let report = handle(
+            &ctx,
+            ApplyParams {
+                plan,
+                confirm: true,
+                parents: false,
+            },
+        )
+        .expect("owner-set refusal must remain a structured report");
+
+        assert_eq!(report.schema_version, 3);
+        assert_eq!(report.outcome, ApplyOutcome::Refused);
+        assert_eq!(report.failed, 0, "no operation ran or failed");
+        assert_eq!(report.operations[0].status, OpStatus::NotRun);
+        assert_eq!(report.preconditions[0].status, PreconditionStatus::Failed);
+        assert_eq!(
+            report.preconditions[0].error.as_ref().unwrap().code,
+            "owner-set-mismatch"
+        );
+        assert_eq!(std::fs::read(root.join("a.md")).unwrap(), before);
+    }
+
     /// NRN-150/183 byte-identity-lie fix, MCP surface. A 2-op plan where op0
     /// (`set_frontmatter`) WRITES on disk in Phase A2, then op1
     /// (`delete_document` of an untracked path) fails a Phase-B precondition
@@ -585,7 +641,7 @@ mod tests {
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [
                 { "kind": "set_frontmatter", "fields": {
@@ -644,7 +700,7 @@ mod tests {
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [{
                 "kind": "add_frontmatter",
@@ -738,7 +794,7 @@ mod tests {
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [
                 { "kind": "set_frontmatter", "fields": {
@@ -791,7 +847,7 @@ mod tests {
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [{
                 "kind": "add_frontmatter",
@@ -931,16 +987,16 @@ mod tests {
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = || {
             serde_json::json!({
-                "schema_version": 1,
-                "vault_root": root.to_string(),
-                "operations": [{
-                    "kind": "create_document",
-                    "fields": {
-                        "path": "sub/dir/new.md",
-                        "new_value": { "frontmatter": {"type": "note"}, "body": "# New\n" }
-                    }
-                }]
-            })
+            "schema_version": 2,
+                    "vault_root": root.to_string(),
+                    "operations": [{
+                        "kind": "create_document",
+                        "fields": {
+                            "path": "sub/dir/new.md",
+                            "new_value": { "frontmatter": {"type": "note"}, "body": "# New\n" }
+                        }
+                    }]
+                })
         };
 
         // parents omitted → the missing parent dir is a PRE-WRITE refusal. NRN-231
@@ -1012,7 +1068,7 @@ mod tests {
 
         let ctx = VaultContext::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
-            "schema_version": 1,
+        "schema_version": 2,
             "vault_root": root.to_string(),
             "operations": [{
                 "kind": "create_document",

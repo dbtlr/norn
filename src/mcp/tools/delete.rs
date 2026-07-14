@@ -201,6 +201,7 @@ pub fn handle(
         vault_root: cwd.to_string(),
         generator: None,
         generated_at: None,
+        preconditions: Vec::new(),
         operations: vec![MigrationOp {
             kind: "delete_document".into(),
             id: None,
@@ -221,6 +222,7 @@ pub fn handle(
         parents: false,
         verbose: false,
         refuse_as_report: true,
+        owner_index_options: Default::default(),
     };
 
     // ── DRY-RUN (default): no lock, discard sink, applier in dry-run mode ───────

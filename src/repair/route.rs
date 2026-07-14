@@ -187,10 +187,11 @@ mod tests {
 
     fn sample_plan() -> MigrationPlan {
         MigrationPlan {
-            schema_version: 1,
+            schema_version: 2,
             vault_root: "/vault".into(),
             generator: None,
             generated_at: None,
+            preconditions: Vec::new(),
             operations: vec![],
             skipped: vec![],
             plan_footnote: None,

@@ -182,6 +182,7 @@ pub fn run_direct(
         parents: args.parents,
         verbose,
         refuse_as_report: false,
+        owner_index_options: loaded_config.index_options.clone(),
     };
 
     let argv: Vec<String> = std::env::args().collect();
