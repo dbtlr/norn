@@ -35,7 +35,7 @@ use crate::telemetry::event::{
     ATTR_STATUS, ATTR_TARGET,
 };
 use crate::telemetry::Event;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::{BTreeSet, HashMap};
 
@@ -113,6 +113,25 @@ pub(crate) fn apply_migration_plan(
     ctx: ApplyContext,
     sink: &mut crate::telemetry::EventSink,
 ) -> Result<ApplyReport> {
+    let vault_root = Utf8PathBuf::from(&plan.vault_root);
+    let canonical_plan_root = vault_root
+        .as_std_path()
+        .canonicalize()
+        .with_context(|| format!("cannot canonicalize vault root {vault_root}"))?;
+    let canonical_index_root = index
+        .root
+        .as_std_path()
+        .canonicalize()
+        .with_context(|| format!("cannot canonicalize vault root {}", index.root))?;
+    if canonical_plan_root != canonical_index_root {
+        return Err(anyhow::anyhow!(
+            crate::standards::apply::ApplyError::VaultRootMismatch {
+                plan: vault_root,
+                cwd: index.root.clone(),
+            }
+        ));
+    }
+
     // ------------------------------------------------------------------
     // Phase 1: expansion + provenance tracking
     // ------------------------------------------------------------------
@@ -153,7 +172,13 @@ pub(crate) fn apply_migration_plan(
     // Resolve every create template before the single owner-set barrier. The
     // concrete paths flow into the delegate, so allocation is performed once
     // under the mutation lock and cannot drift between checking and writing.
-    let operation_stems = resolve_create_paths(plan, index, &mut all_changes, &provenance)?;
+    let resolved_creates = resolve_create_paths(
+        plan,
+        index,
+        &canonical_index_root,
+        &mut all_changes,
+        &provenance,
+    )?;
     let owner_index = if plan.preconditions.is_empty() {
         None
     } else {
@@ -165,7 +190,8 @@ pub(crate) fn apply_migration_plan(
     let preconditions = evaluate_owner_preconditions(
         plan,
         owner_index.as_ref().unwrap_or(index),
-        &operation_stems,
+        &resolved_creates.stems_by_operation,
+        &resolved_creates.changes_by_stem,
     )?;
     if preconditions
         .iter()
@@ -238,7 +264,6 @@ pub(crate) fn apply_migration_plan(
     // Phase 3: delegation to today's applier
     // ------------------------------------------------------------------
 
-    let vault_root = Utf8PathBuf::from(&plan.vault_root);
     let repair_plan = RepairPlan {
         schema_version: REPAIR_PLAN_SCHEMA_VERSION,
         vault_root: vault_root.clone(),
@@ -453,6 +478,7 @@ fn evaluate_owner_preconditions(
     plan: &MigrationPlan,
     index: &GraphIndex,
     operation_stems: &HashMap<String, String>,
+    create_changes_by_stem: &HashMap<String, BTreeSet<usize>>,
 ) -> Result<Vec<ApplyReportPrecondition>> {
     let mut precondition_ids = BTreeSet::new();
     for precondition in &plan.preconditions {
@@ -553,10 +579,10 @@ fn evaluate_owner_preconditions(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // A pair of creates that claim the same derived stem can both observe an
-    // empty on-disk owner set. Refuse that internally contradictory plan at the
-    // same barrier instead of letting operation order manufacture duplicates.
-    let mut claims_by_stem: HashMap<String, Vec<usize>> = HashMap::new();
+    // A protected create and any other create producing the same derived stem
+    // can both observe an empty on-disk owner set. Refuse that internally
+    // contradictory plan at the same barrier instead of letting operation order
+    // manufacture duplicates.
     for (index, precondition) in plan.preconditions.iter().enumerate() {
         let PlanPrecondition::OwnerSet {
             selector:
@@ -568,24 +594,20 @@ fn evaluate_owner_preconditions(
         else {
             continue;
         };
-        if let Some(stem) = operation_stems.get(stem_from_operation) {
-            claims_by_stem
-                .entry(stem.to_ascii_lowercase())
-                .or_default()
-                .push(index);
-        }
-    }
-    for (stem, indexes) in claims_by_stem {
-        if indexes.len() < 2 {
+        let Some(stem) = operation_stems.get(stem_from_operation) else {
             continue;
-        }
-        for index in indexes {
+        };
+        let normalized_stem = stem.to_ascii_lowercase();
+        if create_changes_by_stem
+            .get(&normalized_stem)
+            .is_some_and(|changes| changes.len() > 1)
+        {
             let result = &mut results[index];
             result.status = PreconditionStatus::Failed;
             result.error = Some(crate::apply_report::ApplyError {
                 code: "owner-claim-conflict".to_string(),
                 message: format!(
-                    "owner-set precondition '{}' conflicts with another planned create for stem '{stem}'",
+                    "owner-set precondition '{}' conflicts with another planned create for stem '{normalized_stem}'",
                     result.id
                 ),
                 path: None,
@@ -624,9 +646,28 @@ fn owner_eq_value_matches(actual: &serde_json::Value, expected: &serde_json::Val
             strip_wikilink_brackets(actual) == strip_wikilink_brackets(expected)
         }
         (serde_json::Value::Number(actual), serde_json::Value::Number(expected)) => {
-            actual.as_f64() == expected.as_f64()
+            numbers_match(actual, expected)
         }
         _ => actual == expected,
+    }
+}
+
+fn numbers_match(actual: &serde_json::Number, expected: &serde_json::Number) -> bool {
+    let integer = |number: &serde_json::Number| {
+        number
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| number.as_u64().map(i128::from))
+    };
+    match (integer(actual), integer(expected)) {
+        (Some(actual), Some(expected)) => actual == expected,
+        (Some(integer), None) => expected.as_f64().is_some_and(|float| {
+            float.is_finite() && float.fract() == 0.0 && float as i128 == integer
+        }),
+        (None, Some(integer)) => actual.as_f64().is_some_and(|float| {
+            float.is_finite() && float.fract() == 0.0 && float as i128 == integer
+        }),
+        (None, None) => actual.as_f64() == expected.as_f64(),
     }
 }
 
@@ -634,13 +675,20 @@ fn strip_wikilink_brackets(value: &str) -> String {
     value.replace("[[", "").replace("]]", "")
 }
 
+struct ResolvedCreatePaths {
+    stems_by_operation: HashMap<String, String>,
+    changes_by_stem: HashMap<String, BTreeSet<usize>>,
+}
+
 fn resolve_create_paths(
     plan: &MigrationPlan,
     index: &GraphIndex,
+    canonical_root: &std::path::Path,
     changes: &mut [PlannedChange],
     provenance: &[usize],
-) -> Result<HashMap<String, String>> {
+) -> Result<ResolvedCreatePaths> {
     let mut stems = HashMap::new();
+    let mut create_changes_by_stem: HashMap<String, BTreeSet<usize>> = HashMap::new();
     let mut allocated_this_plan: Vec<Utf8PathBuf> = Vec::new();
     let mut operation_ids = BTreeSet::new();
     for operation in &plan.operations {
@@ -651,11 +699,12 @@ fn resolve_create_paths(
         }
     }
 
-    for (change, parent_index) in changes.iter_mut().zip(provenance) {
+    for (change_index, (change, parent_index)) in changes.iter_mut().zip(provenance).enumerate() {
         if change.operation != "create_document" {
             continue;
         }
         let path = change.path.clone();
+        crate::standards::apply::ensure_within_vault(&index.root, canonical_root, &path)?;
         let resolved = if crate::seq_alloc::has_seq(&path) {
             let dir = index
                 .root
@@ -684,12 +733,19 @@ fn resolve_create_paths(
         let stem = resolved
             .file_stem()
             .ok_or_else(|| anyhow::anyhow!("create_document path has no file stem: {resolved}"))?;
+        create_changes_by_stem
+            .entry(stem.to_ascii_lowercase())
+            .or_default()
+            .insert(change_index);
         if let Some(id) = plan.operations[*parent_index].id.as_ref() {
             stems.insert(id.clone(), stem.to_string());
         }
     }
 
-    Ok(stems)
+    Ok(ResolvedCreatePaths {
+        stems_by_operation: stems,
+        changes_by_stem: create_changes_by_stem,
+    })
 }
 
 fn build_owner_precondition_refusal_report(

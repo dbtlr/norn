@@ -503,3 +503,367 @@ fn successful_apply_reports_v3_passed_preconditions() {
         .unwrap()
         .contains("status: done"));
 }
+
+#[test]
+fn seq_create_rejects_parent_traversal_before_scanning_the_target_directory() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-containment-")
+        .tempdir()
+        .expect("tempdir");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+    std::fs::write(tmp.path().join("outside"), "not a directory").expect("outside sentinel");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [{
+            "id": "new-task-owner",
+            "kind": "owner_set",
+            "selector": { "stem_from_operation": "create-task" },
+            "expected_paths": []
+        }],
+        "operations": [{
+            "id": "create-task",
+            "kind": "create_document",
+            "fields": {
+                "path": "../outside/MMR-{{seq}}.md",
+                "new_value": {
+                    "frontmatter": {"type": "task"},
+                    "body": "# Task\n"
+                }
+            }
+        }]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "json"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(output.status.code(), Some(2));
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["code"], "containment-parent-traversal");
+}
+
+#[test]
+fn repeated_owner_checks_for_one_create_are_not_conflicting_create_claims() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-repeated-check-")
+        .tempdir()
+        .expect("tempdir");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [
+            {
+                "id": "first-check",
+                "kind": "owner_set",
+                "selector": { "stem_from_operation": "create-task" },
+                "expected_paths": []
+            },
+            {
+                "id": "second-check",
+                "kind": "owner_set",
+                "selector": { "stem_from_operation": "create-task" },
+                "expected_paths": []
+            }
+        ],
+        "operations": [{
+            "id": "create-task",
+            "kind": "create_document",
+            "fields": {
+                "path": "MMR-1.md",
+                "new_value": {
+                    "frontmatter": {"type": "task"},
+                    "body": "# Task\n"
+                }
+            }
+        }]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "json"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["preconditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|precondition| precondition["status"] == "passed"));
+    assert!(vault.join("MMR-1.md").exists());
+}
+
+#[test]
+fn protected_create_conflicts_with_any_sibling_create_of_the_same_stem() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-unprotected-conflict-")
+        .tempdir()
+        .expect("tempdir");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(vault.join("one")).expect("first directory");
+    std::fs::create_dir_all(vault.join("two")).expect("second directory");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [{
+            "id": "protected-owner",
+            "kind": "owner_set",
+            "selector": { "stem_from_operation": "protected-create" },
+            "expected_paths": []
+        }],
+        "operations": [
+            {
+                "id": "protected-create",
+                "kind": "create_document",
+                "fields": {
+                    "path": "one/MMR-1.md",
+                    "new_value": {"frontmatter": {"type": "task"}, "body": "# One\n"}
+                }
+            },
+            {
+                "kind": "create_document",
+                "fields": {
+                    "path": "two/MMR-1.md",
+                    "new_value": {"frontmatter": {"type": "task"}, "body": "# Two\n"}
+                }
+            }
+        ]
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "json"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(output.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["preconditions"][0]["error"]["code"],
+        "owner-claim-conflict"
+    );
+    assert!(report["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|operation| operation["status"] == "not-run"));
+    assert!(!vault.join("one/MMR-1.md").exists());
+    assert!(!vault.join("two/MMR-1.md").exists());
+}
+
+#[test]
+fn eq_selector_keeps_large_integer_identities_distinct() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-large-integer-")
+        .tempdir()
+        .expect("tempdir");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+    std::fs::write(
+        vault.join("actual.md"),
+        "---\nsequence: 9007199254740993\n---\n# Actual\n",
+    )
+    .expect("document");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [{
+            "id": "different-sequence",
+            "kind": "owner_set",
+            "selector": { "eq": ["sequence:9007199254740992"] },
+            "expected_paths": []
+        }],
+        "operations": []
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "json"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["preconditions"][0]["status"], "passed");
+    assert_eq!(
+        report["preconditions"][0]["actual_paths"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn eq_selector_does_not_round_large_integer_against_float() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-large-float-")
+        .tempdir()
+        .expect("tempdir");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+    std::fs::write(
+        vault.join("actual.md"),
+        "---\nsequence: 9007199254740993\n---\n# Actual\n",
+    )
+    .expect("document");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [{
+            "id": "different-sequence",
+            "kind": "owner_set",
+            "selector": { "eq": ["sequence:9007199254740992.0"] },
+            "expected_paths": []
+        }],
+        "operations": []
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "json"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["preconditions"][0]["status"], "passed");
+    assert_eq!(
+        report["preconditions"][0]["actual_paths"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn records_output_explains_owner_set_refusal() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-records-")
+        .tempdir()
+        .expect("tempdir");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(vault.join("other")).expect("vault");
+    std::fs::write(vault.join("a.md"), "# A\n").expect("owner");
+    std::fs::write(vault.join("other/a.md"), "# Other A\n").expect("collider");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [{
+            "id": "a-owner",
+            "kind": "owner_set",
+            "selector": { "stem": "a" },
+            "expected_paths": ["a.md"]
+        }],
+        "operations": []
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "records"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("apply refused\n"), "stdout: {stdout}");
+    assert!(stdout.contains("[failed] a-owner"), "stdout: {stdout}");
+    assert!(stdout.contains("owner-set-mismatch"), "stdout: {stdout}");
+}
+
+#[test]
+fn vault_root_mismatch_refuses_before_owner_set_evaluation() {
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-root-mismatch-")
+        .tempdir()
+        .expect("tempdir");
+    let current_vault = tmp.path().join("current");
+    let other_vault = tmp.path().join("other");
+    std::fs::create_dir_all(current_vault.join("duplicate")).expect("current vault");
+    std::fs::create_dir_all(&other_vault).expect("other vault");
+    std::fs::write(current_vault.join("a.md"), "# A\n").expect("owner");
+    std::fs::write(current_vault.join("duplicate/a.md"), "# Other A\n").expect("collider");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": other_vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [{
+            "id": "a-owner",
+            "kind": "owner_set",
+            "selector": { "stem": "a" },
+            "expected_paths": ["a.md"]
+        }],
+        "operations": []
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&current_vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "json"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(output.status.code(), Some(2));
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refusal["code"], "vault-root-mismatch");
+}
