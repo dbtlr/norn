@@ -449,10 +449,13 @@ fn warn_build_skew(version: &str) {
 /// enough to have been selected but no longer proves liveness/progress.
 #[cfg(unix)]
 pub(crate) fn warn_service_stalled() {
-    eprintln!(
-        "norn: service stopped responding or making writer progress — run `norn service restart`; using direct execution"
-    );
+    eprintln!("norn: {SERVICE_STALLED_REMEDY}; using direct execution");
 }
+
+/// Shared diagnosis and recovery instruction for every service-stall surface.
+#[cfg(unix)]
+const SERVICE_STALLED_REMEDY: &str =
+    "service stopped responding or making writer progress — run `norn service restart`";
 
 /// Upper bound on the control-frame response size. The pong is a few dozen
 /// bytes; this cap turns a peer that streams bytes without a newline into a
@@ -873,18 +876,41 @@ fn read_line_capped<R: std::io::BufRead>(
 ) -> std::io::Result<Option<Vec<u8>>> {
     use std::io::{Error, ErrorKind};
 
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
+    read_line_capped_with_gate(reader, cap, || {
         if std::time::Instant::now() >= deadline {
             return Err(Error::new(
                 ErrorKind::TimedOut,
                 "deadline exceeded before a full line arrived",
             ));
         }
+        Ok(())
+    })
+}
+
+/// The single framing implementation for control and request sockets. `gate`
+/// runs before every read attempt and every consumed buffer chunk, so callers
+/// can enforce either a cumulative deadline or a heartbeat cadence even while
+/// the peer continuously supplies partial bytes.
+#[cfg(unix)]
+fn read_line_capped_with_gate<R, E, F>(
+    reader: &mut R,
+    cap: usize,
+    mut gate: F,
+) -> Result<Option<Vec<u8>>, E>
+where
+    R: std::io::BufRead,
+    E: From<std::io::Error>,
+    F: FnMut() -> Result<(), E>,
+{
+    use std::io::{Error, ErrorKind};
+
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        gate()?;
         let available = match reader.fill_buf() {
             Ok(a) => a,
             // A per-read `SO_RCVTIMEO` expiry or a stray signal: loop and let the
-            // deadline check above decide whether to keep waiting.
+            // caller's gate decide whether to keep waiting.
             Err(e)
                 if matches!(
                     e.kind(),
@@ -893,7 +919,7 @@ fn read_line_capped<R: std::io::BufRead>(
             {
                 continue
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         };
         if available.is_empty() {
             // Clean EOF before any newline: a partial buffer is discarded.
@@ -917,50 +943,22 @@ fn read_line_capped<R: std::io::BufRead>(
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "line exceeded the byte cap without a newline",
-            ));
+            )
+            .into());
         }
     }
 }
 
-/// Request-path sibling of [`read_line_capped`]. A socket read timeout is a
-/// heartbeat opportunity rather than a call deadline: `wait.heartbeat()`
-/// decides whether the service is healthy enough to continue waiting.
+/// Request-path policy over the shared capped line reader. Heartbeats are
+/// cadence-gated independently of request-channel activity, so a partial-byte
+/// trickle cannot hide a dead control plane or stalled writer.
 #[cfg(unix)]
 fn read_line_capped_waiting<R: std::io::BufRead>(
     reader: &mut R,
     cap: usize,
     wait: &mut ServiceWait<'_>,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    use std::io::ErrorKind;
-
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
-        let available = match reader.fill_buf() {
-            Ok(available) => available,
-            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                wait.heartbeat()?;
-                continue;
-            }
-            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if available.is_empty() {
-            return Ok(None);
-        }
-        let budget = cap - buf.len() + 1;
-        let window = &available[..available.len().min(budget)];
-        if let Some(pos) = window.iter().position(|&byte| byte == b'\n') {
-            buf.extend_from_slice(&window[..pos]);
-            reader.consume(pos + 1);
-            return Ok(Some(buf));
-        }
-        let taken = window.len();
-        buf.extend_from_slice(window);
-        reader.consume(taken);
-        if buf.len() > cap {
-            anyhow::bail!("line exceeded the byte cap without a newline");
-        }
-    }
+    read_line_capped_with_gate(reader, cap, || wait.heartbeat_if_due())
 }
 
 /// Where a routed tool call failed, relative to the moment the `tools/call`
@@ -1041,9 +1039,18 @@ impl std::error::Error for CallToolError {
 /// A request wait ended because the scoped control plane could no longer prove
 /// service liveness or writer progress within the service stall budget.
 #[cfg(unix)]
-#[derive(Debug, thiserror::Error)]
-#[error("service stopped responding or making writer progress; run `norn service restart`")]
+#[derive(Debug)]
 struct ServiceStalledError;
+
+#[cfg(unix)]
+impl std::fmt::Display for ServiceStalledError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(SERVICE_STALLED_REMEDY)
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for ServiceStalledError {}
 
 /// Request-local interpretation of scoped pongs (NRN-255). The client's own
 /// monotonic clock owns elapsed time; the daemon contributes only the opaque
@@ -1054,6 +1061,7 @@ struct ServiceWait<'a> {
     vault_root: &'a Utf8Path,
     stall_budget: std::time::Duration,
     heartbeat_timeout: std::time::Duration,
+    next_heartbeat_at: std::time::Instant,
     last_pong_at: std::time::Instant,
     busy_progress: Option<(u64, std::time::Instant)>,
 }
@@ -1066,20 +1074,33 @@ impl<'a> ServiceWait<'a> {
         stall_budget: std::time::Duration,
         heartbeat_timeout: std::time::Duration,
     ) -> Self {
+        let now = std::time::Instant::now();
         Self {
             socket_path,
             vault_root,
             stall_budget,
             heartbeat_timeout,
-            last_pong_at: std::time::Instant::now(),
+            next_heartbeat_at: now + heartbeat_timeout,
+            last_pong_at: now,
             busy_progress: None,
         }
+    }
+
+    /// Probe only when the heartbeat cadence has elapsed. Called on every line
+    /// reader loop, including loops that consumed request bytes rather than
+    /// blocking in the socket.
+    fn heartbeat_if_due(&mut self) -> anyhow::Result<()> {
+        if std::time::Instant::now() < self.next_heartbeat_at {
+            return Ok(());
+        }
+        self.heartbeat()
     }
 
     /// Observe one heartbeat after the request socket's poll interval elapses.
     /// A healthy idle writer is enough proof to keep waiting; only busy writers
     /// are required to advance their sequence.
     fn heartbeat(&mut self) -> anyhow::Result<()> {
+        self.next_heartbeat_at = std::time::Instant::now() + self.heartbeat_timeout;
         // Re-check ownership before every scoped ping: a service socket can be
         // replaced after the request connection was established, and the vault
         // root must never be disclosed to an untrusted replacement.
@@ -1893,11 +1914,11 @@ mod tests {
         client.join().unwrap();
     }
 
-    /// NRN-255: absence of a compatible scoped pong for the stall budget is a
-    /// service stall. Before the tools/call send boundary that remains safe to
-    /// retry through Direct.
+    /// NRN-255: request-channel activity must not suppress the control-plane
+    /// heartbeat. Even while a daemon dribbles an incomplete frame, absence of
+    /// a compatible scoped pong for the stall budget is a pre-send stall.
     #[test]
-    fn call_tool_classifies_missing_pongs_before_send() {
+    fn call_tool_classifies_missing_pongs_despite_request_bytes_before_send() {
         use std::sync::mpsc;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1921,13 +1942,24 @@ mod tests {
             result_tx.send(result).unwrap();
         });
 
-        let (request, _) = listener.accept().unwrap();
+        let (mut request, _) = listener.accept().unwrap();
         let mut request_reader = BufReader::new(request.try_clone().unwrap());
         let mut hello = String::new();
         request_reader.read_line(&mut hello).unwrap();
-        // Keep the request connection open without answering `ready`.
+        // Keep the request connection active without ever completing `ready`.
+        // Every byte arrives inside the socket poll interval, so a client that
+        // heartbeats only after read timeouts will miss the stall indefinitely.
+        let dribbler = thread::spawn(move || {
+            for _ in 0..400 {
+                if request.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
 
         listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         let error = loop {
             match listener.accept() {
                 Ok((conn, _)) => {
@@ -1942,6 +1974,10 @@ mod tests {
                     if let Ok(result) = result_rx.try_recv() {
                         break result.expect_err("missing pongs must fail the routed call");
                     }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "request bytes suppressed heartbeat stall classification"
+                    );
                     thread::yield_now();
                 }
                 Err(error) => panic!("heartbeat accept failed: {error}"),
@@ -1951,6 +1987,7 @@ mod tests {
         assert_eq!(error.phase, CallPhase::PreSend);
         assert!(error.is_service_stalled());
         drop(request_reader);
+        dribbler.join().unwrap();
         client.join().unwrap();
     }
 

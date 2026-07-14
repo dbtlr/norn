@@ -205,8 +205,8 @@ A few shapes are deliberately excluded from routing, by design, regardless of wh
 A routed call has **no overall call timeout**. While its request socket is waiting for a response, the client heartbeats the vault-scoped control plane and interprets `writer_progress` on its own monotonic clock:
 
 - A responsive idle writer is healthy. Its sequence does not need to change.
-- A busy writer whose sequence advances is making progress, so the client waits indefinitely — a legitimate cold open or large mutation is not cut off by a fixed per-call deadline.
-- No compatible scoped pong for five seconds, or a busy writer whose sequence is unchanged for five seconds, classifies the service as stalled. This is the one service-level stall budget; sequence changes reset it.
+- A busy writer whose sequence advances is making progress, so the client waits indefinitely. A long chunked operation may outlive five seconds in total as long as it keeps publishing progress.
+- No compatible scoped pong for five seconds, or a busy writer whose sequence is unchanged for five seconds, classifies the service as stalled. This is the one service-level stall budget; sequence changes reset it. An indivisible writer step that publishes no transition inside the budget is therefore classified as stalled even if it is merely slow.
 
 Non-writer tool-body progress is deliberately outside this signal. If scoped pongs stay healthy and the writer stays idle, the client continues waiting even though the tool body itself has no separate progress stamp.
 
