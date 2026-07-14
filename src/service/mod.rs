@@ -21,6 +21,9 @@
 //! 2. handshake on the control path, short timeout
 //!      prompt pong  -> Route(conn)        # a live authority answered
 //!      timeout/refused/garbage -> Direct  # hung or dead daemon => fall back
+//! 3. while the request waits, heartbeat the scoped control path
+//!      idle or busy+advancing -> keep waiting
+//!      no pong or busy+stalled -> Direct if safe; post-send uncertainty otherwise
 //! ```
 //!
 //! Two guards keep this honest and cheap: **socket-existence is the no-service
@@ -54,9 +57,10 @@
 //! [`ServiceClient::call_tool_structured_phased`] sends the `hello` vault preamble and
 //! runs the MCP `initialize` + `tools/call` exchange over the same stream. The
 //! daemon that answers is NRN-93. The routing seam in `src/lib.rs` decides which
-//! commands actually route (only `count` today — see `try_route_read`); every
-//! other read, and every routing failure, falls through to a verified direct
-//! open, which always preserves the trust invariant.
+//! commands actually route; every routing failure that is safe to retry falls
+//! through to a verified direct open, which always preserves the trust
+//! invariant. Committing mutations retain the send boundary and never retry
+//! after the tool call crosses to the daemon.
 //!
 //! Unix-domain sockets are Unix-only; on non-Unix targets [`probe`] is a
 //! compile-time `Direct`, so the crate still builds everywhere.
@@ -266,27 +270,17 @@ pub fn handshake_timeout() -> std::time::Duration {
     }
 }
 
-/// The OVERALL wall-clock budget for one routed read (NRN-94 review F3).
+/// The ONE service-level stall budget (NRN-255).
 ///
-/// This is a *tight overall deadline*, not a generous per-read timeout: connect,
-/// the `hello`/`ready` preamble, MCP `initialize`, and the `tools/call` all share
-/// it, so a routed read costs at most this before falling back to a verified
-/// direct open. The old 30s per-read timeout let a daemon that passed the 250ms
-/// liveness ping but then wedged in its serve path stall EVERY count for 30s,
-/// while direct execution costs ~50ms.
-///
-/// 5s is the deliberate balance: a genuinely cold daemon open (first touch,
-/// integrity check, index build) can legitimately take a second or two and
-/// should still route; but if it exceeds 5s, falling back to Direct is nearly
-/// free because Direct pays a comparable cold-open cost anyway — and a truly
-/// wedged daemon then costs at most 5s, once per invocation, instead of 30s.
+/// This is not a per-call deadline. A routed request may run indefinitely while
+/// the scoped control plane stays responsive and a busy writer's sequence keeps
+/// advancing. The budget applies only to absence of a compatible scoped pong or
+/// to a busy writer whose sequence stops advancing.
 #[cfg(unix)]
-const ROUTED_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+const SERVICE_STALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Per-read `SO_RCVTIMEO` for the request path: short enough that the reader
-/// wakes to re-check the [`ROUTED_READ_BUDGET`] deadline, bounding total
-/// overshoot to one interval, without the per-read `setsockopt` churn that trips
-/// EINVAL on macOS under load (so we set it ONCE, not per read).
+/// Request-socket poll cadence. This is only how often a blocked response read
+/// wakes to consult the scoped control plane; it is not a call timeout.
 #[cfg(unix)]
 const REQUEST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -449,6 +443,19 @@ fn warn_version_skew(server: &str, client: &str) {
 fn warn_build_skew(version: &str) {
     eprintln!("norn: service is a different build of v{version} — restart the norn serve daemon");
 }
+
+/// The actionable notice for a heartbeat-classified service stall. Unlike an
+/// ordinary routed-read fallback, this is always visible: the daemon is alive
+/// enough to have been selected but no longer proves liveness/progress.
+#[cfg(unix)]
+pub(crate) fn warn_service_stalled() {
+    eprintln!("norn: {SERVICE_STALLED_REMEDY}; using direct execution");
+}
+
+/// Shared diagnosis and recovery instruction for every service-stall surface.
+#[cfg(unix)]
+const SERVICE_STALLED_REMEDY: &str =
+    "service stopped responding or making writer progress — run `norn service restart`";
 
 /// Upper bound on the control-frame response size. The pong is a few dozen
 /// bytes; this cap turns a peer that streams bytes without a newline into a
@@ -869,18 +876,41 @@ fn read_line_capped<R: std::io::BufRead>(
 ) -> std::io::Result<Option<Vec<u8>>> {
     use std::io::{Error, ErrorKind};
 
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
+    read_line_capped_with_gate(reader, cap, || {
         if std::time::Instant::now() >= deadline {
             return Err(Error::new(
                 ErrorKind::TimedOut,
                 "deadline exceeded before a full line arrived",
             ));
         }
+        Ok(())
+    })
+}
+
+/// The single framing implementation for control and request sockets. `gate`
+/// runs before every read attempt and every consumed buffer chunk, so callers
+/// can enforce either a cumulative deadline or a heartbeat cadence even while
+/// the peer continuously supplies partial bytes.
+#[cfg(unix)]
+fn read_line_capped_with_gate<R, E, F>(
+    reader: &mut R,
+    cap: usize,
+    mut gate: F,
+) -> Result<Option<Vec<u8>>, E>
+where
+    R: std::io::BufRead,
+    E: From<std::io::Error>,
+    F: FnMut() -> Result<(), E>,
+{
+    use std::io::{Error, ErrorKind};
+
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        gate()?;
         let available = match reader.fill_buf() {
             Ok(a) => a,
             // A per-read `SO_RCVTIMEO` expiry or a stray signal: loop and let the
-            // deadline check above decide whether to keep waiting.
+            // caller's gate decide whether to keep waiting.
             Err(e)
                 if matches!(
                     e.kind(),
@@ -889,7 +919,7 @@ fn read_line_capped<R: std::io::BufRead>(
             {
                 continue
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         };
         if available.is_empty() {
             // Clean EOF before any newline: a partial buffer is discarded.
@@ -913,9 +943,22 @@ fn read_line_capped<R: std::io::BufRead>(
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "line exceeded the byte cap without a newline",
-            ));
+            )
+            .into());
         }
     }
+}
+
+/// Request-path policy over the shared capped line reader. Heartbeats are
+/// cadence-gated independently of request-channel activity, so a partial-byte
+/// trickle cannot hide a dead control plane or stalled writer.
+#[cfg(unix)]
+fn read_line_capped_waiting<R: std::io::BufRead>(
+    reader: &mut R,
+    cap: usize,
+    wait: &mut ServiceWait<'_>,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    read_line_capped_with_gate(reader, cap, || wait.heartbeat_if_due())
 }
 
 /// Where a routed tool call failed, relative to the moment the `tools/call`
@@ -970,6 +1013,13 @@ impl CallToolError {
             source: source.into(),
         }
     }
+
+    /// Whether this failure came from the service-level heartbeat contract.
+    /// The routing seam uses this to emit the actionable restart note even
+    /// without `--verbose`; ordinary transport failures stay silent.
+    pub fn is_service_stalled(&self) -> bool {
+        self.source.downcast_ref::<ServiceStalledError>().is_some()
+    }
 }
 
 #[cfg(unix)]
@@ -983,6 +1033,115 @@ impl std::fmt::Display for CallToolError {
 impl std::error::Error for CallToolError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.source.as_ref())
+    }
+}
+
+/// A request wait ended because the scoped control plane could no longer prove
+/// service liveness or writer progress within the service stall budget.
+#[cfg(unix)]
+#[derive(Debug)]
+struct ServiceStalledError;
+
+#[cfg(unix)]
+impl std::fmt::Display for ServiceStalledError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(SERVICE_STALLED_REMEDY)
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for ServiceStalledError {}
+
+/// Request-local interpretation of scoped pongs (NRN-255). The client's own
+/// monotonic clock owns elapsed time; the daemon contributes only the opaque
+/// writer sequence.
+#[cfg(unix)]
+struct ServiceWait<'a> {
+    socket_path: &'a Utf8Path,
+    vault_root: &'a Utf8Path,
+    stall_budget: std::time::Duration,
+    heartbeat_timeout: std::time::Duration,
+    next_heartbeat_at: std::time::Instant,
+    last_pong_at: std::time::Instant,
+    busy_progress: Option<(u64, std::time::Instant)>,
+}
+
+#[cfg(unix)]
+impl<'a> ServiceWait<'a> {
+    fn new(
+        socket_path: &'a Utf8Path,
+        vault_root: &'a Utf8Path,
+        stall_budget: std::time::Duration,
+        heartbeat_timeout: std::time::Duration,
+    ) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            socket_path,
+            vault_root,
+            stall_budget,
+            heartbeat_timeout,
+            next_heartbeat_at: now + heartbeat_timeout,
+            last_pong_at: now,
+            busy_progress: None,
+        }
+    }
+
+    /// Probe only when the heartbeat cadence has elapsed. Called on every line
+    /// reader loop, including loops that consumed request bytes rather than
+    /// blocking in the socket.
+    fn heartbeat_if_due(&mut self) -> anyhow::Result<()> {
+        if std::time::Instant::now() < self.next_heartbeat_at {
+            return Ok(());
+        }
+        self.heartbeat()
+    }
+
+    /// Observe one heartbeat after the request socket's poll interval elapses.
+    /// A healthy idle writer is enough proof to keep waiting; only busy writers
+    /// are required to advance their sequence.
+    fn heartbeat(&mut self) -> anyhow::Result<()> {
+        self.next_heartbeat_at = std::time::Instant::now() + self.heartbeat_timeout;
+        // Re-check ownership before every scoped ping: a service socket can be
+        // replaced after the request connection was established, and the vault
+        // root must never be disclosed to an untrusted replacement.
+        let pong = socket_is_trusted(self.socket_path)
+            .then(|| {
+                probe_status_socket(
+                    self.socket_path,
+                    self.heartbeat_timeout,
+                    Some(self.vault_root),
+                )
+            })
+            .flatten()
+            .filter(|pong| {
+                pong.version == env!("CARGO_PKG_VERSION")
+                    && pong.build.as_deref() == Some(env!("NORN_BUILD_ID"))
+                    && pong.writer_progress.is_some()
+            });
+        let now = std::time::Instant::now();
+
+        let Some(progress) = pong.and_then(|pong| pong.writer_progress) else {
+            if now.duration_since(self.last_pong_at) >= self.stall_budget {
+                return Err(ServiceStalledError.into());
+            }
+            return Ok(());
+        };
+
+        self.last_pong_at = now;
+        if !progress.busy {
+            self.busy_progress = None;
+            return Ok(());
+        }
+
+        match self.busy_progress {
+            Some((sequence, since)) if sequence == progress.sequence => {
+                if now.duration_since(since) >= self.stall_budget {
+                    return Err(ServiceStalledError.into());
+                }
+            }
+            _ => self.busy_progress = Some((progress.sequence, now)),
+        }
+        Ok(())
     }
 }
 
@@ -1026,10 +1185,11 @@ impl PostSendUncertainError {
 ///
 /// A [`ServiceClient`] is proof that a daemon answered the liveness ping on a
 /// *separate* control connection. This opens a fresh REQUEST connection to the
-/// same socket — under the tight overall [`ROUTED_READ_BUDGET`] deadline, not the
-/// probe's short handshake timeout — verifies the socket is ours, sends the
-/// `hello` vault preamble, runs the MCP `initialize` + `tools/call` exchange as
-/// raw newline-delimited JSON-RPC, and returns the tool's `structuredContent`.
+/// same socket, verifies the socket is ours, sends the `hello` vault preamble,
+/// runs the MCP `initialize` + `tools/call` exchange as raw newline-delimited
+/// JSON-RPC, and returns the tool's `structuredContent`. Blocked response reads
+/// consult the scoped control plane; [`SERVICE_STALL_BUDGET`] measures missing
+/// pongs or stalled busy-writer progress, never total call duration.
 ///
 /// Every failure — a socket that fails the ownership check (a squatter on the
 /// well-known path), connect refused (daemon died in the probe→request gap), a
@@ -1070,6 +1230,25 @@ impl ServiceClient {
         arguments: serde_json::Value,
         on_tool_error: OnToolError,
     ) -> Result<serde_json::Value, CallToolError> {
+        self.call_tool_structured_phased_with_wait_budget(
+            vault_root,
+            tool,
+            arguments,
+            on_tool_error,
+            SERVICE_STALL_BUDGET,
+            REQUEST_POLL_INTERVAL,
+        )
+    }
+
+    fn call_tool_structured_phased_with_wait_budget(
+        &self,
+        vault_root: &Utf8Path,
+        tool: &str,
+        arguments: serde_json::Value,
+        on_tool_error: OnToolError,
+        stall_budget: std::time::Duration,
+        poll_interval: std::time::Duration,
+    ) -> Result<serde_json::Value, CallToolError> {
         use std::io::BufReader;
 
         // ── PRE-SEND: nothing below has written the tool call yet, so every
@@ -1085,27 +1264,28 @@ impl ServiceClient {
             )));
         }
 
-        // One overall wall-clock deadline for the whole routed read (F3): a
-        // daemon that passed the 250ms liveness ping but then wedges costs at
-        // most the budget, not the old 30s. Every read below shares this deadline.
-        let deadline = std::time::Instant::now() + ROUTED_READ_BUDGET;
-
-        // Fresh request connection, bounded by the same budget.
-        let stream = connect_control(&self.socket_path, ROUTED_READ_BUDGET)
-            .map_err(CallToolError::pre_send)?;
-        // `SO_RCVTIMEO` is the per-read poll interval (short, so the reader wakes
-        // to re-check the deadline); the deadline bounds the cumulative time. Set
-        // once — per-read `setsockopt` trips EINVAL on macOS under load.
+        // Connect and writes are bounded by the same service-level stall budget
+        // that governs heartbeat health. Response reads have no call deadline.
+        let stream =
+            connect_control(&self.socket_path, stall_budget).map_err(CallToolError::pre_send)?;
+        // `SO_RCVTIMEO` is only a heartbeat cadence. Set once — per-read
+        // `setsockopt` trips EINVAL on macOS under load.
         stream
-            .set_read_timeout(Some(REQUEST_POLL_INTERVAL))
+            .set_read_timeout(Some(poll_interval))
             .map_err(CallToolError::pre_send)?;
         stream
-            .set_write_timeout(Some(ROUTED_READ_BUDGET))
+            .set_write_timeout(Some(stall_budget))
             .map_err(CallToolError::pre_send)?;
         // Read via a BufReader over `&stream`; write via `&stream` directly. Both
         // are shared borrows, so no `try_clone` (whose dup'd-fd churn trips the
         // macOS `SO_RCVTIMEO` EINVAL noted on the probe path).
         let mut reader = BufReader::new(&stream);
+        let mut wait = ServiceWait::new(
+            &self.socket_path,
+            vault_root,
+            stall_budget,
+            poll_interval.min(stall_budget),
+        );
 
         // 1. Vault preamble: name the vault for this connection, then require a
         //    `ready` frame. Anything else (an `error` frame, EOF, garbage) means
@@ -1115,7 +1295,7 @@ impl ServiceClient {
             vault_root: vault_root.as_str().to_string(),
         };
         write_json_line(&stream, &hello).map_err(CallToolError::pre_send)?;
-        let ready = read_json_value(&mut reader, deadline)
+        let ready = read_json_value_waiting(&mut reader, &mut wait)
             .map_err(CallToolError::pre_send)?
             .ok_or_else(|| {
                 CallToolError::pre_send(anyhow::anyhow!("daemon closed before answering hello"))
@@ -1163,8 +1343,8 @@ impl ServiceClient {
             }),
         );
         write_json_line(&stream, &init).map_err(CallToolError::pre_send)?;
-        let init_resp =
-            read_rpc_response(&mut reader, 1, deadline).map_err(CallToolError::pre_send)?;
+        let init_resp = read_rpc_response_waiting(&mut reader, 1, &mut wait)
+            .map_err(CallToolError::pre_send)?;
         if let Some(err) = init_resp.get("error") {
             return Err(CallToolError::pre_send(anyhow::anyhow!(
                 "MCP initialize failed: {err}"
@@ -1188,7 +1368,8 @@ impl ServiceClient {
         // mutation safety must not couple to a separate component's parser
         // behavior, so the conservative tag holds across daemon changes.
         write_json_line(&stream, &call).map_err(CallToolError::post_send)?;
-        let resp = read_rpc_response(&mut reader, 2, deadline).map_err(CallToolError::post_send)?;
+        let resp = read_rpc_response_waiting(&mut reader, 2, &mut wait)
+            .map_err(CallToolError::post_send)?;
         if let Some(err) = resp.get("error") {
             return Err(CallToolError::post_send(anyhow::anyhow!(
                 "tool '{tool}' failed on the daemon: {err}"
@@ -1290,51 +1471,45 @@ fn write_json_line<T: serde::Serialize>(
     stream.flush()
 }
 
-/// Read one newline-delimited JSON value, skipping blank / non-JSON noise lines,
-/// bounded by [`MAX_REQUEST_FRAME_BYTES`], the `deadline`, and
-/// [`MAX_SKIPPED_FRAMES`] (NRN-94 review F2 — the skip loop was previously
-/// unbounded). Returns `Ok(None)` on EOF before any JSON value.
+/// Request-path JSON reader governed by [`ServiceWait`] instead of an absolute
+/// per-call deadline.
 #[cfg(unix)]
-fn read_json_value<R: std::io::BufRead>(
+fn read_json_value_waiting<R: std::io::BufRead>(
     reader: &mut R,
-    deadline: std::time::Instant,
+    wait: &mut ServiceWait<'_>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     for _ in 0..MAX_SKIPPED_FRAMES {
-        let Some(line) = read_line_capped(reader, MAX_REQUEST_FRAME_BYTES, deadline)? else {
+        let Some(line) = read_line_capped_waiting(reader, MAX_REQUEST_FRAME_BYTES, wait)? else {
             return Ok(None);
         };
         let trimmed = line
             .iter()
-            .position(|b| !b.is_ascii_whitespace())
+            .position(|byte| !byte.is_ascii_whitespace())
             .map(|start| &line[start..])
             .unwrap_or(&[]);
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(trimmed) {
-            return Ok(Some(v));
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(trimmed) {
+            return Ok(Some(value));
         }
-        // Non-JSON line on the wire: skip and keep reading (bounded by the loop).
     }
     anyhow::bail!("too many non-JSON frames before a JSON value")
 }
 
-/// Read JSON-RPC responses until one matches `id` (skipping notifications and
-/// out-of-order frames), bounded by the `deadline` (F3) and a frame count so a
-/// chatty peer cannot loop forever.
+/// Request-path response reader governed by the service heartbeat contract.
 #[cfg(unix)]
-fn read_rpc_response<R: std::io::BufRead>(
+fn read_rpc_response_waiting<R: std::io::BufRead>(
     reader: &mut R,
     id: u32,
-    deadline: std::time::Instant,
+    wait: &mut ServiceWait<'_>,
 ) -> anyhow::Result<serde_json::Value> {
     for _ in 0..10_000 {
-        let v = read_json_value(reader, deadline)?
+        let value = read_json_value_waiting(reader, wait)?
             .ok_or_else(|| anyhow::anyhow!("daemon closed before answering request {id}"))?;
-        if v.get("id").and_then(|i| i.as_u64()) == Some(u64::from(id)) {
-            return Ok(v);
+        if value.get("id").and_then(|value| value.as_u64()) == Some(u64::from(id)) {
+            return Ok(value);
         }
-        // A notification (no id) or a response to a different id: keep reading.
     }
     anyhow::bail!("no JSON-RPC response for request {id}")
 }
@@ -1468,6 +1643,352 @@ mod tests {
         assert_eq!(structured, serde_json::json!({"total": 3}));
         assert_eq!(rx.recv().unwrap(), "/vaults/atlas", "hello named the vault");
         server.join().unwrap();
+    }
+
+    /// NRN-255: the service stall budget measures lack of writer progress; it
+    /// is not a per-call deadline. A request that outlives the budget still
+    /// succeeds while scoped pongs report a busy writer with an advancing
+    /// sequence.
+    #[test]
+    fn call_tool_waits_past_the_stall_budget_while_writer_advances() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+        let vault_root = Utf8PathBuf::from("/vaults/atlas");
+        let (finish_tx, finish_rx) = mpsc::channel::<()>();
+
+        let server = thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let request = thread::spawn(move || {
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut writer = conn;
+
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::json!({
+                        "norn_control": "ready",
+                        "protocol": CONTROL_PROTOCOL,
+                        "version": env!("CARGO_PKG_VERSION"),
+                    })
+                )
+                .unwrap();
+                writer.flush().unwrap();
+
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+                )
+                .unwrap();
+                writer.flush().unwrap();
+
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                finish_rx.recv().unwrap();
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {
+                            "structuredContent": {"total": 3},
+                            "isError": false,
+                        }
+                    })
+                )
+                .unwrap();
+                writer.flush().unwrap();
+            });
+
+            for sequence in 1..=4 {
+                let (conn, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let ping: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                assert_eq!(ping["vault_root"], "/vaults/atlas");
+                let mut writer = conn;
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&ControlFrame::Pong {
+                        protocol: CONTROL_PROTOCOL,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        build: Some(env!("NORN_BUILD_ID").to_string()),
+                        pid: Some(std::process::id()),
+                        uptime_secs: Some(1),
+                        serving: Some(ServingState::Ready),
+                        writer_progress: Some(WriterProgress {
+                            busy: true,
+                            sequence,
+                        }),
+                    })
+                    .unwrap()
+                )
+                .unwrap();
+                writer.flush().unwrap();
+            }
+            finish_tx.send(()).unwrap();
+            request.join().unwrap();
+        });
+
+        let client = ServiceClient {
+            socket_path: path.clone(),
+        };
+        let structured = client
+            .call_tool_structured_phased_with_wait_budget(
+                &vault_root,
+                "vault.count",
+                serde_json::json!({}),
+                OnToolError::FallBackDirect,
+                std::time::Duration::from_millis(35),
+                std::time::Duration::from_millis(15),
+            )
+            .expect("advancing writer progress must keep the request alive");
+
+        assert_eq!(structured, serde_json::json!({"total": 3}));
+        server.join().unwrap();
+    }
+
+    /// NRN-255: an idle writer does not owe sequence progress. Repeated scoped
+    /// pongs keep the service healthy even when the same sequence is observed
+    /// for longer than the stall budget.
+    #[test]
+    fn idle_writer_pongs_remain_healthy_without_sequence_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+        let server = thread::spawn(move || {
+            for _ in 0..4 {
+                let (conn, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut writer = conn;
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&ControlFrame::Pong {
+                        protocol: CONTROL_PROTOCOL,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        build: Some(env!("NORN_BUILD_ID").to_string()),
+                        pid: Some(std::process::id()),
+                        uptime_secs: Some(1),
+                        serving: Some(ServingState::Ready),
+                        writer_progress: Some(WriterProgress {
+                            busy: false,
+                            sequence: 12,
+                        }),
+                    })
+                    .unwrap()
+                )
+                .unwrap();
+                writer.flush().unwrap();
+            }
+        });
+
+        let mut wait = ServiceWait::new(
+            &path,
+            Utf8Path::new("/vaults/atlas"),
+            std::time::Duration::from_millis(35),
+            std::time::Duration::from_millis(15),
+        );
+        let start = std::time::Instant::now();
+        for _ in 0..4 {
+            thread::sleep(std::time::Duration::from_millis(15));
+            wait.heartbeat()
+                .expect("a responsive idle writer remains healthy");
+        }
+        assert!(start.elapsed() > std::time::Duration::from_millis(35));
+        server.join().unwrap();
+    }
+
+    /// NRN-255 + NRN-228: an unchanged busy sequence eventually classifies the
+    /// service as stalled, but a tool call already sent remains post-send
+    /// uncertain rather than becoming eligible for a Direct retry.
+    #[test]
+    fn call_tool_classifies_stalled_busy_writer_after_send() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+        let client_path = path.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let client = thread::spawn(move || {
+            let client = ServiceClient {
+                socket_path: client_path,
+            };
+            let result = client.call_tool_structured_phased_with_wait_budget(
+                Utf8Path::new("/vaults/atlas"),
+                "vault.set",
+                serde_json::json!({}),
+                OnToolError::AcceptWithPayload,
+                std::time::Duration::from_millis(60),
+                std::time::Duration::from_millis(15),
+            );
+            result_tx.send(result).unwrap();
+        });
+
+        let (request, _) = listener.accept().unwrap();
+        let mut request_reader = BufReader::new(request.try_clone().unwrap());
+        let mut request_writer = request;
+        let mut line = String::new();
+        request_reader.read_line(&mut line).unwrap();
+        writeln!(
+            request_writer,
+            "{}",
+            serde_json::json!({
+                "norn_control": "ready",
+                "protocol": CONTROL_PROTOCOL,
+                "version": env!("CARGO_PKG_VERSION"),
+            })
+        )
+        .unwrap();
+        request_writer.flush().unwrap();
+        line.clear();
+        request_reader.read_line(&mut line).unwrap();
+        writeln!(
+            request_writer,
+            "{}",
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}})
+        )
+        .unwrap();
+        request_writer.flush().unwrap();
+        line.clear();
+        request_reader.read_line(&mut line).unwrap();
+
+        listener.set_nonblocking(true).unwrap();
+        let error = loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    let mut reader = BufReader::new(conn.try_clone().unwrap());
+                    let mut ping = String::new();
+                    reader.read_line(&mut ping).unwrap();
+                    let mut writer = conn;
+                    writeln!(
+                        writer,
+                        "{}",
+                        serde_json::to_string(&ControlFrame::Pong {
+                            protocol: CONTROL_PROTOCOL,
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                            build: Some(env!("NORN_BUILD_ID").to_string()),
+                            pid: Some(std::process::id()),
+                            uptime_secs: Some(1),
+                            serving: Some(ServingState::Ready),
+                            writer_progress: Some(WriterProgress {
+                                busy: true,
+                                sequence: 9,
+                            }),
+                        })
+                        .unwrap()
+                    )
+                    .unwrap();
+                    writer.flush().unwrap();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Ok(result) = result_rx.try_recv() {
+                        break result.expect_err("a stalled writer must fail the routed call");
+                    }
+                    thread::yield_now();
+                }
+                Err(error) => panic!("heartbeat accept failed: {error}"),
+            }
+        };
+
+        assert_eq!(error.phase, CallPhase::PostSend);
+        assert!(
+            error.is_service_stalled(),
+            "the failure must retain the heartbeat classification: {error}"
+        );
+        client.join().unwrap();
+    }
+
+    /// NRN-255: request-channel activity must not suppress the control-plane
+    /// heartbeat. Even while a daemon dribbles an incomplete frame, absence of
+    /// a compatible scoped pong for the stall budget is a pre-send stall.
+    #[test]
+    fn call_tool_classifies_missing_pongs_despite_request_bytes_before_send() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+        let client_path = path.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let client = thread::spawn(move || {
+            let client = ServiceClient {
+                socket_path: client_path,
+            };
+            let result = client.call_tool_structured_phased_with_wait_budget(
+                Utf8Path::new("/vaults/atlas"),
+                "vault.set",
+                serde_json::json!({}),
+                OnToolError::AcceptWithPayload,
+                std::time::Duration::from_millis(60),
+                std::time::Duration::from_millis(15),
+            );
+            result_tx.send(result).unwrap();
+        });
+
+        let (mut request, _) = listener.accept().unwrap();
+        let mut request_reader = BufReader::new(request.try_clone().unwrap());
+        let mut hello = String::new();
+        request_reader.read_line(&mut hello).unwrap();
+        // Keep the request connection active without ever completing `ready`.
+        // Every byte arrives inside the socket poll interval, so a client that
+        // heartbeats only after read timeouts will miss the stall indefinitely.
+        let dribbler = thread::spawn(move || {
+            for _ in 0..400 {
+                if request.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let error = loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    let mut reader = BufReader::new(conn);
+                    let mut ping = String::new();
+                    reader.read_line(&mut ping).unwrap();
+                    // Drop without a pong. The client must tolerate this until
+                    // its one service-level stall budget elapses.
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Ok(result) = result_rx.try_recv() {
+                        break result.expect_err("missing pongs must fail the routed call");
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "request bytes suppressed heartbeat stall classification"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("heartbeat accept failed: {error}"),
+            }
+        };
+
+        assert_eq!(error.phase, CallPhase::PreSend);
+        assert!(error.is_service_stalled());
+        drop(request_reader);
+        dribbler.join().unwrap();
+        client.join().unwrap();
     }
 
     /// A daemon that answers `hello` with an `error` frame (vault open failed on
