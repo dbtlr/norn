@@ -321,7 +321,7 @@ impl McpServer {
     /// auto-derives for the literal `Json`).
     #[tool(
         name = "vault.get",
-        description = "Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally body.",
+        description = "Fetch structured documents, or one exact on-disk source document with format=markdown.",
         // MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219/214).
         output_schema = crate::mcp::mutation_result::output_schema_for::<GetOutput>()
     )]

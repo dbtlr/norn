@@ -942,7 +942,7 @@ pub struct GetArgs {
     )]
     pub section: Vec<String>,
 
-    /// Output format. Default records (vertical key-value block per doc).
+    /// Output format. Default records; markdown returns one exact source file.
     #[arg(long, value_enum, default_value_t = GetFormat::Records, help_heading = "Output")]
     pub format: GetFormat,
 }

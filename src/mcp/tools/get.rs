@@ -8,7 +8,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{GetArgs, GetFormat, SortPaginateArgs};
+use crate::cli::{GetArgs, GetFormat as CliGetFormat, SortPaginateArgs};
 use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 use crate::show::{SectionFailure, ShowReport};
@@ -24,9 +24,8 @@ fn default_starts_at() -> usize {
 ///
 /// Mirrors `norn get`'s daily surface: one or more targets, an optional column
 /// request, the shared sort/paging knobs ([`SortPaginateArgs`]), the repeatable
-/// `--section` heading slice, and `--all-cols`. The byte-faithful `markdown`
-/// output format stays CLI-only (a rendering concern; the MCP envelope is always
-/// structured JSON).
+/// `--section` heading slice, and `--all-cols`. `format: "markdown"` selects a
+/// dedicated exact-source response envelope instead of structural records.
 ///
 /// The sort/paging fields carry the SAME names and defaults as the CLI's
 /// `SortPaginateArgs` (NRN-173 parity), so an MCP client pages a resolved record
@@ -35,6 +34,12 @@ fn default_starts_at() -> usize {
 pub struct GetParams {
     /// One or more document targets (stem or path), as `norn get` accepts.
     pub targets: Vec<String>,
+
+    /// Response representation. `structured` (the default) returns document
+    /// records; `markdown` returns one exact on-disk document in the dedicated
+    /// `markdown` envelope and refuses unless exactly one document is selected.
+    #[serde(default)]
+    pub format: GetRepresentation,
     /// Optional column request, comma-separated, in `norn get --col` syntax (bare
     /// frontmatter fields like `status,title`; dot-prefixed facets like `.body`,
     /// `.headings`). NOTE (v1): this only controls whether the on-request facets
@@ -96,6 +101,19 @@ pub struct GetParams {
     pub all_cols: bool,
 }
 
+/// Representation returned by `vault.get`.
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GetRepresentation {
+    /// Parsed document records and their graph connections.
+    #[default]
+    Structured,
+    /// One byte-faithful UTF-8 Markdown document read from the vault file.
+    Markdown,
+}
+
 /// Structured output for `vault.get`.
 ///
 /// rmcp requires a tool's advertised `outputSchema` to have a root `type:
@@ -134,6 +152,20 @@ pub struct GetOutput {
     /// the `error:` prefix, or on the structured `section_failures` for the
     /// section case.
     pub notes: Vec<String>,
+    /// Exact source representation, present only for `format: "markdown"`.
+    /// It is deliberately a sibling envelope, never a field/facet on a
+    /// structured document record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<MarkdownOutput>,
+}
+
+/// Format-specific response for `vault.get { format: "markdown" }`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct MarkdownOutput {
+    /// Resolved vault-relative document path.
+    pub path: String,
+    /// Exact UTF-8 file content, with no newline normalization or reconstruction.
+    pub content: String,
 }
 
 impl GetOutput {
@@ -151,6 +183,7 @@ impl GetOutput {
             records,
             section_failures: report.section_failures.clone(),
             notes: report.notes.clone(),
+            markdown: None,
         })
     }
 }
@@ -181,7 +214,52 @@ pub fn handle_output(
     scope: &RequestScope,
     p: GetParams,
 ) -> Result<MutationResult<GetOutput>> {
-    let report = handle(ctx, scope, p)?;
+    let representation = p.format;
+    let mut report = handle(ctx, scope, p)?;
+    if representation == GetRepresentation::Markdown {
+        let markdown = match report.records.len() {
+            1 => {
+                let path = &report.records[0].path;
+                match std::fs::read_to_string(ctx.vault_root.join(path)) {
+                    Ok(content) => Some(MarkdownOutput {
+                        path: path.to_string(),
+                        content,
+                    }),
+                    Err(_) => {
+                        report
+                            .notes
+                            .push(format!("error: could not read source file for '{}'", path));
+                        None
+                    }
+                }
+            }
+            0 => {
+                if !report.has_error() {
+                    report.notes.push(
+                        "error: format markdown requires exactly one document; 0 selected"
+                            .to_string(),
+                    );
+                }
+                None
+            }
+            n => {
+                report.notes.push(format!(
+                    "error: --format markdown returns a single document; {n} selected — request one target at a time"
+                ));
+                None
+            }
+        };
+        let is_error = report.has_error();
+        return Ok(MutationResult::from_flag(
+            GetOutput {
+                records: Vec::new(),
+                section_failures: Vec::new(),
+                notes: report.notes,
+                markdown,
+            },
+            is_error,
+        ));
+    }
     let is_error = report.has_error();
     let output = GetOutput::from_report(&report)?;
     Ok(MutationResult::from_flag(output, is_error))
@@ -241,7 +319,10 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: GetParams) -> Result<
         // it; Paths/Markdown ignore it). The MCP wrapper serializes the returned
         // `ShowReport` to JSON regardless, so this governs which facets
         // `show::run` loads (body, sections), not a textual rendering.
-        format: GetFormat::Records,
+        format: match p.format {
+            GetRepresentation::Structured => CliGetFormat::Records,
+            GetRepresentation::Markdown => CliGetFormat::Markdown,
+        },
     };
 
     // Section hard-fail signal (F1/F2, mirroring the CLI's exit-1 contract):
@@ -881,6 +962,52 @@ mod tests {
             out.notes.iter().all(|n| !n.starts_with("error:")),
             "no error notes on a clean get: {:?}",
             out.notes
+        );
+    }
+
+    #[test]
+    fn markdown_zero_targets_is_explicit_error() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let result = handle_output(
+            &ctx,
+            GetParams {
+                targets: vec![],
+                format: GetRepresentation::Markdown,
+                ..Default::default()
+            },
+        )
+        .expect("zero targets returns a structured error result");
+
+        assert!(result.is_error(), "zero targets must set isError:true");
+        let out = result.value();
+        assert!(out.markdown.is_none(), "zero targets return no content");
+        assert!(
+            out.notes
+                .iter()
+                .any(|note| note.contains("exactly one document")),
+            "zero targets need an explicit selection error: {:?}",
+            out.notes
+        );
+
+        let missing = handle_output(
+            &ctx,
+            GetParams {
+                targets: vec!["missing".into()],
+                format: GetRepresentation::Markdown,
+                ..Default::default()
+            },
+        )
+        .expect("missing target returns its normal structured error");
+        let notes = &missing.value().notes;
+        assert!(
+            notes.iter().any(|note| note.contains("did not resolve")),
+            "missing-target detail must be preserved: {notes:?}"
+        );
+        assert!(
+            notes.iter().all(|note| !note.contains("0 selected")),
+            "the generic zero-selection error must not replace or obscure a target error: {notes:?}"
         );
     }
 }

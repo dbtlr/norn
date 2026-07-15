@@ -198,8 +198,9 @@ fn stdin_carries_redirected_payload() -> bool {
 ///   emits; the client rebuilds a `FindResult` + deep/raw and renders via `find::emit`.
 /// - `get` — `vault.get` ships each full serialized `ShowRecord` plus `notes`
 ///   (NRN-214); the client rebuilds a `ShowReport` and renders via `show::emit`,
-///   applying the CLI's client-side `--col` narrowing. `--format markdown` and
-///   `--section` stay Direct (see `route_get`).
+///   applying the CLI's client-side `--col` narrowing. `--format markdown`
+///   travels in a dedicated exact-source envelope; `--section` stays Direct
+///   (see `route_get`).
 /// - `repair --plan` — `vault.repair` carries the full `MigrationPlan` (byte-equal
 ///   to `serde_json::to_value(&plan)`) plus `has_diagnostic_errors` (the exit-1
 ///   signal); the client rebuilds the `MigrationPlan` and renders/writes it via
@@ -636,17 +637,57 @@ fn route_find(
 
 /// Route a `get` to the warm daemon, or `None` to run Direct.
 ///
-/// `--format markdown` (a byte-faithful single-doc disk read with bespoke
-/// multi-doc handling) and `--section` (the wire serializes sections as an
-/// alphabetically-keyed object, dropping the request order the `records` renderer
-/// needs) are gated to Direct.
+/// Structured `--section` is gated to Direct because the wire serializes sections
+/// as an alphabetically-keyed object, dropping the request order the `records`
+/// renderer needs. Markdown routes through its dedicated exact-source envelope
+/// even with `--section`, which that representation ignores.
 #[cfg(unix)]
 fn route_get(
     args: &crate::cli::GetArgs,
     cwd: &camino::Utf8Path,
     verbose: bool,
 ) -> Option<Result<i32>> {
-    if matches!(args.format, crate::cli::GetFormat::Markdown) || !args.section.is_empty() {
+    if matches!(args.format, crate::cli::GetFormat::Markdown) {
+        return route_read(
+            cwd,
+            CallSpec {
+                tool: "vault.get",
+                arguments: crate::show::route::to_mcp_arguments(args),
+                on_tool_error: crate::service::OnToolError::AcceptWithPayload,
+                verbose,
+            },
+            crate::show::route::reconstruct_markdown,
+            |routed| {
+                use std::io::Write as _;
+
+                let stdout = std::io::stdout();
+                let mut stdout = stdout.lock();
+                if let Some(content) = &routed.content {
+                    stdout.write_all(content.as_bytes())?;
+                }
+                drop(stdout);
+
+                let stderr = std::io::stderr();
+                let mut stderr = stderr.lock();
+                crate::output::projection::warn_col_ignored(
+                    &args.col,
+                    Some("markdown"),
+                    &mut stderr,
+                )?;
+                crate::output::projection::warn_section_ignored(
+                    &args.section,
+                    Some("markdown"),
+                    &mut stderr,
+                )?;
+                let has_error = routed.notes.iter().any(|note| note.starts_with("error:"));
+                for note in routed.notes {
+                    writeln!(stderr, "{note}")?;
+                }
+                Ok(if has_error { 1 } else { 0 })
+            },
+        );
+    }
+    if !args.section.is_empty() {
         return None;
     }
     route_read(
@@ -1635,7 +1676,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                             // Byte-faithful: print verbatim, no trailing-newline fixup.
                             Ok(raw) => {
                                 print!("{}", raw);
-                                Ok(0)
+                                Ok(if report.has_error() { 1 } else { 0 })
                             }
                             Err(_) => {
                                 eprintln!("error: could not read source file for '{}'", path);

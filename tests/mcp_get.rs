@@ -94,6 +94,31 @@ fn lists_and_calls_vault_get() {
                 }
             })))
             .unwrap();
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.get",
+                    "arguments": { "targets": ["note"], "format": "markdown" }
+                }
+            })))
+            .unwrap();
+        stdin
+            .write_all(&line(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "vault.get",
+                    "arguments": {
+                        "targets": ["note", "note"],
+                        "format": "markdown"
+                    }
+                }
+            })))
+            .unwrap();
     }
     drop(child.stdin.take());
 
@@ -152,6 +177,10 @@ fn lists_and_calls_vault_get() {
         schema["properties"].get("targets").is_some(),
         "vault.get inputSchema must expose a `targets` property, got: {schema}"
     );
+    assert!(
+        schema["properties"].get("format").is_some(),
+        "vault.get inputSchema must expose a `format` property, got: {schema}"
+    );
 
     // ── tools/call (id=3): returns the seeded record ──────────────────────
     let call_resp = responses
@@ -190,5 +219,53 @@ fn lists_and_calls_vault_get() {
         rec["frontmatter"]["status"].as_str(),
         Some("active"),
         "record frontmatter should reflect the seeded status, got: {rec}"
+    );
+
+    // ── tools/call (id=4): exact Markdown uses a format-specific envelope ──
+    let markdown_resp = responses
+        .iter()
+        .find(|r| r["id"] == 4)
+        .unwrap_or_else(|| panic!("no markdown tools/call response\nstdout: {stdout}"));
+    assert!(
+        markdown_resp.get("error").is_none(),
+        "markdown get must not protocol-error, got: {markdown_resp}"
+    );
+    let markdown = &markdown_resp["result"]["structuredContent"];
+    assert_eq!(
+        markdown["markdown"]["content"].as_str(),
+        Some("---\ntype: note\ntitle: Hello Note\nstatus: active\n---\nNote body\n"),
+        "markdown content must be exact on-disk source: {markdown_resp}"
+    );
+    assert!(
+        markdown.get("raw").is_none() && markdown.get("source").is_none(),
+        "exact source must not reappear as a raw/source structural field: {markdown}"
+    );
+    assert_eq!(
+        markdown["records"],
+        serde_json::json!([]),
+        "markdown representation must not mix source into structured records"
+    );
+
+    // ── tools/call (id=5): Markdown refuses a multi-document selection ─────
+    let multi_resp = responses
+        .iter()
+        .find(|r| r["id"] == 5)
+        .unwrap_or_else(|| panic!("no multi-target tools/call response\nstdout: {stdout}"));
+    assert_eq!(
+        multi_resp["result"]["isError"], true,
+        "multi-document markdown selection must be an MCP error result: {multi_resp}"
+    );
+    let multi = &multi_resp["result"]["structuredContent"];
+    assert!(
+        multi["notes"]
+            .as_array()
+            .is_some_and(|notes| notes.iter().any(|n| n
+                .as_str()
+                .is_some_and(|n| { n.contains("--format markdown returns a single document") }))),
+        "multi-document refusal must explain the single-document contract: {multi_resp}"
+    );
+    assert!(
+        multi.get("markdown").is_none(),
+        "a refused multi-document request must not return source: {multi_resp}"
     );
 }

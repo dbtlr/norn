@@ -26,7 +26,7 @@ norn get notes/my-note.md --all-cols --format json
 # the complete structured dump, including body
 
 norn get notes/my-note.md --format markdown
-# rebuild the document as Markdown (frontmatter + body)
+# print the exact source file, without newline normalization
 
 norn get notes/my-note.md --section "Task Description" --section "Annotations" --format json
 # just those two named sections' content (repeat --section per heading)
@@ -76,7 +76,12 @@ The `--col` vocabulary is identical to `norn find`:
 | `paths` | One vault-relative path per line. | Yes. |
 | `json` | A JSON array of document records, one per resolved target. (Unlike `find`, `get` emits a bare array, not a `{ total, … }` wrapper.) | Yes, versioned. |
 | `jsonl` | One JSON object per line. | Yes. |
-| `markdown` | The document rebuilt as Markdown (frontmatter + body). One document at a time. | `get`-only. |
+| `markdown` | The exact UTF-8 source file read from disk, with no trailing-newline fixup. One document at a time. | `get`-only. |
+
+When a matching `norn serve` daemon is live, `markdown` routes through
+`vault.get` like the structured formats; the daemon reads the resolved file at
+request time and returns the same exact content. Markdown is a representation,
+not a structural facet: it never adds `.raw` or `.source` to records.
 
 ## See also
 

@@ -44,7 +44,7 @@ Fourteen tools, split into seven read and seven mutation.
 |---|---|
 | `vault.find` | Full-text + metadata document search, with sort, limit, and paging — the same selection surface as `norn find`. |
 | `vault.count` | Count documents, total or grouped by a frontmatter field. |
-| `vault.get` | Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally the body. |
+| `vault.get` | Fetch structured documents, or one exact on-disk source document with `format: "markdown"`. |
 | `vault.validate` | Validate graph facts and configured frontmatter/link rules; returns structured findings. |
 | `vault.repair` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply`. |
 | `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, creatable rules, inbox, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
@@ -61,6 +61,19 @@ Fourteen tools, split into seven read and seven mutation.
 | `vault.delete` | Delete a document, optionally redirecting incoming links to an alternate target. |
 | `vault.rewrite_wikilink` | Retarget every occurrence of a wikilink across the vault (body + frontmatter), without moving any file. |
 | `vault.apply` | Apply a `MigrationPlan` (e.g. one returned by `vault.repair`) inline — moves, deletes, link rewrites, frontmatter ops. |
+
+`vault.get` defaults to `format: "structured"`. For a byte-faithful whole-file
+read, request exactly one selected document:
+
+```json
+{ "name": "vault.get", "arguments": { "targets": ["notes/task.md"], "format": "markdown" } }
+```
+
+The result carries `markdown: { "path": "notes/task.md", "content": "..." }`.
+The content is read from the source file at request time; it is not cached or
+reconstructed from frontmatter/body fields. Anything other than exactly one
+selected document returns `isError: true`. Exact Markdown is a response
+representation, not a `.raw`/`.source` structural facet on document records.
 
 Every mutation tool follows the same safety contract below.
 

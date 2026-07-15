@@ -98,6 +98,131 @@ fn spawn_daemon_logged() -> (
     (guard, cache_home, state_home, stderr_path, daemon_root)
 }
 
+/// Markdown is a source representation, not a cache facet: a live daemon must
+/// serve the request from the vault file and return the exact bytes for the CLI
+/// to write, including trailing spaces and an absent final newline.
+#[test]
+fn routed_get_markdown_is_byte_faithful_and_served() {
+    let vault = seed_vault();
+    let markdown = b"---\ntype: note\n# formatting only source can preserve\ntitle: 'Exact'\n---\n\n# Heading  \nbody without final newline";
+    std::fs::write(vault.path().join("exact.md"), markdown).unwrap();
+
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    let args = &["get", "exact.md", "--format", "markdown"][..];
+    let direct = run_norn(direct_cache.path(), direct_state.path(), vault.path(), args);
+    assert_eq!(direct.2, 0, "direct markdown get exits 0");
+    assert_eq!(
+        direct.0, markdown,
+        "direct output preserves exact source bytes"
+    );
+
+    let (_guard, cache_home, state_home, stderr_path, _root) = spawn_daemon_logged();
+    let routed = run_norn(&cache_home, &state_home, vault.path(), args);
+    assert_eq!(
+        routed, direct,
+        "routed markdown get must match direct on (stdout, stderr, code)"
+    );
+    assert_eq!(
+        count_served(&stderr_path, "vault.get"),
+        1,
+        "the daemon must serve markdown rather than falling back to disk locally; stderr:\n{}",
+        read_to_string(&stderr_path)
+    );
+
+    let multi_args = &["get", "exact.md", "note1.md", "--format", "markdown"][..];
+    let direct_multi = run_norn(
+        direct_cache.path(),
+        direct_state.path(),
+        vault.path(),
+        multi_args,
+    );
+    let routed_multi = run_norn(&cache_home, &state_home, vault.path(), multi_args);
+    assert_eq!(
+        routed_multi, direct_multi,
+        "routed multi-document markdown refusal must match direct"
+    );
+    assert_eq!(
+        count_served(&stderr_path, "vault.get"),
+        2,
+        "the daemon must serve the multi-document refusal too; stderr:\n{}",
+        read_to_string(&stderr_path)
+    );
+}
+
+/// A partially-resolved Markdown request still carries its good document, but
+/// the unresolved sibling is an error on both direct and routed paths.
+#[test]
+fn routed_get_markdown_partial_resolution_matches_direct_error_triple() {
+    let vault = seed_vault();
+    let args = &["get", "note1.md", "missing.md", "--format", "markdown"][..];
+
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    let direct = run_norn(direct_cache.path(), direct_state.path(), vault.path(), args);
+    assert_eq!(direct.2, 1, "partial Markdown resolution must exit 1");
+    assert!(
+        !direct.0.is_empty(),
+        "the one resolved document is still emitted"
+    );
+    assert!(
+        String::from_utf8_lossy(&direct.1).contains("did not resolve to any doc"),
+        "the unresolved sibling must remain visible: {}",
+        String::from_utf8_lossy(&direct.1)
+    );
+
+    let (_guard, cache_home, state_home, stderr_path, _root) = spawn_daemon_logged();
+    let routed = run_norn(&cache_home, &state_home, vault.path(), args);
+    assert_eq!(
+        routed, direct,
+        "routed partial Markdown must match direct on stdout/stderr/exit"
+    );
+    assert_eq!(
+        count_served(&stderr_path, "vault.get"),
+        1,
+        "partial Markdown must be served, not fall back; stderr:\n{}",
+        read_to_string(&stderr_path)
+    );
+}
+
+/// `--section` is inert for Markdown, so it must not block routing; both paths
+/// warn and still emit the exact whole source document.
+#[test]
+fn routed_get_markdown_with_section_is_served_and_matches_direct() {
+    let vault = seed_vault();
+    let args = &[
+        "get",
+        "note1.md",
+        "--section",
+        "Does Not Matter",
+        "--format",
+        "markdown",
+    ][..];
+
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    let direct = run_norn(direct_cache.path(), direct_state.path(), vault.path(), args);
+    assert_eq!(direct.2, 0, "ignored section does not fail Markdown");
+    assert!(
+        String::from_utf8_lossy(&direct.1).contains("--section is ignored with --format markdown"),
+        "direct path must preserve the ignored-section warning: {}",
+        String::from_utf8_lossy(&direct.1)
+    );
+
+    let (_guard, cache_home, state_home, stderr_path, _root) = spawn_daemon_logged();
+    let routed = run_norn(&cache_home, &state_home, vault.path(), args);
+    assert_eq!(
+        routed, direct,
+        "routed Markdown+section must match direct on stdout/stderr/exit"
+    );
+    assert_eq!(
+        count_served(&stderr_path, "vault.get"),
+        1,
+        "Markdown+section must be served because section is inert; stderr:\n{}",
+        read_to_string(&stderr_path)
+    );
+}
+
 /// A `get` whose target does not resolve must be SERVED by the daemon — exit 1
 /// derived from the wire's `error:` note — not bounced to a second, direct
 /// execution (NRN-222 review F3). `vault.get` maps the not-found signal to

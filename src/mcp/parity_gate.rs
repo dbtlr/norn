@@ -31,9 +31,11 @@
 //! 1. **SAFETY** — MCP mutation tools are dry-run-by-default with a `confirm`
 //!    param; the CLI uses a prompt plus `--yes` / `--dry-run`. So CLI `yes` and
 //!    `dry_run` map to MCP `confirm`.
-//! 2. **PRESENTATION** — CLI-only *rendering* knobs (`--format`, `--no-pager`,
-//!    output-destination `--out`). Valid only when they change how output is
-//!    shown, never *what* is computed.
+//! 2. **PRESENTATION** — CLI-only *rendering* knobs (`--format` on commands where
+//!    it only renders an already-computed result, `--no-pager`, output-destination
+//!    `--out`). Valid only when they change how output is shown, never *what* is
+//!    computed. `get --format` is intentionally not in this class: `markdown`
+//!    selects the exact-source representation shared with `vault.get.format`.
 //! 3. **SHAPE** — CLI-only *ergonomic/surface-shape* fields with no MCP field:
 //!    guards (`find --all`), aliases (`describe --stats`), mode selectors
 //!    (`repair --plan`), and input file-format selection (`apply
@@ -187,7 +189,12 @@ fn specs() -> Vec<Spec> {
             parity: Mcp {
                 tool: "vault.get",
                 safety: &[],
-                presentation: &["format"],
+                // `format` is now a real capability twin: `markdown` selects the
+                // exact-source representation on both surfaces. Other CLI values
+                // remain client renderers while MCP calls the default
+                // `structured`; this presence gate cannot express enum-value
+                // overlap, just like the documented `col` semantics divergence.
+                presentation: &[],
                 shape: &[],
                 naming: &[],
                 // NRN-173 CLOSED: vault.get now serves `sort`/`desc`/`limit`/
