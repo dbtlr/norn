@@ -24,6 +24,11 @@ std::thread_local! {
     /// Deterministic inter-statement publication seam for reservation tests.
     static AFTER_INCREMENT_FINGERPRINT_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+
+    /// Deterministic filesystem-race seam after SQLite publication authority
+    /// is acquired but before the terminal source observation.
+    static AFTER_INCREMENT_PUBLICATION_AUTHORITY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -82,6 +87,26 @@ fn install_after_increment_fingerprint_check_hook(hook: impl FnOnce() + 'static)
         assert!(
             previous.is_none(),
             "increment fingerprint-check test hook already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_after_increment_publication_authority_hook() {
+    AFTER_INCREMENT_PUBLICATION_AUTHORITY.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_after_increment_publication_authority_hook(hook: impl FnOnce() + 'static) {
+    AFTER_INCREMENT_PUBLICATION_AUTHORITY.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(
+            previous.is_none(),
+            "increment publication-authority test hook already installed"
         );
     });
 }
@@ -296,30 +321,17 @@ impl crate::cache::Cache {
             .map(|file| (file.path.clone(), file))
             .collect();
 
-        // The parse is authoritative for affected Markdown content, so its
-        // metadata must describe those same parsed bytes. A path can drift
-        // after `build_index_with_options` returns; publishing later live
-        // metadata would otherwise bless unparsed bytes as fresh. Validate and
-        // capture metadata before opening the publication transaction. On
-        // drift, retain the previous coherent snapshot so a later refresh can
-        // detect and heal it.
-        let mut parsed_metadata = std::collections::HashMap::new();
-        for path in &affected_paths {
-            if let Some(doc) = fresh_docs.get(path) {
-                let metadata = metadata_for_parsed_bytes(vault_root, doc)
-                    .ok_or_else(|| CacheError::IncrementSourceDrift { path: path.clone() })?;
-                parsed_metadata.insert(path.clone(), metadata);
-            } else if !graph_intentionally_ignores(path, &self.files_ignore) {
-                match std::fs::symlink_metadata(vault_root.join(path).as_std_path()) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Ok(_) | Err(_) => {
-                        return Err(CacheError::IncrementSourceDrift { path: path.clone() });
-                    }
-                }
-            }
-        }
-
-        let tx = self.conn.transaction()?;
+        let source_authority =
+            PublicationAuthority::from_graph(&affected_paths, &fresh_index, &self.files_ignore);
+        // IMMEDIATE is the publication authority boundary. The terminal source
+        // observation happens after it and immediately before row replacement,
+        // so a parsed graph can never be paired with later filesystem state.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        #[cfg(test)]
+        run_after_increment_publication_authority_hook();
+        let authoritative_metadata = source_authority.verify(vault_root)?;
         let mut report = IndexReport::default();
 
         for change in &changes {
@@ -327,21 +339,21 @@ impl crate::cache::Cache {
             tx.execute("DELETE FROM files WHERE path = ?", [path.as_str()])?;
             if let Some(file) = fresh_files.get(path) {
                 let &(mtime_ns, size_bytes) =
-                    parsed_metadata
-                        .get(path)
-                        .ok_or_else(|| CacheError::IncrementSourceDrift {
+                    authoritative_metadata.get(path).ok_or_else(|| {
+                        CacheError::IncrementSourceDrift {
                             path: path.to_owned(),
-                        })?;
+                        }
+                    })?;
                 insert_file_with_metadata(&tx, file, mtime_ns, size_bytes)?;
             }
             crate::cache::invalidation::drop_document(&tx, path)?;
             if let Some(doc) = fresh_docs.get(path) {
                 let &(mtime_ns, size_bytes) =
-                    parsed_metadata
-                        .get(path)
-                        .ok_or_else(|| CacheError::IncrementSourceDrift {
+                    authoritative_metadata.get(path).ok_or_else(|| {
+                        CacheError::IncrementSourceDrift {
                             path: path.to_owned(),
-                        })?;
+                        }
+                    })?;
                 insert_document_with_metadata(
                     &tx,
                     doc,
@@ -414,6 +426,106 @@ enum IncrementPhase {
     Superseded,
 }
 
+/// The exact filesystem state an affected path contributed to an in-memory
+/// graph. Both refresh and explicit mutation increments re-prove this state
+/// after acquiring SQLite publication authority.
+#[derive(Debug)]
+struct PublicationAuthority {
+    sources: std::collections::BTreeMap<Utf8PathBuf, PublishedSourceState>,
+}
+
+#[derive(Debug)]
+enum PublishedSourceState {
+    ParsedDocument {
+        hash: String,
+    },
+    ReadFailedDocument {
+        file_hash: Option<String>,
+        detail: Option<String>,
+    },
+    RegularFile,
+    IntentionallyExcluded,
+    GraphExcluded,
+}
+
+impl PublicationAuthority {
+    fn from_graph(
+        affected_paths: &std::collections::BTreeSet<Utf8PathBuf>,
+        index: &GraphIndex,
+        files_ignore: &[String],
+    ) -> Self {
+        let documents: HashMap<_, _> = index
+            .documents
+            .iter()
+            .map(|document| (&document.path, document))
+            .collect();
+        let files: HashMap<_, _> = index.files.iter().map(|file| (&file.path, file)).collect();
+        let sources = affected_paths
+            .iter()
+            .map(|path| {
+                let state = if let Some(document) = documents.get(path) {
+                    if document.hash.is_empty() {
+                        let detail = document
+                            .diagnostics
+                            .iter()
+                            .find(|diagnostic| diagnostic.code == "read-failed")
+                            .and_then(|diagnostic| diagnostic.detail.clone());
+                        PublishedSourceState::ReadFailedDocument {
+                            file_hash: files.get(path).and_then(|file| file.hash.clone()),
+                            detail,
+                        }
+                    } else {
+                        PublishedSourceState::ParsedDocument {
+                            hash: document.hash.clone(),
+                        }
+                    }
+                } else if files.contains_key(path) {
+                    PublishedSourceState::RegularFile
+                } else if graph_intentionally_ignores(path, files_ignore) {
+                    PublishedSourceState::IntentionallyExcluded
+                } else {
+                    PublishedSourceState::GraphExcluded
+                };
+                (path.clone(), state)
+            })
+            .collect();
+        Self { sources }
+    }
+
+    /// Re-prove every affected source and return metadata captured by that same
+    /// observation. Callers use this map for both `files` and `documents` rows.
+    fn verify(
+        &self,
+        vault_root: &Utf8Path,
+    ) -> Result<HashMap<Utf8PathBuf, (i64, i64)>, CacheError> {
+        let mut metadata = HashMap::new();
+        for (path, expected) in &self.sources {
+            let observed = match expected {
+                PublishedSourceState::ParsedDocument { hash } => {
+                    verify_parsed_document(vault_root, path, hash)
+                }
+                PublishedSourceState::ReadFailedDocument { file_hash, detail } => {
+                    verify_read_failed_document(vault_root, path, file_hash.as_deref(), detail)
+                }
+                PublishedSourceState::RegularFile => stable_regular_file_metadata(vault_root, path),
+                PublishedSourceState::IntentionallyExcluded => continue,
+                PublishedSourceState::GraphExcluded => {
+                    let before = graph_excluded_kind(vault_root, path);
+                    let after = graph_excluded_kind(vault_root, path);
+                    if before.is_none() || before != after {
+                        return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+                    }
+                    continue;
+                }
+            };
+            let observed =
+                observed.ok_or_else(|| CacheError::IncrementSourceDrift { path: path.clone() })?;
+            metadata.insert(path.clone(), observed);
+        }
+        Ok(metadata)
+    }
+}
+
 static NEXT_INCREMENT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 const INCREMENT_STAGING_TABLES: &[&str] = &[
     "norn_increment_jobs",
@@ -442,11 +554,9 @@ pub(crate) struct IncrementCommit {
     fresh_index: GraphIndex,
     fresh_docs: HashMap<Utf8PathBuf, usize>,
     fresh_files: HashMap<Utf8PathBuf, usize>,
-    affected_paths: std::collections::BTreeSet<Utf8PathBuf>,
     publication_fingerprint: String,
-    intentionally_ignored_paths: std::collections::BTreeSet<Utf8PathBuf>,
-    parsed_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
-    file_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
+    source_authority: PublicationAuthority,
+    staged_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
     pending: VecDeque<Utf8PathBuf>,
     pending_links: VecDeque<(usize, usize)>,
     next_link_sequence: i64,
@@ -500,11 +610,6 @@ impl crate::cache::Cache {
         pending.sort();
         pending.dedup();
         let affected_paths: std::collections::BTreeSet<_> = pending.iter().cloned().collect();
-        let intentionally_ignored_paths = affected_paths
-            .iter()
-            .filter(|path| graph_intentionally_ignores(path, files_ignore))
-            .cloned()
-            .collect();
 
         // Generation N is authoritative for everything outside this mutation.
         // Only affected paths cross from the post-mutation disk parse into the
@@ -547,25 +652,12 @@ impl crate::cache::Cache {
             .enumerate()
             .map(|(i, file)| (file.path.clone(), i))
             .collect();
-        let parsed_metadata: HashMap<Utf8PathBuf, (i64, i64)> = affected_paths
-            .iter()
-            .filter_map(|path| {
-                let &index = fresh_docs.get(path)?;
-                metadata_for_parsed_bytes(vault_root, &fresh_index.documents[index])
-                    .map(|metadata| (path.clone(), metadata))
-            })
-            .collect();
-        let file_metadata = affected_paths
-            .iter()
-            .filter_map(|path| {
-                fresh_files.get(path)?;
-                parsed_metadata
-                    .get(path)
-                    .copied()
-                    .or_else(|| stable_file_metadata(vault_root, path))
-                    .map(|metadata| (path.clone(), metadata))
-            })
-            .collect();
+        let source_authority =
+            PublicationAuthority::from_graph(&affected_paths, &fresh_index, files_ignore);
+        // This early proof supplies coherent metadata for TEMP staging. The
+        // same authority is always re-proved after terminal publication
+        // authority, and those terminal values replace the staged metadata.
+        let staged_metadata = source_authority.verify(vault_root)?;
         let pending_links = fresh_index
             .documents
             .iter()
@@ -578,11 +670,9 @@ impl crate::cache::Cache {
             fresh_index,
             fresh_docs,
             fresh_files,
-            affected_paths,
             publication_fingerprint,
-            intentionally_ignored_paths,
-            parsed_metadata,
-            file_metadata,
+            source_authority,
+            staged_metadata,
             pending: pending.into_iter().collect(),
             pending_links,
             next_link_sequence: 0,
@@ -723,7 +813,7 @@ impl crate::cache::Cache {
                 params![commit.job_id, path.as_str()],
             )?;
             if let Some(&i) = commit.fresh_docs.get(&path) {
-                let Some(&(mtime_ns, size_bytes)) = commit.parsed_metadata.get(&path) else {
+                let Some(&(mtime_ns, size_bytes)) = commit.staged_metadata.get(&path) else {
                     tx.rollback()?;
                     let _ = self.cleanup_staged_increment(commit.job_id);
                     return Err(CacheError::IncrementSourceDrift { path });
@@ -738,7 +828,7 @@ impl crate::cache::Cache {
                 )?;
             }
             if let Some(&i) = commit.fresh_files.get(&path) {
-                let Some(&(mtime_ns, size_bytes)) = commit.file_metadata.get(&path) else {
+                let Some(&(mtime_ns, size_bytes)) = commit.staged_metadata.get(&path) else {
                     tx.rollback()?;
                     let _ = self.cleanup_staged_increment(commit.job_id);
                     return Err(CacheError::IncrementSourceDrift { path });
@@ -824,12 +914,29 @@ impl crate::cache::Cache {
             commit.phase = IncrementPhase::Superseded;
             return Ok(());
         }
-        // Validate source bytes only after publication authority. An intervening
-        // cache publication supersedes this job cleanly; otherwise this is the
-        // last filesystem read before the atomic main-row replacement.
-        if let Err(error) = affected_sources_still_match(&self.vault_root, commit) {
-            tx.rollback()?;
-            return Err(error);
+        #[cfg(test)]
+        run_after_increment_publication_authority_hook();
+        // Re-prove the exact graph state only after publication authority. An
+        // intervening cache publication supersedes this job cleanly; otherwise
+        // this is the last filesystem observation before atomic row replacement.
+        let authoritative_metadata = match commit.source_authority.verify(&self.vault_root) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tx.rollback()?;
+                return Err(error);
+            }
+        };
+        for (path, (mtime_ns, size_bytes)) in &authoritative_metadata {
+            tx.execute(
+                "UPDATE temp.norn_increment_files SET mtime_ns = ?, size_bytes = ? \
+                 WHERE job_id = ? AND path = ?",
+                params![mtime_ns, size_bytes, job_id, path.as_str()],
+            )?;
+            tx.execute(
+                "UPDATE temp.norn_increment_documents SET mtime_ns = ?, size_bytes = ? \
+                 WHERE job_id = ? AND path = ?",
+                params![mtime_ns, size_bytes, job_id, path.as_str()],
+            )?;
         }
         tx.execute("DELETE FROM main.links", [])?;
         for table in ["diagnostics", "block_ids", "headings", "document_fields"] {
@@ -1161,76 +1268,137 @@ fn stage_file(
     Ok(())
 }
 
-fn metadata_for_parsed_bytes(vault_root: &Utf8Path, doc: &Document) -> Option<(i64, i64)> {
-    let path = vault_root.join(&doc.path);
-    let before_mtime = mtime_ns(&path)?;
-    let before_size = size_bytes(&path)?;
-    let bytes = std::fs::read(path.as_std_path()).ok()?;
-    let after_mtime = mtime_ns(&path)?;
-    let after_size = size_bytes(&path)?;
-    if (before_mtime, before_size) != (after_mtime, after_size)
-        || bytes.len() as i64 != after_size
-        || blake3::hash(&bytes).to_hex().as_str() != doc.hash
-    {
-        return None;
-    }
-    Some((after_mtime, after_size))
+fn verify_parsed_document(
+    vault_root: &Utf8Path,
+    path: &Utf8Path,
+    expected_hash: &str,
+) -> Option<(i64, i64)> {
+    let before = regular_file_metadata_without_symlinks(vault_root, path)?;
+    let bytes = std::fs::read(vault_root.join(path).as_std_path()).ok()?;
+    let after = regular_file_metadata_without_symlinks(vault_root, path)?;
+    (before == after
+        && bytes.len() as i64 == after.1
+        && blake3::hash(&bytes).to_hex().as_str() == expected_hash)
+        .then_some(after)
 }
 
-fn stable_file_metadata(vault_root: &Utf8Path, path: &Utf8Path) -> Option<(i64, i64)> {
+fn verify_read_failed_document(
+    vault_root: &Utf8Path,
+    path: &Utf8Path,
+    expected_file_hash: Option<&str>,
+    expected_detail: &Option<String>,
+) -> Option<(i64, i64)> {
+    let before = regular_file_metadata_without_symlinks(vault_root, path)?;
     let absolute = vault_root.join(path);
-    let read_regular = || {
+    if let Some(expected_hash) = expected_file_hash {
+        let bytes = std::fs::read(absolute.as_std_path()).ok()?;
+        if bytes.len() as i64 != before.1 || blake3::hash(&bytes).to_hex().as_str() != expected_hash
+        {
+            return None;
+        }
+    }
+    let read_error = std::fs::read_to_string(absolute.as_std_path()).err()?;
+    if expected_detail.as_deref() != Some(read_error.to_string().as_str()) {
+        return None;
+    }
+    let after = regular_file_metadata_without_symlinks(vault_root, path)?;
+    (before == after).then_some(after)
+}
+
+fn stable_regular_file_metadata(vault_root: &Utf8Path, path: &Utf8Path) -> Option<(i64, i64)> {
+    let before = regular_file_metadata_without_symlinks(vault_root, path)?;
+    let after = regular_file_metadata_without_symlinks(vault_root, path)?;
+    (before == after).then_some(after)
+}
+
+/// Stat a regular leaf without following any symlink in its vault-relative
+/// component chain. The graph walk does not follow symlinks, so a followed
+/// ancestor would observe a different graph even when the target bytes match.
+fn regular_file_metadata_without_symlinks(
+    vault_root: &Utf8Path,
+    path: &Utf8Path,
+) -> Option<(i64, i64)> {
+    let mut absolute = vault_root.to_path_buf();
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        let name = match component {
+            camino::Utf8Component::Normal(name) => name,
+            camino::Utf8Component::CurDir => continue,
+            camino::Utf8Component::Prefix(_)
+            | camino::Utf8Component::RootDir
+            | camino::Utf8Component::ParentDir => return None,
+        };
+        absolute.push(name);
         let metadata = std::fs::symlink_metadata(absolute.as_std_path()).ok()?;
+        if metadata.file_type().is_symlink() {
+            return None;
+        }
+        if components.peek().is_some() {
+            if !metadata.file_type().is_dir() {
+                return None;
+            }
+            continue;
+        }
         if !metadata.file_type().is_file() {
             return None;
         }
-        let mtime = metadata
+        let mtime_ns = metadata
             .modified()
             .ok()?
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
             .as_nanos() as i64;
-        Some((mtime, metadata.len() as i64))
-    };
-    let before = read_regular()?;
-    let after = read_regular()?;
-    (before == after).then_some(after)
+        return Some((mtime_ns, metadata.len() as i64));
+    }
+    None
 }
 
-fn affected_sources_still_match(
-    vault_root: &Utf8Path,
-    commit: &IncrementCommit,
-) -> Result<(), CacheError> {
-    for path in &commit.affected_paths {
-        if let Some(&file_metadata) = commit.file_metadata.get(path) {
-            if stable_file_metadata(vault_root, path) != Some(file_metadata) {
-                return Err(CacheError::IncrementSourceDrift { path: path.clone() });
-            }
-        } else if commit.intentionally_ignored_paths.contains(path) {
-            continue;
-        } else {
-            match std::fs::symlink_metadata(vault_root.join(path).as_std_path()) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Ok(_) | Err(_) => {
-                    return Err(CacheError::IncrementSourceDrift { path: path.clone() });
-                }
-            }
-        }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphExcludedKind {
+    Missing,
+    Directory,
+    Symlink,
+    OtherNonRegular,
+}
 
-        if let Some(&index) = commit.fresh_docs.get(path) {
-            let absolute = vault_root.join(path);
-            let matches = std::fs::read(absolute.as_std_path())
-                .ok()
-                .is_some_and(|bytes| {
-                    blake3::hash(&bytes).to_hex().as_str()
-                        == commit.fresh_index.documents[index].hash
-                });
-            if !matches {
-                return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+fn graph_excluded_kind(vault_root: &Utf8Path, path: &Utf8Path) -> Option<GraphExcludedKind> {
+    let mut absolute = vault_root.to_path_buf();
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        let name = match component {
+            camino::Utf8Component::Normal(name) => name,
+            camino::Utf8Component::CurDir => continue,
+            camino::Utf8Component::Prefix(_)
+            | camino::Utf8Component::RootDir
+            | camino::Utf8Component::ParentDir => return None,
+        };
+        absolute.push(name);
+        let metadata = match std::fs::symlink_metadata(absolute.as_std_path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Some(GraphExcludedKind::Missing);
             }
+            Err(_) => return None,
+        };
+        if metadata.file_type().is_symlink() {
+            return Some(GraphExcludedKind::Symlink);
         }
+        if components.peek().is_some() {
+            if !metadata.file_type().is_dir() {
+                return Some(GraphExcludedKind::OtherNonRegular);
+            }
+            continue;
+        }
+        if metadata.file_type().is_file() {
+            return None;
+        }
+        return Some(if metadata.file_type().is_dir() {
+            GraphExcludedKind::Directory
+        } else {
+            GraphExcludedKind::OtherNonRegular
+        });
     }
-    Ok(())
+    None
 }
 
 fn graph_intentionally_ignores(path: &Utf8Path, patterns: &[String]) -> bool {
@@ -3251,6 +3419,194 @@ mod tests {
             cache.detect_change_count(&root) > 0,
             "a rewrite after parse must remain detectable rather than blessed fresh"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incremental_refresh_rejects_post_parse_ancestor_symlink_then_converges() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes/doc.md"), "---\n---\nOLD\n").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        std::fs::write(root.join("notes/doc.md"), "---\n---\nNEW\n").unwrap();
+        let notes = root.join("notes");
+        let real_notes = root.join("real-notes");
+        install_after_increment_parse_hook(move || {
+            std::fs::rename(&notes, &real_notes).unwrap();
+            symlink(&real_notes, &notes).unwrap();
+        });
+
+        let error = cache
+            .index_incremental(&root, &Default::default())
+            .expect_err("a parsed path reached through a new ancestor symlink must drift");
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path }
+                if path == Utf8Path::new("notes/doc.md")
+        ));
+        let cached_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'notes/doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cached_body, "OLD\n",
+            "the prior snapshot must survive drift"
+        );
+
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("a stable graph-excluded symlink must converge on retry");
+        let cached: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = 'notes/doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached, 0, "the retry must publish graph exclusion");
+    }
+
+    #[test]
+    fn incremental_refresh_publishes_stable_invalid_utf8_read_failure() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        std::fs::write(root.join("doc.md"), b"---\n---\ninvalid: \xff\n").unwrap();
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("a stable read-failed document must publish");
+
+        let document: (String, String) = cache
+            .conn
+            .query_row(
+                "SELECT hash, body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(document, (String::new(), String::new()));
+        let diagnostic: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM diagnostics \
+                 WHERE doc_path = 'doc.md' AND code = 'read-failed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(diagnostic, 1);
+        assert_eq!(cache.detect_change_count(&root), 0);
+    }
+
+    #[test]
+    fn incremental_refresh_publishes_stable_directory_exclusion() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        std::fs::remove_file(root.join("doc.md")).unwrap();
+        std::fs::create_dir(root.join("doc.md")).unwrap();
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("a stable nonregular graph exclusion must publish");
+
+        let cached: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached, 0);
+        let retry = cache
+            .index_incremental(&root, &Default::default())
+            .expect("the converged exclusion must stay clean");
+        assert_eq!(retry.doc_count, 0);
+    }
+
+    #[test]
+    fn incremental_refresh_revalidates_after_publication_authority() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let baseline_fingerprint: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed = "---\n---\nPARSED\n";
+        let drifted = "---\n---\nDRIFT!\n";
+        assert_eq!(parsed.len(), drifted.len());
+        let path = root.join("doc.md");
+        std::fs::write(&path, parsed).unwrap();
+        let parsed_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(path.as_std_path()).unwrap(),
+        );
+        install_after_increment_publication_authority_hook(move || {
+            std::fs::write(&path, drifted).unwrap();
+            filetime::set_file_mtime(path.as_std_path(), parsed_mtime).unwrap();
+        });
+
+        let error = cache
+            .index_incremental(&root, &Default::default())
+            .expect_err("same-size, restored-mtime drift after authority must fail closed");
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path }
+                if path == Utf8Path::new("doc.md")
+        ));
+        let cached_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cached_body.contains("# Heading"));
+        let stored_fingerprint: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_fingerprint, baseline_fingerprint);
+        assert_eq!(
+            stored_fingerprint,
+            graph_fingerprint(&cache.load_graph_index().unwrap()),
+            "the failed refresh must leave the prior snapshot coherent"
+        );
+
+        let retry = cache
+            .index_incremental(&root, &Default::default())
+            .expect("the next refresh must heal the terminal drift");
+        assert_eq!(retry.doc_count, 1);
+        let healed_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(healed_body, "DRIFT!\n");
     }
 
     #[test]
