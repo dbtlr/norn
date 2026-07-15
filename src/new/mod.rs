@@ -464,6 +464,8 @@ fn apply_and_render(
     let ctx = crate::repair_apply::CreateApplyContext {
         parents: args.parents,
         ignore: cfg.files.ignore.clone(),
+        // NRN-265: `new` passes `{{seq}}` unresolved — the delegate resolves it.
+        creates_preresolved: false,
     };
     let vault_root_buf = vault_root.to_owned();
 
