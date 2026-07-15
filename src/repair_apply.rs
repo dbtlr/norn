@@ -29,6 +29,18 @@ pub struct CreateApplyContext {
     /// `create_document` changes are not `new`-synthesized, so there is no
     /// build-time guard for this to backstop).
     pub ignore: Vec<String>,
+    /// NRN-265: the caller declares that every `create_document` change arrives
+    /// with its `{{seq}}` template ALREADY resolved to a concrete path. Only the
+    /// MigrationPlan applier (`applier.rs`) sets this — it pre-resolves via
+    /// `resolve_create_paths` under the single owner-set barrier and rewrites
+    /// `change.path` BEFORE delegating here, so Pass 1e's own seq resolver is
+    /// unreachable on that path. Under this declaration a surviving `{{seq}}`
+    /// token means the two resolvers have drifted (or a hand-authored plan
+    /// bypassed the applier barrier): the delegate fails closed rather than
+    /// silently re-resolve on a second, divergent code path. Left `false` by
+    /// every other caller (`new` CLI/MCP), where the Pass-1e resolver is
+    /// load-bearing (they pass the `{{seq}}` template unresolved).
+    pub creates_preresolved: bool,
 }
 
 pub use crate::standards::apply::RepairApplyReport;
@@ -755,6 +767,22 @@ pub fn apply_repair_plan_with_context(
         // introduced: the NRN-87 warm daemon will own this same boundary and can
         // swap the impl behind it untouched.
         let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
+            // NRN-265: per-caller reachability of this Pass-1e seq resolver —
+            //   • MigrationPlan applier (`applier.rs`): pre-resolves in
+            //     `resolve_create_paths` and sets `creates_preresolved`, so a
+            //     `{{seq}}` token here proves the two resolvers drifted → fail
+            //     closed below rather than re-resolve on a divergent path.
+            //   • `new` (CLI `new/mod.rs`, MCP `mcp/tools/new.rs`): passes the
+            //     `{{seq}}` template UNRESOLVED (default ctx) — this branch is
+            //     load-bearing there.
+            //   • set / edit (CLI `lib.rs`, MCP `set.rs`/`edit.rs`): emit no
+            //     `create_document` ops, so they never reach this branch.
+            if ctx.creates_preresolved {
+                return Err(anyhow::anyhow!(
+                    "create_document: `{{{{seq}}}}` reached the apply delegate at {} after the caller declared creates pre-resolved — the pre-resolution barrier did not run (resolver drift)",
+                    change.path
+                ));
+            }
             let dir = cwd.join(change.path.parent().unwrap_or_else(|| Utf8Path::new("")));
             let mut siblings = crate::seq_alloc::dir_file_names(&dir)
                 .with_context(|| format!("create_document: scan {dir} for {{{{seq}}}}"))?;
@@ -1826,6 +1854,7 @@ mod tests {
         let ctx = CreateApplyContext {
             parents: true,
             ignore: vec!["logs/1.md".to_string()],
+            ..Default::default()
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
@@ -1861,6 +1890,7 @@ mod tests {
         let ctx = CreateApplyContext {
             parents: true,
             ignore: vec!["other/**".to_string()],
+            ..Default::default()
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
@@ -1878,6 +1908,45 @@ mod tests {
         assert!(full.as_std_path().exists(), "file should exist after apply");
         let written = std::fs::read_to_string(full.as_std_path()).unwrap();
         assert!(written.contains("Hello\n"), "got: {written}");
+    }
+
+    #[test]
+    fn apply_create_document_fails_closed_on_seq_when_preresolved_declared() {
+        // NRN-265: when a caller declares `creates_preresolved` (the MigrationPlan
+        // applier's contract — it resolves `{{seq}}` before delegating) but a
+        // `{{seq}}` token still reaches Pass 1e, the two resolvers have drifted.
+        // The delegate must fail closed rather than silently re-resolve, and must
+        // do so before any write or parent-dir creation.
+        let (_tmp, root, index) = make_empty_vault("vault-apply-seq-preresolved-");
+        let mut fm = serde_json::Map::new();
+        fm.insert("type".to_string(), serde_json::json!("note"));
+        let plan = create_plan(&root, "logs/{{seq}}.md", fm, "Hello\n", false);
+
+        let ctx = CreateApplyContext {
+            parents: true,
+            creates_preresolved: true,
+            ..Default::default()
+        };
+        let mut sink = discard_sink();
+        let spans = std::collections::HashMap::new();
+        let err = apply_repair_plan_with_context(
+            &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pre-resolved") && msg.contains("{{seq}}"),
+            "expected fail-closed drift error, got: {msg}"
+        );
+        assert!(
+            !root.join("logs/1.md").as_std_path().exists(),
+            "fail-closed guard must run before any write"
+        );
+        assert!(
+            !root.join("logs").as_std_path().exists(),
+            "guard must fire before parent-dir creation"
+        );
     }
 
     // ── -p / --parents tests ───────────────────────────────────────────────────

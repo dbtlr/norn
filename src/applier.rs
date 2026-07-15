@@ -307,6 +307,12 @@ pub(crate) fn apply_migration_plan(
 
     let create_ctx = CreateApplyContext {
         parents: ctx.parents,
+        // NRN-265: every `{{seq}}` create was already resolved to a concrete
+        // path by `resolve_create_paths` above (which rewrote `change.path`
+        // under the owner-set barrier). Declare it so the delegate's Pass-1e seq
+        // resolver — unreachable on this path — fails closed if a `{{seq}}` token
+        // ever survives here, catching drift between the two resolvers.
+        creates_preresolved: true,
         // NRN-138 ignore re-check applies to `new`-synthesized create_document
         // changes (already guarded at plan time by synth::build_plan); the
         // migration-plan create_document ops routed through here have no such
@@ -1749,6 +1755,54 @@ mod tests {
         // Apply: file moved
         assert!(!tmp.path().join("a.md").exists());
         assert!(tmp.path().join("renamed.md").exists());
+    }
+
+    #[test]
+    fn applier_preresolves_seq_create_before_delegate() {
+        // NRN-265: the MigrationPlan applier resolves `{{seq}}` in
+        // `resolve_create_paths` and rewrites `change.path` before delegating,
+        // so the create lands at the concrete `logs/1.md` and the delegate's
+        // `creates_preresolved` guard never fires on the normal path (a fired
+        // guard would surface as an Err here instead of a clean apply).
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root: vault_root.clone(),
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations: vec![MigrationOp {
+                kind: "create_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({
+                    "path": "logs/{{seq}}.md",
+                    "new_value": { "frontmatter": {"type": "note"}, "body": "# L\n" }
+                }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let ctx = ApplyContext {
+            dry_run: false,
+            parents: true,
+            verbose: false,
+            refuse_as_report: false,
+            owner_index_options: Default::default(),
+        };
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
+        assert_eq!(report.applied, 1, "seq create must apply cleanly");
+        assert!(
+            tmp.path().join("logs/1.md").exists(),
+            "seq must resolve to logs/1.md via the applier pre-resolver"
+        );
+        assert!(
+            report.operations[0].summary.contains("logs/1.md"),
+            "op summary must reflect the resolved path, got: {}",
+            report.operations[0].summary
+        );
     }
 
     /// NRN-248: `build_link_impact`'s fallback branch (files come from

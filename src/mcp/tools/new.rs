@@ -390,6 +390,10 @@ pub fn handle(
     let apply_ctx = crate::repair_apply::CreateApplyContext {
         parents: p.parents,
         ignore: loaded_config.vault_config.files.ignore.clone(),
+        // NRN-265: `new` passes the `{{seq}}` template UNRESOLVED — the delegate's
+        // Pass-1e seq resolver is load-bearing here, so it must NOT be declared
+        // pre-resolved.
+        creates_preresolved: false,
     };
 
     // Emit one op_planned span for the single create_document change so action
