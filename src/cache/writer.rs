@@ -217,6 +217,16 @@ enum IncrementPhase {
 }
 
 static NEXT_INCREMENT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+const INCREMENT_STAGING_TABLES: &[&str] = &[
+    "norn_increment_jobs",
+    "norn_increment_links",
+    "norn_increment_diagnostics",
+    "norn_increment_block_ids",
+    "norn_increment_headings",
+    "norn_increment_document_fields",
+    "norn_increment_documents",
+    "norn_increment_paths",
+];
 
 /// Driver state for a chunked increment commit (ADR 0013 Phase 2, NRN-252,
 /// NRN-158). Built once at op start by [`Cache::begin_increment_commit`] — which
@@ -232,6 +242,9 @@ pub(crate) struct IncrementCommit {
     publication_epoch: u64,
     fresh_index: GraphIndex,
     fresh_docs: HashMap<Utf8PathBuf, usize>,
+    affected_paths: std::collections::BTreeSet<Utf8PathBuf>,
+    parsed_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
+    baseline_validated: bool,
     pending: VecDeque<Utf8PathBuf>,
     pending_links: VecDeque<(usize, usize)>,
     next_link_sequence: i64,
@@ -277,7 +290,7 @@ impl crate::cache::Cache {
             ..Default::default()
         };
         let fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
-        let fresh_docs = fresh_index
+        let fresh_docs: HashMap<Utf8PathBuf, usize> = fresh_index
             .documents
             .iter()
             .enumerate()
@@ -288,6 +301,15 @@ impl crate::cache::Cache {
         let mut pending: Vec<Utf8PathBuf> = changed_paths.to_vec();
         pending.sort();
         pending.dedup();
+        let affected_paths: std::collections::BTreeSet<_> = pending.iter().cloned().collect();
+        let parsed_metadata = affected_paths
+            .iter()
+            .filter_map(|path| {
+                let &index = fresh_docs.get(path)?;
+                metadata_for_parsed_bytes(vault_root, &fresh_index.documents[index])
+                    .map(|metadata| (path.clone(), metadata))
+            })
+            .collect();
         let pending_links = fresh_index
             .documents
             .iter()
@@ -299,6 +321,9 @@ impl crate::cache::Cache {
             publication_epoch: reservation.publication_epoch,
             fresh_index,
             fresh_docs,
+            affected_paths,
+            parsed_metadata,
+            baseline_validated: false,
             pending: pending.into_iter().collect(),
             pending_links,
             next_link_sequence: 0,
@@ -355,10 +380,18 @@ impl crate::cache::Cache {
     ///   (an alias/path/stem change re-resolves links in unchanged files too).
     pub(crate) fn commit_increment_chunk(
         &mut self,
-        vault_root: &Utf8Path,
+        _vault_root: &Utf8Path,
         commit: &mut IncrementCommit,
         budget: Duration,
     ) -> Result<bool, CacheError> {
+        if !commit.baseline_validated {
+            if !self.parsed_sources_match_unchanged_main(commit)? {
+                let _ = self.cleanup_staged_increment(commit.job_id);
+                commit.phase = IncrementPhase::Superseded;
+                return Ok(false);
+            }
+            commit.baseline_validated = true;
+        }
         if commit.publication_epoch != self.increment_publication_epoch
             || !self.staged_increment_exists(commit.job_id)?
         {
@@ -368,7 +401,7 @@ impl crate::cache::Cache {
         }
 
         let result = match commit.phase {
-            IncrementPhase::Files => self.stage_increment_files(vault_root, commit, budget),
+            IncrementPhase::Files => self.stage_increment_files(commit, budget),
             IncrementPhase::Links => self.stage_increment_links(commit, budget),
             IncrementPhase::Ready => self.publish_increment(commit).map(|()| false),
             IncrementPhase::Done | IncrementPhase::Superseded => Ok(false),
@@ -383,22 +416,14 @@ impl crate::cache::Cache {
     /// liveness refresh calls this after publishing its newer main snapshot; old
     /// bulk drivers then observe their missing job marker and finish without
     /// publishing. Failed/contended refreshes deliberately do not call it.
-    pub(crate) fn supersede_staged_increments_after_refresh(&mut self) -> Result<(), CacheError> {
+    pub(crate) fn supersede_staged_increments_after_refresh(&mut self) {
         // Non-fallible revocation happens before any TEMP cleanup. Even if a
         // trigger/SQLite error blocks DELETE, old drivers fail the epoch check.
         self.increment_publication_epoch = self.increment_publication_epoch.saturating_add(1);
-        ensure_increment_staging_tables(&self.conn)?;
-        self.conn.execute_batch(
-            "DELETE FROM temp.norn_increment_jobs;
-             DELETE FROM temp.norn_increment_links;
-             DELETE FROM temp.norn_increment_diagnostics;
-             DELETE FROM temp.norn_increment_block_ids;
-             DELETE FROM temp.norn_increment_headings;
-             DELETE FROM temp.norn_increment_document_fields;
-             DELETE FROM temp.norn_increment_documents;
-             DELETE FROM temp.norn_increment_paths;",
-        )?;
-        Ok(())
+        let _ = ensure_increment_staging_tables(&self.conn);
+        for table in INCREMENT_STAGING_TABLES {
+            let _ = self.conn.execute(&format!("DELETE FROM temp.{table}"), []);
+        }
     }
 
     fn staged_increment_exists(&self, job_id: i64) -> Result<bool, CacheError> {
@@ -412,7 +437,6 @@ impl crate::cache::Cache {
 
     fn stage_increment_files(
         &mut self,
-        vault_root: &Utf8Path,
         commit: &mut IncrementCommit,
         budget: Duration,
     ) -> Result<bool, CacheError> {
@@ -428,12 +452,19 @@ impl crate::cache::Cache {
                 params![commit.job_id, path.as_str()],
             )?;
             if let Some(&i) = commit.fresh_docs.get(&path) {
+                let Some(&(mtime_ns, size_bytes)) = commit.parsed_metadata.get(&path) else {
+                    tx.rollback()?;
+                    let _ = self.cleanup_staged_increment(commit.job_id);
+                    commit.phase = IncrementPhase::Superseded;
+                    return Ok(false);
+                };
                 stage_document(
                     &tx,
                     commit.job_id,
-                    vault_root,
                     &commit.fresh_index.documents[i],
                     &self.index_set,
+                    mtime_ns,
+                    size_bytes,
                 )?;
             }
             if start.elapsed() >= budget {
@@ -445,6 +476,37 @@ impl crate::cache::Cache {
             commit.phase = IncrementPhase::Links;
         }
         Ok(true)
+    }
+
+    fn parsed_sources_match_unchanged_main(
+        &self,
+        commit: &IncrementCommit,
+    ) -> Result<bool, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT path, hash FROM main.documents")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                Utf8PathBuf::from(row.get::<_, String>(0)?),
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        let mut main_hashes = HashMap::new();
+        for row in rows {
+            let (path, hash) = row?;
+            main_hashes.insert(path, hash);
+        }
+        for (path, &index) in &commit.fresh_docs {
+            if commit.affected_paths.contains(path) {
+                continue;
+            }
+            if main_hashes.remove(path).as_deref()
+                != Some(commit.fresh_index.documents[index].hash.as_str())
+            {
+                return Ok(false);
+            }
+        }
+        Ok(main_hashes
+            .keys()
+            .all(|path| commit.affected_paths.contains(path)))
     }
 
     fn stage_increment_links(
@@ -478,6 +540,11 @@ impl crate::cache::Cache {
     }
 
     fn publish_increment(&mut self, commit: &mut IncrementCommit) -> Result<(), CacheError> {
+        if !affected_sources_still_match(&self.vault_root, commit) {
+            let _ = self.cleanup_staged_increment(commit.job_id);
+            commit.phase = IncrementPhase::Superseded;
+            return Ok(());
+        }
         let _lock = crate::cache::lock::WriteLock::acquire(
             &self.cache_dir,
             crate::cache::lock::write_lock_timeout(),
@@ -576,24 +643,13 @@ impl crate::cache::Cache {
         // This publication supersedes every other reservation captured before
         // it, including jobs that have parsed but not entered their first chunk.
         self.increment_publication_epoch = self.increment_publication_epoch.saturating_add(1);
-        self.cleanup_staged_increment(job_id)?;
+        let _ = self.cleanup_staged_increment(job_id);
         commit.phase = IncrementPhase::Done;
         Ok(())
     }
 
     fn cleanup_staged_increment(&self, job_id: i64) -> Result<(), CacheError> {
-        for table in [
-            // Invalidate publication authority first. Even if best-effort
-            // payload cleanup later fails, this driver can no longer publish.
-            "norn_increment_jobs",
-            "norn_increment_links",
-            "norn_increment_diagnostics",
-            "norn_increment_block_ids",
-            "norn_increment_headings",
-            "norn_increment_document_fields",
-            "norn_increment_documents",
-            "norn_increment_paths",
-        ] {
+        for table in INCREMENT_STAGING_TABLES {
             self.conn.execute(
                 &format!("DELETE FROM temp.{table} WHERE job_id = ?"),
                 [job_id],
@@ -610,6 +666,15 @@ impl crate::cache::Cache {
         detect(vault_root, self, &ChangeDetectOptions::default())
             .expect("detect")
             .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn staged_increment_job_count(&self) -> i64 {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM temp.norn_increment_jobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -702,15 +767,15 @@ fn ensure_increment_staging_tables(conn: &rusqlite::Connection) -> Result<(), Ca
 fn stage_document(
     tx: &Transaction,
     job_id: i64,
-    vault_root: &Utf8Path,
     doc: &Document,
     index_set: &std::collections::BTreeSet<String>,
+    parsed_mtime_ns: i64,
+    parsed_size_bytes: i64,
 ) -> Result<(), CacheError> {
     let frontmatter_json = doc
         .frontmatter
         .as_ref()
         .map(|value| serde_json::to_string(value).unwrap_or_default());
-    let absolute = vault_root.join(&doc.path);
     tx.execute(
         "INSERT INTO temp.norn_increment_documents
          (job_id, path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes)
@@ -722,22 +787,25 @@ fn stage_document(
             doc.hash,
             frontmatter_json,
             doc.body_text,
-            mtime_ns(&absolute).unwrap_or(0),
-            size_bytes(&absolute).unwrap_or(0),
+            parsed_mtime_ns,
+            parsed_size_bytes,
         ],
     )?;
 
-    for (sequence, (key, value)) in
-        crate::cache::document_fields::expanded_rows(doc.frontmatter.as_ref(), index_set)
-            .into_iter()
-            .enumerate()
-    {
-        tx.execute(
-            "INSERT INTO temp.norn_increment_document_fields
+    let mut sequence = 0_i64;
+    crate::cache::document_fields::visit_expanded_rows(
+        doc.frontmatter.as_ref(),
+        index_set,
+        |key, value| -> Result<(), CacheError> {
+            tx.execute(
+                "INSERT INTO temp.norn_increment_document_fields
              (job_id, path, key, value, sequence) VALUES (?, ?, ?, ?, ?)",
-            params![job_id, doc.path.as_str(), key, value, sequence as i64],
-        )?;
-    }
+                params![job_id, doc.path.as_str(), key, value, sequence],
+            )?;
+            sequence += 1;
+            Ok(())
+        },
+    )?;
 
     for (sequence, heading) in doc.headings.iter().enumerate() {
         let (line, column, byte_offset): (Option<i64>, Option<i64>, Option<i64>) =
@@ -797,6 +865,37 @@ fn stage_document(
     Ok(())
 }
 
+fn metadata_for_parsed_bytes(vault_root: &Utf8Path, doc: &Document) -> Option<(i64, i64)> {
+    let path = vault_root.join(&doc.path);
+    let before_mtime = mtime_ns(&path)?;
+    let before_size = size_bytes(&path)?;
+    let bytes = std::fs::read(path.as_std_path()).ok()?;
+    let after_mtime = mtime_ns(&path)?;
+    let after_size = size_bytes(&path)?;
+    if (before_mtime, before_size) != (after_mtime, after_size)
+        || bytes.len() as i64 != after_size
+        || blake3::hash(&bytes).to_hex().as_str() != doc.hash
+    {
+        return None;
+    }
+    Some((after_mtime, after_size))
+}
+
+fn affected_sources_still_match(vault_root: &Utf8Path, commit: &IncrementCommit) -> bool {
+    commit.affected_paths.iter().all(|path| {
+        let absolute = vault_root.join(path);
+        match commit.fresh_docs.get(path) {
+            Some(&index) => std::fs::read(absolute.as_std_path())
+                .ok()
+                .is_some_and(|bytes| {
+                    blake3::hash(&bytes).to_hex().as_str()
+                        == commit.fresh_index.documents[index].hash
+                }),
+            None => !absolute.exists(),
+        }
+    })
+}
+
 fn stage_link(tx: &Transaction, job_id: i64, sequence: i64, link: &Link) -> Result<(), CacheError> {
     let resolved = link.resolved_path.as_ref().map(|path| path.as_str());
     let source_context = link
@@ -827,35 +926,35 @@ fn stage_link(tx: &Transaction, job_id: i64, sequence: i64, link: &Link) -> Resu
     } else {
         Some(serde_json::to_string(&link.candidates).unwrap_or_default())
     };
-    tx.execute(
+    let mut statement = tx.prepare_cached(
         "INSERT INTO temp.norn_increment_links
          (job_id, sequence, source_path, raw, kind, target_raw, resolved_path,
           anchor, block_ref, label, source_span_start, source_span_end,
           source_span_line, source_span_column, source_context,
           source_context_property, status, unresolved_reason, candidates_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![
-            job_id,
-            sequence,
-            link.source_path.as_str(),
-            link.raw,
-            link_kind_str(&link.kind),
-            link.target,
-            resolved,
-            link.anchor,
-            link.block_ref,
-            link.label,
-            span_start,
-            span_end,
-            span_line,
-            span_column,
-            source_context,
-            source_context_property,
-            link_status_str(&link.status),
-            unresolved_reason,
-            candidates_json,
-        ],
     )?;
+    statement.execute(params![
+        job_id,
+        sequence,
+        link.source_path.as_str(),
+        link.raw,
+        link_kind_str(&link.kind),
+        link.target,
+        resolved,
+        link.anchor,
+        link.block_ref,
+        link.label,
+        span_start,
+        span_end,
+        span_line,
+        span_column,
+        source_context,
+        source_context_property,
+        link_status_str(&link.status),
+        unresolved_reason,
+        candidates_json,
+    ])?;
     Ok(())
 }
 
@@ -2178,7 +2277,7 @@ mod tests {
                  BEGIN SELECT RAISE(FAIL, 'injected cleanup failure'); END;",
             )
             .unwrap();
-        assert!(cache.supersede_staged_increments_after_refresh().is_err());
+        cache.supersede_staged_increments_after_refresh();
 
         assert!(!cache
             .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
@@ -2192,5 +2291,107 @@ mod tests {
             )
             .unwrap();
         assert!(body.contains("REFRESH WINS"));
+    }
+
+    #[test]
+    fn published_increment_remains_success_when_temp_cleanup_fails() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let reservation = cache.reserve_increment_commit().unwrap();
+        std::fs::write(root.join("doc.md"), "---\n---\nPUBLISHED\n").unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["doc.md".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+        )
+        .unwrap();
+        while !matches!(commit.phase, IncrementPhase::Ready) {
+            assert!(cache
+                .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+                .unwrap());
+        }
+        cache
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_published_cleanup
+                 BEFORE DELETE ON norn_increment_jobs
+                 BEGIN SELECT RAISE(FAIL, 'cleanup failed'); END;",
+            )
+            .unwrap();
+        assert!(!cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .expect("post-publication cleanup is best-effort"));
+    }
+
+    #[test]
+    fn increment_never_blesses_old_parsed_bytes_with_newer_metadata() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let reservation = cache.reserve_increment_commit().unwrap();
+        let parsed = "---\n---\nOLD PARSED\n";
+        let rewritten = "---\n---\nNEW BYTES!\n";
+        assert_eq!(parsed.len(), rewritten.len());
+        std::fs::write(root.join("doc.md"), parsed).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["doc.md".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+        )
+        .unwrap();
+        std::fs::write(root.join("doc.md"), rewritten).unwrap();
+        while cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap()
+        {}
+        assert!(
+            cache.detect_change_count(&root) > 0,
+            "a rewrite after parse must remain detectable rather than blessed fresh"
+        );
+    }
+
+    #[test]
+    fn unrelated_source_drift_cannot_publish_links_from_a_different_generation() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("a.md"), "---\n---\nA old\n").unwrap();
+        std::fs::write(root.join("b.md"), "---\n---\n[[old-target]]\n").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let reservation = cache.reserve_increment_commit().unwrap();
+        std::fs::write(root.join("a.md"), "---\n---\nA changed\n").unwrap();
+        std::fs::write(root.join("b.md"), "---\n---\n[[new-target]]\n").unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["a.md".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+        )
+        .unwrap();
+        while cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap()
+        {}
+        let new_links: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE source_path = 'b.md' AND target_raw = 'new-target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            new_links, 0,
+            "unrelated B drift must supersede A's job, not publish B-new links beside B-old rows"
+        );
     }
 }

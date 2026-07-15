@@ -168,6 +168,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -407,6 +409,8 @@ pub(crate) struct Generation {
     /// increment ran on (NRN-253 review).
     #[cfg(test)]
     inject_increment_error: Mutex<Option<CacheError>>,
+    #[cfg(test)]
+    inject_increment_panic: AtomicBool,
     /// Test-only: a one-shot gate the next refresh op waits on AFTER its start
     /// transition (started flag set, pending cleared) and BEFORE its scan, so a
     /// test can hold a refresh "in flight" while a new requester arrives.
@@ -1063,14 +1067,10 @@ fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<R
             .write_cache
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let report =
-            match write_cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
-                Ok(report) => match write_cache.supersede_staged_increments_after_refresh() {
-                    Ok(()) => Ok(report),
-                    Err(error) => Err(error),
-                },
-                Err(error) => Err(error),
-            };
+        let report = write_cache.index_incremental(vault_root, &ChangeDetectOptions::default());
+        if report.is_ok() {
+            write_cache.supersede_staged_increments_after_refresh();
+        }
         // Test-only: capture the report so the NRN-158 acceptance test can assert
         // it is empty (zero changes ⇒ no whole-vault rebuild) after an increment.
         #[cfg(test)]
@@ -1103,6 +1103,13 @@ fn run_increment_chunk(
     driver: &mut crate::cache::IncrementCommit,
     budget: std::time::Duration,
 ) -> ChunkOutcome<Result<(), CacheError>> {
+    #[cfg(test)]
+    if generation
+        .inject_increment_panic
+        .swap(false, Ordering::AcqRel)
+    {
+        panic!("injected increment panic");
+    }
     // Test-only: fail this chunk with an injected error instead of committing,
     // to drive an increment failure (e.g. corruption) deterministically.
     #[cfg(test)]
@@ -1587,7 +1594,7 @@ impl VaultContext {
     /// for `query_cache`, so config is stable for the whole request.
     pub(crate) fn load_graph_index(&self, scope: &RequestScope) -> Result<crate::core::GraphIndex> {
         let cache = self.query_cache(scope)?;
-        Ok(cache.load_graph_index()?)
+        cache.load_graph_index()
     }
 
     /// The warm per-request pipeline (steps 2–4). See the module-level docs for
@@ -1854,8 +1861,14 @@ impl VaultContext {
                 self.evict_generation_on_corruption(generation.number, &err);
                 self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
             }
-            Outcome::Dropped => self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE),
-            Outcome::Panicked => self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE),
+            Outcome::Dropped => {
+                self.discard_increment_reservation(slot, &generation, reservation);
+                self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE);
+            }
+            Outcome::Panicked => {
+                self.discard_increment_reservation(slot, &generation, reservation);
+                self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE);
+            }
         }
     }
 
@@ -2542,6 +2555,8 @@ fn open_generation(
         inject_refresh_error: Mutex::new(None),
         #[cfg(test)]
         inject_increment_error: Mutex::new(None),
+        #[cfg(test)]
+        inject_increment_panic: AtomicBool::new(false),
         #[cfg(test)]
         refresh_gate: Mutex::new(None),
         #[cfg(test)]
@@ -5041,6 +5056,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn refresh_waiters_succeed_when_post_refresh_temp_cleanup_fails() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        let _cache = ctx.query_cache_unscoped().expect("build cache");
+        drop(_cache);
+        let generation = ctx.current_generation().expect("current generation");
+        let Mode::Warm(slot) = &ctx.mode else {
+            unreachable!()
+        };
+        let _reservation = match ctx.submit_increment_reservation(slot, &generation).wait() {
+            Outcome::Done(Ok(reservation)) => reservation,
+            other => panic!("reservation failed: {other:?}"),
+        };
+        {
+            let cache = generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cache
+                .conn
+                .execute_batch(
+                    "CREATE TEMP TRIGGER fail_refresh_cleanup
+                     BEFORE DELETE ON norn_increment_jobs
+                     BEGIN SELECT RAISE(FAIL, 'cleanup failed'); END;",
+                )
+                .unwrap();
+        }
+        std::fs::write(root.join("delta.md"), "---\n---\nDelta\n").unwrap();
+        assert!(matches!(ctx.test_refresh_current(), RefreshOutcome::Served));
+    }
+
     /// Preemption: a liveness op submitted while a multi-chunk increment is in
     /// flight runs BETWEEN two increment chunks, not after all of them.
     #[test]
@@ -5159,6 +5207,15 @@ mod tests {
             notes.iter().any(|n| n.contains("abandoned")),
             "a dropped increment must leave the deferred operator note, got {notes:?}"
         );
+        assert_eq!(
+            generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .staged_increment_job_count(),
+            0,
+            "dropped bulk must schedule reservation cleanup on the held generation"
+        );
 
         // A later request opens a healthy generation and heals from disk.
         ctx.begin_request()
@@ -5166,6 +5223,37 @@ mod tests {
         let healed = ctx.query_cache_unscoped().expect("healed cache");
         assert!(doc_present(&healed, "delta.md"));
         assert!(doc_present(&healed, "epsilon.md"));
+    }
+
+    #[test]
+    fn panicked_increment_cleans_its_reserved_temp_job() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let scope = ctx.begin_request().expect("begin_request");
+        {
+            let _cache = ctx.query_cache(&scope).expect("build cache");
+        }
+        let generation = ctx.current_generation().expect("current generation");
+        generation
+            .inject_increment_panic
+            .store(true, Ordering::Release);
+        std::fs::write(root.join("delta.md"), "---\n---\nDelta\n").unwrap();
+
+        ctx.commit_apply_increments(&scope, &["delta.md".into()]);
+
+        assert!(scope
+            .take_operator_notes()
+            .iter()
+            .any(|note| note.contains("panicked")));
+        assert_eq!(
+            generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .staged_increment_job_count(),
+            0,
+            "panicked bulk must schedule reservation cleanup"
+        );
     }
 
     /// Eviction targeting (NRN-253 review): a corruption-class increment failure

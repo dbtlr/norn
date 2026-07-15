@@ -34,6 +34,8 @@ mod query_links;
 mod query_show;
 mod reader;
 #[cfg(test)]
+pub(crate) use reader::install_after_documents_loaded_hook;
+#[cfg(test)]
 mod scan_semantics_probe;
 pub(crate) mod schema;
 mod status;
@@ -130,12 +132,21 @@ impl Cache {
     /// work never extends the snapshot lifetime. `unchecked_transaction` accepts
     /// `&Connection`, allowing the existing read primitives to keep taking
     /// `&Cache`; this transaction is read-only by convention and remains
-    /// WAL-friendly for concurrent writers.
+    /// WAL-friendly for concurrent writers. Nested calls reuse the outer
+    /// transaction, allowing snapshot-owning helpers to compose into a wider
+    /// structured read phase without a nested `BEGIN`.
     pub(crate) fn read_snapshot<T>(
         &self,
         read: impl FnOnce(&Self) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         use anyhow::Context as _;
+
+        // Compose snapshot-owning helpers inside a wider structured read phase.
+        // SQLite exposes the connection's transaction state, so an inner helper
+        // can reuse the caller's snapshot without attempting a nested BEGIN.
+        if !self.conn.is_autocommit() {
+            return read(self);
+        }
 
         let transaction = self
             .conn

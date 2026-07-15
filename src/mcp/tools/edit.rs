@@ -142,18 +142,21 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: EditParams) -> Result
     // Warm-connection reuse under the daemon; fresh open in cold mode (NRN-130).
     let config = scope.config();
     let cache = ctx.query_cache(scope)?;
-    let index = cache.load_graph_index()?;
     let vault_cfg = &config.vault_config;
 
-    let pre = crate::edit::synth::preflight_and_plan(
-        &cwd,
-        &cache,
-        &index,
-        vault_cfg,
-        &p.target,
-        &p.edits,
-        p.expected_hash.as_deref(),
-    )?;
+    let (index, pre) = cache.read_snapshot(|cache| {
+        let index = cache.load_graph_index()?;
+        let pre = crate::edit::synth::preflight_and_plan(
+            &cwd,
+            cache,
+            &index,
+            vault_cfg,
+            &p.target,
+            &p.edits,
+            p.expected_hash.as_deref(),
+        )?;
+        Ok((index, pre))
+    })?;
 
     // DRY-RUN (default): no lock, no apply, no write.
     if !p.confirm {
@@ -274,6 +277,38 @@ mod tests {
             std::fs::read_to_string(root.join("doc.md")).unwrap(),
             "---\ntype: note\n---\nHello world\n"
         );
+    }
+
+    #[test]
+    fn dry_run_uses_one_snapshot_for_graph_and_target_resolution() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let scope = ctx.begin_request().expect("begin request");
+        let (_canonical, cache_dir) = crate::cache::cache_dir_for(&root).unwrap();
+        let db_path = cache_dir.join("cache.db");
+
+        crate::cache::install_after_documents_loaded_hook(move || {
+            let writer = rusqlite::Connection::open(db_path.as_std_path()).unwrap();
+            writer
+                .execute("DELETE FROM documents WHERE path = 'doc.md'", [])
+                .unwrap();
+        });
+
+        let report = handle(
+            &ctx,
+            &scope,
+            EditParams {
+                target: "doc".into(),
+                edits: vec![str_replace("Hello world", "Goodbye")],
+                expected_hash: None,
+                confirm: false,
+            },
+        )
+        .expect("graph reconstruction and target resolution share one snapshot");
+
+        assert_eq!(report.target, "doc.md");
+        assert_eq!(report.edits.len(), 1);
+        assert!(!report.applied);
     }
 
     /// NRN-220 (review fix): an `expected_hash` CAS drift refusal reports the

@@ -29,49 +29,34 @@ pub(crate) fn absent_sentinel() -> SqlValue {
     SqlValue::Blob(vec![0u8])
 }
 
-/// Row values for one (document, field) pair, given the document's
-/// (possibly-missing/unparsed) frontmatter.
-fn field_row_values(frontmatter: Option<&serde_json::Value>, field: &str) -> Vec<SqlValue> {
-    match frontmatter.and_then(|fm| fm.get(field)) {
-        None | Some(serde_json::Value::Null) => vec![absent_sentinel()],
-        Some(serde_json::Value::Array(items)) => {
-            if items.is_empty() {
-                vec![SqlValue::Null]
-            } else {
-                let non_null: Vec<SqlValue> = items
-                    .iter()
-                    .filter(|v| !v.is_null())
-                    .map(canonicalize_scalar)
-                    .collect();
-                if non_null.is_empty() {
-                    // Non-empty array, but every element was null: same
-                    // "present, no scalar" meaning as an empty array — emit
-                    // the single NULL presence row rather than zero rows.
-                    vec![SqlValue::Null]
-                } else {
-                    non_null
-                }
-            }
-        }
-        Some(other) => vec![canonicalize_scalar(other)],
-    }
-}
-
-/// Expand one document's declared frontmatter fields into their canonical EAV
-/// rows. The incremental publisher uses this same authority while staging rows
-/// in TEMP, so its eventual publication cannot drift from rebuild/re-shred
-/// semantics.
-pub(crate) fn expanded_rows(
+/// Visit one document's declared frontmatter fields as canonical EAV rows.
+/// The field name is borrowed from `index_set`, and each value is produced only
+/// when the caller consumes it, so rebuild/re-shred and incremental TEMP staging
+/// share one authority without materializing or cloning the full row set.
+pub(crate) fn visit_expanded_rows<E>(
     frontmatter: Option<&serde_json::Value>,
     index_set: &BTreeSet<String>,
-) -> Vec<(String, SqlValue)> {
-    let mut rows = Vec::new();
+    mut visit: impl FnMut(&str, SqlValue) -> Result<(), E>,
+) -> Result<(), E> {
     for field in index_set {
-        for value in field_row_values(frontmatter, field) {
-            rows.push((field.clone(), value));
+        match frontmatter.and_then(|fm| fm.get(field)) {
+            None | Some(serde_json::Value::Null) => visit(field, absent_sentinel())?,
+            Some(serde_json::Value::Array(items)) => {
+                let mut emitted = false;
+                for item in items.iter().filter(|item| !item.is_null()) {
+                    visit(field, canonicalize_scalar(item))?;
+                    emitted = true;
+                }
+                if !emitted {
+                    // Empty and all-null arrays share the same "present, no
+                    // scalar" meaning: one SQL NULL presence row.
+                    visit(field, SqlValue::Null)?;
+                }
+            }
+            Some(other) => visit(field, canonicalize_scalar(other))?,
         }
     }
-    rows
+    Ok(())
 }
 
 /// Delete every `document_fields` row for `path`. Callers rewriting a
@@ -93,13 +78,13 @@ pub(crate) fn insert_rows(
     frontmatter: Option<&serde_json::Value>,
     index_set: &BTreeSet<String>,
 ) -> Result<(), CacheError> {
-    for (field, value) in expanded_rows(frontmatter, index_set) {
+    visit_expanded_rows(frontmatter, index_set, |field, value| {
         tx.execute(
             "INSERT INTO document_fields (path, key, value) VALUES (?, ?, ?)",
             params![path, field, value],
         )?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Re-derive every `document_fields` row from the cached
@@ -224,6 +209,38 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         (tmp, dir)
+    }
+
+    #[test]
+    fn row_visitor_preserves_scalar_array_and_absence_semantics() {
+        let fm = serde_json::json!({
+            "scalar": "[[active]]",
+            "empty": [],
+            "all_null": [null, null],
+            "mixed": ["a", null, 2],
+            "null": null,
+        });
+        let fields = set(&["scalar", "empty", "all_null", "mixed", "null", "absent"]);
+        let mut rows = Vec::new();
+
+        visit_expanded_rows(Some(&fm), &fields, |field, value| {
+            rows.push((field.to_string(), value));
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("absent".to_string(), absent_sentinel()),
+                ("all_null".to_string(), SqlValue::Null),
+                ("empty".to_string(), SqlValue::Null),
+                ("mixed".to_string(), SqlValue::Text("a".to_string())),
+                ("mixed".to_string(), SqlValue::Integer(2)),
+                ("null".to_string(), absent_sentinel()),
+                ("scalar".to_string(), SqlValue::Text("active".to_string())),
+            ]
+        );
     }
 
     #[test]
