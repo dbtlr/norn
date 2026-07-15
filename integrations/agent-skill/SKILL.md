@@ -94,9 +94,9 @@ A target is a path, a unique stem, or a wikilink-shaped string. `get` returns ev
 Shared by `find` and `get`:
 
 - **Bare names select frontmatter fields:** `--col status,title`.
-- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter` (whole block), `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.raw`.
-- **`--all-cols`** dumps everything cache-served (frontmatter + every facet incl. `.body`), excluding `.raw` so a broad query never fans out to N file reads. Mutually exclusive with `--col`.
-- `.body` is the parsed body from the cache; `.raw` is the file's exact bytes from disk.
+- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter` (whole block), `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.document_hash`.
+- **`--all-cols`** dumps everything cache-served (frontmatter + every facet incl. `.body`) except the opt-in `.stem` and `.document_hash`. Mutually exclusive with `--col`.
+- `.body` is the parsed body from the cache; `.document_hash` is the full-content hash used by guarded edits.
 
 ### count
 

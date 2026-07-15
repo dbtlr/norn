@@ -22,7 +22,7 @@ pub struct ShowRecord {
     pub stem: String,
     /// Full-content blake3 hash, for the opt-in `.document_hash` facet. Populated
     /// (and serialized) ONLY when `.document_hash` is requested — the same
-    /// load-on-request + `skip_serializing_if` pattern as `.body`/`.raw`, so
+    /// load-on-request + `skip_serializing_if` pattern as `.body`, so
     /// `get --format json` (no `--col`) stays byte-identical AND an MCP
     /// `vault.get` (which serializes the record directly) surfaces the hash when
     /// asked. `#[serde(skip)]` would hide it from the MCP envelope entirely.
@@ -42,7 +42,7 @@ pub struct ShowRecord {
     /// format, so a value read here round-trips to `edit --replace-section`.
     /// Headings that were missing or ambiguous in this document are omitted (a
     /// warning lands in `ShowReport::notes` instead). `None` when `--section`
-    /// was not passed (omitted from JSON, like `.body`/`.raw`); `Some(vec![])`
+    /// was not passed (omitted from JSON, like `.body`); `Some(vec![])`
     /// when it was passed but zero requested headings resolved for this
     /// document.
     ///
@@ -57,8 +57,6 @@ pub struct ShowRecord {
         serialize_with = "serialize_sections"
     )]
     pub sections: Option<Vec<(String, String)>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw: Option<String>,
 }
 
 /// Build the `sections` JSON value: a plain object keyed by heading text
@@ -144,8 +142,7 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
 
     // A requested heavy facet must load itself, independent of any flag.
     // `.body` (cache-served) loads when `--all-cols` (full dump) OR `.body`
-    // is requested; `.raw` (disk read) loads when `.raw` is requested.
-    // `--all-cols` is cache-only by design, so it never triggers a `.raw` read.
+    // is requested.
     let (facets, _fields) = crate::output::projection::split_cols(&args.col);
     // Whether the `body` FIELD should be displayed (the pre-existing
     // contract: opt-in via `--all-cols` or `--col .body`).
@@ -178,9 +175,8 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
     // actually lands on `ShowRecord.body` below, so `--section` alone never
     // leaks the full body into output.
     let wants_body_load = wants_body_display || !requested_sections.is_empty();
-    let wants_raw = facets.iter().any(|f| f == "raw");
     // `.document_hash` is identity/metadata-class: opt-in only (never in the
-    // default or `--all-cols` dump), like `.raw`. Populated only when requested
+    // default or `--all-cols` dump). Populated only when requested
     // so the default record stays byte-identical.
     let wants_document_hash = facets.iter().any(|f| f == "document_hash");
 
@@ -205,11 +201,6 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
                     path
                 ));
                 continue;
-            };
-            let raw = if wants_raw {
-                crate::output::projection::read_raw(&cache.vault_root, &deep.path)
-            } else {
-                None
             };
             let sections = if requested_sections.is_empty() {
                 None
@@ -246,8 +237,7 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
                 stem: deep.stem,
                 // Omit when the hash is empty — an unreadable/unindexed file
                 // carries `hash: ""` (graph::build), and handing a caller "" as
-                // a CAS token would be misleading. Absent facet, like `.raw`
-                // omits when the file is unreadable.
+                // a CAS token would be misleading, so omit it.
                 document_hash: (wants_document_hash && !deep.hash.is_empty())
                     .then(|| deep.hash.clone()),
                 frontmatter: deep.frontmatter,
@@ -257,7 +247,6 @@ pub fn run(cache: &Cache, args: &GetArgs) -> Result<ShowReport> {
                 incoming_links: deep.incoming_links,
                 body,
                 sections,
-                raw,
             });
         }
     }
@@ -991,7 +980,6 @@ mod tests {
             incoming_links: vec![],
             body: None,
             sections: None,
-            raw: None,
         }
     }
 

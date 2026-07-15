@@ -148,12 +148,13 @@
 //! [`VaultContext::commit_apply_increments`], which parses the whole vault ONCE
 //! **on the request thread** (no lock, off the writer thread — NRN-252 review)
 //! into an `IncrementCommit`, then runs the commit as ONE **bulk** op on the
-//! per-vault writer queue — a chunked closure that only commits row updates in
-//! file-coherent chunks (~50ms each, WriteLock per chunk) and a final global
-//! links rewrite, guarded by a `still_valid` predicate that drops the op if the
-//! generation dies. Doing the parse on the request thread keeps every writer-queue
-//! chunk bounded, so a liveness refresh queued behind the commit is not stalled
-//! O(parse). The tool AWAITS it, so the report returns with the cache current.
+//! per-vault writer queue — a chunked closure that stages job-scoped document rows
+//! and the full resolved links set in non-shadowing TEMP tables (~50ms chunks),
+//! yields once more at ready-to-publish, then swaps all affected main rows in one
+//! short transaction. A `still_valid` predicate drops the op if the generation
+//! dies. Doing the parse on the request thread keeps every writer-queue chunk
+//! bounded, so a liveness refresh queued behind the commit is not stalled O(parse).
+//! The tool AWAITS it, so the report returns with the cache current.
 //! Without this, the next read's freshness refresh would pay a full detect scan
 //! AND a whole-vault rebuild (changes exist); with it, that refresh finds zero
 //! changes. Failure is degraded, never propagated — the mutation already landed
@@ -167,6 +168,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -406,6 +409,8 @@ pub(crate) struct Generation {
     /// increment ran on (NRN-253 review).
     #[cfg(test)]
     inject_increment_error: Mutex<Option<CacheError>>,
+    #[cfg(test)]
+    inject_increment_panic: AtomicBool,
     /// Test-only: a one-shot gate the next refresh op waits on AFTER its start
     /// transition (started flag set, pending cleared) and BEFORE its scan, so a
     /// test can hold a refresh "in flight" while a new requester arrives.
@@ -418,9 +423,9 @@ pub(crate) struct Generation {
     #[cfg(test)]
     last_refresh_report: Mutex<Option<crate::cache::IndexReport>>,
     /// Test-only: a reusable gate the increment-commit op signals + waits on at
-    /// EACH chunk boundary (after a chunk commits, before the next), so a test can
-    /// observe intermediate committed state, interleave a liveness op, or turn the
-    /// generation stale mid-commit — all without sleeps.
+    /// EACH chunk boundary (after TEMP staging, before the next entry), so a test
+    /// can observe main staying old, interleave a liveness op, or turn the
+    /// generation stale mid-stage — all without sleeps.
     #[cfg(test)]
     increment_gate: Mutex<Option<TestGate>>,
 }
@@ -971,7 +976,7 @@ impl RefreshArrival {
 ///   cleared) and BEFORE its scan, so a test can hold a refresh "in flight" while
 ///   a new requester arrives;
 /// - the increment-commit gate (`increment_gate`) is REUSABLE — the commit op
-///   hits it at EVERY chunk boundary (after a chunk commits, before the next), so
+///   hits it at EVERY chunk boundary (after TEMP staging, before the next), so
 ///   a test can step a multi-chunk commit one boundary at a time.
 ///
 /// In both: `reached.recv()` unblocks when the op reaches the gate; the test
@@ -1063,6 +1068,9 @@ fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<R
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let report = write_cache.index_incremental(vault_root, &ChangeDetectOptions::default());
+        if report.is_ok() {
+            write_cache.supersede_staged_increments_after_refresh();
+        }
         // Test-only: capture the report so the NRN-158 acceptance test can assert
         // it is empty (zero changes ⇒ no whole-vault rebuild) after an increment.
         #[cfg(test)]
@@ -1083,18 +1091,25 @@ fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<R
 ///
 /// It is a chunked closure driving an ALREADY-PARSED [`IncrementCommit`] (the
 /// whole-vault parse ran on the caller thread, off the writer thread — NRN-252
-/// review): each invocation commits ONE file-coherent chunk (or the final global
-/// links rewrite). Each chunk acquires and releases the WriteLock around its own
-/// transaction, so external CLI processes and this daemon's liveness ops
-/// interleave at boundaries. Returns [`ChunkOutcome::More`] while work remains,
-/// [`ChunkOutcome::Done`] with the terminal `Result` on completion or the first
-/// chunk error.
+/// review): bulk invocations stage one bounded chunk in connection-private TEMP;
+/// the terminal invocation alone acquires the WriteLock and publishes all main
+/// rows atomically. External CLI processes and this daemon's liveness ops can
+/// interleave at every staging boundary, including immediately before publish.
+/// Returns [`ChunkOutcome::More`] while work remains, [`ChunkOutcome::Done`] with
+/// the terminal `Result` on completion or the first chunk error.
 fn run_increment_chunk(
     generation: &Generation,
     vault_root: &Utf8Path,
     driver: &mut crate::cache::IncrementCommit,
     budget: std::time::Duration,
 ) -> ChunkOutcome<Result<(), CacheError>> {
+    #[cfg(test)]
+    if generation
+        .inject_increment_panic
+        .swap(false, Ordering::AcqRel)
+    {
+        panic!("injected increment panic");
+    }
     // Test-only: fail this chunk with an injected error instead of committing,
     // to drive an increment failure (e.g. corruption) deterministically.
     #[cfg(test)]
@@ -1579,7 +1594,7 @@ impl VaultContext {
     /// for `query_cache`, so config is stable for the whole request.
     pub(crate) fn load_graph_index(&self, scope: &RequestScope) -> Result<crate::core::GraphIndex> {
         let cache = self.query_cache(scope)?;
-        Ok(cache.load_graph_index()?)
+        cache.load_graph_index()
     }
 
     /// The warm per-request pipeline (steps 2–4). See the module-level docs for
@@ -1754,6 +1769,7 @@ impl VaultContext {
         &self,
         scope: &RequestScope,
         changed_paths: &[Utf8PathBuf],
+        baseline: crate::core::GraphIndex,
     ) {
         let Mode::Warm(slot) = &self.mode else {
             return; // cold: no queue, nothing to commit
@@ -1776,6 +1792,36 @@ impl VaultContext {
         else {
             return;
         };
+        if scope.bound_generation() != generation.number {
+            self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE);
+            return;
+        }
+        let baseline_fingerprint = crate::cache::graph_fingerprint(&baseline);
+
+        // Reserve publication authority on the dedicated writer connection
+        // BEFORE parsing. A refresh can now supersede this job even during the
+        // parse/pre-first-chunk window, and an external publication changes the
+        // baseline captured by the reservation.
+        let reservation = match self
+            .submit_increment_reservation(slot, &generation, baseline_fingerprint)
+            .wait()
+        {
+            Outcome::Done(Ok(reservation)) => reservation,
+            Outcome::Done(Err(error)) => {
+                let err: anyhow::Error = error.into();
+                self.evict_generation_on_corruption(generation.number, &err);
+                self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
+                return;
+            }
+            Outcome::Dropped => {
+                self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE);
+                return;
+            }
+            Outcome::Panicked => {
+                self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE);
+                return;
+            }
+        };
 
         // Build the whole-vault parse (the IncrementCommit driver) HERE, on the
         // request's spawn_blocking thread (post-apply, under the mutation lock),
@@ -1784,15 +1830,21 @@ impl VaultContext {
         // defeating the ~50ms preemption bound a liveness refresh queued behind it
         // relies on. It is read-only over post-apply disk state and needs only the
         // generation's index config (alias_field / files.ignore), no cache
-        // connection, so it belongs off the writer thread.
+        // connection, so it belongs off the writer thread. The caller supplies
+        // the coherent pre-apply graph it already used for planning; reusing it
+        // avoids both duplicate O(vault) reconstruction and a second read-pool
+        // checkout while that mutation may still own the sole pooled handle.
         let commit = match crate::cache::Cache::begin_increment_commit(
             &self.vault_root,
             changed_paths,
             generation.index_identity.alias_field.as_deref(),
             &generation.index_identity.ignore,
+            &reservation,
+            baseline,
         ) {
             Ok(commit) => commit,
             Err(error) => {
+                self.discard_increment_reservation(slot, &generation, reservation);
                 // The parse failed, but the mutation ALREADY landed on disk — so
                 // degrade rather than fail the tool: the next read's refresh heals
                 // the cache. A corruption-class parse error still evicts +
@@ -1822,9 +1874,50 @@ impl VaultContext {
                 self.evict_generation_on_corruption(generation.number, &err);
                 self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
             }
-            Outcome::Dropped => self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE),
-            Outcome::Panicked => self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE),
+            Outcome::Dropped => {
+                self.discard_increment_reservation(slot, &generation, reservation);
+                self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE);
+            }
+            Outcome::Panicked => {
+                self.discard_increment_reservation(slot, &generation, reservation);
+                self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE);
+            }
         }
+    }
+
+    fn submit_increment_reservation(
+        &self,
+        slot: &WarmSlot,
+        generation: &Arc<Generation>,
+        expected_fingerprint: String,
+    ) -> Handle<Result<crate::cache::IncrementReservation, CacheError>> {
+        let generation = Arc::clone(generation);
+        slot.queue.submit_liveness(move || {
+            generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .reserve_increment_commit(&expected_fingerprint)
+        })
+    }
+
+    fn discard_increment_reservation(
+        &self,
+        slot: &WarmSlot,
+        generation: &Arc<Generation>,
+        reservation: crate::cache::IncrementReservation,
+    ) {
+        let generation = Arc::clone(generation);
+        let _ = slot
+            .queue
+            .submit_liveness(move || {
+                generation
+                    .write_cache
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .discard_increment_reservation(&reservation)
+            })
+            .wait();
     }
 
     /// Emit an operator note on BOTH surfaces (NRN-215 pattern): the daemon's own
@@ -1842,9 +1935,9 @@ impl VaultContext {
     /// PARSED `commit` chunk by chunk, and return its queue handle. The op runs
     /// `'static` on the writer thread, so it captures owned / `Arc` state; the
     /// whole-vault parse already happened on the caller thread (NRN-252 review),
-    /// so the op only ever commits file-coherent chunks (each: lock → tx →
-    /// commit) plus the final links rewrite — every chunk bounded, preemptible by
-    /// a liveness op at its boundary.
+    /// so the op only stages bounded TEMP chunks before one terminal atomic
+    /// publication — every staging chunk preemptible by a liveness op at its
+    /// boundary.
     fn submit_increment_commit(
         &self,
         slot: &WarmSlot,
@@ -1997,6 +2090,27 @@ impl VaultContext {
             .unwrap_or(0)
     }
 
+    /// Test-only: gate the current generation's next freshness refresh after its
+    /// start transition but before its scan. Returns the test's
+    /// `(refresh_started_rx, release_refresh_tx)` ends so an MCP-surface proof can
+    /// deterministically introduce a later request while that refresh is in flight.
+    #[cfg(test)]
+    pub(crate) fn install_current_refresh_gate(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let generation = self.current_generation().expect("a current generation");
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *generation
+            .refresh_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(TestGate {
+            reached: reached_tx,
+            release: release_rx,
+        });
+        (reached_rx, release_tx)
+    }
+
     /// Test-only: read connections the CURRENT generation's pool has lazily grown
     /// BEYOND its seed (`0` if none / cold). A value `> 0` proves concurrent warm
     /// reads genuinely overlapped on distinct pooled connections rather than
@@ -2127,7 +2241,7 @@ impl VaultContext {
 
     /// Test-only: install a per-chunk gate on `generation`'s increment op and hand
     /// back the test's `(reached_rx, release_tx)` ends. The op signals `reached`
-    /// after each chunk commits and blocks on `release`, so a test steps a
+    /// after each TEMP chunk (and at ready-to-publish) and blocks on `release`, so a test steps a
     /// multi-chunk commit one boundary at a time.
     #[cfg(test)]
     pub(crate) fn install_increment_gate(
@@ -2158,13 +2272,27 @@ impl VaultContext {
     ) -> Handle<Result<(), CacheError>> {
         match &self.mode {
             Mode::Warm(slot) => {
-                // Mirror `commit_apply_increments`: parse on THIS (test) thread,
-                // then submit the prebuilt driver.
+                // Mirror `commit_apply_increments`: reserve on the writer, parse
+                // on THIS (test) thread, then submit the prebuilt driver.
+                let baseline = generation
+                    .checkout_read()
+                    .load_graph_index()
+                    .expect("test baseline load should succeed");
+                let fingerprint = crate::cache::graph_fingerprint(&baseline);
+                let reservation = match self
+                    .submit_increment_reservation(slot, generation, fingerprint)
+                    .wait()
+                {
+                    Outcome::Done(Ok(reservation)) => reservation,
+                    other => panic!("test increment reservation failed: {other:?}"),
+                };
                 let commit = crate::cache::Cache::begin_increment_commit(
                     &self.vault_root,
                     changed_paths,
                     generation.index_identity.alias_field.as_deref(),
                     &generation.index_identity.ignore,
+                    &reservation,
+                    baseline,
                 )
                 .expect("test increment parse should succeed");
                 self.submit_increment_commit(slot, generation, commit)
@@ -2450,6 +2578,8 @@ fn open_generation(
         inject_refresh_error: Mutex::new(None),
         #[cfg(test)]
         inject_increment_error: Mutex::new(None),
+        #[cfg(test)]
+        inject_increment_panic: AtomicBool::new(false),
         #[cfg(test)]
         refresh_gate: Mutex::new(None),
         #[cfg(test)]
@@ -3848,72 +3978,67 @@ mod tests {
 
     /// Drain-and-drop (ADR 0013, NRN-251): a request in flight on generation N
     /// keeps serving on N while N+1 opens; N's resources (connection + sentinel
-    /// fd) release only when its LAST `Arc` drops. Modeled by holding the
-    /// generation `Arc` across a reopen: the slot releases its reference (leaving
-    /// ours the sole owner) yet N still serves its own snapshot, and the whole
-    /// generation is freed exactly when we drop it.
+    /// fd) release only when its last request-bound [`CacheHandle`] drops. The
+    /// handle returned by `query_cache` pins N across a reopen to an observably
+    /// different N+1, continues serving N's snapshot, and releases N when dropped.
     #[test]
     fn warm_reopen_drains_and_drops_prior_generation() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        ctx.begin_request().expect("begin_request");
-        {
-            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            assert_eq!(doc_count(&cache), 3);
-        }
+        let scope1 = ctx.begin_request().expect("begin_request");
+        let gen1_cache = ctx.query_cache(&scope1).expect("first warm query_cache");
+        assert_eq!(doc_count(&gen1_cache), 3);
+
         let gen1 = ctx.current_generation().expect("generation 1 held");
         assert_eq!(gen1.number, 1);
         let weak = Arc::downgrade(&gen1);
+        drop(gen1);
+
+        // Make the rebuilt generation observably different from the request's
+        // bound snapshot before forcing the ground-shift.
+        std::fs::write(
+            root.join("delta.md"),
+            "---\ntype: note\nstatus: active\n---\nDelta body\n",
+        )
+        .unwrap();
 
         // Trigger a reopen via ground-shift: remove the cache dir out from under
-        // the live context. gen1's held connection keeps the unlinked db alive
-        // (POSIX ghost), so it can still serve its snapshot after this.
+        // the live context. The request-bound handle keeps gen1's unlinked db
+        // alive (POSIX ghost), so it can still serve its snapshot after this.
         let (_canonical, cache_dir) = cache_dir_for(&root).expect("cache_dir_for");
         std::fs::remove_dir_all(cache_dir.as_std_path()).expect("remove cache dir");
 
-        ctx.begin_request().expect("begin_request");
+        let scope2 = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+            let cache = ctx.query_cache(&scope2).expect("second warm query_cache");
             assert_eq!(
                 doc_count(&cache),
-                3,
-                "the reopened generation serves the vault"
+                4,
+                "generation N+1 serves the rebuilt four-document vault"
             );
         }
         let gen2 = ctx.current_generation().expect("generation 2 held");
         assert_eq!(gen2.number, 2, "reopen advanced the generation number");
+        drop(gen2);
 
-        // gen1 drained on N: its still-open pooled connection serves its own
-        // snapshot, even though the file was unlinked.
-        let gen1_docs: i64 = gen1
-            .test_read_conn()
-            .conn()
-            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-            .expect("gen1 connection still usable");
         assert_eq!(
-            gen1_docs, 3,
-            "the drained generation still serves its snapshot"
+            doc_count(&gen1_cache),
+            3,
+            "the request-bound N handle still serves its old three-document snapshot"
         );
 
-        // The slot swapped to gen2 and released its gen1 reference — ours is now
-        // the sole owner.
-        assert_eq!(
-            Arc::strong_count(&gen1),
-            1,
-            "the slot dropped its reference to the prior generation on reopen"
-        );
         assert!(
             weak.upgrade().is_some(),
-            "generation 1 is still alive while held"
+            "generation N remains alive while its request-bound handle is held"
         );
 
-        // Dropping the last `Arc` releases N entirely (connection + sentinel fd
-        // close via Drop) — the Weak going dead is the observable Drop-side effect.
-        drop(gen1);
+        // Dropping the request's handle releases N entirely (connection + sentinel
+        // fd close via Drop) — the Weak going dead is the observable Drop effect.
+        drop(gen1_cache);
         assert!(
             weak.upgrade().is_none(),
-            "generation N is fully dropped — connection + sentinel fd released — with its last Arc"
+            "generation N is fully dropped after its request-bound handle releases it"
         );
     }
 
@@ -4755,6 +4880,7 @@ mod tests {
     /// and runs no whole-vault rebuild.
     #[test]
     fn warm_mutation_commits_increment_so_next_read_sees_no_changes() {
+        let _cap = ReadPoolCapGuard::pin(1);
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
@@ -4799,11 +4925,10 @@ mod tests {
         );
     }
 
-    /// File coherence: with a 0ms budget forcing one file per chunk, a file
-    /// present mid-stream carries its new content in full, and a not-yet-committed
-    /// file is entirely absent — never a mix.
+    /// Atomic publication: every staging boundary exposes the entire old main
+    /// snapshot; only the terminal short transaction switches readers to new.
     #[test]
-    fn increment_commits_files_coherently_across_chunks() {
+    fn increment_publishes_all_files_atomically_after_staging() {
         // 0ms budget ⇒ one whole file per chunk. Process-global but inert: it only
         // makes other increments chunk more finely, never changes correctness.
         std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
@@ -4829,31 +4954,49 @@ mod tests {
         let (reached, release) = ctx.install_increment_gate(&generation);
         let handle = ctx.test_submit_increment_commit(&generation, &changed);
 
-        // Boundary 1: alpha's chunk committed; delta's has NOT started.
+        // Boundary 1: alpha is staged, but main is still entirely old.
         reached.recv().expect("boundary 1");
         {
             let cache = generation.test_read_conn();
             assert!(
                 body_of(&cache, "alpha.md")
                     .as_deref()
-                    .is_some_and(|b| b.contains("REVISED")),
-                "alpha must be fully swapped to its new body at boundary 1"
+                    .is_some_and(|b| b.contains("Alpha body")),
+                "alpha must remain old while staging"
             );
             assert!(
                 !doc_present(&cache, "delta.md"),
-                "delta must be ABSENT until its own chunk commits (file coherence)"
+                "delta must remain absent while staging"
             );
         }
         release.send(()).unwrap();
 
-        // Boundary 2: delta's chunk committed.
+        // Boundary 2: all document rows are staged; main is still old.
         reached.recv().expect("boundary 2");
         {
             let cache = generation.test_read_conn();
             assert!(
-                doc_present(&cache, "delta.md"),
-                "delta present after its own chunk commits"
+                body_of(&cache, "alpha.md")
+                    .as_deref()
+                    .is_some_and(|b| b.contains("Alpha body")),
+                "alpha must remain old until terminal publication"
             );
+            assert!(
+                !doc_present(&cache, "delta.md"),
+                "delta must remain absent until terminal publication"
+            );
+        }
+        release.send(()).unwrap();
+
+        // Boundary 3 is the explicit ready-to-publish yield. Even here readers
+        // still see the complete old snapshot.
+        reached.recv().expect("ready-to-publish boundary");
+        {
+            let cache = generation.test_read_conn();
+            assert!(body_of(&cache, "alpha.md")
+                .as_deref()
+                .is_some_and(|b| b.contains("Alpha body")));
+            assert!(!doc_present(&cache, "delta.md"));
         }
         release.send(()).unwrap();
 
@@ -4861,11 +5004,130 @@ mod tests {
             matches!(handle.wait(), Outcome::Done(Ok(()))),
             "the increment commit must complete cleanly"
         );
+        {
+            let cache = generation.test_read_conn();
+            assert!(
+                body_of(&cache, "alpha.md")
+                    .as_deref()
+                    .is_some_and(|b| b.contains("REVISED")),
+                "terminal publication switches alpha to new"
+            );
+            assert!(
+                doc_present(&cache, "delta.md"),
+                "terminal publication adds delta in the same snapshot"
+            );
+        }
         assert_eq!(
             ctx.detect_change_count(),
             0,
             "a completed increment leaves detect empty"
         );
+    }
+
+    /// Reservation closes the pre-first-chunk authority window: a successful
+    /// refresh on the SAME dedicated writer connection after parsing invalidates
+    /// the reservation, so the older driver completes without publishing.
+    #[test]
+    fn refresh_between_increment_parse_and_first_chunk_supersedes_reservation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let generation = ctx.current_generation().expect("current generation");
+        let Mode::Warm(slot) = &ctx.mode else {
+            unreachable!()
+        };
+
+        let baseline = generation
+            .checkout_read()
+            .load_graph_index()
+            .expect("baseline load");
+        let fingerprint = crate::cache::graph_fingerprint(&baseline);
+        let reservation = match ctx
+            .submit_increment_reservation(slot, &generation, fingerprint)
+            .wait()
+        {
+            Outcome::Done(Ok(reservation)) => reservation,
+            other => panic!("reservation failed: {other:?}"),
+        };
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntype: note\n---\nOLDER PARSED BODY\n",
+        )
+        .unwrap();
+        let commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["alpha.md".into()],
+            generation.index_identity.alias_field.as_deref(),
+            &generation.index_identity.ignore,
+            &reservation,
+            baseline,
+        )
+        .expect("parse older increment");
+
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntype: note\n---\nNEWER REFRESH BODY\n",
+        )
+        .unwrap();
+        assert!(matches!(ctx.test_refresh_current(), RefreshOutcome::Served));
+
+        assert!(matches!(
+            ctx.submit_increment_commit(slot, &generation, commit)
+                .wait(),
+            Outcome::Done(Ok(()))
+        ));
+        let cache = generation.test_read_conn();
+        assert!(
+            body_of(&cache, "alpha.md")
+                .as_deref()
+                .is_some_and(|body| body.contains("NEWER REFRESH BODY")),
+            "the older parsed driver must not overwrite the newer refresh"
+        );
+    }
+
+    #[test]
+    fn refresh_waiters_succeed_when_post_refresh_temp_cleanup_fails() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        let _cache = ctx.query_cache_unscoped().expect("build cache");
+        drop(_cache);
+        let generation = ctx.current_generation().expect("current generation");
+        let Mode::Warm(slot) = &ctx.mode else {
+            unreachable!()
+        };
+        let baseline = generation
+            .checkout_read()
+            .load_graph_index()
+            .expect("baseline load");
+        let fingerprint = crate::cache::graph_fingerprint(&baseline);
+        let _reservation = match ctx
+            .submit_increment_reservation(slot, &generation, fingerprint)
+            .wait()
+        {
+            Outcome::Done(Ok(reservation)) => reservation,
+            other => panic!("reservation failed: {other:?}"),
+        };
+        {
+            let cache = generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cache
+                .conn
+                .execute_batch(
+                    "CREATE TEMP TRIGGER fail_refresh_cleanup
+                     BEFORE DELETE ON norn_increment_jobs
+                     BEGIN SELECT RAISE(FAIL, 'cleanup failed'); END;",
+                )
+                .unwrap();
+        }
+        std::fs::write(root.join("delta.md"), "---\n---\nDelta\n").unwrap();
+        assert!(matches!(ctx.test_refresh_current(), RefreshOutcome::Served));
     }
 
     /// Preemption: a liveness op submitted while a multi-chunk increment is in
@@ -4910,6 +5172,10 @@ mod tests {
         reached.recv().expect("boundary 2 after the liveness op");
         release.send(()).unwrap();
 
+        // Explicit boundary immediately before terminal publication.
+        reached.recv().expect("ready-to-publish boundary");
+        release.send(()).unwrap();
+
         assert!(
             matches!(inc.wait(), Outcome::Done(Ok(()))),
             "the increment still completes after being preempted"
@@ -4926,10 +5192,11 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
         let scope = ctx.begin_request().expect("begin_request");
-        {
+        let baseline = {
             let cache = ctx.query_cache(&scope).expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
-        }
+            cache.load_graph_index().expect("pre-apply baseline")
+        };
         let generation = ctx.current_generation().expect("a current generation");
 
         std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta\n").unwrap();
@@ -4945,7 +5212,7 @@ mod tests {
         let ctx_worker = Arc::clone(&ctx);
         let changed_worker = changed.clone();
         let worker = std::thread::spawn(move || {
-            ctx_worker.commit_apply_increments(&scope, &changed_worker);
+            ctx_worker.commit_apply_increments(&scope, &changed_worker, baseline);
             scope.take_operator_notes()
         });
 
@@ -4963,16 +5230,17 @@ mod tests {
             .join()
             .expect("commit_apply_increments must not panic");
 
-        // The remaining chunk never ran — only delta committed.
+        // Staging was invisible and generation death prevents terminal
+        // publication, so neither addition appears in the dead generation.
         {
             let cache = generation.test_read_conn();
             assert!(
-                doc_present(&cache, "delta.md"),
-                "delta (committed before the death) is present"
+                !doc_present(&cache, "delta.md"),
+                "staged delta must never become visible after generation death"
             );
             assert!(
                 !doc_present(&cache, "epsilon.md"),
-                "epsilon's chunk must NOT run after the generation died"
+                "epsilon must remain unpublished after generation death"
             );
         }
 
@@ -4981,40 +5249,152 @@ mod tests {
             notes.iter().any(|n| n.contains("abandoned")),
             "a dropped increment must leave the deferred operator note, got {notes:?}"
         );
+        assert_eq!(
+            generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .staged_increment_job_count(),
+            0,
+            "dropped bulk must schedule reservation cleanup on the held generation"
+        );
+
+        // A later request opens a healthy generation and heals from disk.
+        ctx.begin_request()
+            .expect("begin request after invalidation");
+        let healed = ctx.query_cache_unscoped().expect("healed cache");
+        assert!(doc_present(&healed, "delta.md"));
+        assert!(doc_present(&healed, "epsilon.md"));
     }
 
-    /// Eviction targeting (NRN-253 review): a corruption-class increment failure
-    /// must evict the generation the increment RAN ON (`slot.current` at commit
-    /// time), not the request's bound generation. The scope binds generation 1, a
-    /// concurrent-style reopen advances the slot to generation 2, and the
-    /// corrupting increment runs on 2 — so the floor must exclude 2 (a fresh
-    /// request opens 3). Keying the bump off the scope's bound generation would
-    /// set the floor to only 2, leaving the actually-corrupt generation 2
-    /// satisfying it and serving.
     #[test]
-    fn increment_corruption_evicts_generation_it_ran_on_not_bound_generation() {
+    fn panicked_increment_cleans_its_reserved_temp_job() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let scope = ctx.begin_request().expect("begin_request");
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("build cache")
+            .load_graph_index()
+            .expect("pre-apply baseline");
+        let generation = ctx.current_generation().expect("current generation");
+        generation
+            .inject_increment_panic
+            .store(true, Ordering::Release);
+        std::fs::write(root.join("delta.md"), "---\n---\nDelta\n").unwrap();
+
+        ctx.commit_apply_increments(&scope, &["delta.md".into()], baseline);
+
+        assert!(scope
+            .take_operator_notes()
+            .iter()
+            .any(|note| note.contains("panicked")));
+        assert_eq!(
+            generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .staged_increment_job_count(),
+            0,
+            "panicked bulk must schedule reservation cleanup"
+        );
+    }
+
+    #[test]
+    fn affected_source_drift_degrades_post_apply_increment() {
+        std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let scope = ctx.begin_request().expect("begin_request");
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("build cache")
+            .load_graph_index()
+            .expect("pre-apply baseline");
+        let generation = ctx.current_generation().expect("current generation");
+        std::fs::write(root.join("alpha.md"), "---\n---\nPARSED ALPHA\n").unwrap();
+        let (reached, release) = ctx.install_increment_gate(&generation);
+        let worker_ctx = Arc::clone(&ctx);
+        let worker = std::thread::spawn(move || {
+            worker_ctx.commit_apply_increments(&scope, &["alpha.md".into()], baseline);
+            scope.take_operator_notes()
+        });
+        reached.recv().expect("first staging boundary");
+        std::fs::write(root.join("alpha.md"), "---\n---\nDRIFTED ALPHA\n").unwrap();
+        release.send(()).unwrap();
+        reached.recv().expect("ready boundary");
+        release.send(()).unwrap();
+        let notes = worker.join().unwrap();
+        assert!(
+            notes.iter().any(|note| note.contains("failed")),
+            "affected drift must produce the deferred-cache note: {notes:?}"
+        );
+    }
+
+    /// A request's pre-apply graph belongs to the generation it bound. If a
+    /// concurrent reopen advances `slot.current` before the post-apply increment,
+    /// that old graph must never be overlaid onto the newer generation.
+    #[test]
+    fn increment_with_old_bound_baseline_does_not_target_new_generation() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        // Bind a request scope on generation 1.
         let scope = ctx.begin_request().expect("begin_request");
-        {
-            let cache = ctx
-                .query_cache(&scope)
-                .expect("query_cache on generation 1");
-            assert_eq!(doc_count(&cache), 3);
-        }
-        assert_eq!(scope.bound_generation(), 1, "scope bound generation 1");
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("generation 1 cache")
+            .load_graph_index()
+            .expect("generation 1 baseline");
+        assert_eq!(scope.bound_generation(), 1);
 
-        // Force a reopen: invalidate generation 1 and open generation 2 while
-        // this request's scope stays bound to 1 (models a concurrent reopen
-        // landing mid-request).
         ctx.test_invalidate_current_generation();
         {
-            let _c = ctx.query_cache_unscoped().expect("reopen generation 2");
+            let _newer = ctx.query_cache_unscoped().expect("open generation 2");
         }
+        let generation_2 = ctx.current_generation().expect("generation 2 current");
+        assert_eq!(generation_2.number, 2);
+
+        std::fs::write(root.join("delta.md"), "---\n---\nDelta\n").unwrap();
+        ctx.commit_apply_increments(&scope, &["delta.md".into()], baseline);
+
+        assert!(
+            scope
+                .take_operator_notes()
+                .iter()
+                .any(|note| note.contains("abandoned")),
+            "generation mismatch must degrade the cache increment"
+        );
+        let cache = generation_2.test_read_conn();
+        assert!(
+            !doc_present(&cache, "delta.md"),
+            "an N baseline must not publish into generation N+1"
+        );
+    }
+
+    /// A corruption-class increment failure evicts the generation it ran on. The
+    /// request and increment both bind generation 2 (cross-generation increments
+    /// are rejected above), so the floor must exclude 2 and the next request must
+    /// open generation 3.
+    #[test]
+    fn increment_corruption_evicts_generation_it_ran_on() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Open generation 1, then invalidate it so the mutation request binds 2.
+        ctx.begin_request().expect("begin_request generation 1");
+        {
+            let _cache = ctx.query_cache_unscoped().expect("open generation 1");
+        }
+        ctx.test_invalidate_current_generation();
+        let scope = ctx.begin_request().expect("begin_request generation 2");
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("reopen generation 2")
+            .load_graph_index()
+            .expect("generation 2 pre-apply baseline");
         let gen2 = ctx.current_generation().expect("generation 2 current");
         assert_eq!(gen2.number, 2, "the reopen produced generation 2");
+        assert_eq!(scope.bound_generation(), 2, "scope bound generation 2");
 
         // Inject a SQLITE_CORRUPT failure into generation 2's increment commit.
         let corrupt = rusqlite::Error::SqliteFailure(
@@ -5026,7 +5406,7 @@ mod tests {
         // A real changed file so the commit has work to submit; the increment
         // runs on generation 2 and fails with the injected corruption.
         std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta\n").unwrap();
-        ctx.commit_apply_increments(&scope, &["delta.md".into()]);
+        ctx.commit_apply_increments(&scope, &["delta.md".into()], baseline);
 
         // The floor must now exclude generation 2: a fresh request reopens to 3.
         ctx.begin_request().expect("begin_request after eviction");
@@ -5036,8 +5416,7 @@ mod tests {
         assert_eq!(
             gen_number(&ctx),
             3,
-            "the eviction must target the generation the increment ran on (2), \
-             not the scope's bound generation (1)"
+            "the eviction must exclude the generation the increment ran on (2)"
         );
     }
 }

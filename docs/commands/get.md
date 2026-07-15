@@ -26,7 +26,7 @@ norn get notes/my-note.md --all-cols --format json
 # the complete structured dump, including body
 
 norn get notes/my-note.md --format markdown
-# rebuild the document as Markdown (frontmatter + body)
+# print the exact source file, without newline normalization
 
 norn get notes/my-note.md --section "Task Description" --section "Annotations" --format json
 # just those two named sections' content (repeat --section per heading)
@@ -47,11 +47,11 @@ An ambiguous target emits one record per resolved candidate. Multiple targets ar
 The `--col` vocabulary is identical to `norn find`:
 
 - **Bare names select frontmatter fields:** `--col status,title`.
-- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter`, `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.raw`, `.document_hash`.
+- **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter`, `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.document_hash`.
 - **Default (no `--col`):** frontmatter, headings, and links. Body is included only with `--all-cols` or `--col .body`.
-- **`--all-cols`:** every frontmatter field plus every cache-served facet, including `.body`. Excludes `.raw` and `.document_hash` (opt-in/identity-class, requested only by name). Mutually exclusive with `--col`.
+- **`--all-cols`:** every frontmatter field plus every cache-served facet, including `.body`, except the opt-in `.stem` and `.document_hash`. Mutually exclusive with `--col`.
 
-`.body` is the parsed body from the cache; `.raw` is the file's exact bytes from disk. `.document_hash` is the blake3 hex of the full file content — the same value plan ops carry and `edit --expected-hash` / `vault.edit`'s `expected_hash` compare against, so `get --col .document_hash` is how you read a document's hash to guard a later edit.
+`.body` is the parsed body from the cache. `.document_hash` is the blake3 hex of the full file content — the same value plan ops carry and `edit --expected-hash` / `vault.edit`'s `expected_hash` compare against, so `get --col .document_hash` is how you read a document's hash to guard a later edit.
 
 ## Selecting sections — `--section`
 
@@ -76,7 +76,12 @@ The `--col` vocabulary is identical to `norn find`:
 | `paths` | One vault-relative path per line. | Yes. |
 | `json` | A JSON array of document records, one per resolved target. (Unlike `find`, `get` emits a bare array, not a `{ total, … }` wrapper.) | Yes, versioned. |
 | `jsonl` | One JSON object per line. | Yes. |
-| `markdown` | The document rebuilt as Markdown (frontmatter + body). One document at a time. | `get`-only. |
+| `markdown` | The exact UTF-8 source file read from disk, with no trailing-newline fixup. One document at a time. | `get`-only. |
+
+When a matching `norn serve` daemon is live, `markdown` routes through
+`vault.get` like the structured formats; the daemon reads the resolved file at
+request time and returns the same content. Markdown is a representation,
+not a structural facet: it never adds `.raw` or `.source` to records.
 
 ## See also
 

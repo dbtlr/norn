@@ -9,11 +9,11 @@
 //! client-side `--col` narrowing itself — so routed and direct output are
 //! byte-for-byte equal.
 //!
-//! **Gated to Direct (handled by the caller, `route_get` in `src/lib.rs`):**
-//! `--format markdown` (a byte-faithful disk read with bespoke multi-doc
-//! handling) and `--section` (the wire serializes sections as an
-//! alphabetically-keyed object, dropping the request order the `records`
-//! renderer needs). Everything else routes.
+//! `--format markdown` takes the format-specific `markdown` envelope instead of
+//! reconstructing a structural record. Structured `--section` remains gated to
+//! Direct (the wire serializes sections as an alphabetically-keyed object,
+//! dropping the request order the `records` renderer needs); Markdown ignores the
+//! flag and routes while the client preserves its warning.
 //!
 //! Both functions here are pure so they unit-test without a live daemon; the
 //! probe + wire round-trip live in the routing seam (`src/lib.rs`).
@@ -29,9 +29,10 @@ use crate::show::{ShowRecord, ShowReport};
 /// Translate parsed `norn get` args into the `vault.get` tool's parameter object
 /// (the `GetParams` shape in `src/mcp/tools/get.rs`).
 ///
-/// `--format` is CLI-only (the client renders the returned records). `--section`
-/// is never sent — the caller gates a `--section` invocation to Direct. `col` is
-/// sent so the daemon LOADS the on-request facets (`.body`/`.raw`/`.document_hash`);
+/// Structured `--format` choices are CLI-side renderers; Markdown is sent as the
+/// MCP representation selector. `--section` is never sent — structured callers
+/// gate it to Direct, while Markdown ignores it client-side. `col` is
+/// sent so the daemon LOADS the on-request facets (`.body`/`.document_hash`);
 /// the actual `--col` narrowing is applied client-side by the renderer, so the
 /// tool's non-narrowing `col` semantics don't affect the routed output.
 pub fn to_mcp_arguments(args: &GetArgs) -> Value {
@@ -49,10 +50,47 @@ pub fn to_mcp_arguments(args: &GetArgs) -> Value {
     if args.all_cols {
         map.insert("all_cols".into(), Value::Bool(true));
     }
+    if matches!(args.format, crate::cli::GetFormat::Markdown) {
+        map.insert("format".into(), Value::String("markdown".into()));
+    }
 
     insert_paging(&mut map, &args.paging);
 
     Value::Object(map)
+}
+
+/// Exact Markdown response reconstructed from the format-specific MCP envelope.
+pub struct RoutedMarkdown {
+    pub content: Option<String>,
+    pub notes: Vec<String>,
+}
+
+/// Rebuild the exact-source response for routed `get --format markdown`.
+pub fn reconstruct_markdown(structured: &Value) -> Result<RoutedMarkdown> {
+    let envelope = structured.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "vault.get markdown envelope: must be an object, got {}",
+            json_type(Some(structured))
+        )
+    })?;
+    let content = envelope
+        .get("markdown")
+        .map(|value| {
+            value
+                .as_object()
+                .and_then(|markdown| markdown.get("content"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("vault.get markdown envelope: `content` must be a string")
+                })
+        })
+        .transpose()?;
+    let notes: Vec<String> = take_vec(envelope, "notes")?;
+    if content.is_none() && !notes.iter().any(|note| note.starts_with("error:")) {
+        anyhow::bail!("vault.get markdown envelope: missing content without an error note");
+    }
+    Ok(RoutedMarkdown { content, notes })
 }
 
 /// Rebuild a [`ShowReport`] from a `vault.get` `structuredContent` object.
@@ -132,7 +170,6 @@ fn record_from_wire(v: &Value) -> Result<ShowRecord> {
         body: obj.get("body").and_then(Value::as_str).map(str::to_string),
         // Never routed: `--section` is gated to Direct.
         sections: None,
-        raw: obj.get("raw").and_then(Value::as_str).map(str::to_string),
     })
 }
 
@@ -175,6 +212,25 @@ mod tests {
         assert_eq!(v["limit"], 3);
         assert!(v.get("all_cols").is_none());
         assert!(v.get("starts_at").is_none());
+    }
+
+    #[test]
+    fn reconstruct_markdown_rejects_contentless_success_envelope() {
+        let wire = json!({
+            "records": [],
+            "section_failures": [],
+            "notes": []
+        });
+
+        let error = reconstruct_markdown(&wire)
+            .err()
+            .expect("contentless success must be a malformed envelope");
+        assert!(
+            error
+                .to_string()
+                .contains("missing content without an error note"),
+            "error should explain the malformed success envelope: {error}"
+        );
     }
 
     // ── Round-trip isomorphism (NRN-222, per the count template) ──────────────
@@ -261,7 +317,6 @@ mod tests {
             incoming_links: vec![],
             body: body.map(str::to_string),
             sections: None,
-            raw: None,
             path,
         }
     }
@@ -363,13 +418,6 @@ mod tests {
         };
         assert_round_trip(make(), vec![]);
         assert_round_trip(make(), vec![".frontmatter".into()]);
-    }
-
-    #[test]
-    fn round_trip_raw_facet() {
-        let mut report = sample_report();
-        report.records[0].raw = Some("---\ntype: note\n---\nThe body\n".into());
-        assert_round_trip(report, vec![".raw".into()]);
     }
 
     #[test]

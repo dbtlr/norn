@@ -199,7 +199,6 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: SetParams) -> Result<
     // daemon; fresh open in cold mode (NRN-130).
     let config = scope.config();
     let cache = ctx.query_cache(scope)?;
-    let index = cache.load_graph_index()?;
 
     let vault_cfg = &config.vault_config;
 
@@ -234,8 +233,11 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: SetParams) -> Result<
         format: SetFormat::Json,
     };
 
-    let mut outcome =
-        crate::set::synth::preflight_and_plan(&cwd, &cache, &index, vault_cfg, &args)?;
+    let (index, mut outcome) = cache.read_snapshot(|cache| {
+        let index = cache.load_graph_index()?;
+        let outcome = crate::set::synth::preflight_and_plan(&cwd, cache, &index, vault_cfg, &args)?;
+        Ok((index, outcome))
+    })?;
 
     // Body replacement: the CLI reads this from stdin in step 8 of
     // preflight_and_plan; an MCP client has none, so we synthesize the same
@@ -295,7 +297,7 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: SetParams) -> Result<
     // chunked writer-queue op (awaited) — the next read then finds the cache
     // current instead of paying a detect scan + rebuild (NRN-252 / NRN-158). A
     // no-op in cold mode.
-    ctx.commit_apply_increments(scope, &apply_report.touched_paths());
+    ctx.commit_apply_increments(scope, &apply_report.touched_paths(), index);
 
     Ok(build_report(&outcome, true, &trace_id))
 }
@@ -362,6 +364,36 @@ mod tests {
             "backlog",
             "dry-run must leave the file on disk UNCHANGED (status still backlog)"
         );
+    }
+
+    #[test]
+    fn dry_run_uses_one_snapshot_for_graph_and_target_resolution() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let (_canonical, cache_dir) = crate::cache::cache_dir_for(&root).unwrap();
+        let db_path = cache_dir.join("cache.db");
+
+        crate::cache::install_after_documents_loaded_hook(move || {
+            let writer = rusqlite::Connection::open(db_path.as_std_path()).unwrap();
+            writer
+                .execute("DELETE FROM documents WHERE path = 'task.md'", [])
+                .unwrap();
+        });
+
+        let report = handle(
+            &ctx,
+            SetParams {
+                target: "task".into(),
+                field_json: vec![r#"status="active""#.into()],
+                confirm: false,
+                ..Default::default()
+            },
+        )
+        .expect("graph reconstruction and target resolution share one snapshot");
+
+        assert_eq!(report.target, "task.md");
+        assert_eq!(report.frontmatter_changes.len(), 1);
+        assert!(!report.applied);
     }
 
     /// `confirm: true` acquires the lock, applies, reports `applied = true`, and

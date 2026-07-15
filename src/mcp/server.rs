@@ -321,7 +321,7 @@ impl McpServer {
     /// auto-derives for the literal `Json`).
     #[tool(
         name = "vault.get",
-        description = "Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally body.",
+        description = "Fetch structured documents, or one exact on-disk source document with format=markdown.",
         // MutationResult<T> defeats rmcp's `Json`-only auto-derive (NRN-219/214).
         output_schema = crate::mcp::mutation_result::output_schema_for::<GetOutput>()
     )]
@@ -712,7 +712,30 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use rmcp::handler::server::wrapper::Parameters;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    const CONCURRENCY_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    async fn wait_for_refresh_arrivals(
+        ctx: Arc<VaultContext>,
+        target: u64,
+        timeout_message: &'static str,
+    ) {
+        tokio::time::timeout(
+            CONCURRENCY_TEST_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let deadline = Instant::now() + CONCURRENCY_TEST_TIMEOUT;
+                while ctx.current_refresh_arrivals() < target {
+                    assert!(Instant::now() < deadline, "{timeout_message}");
+                    std::thread::yield_now();
+                }
+            }),
+        )
+        .await
+        .expect(timeout_message)
+        .expect("refresh-arrival waiter must not panic");
+    }
 
     /// Drift guard for the served-marker names (NRN-222 review): the rmcp
     /// `#[tool]` macro only accepts a string literal for `name`, so the marker
@@ -1131,7 +1154,8 @@ mod tests {
         use std::sync::mpsc;
 
         // Both readers hold a pooled connection across the refresh wait, so the cap
-        // must allow >= 2 (default could be 1 on a single-core host).
+        // must allow >= 2. The shared guard also isolates this test from the
+        // process-global cap=1 wait-at-cap proof running elsewhere in the suite.
         let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
 
         let (tmp, ctx, server) = warm_server_ready().await;
@@ -1153,9 +1177,13 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         let _blocker = ctx.warm_writer_queue().submit_liveness(move || {
             running_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
+            release_rx
+                .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
+                .expect("queued-refresh blocker must be released promptly");
         });
-        running_rx.recv().unwrap();
+        running_rx
+            .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
+            .expect("writer blocker must start promptly");
 
         // Fire two concurrent stale reads through the real funnel.
         let mut set = tokio::task::JoinSet::new();
@@ -1174,25 +1202,28 @@ mod tests {
         // the arrivals counter under the pending lock, so `>= 2` means the second
         // has already JOINED the first's ticket — it cannot submit a second op).
         // Spin on a blocking thread, matching the repo's shutdown-watch pattern.
-        let ctx_wait = Arc::clone(&ctx);
-        tokio::task::spawn_blocking(move || {
-            while ctx_wait.current_refresh_arrivals() < arrivals_base + 2 {
-                std::thread::yield_now();
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_refresh_arrivals(
+            Arc::clone(&ctx),
+            arrivals_base + 2,
+            "both stale reads must reach the coalesced refresh promptly",
+        )
+        .await;
 
         // Release the writer: the single queued op now runs and serves both.
         release_tx.send(()).unwrap();
 
-        let mut seen = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            let noted = joined
-                .expect("read task panicked")
-                .expect("stale warm read must succeed");
-            seen.push(noted.inner().0);
-        }
+        let seen = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, async move {
+            let mut seen = Vec::new();
+            while let Some(joined) = set.join_next().await {
+                let noted = joined
+                    .expect("read task panicked")
+                    .expect("stale warm read must succeed");
+                seen.push(noted.inner().0);
+            }
+            seen
+        })
+        .await
+        .expect("coalesced stale reads must complete promptly");
         assert_eq!(seen, vec![6, 6], "both coalesced reads see the added doc");
         assert_eq!(
             ctx.current_refresh_exec_count(),
@@ -1201,17 +1232,94 @@ mod tests {
         );
     }
 
-    /// Read-during-write snapshot honesty: while a post-apply increment commit is
-    /// parked mid-chunks (all file chunks committed, before the op resolves), a
-    /// concurrent warm read through the server succeeds, sees a consistent committed
-    /// snapshot, and completes WITHOUT waiting for the writer — the read serves off
-    /// its own pooled (WAL) connection while the write connection is idle at the
-    /// gate. Proven by construction: the read returns before the gate is released,
-    /// so it never depended on the parked writer.
+    /// Arrival correctness is live at the public MCP surface: once refresh R has
+    /// started, a later `vault.count` request cannot join R. It schedules a second
+    /// refresh and observes an edit made while R was in flight.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn warm_read_during_a_gated_increment_sees_consistent_state_without_waiting() {
+    async fn count_arriving_after_refresh_started_runs_later_refresh_and_sees_midflight_edit() {
+        // Both readers hold a pooled connection across the refresh wait, so the cap
+        // must allow >= 2 (default could be 1 on a single-core host).
+        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
+
+        let (tmp, ctx, server) = warm_server_ready().await;
+        let baseline = ctx.current_refresh_exec_count();
+        let arrivals_base = ctx.current_refresh_arrivals();
+
+        // Make the first public count stale so it starts refresh R.
+        std::fs::write(
+            tmp.path().join("zeta.md"),
+            "---\ntype: note\nstatus: active\n---\nZeta body\n",
+        )
+        .unwrap();
+        let (refresh_started, release_refresh) = ctx.install_current_refresh_gate();
+
+        let first_server = server.clone();
+        let first = tokio::spawn(async move {
+            first_server
+                .count(Parameters(crate::mcp::tools::count::CountParams::default()))
+                .await
+        });
+
+        // R has crossed its start transition and left the joinable pending slot.
+        refresh_started
+            .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
+            .expect("refresh R reaches start gate");
+
+        // This edit lands after R started but before the later request arrives.
+        std::fs::write(
+            tmp.path().join("eta.md"),
+            "---\ntype: task\nstatus: active\n---\nEta body\n",
+        )
+        .unwrap();
+
+        let late_server = server.clone();
+        let late = tokio::spawn(async move {
+            late_server
+                .count(Parameters(crate::mcp::tools::count::CountParams::default()))
+                .await
+        });
+
+        // Do not release R until the late request has made its distinct arrival
+        // decision. Because R already started, this arrival must submit another
+        // refresh behind it rather than join it.
+        wait_for_refresh_arrivals(
+            Arc::clone(&ctx),
+            arrivals_base + 2,
+            "the late count must make its distinct refresh arrival promptly",
+        )
+        .await;
+        release_refresh.send(()).unwrap();
+
+        let first = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, first)
+            .await
+            .expect("first count must complete promptly")
+            .expect("first count task must not panic")
+            .expect("first count succeeds");
+        let late = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, late)
+            .await
+            .expect("late count must complete promptly")
+            .expect("late count task must not panic")
+            .expect("late count succeeds");
+
+        assert_eq!(first.inner().0.total, 7);
+        assert_eq!(
+            late.inner().0.total,
+            7,
+            "the late public request observes the edit made while R was in flight"
+        );
+        assert_eq!(
+            ctx.current_refresh_exec_count(),
+            baseline + 2,
+            "the late public request triggers a later refresh instead of being satisfied by R"
+        );
+    }
+
+    /// A public read arriving while an older increment is parked in TEMP triggers
+    /// a liveness refresh. That refresh publishes the newer disk snapshot and
+    /// supersedes the old staged job, which can never overwrite it afterward.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn warm_read_preempts_and_supersedes_an_older_staged_increment() {
         use crate::mcp::writer_queue::Outcome;
-        use std::time::Duration;
 
         // 0ms budget ⇒ one whole file per chunk, so the commit parks at a boundary
         // between files. Process-global but inert (only finer chunking elsewhere).
@@ -1251,37 +1359,67 @@ mod tests {
         let (reached, release) = ctx.install_increment_gate(&generation);
         let handle = ctx.test_submit_increment_commit(&generation, &changed);
 
-        // Boundary 1: delta committed (cache == 4, disk == 5). Release to the next.
-        reached.recv().expect("increment boundary 1");
-        release.send(()).unwrap();
-        // Boundary 2: epsilon committed too, so cache == disk == 5, but the op is
-        // still parked here — the write connection is idle at the gate.
-        reached.recv().expect("increment boundary 2");
+        // Boundary 1: delta is staged only; main remains the old three-doc snapshot.
+        reached
+            .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
+            .expect("increment must reach boundary 1 promptly");
 
-        // A concurrent warm read now probes Fresh (cache == disk) and serves off its
-        // own pooled connection — it must NOT block on the parked writer. The
-        // timeout turns a wrong "it waits" into a fast failure instead of a hang.
-        let read = tokio::time::timeout(
-            Duration::from_secs(10),
-            server.run_wrapped(tool_names::COUNT, |ctx, scope| {
-                body_doc_count(ctx, scope).map(Json)
-            }),
+        // Advance disk beyond the staged parse. The public read must refresh to
+        // this six-doc state, not let the older five-doc staging publish later.
+        std::fs::write(root.join("zeta.md"), "---\ntype: note\n---\nZeta\n").unwrap();
+        let arrivals_base = ctx.current_refresh_arrivals();
+        let read_server = server.clone();
+        let read = tokio::spawn(async move {
+            read_server
+                .run_wrapped(tool_names::COUNT, |ctx, scope| {
+                    body_doc_count(ctx, scope).map(Json)
+                })
+                .await
+        });
+
+        wait_for_refresh_arrivals(
+            Arc::clone(&ctx),
+            arrivals_base + 1,
+            "the preempting read must reach refresh promptly",
         )
-        .await
-        .expect("read must not wait on the parked writer (fresh probe serves it)")
-        .expect("concurrent read succeeds");
+        .await;
+
+        // Release the bulk boundary. Queue priority runs the read's refresh
+        // before the next bulk chunk; successful refresh discards the old job.
+        release.send(()).unwrap();
+        let read = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, read)
+            .await
+            .expect("the preempting refresh must complete")
+            .expect("read task must not panic")
+            .expect("concurrent read succeeds");
         assert_eq!(
             read.inner().0,
-            5,
-            "the read sees a consistent committed snapshot (all five docs), no torn read"
+            6,
+            "the read sees the complete newer refresh snapshot"
         );
 
-        // Only NOW release the final boundary — proof the read completed while the
-        // writer was still parked, i.e. without waiting for it.
-        release.send(()).unwrap();
+        let increment_outcome = tokio::time::timeout(
+            CONCURRENCY_TEST_TIMEOUT,
+            tokio::task::spawn_blocking(move || handle.wait_timeout(Duration::from_secs(5))),
+        )
+        .await
+        .expect("the superseded increment must finish promptly")
+        .expect("increment waiter must not panic")
+        .expect("the superseded increment handle must resolve promptly");
         assert!(
-            matches!(handle.wait(), Outcome::Done(Ok(()))),
-            "the increment commit still completes cleanly after the read"
+            matches!(increment_outcome, Outcome::Done(Ok(()))),
+            "the superseded increment finishes cleanly without publishing"
+        );
+        let count = server
+            .run_wrapped(tool_names::COUNT, |ctx, scope| {
+                body_doc_count(ctx, scope).map(Json)
+            })
+            .await
+            .expect("post-supersession read succeeds");
+        assert_eq!(
+            count.inner().0,
+            6,
+            "the old staged job must never overwrite the newer refreshed main state"
         );
     }
 

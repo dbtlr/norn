@@ -34,6 +34,8 @@ mod query_links;
 mod query_show;
 mod reader;
 #[cfg(test)]
+pub(crate) use reader::install_after_documents_loaded_hook;
+#[cfg(test)]
 mod scan_semantics_probe;
 pub(crate) mod schema;
 mod status;
@@ -49,7 +51,9 @@ pub(crate) use identity::{
 };
 #[cfg(test)]
 pub(crate) use writer::IndexReport;
-pub(crate) use writer::{increment_chunk_budget, IncrementCommit};
+pub(crate) use writer::{
+    graph_fingerprint, increment_chunk_budget, IncrementCommit, IncrementReservation,
+};
 
 /// Resolve a vault's on-disk cache directory under an EXPLICIT cache home,
 /// with the SAME identity mapping production opens use (`identity::cache_dir_in`,
@@ -70,9 +74,11 @@ pub fn resolve_cache_dir_in(
         .map_err(|e| e.to_string())
 }
 pub(crate) use lock::{acquire_flock, debug_env_usize};
+#[cfg(test)]
+pub(crate) use query_show::set_after_document_row_hook;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 /// The single operator note emitted when the implicit incremental refresh cannot
 /// acquire the write lock in time (`CacheError::LockTimeout`) and the query
@@ -117,9 +123,55 @@ pub(crate) struct Cache {
     pub(crate) index_set: std::collections::BTreeSet<String>,
     pub(crate) index_set_hash: String,
     pub(crate) index_authoritative: bool,
+    /// Same-connection publication authority for reserved incremental jobs.
+    pub(crate) increment_publication_epoch: u64,
 }
 
 impl Cache {
+    /// Run a structured cache read against one SQLite snapshot.
+    ///
+    /// Callers open/refresh the cache before entering this closure, so freshness
+    /// work never extends the snapshot lifetime. `unchecked_transaction` accepts
+    /// `&Connection`, allowing the existing read primitives to keep taking
+    /// `&Cache`; this transaction is read-only by convention and remains
+    /// WAL-friendly for concurrent writers. Nested calls reuse the outer
+    /// transaction, allowing snapshot-owning helpers to compose into a wider
+    /// structured read phase without a nested `BEGIN`.
+    pub(crate) fn read_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Self) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        use anyhow::Context as _;
+
+        // Compose snapshot-owning helpers inside a wider structured read phase.
+        // SQLite exposes the connection's transaction state, so an inner helper
+        // can reuse the caller's snapshot without attempting a nested BEGIN.
+        if !self.conn.is_autocommit() {
+            return read(self);
+        }
+
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to begin cache read snapshot")?;
+        match read(self) {
+            Ok(value) => {
+                transaction
+                    .commit()
+                    .context("failed to close cache read snapshot")?;
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback() {
+                    return Err(error.context(format!(
+                        "failed to roll back cache read snapshot: {rollback_error}"
+                    )));
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Delete the on-disk cache (database + WAL/SHM siblings). Holds the
     /// advisory write lock for the duration. After clear the caller should
     /// drop the `Cache` handle; the next `Cache::open` recreates a fresh

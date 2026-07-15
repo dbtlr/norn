@@ -275,7 +275,7 @@ fn default_no_col_is_frontmatter_only_no_facets() {
 }
 
 #[test]
-fn unknown_facet_warns() {
+fn removed_raw_facet_warns_and_emits_no_json_key() {
     let tmp = synth_vault();
     let out = run(
         &tmp,
@@ -284,19 +284,25 @@ fn unknown_facet_warns() {
             "--eq",
             "title:Alpha",
             "--col",
-            ".bogus",
+            ".raw",
             "--format",
             "json",
         ],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("unknown --col facet '.bogus'"),
+        stderr.contains("unknown --col facet '.raw'"),
         "expected unknown-facet warning: {stderr}"
     );
     assert!(
         stderr.contains("bare names select frontmatter fields"),
         "expected vocabulary hint: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let a = doc_a(&v);
+    assert!(
+        a.get("raw").is_none(),
+        "removed facet must not emit a raw JSON key: {a}"
     );
 }
 
@@ -323,58 +329,9 @@ fn absent_bare_field_warns_with_find_wording() {
 }
 
 #[test]
-fn col_raw_facet_reads_disk_byte_faithful() {
-    // `.raw` reads the whole source file verbatim from disk — frontmatter
-    // block, body, comments, and trailing whitespace all preserved.
-    let tmp = tempfile::Builder::new()
-        .prefix("norn-find-col-raw-")
-        .tempdir()
-        .unwrap();
-    let root = tmp.path().join("vault");
-    std::fs::create_dir(&root).unwrap();
-    let contents =
-        "---\ntype: note\ntitle: Alpha\n# a yaml comment\n---\n\n# Heading\n\nbody text\n\n   \n";
-    std::fs::write(root.join("a.md"), contents).unwrap();
-
-    let v = json_out(
-        &tmp,
-        &[
-            "find",
-            "--eq",
-            "title:Alpha",
-            "--col",
-            ".raw",
-            "--format",
-            "json",
-        ],
-    );
-    let a = doc_a(&v);
-    let file_bytes = std::fs::read_to_string(root.join("a.md")).unwrap();
-    assert_eq!(
-        a["raw"].as_str().unwrap(),
-        file_bytes,
-        "raw facet must equal exact file bytes"
-    );
-    // Only the requested facet (plus identity).
-    assert!(a.get("frontmatter").is_none());
-    assert!(a.get("body").is_none());
-}
-
-#[test]
-fn default_no_col_omits_raw() {
-    let tmp = synth_vault();
-    let v = json_out(&tmp, &["find", "--eq", "title:Alpha", "--format", "json"]);
-    let a = doc_a(&v);
-    assert!(
-        a.get("raw").is_none(),
-        "raw must not appear by default: {a}"
-    );
-}
-
-#[test]
 fn all_cols_expands_to_full_dump() {
     // `--all-cols` dumps whole frontmatter + every cache-served facet + body,
-    // a superset of the frontmatter-only default. Excludes `.raw`.
+    // a superset of the frontmatter-only default.
     let tmp = synth_vault();
     let v = json_out(
         &tmp,
@@ -400,7 +357,7 @@ fn all_cols_expands_to_full_dump() {
         a["body"].as_str().unwrap().contains("alpha body"),
         "body present: {a}"
     );
-    assert!(a.get("raw").is_none(), "all-cols excludes .raw: {a}");
+    assert!(a.get("raw").is_none(), "--all-cols must omit raw: {a}");
 }
 
 #[test]

@@ -64,7 +64,9 @@
 //! ```
 //!
 //! Scale/seed are env-overridable: `NORN_BENCH_DOCS` (default 50000),
-//! `NORN_BENCH_SEED` (default 83), `NORN_BENCH_ITERS` (default 5).
+//! `NORN_BENCH_SEED` (default 83), `NORN_BENCH_ITERS` (default 5),
+//! `NORN_BENCH_READER_CLIENTS` (default 4), and
+//! `NORN_BENCH_READS_PER_CLIENT` (default 3).
 
 #![cfg(unix)]
 
@@ -75,6 +77,7 @@ mod serve_util;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use bench_util::generate_vault;
@@ -223,6 +226,8 @@ fn integrity_check_acceptance_50k() {
     let n = env_usize("NORN_BENCH_DOCS", 50_000);
     let seed = env_u64("NORN_BENCH_SEED", 83);
     let iters = env_usize("NORN_BENCH_ITERS", 5);
+    let reader_clients = env_usize("NORN_BENCH_READER_CLIENTS", 4);
+    let reads_per_client = env_usize("NORN_BENCH_READS_PER_CLIENT", 3);
     assert!(
         iters >= 2,
         "need at least 2 iterations to separate cold/warm"
@@ -232,6 +237,8 @@ fn integrity_check_acceptance_50k() {
         "benchmark needs ≥3 docs: reads doc-000000, direct-set doc-000001, \
          routed-set doc-000002"
     );
+    assert!(reader_clients > 0, "need at least 1 concurrent reader");
+    assert!(reads_per_client > 0, "need at least 1 read per client");
 
     // ---- Generate the synthetic vault -----------------------------------
     let vault_tmp = tempfile::Builder::new()
@@ -445,17 +452,86 @@ fn integrity_check_acceptance_50k() {
         get_served_total,
         iters + 1,
         "vault.get must have been served {iters} times in the read phase plus 1 for the \
-         post-apply verification get, got {get_served_total}"
+        post-apply verification get, got {get_served_total}"
     );
+
+    // ---- Concurrent routed reader fanout: SAME warm daemon --------------
+    // K client threads synchronize at a barrier before EACH read, then each
+    // spawns one real routed CLI process. This yields K concurrent processes
+    // per round for R rounds while retaining one latency sample per child.
+    let fanout_expected = reader_clients * reads_per_client;
+    let count_served_before_fanout = count_served(&daemon_stderr, "vault.count");
+    let barrier = Arc::new(Barrier::new(reader_clients));
+    let fanout_cache_home = cache_home.as_path();
+    let fanout_state_home = state_home.as_path();
+    let fanout_start = Instant::now();
+    let fanout_results = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(reader_clients);
+        for client in 0..reader_clients {
+            let barrier = Arc::clone(&barrier);
+            handles.push(scope.spawn(move || {
+                let mut results = Vec::with_capacity(reads_per_client);
+                for _ in 0..reads_per_client {
+                    barrier.wait();
+                    results.push(run_norn(
+                        fanout_cache_home,
+                        fanout_state_home,
+                        vault,
+                        &["count"],
+                    ));
+                }
+                (client, results)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("fanout client thread must not panic"))
+            .collect::<Vec<_>>()
+    });
+    let fanout_makespan = fanout_start.elapsed();
+
+    let mut fanout_samples = Vec::with_capacity(fanout_expected);
+    for (client, results) in fanout_results {
+        for (read, result) in results.into_iter().enumerate() {
+            assert_eq!(
+                result.code, 0,
+                "fanout client {client} read {read} must exit 0"
+            );
+            assert_eq!(
+                result.integrity_markers, 0,
+                "fanout client {client} read {read} must not run integrity_check in the CLI process"
+            );
+            fanout_samples.push(result.elapsed);
+        }
+    }
+    assert_eq!(
+        fanout_samples.len(),
+        fanout_expected,
+        "fanout latency accounting must contain exactly K*R samples"
+    );
+    let count_served_after_fanout = count_served(&daemon_stderr, "vault.count");
+    let count_served_fanout_delta = count_served_after_fanout
+        .checked_sub(count_served_before_fanout)
+        .expect("daemon vault.count served count must not decrease");
+    assert_eq!(
+        count_served_fanout_delta, fanout_expected,
+        "daemon vault.count served-count delta must be exactly K*R"
+    );
+
+    fanout_samples.sort();
+    let fanout_median = fanout_samples[fanout_samples.len() / 2];
+    let fanout_p95_rank = (fanout_samples.len() * 95).div_ceil(100);
+    let fanout_p95 = fanout_samples[fanout_p95_rank - 1];
+    let fanout_max = *fanout_samples.last().expect("fanout samples are non-empty");
 
     // ---- STRUCTURAL ACCEPTANCE ASSERTION --------------------------------
     // The daemon opened the cache once and held it: across ALL routed traffic —
-    // reads, writes, AND the post-apply verification read — its stderr carries
-    // exactly ONE integrity_check marker. If routed calls paid the check per
-    // invocation (the founding bug, un-fixed, or a write-path regression that
-    // never inherited the reads' verify-once win), this would be
-    // `total_routed_all` instead.
-    let total_routed_all = total_routed_calls + iters + 1;
+    // sequential reads, writes, the post-apply verification read, AND the
+    // concurrent reader fanout — its stderr carries exactly ONE
+    // integrity_check marker. If routed calls paid the check per invocation
+    // (the founding bug, un-fixed, or a regression that never inherited the
+    // verify-once win), this would be `total_routed_all` instead.
+    let total_routed_all = total_routed_calls + iters + 1 + fanout_expected;
     let daemon_markers = daemon_integrity_markers(&daemon_stderr);
     assert_eq!(
         daemon_markers,
@@ -504,6 +580,10 @@ fn integrity_check_acceptance_50k() {
     println!("cold cache build (count) : {build_elapsed:?}");
     println!("cache.db size            : {} bytes", cache_db_bytes);
     println!("iterations per shape     : {iters}");
+    println!(
+        "concurrent reader fanout : {reader_clients} clients × {reads_per_client} reads = \
+         {fanout_expected} routed count calls"
+    );
     println!("write field / target     : {BENCH_FIELD} on {DIRECT_SET_DOC} (direct) / {ROUTED_SET_DOC} (routed)");
     println!("--------------------------------------------------------------------------");
     println!(
@@ -532,7 +612,11 @@ fn integrity_check_acceptance_50k() {
     );
     println!(
         "routed calls served      : {total_routed_calls} reads + {iters} writes + 1 \
-         post-apply verification get = {total_routed_all} total"
+         post-apply verification get + {fanout_expected} concurrent reads = {total_routed_all} total"
+    );
+    println!(
+        "fanout latency evidence  : median {fanout_median:?}, p95 {fanout_p95:?}, \
+         max {fanout_max:?}, makespan {fanout_makespan:?}"
     );
     println!("==========================================================================\n");
 }

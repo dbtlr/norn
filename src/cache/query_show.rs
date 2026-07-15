@@ -11,6 +11,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::error::CacheError;
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_DOCUMENT_ROW_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_document_row_hook(hook: impl FnOnce() + 'static) {
+    AFTER_DOCUMENT_ROW_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "get document-row hook already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_after_document_row_hook() {
+    AFTER_DOCUMENT_ROW_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 /// A document with full connection context: headings, outgoing links,
 /// unresolved links, and incoming back-links.
 #[derive(Debug, Serialize)]
@@ -78,6 +104,9 @@ impl crate::cache::Cache {
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
         let path_buf = Utf8PathBuf::from(&path_str);
+
+        #[cfg(test)]
+        run_after_document_row_hook();
 
         let headings = crate::cache::reader::load_headings(&self.conn, &path_str)?;
         let all_links = crate::cache::reader::load_links(&self.conn, &path_str)?;

@@ -769,7 +769,6 @@ pub struct FindArgs {
 
     /// Emit the full structured dump for each match: whole frontmatter plus
     /// every cache-served facet (`.headings`, the three link sets, `.body`).
-    /// Excludes `.raw` (so a broad query never fans out to N file reads).
     /// Mutually exclusive with `--col`.
     #[arg(long = "all-cols", conflicts_with = "col", help_heading = "Output")]
     pub all_cols: bool,
@@ -778,9 +777,9 @@ pub struct FindArgs {
     /// fields (e.g. `status,title`), exactly like `norn get`. Structural
     /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
     /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
-    /// `.incoming_links`, `.body`, `.raw`, `.document_hash` (the content hash
-    /// `edit --expected-hash` wants; opt-in only, like `.raw` — never in
-    /// `--all-cols`). Default (no --col): frontmatter
+    /// `.incoming_links`, `.body`, `.document_hash` (the content hash
+    /// `edit --expected-hash` wants; opt-in only — never in `--all-cols`).
+    /// Default (no --col): frontmatter
     /// only. Ignored with a warning on paths format.
     #[arg(
         long,
@@ -898,8 +897,7 @@ pub struct GetArgs {
     // ── Output ───────────────────────────────────────────────────────────
     /// Emit the full structured dump: every frontmatter field plus every
     /// cache-served facet (`.headings`, the three link sets, `.body`).
-    /// Excludes `.raw` (the disk-read representation, always requested by
-    /// name). Mutually exclusive with `--col`.
+    /// Mutually exclusive with `--col`.
     #[arg(long = "all-cols", conflicts_with = "col", help_heading = "Output")]
     pub all_cols: bool,
 
@@ -907,9 +905,9 @@ pub struct GetArgs {
     /// fields (e.g. `status,title`), exactly like `norn find`. Structural
     /// facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole
     /// block), `.headings`, `.outgoing_links`, `.unresolved_links`,
-    /// `.incoming_links`, `.body`, `.raw`, `.document_hash` (the content hash
-    /// `edit --expected-hash` wants; opt-in only, like `.raw` — never in
-    /// `--all-cols`). Without --col, frontmatter +
+    /// `.incoming_links`, `.body`, `.document_hash` (the content hash
+    /// `edit --expected-hash` wants; opt-in only — never in `--all-cols`).
+    /// Without --col, frontmatter +
     /// headings + links are emitted (body only with --all-cols or `--col .body`).
     #[arg(
         long,
@@ -944,7 +942,7 @@ pub struct GetArgs {
     )]
     pub section: Vec<String>,
 
-    /// Output format. Default records (vertical key-value block per doc).
+    /// Output format. Default records; markdown returns one exact source file.
     #[arg(long, value_enum, default_value_t = GetFormat::Records, help_heading = "Output")]
     pub format: GetFormat,
 }

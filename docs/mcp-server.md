@@ -44,7 +44,7 @@ Fourteen tools, split into seven read and seven mutation.
 |---|---|
 | `vault.find` | Full-text + metadata document search, with sort, limit, and paging — the same selection surface as `norn find`. |
 | `vault.count` | Count documents, total or grouped by a frontmatter field. |
-| `vault.get` | Fetch one or more documents: frontmatter, headings, outgoing/incoming/unresolved links, optionally the body. |
+| `vault.get` | Fetch structured documents, or one exact on-disk source document with `format: "markdown"`. |
 | `vault.validate` | Validate graph facts and configured frontmatter/link rules; returns structured findings. |
 | `vault.repair` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply`. |
 | `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, creatable rules, inbox, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
@@ -61,6 +61,19 @@ Fourteen tools, split into seven read and seven mutation.
 | `vault.delete` | Delete a document, optionally redirecting incoming links to an alternate target. |
 | `vault.rewrite_wikilink` | Retarget every occurrence of a wikilink across the vault (body + frontmatter), without moving any file. |
 | `vault.apply` | Apply a `MigrationPlan` (e.g. one returned by `vault.repair`) inline — moves, deletes, link rewrites, frontmatter ops. |
+
+`vault.get` defaults to `format: "structured"`. For a byte-faithful whole-file
+read, request exactly one selected document:
+
+```json
+{ "name": "vault.get", "arguments": { "targets": ["notes/task.md"], "format": "markdown" } }
+```
+
+The result carries `markdown: { "path": "notes/task.md", "content": "..." }`.
+The content is read from the source file at request time; it is not cached or
+reconstructed from frontmatter/body fields. Anything other than exactly one
+selected document returns `isError: true`. Exact Markdown is a response
+representation, not a `.raw`/`.source` structural facet on document records.
 
 Every mutation tool follows the same safety contract below.
 
@@ -141,7 +154,7 @@ Like every mutation tool, `vault.new` is dry-run by default; pass `confirm: true
 
 ## Operational notes
 
-- **Warm reads run concurrently; stdio cold calls stay serialized.** Under the warm daemon (`norn serve`), read tool calls verified fresh at their request boundary run in parallel over a per-generation pool of read-only connections; stale reads coalesce onto one shared refresh, and reads during a daemon-side write serve the last committed WAL snapshot. The stdio server (`norn mcp`) opens a fresh cache per call and still serializes calls in-process (concurrent cold-start calls can't collide into "database is locked"), so concurrent stdio calls queue behind the first call's rebuild. For heavy stdio use, build the cache first with `norn cache rebuild` (or any prior CLI run against the vault) so the first MCP call is already warm.
+- **Warm reads run concurrently; stdio cold calls stay serialized.** Under the warm daemon (`norn serve`), read tool calls verified fresh at their request boundary run in parallel over a per-generation pool of read-only connections; stale reads coalesce onto one shared refresh. Post-mutation cache work stages privately, so reads see the complete previous WAL snapshot until one terminal transaction publishes the complete new document/link snapshot; one structured `find` or `get` response also stays on one read transaction throughout its cache queries. The stdio server (`norn mcp`) opens a fresh cache per call and still serializes calls in-process (concurrent cold-start calls can't collide into "database is locked"), so concurrent stdio calls queue behind the first call's rebuild. For heavy stdio use, build the cache first with `norn cache rebuild` (or any prior CLI run against the vault) so the first MCP call is already warm.
 - **Await each mutation's response before the next call.** Mutations serialize on the per-vault mutation lock and their ordering matters — a client should await each mutation's response before issuing the next. Reads may be pipelined freely against the warm daemon; each is independently freshness-verified at its own request boundary.
 
 ## Known limitations (v1)

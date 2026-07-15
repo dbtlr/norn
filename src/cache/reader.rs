@@ -8,20 +8,53 @@ use camino::Utf8PathBuf;
 
 use crate::cache::error::CacheError;
 
+#[cfg(test)]
+std::thread_local! {
+    /// Deterministic inter-statement publication seam for the snapshot test.
+    static AFTER_DOCUMENTS_LOADED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn run_after_documents_loaded_hook() {
+    AFTER_DOCUMENTS_LOADED.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_documents_loaded_hook(hook: impl FnOnce() + 'static) {
+    AFTER_DOCUMENTS_LOADED.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(previous.is_none(), "graph-load test hook already installed");
+    });
+}
+
 impl crate::cache::Cache {
     /// Reconstruct a `GraphIndex` from the SQLite tables. Mirrors the shape
     /// `crate::graph::build_index` would produce for the same vault.
     ///
+    /// Every relational read is bound to one SQLite snapshot. When called inside
+    /// a wider [`Cache::read_snapshot`](crate::cache::Cache::read_snapshot)
+    /// phase, it reuses that transaction so consumers can keep follow-up cache
+    /// queries on the same generation.
+    ///
     /// Diagnostics are not round-tripped (the writer stores parsed output, not
     /// parse-time warnings); `ignored_files` is empty for the same reason.
-    pub fn load_graph_index(&self) -> Result<GraphIndex, CacheError> {
-        let documents = load_documents(&self.conn, self.alias_field.as_deref())?;
-        let files = load_files(&self.conn)?;
-        Ok(GraphIndex {
-            root: self.vault_root.clone(),
-            documents,
-            files,
-            ignored_files: Vec::new(),
+    pub fn load_graph_index(&self) -> anyhow::Result<GraphIndex> {
+        self.read_snapshot(|cache| {
+            let documents = load_documents(&cache.conn, cache.alias_field.as_deref())?;
+            #[cfg(test)]
+            run_after_documents_loaded_hook();
+            let files = load_files(&cache.conn)?;
+            Ok(GraphIndex {
+                root: cache.vault_root.clone(),
+                documents,
+                files,
+                ignored_files: Vec::new(),
+            })
         })
     }
 }
@@ -301,7 +334,7 @@ pub(crate) fn load_links(
     Ok(links)
 }
 
-fn load_files(conn: &rusqlite::Connection) -> Result<Vec<VaultFile>, CacheError> {
+pub(crate) fn load_files(conn: &rusqlite::Connection) -> Result<Vec<VaultFile>, CacheError> {
     let mut stmt = conn.prepare("SELECT path, ext FROM files ORDER BY path")?;
     let rows = stmt.query_map([], |r| {
         let path: String = r.get(0)?;
@@ -327,6 +360,8 @@ fn load_files(conn: &rusqlite::Connection) -> Result<Vec<VaultFile>, CacheError>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
@@ -368,6 +403,38 @@ mod tests {
         let loaded_paths: std::collections::BTreeSet<_> =
             loaded.documents.iter().map(|d| d.path.clone()).collect();
         assert_eq!(direct_paths, loaded_paths);
+    }
+
+    #[test]
+    fn graph_index_load_holds_one_snapshot_across_documents_and_files() {
+        let (_tmp, root) = make_vault();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let db_path = cache.cache_dir.join("cache.db");
+
+        super::install_after_documents_loaded_hook(move || {
+            let writer = rusqlite::Connection::open(db_path.as_std_path()).unwrap();
+            writer
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                         INSERT INTO documents
+                           (path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes)
+                         VALUES ('delta.md', 'delta', 'delta-hash', NULL, 'Delta', 1, 5);
+                         INSERT INTO files (path, ext, size_bytes, mtime_ns)
+                         VALUES ('delta.md', 'md', 5, 1);
+                         COMMIT;",
+                )
+                .unwrap();
+        });
+
+        let loaded = cache.load_graph_index().unwrap();
+        let document_paths: BTreeSet<_> = loaded.documents.iter().map(|doc| &doc.path).collect();
+        let file_paths: BTreeSet<_> = loaded.files.iter().map(|file| &file.path).collect();
+
+        assert_eq!(
+            document_paths, file_paths,
+            "one GraphIndex must not mix pre-publication documents with post-publication files"
+        );
     }
 
     #[test]

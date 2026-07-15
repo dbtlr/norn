@@ -8,30 +8,25 @@ use anyhow::Result;
 use crate::cli::FindArgs;
 
 /// The full result of running a find query against an open cache: the matched
-/// documents plus the optional deep-fetch (headings + link sets) and `.raw`
-/// disk reads, indexed parallel to `result.matches`.
+/// documents plus the optional deep-fetch (headings + link sets), indexed
+/// parallel to `result.matches`.
 ///
 /// This is the single selection path shared by the CLI print renderers
 /// (`find::run`) and the JSON/MCP seam (`find::query`), so the two can never
-/// drift on which documents match, the deep-fetch trigger, or the raw read.
+/// drift on which documents match or the deep-fetch trigger.
 pub struct Selection {
     pub result: FindResult,
     /// Deep records (headings + link sets), parallel to `result.matches`.
     /// Empty when no deep facet was requested (the cheap-facet path).
     pub deep: Vec<Option<DocumentDeep>>,
-    /// `.raw` whole-file contents, parallel to `result.matches`. Empty when
-    /// `.raw` was not requested.
-    pub raw: Vec<Option<String>>,
 }
 
 /// Run the find query against an already-open `cache` and gather everything the
-/// renderers need: matched documents, deep fetches, and raw reads.
+/// renderers need: matched documents and deep fetches.
 ///
 /// Behavior is identical to the inline selection that previously lived in
 /// `find::run` — `--links-to` resolves against the cache, the deep fetch fires
-/// only for join-backed facets (or `--all-cols`), and `.raw` reads from
-/// `cache.vault_root` (the canonical root, which resolves to the same files the
-/// CLI's `cwd` did, so the bytes are unchanged).
+/// only for join-backed facets (or `--all-cols`).
 pub fn select(cache: &Cache, args: &FindArgs) -> Result<Selection> {
     let mut query = build_find_query(args)?;
     // `--links-to` targets resolve against the cache (stem/alias lookup), so
@@ -56,26 +51,13 @@ pub fn select(cache: &Cache, args: &FindArgs) -> Result<Selection> {
         Vec::new()
     };
 
-    // `.raw` self-loads its per-match disk read only when requested — the
-    // default path does zero disk reads.
-    let raw: Vec<Option<String>> = if wants_raw(&facets) {
-        result
-            .matches
-            .iter()
-            .map(|doc| crate::output::projection::read_raw(&cache.vault_root, &doc.path))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    Ok(Selection { result, deep, raw })
+    Ok(Selection { result, deep })
 }
 
 /// Whether a `--col` facet set (from `split_cols`) requires the per-document
 /// deep fetch: `--all-cols` (which dumps every cache-served facet) or any
 /// join-backed facet (`.headings` and the three link sets). Body comes from
-/// `DocumentSummary.body_text`; raw is excluded by design, so `--all-cols`
-/// never triggers a disk read.
+/// `DocumentSummary.body_text`.
 ///
 /// Shared by [`select`] (the direct fetch decision) and the NRN-222 routed
 /// reconstruction (`find::route`), so the two cannot drift on which facets
@@ -88,12 +70,6 @@ pub fn needs_deep(facets: &[String], all_cols: bool) -> bool {
                 "headings" | "outgoing_links" | "unresolved_links" | "incoming_links"
             )
         })
-}
-
-/// Whether a `--col` facet set requires the per-document `.raw` disk read.
-/// Shared by [`select`] and the routed reconstruction, like [`needs_deep`].
-pub fn wants_raw(facets: &[String]) -> bool {
-    facets.iter().any(|f| f == "raw")
 }
 
 /// The result-count envelope around a find query — the totals the CLI renderers
@@ -154,11 +130,10 @@ fn query_with_envelope_via(
         .enumerate()
         .map(|(i, doc)| {
             let deep = selection.deep.get(i).and_then(|d| d.as_ref());
-            let raw = selection.raw.get(i).and_then(|r| r.as_deref());
             if wire {
-                doc_to_wire_json(doc, deep, raw, &args.col, args.all_cols)
+                doc_to_wire_json(doc, deep, &args.col, args.all_cols)
             } else {
-                crate::find::render::doc_to_json(doc, deep, raw, &args.col, args.all_cols)
+                crate::find::render::doc_to_json(doc, deep, &args.col, args.all_cols)
             }
         })
         .collect();
@@ -182,11 +157,10 @@ fn query_with_envelope_via(
 pub(crate) fn doc_to_wire_json(
     doc: &crate::core::DocumentSummary,
     deep: Option<&DocumentDeep>,
-    raw: Option<&str>,
     cols: &[String],
     all_cols: bool,
 ) -> serde_json::Value {
-    let mut v = crate::find::render::doc_to_json(doc, deep, raw, cols, all_cols);
+    let mut v = crate::find::render::doc_to_json(doc, deep, cols, all_cols);
     crate::route_wire::strip_absent_frontmatter(&mut v, doc.frontmatter.is_none());
     v
 }
@@ -300,7 +274,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// 3 docs: 2 `type: note`, 1 `type: task`, with bodies and a wikilink so the
-    /// deep/raw facets have something to project.
+    /// deep facets have something to project.
     fn seeded_vault() -> (TempDir, Utf8PathBuf) {
         let tmp = tempfile::Builder::new()
             .prefix("norn-find-seam-")
@@ -328,13 +302,12 @@ mod tests {
     /// Extract the `documents` array the CURRENT print path emits, by running the
     /// real `render_json` renderer (the golden source of truth).
     fn print_path_documents(cache: &Cache, args: &FindArgs) -> Vec<serde_json::Value> {
-        let Selection { result, deep, raw } = select(cache, args).unwrap();
+        let Selection { result, deep } = select(cache, args).unwrap();
         let query = build_find_query(args).unwrap();
         let mut buf = Vec::new();
         crate::find::render::render(
             &result,
             &deep,
-            &raw,
             args,
             crate::cli::FindFormat::Json,
             None,
@@ -375,13 +348,12 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         let cache = open(&root);
         let mut args = empty_args();
-        // Exercise a deep facet, a cheap facet, and the raw disk read together.
+        // Exercise deep and cheap facets together.
         args.col = vec![
             "title".to_string(),
             ".headings".to_string(),
             ".outgoing_links".to_string(),
             ".body".to_string(),
-            ".raw".to_string(),
         ];
 
         let golden = print_path_documents(&cache, &args);

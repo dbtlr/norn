@@ -1914,6 +1914,118 @@ mod tests {
         client.join().unwrap();
     }
 
+    /// NRN-256: a responsive control plane can still prove the service stalled
+    /// before a tool call is sent. Hold the request connection before `ready`
+    /// while scoped pongs repeatedly report the same busy writer sequence; the
+    /// routed call remains safe to retry Direct because it never crossed the
+    /// `tools/call` send boundary.
+    #[test]
+    fn call_tool_classifies_stalled_busy_writer_before_send() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("service.sock")).unwrap();
+        let listener = bind_trusted(&path);
+        let client_path = path.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+        let stall_budget = std::time::Duration::from_millis(60);
+
+        let client = thread::spawn(move || {
+            let client = ServiceClient {
+                socket_path: client_path,
+            };
+            let result = client.call_tool_structured_phased_with_wait_budget(
+                Utf8Path::new("/vaults/atlas"),
+                "vault.set",
+                serde_json::json!({}),
+                OnToolError::AcceptWithPayload,
+                stall_budget,
+                std::time::Duration::from_millis(15),
+            );
+            result_tx.send(result).unwrap();
+        });
+
+        let (request, _) = listener.accept().unwrap();
+        let mut request_reader = BufReader::new(request);
+        let mut hello = String::new();
+        request_reader.read_line(&mut hello).unwrap();
+        let hello: serde_json::Value = serde_json::from_str(hello.trim()).unwrap();
+        assert_eq!(hello["norn_control"], "hello");
+        assert_eq!(hello["vault_root"], "/vaults/atlas");
+        // Deliberately do not answer `ready`: all heartbeat observations below
+        // happen while the routed call is still before its send boundary.
+
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut first_pong_at = None;
+        let mut pong_count = 0;
+        let error = loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    let mut reader = BufReader::new(conn.try_clone().unwrap());
+                    let mut ping = String::new();
+                    reader.read_line(&mut ping).unwrap();
+                    let ping: serde_json::Value = serde_json::from_str(ping.trim()).unwrap();
+                    assert_eq!(ping["norn_control"], "ping");
+                    assert_eq!(ping["vault_root"], "/vaults/atlas");
+
+                    let mut writer = conn;
+                    first_pong_at.get_or_insert_with(std::time::Instant::now);
+                    pong_count += 1;
+                    writeln!(
+                        writer,
+                        "{}",
+                        serde_json::to_string(&ControlFrame::Pong {
+                            protocol: CONTROL_PROTOCOL,
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                            build: Some(env!("NORN_BUILD_ID").to_string()),
+                            pid: Some(std::process::id()),
+                            uptime_secs: Some(1),
+                            serving: Some(ServingState::Ready),
+                            writer_progress: Some(WriterProgress {
+                                busy: true,
+                                sequence: 9,
+                            }),
+                        })
+                        .unwrap()
+                    )
+                    .unwrap();
+                    writer.flush().unwrap();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Ok(result) = result_rx.try_recv() {
+                        break result.expect_err("a stalled writer must fail the routed call");
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "unchanged busy progress did not stall the pre-send call"
+                    );
+                    thread::yield_now();
+                }
+                Err(error) => panic!("heartbeat accept failed: {error}"),
+            }
+        };
+
+        assert!(pong_count >= 2, "the test must observe repeated busy pongs");
+        assert!(
+            first_pong_at.unwrap().elapsed() >= stall_budget,
+            "the busy sequence must remain unchanged for the full stall budget"
+        );
+        assert_eq!(error.phase, CallPhase::PreSend);
+        assert!(
+            error.is_service_stalled(),
+            "the failure must retain the heartbeat classification: {error}"
+        );
+        let mut unexpected_request = String::new();
+        assert_eq!(
+            request_reader.read_line(&mut unexpected_request).unwrap(),
+            0,
+            "the client must not send initialize or tools/call before ready"
+        );
+        client.join().unwrap();
+    }
+
     /// NRN-255: request-channel activity must not suppress the control-plane
     /// heartbeat. Even while a daemon dribbles an incomplete frame, absence of
     /// a compatible scoped pong for the stall budget is a pre-send stall.

@@ -2790,7 +2790,7 @@ fn cache_index_creates_cache_and_status_reports_documents() {
     );
     assert!(status["cache_path"].as_str().unwrap().ends_with("cache.db"));
     assert!(status["size_bytes"].as_u64().unwrap() > 0);
-    assert_eq!(status["schema_version"], 4);
+    assert_eq!(status["schema_version"], 5);
 
     fs::remove_dir_all(&root).ok();
     fs::remove_dir_all(&cache_home).ok();

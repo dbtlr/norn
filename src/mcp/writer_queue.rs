@@ -188,6 +188,17 @@ impl<R> Handle<R> {
     pub fn wait(self) -> Outcome<R> {
         self.rx.recv().unwrap_or(Outcome::Dropped)
     }
+
+    /// Test-only bounded receive for concurrency proofs that must fail instead of
+    /// leaving a non-cancellable blocking task parked during runtime shutdown.
+    #[cfg(test)]
+    pub(crate) fn wait_timeout(self, timeout: std::time::Duration) -> Option<Outcome<R>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(outcome) => Some(outcome),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Some(Outcome::Dropped),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+        }
+    }
 }
 
 /// The work the writer thread serializes, guarded by [`Inner::state`].
