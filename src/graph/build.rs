@@ -306,6 +306,41 @@ mod tests {
         assert_eq!(subtree, full_paths);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn subtree_scan_rejects_symlink_component() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().join("vault")).unwrap();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("note.md"), "---\n---\nNOTE\n").unwrap();
+        std::os::unix::fs::symlink(real.as_std_path(), root.join("link").as_std_path()).unwrap();
+
+        let subtree =
+            graph_visible_markdown_under(&root, Utf8Path::new("link/note.md"), &[]).unwrap();
+
+        assert!(
+            subtree.is_empty(),
+            "the graph walk does not follow a symlink component"
+        );
+    }
+
+    #[test]
+    fn subtree_scan_rejects_non_directory_intermediate_component() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().join("vault")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("not-a-dir"), "plain file").unwrap();
+
+        let subtree =
+            graph_visible_markdown_under(&root, Utf8Path::new("not-a-dir/note.md"), &[]).unwrap();
+
+        assert!(
+            subtree.is_empty(),
+            "the graph walk cannot traverse through a regular file"
+        );
+    }
+
     #[test]
     fn indexes_documents_and_resolves_links() {
         let index = build_index(Utf8Path::new("fixtures/basic")).unwrap();
