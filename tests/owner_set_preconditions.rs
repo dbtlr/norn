@@ -362,6 +362,10 @@ fn conflicting_create_claims_in_one_plan_refuse_before_write() {
         report["preconditions"][0]["error"]["code"],
         "owner-claim-conflict"
     );
+    assert_eq!(
+        report["preconditions"][1]["error"]["code"],
+        "owner-claim-conflict"
+    );
     assert!(
         !vault.join("one/MMR-1.md").exists() && !vault.join("two/MMR-1.md").exists(),
         "neither conflicting claim may write"

@@ -187,7 +187,7 @@ mod tests {
 
     fn sample_plan() -> MigrationPlan {
         MigrationPlan {
-            schema_version: 2,
+            schema_version: crate::migration_plan::MIGRATION_PLAN_SCHEMA_VERSION,
             vault_root: "/vault".into(),
             generator: None,
             generated_at: None,

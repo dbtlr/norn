@@ -92,7 +92,7 @@ fn plan_json(kind: PlanKind, vault_root: &str) -> String {
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::OwnerMismatch => format!(
-            r##"{{"schema_version":2,"vault_root":{root},"preconditions":[{{"id":"note-owner","kind":"owner_set","selector":{{"stem":"note"}},"expected_paths":["wrong.md"]}}],"operations":[]}}"##,
+            r##"{{"schema_version":2,"vault_root":{root},"preconditions":[{{"id":"note-owner","kind":"owner_set","selector":{{"stem":"note"}},"expected_paths":["wrong.md"]}}],"operations":[{{"kind":"move_document","fields":{{"src":"note.md","dst":"renamed.md"}}}}]}}"##,
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::BadVersion => format!(
@@ -610,6 +610,10 @@ fn routed_owner_set_refusal_renders_preconditions_and_honors_out() {
     let d_report: serde_json::Value = serde_json::from_slice(&d_out).expect("direct json report");
     let r_report: serde_json::Value = serde_json::from_slice(&r_out).expect("routed json report");
     assert_eq!(r_report["outcome"], "refused");
+    // The plan's operation is reported not-run on both paths (the owner-set
+    // barrier refuses before any operation executes).
+    assert_eq!(r_report["operations"][0]["status"], "not-run");
+    assert_eq!(d_report["operations"][0]["status"], "not-run");
     assert_eq!(
         r_report["preconditions"][0]["expected_paths"],
         serde_json::json!(["wrong.md"]),
@@ -637,7 +641,7 @@ fn routed_owner_set_refusal_renders_preconditions_and_honors_out() {
 
     let direct_cache2 = TempDir::new().unwrap();
     let direct_state2 = TempDir::new().unwrap();
-    let (_d_stdout, _d_err, d_code) = run_apply(
+    let (d_stdout, _d_err, d_code) = run_apply(
         direct_cache2.path(),
         direct_state2.path(),
         direct_vault.path(),
@@ -645,7 +649,7 @@ fn routed_owner_set_refusal_renders_preconditions_and_honors_out() {
         Deliver::File,
         &["--yes", "--out", d_out_file.to_str().unwrap()],
     );
-    let (_r_stdout, _r_err, r_code) = run_apply(
+    let (r_stdout, _r_err, r_code) = run_apply(
         &daemon.cache_home,
         &daemon.state_home,
         routed_vault.path(),
@@ -655,6 +659,9 @@ fn routed_owner_set_refusal_renders_preconditions_and_honors_out() {
     );
     assert_eq!(d_code, 2, "direct --out refusal exits 2");
     assert_eq!(r_code, 2, "routed --out refusal exits 2");
+    // `--out` writes the report to the file and keeps stdout silent on both paths.
+    assert!(d_stdout.is_empty(), "direct --out must silence stdout");
+    assert!(r_stdout.is_empty(), "routed --out must silence stdout");
 
     let d_written = std::fs::read(&d_out_file).expect("direct wrote --out report");
     let r_written = std::fs::read(&r_out_file).expect("routed wrote --out report");
