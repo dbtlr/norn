@@ -654,32 +654,35 @@ fn scan_by_stem(index: &GraphIndex, stem: &str) -> Vec<String> {
         .collect()
 }
 
-/// True when the expected and actual owner path-sets differ, comparing ASCII
-/// case-insensitively to stay consistent with the `eq_ignore_ascii_case` stem
-/// selection above: an author-supplied `foo.md` and an on-disk `Foo.md` denote
-/// the same owner (and are the same file on a case-insensitive filesystem like
-/// macOS), so they must not spuriously refuse a legitimate apply. Non-ASCII
-/// characters are left unfolded, matching `eq_ignore_ascii_case`'s ASCII-only
-/// scope. Both inputs are already individually sorted+deduped; folding can
-/// reorder or collide entries, so re-normalize before comparing.
+/// True when the expected and actual owner path-sets differ. Both inputs are
+/// already individually sorted+deduped, so an exact element-wise comparison is
+/// the identity check the barrier needs: any owner appearing, disappearing, or
+/// moving registers as a mismatch.
+///
+/// Comparison is case-SENSITIVE by design; the `eq_ignore_ascii_case` stem
+/// selection above is deliberately NOT mirrored here. ASCII-folding the
+/// comparison would let a case-colliding owner (e.g. `Foo.md` alongside `foo.md`
+/// on a case-sensitive filesystem) fold+dedup into an expected `foo.md` and
+/// silently PASS — a false negative that defeats the whole identity barrier.
+/// Exact comparison stays fail-safe instead: a mixed-case author-supplied
+/// expected path spuriously refuses (recoverable) rather than letting a real
+/// owner change slip through. A filesystem-case-aware policy is tracked as
+/// NRN-266.
 fn owner_paths_mismatch(expected: &[String], actual: &[String]) -> bool {
-    fn folded(paths: &[String]) -> Vec<String> {
-        let mut folded: Vec<String> = paths.iter().map(|p| p.to_ascii_lowercase()).collect();
-        folded.sort();
-        folded.dedup();
-        folded
-    }
-    folded(expected) != folded(actual)
+    expected != actual
 }
 
 /// True when `document`'s frontmatter satisfies every parsed `field:value`
-/// predicate. Equality routes through `cache::canonical::canonicalize_scalar` —
-/// the SAME canonicalizer the `find --eq` query path binds through — so owner-set
-/// eq and `find --eq` share one tested definition of scalar equality (numbers
-/// compare by SQL affinity: `2` and `2.0` are DISTINCT, matching `find --eq` and
-/// unlike the former hand-rolled `numbers_match`; strings have wikilink brackets
-/// collapsed). An array field matches if ANY element canonicalizes equal, the
-/// same array-awareness the query's `document_fields` rows give `find --eq`.
+/// predicate, matching `find --eq`'s scalar equality. STRINGS route through
+/// `cache::canonical::canonicalize_scalar` — the SAME canonicalizer the query
+/// path binds through — so wikilink brackets collapse exactly once and owner-set
+/// eq can never drift from `find --eq`'s string handling. NUMBERS compare
+/// numerically (`numbers_match`): `find --eq` binds through SQLite's `value = ?`,
+/// where INTEGER and REAL compare by value, so `2` matches a stored `2.0` (see
+/// `scan_semantics_probe::eq_integer_matches_stored_float_numerically`), while an
+/// integer beyond f64 precision never rounds into a float. An array field matches
+/// if ANY element matches, the same array-awareness the query's `document_fields`
+/// rows give `find --eq`.
 fn document_matches_eq(
     document: &crate::core::Document,
     predicates: &[(String, serde_json::Value)],
@@ -688,21 +691,58 @@ fn document_matches_eq(
         return false;
     };
     for (field, expected) in predicates {
-        let expected_canonical = crate::cache::canonical::canonicalize_scalar(expected);
         let Some(actual) = frontmatter.get(field) else {
             return false;
         };
         let matches = match actual {
-            serde_json::Value::Array(values) => values.iter().any(|value| {
-                crate::cache::canonical::canonicalize_scalar(value) == expected_canonical
-            }),
-            value => crate::cache::canonical::canonicalize_scalar(value) == expected_canonical,
+            serde_json::Value::Array(values) => {
+                values.iter().any(|value| eq_value_matches(value, expected))
+            }
+            value => eq_value_matches(value, expected),
         };
         if !matches {
             return false;
         }
     }
     true
+}
+
+/// One frontmatter value against one eq predicate value, matching `find --eq`:
+/// two numbers compare numerically (see `numbers_match`); everything else
+/// compares through `canonicalize_scalar` (wikilink-stripped strings, bools,
+/// null, JSON-encoded objects).
+fn eq_value_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    if let (serde_json::Value::Number(actual), serde_json::Value::Number(expected)) =
+        (actual, expected)
+    {
+        return numbers_match(actual, expected);
+    }
+    crate::cache::canonical::canonicalize_scalar(actual)
+        == crate::cache::canonical::canonicalize_scalar(expected)
+}
+
+/// Numeric equality matching SQLite's INTEGER/REAL comparison, which `find --eq`
+/// binds through: equal integers match; an integer matches a float only when the
+/// float is finite, integral, and exactly equals the integer (so `2` == `2.0`,
+/// but an integer beyond f64 precision never rounds into a float); two floats
+/// compare by value.
+fn numbers_match(actual: &serde_json::Number, expected: &serde_json::Number) -> bool {
+    let integer = |number: &serde_json::Number| {
+        number
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| number.as_u64().map(i128::from))
+    };
+    match (integer(actual), integer(expected)) {
+        (Some(actual), Some(expected)) => actual == expected,
+        (Some(integer), None) => expected.as_f64().is_some_and(|float| {
+            float.is_finite() && float.fract() == 0.0 && float as i128 == integer
+        }),
+        (None, Some(integer)) => actual.as_f64().is_some_and(|float| {
+            float.is_finite() && float.fract() == 0.0 && float as i128 == integer
+        }),
+        (None, None) => actual.as_f64() == expected.as_f64(),
+    }
 }
 
 struct ResolvedCreatePaths {
@@ -2664,7 +2704,13 @@ mod tests {
     /// author-supplied expected `foo.md` MATCHES (passes), rather than spuriously
     /// refusing over the case difference.
     #[test]
-    fn owner_set_stem_expected_path_is_case_insensitive() {
+    fn owner_set_mixed_case_expected_path_refuses_fail_safe() {
+        // The stem scan folds ASCII case (`eq_ignore_ascii_case`), but the owner
+        // path-set comparison is exact by design (`owner_paths_mismatch`): a
+        // mixed-case author-supplied expected path REFUSES rather than risk a
+        // case-colliding owner silently passing on a case-sensitive filesystem.
+        // Fail-safe — a spurious refuse is recoverable; a missed owner change is
+        // not. A filesystem-case-aware policy is tracked as NRN-266.
         let tmp = tempfile::Builder::new()
             .prefix("applier-nrn264-case-")
             .tempdir()
@@ -2693,12 +2739,68 @@ mod tests {
             .expect("apply returns a report");
         assert_eq!(
             report.outcome,
-            crate::apply_report::ApplyOutcome::Applied,
-            "a case-only path difference must not refuse; report: {report:?}"
+            crate::apply_report::ApplyOutcome::Refused,
+            "an exact-comparison case mismatch must refuse (fail-safe); report: {report:?}"
         );
         assert_eq!(
             report.preconditions[0].status,
-            crate::apply_report::PreconditionStatus::Passed
+            crate::apply_report::PreconditionStatus::Failed
         );
+    }
+
+    #[test]
+    fn owner_paths_mismatch_is_case_sensitive_and_exact() {
+        // Equal sets match.
+        assert!(!owner_paths_mismatch(
+            &["a.md".to_string(), "b.md".to_string()],
+            &["a.md".to_string(), "b.md".to_string()]
+        ));
+        // A case-colliding extra owner (`Foo.md` alongside `foo.md`) must register
+        // as a mismatch, never fold away — the safety property NRN-266 guards.
+        assert!(owner_paths_mismatch(
+            &["foo.md".to_string()],
+            &["Foo.md".to_string(), "foo.md".to_string()]
+        ));
+    }
+
+    #[test]
+    fn numbers_match_aligns_with_find_eq() {
+        let num = |v: serde_json::Value| match v {
+            serde_json::Value::Number(n) => n,
+            _ => unreachable!("test passes only numbers"),
+        };
+        // `2` matches a stored `2.0` — SQLite INTEGER/REAL numeric equality, the
+        // behavior `find --eq` binds through (the regression this fix restores).
+        assert!(numbers_match(
+            &num(serde_json::json!(2)),
+            &num(serde_json::json!(2.0))
+        ));
+        assert!(numbers_match(
+            &num(serde_json::json!(2.0)),
+            &num(serde_json::json!(2))
+        ));
+        assert!(numbers_match(
+            &num(serde_json::json!(2)),
+            &num(serde_json::json!(2))
+        ));
+        // Different values never match.
+        assert!(!numbers_match(
+            &num(serde_json::json!(2)),
+            &num(serde_json::json!(3.0))
+        ));
+        // An integer beyond f64 precision never rounds into a float.
+        assert!(!numbers_match(
+            &num(serde_json::json!(9007199254740993i64)),
+            &num(serde_json::json!(9007199254740992.0))
+        ));
+        // Two floats compare by value.
+        assert!(numbers_match(
+            &num(serde_json::json!(1.5)),
+            &num(serde_json::json!(1.5))
+        ));
+        assert!(!numbers_match(
+            &num(serde_json::json!(1.5)),
+            &num(serde_json::json!(1.6))
+        ));
     }
 }

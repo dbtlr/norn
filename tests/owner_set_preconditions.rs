@@ -787,6 +787,61 @@ fn eq_selector_does_not_round_large_integer_against_float() {
 }
 
 #[test]
+fn eq_selector_matches_integer_against_stored_float() {
+    // `find --eq sequence:2` matches a stored `2.0` (SQLite INTEGER/REAL numeric
+    // equality); owner-set eq must agree, so the owner IS selected. Regression
+    // for the amended-review finding where the refactor diverged from find --eq.
+    let tmp = tempfile::Builder::new()
+        .prefix("norn-owner-set-int-float-")
+        .tempdir()
+        .expect("tempdir");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+    std::fs::write(
+        vault.join("actual.md"),
+        "---\nsequence: 2.0\n---\n# Actual\n",
+    )
+    .expect("document");
+
+    let plan = serde_json::json!({
+        "schema_version": 2,
+        "vault_root": vault.to_str().expect("UTF-8 vault path"),
+        "preconditions": [{
+            "id": "numeric-owner",
+            "kind": "owner_set",
+            "selector": { "eq": ["sequence:2"] },
+            "expected_paths": ["actual.md"]
+        }],
+        "operations": []
+    });
+    let plan_path = tmp.path().join("plan.json");
+    std::fs::write(&plan_path, serde_json::to_vec_pretty(&plan).unwrap()).expect("plan");
+
+    let output = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&vault)
+        .args(["apply"])
+        .arg(&plan_path)
+        .args(["--yes", "--format", "json"])
+        .output()
+        .expect("run norn apply");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["preconditions"][0]["status"], "passed");
+    assert_eq!(
+        report["preconditions"][0]["actual_paths"],
+        serde_json::json!(["actual.md"])
+    );
+}
+
+#[test]
 fn records_output_explains_owner_set_refusal() {
     let tmp = tempfile::Builder::new()
         .prefix("norn-owner-set-records-")
