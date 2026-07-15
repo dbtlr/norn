@@ -36,7 +36,7 @@ fn blake3_of_file(path: &std::path::Path) -> String {
 /// promoted to the op `kind`.
 fn plan_json(vault_root: &str, note_rel: &str, document_hash: &str, new_body: &str) -> String {
     serde_json::to_string(&serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault_root,
         "operations": [{
             "kind": "replace_body",

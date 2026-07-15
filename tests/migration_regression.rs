@@ -193,7 +193,7 @@ fn atlas_migration_two_invocation_link_preserving_flow() {
     // -----------------------------------------------------------------------
 
     let plan1 = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {vault_root}
 operations:
   - kind: move_document
@@ -229,7 +229,7 @@ operations:
     let dry1_report: serde_json::Value =
         serde_json::from_str(&dry1_stdout).expect("Invocation 1 dry-run output must be valid JSON");
 
-    assert_eq!(dry1_report["schema_version"], 2);
+    assert_eq!(dry1_report["schema_version"], 3);
     assert_eq!(dry1_report["dry_run"], true);
 
     let dry1_ops = dry1_report["operations"]
@@ -352,7 +352,7 @@ operations:
     // -----------------------------------------------------------------------
 
     let plan2 = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {vault_root}
 operations:
   - kind: move_folder
@@ -389,7 +389,7 @@ operations:
     let dry2_report: serde_json::Value =
         serde_json::from_str(&dry2_stdout).expect("Invocation 2 dry-run output must be valid JSON");
 
-    assert_eq!(dry2_report["schema_version"], 2);
+    assert_eq!(dry2_report["schema_version"], 3);
     assert_eq!(dry2_report["dry_run"], true);
 
     let dry2_ops = dry2_report["operations"]
@@ -573,7 +573,7 @@ fn atlas_migration_dry_run_expands_to_expected_op_counts() {
         .unwrap();
 
     let plan = format!(
-        r#"schema_version: 1
+        r#"schema_version: 2
 vault_root: {vault_root}
 operations:
   - kind: move_folder

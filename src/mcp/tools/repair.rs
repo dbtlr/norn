@@ -294,8 +294,8 @@ mod tests {
 
         // Must carry `schema_version`.
         assert_eq!(
-            out.plan["schema_version"], 1,
-            "plan must have schema_version=1, got: {:?}",
+            out.plan["schema_version"], 2,
+            "plan must have schema_version=2, got: {:?}",
             out.plan["schema_version"]
         );
 

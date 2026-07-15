@@ -226,7 +226,7 @@ fn delete_yes_format_json_emits_single_json_object() {
     let v: serde_json::Value = serde_json::from_str(trimmed)
         .unwrap_or_else(|e| panic!("output must be a single JSON object: {e}\ngot: {trimmed}"));
     // ApplyReport shape: schema_version, dry_run, applied count, operations[].
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert_eq!(v["dry_run"], false);
     // applied count = 1: the delete_document op was executed.
     assert_eq!(v["applied"], 1);
@@ -266,7 +266,7 @@ fn delete_dry_run_format_json_emits_envelope() {
         panic!("--dry-run --format json must emit a JSON envelope: {e}\ngot: {trimmed}")
     });
     // ApplyReport shape.
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["operations"][0]["kind"], "delete_document");
     assert!(
@@ -382,7 +382,7 @@ fn delete_format_json_emits_envelope() {
     let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
         .expect("output must parse as JSON");
     // ApplyReport shape: --format json without --yes is implicitly dry-run.
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert_eq!(v["dry_run"], true);
     assert_eq!(v["operations"][0]["kind"], "delete_document");
     assert!(

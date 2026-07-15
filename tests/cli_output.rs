@@ -291,10 +291,10 @@ fn repair_plan_generates_configured_frontmatter_change() {
         "status",
     ]);
 
-    // `repair --plan` emits a MigrationPlan: schema_version 1, generator
+    // `repair --plan` emits a MigrationPlan: schema_version 2, generator
     // norn-repair, ops nested under `operations[].fields` with `operation` → `kind`.
     let plan = serde_json::from_str::<Value>(&output).expect("repair --plan should be JSON");
-    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["schema_version"], 2);
     assert_eq!(plan["generator"], "norn-repair");
     assert_eq!(plan["operations"].as_array().unwrap().len(), 1);
     assert!(
@@ -353,7 +353,7 @@ fn repair_plan_out_writes_json_artifact_without_stdout() {
     assert_eq!(stdout, "");
     let plan_text = fs::read_to_string(&plan_path).expect("plan should write");
     let plan = serde_json::from_str::<Value>(&plan_text).expect("repair --plan should be JSON");
-    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["schema_version"], 2);
     assert_eq!(plan["operations"].as_array().unwrap().len(), 1);
     assert_eq!(plan["operations"][0]["fields"]["path"], "task.md");
 
@@ -2415,7 +2415,7 @@ repair:
     let plan_text = fs::read_to_string(&plan_path).expect("plan should write");
     let plan_json: Value = serde_json::from_str(&plan_text).expect("repair --plan should be JSON");
 
-    assert_eq!(plan_json["schema_version"], 1);
+    assert_eq!(plan_json["schema_version"], 2);
     assert_eq!(plan_json["operations"].as_array().unwrap().len(), 1);
     let op = &plan_json["operations"][0];
     assert_eq!(op["kind"], "move_document");
@@ -2620,7 +2620,7 @@ fn apply_partial_apply_exits_1_not_2_when_a_move_already_landed() {
     fs::write(root.join("d.md"), "---\ntype: note\n---\n# D\n").expect("d");
 
     let plan = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": root.to_str().unwrap(),
         "operations": [
             { "kind": "move_document", "fields": { "src": "a.md", "dst": "b.md" } },

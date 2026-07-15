@@ -536,7 +536,7 @@ fn apply_guidance_suppresses_apply_block_when_skip_reason_active() {
 }
 
 /// Subprocess stdout is a pipe, not a tty, so omitting `--format` should default
-/// to JSON output (MigrationPlan schema_version 1). Explicit `--format report`
+/// to JSON output (MigrationPlan schema_version 2). Explicit `--format report`
 /// still wins.
 #[test]
 fn piped_default_is_json_explicit_format_overrides() {
@@ -574,7 +574,7 @@ fn piped_default_is_json_explicit_format_overrides() {
     );
     let json: serde_json::Value =
         serde_json::from_str(&piped_stdout).expect("piped default should be valid JSON");
-    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["schema_version"], 2);
     assert_eq!(json["generator"], "norn-repair");
     assert!(
         json["operations"].is_array(),

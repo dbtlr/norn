@@ -113,7 +113,7 @@ pub fn resolve_links_to(
     Ok(resolved)
 }
 
-fn parse_field_value(spec: &str, flag: &str) -> Result<(String, Value)> {
+pub(crate) fn parse_field_value(spec: &str, flag: &str) -> Result<(String, Value)> {
     let (field, raw) = crate::grammar::split_field_value(spec)
         .ok_or_else(|| anyhow!("invalid {} value, expected field:value: {}", flag, spec))?;
     let field = field.trim().to_string();

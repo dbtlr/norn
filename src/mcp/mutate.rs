@@ -439,13 +439,13 @@ mod lock_ordering_tests {
                 "apply",
                 Box::new(|ctx| {
                     let plan = serde_json::json!({
-                        "schema_version": 1,
-                        "vault_root": ctx.vault_root.to_string(),
-                        "operations": [{
-                            "kind": "delete_document",
-                            "fields": { "path": "bogus-target.md" }
-                        }]
-                    });
+                    "schema_version": 2,
+                                    "vault_root": ctx.vault_root.to_string(),
+                                    "operations": [{
+                                        "kind": "delete_document",
+                                        "fields": { "path": "bogus-target.md" }
+                                    }]
+                                });
                     crate::mcp::tools::apply::handle(
                         ctx,
                         &ctx.begin_request().unwrap(),
@@ -604,13 +604,13 @@ mod lock_ordering_tests {
                 "apply",
                 Box::new(|ctx| {
                     let plan = serde_json::json!({
-                        "schema_version": 1,
-                        "vault_root": ctx.vault_root.to_string(),
-                        "operations": [{
-                            "kind": "delete_document",
-                            "fields": { "path": "doc.md" }
-                        }]
-                    });
+                    "schema_version": 2,
+                                    "vault_root": ctx.vault_root.to_string(),
+                                    "operations": [{
+                                        "kind": "delete_document",
+                                        "fields": { "path": "doc.md" }
+                                    }]
+                                });
                     let r = crate::mcp::tools::apply::handle_output(
                         ctx,
                         &ctx.begin_request().unwrap(),

@@ -182,6 +182,7 @@ pub fn run_direct(
         parents: args.parents,
         verbose,
         refuse_as_report: false,
+        owner_index_options: loaded_config.index_options.clone(),
     };
 
     let argv: Vec<String> = std::env::args().collect();
@@ -324,13 +325,29 @@ fn render_report(report: &ApplyReport, format: ApplyFormat, out: Option<&str>) -
 
 /// Human-readable records rendering for the apply report.
 fn render_records(report: &ApplyReport, out: &mut dyn Write) -> Result<()> {
-    let status_label = if report.dry_run { "dry-run" } else { "applied" };
+    let status_label = match report.outcome {
+        crate::apply_report::ApplyOutcome::Applied if report.dry_run => "dry-run",
+        crate::apply_report::ApplyOutcome::Applied => "applied",
+        crate::apply_report::ApplyOutcome::Failed => "failed",
+        crate::apply_report::ApplyOutcome::Refused => "refused",
+        crate::apply_report::ApplyOutcome::Rebased => "rebased",
+    };
     writeln!(out, "apply {status_label}")?;
     writeln!(
         out,
         "  applied: {}  skipped: {}  failed: {}  remaining: {}",
         report.applied, report.skipped, report.failed, report.remaining
     )?;
+    if !report.preconditions.is_empty() {
+        writeln!(out, "preconditions:")?;
+        for precondition in &report.preconditions {
+            let status = format!("{:?}", precondition.status).to_lowercase();
+            writeln!(out, "  [{status}] {}", precondition.id)?;
+            if let Some(error) = &precondition.error {
+                writeln!(out, "    {}: {}", error.code, error.message)?;
+            }
+        }
+    }
     for op in &report.operations {
         let status = format!("{:?}", op.status).to_lowercase();
         writeln!(out, "  [{status}] {}", op.summary)?;

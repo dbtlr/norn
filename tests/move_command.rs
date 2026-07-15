@@ -212,7 +212,7 @@ fn move_format_json_emits_envelope() {
     let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
         .expect("output must parse as JSON");
     // ApplyReport shape (replaces MoveReport as of Plan Task 14)
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert!(
         v["dry_run"].as_bool().unwrap_or(false),
         "dry_run should be true for implicit non-interactive"
@@ -265,7 +265,7 @@ fn move_dry_run_format_json_emits_envelope() {
         panic!("--dry-run --format json must emit a JSON envelope: {e}\ngot: {trimmed}")
     });
     // ApplyReport shape (replaces MoveReport as of Plan Task 14)
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert!(
         v["dry_run"].as_bool().unwrap_or(false),
         "dry_run must be true"
@@ -328,7 +328,7 @@ fn move_yes_format_json_emits_single_json_object() {
     let v: serde_json::Value = serde_json::from_str(trimmed)
         .unwrap_or_else(|e| panic!("output must be a single JSON object: {e}\ngot: {trimmed}"));
     // ApplyReport shape (replaces MoveReport as of Plan Task 14)
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     // dry_run = false: the mutation was performed
     assert_eq!(
         v["dry_run"], false,

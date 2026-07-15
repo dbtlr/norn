@@ -6,7 +6,7 @@
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
-pub const APPLY_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const APPLY_REPORT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyReport {
@@ -20,6 +20,8 @@ pub struct ApplyReport {
     pub skipped: usize,
     pub failed: usize,
     pub remaining: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub preconditions: Vec<ApplyReportPrecondition>,
     pub operations: Vec<ApplyReportOp>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<ApplyWarning>,
@@ -112,6 +114,7 @@ impl ApplyReport {
             skipped: 0,
             failed: 1,
             remaining: 0,
+            preconditions: Vec::new(),
             operations: vec![ApplyReportOp {
                 op_id: "0".to_string(),
                 kind: op_kind.to_string(),
@@ -131,6 +134,24 @@ impl ApplyReport {
             touched_paths: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApplyReportPrecondition {
+    pub id: String,
+    pub status: PreconditionStatus,
+    pub expected_paths: Vec<String>,
+    pub actual_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<ApplyError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreconditionStatus {
+    Passed,
+    Failed,
+    NotRun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,8 +191,9 @@ pub struct ApplyReportOp {
     /// (wire) paths render byte-identically without re-consulting the index
     /// (NRN-237). Populated ONLY for `delete_document` ops; `None` for every other
     /// op kind, so their serialized bytes are unchanged. Additive + serde-defaulted:
-    /// the schema version stays 2 (a pre-NRN-237 report with no `link_impact` key
-    /// still deserializes, and an op without it serializes no key).
+    /// it did not require a schema bump at introduction (a pre-NRN-237 report
+    /// with no `link_impact` key still deserializes, and an op without it
+    /// serializes no key).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub link_impact: Option<LinkImpact>,
 }
@@ -398,8 +420,9 @@ impl ApplyError {
 /// and deserializes it back into the native [`ApplyReport`] — the exact inverse
 /// of the daemon's `serde_json::to_value(report)` projection, so rendering the
 /// rebuilt value equals rendering the direct value. A refused report MUST carry
-/// its coded `error` on a `failed` op (what [`emit_refusal`] renders); a missing
-/// one is a malformed envelope, returned as `Err` so the routing seam handles it
+/// a coded `error` on either a failed operation or failed precondition (what
+/// [`emit_refusal`] renders); a missing one is a malformed envelope, returned as
+/// `Err` so the routing seam handles it
 /// (fall back to Direct on a dry-run, post-send-uncertain on an apply). Any shape
 /// mismatch is likewise an `Err`. The shared analogue of `set::route::reconstruct`
 /// / `edit::route::reconstruct` — every cascade command wraps the same
@@ -412,6 +435,7 @@ pub fn reconstruct_wire_report(structured: &serde_json::Value) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!("mutation envelope: unreadable report: {e}"))?;
     if matches!(report.outcome, ApplyOutcome::Refused)
         && !report.operations.iter().any(|o| o.error.is_some())
+        && !report.preconditions.iter().any(|p| p.error.is_some())
     {
         anyhow::bail!("mutation envelope: refused report carries no coded error");
     }
@@ -437,6 +461,7 @@ pub fn emit_refusal(report: &ApplyReport, json: bool) -> anyhow::Result<i32> {
         .operations
         .iter()
         .find_map(|o| o.error.as_ref())
+        .or_else(|| report.preconditions.iter().find_map(|p| p.error.as_ref()))
         .expect("reconstruct_wire_report guarantees a refused report carries a coded error");
     if json {
         let stdout = std::io::stdout();
@@ -549,9 +574,51 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_accepts_refusal_error_on_first_class_precondition() {
+        let structured = serde_json::json!({
+            "report": {
+                "schema_version": 3,
+                "trace_id": "",
+                "plan_hash": "h",
+                "vault_root": "/v",
+                "dry_run": false,
+                "applied": 0,
+                "skipped": 0,
+                "failed": 0,
+                "remaining": 1,
+                "preconditions": [{
+                    "id": "task-owner",
+                    "status": "failed",
+                    "expected_paths": [],
+                    "actual_paths": ["other/task.md"],
+                    "error": {
+                        "code": "owner-set-mismatch",
+                        "message": "owner set changed"
+                    }
+                }],
+                "operations": [{
+                    "op_id": "0",
+                    "kind": "create_document",
+                    "status": "not-run",
+                    "summary": "would create_document task.md"
+                }],
+                "outcome": "refused"
+            }
+        });
+
+        let report = reconstruct_wire_report(&structured).expect("precondition refusal rebuilds");
+        assert_eq!(report.outcome, ApplyOutcome::Refused);
+        assert_eq!(report.operations[0].status, OpStatus::NotRun);
+        assert_eq!(
+            report.preconditions[0].error.as_ref().unwrap().code,
+            "owner-set-mismatch"
+        );
+    }
+
+    #[test]
     fn apply_report_serializes_with_per_op_status() {
         let report = ApplyReport {
-            schema_version: 2,
+            schema_version: APPLY_REPORT_SCHEMA_VERSION,
             trace_id: "".into(),
             plan_hash: "abc123".into(),
             vault_root: "/abs/vault".into(),
@@ -560,6 +627,7 @@ mod tests {
             skipped: 0,
             failed: 0,
             remaining: 0,
+            preconditions: Vec::new(),
             operations: vec![ApplyReportOp {
                 op_id: "0".into(),
                 kind: "move_document".into(),
@@ -835,8 +903,7 @@ mod tests {
     }
 
     /// NRN-237: the field is additive + serde-defaulted, so a pre-NRN-237 report
-    /// JSON (no `link_impact` key on any op) still deserializes — the schema
-    /// version stays 2, no breaking bump.
+    /// JSON (no `link_impact` key on any op) still deserializes.
     #[test]
     fn pre_nrn237_report_without_link_impact_still_deserializes() {
         let legacy = serde_json::json!({

@@ -129,23 +129,24 @@ norn repair --plan --code value-not-allowed --field status --out plan.json
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "vault_root": "/abs/path/to/vault",
-  "source_filters": { "...": "..." },
-  "summary": {
-    "findings": 42,
-    "planned_changes": 18,
-    "skipped": {
-      "by_reason": { "no-rule-matched": 20, "ambiguous-target": 3, "precondition-failed": 1 },
-      "total": 24
+  "preconditions": [
+    {
+      "id": "note-owner",
+      "kind": "owner_set",
+      "selector": { "stem": "x" },
+      "expected_paths": ["notes/x.md"]
     }
-  },
+  ],
   "operations": [ { "kind": "set_frontmatter", "fields": { "...": "..." } } ],
   "skipped": [ { "finding_code": "value-not-allowed", "path": "notes/x.md", "reason": "no-rule-matched" } ]
 }
 ```
 
 Each planned operation carries a `kind` and a `fields` object with the target path, document-hash precondition, and the operation's data (field/value, destination, etc.).
+
+The optional `preconditions` array protects logical identities rather than physical paths. An `owner_set` entry asserts the exact current path set selected by `{ "stem": "…" }`, `{ "eq": ["field:value", "…"] }`, or `{ "stem_from_operation": "operation-id" }`. The operation-derived form resolves `{{seq}}` first. Norn evaluates the whole array once under the mutation lock; any mismatch refuses before an operation runs.
 
 Each skipped finding carries `finding_code` (the underlying validate code, e.g. `link-ambiguous`), `path`, and a single canonical `reason` — the stable **kebab-case** skip-reason code, one of `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, or `precondition-failed`. Branch on `reason`; the summary's `by_reason` map keys on the same codes. Fix the repairability problem, then rerun `repair --plan`.
 
@@ -200,8 +201,9 @@ Apply rejects:
 - Stale document hashes (the document changed since the plan was created).
 - Conflicting field changes within one apply run.
 - Expected-old-value mismatches.
+- Logical owner-set mismatches or conflicting create claims.
 
-The orchestrator is atomic-at-batch-level: any precondition failure aborts the whole apply before any partial writes (stderr error, exit 1, no report rendered).
+First-class owner-set preconditions form one atomic pre-write barrier. A failure returns `outcome: "refused"` (exit 2), records the failed precondition with sorted expected/actual paths and a stable code, marks every operation `not-run`, and leaves the vault byte-identical. Later operation-class failures retain the existing truthful partial-apply contract described in [Error and outcome contract](errors.md).
 
 ### Vaults are self-contained
 
@@ -219,7 +221,7 @@ The JSON `ApplyReport` (`--format json`, or `--out <PATH>`) carries top-level co
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "trace_id": "…",
   "plan_hash": "…",
   "vault_root": "/abs/path/to/vault",
@@ -228,6 +230,9 @@ The JSON `ApplyReport` (`--format json`, or `--out <PATH>`) carries top-level co
   "skipped": 1,
   "failed": 0,
   "remaining": 0,
+  "preconditions": [
+    { "id": "note-owner", "status": "passed", "expected_paths": ["notes/x.md"], "actual_paths": ["notes/x.md"] }
+  ],
   "operations": [ { "op_id": "…", "kind": "set_frontmatter", "status": "applied", "summary": "…" } ],
   "warnings": []
 }

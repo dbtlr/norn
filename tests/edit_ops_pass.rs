@@ -35,7 +35,7 @@ fn blake3_of_file(path: &std::path::Path) -> String {
 /// or old/new) plus `path`/`document_hash`.
 fn edit_plan(vault_root: &str, ops: Vec<serde_json::Value>) -> String {
     serde_json::to_string(&serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "vault_root": vault_root,
         "operations": ops,
     }))

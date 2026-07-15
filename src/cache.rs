@@ -16,7 +16,7 @@ pub(crate) use find::{FindQuery, FindResult, SortClause, SortDirection};
 pub(crate) use live_examples::{count_matching, field_statistics, FieldStats};
 pub(crate) use query::DocumentQuery;
 
-mod canonical;
+pub(crate) mod canonical;
 mod change_detection;
 mod document_fields;
 #[cfg(test)]

@@ -76,7 +76,7 @@ fn hold_mutation_lock(vault_root: &std::path::Path, state_base: &std::path::Path
 
 fn minimal_plan_json(vault_root: &std::path::Path) -> String {
     format!(
-        r#"{{"schema_version":1,"vault_root":"{}","operations":[{{"kind":"move_document","fields":{{"src":"a.md","dst":"renamed.md"}}}}]}}"#,
+        r#"{{"schema_version":2,"vault_root":"{}","operations":[{{"kind":"move_document","fields":{{"src":"a.md","dst":"renamed.md"}}}}]}}"#,
         vault_root.to_str().unwrap()
     )
 }
