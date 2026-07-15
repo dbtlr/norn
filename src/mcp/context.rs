@@ -3940,72 +3940,67 @@ mod tests {
 
     /// Drain-and-drop (ADR 0013, NRN-251): a request in flight on generation N
     /// keeps serving on N while N+1 opens; N's resources (connection + sentinel
-    /// fd) release only when its LAST `Arc` drops. Modeled by holding the
-    /// generation `Arc` across a reopen: the slot releases its reference (leaving
-    /// ours the sole owner) yet N still serves its own snapshot, and the whole
-    /// generation is freed exactly when we drop it.
+    /// fd) release only when its last request-bound [`CacheHandle`] drops. The
+    /// handle returned by `query_cache` pins N across a reopen to an observably
+    /// different N+1, continues serving N's snapshot, and releases N when dropped.
     #[test]
     fn warm_reopen_drains_and_drops_prior_generation() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        ctx.begin_request().expect("begin_request");
-        {
-            let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
-            assert_eq!(doc_count(&cache), 3);
-        }
+        let scope1 = ctx.begin_request().expect("begin_request");
+        let gen1_cache = ctx.query_cache(&scope1).expect("first warm query_cache");
+        assert_eq!(doc_count(&gen1_cache), 3);
+
         let gen1 = ctx.current_generation().expect("generation 1 held");
         assert_eq!(gen1.number, 1);
         let weak = Arc::downgrade(&gen1);
+        drop(gen1);
+
+        // Make the rebuilt generation observably different from the request's
+        // bound snapshot before forcing the ground-shift.
+        std::fs::write(
+            root.join("delta.md"),
+            "---\ntype: note\nstatus: active\n---\nDelta body\n",
+        )
+        .unwrap();
 
         // Trigger a reopen via ground-shift: remove the cache dir out from under
-        // the live context. gen1's held connection keeps the unlinked db alive
-        // (POSIX ghost), so it can still serve its snapshot after this.
+        // the live context. The request-bound handle keeps gen1's unlinked db
+        // alive (POSIX ghost), so it can still serve its snapshot after this.
         let (_canonical, cache_dir) = cache_dir_for(&root).expect("cache_dir_for");
         std::fs::remove_dir_all(cache_dir.as_std_path()).expect("remove cache dir");
 
-        ctx.begin_request().expect("begin_request");
+        let scope2 = ctx.begin_request().expect("begin_request");
         {
-            let cache = ctx.query_cache_unscoped().expect("second warm query_cache");
+            let cache = ctx.query_cache(&scope2).expect("second warm query_cache");
             assert_eq!(
                 doc_count(&cache),
-                3,
-                "the reopened generation serves the vault"
+                4,
+                "generation N+1 serves the rebuilt four-document vault"
             );
         }
         let gen2 = ctx.current_generation().expect("generation 2 held");
         assert_eq!(gen2.number, 2, "reopen advanced the generation number");
+        drop(gen2);
 
-        // gen1 drained on N: its still-open pooled connection serves its own
-        // snapshot, even though the file was unlinked.
-        let gen1_docs: i64 = gen1
-            .test_read_conn()
-            .conn()
-            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
-            .expect("gen1 connection still usable");
         assert_eq!(
-            gen1_docs, 3,
-            "the drained generation still serves its snapshot"
+            doc_count(&gen1_cache),
+            3,
+            "the request-bound N handle still serves its old three-document snapshot"
         );
 
-        // The slot swapped to gen2 and released its gen1 reference — ours is now
-        // the sole owner.
-        assert_eq!(
-            Arc::strong_count(&gen1),
-            1,
-            "the slot dropped its reference to the prior generation on reopen"
-        );
         assert!(
             weak.upgrade().is_some(),
-            "generation 1 is still alive while held"
+            "generation N remains alive while its request-bound handle is held"
         );
 
-        // Dropping the last `Arc` releases N entirely (connection + sentinel fd
-        // close via Drop) — the Weak going dead is the observable Drop-side effect.
-        drop(gen1);
+        // Dropping the request's handle releases N entirely (connection + sentinel
+        // fd close via Drop) — the Weak going dead is the observable Drop effect.
+        drop(gen1_cache);
         assert!(
             weak.upgrade().is_none(),
-            "generation N is fully dropped — connection + sentinel fd released — with its last Arc"
+            "generation N is fully dropped after its request-bound handle releases it"
         );
     }
 

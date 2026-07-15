@@ -1131,7 +1131,8 @@ mod tests {
         use std::sync::mpsc;
 
         // Both readers hold a pooled connection across the refresh wait, so the cap
-        // must allow >= 2 (default could be 1 on a single-core host).
+        // must allow >= 2. The shared guard also isolates this test from the
+        // process-global cap=1 wait-at-cap proof running elsewhere in the suite.
         let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
 
         let (tmp, ctx, server) = warm_server_ready().await;
@@ -1206,6 +1207,10 @@ mod tests {
     /// refresh and observes an edit made while R was in flight.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn count_arriving_after_refresh_started_runs_later_refresh_and_sees_midflight_edit() {
+        // Both readers hold a pooled connection across the refresh wait, so the cap
+        // must allow >= 2 (default could be 1 on a single-core host).
+        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
+
         let (tmp, ctx, server) = warm_server_ready().await;
         let baseline = ctx.current_refresh_exec_count();
         let arrivals_base = ctx.current_refresh_arrivals();
