@@ -357,6 +357,7 @@ fn all_cols_expands_to_full_dump() {
         a["body"].as_str().unwrap().contains("alpha body"),
         "body present: {a}"
     );
+    assert!(a.get("raw").is_none(), "--all-cols must omit raw: {a}");
 }
 
 #[test]

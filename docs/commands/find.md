@@ -72,7 +72,7 @@ By default `find` shows frontmatter only. `--col` narrows or extends that select
 
 - **Bare names select frontmatter fields:** `--col status,title`.
 - **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter` (the whole block), `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.document_hash`.
-- **`--all-cols`** emits the full structured dump — whole frontmatter plus every cache-served facet. It excludes `.document_hash` (opt-in/identity-class). Mutually exclusive with `--col`.
+- **`--all-cols`** emits the full structured dump — whole frontmatter plus every cache-served facet except the opt-in `.stem` and `.document_hash`. Mutually exclusive with `--col`.
 
 `.body` comes from the cache; `.document_hash` is the full-content blake3 hex (the value `edit --expected-hash` compares against). On `paths` format `--col` is ignored with a warning — paths output is a single path per line by definition.
 

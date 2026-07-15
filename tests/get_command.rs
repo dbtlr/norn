@@ -720,6 +720,8 @@ fn get_col_raw_is_unknown_and_markdown_remains_byte_faithful() {
     );
     let v: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1, "expected one record: {v}");
+    assert_eq!(v[0]["path"], "a.md", "expected the selected record: {v}");
     assert!(
         v[0].get("raw").is_none(),
         "unknown raw facet must not emit a JSON key: {v}"

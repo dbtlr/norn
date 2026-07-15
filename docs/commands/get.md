@@ -49,7 +49,7 @@ The `--col` vocabulary is identical to `norn find`:
 - **Bare names select frontmatter fields:** `--col status,title`.
 - **Structural facets are dot-prefixed:** `.path`, `.stem`, `.frontmatter`, `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.document_hash`.
 - **Default (no `--col`):** frontmatter, headings, and links. Body is included only with `--all-cols` or `--col .body`.
-- **`--all-cols`:** every frontmatter field plus every cache-served facet, including `.body`. Excludes `.document_hash` (opt-in/identity-class, requested only by name). Mutually exclusive with `--col`.
+- **`--all-cols`:** every frontmatter field plus every cache-served facet, including `.body`, except the opt-in `.stem` and `.document_hash`. Mutually exclusive with `--col`.
 
 `.body` is the parsed body from the cache. `.document_hash` is the blake3 hex of the full file content — the same value plan ops carry and `edit --expected-hash` / `vault.edit`'s `expected_hash` compare against, so `get --col .document_hash` is how you read a document's hash to guard a later edit.
 
@@ -80,7 +80,7 @@ The `--col` vocabulary is identical to `norn find`:
 
 When a matching `norn serve` daemon is live, `markdown` routes through
 `vault.get` like the structured formats; the daemon reads the resolved file at
-request time and returns the same exact content. Markdown is a representation,
+request time and returns the same content. Markdown is a representation,
 not a structural facet: it never adds `.raw` or `.source` to records.
 
 ## See also

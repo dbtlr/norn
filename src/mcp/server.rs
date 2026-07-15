@@ -712,7 +712,30 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use rmcp::handler::server::wrapper::Parameters;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    const CONCURRENCY_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    async fn wait_for_refresh_arrivals(
+        ctx: Arc<VaultContext>,
+        target: u64,
+        timeout_message: &'static str,
+    ) {
+        tokio::time::timeout(
+            CONCURRENCY_TEST_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let deadline = Instant::now() + CONCURRENCY_TEST_TIMEOUT;
+                while ctx.current_refresh_arrivals() < target {
+                    assert!(Instant::now() < deadline, "{timeout_message}");
+                    std::thread::yield_now();
+                }
+            }),
+        )
+        .await
+        .expect(timeout_message)
+        .expect("refresh-arrival waiter must not panic");
+    }
 
     /// Drift guard for the served-marker names (NRN-222 review): the rmcp
     /// `#[tool]` macro only accepts a string literal for `name`, so the marker
@@ -1154,9 +1177,13 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         let _blocker = ctx.warm_writer_queue().submit_liveness(move || {
             running_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
+            release_rx
+                .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
+                .expect("queued-refresh blocker must be released promptly");
         });
-        running_rx.recv().unwrap();
+        running_rx
+            .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
+            .expect("writer blocker must start promptly");
 
         // Fire two concurrent stale reads through the real funnel.
         let mut set = tokio::task::JoinSet::new();
@@ -1175,25 +1202,28 @@ mod tests {
         // the arrivals counter under the pending lock, so `>= 2` means the second
         // has already JOINED the first's ticket — it cannot submit a second op).
         // Spin on a blocking thread, matching the repo's shutdown-watch pattern.
-        let ctx_wait = Arc::clone(&ctx);
-        tokio::task::spawn_blocking(move || {
-            while ctx_wait.current_refresh_arrivals() < arrivals_base + 2 {
-                std::thread::yield_now();
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_refresh_arrivals(
+            Arc::clone(&ctx),
+            arrivals_base + 2,
+            "both stale reads must reach the coalesced refresh promptly",
+        )
+        .await;
 
         // Release the writer: the single queued op now runs and serves both.
         release_tx.send(()).unwrap();
 
-        let mut seen = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            let noted = joined
-                .expect("read task panicked")
-                .expect("stale warm read must succeed");
-            seen.push(noted.inner().0);
-        }
+        let seen = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, async move {
+            let mut seen = Vec::new();
+            while let Some(joined) = set.join_next().await {
+                let noted = joined
+                    .expect("read task panicked")
+                    .expect("stale warm read must succeed");
+                seen.push(noted.inner().0);
+            }
+            seen
+        })
+        .await
+        .expect("coalesced stale reads must complete promptly");
         assert_eq!(seen, vec![6, 6], "both coalesced reads see the added doc");
         assert_eq!(
             ctx.current_refresh_exec_count(),
@@ -1232,7 +1262,7 @@ mod tests {
 
         // R has crossed its start transition and left the joinable pending slot.
         refresh_started
-            .recv()
+            .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
             .expect("refresh R reaches start gate");
 
         // This edit lands after R started but before the later request arrives.
@@ -1252,22 +1282,22 @@ mod tests {
         // Do not release R until the late request has made its distinct arrival
         // decision. Because R already started, this arrival must submit another
         // refresh behind it rather than join it.
-        let ctx_wait = Arc::clone(&ctx);
-        tokio::task::spawn_blocking(move || {
-            while ctx_wait.current_refresh_arrivals() < arrivals_base + 2 {
-                std::thread::yield_now();
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_refresh_arrivals(
+            Arc::clone(&ctx),
+            arrivals_base + 2,
+            "the late count must make its distinct refresh arrival promptly",
+        )
+        .await;
         release_refresh.send(()).unwrap();
 
-        let first = first
+        let first = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, first)
             .await
+            .expect("first count must complete promptly")
             .expect("first count task must not panic")
             .expect("first count succeeds");
-        let late = late
+        let late = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, late)
             .await
+            .expect("late count must complete promptly")
             .expect("late count task must not panic")
             .expect("late count succeeds");
 
@@ -1290,7 +1320,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn warm_read_preempts_and_supersedes_an_older_staged_increment() {
         use crate::mcp::writer_queue::Outcome;
-        use std::time::Duration;
 
         // 0ms budget ⇒ one whole file per chunk, so the commit parks at a boundary
         // between files. Process-global but inert (only finer chunking elsewhere).
@@ -1331,7 +1360,9 @@ mod tests {
         let handle = ctx.test_submit_increment_commit(&generation, &changed);
 
         // Boundary 1: delta is staged only; main remains the old three-doc snapshot.
-        reached.recv().expect("increment boundary 1");
+        reached
+            .recv_timeout(CONCURRENCY_TEST_TIMEOUT)
+            .expect("increment must reach boundary 1 promptly");
 
         // Advance disk beyond the staged parse. The public read must refresh to
         // this six-doc state, not let the older five-doc staging publish later.
@@ -1346,19 +1377,17 @@ mod tests {
                 .await
         });
 
-        let ctx_wait = Arc::clone(&ctx);
-        tokio::task::spawn_blocking(move || {
-            while ctx_wait.current_refresh_arrivals() < arrivals_base + 1 {
-                std::thread::yield_now();
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_refresh_arrivals(
+            Arc::clone(&ctx),
+            arrivals_base + 1,
+            "the preempting read must reach refresh promptly",
+        )
+        .await;
 
         // Release the bulk boundary. Queue priority runs the read's refresh
         // before the next bulk chunk; successful refresh discards the old job.
         release.send(()).unwrap();
-        let read = tokio::time::timeout(Duration::from_secs(10), read)
+        let read = tokio::time::timeout(CONCURRENCY_TEST_TIMEOUT, read)
             .await
             .expect("the preempting refresh must complete")
             .expect("read task must not panic")
@@ -1369,8 +1398,16 @@ mod tests {
             "the read sees the complete newer refresh snapshot"
         );
 
+        let increment_outcome = tokio::time::timeout(
+            CONCURRENCY_TEST_TIMEOUT,
+            tokio::task::spawn_blocking(move || handle.wait_timeout(Duration::from_secs(5))),
+        )
+        .await
+        .expect("the superseded increment must finish promptly")
+        .expect("increment waiter must not panic")
+        .expect("the superseded increment handle must resolve promptly");
         assert!(
-            matches!(handle.wait(), Outcome::Done(Ok(()))),
+            matches!(increment_outcome, Outcome::Done(Ok(()))),
             "the superseded increment finishes cleanly without publishing"
         );
         let count = server

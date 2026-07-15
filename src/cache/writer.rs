@@ -305,16 +305,9 @@ impl crate::cache::Cache {
             if let Some(file) = fresh_files.get(path) {
                 insert_file(&tx, vault_root, file)?;
             }
-            match change {
-                FileChange::Deleted(path) => {
-                    crate::cache::invalidation::drop_document(&tx, path)?;
-                }
-                FileChange::Added(path) | FileChange::Modified(path) => {
-                    crate::cache::invalidation::drop_document(&tx, path)?;
-                    if let Some(doc) = fresh_docs.get(path) {
-                        insert_document(&tx, vault_root, doc, &mut report, &self.index_set)?;
-                    }
-                }
+            crate::cache::invalidation::drop_document(&tx, path)?;
+            if let Some(doc) = fresh_docs.get(path) {
+                insert_document(&tx, vault_root, doc, &mut report, &self.index_set)?;
             }
         }
 
@@ -1745,6 +1738,79 @@ mod tests {
         assert_eq!(stored, graph_fingerprint(&persisted));
         assert!(persisted.files.iter().any(|file| file.path == "new.md"));
         assert!(!persisted.files.iter().any(|file| file.path == "other.md"));
+    }
+
+    #[test]
+    fn incremental_refresh_publishes_document_recreated_after_deleted_detection() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        std::fs::remove_file(root.join("doc.md")).unwrap();
+        let recreated = root.join("doc.md");
+        install_after_increment_detect_hook(move || {
+            std::fs::write(
+                recreated,
+                "---\ntitle: Recreated\n---\n# New heading\n\nrecreated body [[other]]\n",
+            )
+            .unwrap();
+        });
+
+        cache.index_incremental(&root, &Default::default()).unwrap();
+
+        let file_count: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(file_count, 1, "the recreated file must publish");
+        let body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(body, "# New heading\n\nrecreated body [[other]]\n");
+        let resolved_link_count: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links
+                 WHERE source_path = 'doc.md' AND target_raw = 'other'
+                   AND resolved_path = 'other.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved_link_count, 1,
+            "the recreated document's links must publish coherently"
+        );
+
+        let persisted = cache.load_graph_index().unwrap();
+        let stored: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, graph_fingerprint(&persisted));
+
+        let retry = cache.index_incremental(&root, &Default::default()).unwrap();
+        assert_eq!(
+            retry.doc_count, 0,
+            "the coherent publication needs no repair"
+        );
+        assert_eq!(
+            stored,
+            graph_fingerprint(&cache.load_graph_index().unwrap())
+        );
     }
 
     #[test]
