@@ -189,7 +189,7 @@ fn walk_visit<B>(
             if let ControlFlow::Break(b) = walk_visit(base, &path, ignore, visit)? {
                 return Ok(ControlFlow::Break(b));
             }
-        } else if ft.is_file() && path.extension() == Some("md") {
+        } else if ft.is_file() && crate::graph::is_markdown(&path) {
             // Pass the borrow straight through: `strip_prefix` already yields a
             // `&Utf8Path`, and every visitor takes one — so the common walk path
             // allocates nothing per file (the probe's Fresh sweep is hot), and a

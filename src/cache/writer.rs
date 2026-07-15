@@ -29,6 +29,11 @@ std::thread_local! {
     /// is acquired but before the terminal source observation.
     static AFTER_INCREMENT_PUBLICATION_AUTHORITY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+
+    /// Deterministic atomic-replacement seam after the first terminal source
+    /// read but before the confirming read.
+    static AFTER_PARSED_DOCUMENT_FIRST_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
@@ -107,6 +112,26 @@ fn install_after_increment_publication_authority_hook(hook: impl FnOnce() + 'sta
         assert!(
             previous.is_none(),
             "increment publication-authority test hook already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_after_parsed_document_first_read_hook() {
+    AFTER_PARSED_DOCUMENT_FIRST_READ.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_after_parsed_document_first_read_hook(hook: impl FnOnce() + 'static) {
+    AFTER_PARSED_DOCUMENT_FIRST_READ.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(
+            previous.is_none(),
+            "parsed-document first-read test hook already installed"
         );
     });
 }
@@ -313,16 +338,23 @@ impl crate::cache::Cache {
         let fresh_docs: std::collections::HashMap<_, _> = fresh_index
             .documents
             .iter()
-            .map(|d| (d.path.clone(), d))
+            .enumerate()
+            .map(|(i, d)| (d.path.clone(), i))
             .collect();
         let fresh_files: std::collections::HashMap<_, _> = fresh_index
             .files
             .iter()
-            .map(|file| (file.path.clone(), file))
+            .enumerate()
+            .map(|(i, file)| (file.path.clone(), i))
             .collect();
 
-        let source_authority =
-            PublicationAuthority::from_graph(&affected_paths, &fresh_index, &self.files_ignore);
+        let source_authority = PublicationAuthority::from_graph(
+            &affected_paths,
+            &fresh_index,
+            &fresh_docs,
+            &fresh_files,
+            &self.files_ignore,
+        );
         // IMMEDIATE is the publication authority boundary. The terminal source
         // observation happens after it and immediately before row replacement,
         // so a parsed graph can never be paired with later filesystem state.
@@ -337,17 +369,17 @@ impl crate::cache::Cache {
         for change in &changes {
             let path = change_path(change);
             tx.execute("DELETE FROM files WHERE path = ?", [path.as_str()])?;
-            if let Some(file) = fresh_files.get(path) {
+            if let Some(&file_i) = fresh_files.get(path) {
                 let &(mtime_ns, size_bytes) =
                     authoritative_metadata.get(path).ok_or_else(|| {
                         CacheError::IncrementSourceDrift {
                             path: path.to_owned(),
                         }
                     })?;
-                insert_file_with_metadata(&tx, file, mtime_ns, size_bytes)?;
+                insert_file_with_metadata(&tx, &fresh_index.files[file_i], mtime_ns, size_bytes)?;
             }
             crate::cache::invalidation::drop_document(&tx, path)?;
-            if let Some(doc) = fresh_docs.get(path) {
+            if let Some(&doc_i) = fresh_docs.get(path) {
                 let &(mtime_ns, size_bytes) =
                     authoritative_metadata.get(path).ok_or_else(|| {
                         CacheError::IncrementSourceDrift {
@@ -356,7 +388,7 @@ impl crate::cache::Cache {
                     })?;
                 insert_document_with_metadata(
                     &tx,
-                    doc,
+                    &fresh_index.documents[doc_i],
                     &mut report,
                     &self.index_set,
                     mtime_ns,
@@ -432,6 +464,7 @@ enum IncrementPhase {
 #[derive(Debug)]
 struct PublicationAuthority {
     sources: std::collections::BTreeMap<Utf8PathBuf, PublishedSourceState>,
+    files_ignore: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -444,26 +477,27 @@ enum PublishedSourceState {
         detail: Option<String>,
     },
     RegularFile,
-    IntentionallyExcluded,
-    GraphExcluded,
+    IntentionallyExcluded {
+        expected_markdown: Option<Vec<Utf8PathBuf>>,
+    },
+    GraphExcluded {
+        expected_markdown: Vec<Utf8PathBuf>,
+    },
 }
 
 impl PublicationAuthority {
     fn from_graph(
         affected_paths: &std::collections::BTreeSet<Utf8PathBuf>,
         index: &GraphIndex,
+        documents: &HashMap<Utf8PathBuf, usize>,
+        files: &HashMap<Utf8PathBuf, usize>,
         files_ignore: &[String],
     ) -> Self {
-        let documents: HashMap<_, _> = index
-            .documents
-            .iter()
-            .map(|document| (&document.path, document))
-            .collect();
-        let files: HashMap<_, _> = index.files.iter().map(|file| (&file.path, file)).collect();
         let sources = affected_paths
             .iter()
             .map(|path| {
-                let state = if let Some(document) = documents.get(path) {
+                let state = if let Some(&document_i) = documents.get(path) {
+                    let document = &index.documents[document_i];
                     if document.hash.is_empty() {
                         let detail = document
                             .diagnostics
@@ -471,7 +505,9 @@ impl PublicationAuthority {
                             .find(|diagnostic| diagnostic.code == "read-failed")
                             .and_then(|diagnostic| diagnostic.detail.clone());
                         PublishedSourceState::ReadFailedDocument {
-                            file_hash: files.get(path).and_then(|file| file.hash.clone()),
+                            file_hash: files
+                                .get(path)
+                                .and_then(|&file_i| index.files[file_i].hash.clone()),
                             detail,
                         }
                     } else {
@@ -482,14 +518,24 @@ impl PublicationAuthority {
                 } else if files.contains_key(path) {
                     PublishedSourceState::RegularFile
                 } else if graph_intentionally_ignores(path, files_ignore) {
-                    PublishedSourceState::IntentionallyExcluded
+                    PublishedSourceState::IntentionallyExcluded {
+                        // A hidden component is recursively excluded by the
+                        // graph walker regardless of descendants.
+                        expected_markdown: (!has_hidden_component(path))
+                            .then(|| expected_markdown_under(path, index)),
+                    }
                 } else {
-                    PublishedSourceState::GraphExcluded
+                    PublishedSourceState::GraphExcluded {
+                        expected_markdown: expected_markdown_under(path, index),
+                    }
                 };
                 (path.clone(), state)
             })
             .collect();
-        Self { sources }
+        Self {
+            sources,
+            files_ignore: files_ignore.to_vec(),
+        }
     }
 
     /// Re-prove every affected source and return metadata captured by that same
@@ -508,11 +554,32 @@ impl PublicationAuthority {
                     verify_read_failed_document(vault_root, path, file_hash.as_deref(), detail)
                 }
                 PublishedSourceState::RegularFile => stable_regular_file_metadata(vault_root, path),
-                PublishedSourceState::IntentionallyExcluded => continue,
-                PublishedSourceState::GraphExcluded => {
+                PublishedSourceState::IntentionallyExcluded {
+                    expected_markdown: None,
+                } => continue,
+                PublishedSourceState::IntentionallyExcluded {
+                    expected_markdown: Some(expected_markdown),
+                } => {
+                    if !excluded_subtree_matches_graph(
+                        vault_root,
+                        path,
+                        &self.files_ignore,
+                        expected_markdown,
+                    ) {
+                        return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+                    }
+                    continue;
+                }
+                PublishedSourceState::GraphExcluded { expected_markdown } => {
                     let before = graph_excluded_kind(vault_root, path);
+                    let subtree_matches = excluded_subtree_matches_graph(
+                        vault_root,
+                        path,
+                        &self.files_ignore,
+                        expected_markdown,
+                    );
                     let after = graph_excluded_kind(vault_root, path);
-                    if before.is_none() || before != after {
+                    if before.is_none() || before != after || !subtree_matches {
                         return Err(CacheError::IncrementSourceDrift { path: path.clone() });
                     }
                     continue;
@@ -524,6 +591,32 @@ impl PublicationAuthority {
         }
         Ok(metadata)
     }
+}
+
+fn expected_markdown_under(path: &Utf8Path, index: &GraphIndex) -> Vec<Utf8PathBuf> {
+    // Graph construction sorts documents by path. Find the first possible
+    // descendant in O(log N), then clone only the contiguous subtree range.
+    // This keeps publication proof proportional to the affected paths and
+    // their descendants rather than rescanning the whole graph per path.
+    let first = index
+        .documents
+        .partition_point(|document| document.path.as_path() < path);
+    index.documents[first..]
+        .iter()
+        .take_while(|document| document.path.starts_with(path))
+        .map(|document| document.path.clone())
+        .collect()
+}
+
+fn excluded_subtree_matches_graph(
+    vault_root: &Utf8Path,
+    path: &Utf8Path,
+    files_ignore: &[String],
+    expected_markdown: &[Utf8PathBuf],
+) -> bool {
+    let first = crate::graph::graph_visible_markdown_under(vault_root, path, files_ignore).ok();
+    let second = crate::graph::graph_visible_markdown_under(vault_root, path, files_ignore).ok();
+    first.as_deref() == Some(expected_markdown) && second == first
 }
 
 static NEXT_INCREMENT_JOB_ID: AtomicU64 = AtomicU64::new(1);
@@ -652,8 +745,13 @@ impl crate::cache::Cache {
             .enumerate()
             .map(|(i, file)| (file.path.clone(), i))
             .collect();
-        let source_authority =
-            PublicationAuthority::from_graph(&affected_paths, &fresh_index, files_ignore);
+        let source_authority = PublicationAuthority::from_graph(
+            &affected_paths,
+            &fresh_index,
+            &fresh_docs,
+            &fresh_files,
+            files_ignore,
+        );
         // This early proof supplies coherent metadata for TEMP staging. The
         // same authority is always re-proved after terminal publication
         // authority, and those terminal values replace the staged metadata.
@@ -1274,12 +1372,21 @@ fn verify_parsed_document(
     expected_hash: &str,
 ) -> Option<(i64, i64)> {
     let before = regular_file_metadata_without_symlinks(vault_root, path)?;
-    let bytes = std::fs::read(vault_root.join(path).as_std_path()).ok()?;
-    let after = regular_file_metadata_without_symlinks(vault_root, path)?;
-    (before == after
-        && bytes.len() as i64 == after.1
-        && blake3::hash(&bytes).to_hex().as_str() == expected_hash)
-        .then_some(after)
+    let first_bytes = std::fs::read(vault_root.join(path).as_std_path()).ok()?;
+    #[cfg(test)]
+    run_after_parsed_document_first_read_hook();
+    let between = regular_file_metadata_without_symlinks(vault_root, path)?;
+    let second_bytes = std::fs::read(vault_root.join(path).as_std_path()).ok()?;
+    let terminal = regular_file_metadata_without_symlinks(vault_root, path)?;
+    let first_hash = blake3::hash(&first_bytes);
+    let second_hash = blake3::hash(&second_bytes);
+    (before == between
+        && between == terminal
+        && first_bytes.len() as i64 == terminal.1
+        && second_bytes.len() as i64 == terminal.1
+        && first_hash == second_hash
+        && first_hash.to_hex().as_str() == expected_hash)
+        .then_some(terminal)
 }
 
 fn verify_read_failed_document(
@@ -1297,12 +1404,23 @@ fn verify_read_failed_document(
             return None;
         }
     }
-    let read_error = std::fs::read_to_string(absolute.as_std_path()).err()?;
-    if expected_detail.as_deref() != Some(read_error.to_string().as_str()) {
+    let first_error = std::fs::read_to_string(absolute.as_std_path()).err()?;
+    if expected_detail.as_deref() != Some(first_error.to_string().as_str()) {
         return None;
     }
-    let after = regular_file_metadata_without_symlinks(vault_root, path)?;
-    (before == after).then_some(after)
+    let between = regular_file_metadata_without_symlinks(vault_root, path)?;
+    if expected_file_hash.is_none() {
+        let second_error = std::fs::read_to_string(absolute.as_std_path()).err()?;
+        let terminal = regular_file_metadata_without_symlinks(vault_root, path)?;
+        return (before == between
+            && between == terminal
+            && first_error.kind() == second_error.kind()
+            && first_error.to_string() == second_error.to_string())
+        // A metadata sentinel keeps both cached rows coherent while forcing
+        // the next freshness/detect pass to retry after permission recovery.
+        .then_some((-1, -1));
+    }
+    (before == between).then_some(between)
 }
 
 fn stable_regular_file_metadata(vault_root: &Utf8Path, path: &Utf8Path) -> Option<(i64, i64)> {
@@ -1402,9 +1520,12 @@ fn graph_excluded_kind(vault_root: &Utf8Path, path: &Utf8Path) -> Option<GraphEx
 }
 
 fn graph_intentionally_ignores(path: &Utf8Path, patterns: &[String]) -> bool {
+    has_hidden_component(path) || crate::graph::is_ignored(path, patterns)
+}
+
+fn has_hidden_component(path: &Utf8Path) -> bool {
     path.components()
         .any(|component| component.as_str().starts_with('.'))
-        || crate::graph::is_ignored(path, patterns)
 }
 
 fn load_document_hashes(
@@ -3607,6 +3728,234 @@ mod tests {
             )
             .unwrap();
         assert_eq!(healed_body, "DRIFT!\n");
+    }
+
+    #[test]
+    fn incremental_refresh_rejects_atomic_swap_inside_terminal_document_read() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let parsed = "---\n---\nPARSED A\n";
+        let replacement = "---\n---\nSWAPPED!\n";
+        assert_eq!(parsed.len(), replacement.len());
+        let path = root.join("doc.md");
+        std::fs::write(&path, parsed).unwrap();
+        let parsed_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(path.as_std_path()).unwrap(),
+        );
+        let replacement_path = root.join("replacement.md.tmp");
+        std::fs::write(&replacement_path, replacement).unwrap();
+        filetime::set_file_mtime(replacement_path.as_std_path(), parsed_mtime).unwrap();
+        install_after_parsed_document_first_read_hook(move || {
+            std::fs::rename(&replacement_path, &path).unwrap();
+        });
+
+        let error = cache
+            .index_incremental(&root, &Default::default())
+            .expect_err("an atomic swap inside terminal verification must fail closed");
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path }
+                if path == Utf8Path::new("doc.md")
+        ));
+        let cached_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cached_body.contains("# Heading"));
+
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("the retry must parse and publish the replacement");
+        let healed_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(healed_body, "SWAPPED!\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_new_document_retries_after_permission_recovery() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let path = root.join("blocked.md");
+        std::fs::write(&path, "---\n---\nRECOVERED\n").unwrap();
+        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("a stable permission read failure should publish diagnostically");
+        let document_metadata: (i64, i64) = cache
+            .conn
+            .query_row(
+                "SELECT mtime_ns, size_bytes FROM documents WHERE path = 'blocked.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let file_metadata: (i64, i64) = cache
+            .conn
+            .query_row(
+                "SELECT mtime_ns, size_bytes FROM files WHERE path = 'blocked.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(document_metadata, (-1, -1));
+        assert_eq!(file_metadata, document_metadata);
+
+        std::fs::set_permissions(path.as_std_path(), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("a normal retry must heal after chmod");
+        let healed: (String, i64, i64) = cache
+            .conn
+            .query_row(
+                "SELECT body_text, mtime_ns, size_bytes FROM documents WHERE path = 'blocked.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(healed.0, "RECOVERED\n");
+        assert_ne!((healed.1, healed.2), (-1, -1));
+        let healed_file_metadata: (i64, i64) = cache
+            .conn
+            .query_row(
+                "SELECT mtime_ns, size_bytes FROM files WHERE path = 'blocked.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(healed_file_metadata, (healed.1, healed.2));
+        assert_eq!(cache.detect_change_count(&root), 0);
+    }
+
+    #[test]
+    fn directory_child_created_after_parse_is_rejected_then_included() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        std::fs::remove_file(root.join("doc.md")).unwrap();
+        std::fs::create_dir(root.join("doc.md")).unwrap();
+        let hook_root = root.clone();
+        install_after_increment_publication_authority_hook(move || {
+            std::fs::write(hook_root.join("doc.md/child.md"), "---\n---\nCHILD\n").unwrap();
+        });
+
+        let error = cache
+            .index_incremental(&root, &Default::default())
+            .expect_err("a graph-visible child absent from the parse must reject publication");
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path }
+                if path == Utf8Path::new("doc.md")
+        ));
+
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("the retry must include the child observed by its parse");
+        let paths: Vec<String> = cache
+            .conn
+            .prepare("SELECT path FROM documents ORDER BY path")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(paths, vec!["doc.md/child.md", "other.md"]);
+        assert_eq!(cache.detect_change_count(&root), 0);
+    }
+
+    #[test]
+    fn exact_ignored_parent_cannot_hide_new_unignored_child_from_explicit_increment() {
+        assert_exact_ignored_parent_cannot_hide_new_unignored_child("unignored.md");
+    }
+
+    #[test]
+    fn exact_ignored_parent_cannot_hide_uppercase_markdown_child() {
+        assert_exact_ignored_parent_cannot_hide_new_unignored_child("unignored.MD");
+    }
+
+    fn assert_exact_ignored_parent_cannot_hide_new_unignored_child(child_name: &str) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("live.md"), "---\n---\nLIVE\n").unwrap();
+        std::fs::write(root.join("Archive"), "ignored file").unwrap();
+        let ignore = vec!["Archive".to_string()];
+        let mut cache = crate::cache::Cache::open_with_index(
+            &root,
+            None,
+            &ignore,
+            &std::collections::BTreeSet::new(),
+            "exact-ignore-proof",
+        )
+        .unwrap();
+        cache.rebuild(&root).unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
+        std::fs::remove_file(root.join("Archive")).unwrap();
+        std::fs::create_dir(root.join("Archive")).unwrap();
+        let hook_root = root.clone();
+        let hook_child_name = child_name.to_string();
+        install_after_increment_publication_authority_hook(move || {
+            std::fs::write(
+                hook_root.join("Archive").join(hook_child_name),
+                "---\n---\nUNIGNORED\n",
+            )
+            .unwrap();
+        });
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["Archive".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+            baseline,
+        )
+        .unwrap();
+        let error = loop {
+            match cache.commit_increment_chunk(&root, &mut commit, Duration::ZERO) {
+                Ok(true) => {}
+                Ok(false) => panic!("the stale explicit increment must not publish"),
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path }
+                if path == Utf8Path::new("Archive")
+        ));
+
+        cache
+            .index_incremental(&root, &Default::default())
+            .expect("normal freshness retry must include the unignored child");
+        let child_path = format!("Archive/{child_name}");
+        let count: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = ?",
+                params![child_path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(cache.detect_change_count(&root), 0);
     }
 
     #[test]

@@ -50,7 +50,10 @@ impl Default for IndexOptions {
 }
 
 pub(crate) use aliases::parse_aliases;
-pub(crate) use build::{build_index_with_options, concise_diagnostics, has_errors, is_ignored};
+pub(crate) use build::{
+    build_index_with_options, concise_diagnostics, graph_visible_markdown_under, has_errors,
+    is_ignored, is_markdown,
+};
 // Test-only re-export: build_index is a default-options convenience used solely
 // in #[cfg(test)] callers across norn (move_doc, delete_doc, set/validate,
 // repair_apply, cache/reader).
