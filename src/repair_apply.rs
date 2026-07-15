@@ -30,16 +30,23 @@ pub struct CreateApplyContext {
     /// build-time guard for this to backstop).
     pub ignore: Vec<String>,
     /// NRN-265: the caller declares that every `create_document` change arrives
-    /// with its `{{seq}}` template ALREADY resolved to a concrete path. Only the
-    /// MigrationPlan applier (`applier.rs`) sets this — it pre-resolves via
-    /// `resolve_create_paths` under the single owner-set barrier and rewrites
-    /// `change.path` BEFORE delegating here, so Pass 1e's own seq resolver is
-    /// unreachable on that path. Under this declaration a surviving `{{seq}}`
-    /// token means the two resolvers have drifted (or a hand-authored plan
-    /// bypassed the applier barrier): the delegate fails closed rather than
-    /// silently re-resolve on a second, divergent code path. Left `false` by
-    /// every other caller (`new` CLI/MCP), where the Pass-1e resolver is
-    /// load-bearing (they pass the `{{seq}}` template unresolved).
+    /// with its `{{seq}}` template ALREADY resolved to a concrete path.
+    /// Allocation semantics live in one shared helper
+    /// (`seq_alloc::resolve_seq_create`), so the flag's job is narrower than
+    /// drift detection: under this declaration a surviving `{{seq}}` token
+    /// means the applier's pre-resolution step — and with it the NRN-264
+    /// owner-set barrier, which validated the RESOLVED paths — did not run, so
+    /// the delegate fails closed rather than allocate a path that barrier never
+    /// validated.
+    ///
+    /// Per-caller reachability of the Pass-1e seq branch (authoritative copy):
+    ///   - MigrationPlan applier (`applier.rs`): sets `true` — pre-resolves via
+    ///     `resolve_create_paths` under the owner-set barrier and rewrites
+    ///     `change.path` before delegating, so the branch is unreachable there.
+    ///   - `new` (CLI `new/mod.rs`, MCP `mcp/tools/new.rs`): `false` — passes
+    ///     the `{{seq}}` template unresolved; the branch is load-bearing.
+    ///   - set / edit (CLI `lib.rs`, MCP `set.rs`/`edit.rs`): `false` (default)
+    ///     — they emit no `create_document` ops and never reach the branch.
     pub creates_preresolved: bool,
 }
 
@@ -761,52 +768,31 @@ pub fn apply_repair_plan_with_context(
         // exist yet). Skip the hash-check used by other passes.
 
         // NRN-101: resolve an incremental `{{seq}}` token to the next id via
-        // filesystem max+1. This runs under the mutation lock the caller holds
-        // around apply, so two concurrent creates serialize — the second observes
-        // the first's file and gets a distinct sequential id. No new lock is
-        // introduced: the NRN-87 warm daemon will own this same boundary and can
-        // swap the impl behind it untouched.
+        // filesystem max+1 (`seq_alloc::resolve_seq_create`, shared with the
+        // MigrationPlan applier's pre-resolution barrier). This runs under the
+        // mutation lock the caller holds around apply, so two concurrent creates
+        // serialize — the second observes the first's file and gets a distinct
+        // sequential id. No new lock is introduced: the NRN-87 warm daemon will
+        // own this same boundary and can swap the impl behind it untouched.
         let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
-            // NRN-265: per-caller reachability of this Pass-1e seq resolver —
-            //   • MigrationPlan applier (`applier.rs`): pre-resolves in
-            //     `resolve_create_paths` and sets `creates_preresolved`, so a
-            //     `{{seq}}` token here proves the two resolvers drifted → fail
-            //     closed below rather than re-resolve on a divergent path.
-            //   • `new` (CLI `new/mod.rs`, MCP `mcp/tools/new.rs`): passes the
-            //     `{{seq}}` template UNRESOLVED (default ctx) — this branch is
-            //     load-bearing there.
-            //   • set / edit (CLI `lib.rs`, MCP `set.rs`/`edit.rs`): emit no
-            //     `create_document` ops, so they never reach this branch.
+            // NRN-265: per-caller reachability of this branch is documented on
+            // `CreateApplyContext::creates_preresolved`. Allocation semantics
+            // live in the shared `resolve_seq_create`; under the pre-resolved
+            // declaration a surviving `{{seq}}` token means the applier's
+            // pre-resolution step (and with it the NRN-264 owner-set barrier,
+            // which validated the RESOLVED paths) was skipped — fail closed
+            // rather than allocate a path that barrier never saw. Earlier
+            // passes of a mixed plan may already have written; that surfaces
+            // as a truthful partial-apply report, but this create writes
+            // nothing.
             if ctx.creates_preresolved {
                 return Err(anyhow::anyhow!(
-                    "create_document: `{{{{seq}}}}` reached the apply delegate at {} after the caller declared creates pre-resolved — the pre-resolution barrier did not run (resolver drift)",
+                    "create_document: `{{{{seq}}}}` reached the apply delegate at {} after the caller declared creates pre-resolved — the pre-resolution barrier did not run",
                     change.path
                 ));
             }
-            let dir = cwd.join(change.path.parent().unwrap_or_else(|| Utf8Path::new("")));
-            let mut siblings = crate::seq_alloc::dir_file_names(&dir)
-                .with_context(|| format!("create_document: scan {dir} for {{{{seq}}}}"))?;
-            // Fold in ids already claimed by earlier same-directory seq-creates
-            // in this plan (not necessarily on disk yet).
-            for prior in &allocated_this_plan {
-                if prior.parent() == change.path.parent() {
-                    if let Some(name) = prior.file_name() {
-                        siblings.push(name.to_string());
-                    }
-                }
-            }
-            let resolved = crate::seq_alloc::resolve_seq(&change.path, &siblings);
-            // `{{seq}}` is only resolvable once, in the file name. If any token
-            // survives (it appeared in a directory component, or more than once),
-            // refuse rather than write a path with a literal `{{seq}}` in it. The
-            // `new` path already refuses this at generate time; this backstops
-            // hand-authored MigrationPlans that bypass `generate_path`.
-            if crate::seq_alloc::has_seq(&resolved) {
-                return Err(anyhow::anyhow!(
-                    "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {}",
-                    change.path
-                ));
-            }
+            let resolved =
+                crate::seq_alloc::resolve_seq_create(cwd, &change.path, &allocated_this_plan)?;
             allocated_this_plan.push(resolved.clone());
             resolved
         } else {
@@ -1914,9 +1900,12 @@ mod tests {
     fn apply_create_document_fails_closed_on_seq_when_preresolved_declared() {
         // NRN-265: when a caller declares `creates_preresolved` (the MigrationPlan
         // applier's contract — it resolves `{{seq}}` before delegating) but a
-        // `{{seq}}` token still reaches Pass 1e, the two resolvers have drifted.
-        // The delegate must fail closed rather than silently re-resolve, and must
-        // do so before any write or parent-dir creation.
+        // `{{seq}}` token still reaches Pass 1e, the pre-resolution/owner-set
+        // barrier did not run. The delegate must fail closed rather than allocate
+        // a path that barrier never validated — before THIS create writes or
+        // creates parent dirs. (Earlier passes of a mixed plan may already have
+        // written and would surface as a truthful partial-apply report; this
+        // plan is create-only, so nothing is written at all.)
         let (_tmp, root, index) = make_empty_vault("vault-apply-seq-preresolved-");
         let mut fm = serde_json::Map::new();
         fm.insert("type".to_string(), serde_json::json!("note"));
@@ -1941,11 +1930,11 @@ mod tests {
         );
         assert!(
             !root.join("logs/1.md").as_std_path().exists(),
-            "fail-closed guard must run before any write"
+            "fail-closed guard must run before this create writes"
         );
         assert!(
             !root.join("logs").as_std_path().exists(),
-            "guard must fire before parent-dir creation"
+            "guard must fire before this create's parent-dir creation"
         );
     }
 

@@ -44,6 +44,41 @@ pub fn predict(cwd: &Utf8Path, template: &Utf8Path) -> std::io::Result<Utf8PathB
     Ok(resolve_seq(template, &dir_file_names(&dir)?))
 }
 
+/// Resolve a `{{seq}}` create `template` (vault-relative) at apply time: scan
+/// the template's parent directory under `base_dir`, fold in same-directory
+/// paths already allocated by earlier creates in this plan (not necessarily on
+/// disk yet — NRN-101), apply [`resolve_seq`], and refuse if a token survives
+/// (it appeared in a directory component, or more than once). This is the ONE
+/// allocation composition shared by the MigrationPlan applier's pre-resolution
+/// barrier and the apply delegate's Pass-1e resolver, so the two sites cannot
+/// drift in allocation semantics (NRN-265).
+pub(crate) fn resolve_seq_create(
+    base_dir: &Utf8Path,
+    template: &Utf8Path,
+    allocated_this_plan: &[Utf8PathBuf],
+) -> anyhow::Result<Utf8PathBuf> {
+    use anyhow::Context as _;
+    let dir = base_dir.join(template.parent().unwrap_or_else(|| Utf8Path::new("")));
+    let mut siblings = dir_file_names(&dir)
+        .with_context(|| format!("create_document: scan {dir} for {{{{seq}}}}"))?;
+    for prior in allocated_this_plan {
+        if prior.parent() == template.parent() {
+            if let Some(name) = prior.file_name() {
+                siblings.push(name.to_string());
+            }
+        }
+    }
+    let resolved = resolve_seq(template, &siblings);
+    // `{{seq}}` is only resolvable once, in the file name. If any token
+    // survives, refuse rather than emit a path with a literal `{{seq}}` in it.
+    if has_seq(&resolved) {
+        anyhow::bail!(
+            "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {template}"
+        );
+    }
+    Ok(resolved)
+}
+
 /// True when `path` carries a `{{seq}}` token that cannot be resolved: the token
 /// must appear **exactly once, in the file name**. A token in a directory
 /// component, or a second occurrence, is a rule misconfiguration. Lets callers

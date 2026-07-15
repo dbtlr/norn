@@ -309,9 +309,11 @@ pub(crate) fn apply_migration_plan(
         parents: ctx.parents,
         // NRN-265: every `{{seq}}` create was already resolved to a concrete
         // path by `resolve_create_paths` above (which rewrote `change.path`
-        // under the owner-set barrier). Declare it so the delegate's Pass-1e seq
-        // resolver — unreachable on this path — fails closed if a `{{seq}}` token
-        // ever survives here, catching drift between the two resolvers.
+        // under the owner-set barrier). Declare it so the delegate's Pass-1e
+        // seq branch — unreachable on this path — fails closed if a `{{seq}}`
+        // token ever survives, i.e. this pre-resolution step was skipped and
+        // the owner-set barrier validated different paths than would be
+        // written.
         creates_preresolved: true,
         // NRN-138 ignore re-check applies to `new`-synthesized create_document
         // changes (already guarded at plan time by synth::build_plan); the
@@ -782,24 +784,7 @@ fn resolve_create_paths(
         let path = change.path.clone();
         crate::standards::apply::ensure_within_vault(&index.root, canonical_root, &path)?;
         let resolved = if crate::seq_alloc::has_seq(&path) {
-            let dir = index
-                .root
-                .join(path.parent().unwrap_or_else(|| Utf8Path::new("")));
-            let mut siblings = crate::seq_alloc::dir_file_names(&dir)?;
-            for prior in &allocated_this_plan {
-                if prior.parent() == path.parent() {
-                    if let Some(name) = prior.file_name() {
-                        siblings.push(name.to_string());
-                    }
-                }
-            }
-            let resolved = crate::seq_alloc::resolve_seq(&path, &siblings);
-            if crate::seq_alloc::has_seq(&resolved) {
-                anyhow::bail!(
-                    "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {path}"
-                );
-            }
-            resolved
+            crate::seq_alloc::resolve_seq_create(&index.root, &path, &allocated_this_plan)?
         } else {
             path
         };
