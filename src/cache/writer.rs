@@ -11,6 +11,81 @@ use rusqlite::{params, Transaction, TransactionBehavior};
 use crate::cache::change_detection::{detect, ChangeDetectOptions, FileChange};
 use crate::cache::error::CacheError;
 
+#[cfg(test)]
+std::thread_local! {
+    /// Deterministic filesystem-race seam between detection and full parsing.
+    static AFTER_INCREMENT_DETECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+
+    /// Deterministic filesystem-race seam after the authoritative graph parse.
+    static AFTER_INCREMENT_PARSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+
+    /// Deterministic inter-statement publication seam for reservation tests.
+    static AFTER_INCREMENT_FINGERPRINT_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn run_after_increment_detect_hook() {
+    AFTER_INCREMENT_DETECT.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_after_increment_detect_hook(hook: impl FnOnce() + 'static) {
+    AFTER_INCREMENT_DETECT.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(
+            previous.is_none(),
+            "increment detect test hook already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_after_increment_parse_hook() {
+    AFTER_INCREMENT_PARSE.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_after_increment_parse_hook(hook: impl FnOnce() + 'static) {
+    AFTER_INCREMENT_PARSE.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(
+            previous.is_none(),
+            "increment parse test hook already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_after_increment_fingerprint_check_hook() {
+    AFTER_INCREMENT_FINGERPRINT_CHECK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn install_after_increment_fingerprint_check_hook(hook: impl FnOnce() + 'static) {
+    AFTER_INCREMENT_FINGERPRINT_CHECK.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(
+            previous.is_none(),
+            "increment fingerprint-check test hook already installed"
+        );
+    });
+}
+
 // Superseded by `ChangeDetectOptions` (the live force-hash knob). Kept to
 // preserve the writer's option-struct shape; safe to delete in a cleanup pass.
 #[derive(Debug, Clone, Default)]
@@ -72,6 +147,7 @@ impl crate::cache::Cache {
             insert_file(&tx, vault_root, file)?;
             report.file_count += 1;
         }
+        update_meta_graph_fingerprint(&tx, &graph_fingerprint(&index))?;
         update_meta_rebuild_ts(&tx)?;
         update_meta_alias_field(&tx, self.alias_field.as_deref())?;
         // Only an authoritative open (`Cache::open_with_index`) knows the
@@ -117,10 +193,12 @@ impl crate::cache::Cache {
             crate::cache::lock::write_lock_timeout(),
         )?;
         let start = std::time::Instant::now();
-        let changes = detect(vault_root, self, options)?;
+        let mut changes = detect(vault_root, self, options)?;
         if changes.is_empty() {
             return Ok(IndexReport::default());
         }
+        #[cfg(test)]
+        run_after_increment_detect_hook();
 
         // Re-parse the affected docs from the filesystem. Aggressive
         // invalidation: re-run build_index on the whole vault and pick out
@@ -132,17 +210,101 @@ impl crate::cache::Cache {
             alias_field: self.alias_field.clone(),
             ..Default::default()
         };
-        let fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
+        let mut fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
+        #[cfg(test)]
+        run_after_increment_parse_hook();
+
+        // Detection and the authoritative whole-vault parse are separate
+        // filesystem observations. Expand the affected set to include every
+        // path+hash difference the parse observed, so an unrelated document
+        // changed between those observations cannot leave document rows from
+        // the old graph beside files, links, and a fingerprint from the new
+        // graph. Keep the initially detected paths too: their metadata may
+        // need refreshing even if their bytes were restored before parsing.
+        let cached_hashes = load_document_hashes(&self.conn)?;
+        let fresh_hashes: std::collections::BTreeMap<_, _> = fresh_index
+            .documents
+            .iter()
+            .map(|document| (document.path.clone(), document.hash.clone()))
+            .collect();
+        let mut affected_paths: std::collections::BTreeSet<_> = changes
+            .iter()
+            .map(|change| match change {
+                FileChange::Added(path)
+                | FileChange::Modified(path)
+                | FileChange::Deleted(path) => path.clone(),
+            })
+            .collect();
+        let all_document_paths: std::collections::BTreeSet<_> = cached_hashes
+            .keys()
+            .chain(fresh_hashes.keys())
+            .cloned()
+            .collect();
+        for path in all_document_paths {
+            if affected_paths.contains(&path) {
+                continue;
+            }
+            let drift = match (cached_hashes.get(&path), fresh_hashes.get(&path)) {
+                (None, Some(_)) => Some(FileChange::Added(path.clone())),
+                (Some(_), None) => Some(FileChange::Deleted(path.clone())),
+                (Some(cached), Some(fresh)) if cached != fresh => {
+                    Some(FileChange::Modified(path.clone()))
+                }
+                _ => None,
+            };
+            if let Some(drift) = drift {
+                affected_paths.insert(path);
+                changes.push(drift);
+            }
+        }
+        fn change_path(change: &FileChange) -> &Utf8Path {
+            match change {
+                FileChange::Added(path)
+                | FileChange::Modified(path)
+                | FileChange::Deleted(path) => path,
+            }
+        }
+        changes.sort_by(|a, b| change_path(a).cmp(change_path(b)));
+
+        // Incremental detection is authoritative only for Markdown paths. Keep
+        // cached file identity everywhere else, then overlay the affected
+        // Markdown paths from this parse. Unrelated attachment disk races must
+        // not enter a Markdown refresh; explicit mutation increments own those
+        // paths. Resolve every link against the exact overlay that will be
+        // persisted and fingerprinted below.
+        let mut overlay_files = crate::cache::reader::load_files(&self.conn)?;
+        overlay_files.retain(|file| !affected_paths.contains(&file.path));
+        overlay_files.extend(
+            fresh_index
+                .files
+                .iter()
+                .filter(|file| affected_paths.contains(&file.path))
+                .cloned(),
+        );
+        overlay_files.sort_by(|a, b| a.path.cmp(&b.path));
+        fresh_index.files = overlay_files;
+        crate::links::resolve_links(&fresh_index.files, &mut fresh_index.documents);
+
         let fresh_docs: std::collections::HashMap<_, _> = fresh_index
             .documents
             .iter()
             .map(|d| (d.path.clone(), d))
+            .collect();
+        let fresh_files: std::collections::HashMap<_, _> = fresh_index
+            .files
+            .iter()
+            .map(|file| (file.path.clone(), file))
             .collect();
 
         let tx = self.conn.transaction()?;
         let mut report = IndexReport::default();
 
         for change in &changes {
+            let path = change_path(change);
+            tx.execute("DELETE FROM files WHERE path = ?", [path.as_str()])?;
+            if let Some(file) = fresh_files.get(path) {
+                insert_file(&tx, vault_root, file)?;
+            }
             match change {
                 FileChange::Deleted(path) => {
                     crate::cache::invalidation::drop_document(&tx, path)?;
@@ -162,6 +324,7 @@ impl crate::cache::Cache {
         // link resolution is not decomposable per-doc (NRN-126). This supersedes
         // any incoming-link fixup, so no `unresolve_incoming` is needed above.
         rerun_link_resolution(&tx, &fresh_index)?;
+        update_meta_graph_fingerprint(&tx, &graph_fingerprint(&fresh_index))?;
 
         tx.commit()?;
 
@@ -245,6 +408,8 @@ pub(crate) struct IncrementCommit {
     fresh_docs: HashMap<Utf8PathBuf, usize>,
     fresh_files: HashMap<Utf8PathBuf, usize>,
     affected_paths: std::collections::BTreeSet<Utf8PathBuf>,
+    publication_fingerprint: String,
+    intentionally_ignored_paths: std::collections::BTreeSet<Utf8PathBuf>,
     parsed_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
     file_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
     pending: VecDeque<Utf8PathBuf>,
@@ -300,6 +465,11 @@ impl crate::cache::Cache {
         pending.sort();
         pending.dedup();
         let affected_paths: std::collections::BTreeSet<_> = pending.iter().cloned().collect();
+        let intentionally_ignored_paths = affected_paths
+            .iter()
+            .filter(|path| graph_intentionally_ignores(path, files_ignore))
+            .cloned()
+            .collect();
 
         // Generation N is authoritative for everything outside this mutation.
         // Only affected paths cross from the post-mutation disk parse into the
@@ -329,6 +499,7 @@ impl crate::cache::Cache {
         baseline.files.sort_by(|a, b| a.path.cmp(&b.path));
         crate::links::resolve_links(&baseline.files, &mut baseline.documents);
         let fresh_index = baseline;
+        let publication_fingerprint = graph_fingerprint(&fresh_index);
         let fresh_docs: HashMap<Utf8PathBuf, usize> = fresh_index
             .documents
             .iter()
@@ -373,6 +544,8 @@ impl crate::cache::Cache {
             fresh_docs,
             fresh_files,
             affected_paths,
+            publication_fingerprint,
+            intentionally_ignored_paths,
             parsed_metadata,
             file_metadata,
             pending: pending.into_iter().collect(),
@@ -383,14 +556,34 @@ impl crate::cache::Cache {
     }
 
     /// Reserve a job marker and its external-publication baseline on the
-    /// dedicated writer connection. The warm path submits and awaits this as a
-    /// short liveness op before doing the whole-vault parse off-thread.
-    pub(crate) fn reserve_increment_commit(&mut self) -> Result<IncrementReservation, CacheError> {
+    /// dedicated writer connection. `data_version` is captured before the O(1)
+    /// graph-fingerprint check: a publication before the check changes the
+    /// fingerprint, while one after it changes the terminal data version. The
+    /// warm path submits and awaits this as a short liveness op before doing the
+    /// whole-vault parse off-thread.
+    pub(crate) fn reserve_increment_commit(
+        &mut self,
+        expected_fingerprint: &str,
+    ) -> Result<IncrementReservation, CacheError> {
         ensure_increment_staging_tables(&self.conn)?;
-        let job_id = NEXT_INCREMENT_JOB_ID.fetch_add(1, Ordering::Relaxed) as i64;
         let base_data_version: i64 =
             self.conn
                 .query_row("PRAGMA main.data_version", [], |row| row.get(0))?;
+        let stored_fingerprint = self.conn.query_row(
+            "SELECT value FROM main.meta WHERE key = 'graph_fingerprint'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match stored_fingerprint {
+            Ok(stored) if stored == expected_fingerprint => {}
+            Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(CacheError::IncrementBaselineDrift);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        #[cfg(test)]
+        run_after_increment_fingerprint_check_hook();
+        let job_id = NEXT_INCREMENT_JOB_ID.fetch_add(1, Ordering::Relaxed) as i64;
         self.conn.execute(
             "INSERT INTO temp.norn_increment_jobs
              (job_id, base_data_version, publication_epoch) VALUES (?, ?, ?)",
@@ -677,6 +870,7 @@ impl crate::cache::Cache {
              FROM temp.norn_increment_links WHERE job_id = ? ORDER BY sequence",
             [job_id],
         )?;
+        update_meta_graph_fingerprint(&tx, &commit.publication_fingerprint)?;
         tx.commit()?;
         // This publication supersedes every other reservation captured before
         // it, including jobs that have parsed but not entered their first chunk.
@@ -950,8 +1144,21 @@ fn metadata_for_parsed_bytes(vault_root: &Utf8Path, doc: &Document) -> Option<(i
 
 fn stable_file_metadata(vault_root: &Utf8Path, path: &Utf8Path) -> Option<(i64, i64)> {
     let absolute = vault_root.join(path);
-    let before = (mtime_ns(&absolute)?, size_bytes(&absolute)?);
-    let after = (mtime_ns(&absolute)?, size_bytes(&absolute)?);
+    let read_regular = || {
+        let metadata = std::fs::symlink_metadata(absolute.as_std_path()).ok()?;
+        if !metadata.file_type().is_file() {
+            return None;
+        }
+        let mtime = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos() as i64;
+        Some((mtime, metadata.len() as i64))
+    };
+    let before = read_regular()?;
+    let after = read_regular()?;
     (before == after).then_some(after)
 }
 
@@ -960,24 +1167,100 @@ fn affected_sources_still_match(
     commit: &IncrementCommit,
 ) -> Result<(), CacheError> {
     for path in &commit.affected_paths {
-        // Only parsed Markdown bytes need a final hash guard. An affected path
-        // absent from the overlay is an authoritative deletion or ignored
-        // destination; its current filesystem existence is intentionally
-        // irrelevant to this publication.
-        let Some(&index) = commit.fresh_docs.get(path) else {
+        if let Some(&file_metadata) = commit.file_metadata.get(path) {
+            if stable_file_metadata(vault_root, path) != Some(file_metadata) {
+                return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+            }
+        } else if commit.intentionally_ignored_paths.contains(path) {
             continue;
-        };
-        let absolute = vault_root.join(path);
-        let matches = std::fs::read(absolute.as_std_path())
-            .ok()
-            .is_some_and(|bytes| {
-                blake3::hash(&bytes).to_hex().as_str() == commit.fresh_index.documents[index].hash
-            });
-        if !matches {
-            return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+        } else {
+            match std::fs::symlink_metadata(vault_root.join(path).as_std_path()) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) | Err(_) => {
+                    return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+                }
+            }
+        }
+
+        if let Some(&index) = commit.fresh_docs.get(path) {
+            let absolute = vault_root.join(path);
+            let matches = std::fs::read(absolute.as_std_path())
+                .ok()
+                .is_some_and(|bytes| {
+                    blake3::hash(&bytes).to_hex().as_str()
+                        == commit.fresh_index.documents[index].hash
+                });
+            if !matches {
+                return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+            }
         }
     }
     Ok(())
+}
+
+fn graph_intentionally_ignores(path: &Utf8Path, patterns: &[String]) -> bool {
+    path.components()
+        .any(|component| component.as_str().starts_with('.'))
+        || crate::graph::is_ignored(path, patterns)
+}
+
+fn load_document_hashes(
+    conn: &rusqlite::Connection,
+) -> Result<std::collections::BTreeMap<Utf8PathBuf, String>, CacheError> {
+    let mut statement = conn.prepare("SELECT path, hash FROM documents")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            Utf8PathBuf::from(row.get::<_, String>(0)?),
+            row.get::<_, String>(1)?,
+        ))
+    })?;
+    let mut hashes = std::collections::BTreeMap::new();
+    for row in rows {
+        let (path, hash) = row?;
+        hashes.insert(path, hash);
+    }
+    Ok(hashes)
+}
+
+fn canonical_extension(extension: Option<&str>) -> Option<&str> {
+    extension.filter(|extension| !extension.is_empty())
+}
+
+/// Deterministic identity of the graph inputs that can affect global link
+/// resolution. Length framing prevents path/hash/extension concatenation
+/// ambiguities, and explicit record/option tags keep future extensions safe.
+pub(crate) fn graph_fingerprint(index: &GraphIndex) -> String {
+    fn field(hasher: &mut blake3::Hasher, value: &str) {
+        hasher.update(&(value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+
+    let mut documents: Vec<_> = index.documents.iter().collect();
+    documents.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut files: Vec<_> = index.files.iter().collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"norn-cache-graph-fingerprint-v1\0");
+    for document in documents {
+        hasher.update(b"D");
+        field(&mut hasher, document.path.as_str());
+        field(&mut hasher, &document.hash);
+    }
+    for file in files {
+        hasher.update(b"F");
+        field(&mut hasher, file.path.as_str());
+        match canonical_extension(file.extension.as_deref()) {
+            Some(extension) => {
+                hasher.update(b"1");
+                field(&mut hasher, extension);
+            }
+            None => {
+                hasher.update(b"0");
+            }
+        }
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn stage_link(tx: &Transaction, job_id: i64, sequence: i64, link: &Link) -> Result<(), CacheError> {
@@ -1342,6 +1625,17 @@ fn update_meta_index_set_hash(tx: &rusqlite::Transaction, hash: &str) -> Result<
     Ok(())
 }
 
+fn update_meta_graph_fingerprint(
+    tx: &rusqlite::Transaction,
+    fingerprint: &str,
+) -> Result<(), CacheError> {
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('graph_fingerprint', ?)",
+        params![fingerprint],
+    )?;
+    Ok(())
+}
+
 fn mtime_ns(path: &Utf8Path) -> Option<i64> {
     std::fs::metadata(path.as_std_path()).ok().and_then(|m| {
         m.modified()
@@ -1418,6 +1712,225 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap()
+    }
+
+    fn baseline_and_reservation(
+        cache: &mut crate::cache::Cache,
+    ) -> (GraphIndex, IncrementReservation) {
+        let baseline = cache.load_graph_index().unwrap();
+        let fingerprint = graph_fingerprint(&baseline);
+        let reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
+        (baseline, reservation)
+    }
+
+    #[test]
+    fn incremental_refresh_stores_fingerprint_of_persisted_graph() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        std::fs::remove_file(root.join("other.md")).unwrap();
+        std::fs::write(root.join("new.md"), "---\n---\n[[doc]]\n").unwrap();
+        cache.index_incremental(&root, &Default::default()).unwrap();
+
+        let persisted = cache.load_graph_index().unwrap();
+        let stored: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, graph_fingerprint(&persisted));
+        assert!(persisted.files.iter().any(|file| file.path == "new.md"));
+        assert!(!persisted.files.iter().any(|file| file.path == "other.md"));
+    }
+
+    #[test]
+    fn incremental_refresh_expands_changes_seen_after_detection() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("a.md"), "---\n---\nA old\n").unwrap();
+        std::fs::write(root.join("b.md"), "---\n---\nB old\n").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        std::fs::write(root.join("a.md"), "---\n---\nA changed and larger\n").unwrap();
+        let b_path = root.join("b.md");
+        let original_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(b_path.as_std_path()).unwrap(),
+        );
+        install_after_increment_detect_hook(move || {
+            std::fs::write(&b_path, "---\n---\nB new\n").unwrap();
+            filetime::set_file_mtime(b_path.as_std_path(), original_mtime).unwrap();
+        });
+
+        cache
+            .index_incremental(&root, &ChangeDetectOptions::default())
+            .unwrap();
+
+        let bodies: Vec<(String, String)> = cache
+            .conn
+            .prepare("SELECT path, body_text FROM documents ORDER BY path")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            bodies,
+            vec![
+                ("a.md".to_string(), "A changed and larger\n".to_string()),
+                ("b.md".to_string(), "B new\n".to_string()),
+            ],
+            "the refresh must expand its affected set to every document observed by the fresh parse"
+        );
+        let persisted = cache.load_graph_index().unwrap();
+        let stored: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, graph_fingerprint(&persisted));
+
+        let retry = cache
+            .index_incremental(&root, &ChangeDetectOptions::default())
+            .unwrap();
+        assert_eq!(
+            retry.doc_count, 0,
+            "the coherent publication needs no repair"
+        );
+        assert_eq!(
+            stored,
+            graph_fingerprint(&cache.load_graph_index().unwrap())
+        );
+    }
+
+    #[test]
+    fn incremental_refresh_retains_cached_attachment_authority_after_parse_drift() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("doc.md"), "---\n---\nold cache body\n").unwrap();
+        std::fs::write(root.join("asset.png"), b"png").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        std::fs::write(
+            root.join("doc.md"),
+            "---\n---\nnew body links ![[asset.png]]\n",
+        )
+        .unwrap();
+        let asset = root.join("asset.png");
+        install_after_increment_parse_hook(move || {
+            std::fs::remove_file(asset).unwrap();
+        });
+
+        cache
+            .index_incremental(&root, &ChangeDetectOptions::default())
+            .unwrap();
+
+        let body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            body, "new body links ![[asset.png]]\n",
+            "the affected Markdown row must publish"
+        );
+        let cached_asset: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'asset.png'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cached_asset, 1,
+            "an unrelated attachment keeps its cached authority"
+        );
+        let resolved_link: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links
+                 WHERE source_path = 'doc.md' AND target_raw = 'asset.png'
+                   AND resolved_path = 'asset.png'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved_link, 1,
+            "global links must resolve against the cached attachment overlay"
+        );
+        let fingerprint: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fingerprint,
+            graph_fingerprint(&cache.load_graph_index().unwrap()),
+            "the publication must fingerprint the exact cached-file overlay"
+        );
+
+        let retry = cache
+            .index_incremental(&root, &ChangeDetectOptions::default())
+            .unwrap();
+        assert_eq!(
+            retry.doc_count, 0,
+            "a clean Markdown retry must not absorb unrelated attachment drift"
+        );
+        assert_eq!(
+            fingerprint,
+            graph_fingerprint(&cache.load_graph_index().unwrap()),
+            "a clean retry must preserve the coherent cached-file overlay"
+        );
+    }
+
+    #[test]
+    fn trailing_dot_file_fingerprint_survives_cache_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("doc.md"), "---\n---\nDoc\n").unwrap();
+        std::fs::write(root.join("trailing."), b"attachment").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let stored: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let persisted = cache.load_graph_index().unwrap();
+        assert_eq!(
+            stored,
+            graph_fingerprint(&persisted),
+            "empty and absent extensions persist identically and must fingerprint identically"
+        );
     }
 
     #[test]
@@ -2010,14 +2523,14 @@ mod tests {
         std::fs::remove_file(root.join("other.md").as_std_path()).unwrap();
 
         let changed: Vec<Utf8PathBuf> = vec!["doc.md".into(), "new.md".into(), "other.md".into()];
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         let mut commit = crate::cache::Cache::begin_increment_commit(
             &root,
             &changed,
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         let mut chunks = 0usize;
@@ -2140,14 +2653,14 @@ mod tests {
         .unwrap();
 
         let changed: Vec<Utf8PathBuf> = vec!["b.md".into()];
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         let mut commit = crate::cache::Cache::begin_increment_commit(
             &root,
             &changed,
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         while cache
@@ -2179,7 +2692,7 @@ mod tests {
         let mut staged_writer = crate::cache::Cache::open(&root).unwrap();
         staged_writer.rebuild(&root).unwrap();
 
-        let reservation = staged_writer.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut staged_writer);
         std::fs::write(
             root.join("doc.md"),
             "---\ntitle: Staged\n---\n# Staged\n\nold staged parse\n",
@@ -2191,7 +2704,7 @@ mod tests {
             staged_writer.alias_field.as_deref(),
             &staged_writer.files_ignore,
             &reservation,
-            staged_writer.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         assert!(
@@ -2229,6 +2742,67 @@ mod tests {
         );
     }
 
+    /// An external publication may land after reservation validates the
+    /// caller's graph fingerprint but before it records a TEMP job. The
+    /// reservation's data-version baseline must predate that window so the
+    /// terminal publication retires the stale parse.
+    #[test]
+    fn increment_does_not_publish_after_fingerprint_check_race() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut staged_writer = crate::cache::Cache::open(&root).unwrap();
+        staged_writer.rebuild(&root).unwrap();
+
+        let baseline = staged_writer.load_graph_index().unwrap();
+        let fingerprint = graph_fingerprint(&baseline);
+        let hook_root = root.clone();
+        install_after_increment_fingerprint_check_hook(move || {
+            std::fs::write(
+                hook_root.join("doc.md"),
+                "---\ntitle: External\n---\n# External\n\nexternal publication wins\n",
+            )
+            .unwrap();
+            let mut external_writer = crate::cache::Cache::open(&hook_root).unwrap();
+            external_writer.rebuild(&hook_root).unwrap();
+            drop(external_writer);
+
+            std::fs::write(
+                hook_root.join("doc.md"),
+                "---\ntitle: Staged\n---\n# Staged\n\nstale staged parse\n",
+            )
+            .unwrap();
+        });
+        let reservation = staged_writer
+            .reserve_increment_commit(&fingerprint)
+            .unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["doc.md".into()],
+            staged_writer.alias_field.as_deref(),
+            &staged_writer.files_ignore,
+            &reservation,
+            baseline,
+        )
+        .unwrap();
+
+        while staged_writer
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap()
+        {}
+
+        let body: String = staged_writer
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            body.contains("external publication wins"),
+            "the stale parse must not publish across the fingerprint/data-version window: {body}"
+        );
+    }
+
     /// TEMP staging may preserve duplicate parsed identities by sequence, but
     /// terminal publication must retain rebuild's deterministic first-occurrence
     /// `INSERT OR IGNORE` behavior for heading slugs and block IDs.
@@ -2237,7 +2811,7 @@ mod tests {
         let (_tmp, root) = make_vault_with_one_doc();
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         std::fs::write(
             root.join("doc.md"),
             "---\ntitle: Duplicates\n---\n# Same\n# Same\nfirst ^dup\nsecond ^dup\n",
@@ -2249,7 +2823,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         while cache
@@ -2299,7 +2873,9 @@ mod tests {
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
 
-        let older_reservation = cache.reserve_increment_commit().unwrap();
+        let baseline = cache.load_graph_index().unwrap();
+        let fingerprint = graph_fingerprint(&baseline);
+        let older_reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
         std::fs::write(root.join("doc.md"), "---\n---\nOLDER RESERVED\n").unwrap();
         let mut older = crate::cache::Cache::begin_increment_commit(
             &root,
@@ -2307,11 +2883,11 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &older_reservation,
-            cache.load_graph_index().unwrap(),
+            baseline.clone(),
         )
         .unwrap();
 
-        let newer_reservation = cache.reserve_increment_commit().unwrap();
+        let newer_reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
         std::fs::write(root.join("doc.md"), "---\n---\nNEWER WINNER\n").unwrap();
         let mut newer = crate::cache::Cache::begin_increment_commit(
             &root,
@@ -2319,7 +2895,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &newer_reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
 
@@ -2350,7 +2926,7 @@ mod tests {
         let (_tmp, root) = make_vault_with_one_doc();
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         std::fs::write(root.join("doc.md"), "---\n---\nOLDER PARSE\n").unwrap();
         let mut commit = crate::cache::Cache::begin_increment_commit(
             &root,
@@ -2358,7 +2934,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
 
@@ -2393,7 +2969,7 @@ mod tests {
         let (_tmp, root) = make_vault_with_one_doc();
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         std::fs::write(root.join("doc.md"), "---\n---\nPUBLISHED\n").unwrap();
         let mut commit = crate::cache::Cache::begin_increment_commit(
             &root,
@@ -2401,7 +2977,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         while !matches!(commit.phase, IncrementPhase::Ready) {
@@ -2427,7 +3003,7 @@ mod tests {
         let (_tmp, root) = make_vault_with_one_doc();
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         let parsed = "---\n---\nOLD PARSED\n";
         let rewritten = "---\n---\nNEW BYTES!\n";
         assert_eq!(parsed.len(), rewritten.len());
@@ -2438,7 +3014,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         std::fs::write(root.join("doc.md"), rewritten).unwrap();
@@ -2468,7 +3044,7 @@ mod tests {
         std::fs::write(root.join("b.md"), "---\n---\n[[old-target]]\n").unwrap();
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         std::fs::write(root.join("a.md"), "---\n---\nA changed\n").unwrap();
         std::fs::write(root.join("b.md"), "---\n---\n[[new-target]]\n").unwrap();
         let mut commit = crate::cache::Cache::begin_increment_commit(
@@ -2477,7 +3053,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         while cache
@@ -2519,12 +3095,63 @@ mod tests {
         );
     }
 
+    /// The caller captures its pre-apply graph before reserving publication.
+    /// If a refresh publishes an unrelated document in that interval, the old
+    /// graph no longer belongs to the reservation's main snapshot and must not
+    /// replace the refreshed global links.
+    #[test]
+    fn increment_does_not_publish_baseline_older_than_its_reservation() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("a.md"), "---\n---\nA old\n").unwrap();
+        std::fs::write(root.join("b.md"), "---\n---\n[[old-target]]\n").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let old_baseline = cache.load_graph_index().unwrap();
+        let old_fingerprint = graph_fingerprint(&old_baseline);
+        std::fs::write(root.join("b.md"), "---\n---\n[[new-target]]\n").unwrap();
+        cache.index_incremental(&root, &Default::default()).unwrap();
+
+        let error = cache
+            .reserve_increment_commit(&old_fingerprint)
+            .expect_err("an older baseline must be rejected before reserving");
+        assert!(matches!(error, CacheError::IncrementBaselineDrift));
+        assert_eq!(
+            cache.staged_increment_job_count(),
+            0,
+            "baseline refusal must not leak a TEMP reservation"
+        );
+
+        let new_links: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE source_path = 'b.md' AND target_raw = 'new-target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let old_links: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE source_path = 'b.md' AND target_raw = 'old-target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_links, 1, "the reservation's refreshed links must win");
+        assert_eq!(old_links, 0, "an older baseline must not publish");
+    }
+
     #[test]
     fn increment_updates_affected_files_with_documents_and_links() {
         let (_tmp, root) = make_vault_with_one_doc();
         let mut cache = crate::cache::Cache::open(&root).unwrap();
         cache.rebuild(&root).unwrap();
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         std::fs::remove_file(root.join("other.md")).unwrap();
         std::fs::write(root.join("new.md"), "---\n---\n[[asset.png]]\n").unwrap();
         std::fs::write(root.join("asset.png"), b"png").unwrap();
@@ -2534,7 +3161,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         while cache
@@ -2559,6 +3186,186 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deleted, 0);
+        let persisted = cache.load_graph_index().unwrap();
+        let stored: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            graph_fingerprint(&persisted),
+            "increment publication must stamp the graph it committed"
+        );
+    }
+
+    #[test]
+    fn increment_degrades_when_staged_attachment_disappears_before_publication() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("doc.md"), "---\n---\n[[asset.png]]\n").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let baseline = cache.load_graph_index().unwrap();
+        let fingerprint = graph_fingerprint(&baseline);
+        std::fs::write(root.join("asset.png"), b"png").unwrap();
+        let reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["asset.png".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+            baseline,
+        )
+        .unwrap();
+        assert!(cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap());
+        std::fs::remove_file(root.join("asset.png")).unwrap();
+
+        let error = loop {
+            match cache.commit_increment_chunk(&root, &mut commit, Duration::ZERO) {
+                Ok(true) => {}
+                Ok(false) => panic!("attachment drift must degrade, not publish"),
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path } if path == Utf8Path::new("asset.png")
+        ));
+        let cached: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'asset.png'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached, 0, "the vanished attachment must not publish");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn increment_degrades_when_staged_attachment_becomes_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("doc.md"), "---\n---\n[[asset.png]]\n").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let baseline = cache.load_graph_index().unwrap();
+        let fingerprint = graph_fingerprint(&baseline);
+        let asset = root.join("asset.png");
+        std::fs::write(&asset, b"png").unwrap();
+        let asset_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(asset.as_std_path()).unwrap(),
+        );
+        let reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["asset.png".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+            baseline,
+        )
+        .unwrap();
+        assert!(cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap());
+
+        let target = Utf8PathBuf::from_path_buf(tmp.path().join("target.png")).unwrap();
+        std::fs::write(&target, b"png").unwrap();
+        filetime::set_file_mtime(target.as_std_path(), asset_mtime).unwrap();
+        std::fs::remove_file(&asset).unwrap();
+        symlink(target.as_std_path(), asset.as_std_path()).unwrap();
+
+        let error = loop {
+            match cache.commit_increment_chunk(&root, &mut commit, Duration::ZERO) {
+                Ok(true) => {}
+                Ok(false) => panic!("symlink substitution must degrade, not publish"),
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path } if path == Utf8Path::new("asset.png")
+        ));
+        let cached: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'asset.png'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached, 0, "the substituted symlink must not publish");
+    }
+
+    #[test]
+    fn increment_degrades_when_deleted_attachment_is_recreated_before_publication() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(root.join("doc.md"), "---\n---\n[[asset.png]]\n").unwrap();
+        std::fs::write(root.join("asset.png"), b"old").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let baseline = cache.load_graph_index().unwrap();
+        let fingerprint = graph_fingerprint(&baseline);
+        std::fs::remove_file(root.join("asset.png")).unwrap();
+        let reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["asset.png".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+            baseline,
+        )
+        .unwrap();
+        assert!(cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap());
+        std::fs::write(root.join("asset.png"), b"recreated").unwrap();
+
+        let error = loop {
+            match cache.commit_increment_chunk(&root, &mut commit, Duration::ZERO) {
+                Ok(true) => {}
+                Ok(false) => panic!("recreated source must degrade, not publish"),
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(
+            error,
+            CacheError::IncrementSourceDrift { ref path } if path == Utf8Path::new("asset.png")
+        ));
+        let cached: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'asset.png'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached, 1, "the prior cache row must survive degradation");
     }
 
     #[test]
@@ -2579,7 +3386,7 @@ mod tests {
         )
         .unwrap();
         cache.rebuild(&root).unwrap();
-        let reservation = cache.reserve_increment_commit().unwrap();
+        let (baseline, reservation) = baseline_and_reservation(&mut cache);
         std::fs::rename(root.join("a.md"), root.join("Archive/a.md")).unwrap();
         let mut commit = crate::cache::Cache::begin_increment_commit(
             &root,
@@ -2587,7 +3394,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
-            cache.load_graph_index().unwrap(),
+            baseline,
         )
         .unwrap();
         while cache
@@ -2603,5 +3410,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 0, "ignored destination move removes source");
+    }
+
+    #[test]
+    fn move_into_hidden_destination_publishes_source_removal() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir_all(root.join(".Archive")).unwrap();
+        std::fs::write(root.join("a.md"), "---\n---\nA\n").unwrap();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+
+        let baseline = cache.load_graph_index().unwrap();
+        let fingerprint = graph_fingerprint(&baseline);
+        std::fs::rename(root.join("a.md"), root.join(".Archive/a.md")).unwrap();
+        let reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["a.md".into(), ".Archive/a.md".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+            baseline,
+        )
+        .unwrap();
+        while cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap()
+        {}
+
+        let remaining: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path IN ('a.md', '.Archive/a.md')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "hidden destination stays outside the graph");
     }
 }

@@ -51,7 +51,9 @@ pub(crate) use identity::{
 };
 #[cfg(test)]
 pub(crate) use writer::IndexReport;
-pub(crate) use writer::{increment_chunk_budget, IncrementCommit, IncrementReservation};
+pub(crate) use writer::{
+    graph_fingerprint, increment_chunk_budget, IncrementCommit, IncrementReservation,
+};
 
 /// Resolve a vault's on-disk cache directory under an EXPLICIT cache home,
 /// with the SAME identity mapping production opens use (`identity::cache_dir_in`,
@@ -76,7 +78,7 @@ pub(crate) use lock::{acquire_flock, debug_env_usize};
 pub(crate) use query_show::set_after_document_row_hook;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 /// The single operator note emitted when the implicit incremental refresh cannot
 /// acquire the write lock in time (`CacheError::LockTimeout`) and the query

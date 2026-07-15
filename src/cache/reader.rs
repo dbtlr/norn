@@ -334,7 +334,7 @@ pub(crate) fn load_links(
     Ok(links)
 }
 
-fn load_files(conn: &rusqlite::Connection) -> Result<Vec<VaultFile>, CacheError> {
+pub(crate) fn load_files(conn: &rusqlite::Connection) -> Result<Vec<VaultFile>, CacheError> {
     let mut stmt = conn.prepare("SELECT path, ext FROM files ORDER BY path")?;
     let rows = stmt.query_map([], |r| {
         let path: String = r.get(0)?;

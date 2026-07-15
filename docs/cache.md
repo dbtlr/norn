@@ -42,7 +42,7 @@ The cache is *disposable*. Any of the following triggers an automatic silent reb
 
 A cache with a *newer* schema version than the binary supports is the one case that hard-errors — interpreting unknown future fields would be unsafe. Upgrade `norn` to read it.
 
-The current `schema_version` is `4`. It is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
+The current `schema_version` is `5`. Version 5 adds an atomically maintained graph fingerprint to `meta`; daemon mutation reservations compare that O(1) token before staging so a graph captured before a newer cache publication cannot overwrite it. Upgrading from version 4 triggers one silent rebuild on first use to populate the fingerprint. The schema version is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
 
 ## Lifecycle
 
@@ -91,7 +91,7 @@ If you're seeing significantly slower numbers, run `norn cache rebuild` to start
 
 ## Schema evolution
 
-The schema is versioned. Bumps trigger a silent auto-rebuild on next open. The current version is exposed via `norn cache status`.
+The schema is versioned. Bumps trigger a silent auto-rebuild on next open. Version 5's one-time rebuild from version 4 initializes the graph fingerprint used by atomic daemon mutation publication; rebuilds, incremental refreshes, and successful mutation publications then update that fingerprint in the same transaction as the graph rows. The current version is exposed via `norn cache status`.
 
 Future evolution (planned, not in this release):
 

@@ -1792,12 +1792,20 @@ impl VaultContext {
         else {
             return;
         };
+        if scope.bound_generation() != generation.number {
+            self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE);
+            return;
+        }
+        let baseline_fingerprint = crate::cache::graph_fingerprint(&baseline);
 
         // Reserve publication authority on the dedicated writer connection
         // BEFORE parsing. A refresh can now supersede this job even during the
         // parse/pre-first-chunk window, and an external publication changes the
         // baseline captured by the reservation.
-        let reservation = match self.submit_increment_reservation(slot, &generation).wait() {
+        let reservation = match self
+            .submit_increment_reservation(slot, &generation, baseline_fingerprint)
+            .wait()
+        {
             Outcome::Done(Ok(reservation)) => reservation,
             Outcome::Done(Err(error)) => {
                 let err: anyhow::Error = error.into();
@@ -1881,6 +1889,7 @@ impl VaultContext {
         &self,
         slot: &WarmSlot,
         generation: &Arc<Generation>,
+        expected_fingerprint: String,
     ) -> Handle<Result<crate::cache::IncrementReservation, CacheError>> {
         let generation = Arc::clone(generation);
         slot.queue.submit_liveness(move || {
@@ -1888,7 +1897,7 @@ impl VaultContext {
                 .write_cache
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .reserve_increment_commit()
+                .reserve_increment_commit(&expected_fingerprint)
         })
     }
 
@@ -2265,14 +2274,18 @@ impl VaultContext {
             Mode::Warm(slot) => {
                 // Mirror `commit_apply_increments`: reserve on the writer, parse
                 // on THIS (test) thread, then submit the prebuilt driver.
-                let reservation = match self.submit_increment_reservation(slot, generation).wait() {
-                    Outcome::Done(Ok(reservation)) => reservation,
-                    other => panic!("test increment reservation failed: {other:?}"),
-                };
                 let baseline = generation
                     .checkout_read()
                     .load_graph_index()
                     .expect("test baseline load should succeed");
+                let fingerprint = crate::cache::graph_fingerprint(&baseline);
+                let reservation = match self
+                    .submit_increment_reservation(slot, generation, fingerprint)
+                    .wait()
+                {
+                    Outcome::Done(Ok(reservation)) => reservation,
+                    other => panic!("test increment reservation failed: {other:?}"),
+                };
                 let commit = crate::cache::Cache::begin_increment_commit(
                     &self.vault_root,
                     changed_paths,
@@ -5028,14 +5041,18 @@ mod tests {
             unreachable!()
         };
 
-        let reservation = match ctx.submit_increment_reservation(slot, &generation).wait() {
-            Outcome::Done(Ok(reservation)) => reservation,
-            other => panic!("reservation failed: {other:?}"),
-        };
         let baseline = generation
             .checkout_read()
             .load_graph_index()
             .expect("baseline load");
+        let fingerprint = crate::cache::graph_fingerprint(&baseline);
+        let reservation = match ctx
+            .submit_increment_reservation(slot, &generation, fingerprint)
+            .wait()
+        {
+            Outcome::Done(Ok(reservation)) => reservation,
+            other => panic!("reservation failed: {other:?}"),
+        };
         std::fs::write(
             root.join("alpha.md"),
             "---\ntype: note\n---\nOLDER PARSED BODY\n",
@@ -5083,7 +5100,15 @@ mod tests {
         let Mode::Warm(slot) = &ctx.mode else {
             unreachable!()
         };
-        let _reservation = match ctx.submit_increment_reservation(slot, &generation).wait() {
+        let baseline = generation
+            .checkout_read()
+            .load_graph_index()
+            .expect("baseline load");
+        let fingerprint = crate::cache::graph_fingerprint(&baseline);
+        let _reservation = match ctx
+            .submit_increment_reservation(slot, &generation, fingerprint)
+            .wait()
+        {
             Outcome::Done(Ok(reservation)) => reservation,
             other => panic!("reservation failed: {other:?}"),
         };
@@ -5306,42 +5331,70 @@ mod tests {
         );
     }
 
-    /// Eviction targeting (NRN-253 review): a corruption-class increment failure
-    /// must evict the generation the increment RAN ON (`slot.current` at commit
-    /// time), not the request's bound generation. The scope binds generation 1, a
-    /// concurrent-style reopen advances the slot to generation 2, and the
-    /// corrupting increment runs on 2 — so the floor must exclude 2 (a fresh
-    /// request opens 3). Keying the bump off the scope's bound generation would
-    /// set the floor to only 2, leaving the actually-corrupt generation 2
-    /// satisfying it and serving.
+    /// A request's pre-apply graph belongs to the generation it bound. If a
+    /// concurrent reopen advances `slot.current` before the post-apply increment,
+    /// that old graph must never be overlaid onto the newer generation.
     #[test]
-    fn increment_corruption_evicts_generation_it_ran_on_not_bound_generation() {
+    fn increment_with_old_bound_baseline_does_not_target_new_generation() {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
-        // Bind a request scope on generation 1.
         let scope = ctx.begin_request().expect("begin_request");
-        {
-            let cache = ctx
-                .query_cache(&scope)
-                .expect("query_cache on generation 1");
-            assert_eq!(doc_count(&cache), 3);
-        }
-        assert_eq!(scope.bound_generation(), 1, "scope bound generation 1");
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("generation 1 cache")
+            .load_graph_index()
+            .expect("generation 1 baseline");
+        assert_eq!(scope.bound_generation(), 1);
 
-        // Force a reopen: invalidate generation 1 and open generation 2 while
-        // this request's scope stays bound to 1 (models a concurrent reopen
-        // landing mid-request).
         ctx.test_invalidate_current_generation();
         {
-            let _c = ctx.query_cache_unscoped().expect("reopen generation 2");
+            let _newer = ctx.query_cache_unscoped().expect("open generation 2");
         }
-        let gen2 = ctx.current_generation().expect("generation 2 current");
-        assert_eq!(gen2.number, 2, "the reopen produced generation 2");
-        let baseline = gen2
-            .test_read_conn()
+        let generation_2 = ctx.current_generation().expect("generation 2 current");
+        assert_eq!(generation_2.number, 2);
+
+        std::fs::write(root.join("delta.md"), "---\n---\nDelta\n").unwrap();
+        ctx.commit_apply_increments(&scope, &["delta.md".into()], baseline);
+
+        assert!(
+            scope
+                .take_operator_notes()
+                .iter()
+                .any(|note| note.contains("abandoned")),
+            "generation mismatch must degrade the cache increment"
+        );
+        let cache = generation_2.test_read_conn();
+        assert!(
+            !doc_present(&cache, "delta.md"),
+            "an N baseline must not publish into generation N+1"
+        );
+    }
+
+    /// A corruption-class increment failure evicts the generation it ran on. The
+    /// request and increment both bind generation 2 (cross-generation increments
+    /// are rejected above), so the floor must exclude 2 and the next request must
+    /// open generation 3.
+    #[test]
+    fn increment_corruption_evicts_generation_it_ran_on() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+
+        // Open generation 1, then invalidate it so the mutation request binds 2.
+        ctx.begin_request().expect("begin_request generation 1");
+        {
+            let _cache = ctx.query_cache_unscoped().expect("open generation 1");
+        }
+        ctx.test_invalidate_current_generation();
+        let scope = ctx.begin_request().expect("begin_request generation 2");
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("reopen generation 2")
             .load_graph_index()
             .expect("generation 2 pre-apply baseline");
+        let gen2 = ctx.current_generation().expect("generation 2 current");
+        assert_eq!(gen2.number, 2, "the reopen produced generation 2");
+        assert_eq!(scope.bound_generation(), 2, "scope bound generation 2");
 
         // Inject a SQLITE_CORRUPT failure into generation 2's increment commit.
         let corrupt = rusqlite::Error::SqliteFailure(
@@ -5363,8 +5416,7 @@ mod tests {
         assert_eq!(
             gen_number(&ctx),
             3,
-            "the eviction must target the generation the increment ran on (2), \
-             not the scope's bound generation (1)"
+            "the eviction must exclude the generation the increment ran on (2)"
         );
     }
 }

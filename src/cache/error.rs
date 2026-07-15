@@ -64,6 +64,9 @@ pub enum CacheError {
     #[error("affected source changed while its cache increment was being published: {path}")]
     IncrementSourceDrift { path: Utf8PathBuf },
 
+    #[error("cache changed after the mutation's baseline was captured but before publication was reserved")]
+    IncrementBaselineDrift,
+
     #[error("graph build error: {0}")]
     GraphBuild(#[from] crate::graph::IndexError),
 }
