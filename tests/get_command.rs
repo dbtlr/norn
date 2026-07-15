@@ -112,8 +112,8 @@ fn get_document_hash_facet_matches_find_and_content() {
 }
 
 /// NRN-105 (review [0]): a file that failed UTF-8 read at index time carries an
-/// empty hash — `.document_hash` must OMIT the facet (like `.raw` on an
-/// unreadable file), never hand out `""` as a bogus CAS token.
+/// empty hash — `.document_hash` must OMIT the facet, never hand out `""` as a
+/// bogus CAS token.
 #[test]
 fn get_document_hash_facet_omitted_for_unreadable_file() {
     let tmp = tempfile::Builder::new()
@@ -315,11 +315,10 @@ fn get_all_cols_includes_body_content() {
     let v: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert!(v[0]["body"].as_str().unwrap().contains("A"));
-    // Full structured dump: frontmatter + headings + links present; `.raw` not.
+    // Full structured dump: frontmatter + headings + links present.
     assert!(v[0]["frontmatter"].is_object());
     assert!(v[0].get("headings").is_some());
     assert!(v[0].get("incoming_links").is_some());
-    assert!(v[0].get("raw").is_none(), "all-cols excludes .raw");
 }
 
 #[test]
@@ -692,9 +691,7 @@ fn get_col_body_without_body_flag_shows_body() {
 }
 
 #[test]
-fn get_col_raw_reads_disk_byte_faithful() {
-    // `.raw` reads the whole source file verbatim — frontmatter block, comment,
-    // body, and trailing whitespace all preserved — even with no `--body`.
+fn get_col_raw_is_unknown_and_markdown_remains_byte_faithful() {
     let tmp = tempfile::Builder::new()
         .prefix("norn-get-col-raw-")
         .tempdir()
@@ -716,37 +713,30 @@ fn get_col_raw_reads_disk_byte_faithful() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let v: serde_json::Value =
-        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
-    let file_bytes = std::fs::read_to_string(root.join("a.md")).unwrap();
-    assert_eq!(
-        v[0]["raw"].as_str().unwrap(),
-        file_bytes,
-        "raw facet must equal exact file bytes"
-    );
-}
-
-#[test]
-fn get_default_no_col_omits_raw() {
-    let tmp = synth();
-    let out = norn_cmd(&tmp)
-        .args(["--cwd"])
-        .arg(tmp.path().join("vault"))
-        .args(["get", "a.md", "--format", "json"])
-        .output()
-        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        stderr.contains("unknown --col facet '.raw'"),
+        "expected unknown-facet warning: {stderr}"
     );
     let v: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert!(
         v[0].get("raw").is_none(),
-        "raw must not appear by default: {}",
-        v
+        "unknown raw facet must not emit a JSON key: {v}"
     );
+
+    let markdown = norn_cmd(&tmp)
+        .args(["--cwd"])
+        .arg(&root)
+        .args(["get", "a.md", "--format", "markdown"])
+        .output()
+        .unwrap();
+    assert!(
+        markdown.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&markdown.stderr)
+    );
+    assert_eq!(markdown.stdout, contents.as_bytes());
 }
 
 #[test]

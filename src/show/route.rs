@@ -31,7 +31,7 @@ use crate::show::{ShowRecord, ShowReport};
 ///
 /// `--format` is CLI-only (the client renders the returned records). `--section`
 /// is never sent — the caller gates a `--section` invocation to Direct. `col` is
-/// sent so the daemon LOADS the on-request facets (`.body`/`.raw`/`.document_hash`);
+/// sent so the daemon LOADS the on-request facets (`.body`/`.document_hash`);
 /// the actual `--col` narrowing is applied client-side by the renderer, so the
 /// tool's non-narrowing `col` semantics don't affect the routed output.
 pub fn to_mcp_arguments(args: &GetArgs) -> Value {
@@ -132,7 +132,6 @@ fn record_from_wire(v: &Value) -> Result<ShowRecord> {
         body: obj.get("body").and_then(Value::as_str).map(str::to_string),
         // Never routed: `--section` is gated to Direct.
         sections: None,
-        raw: obj.get("raw").and_then(Value::as_str).map(str::to_string),
     })
 }
 
@@ -261,7 +260,6 @@ mod tests {
             incoming_links: vec![],
             body: body.map(str::to_string),
             sections: None,
-            raw: None,
             path,
         }
     }
@@ -363,13 +361,6 @@ mod tests {
         };
         assert_round_trip(make(), vec![]);
         assert_round_trip(make(), vec![".frontmatter".into()]);
-    }
-
-    #[test]
-    fn round_trip_raw_facet() {
-        let mut report = sample_report();
-        report.records[0].raw = Some("---\ntype: note\n---\nThe body\n".into());
-        assert_round_trip(report, vec![".raw".into()]);
     }
 
     #[test]

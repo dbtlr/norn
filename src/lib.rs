@@ -624,7 +624,7 @@ fn route_find(
         |structured| crate::find::route::reconstruct(structured, args),
         |routed| {
             let palette = crate::output::palette::resolve(color);
-            crate::find::emit(&routed.result, &routed.deep, &routed.raw, args, &palette)?;
+            crate::find::emit(&routed.result, &routed.deep, args, &palette)?;
             // Direct find exits 2 when the vault carries any error-severity
             // diagnostic (`cache.has_diagnostic_errors()`); the daemon surfaces
             // the same signal in the envelope, so routed and direct exit codes
@@ -1631,13 +1631,13 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 return match report.records.len() {
                     1 => {
                         let path = &report.records[0].path;
-                        match crate::output::projection::read_raw(&cache.vault_root, path) {
+                        match std::fs::read_to_string(cache.vault_root.join(path)) {
                             // Byte-faithful: print verbatim, no trailing-newline fixup.
-                            Some(raw) => {
+                            Ok(raw) => {
                                 print!("{}", raw);
                                 Ok(0)
                             }
-                            None => {
+                            Err(_) => {
                                 eprintln!("error: could not read source file for '{}'", path);
                                 Ok(1)
                             }
@@ -1648,7 +1648,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     n => {
                         eprintln!(
                             "error: --format markdown returns a single document; {n} selected \
-                             — use --format json --col .raw for multiple"
+                             — request one target at a time"
                         );
                         Ok(1)
                     }

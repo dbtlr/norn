@@ -130,13 +130,6 @@ fn narrow_to_json(record: &super::ShowRecord, cols: &[String]) -> Value {
         if let Some(sections) = &record.sections {
             map.insert("sections".into(), super::sections_to_json_object(sections));
         }
-        // `.raw` last: the heaviest/most-derived facet (whole source file from
-        // disk). Omit the key when the file was unreadable.
-        if allow.contains("raw") {
-            if let Some(raw) = &record.raw {
-                map.insert("raw".into(), serde_json::Value::String(raw.clone()));
-            }
-        }
         obj
     }
 }
@@ -350,18 +343,6 @@ fn build_text_fields(
                 label: heading.clone(),
                 value: content.clone(),
             });
-        }
-    }
-
-    // `.raw` last, and never in the default dump (heavy/disk; opt-in by name).
-    if facet_set.contains("raw") {
-        if let Some(raw) = &record.raw {
-            if !raw.is_empty() {
-                fields.push(FieldOwned {
-                    label: "raw".into(),
-                    value: raw.clone(),
-                });
-            }
         }
     }
 

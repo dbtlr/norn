@@ -18,18 +18,10 @@ fn deep_at(deep: &[Option<DocumentDeep>], i: usize) -> Option<&DocumentDeep> {
     deep.get(i).and_then(|d| d.as_ref())
 }
 
-/// The `.raw` value for the match at `i`, if a disk read was performed and
-/// succeeded. Returns `None` both when no read ran (`.raw` not requested) and
-/// when the file was unreadable.
-fn raw_at(raw: &[Option<String>], i: usize) -> Option<&str> {
-    raw.get(i).and_then(|r| r.as_deref())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     result: &FindResult,
     deep: &[Option<DocumentDeep>],
-    raw: &[Option<String>],
     args: &FindArgs,
     format: FindFormat,
     sort_field: Option<&str>,
@@ -44,15 +36,14 @@ pub fn render(
         FindFormat::Json => render_json(
             result,
             deep,
-            raw,
             args,
             sort_field,
             sort_direction,
             starts_at,
             stdout,
         ),
-        FindFormat::Jsonl => render_jsonl(result, deep, raw, args, stdout, stderr),
-        FindFormat::Records => render_records(result, deep, raw, args, palette, stdout, stderr),
+        FindFormat::Jsonl => render_jsonl(result, deep, args, stdout, stderr),
+        FindFormat::Records => render_records(result, deep, args, palette, stdout, stderr),
     }
 }
 
@@ -84,7 +75,6 @@ fn render_paths(
 pub(crate) fn doc_to_json(
     doc: &crate::core::DocumentSummary,
     deep: Option<&DocumentDeep>,
-    raw: Option<&str>,
     cols: &[String],
     all_cols: bool,
 ) -> serde_json::Value {
@@ -162,13 +152,6 @@ pub(crate) fn doc_to_json(
             serde_json::Value::String(doc.body_text.clone()),
         );
     }
-    // `.raw` last: byte-faithful whole source file from disk. Omit when
-    // unreadable. Never emitted by `--all-cols` (cache-only dump).
-    if !all_cols && allow.contains("raw") {
-        if let Some(raw) = raw {
-            map.insert("raw".into(), serde_json::Value::String(raw.to_string()));
-        }
-    }
     obj
 }
 
@@ -176,7 +159,6 @@ pub(crate) fn doc_to_json(
 fn render_json(
     result: &FindResult,
     deep: &[Option<DocumentDeep>],
-    raw: &[Option<String>],
     args: &FindArgs,
     _sort_field: Option<&str>,
     _sort_direction: Option<&str>,
@@ -187,15 +169,7 @@ fn render_json(
         .matches
         .iter()
         .enumerate()
-        .map(|(i, d)| {
-            doc_to_json(
-                d,
-                deep_at(deep, i),
-                raw_at(raw, i),
-                &args.col,
-                args.all_cols,
-            )
-        })
+        .map(|(i, d)| doc_to_json(d, deep_at(deep, i), &args.col, args.all_cols))
         .collect();
 
     let payload = serde_json::json!({
@@ -210,19 +184,12 @@ fn render_json(
 fn render_jsonl(
     result: &FindResult,
     deep: &[Option<DocumentDeep>],
-    raw: &[Option<String>],
     args: &FindArgs,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> std::io::Result<()> {
     for (i, doc) in result.matches.iter().enumerate() {
-        let line = doc_to_json(
-            doc,
-            deep_at(deep, i),
-            raw_at(raw, i),
-            &args.col,
-            args.all_cols,
-        );
+        let line = doc_to_json(doc, deep_at(deep, i), &args.col, args.all_cols);
         writeln!(stdout, "{}", serde_json::to_string(&line)?)?;
     }
     if result.truncated {
@@ -238,7 +205,6 @@ fn render_jsonl(
 fn render_records(
     result: &FindResult,
     deep: &[Option<DocumentDeep>],
-    raw: &[Option<String>],
     args: &FindArgs,
     palette: &crate::output::palette::Palette,
     stdout: &mut dyn Write,
@@ -267,13 +233,7 @@ fn render_records(
         if i > 0 {
             separator(stdout, palette, term_width)?;
         }
-        let pairs = build_record_pairs(
-            doc,
-            deep_at(deep, i),
-            raw_at(raw, i),
-            &args.col,
-            args.all_cols,
-        );
+        let pairs = build_record_pairs(doc, deep_at(deep, i), &args.col, args.all_cols);
         let fields: Vec<Field<'_>> = pairs
             .iter()
             .map(|(k, v)| Field {
@@ -317,7 +277,6 @@ fn render_records(
 fn build_record_pairs(
     doc: &crate::core::DocumentSummary,
     deep: Option<&DocumentDeep>,
-    raw: Option<&str>,
     cols: &[String],
     all_cols: bool,
 ) -> Vec<(String, String)> {
@@ -354,7 +313,7 @@ fn build_record_pairs(
     }
 
     // `--all-cols`: per-field frontmatter rows (like the default), then every
-    // cache-served facet. No consolidated `.frontmatter` block, no `.raw`.
+    // cache-served facet. No consolidated `.frontmatter` block.
     if all_cols {
         if let Some(obj) = fm_object {
             for (key, value) in obj {
@@ -415,16 +374,6 @@ fn build_record_pairs(
         let body = doc.body_text.trim();
         if !body.is_empty() {
             pairs.push(("body".into(), body.to_string()));
-        }
-    }
-
-    // `.raw` last: byte-faithful whole source file from disk. Omit when
-    // unreadable or empty. Never emitted by `--all-cols` (cache-only dump).
-    if !all_cols && facet_set.contains("raw") {
-        if let Some(raw) = raw {
-            if !raw.is_empty() {
-                pairs.push(("raw".into(), raw.to_string()));
-            }
         }
     }
 
@@ -555,7 +504,7 @@ mod tests {
         let result = sample_result();
         let mut stdout = Vec::new();
         let args = sample_args();
-        render_json(&result, &[], &[], &args, None, None, 1, &mut stdout).unwrap();
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(parsed["total"], 2);
         assert_eq!(parsed["returned"], 2);
@@ -577,7 +526,6 @@ mod tests {
         let args = sample_args();
         render_json(
             &result,
-            &[],
             &[],
             &args,
             Some("modified"),
@@ -603,7 +551,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut args = sample_args();
         args.col = vec!["type".to_string()];
-        render_json(&result, &[], &[], &args, None, None, 1, &mut stdout).unwrap();
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(parsed["documents"][0]["frontmatter"]["type"], "note");
     }
@@ -614,7 +562,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        render_jsonl(&result, &[], &[], &args, &mut stdout, &mut stderr).unwrap();
+        render_jsonl(&result, &[], &args, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -630,7 +578,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = sample_args();
-        render_jsonl(&result, &[], &[], &args, &mut stdout, &mut stderr).unwrap();
+        render_jsonl(&result, &[], &args, &mut stdout, &mut stderr).unwrap();
         let s = std::str::from_utf8(&stderr).unwrap();
         assert!(s.starts_with("note: showing "));
         assert!(s.contains("2 of 5"));
@@ -643,7 +591,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         let first_line = text.lines().next().unwrap();
         assert!(
@@ -661,7 +609,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         let first_line = text.lines().next().unwrap();
         assert!(
@@ -682,7 +630,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // Field rows look like "  type    note" — starts with 2-space indent.
         assert!(
@@ -698,7 +646,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // No blank-line padding around the horizontal rule.
         assert!(!text.contains("\n\n─"), "blank before separator: {text:?}");
@@ -712,7 +660,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // b.md has no frontmatter; it should show the placeholder line.
         assert!(
@@ -730,7 +678,7 @@ mod tests {
         // a.md has type=note but no `nonexistent` field.
         args.col = vec!["nonexistent".to_string()];
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(
             text.contains("a.md\n  (no matching fields)\n"),
@@ -756,7 +704,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::on();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // Dim renders as ANSI 256 #244.
         assert!(
@@ -772,7 +720,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // The path "a.md" appears as a header line at column 0, not as a "  path  a.md" field row.
         // lines[0] = count line, lines[1] = blank, lines[2] = first record header.
@@ -823,7 +771,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(
             !text.contains("\x1b["),
@@ -839,7 +787,7 @@ mod tests {
         let mut stderr = Vec::new();
         let args = sample_args();
         let palette = crate::output::palette::Palette::on();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         assert!(
             text.contains("\x1b["),
@@ -872,7 +820,7 @@ mod tests {
         let mut args = sample_args();
         args.col = vec![".body".to_string()];
         // No deep slice supplied — `.body` must still resolve from body_text.
-        render_json(&result, &[], &[], &args, None, None, 1, &mut stdout).unwrap();
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         let doc = &v["documents"][0];
         assert_eq!(doc["body"], "  alpha body  ");
@@ -886,17 +834,7 @@ mod tests {
         // Default (no --col): identity `path` only, no `stem` key.
         let mut out_default = Vec::new();
         let args_default = sample_args();
-        render_json(
-            &result,
-            &[],
-            &[],
-            &args_default,
-            None,
-            None,
-            1,
-            &mut out_default,
-        )
-        .unwrap();
+        render_json(&result, &[], &args_default, None, None, 1, &mut out_default).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out_default).unwrap();
         assert!(
             v["documents"][0].get("stem").is_none(),
@@ -907,7 +845,7 @@ mod tests {
         let mut out_stem = Vec::new();
         let mut args = sample_args();
         args.col = vec![".stem".to_string()];
-        render_json(&result, &[], &[], &args, None, None, 1, &mut out_stem).unwrap();
+        render_json(&result, &[], &args, None, None, 1, &mut out_stem).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out_stem).unwrap();
         let doc = &v["documents"][0];
         assert_eq!(doc["stem"], "a");
@@ -920,7 +858,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut args = sample_args();
         args.col = vec![".frontmatter".to_string()];
-        render_json(&result, &[], &[], &args, None, None, 1, &mut stdout).unwrap();
+        render_json(&result, &[], &args, None, None, 1, &mut stdout).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         let doc = &v["documents"][0];
         assert_eq!(doc["frontmatter"]["type"], "note");
@@ -935,7 +873,7 @@ mod tests {
         let mut args = sample_args();
         args.col = vec![".body".to_string()];
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // Trimmed body under a `body` label, no surrounding whitespace.
         assert!(
@@ -956,7 +894,7 @@ mod tests {
         let mut args = sample_args();
         args.col = vec!["title".to_string(), ".frontmatter".to_string()];
         let palette = crate::output::palette::Palette::off();
-        render_records(&result, &[], &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
+        render_records(&result, &[], &args, &palette, &mut stdout, &mut stderr).unwrap();
         let text = std::str::from_utf8(&stdout).unwrap();
         // Bare `title` row first, then the consolidated `frontmatter` block.
         assert!(text.contains("\n  title"), "expected title row: {text:?}");

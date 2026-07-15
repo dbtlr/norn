@@ -85,14 +85,14 @@ pub fn run(
         crate::grammar::QueryCmd::Find,
     )?;
 
-    // Shared selection seam: matched docs + deep/raw fetches. The MCP
+    // Shared selection seam: matched docs + deep fetches. The MCP
     // `vault.find` tool consumes the same `select`/`query` path, so the two
     // surfaces can't drift on which documents match or what gets fetched.
-    let self::query::Selection { result, deep, raw } = self::query::select(&cache, &args)?;
+    let self::query::Selection { result, deep } = self::query::select(&cache, &args)?;
 
     // Shared print seam with the daemon-routed path (`route_find`).
     let palette = crate::output::palette::resolve(color);
-    emit(&result, &deep, &raw, &args, &palette)?;
+    emit(&result, &deep, &args, &palette)?;
 
     let exit = if cache.has_diagnostic_errors()? { 2 } else { 0 };
     Ok(exit)
@@ -108,7 +108,6 @@ pub fn run(
 pub fn emit(
     result: &crate::cache::FindResult,
     deep: &[Option<crate::cache::DocumentDeep>],
-    raw: &[Option<String>],
     args: &FindArgs,
     palette: &crate::output::palette::Palette,
 ) -> Result<()> {
@@ -136,7 +135,6 @@ pub fn emit(
     self::render::render(
         result,
         deep,
-        raw,
         args,
         format,
         sort_field,

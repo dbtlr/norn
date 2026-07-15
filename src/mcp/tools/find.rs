@@ -128,15 +128,16 @@ pub struct FindParams {
 
     // ── Column projection (mirrors --col / --all-cols) ───────────────────────
     /// Columns to include, in `norn find --col` syntax: bare frontmatter fields
-    /// (e.g. `status`, `title`) and dot-prefixed facets (`.body`, `.headings`,
-    /// `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.raw`,
-    /// `.stem`, `.frontmatter`). Default (empty): `{path, frontmatter}` per doc.
+    /// (e.g. `status`, `title`) and dot-prefixed facets (`.path`, `.stem`,
+    /// `.frontmatter`, `.headings`, `.outgoing_links`, `.unresolved_links`,
+    /// `.incoming_links`, `.body`, `.document_hash`). Default (empty):
+    /// `{path, frontmatter}` per doc. `.document_hash` is opt-in only.
     #[serde(default)]
     pub col: Vec<String>,
 
     /// Emit the full structured dump per match: whole frontmatter plus every
-    /// cache-served facet (`.headings`, the three link sets, `.body`). Excludes
-    /// `.raw`. Mutually exclusive with `col`.
+    /// cache-served facet (`.headings`, the three link sets, `.body`). The
+    /// opt-in `.document_hash` facet is excluded. Mutually exclusive with `col`.
     #[serde(default)]
     pub all_cols: bool,
 
@@ -352,6 +353,31 @@ mod tests {
             assert_eq!(
                 doc["frontmatter"]["type"], "note",
                 "every returned doc is type:note: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_removed_raw_col_emits_no_structured_key() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+
+        let out = handle(
+            &ctx,
+            FindParams {
+                eq: vec!["type:note".into()],
+                col: vec![".raw".into()],
+                ..FindParams::default()
+            },
+        )
+        .expect("unknown projection facets do not fail the structured query");
+
+        assert_eq!(out.documents.len(), 2);
+        for doc in &out.documents {
+            assert!(doc.get("path").is_some(), "identity path remains: {doc}");
+            assert!(
+                doc.get("raw").is_none(),
+                "removed raw facet must not cross the MCP/routed wire: {doc}"
             );
         }
     }

@@ -6,7 +6,7 @@
 //! (NRN-214) and, per document, the projected JSON `find --format json` emits
 //! (`doc_to_wire_json` — `doc_to_json` plus the absent-vs-null frontmatter
 //! distinction). The client rebuilds a [`FindResult`] plus the parallel
-//! deep-fetch / raw-read vectors from that payload and renders it through the
+//! deep-fetch vector from that payload and renders it through the
 //! SAME `find::emit` seam the direct path uses, so routed and direct output are
 //! byte-for-byte equal.
 //!
@@ -37,13 +37,12 @@ use crate::route_wire::{
 };
 
 /// The reconstructed find result: the matched documents plus the parallel
-/// deep-fetch / raw-read vectors, in the exact shape `find::emit` consumes,
+/// deep-fetch vector, in the exact shape `find::emit` consumes,
 /// plus the vault-level diagnostics bit the exit code derives from.
 #[derive(Debug)]
 pub struct RoutedFind {
     pub result: FindResult,
     pub deep: Vec<Option<DocumentDeep>>,
-    pub raw: Vec<Option<String>>,
     /// Whether the vault carries any error-severity diagnostic — the daemon-side
     /// `cache.has_diagnostic_errors()`, crossing the wire so the routed path
     /// reproduces direct find's exit-2 contract (NRN-222).
@@ -89,8 +88,8 @@ pub fn to_mcp_arguments(args: &FindArgs, dynamic_keys: &[String]) -> Value {
 ///
 /// The envelope (`total`/`returned`/`truncated`) rebuilds [`FindResult`]'s
 /// counts; each `documents[i]` object is mapped back to a [`DocumentSummary`]
-/// (plus a parallel [`DocumentDeep`] for the join-backed facets and a `.raw`
-/// string), keyed off the same `--col`/`--all-cols` decision the direct
+/// (plus a parallel [`DocumentDeep`] for the join-backed facets), keyed off the
+/// same `--col`/`--all-cols` decision the direct
 /// `find::query::select` makes — so `find::emit` renders the reconstruction
 /// byte-identically to the direct path. Any shape mismatch is an `Err`, which the
 /// caller maps to a verified direct open.
@@ -113,16 +112,13 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
         })?;
 
     // Mirror `find::query::select`'s facet decisions (the shared predicates) so
-    // the reconstructed deep/raw vectors are shaped exactly as the direct
-    // path's — empty when the projection asks for no join-backed facet / no
-    // raw read.
+    // the reconstructed deep vector is shaped exactly as the direct path's —
+    // empty when the projection asks for no join-backed facet.
     let (facets, _fields) = split_cols(&args.col);
     let needs_deep = crate::find::query::needs_deep(&facets, args.all_cols);
-    let wants_raw = crate::find::query::wants_raw(&facets);
 
     let mut matches = Vec::with_capacity(documents.len());
     let mut deep: Vec<Option<DocumentDeep>> = Vec::new();
-    let mut raw: Vec<Option<String>> = Vec::new();
 
     for doc in documents {
         let obj = doc.as_object().ok_or_else(|| {
@@ -182,9 +178,6 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
                 body: None,
             }));
         }
-        if wants_raw {
-            raw.push(obj.get("raw").and_then(Value::as_str).map(str::to_string));
-        }
     }
 
     Ok(RoutedFind {
@@ -195,7 +188,6 @@ pub fn reconstruct(structured: &Value, args: &FindArgs) -> Result<RoutedFind> {
             truncated,
         },
         deep,
-        raw,
         has_diagnostic_errors,
     })
 }
@@ -266,21 +258,16 @@ mod tests {
     // ── Round-trip isomorphism (NRN-222, per the count template) ──────────────
     //
     // The reconstruction is the exact inverse (for rendering purposes) of the
-    // daemon's `vault.find` projection: build a `FindResult` + deep/raw, project
+    // daemon's `vault.find` projection: build a `FindResult` + deep, project
     // it to the wire `FindOutput` the tool serializes, reconstruct, and assert the
     // RENDERED bytes match the direct path — across formats and `--col`. (Struct
     // equality is deliberately NOT asserted: fields the projection omits, e.g. an
     // unread `hash`/`body_text`, are reconstructed as defaults and never read.)
 
-    /// Project a `FindResult` + deep/raw to the `vault.find` wire envelope,
+    /// Project a `FindResult` + deep to the `vault.find` wire envelope,
     /// exactly as `mcp::tools::find` does (`doc_to_json` per match + the count
     /// envelope), then serialize to the `structuredContent` JSON value.
-    fn to_wire(
-        result: &FindResult,
-        deep: &[Option<DocumentDeep>],
-        raw: &[Option<String>],
-        args: &FindArgs,
-    ) -> Value {
+    fn to_wire(result: &FindResult, deep: &[Option<DocumentDeep>], args: &FindArgs) -> Value {
         let documents: Vec<Value> = result
             .matches
             .iter()
@@ -291,7 +278,6 @@ mod tests {
                 crate::find::query::doc_to_wire_json(
                     d,
                     deep.get(i).and_then(|x| x.as_ref()),
-                    raw.get(i).and_then(|x| x.as_deref()),
                     &args.col,
                     args.all_cols,
                 )
@@ -310,7 +296,6 @@ mod tests {
     fn render_bytes(
         result: &FindResult,
         deep: &[Option<DocumentDeep>],
-        raw: &[Option<String>],
         args: &FindArgs,
     ) -> (Vec<u8>, Vec<u8>) {
         let query = crate::find::query::build_find_query(args).unwrap();
@@ -320,7 +305,6 @@ mod tests {
         crate::find::render::render(
             result,
             deep,
-            raw,
             args,
             format,
             None,
@@ -336,12 +320,7 @@ mod tests {
 
     /// Assert routed (reconstructed) render bytes equal the direct render bytes
     /// for every output format, under the projection encoded in `args`.
-    fn assert_round_trip(
-        result: FindResult,
-        deep: Vec<Option<DocumentDeep>>,
-        raw: Vec<Option<String>>,
-        mut args: FindArgs,
-    ) {
+    fn assert_round_trip(result: FindResult, deep: Vec<Option<DocumentDeep>>, mut args: FindArgs) {
         for format in [
             FindFormat::Paths,
             FindFormat::Records,
@@ -349,12 +328,11 @@ mod tests {
             FindFormat::Jsonl,
         ] {
             args.format = Some(format);
-            let wire = to_wire(&result, &deep, &raw, &args);
+            let wire = to_wire(&result, &deep, &args);
             let routed = reconstruct(&wire, &args).unwrap();
 
-            let (direct_out, direct_err) = render_bytes(&result, &deep, &raw, &args);
-            let (routed_out, routed_err) =
-                render_bytes(&routed.result, &routed.deep, &routed.raw, &args);
+            let (direct_out, direct_err) = render_bytes(&result, &deep, &args);
+            let (routed_out, routed_err) = render_bytes(&routed.result, &routed.deep, &args);
 
             assert_eq!(
                 direct_out, routed_out,
@@ -403,7 +381,7 @@ mod tests {
     #[test]
     fn round_trip_default_projection() {
         let result = sample_result();
-        assert_round_trip(result, vec![], vec![], base_args());
+        assert_round_trip(result, vec![], base_args());
     }
 
     /// A forwarded-note envelope (NRN-215): the daemon injects an
@@ -416,15 +394,14 @@ mod tests {
         let result = sample_result();
         let mut args = base_args();
         args.format = Some(FindFormat::Json);
-        let mut wire = to_wire(&result, &[], &[], &args);
+        let mut wire = to_wire(&result, &[], &args);
         wire.as_object_mut().unwrap().insert(
             "operator_notes".into(),
             json!(["vault: another cache operation is in progress; using current cache state"]),
         );
         let routed = reconstruct(&wire, &args).unwrap();
-        let (direct_out, direct_err) = render_bytes(&result, &[], &[], &args);
-        let (routed_out, routed_err) =
-            render_bytes(&routed.result, &routed.deep, &routed.raw, &args);
+        let (direct_out, direct_err) = render_bytes(&result, &[], &args);
+        let (routed_out, routed_err) = render_bytes(&routed.result, &routed.deep, &args);
         assert_eq!(
             direct_out, routed_out,
             "stdout must ignore the notes sibling"
@@ -440,7 +417,7 @@ mod tests {
         let result = sample_result();
         let mut args = base_args();
         args.col = vec!["title".into()];
-        assert_round_trip(result, vec![], vec![], args);
+        assert_round_trip(result, vec![], args);
     }
 
     #[test]
@@ -455,7 +432,7 @@ mod tests {
         };
         let mut args = base_args();
         args.col = vec!["nonexistent".into()];
-        assert_round_trip(result, vec![], vec![], args);
+        assert_round_trip(result, vec![], args);
     }
 
     #[test]
@@ -463,7 +440,7 @@ mod tests {
         let result = sample_result();
         let mut args = base_args();
         args.col = vec![".body".into(), ".stem".into(), ".document_hash".into()];
-        assert_round_trip(result, vec![], vec![], args);
+        assert_round_trip(result, vec![], args);
     }
 
     fn deep_for(path: &str) -> DocumentDeep {
@@ -507,7 +484,7 @@ mod tests {
         let deep = vec![Some(deep_for("note1.md")), Some(deep_for("note2.md"))];
         let mut args = base_args();
         args.col = vec![".headings".into(), ".outgoing_links".into()];
-        assert_round_trip(result, deep, vec![], args);
+        assert_round_trip(result, deep, args);
     }
 
     #[test]
@@ -516,19 +493,7 @@ mod tests {
         let deep = vec![Some(deep_for("note1.md")), Some(deep_for("note2.md"))];
         let mut args = base_args();
         args.all_cols = true;
-        assert_round_trip(result, deep, vec![], args);
-    }
-
-    #[test]
-    fn round_trip_raw_facet() {
-        let result = sample_result();
-        let raw = vec![
-            Some("---\ntype: note\n---\nraw one\n".to_string()),
-            Some("---\ntype: note\n---\nraw two\n".to_string()),
-        ];
-        let mut args = base_args();
-        args.col = vec![".raw".into()];
-        assert_round_trip(result, vec![], raw, args);
+        assert_round_trip(result, deep, args);
     }
 
     #[test]
@@ -539,7 +504,7 @@ mod tests {
             returned: 0,
             truncated: false,
         };
-        assert_round_trip(result, vec![], vec![], base_args());
+        assert_round_trip(result, vec![], base_args());
     }
 
     /// A frontmatter-less document round-trips: the wire serializes its
@@ -563,10 +528,10 @@ mod tests {
             truncated: false,
         };
         // Both the default projection and the explicit `.frontmatter` facet.
-        assert_round_trip(result.clone(), vec![], vec![], base_args());
+        assert_round_trip(result.clone(), vec![], base_args());
         let mut args = base_args();
         args.col = vec![".frontmatter".into()];
-        assert_round_trip(result, vec![], vec![], args);
+        assert_round_trip(result, vec![], args);
     }
 
     /// An EMPTY `---\n---` frontmatter block is `Some(Value::Null)` on the
@@ -590,10 +555,10 @@ mod tests {
             returned: 1,
             truncated: false,
         };
-        assert_round_trip(result.clone(), vec![], vec![], base_args());
+        assert_round_trip(result.clone(), vec![], base_args());
         let mut args = base_args();
         args.col = vec![".frontmatter".into()];
-        assert_round_trip(result, vec![], vec![], args);
+        assert_round_trip(result, vec![], args);
     }
 
     // ── Exit-code isomorphism: the vault-diagnostics bit (NRN-222) ────────────
@@ -604,7 +569,7 @@ mod tests {
     fn diagnostics_bit_round_trips() {
         let args = base_args();
         for bit in [false, true] {
-            let mut wire = to_wire(&sample_result(), &[], &[], &args);
+            let mut wire = to_wire(&sample_result(), &[], &args);
             wire["has_diagnostic_errors"] = json!(bit);
             let routed = reconstruct(&wire, &args).unwrap();
             assert_eq!(routed.has_diagnostic_errors, bit);
@@ -617,7 +582,7 @@ mod tests {
     #[test]
     fn missing_diagnostics_bit_is_an_error() {
         let args = base_args();
-        let mut wire = to_wire(&sample_result(), &[], &[], &args);
+        let mut wire = to_wire(&sample_result(), &[], &args);
         wire.as_object_mut()
             .unwrap()
             .remove("has_diagnostic_errors");
