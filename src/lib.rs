@@ -1648,7 +1648,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 &loaded_config.index_options,
                 no_cache_refresh,
             )?;
-            let report = show::run(&cache, &args)?;
+            let report = cache.read_snapshot(|cache| show::run(cache, &args))?;
 
             // `markdown` is the one principled divergence: a single, byte-faithful
             // document straight from disk. It is selection-bound (meaningful only

@@ -336,7 +336,7 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: GetParams) -> Result<
     // whose name contained `--section`). A plain missing target (no sections)
     // still yields zero records without erroring (NRN-183 exit-signal asymmetry
     // is tracked separately and unchanged here).
-    crate::show::run(&cache, &args)
+    cache.read_snapshot(|cache| crate::show::run(cache, &args))
 }
 
 #[cfg(test)]
@@ -413,6 +413,76 @@ mod tests {
             fm.get("status").and_then(|v| v.as_str()),
             Some("active"),
             "frontmatter status should reflect the seeded field, got {fm:?}"
+        );
+    }
+
+    /// NRN-256: target/document lookup and all child-row reads belong to one
+    /// SQLite read generation. A second connection replaces both the document
+    /// metadata and headings after the primary row is read; the response must
+    /// remain wholly old rather than combining old metadata with new children.
+    #[test]
+    fn handle_holds_one_snapshot_across_document_and_child_rows() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-mcp-get-snapshot-")
+            .tempdir()
+            .unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            root.join("doc.md"),
+            "---\ngeneration: old\n---\n# Old Heading\nbody\n",
+        )
+        .unwrap();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let db_path = {
+            let cache = ctx.query_cache_unscoped().expect("seed query cache");
+            cache.cache_dir.join("cache.db")
+        };
+
+        let (row_tx, row_rx) = std::sync::mpsc::sync_channel(0);
+        let (committed_tx, committed_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            row_rx.recv().expect("document row reached gate");
+            let conn = rusqlite::Connection::open(db_path).expect("open writer connection");
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE documents
+                    SET frontmatter_json = '{\"generation\":\"new\"}'
+                  WHERE path = 'doc.md';
+                 DELETE FROM headings WHERE doc_path = 'doc.md';
+                 INSERT INTO headings
+                    (doc_path, level, text, slug, source_span_line,
+                     source_span_column, source_span_byte_offset)
+                 VALUES ('doc.md', 1, 'New Heading', 'new-heading', 1, 1, 0);
+                 COMMIT;",
+            )
+            .expect("commit new cache generation");
+            committed_tx.send(()).expect("release get request");
+        });
+
+        crate::cache::set_after_document_row_hook(move || {
+            row_tx.send(()).expect("release writer");
+            committed_rx.recv().expect("writer committed");
+        });
+        let report = handle(
+            &ctx,
+            GetParams {
+                targets: vec!["doc.md".into()],
+                ..Default::default()
+            },
+        )
+        .expect("handle should succeed");
+        writer.join().expect("writer thread");
+
+        let record = report.records.first().expect("one record");
+        assert_eq!(record.frontmatter.as_ref().unwrap()["generation"], "old");
+        assert_eq!(
+            record
+                .headings
+                .iter()
+                .map(|heading| heading.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Old Heading"],
+            "old document metadata must not mix with new child rows"
         );
     }
 

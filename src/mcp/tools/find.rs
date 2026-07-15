@@ -20,6 +20,32 @@ use crate::cli::{FindArgs, SortPaginateArgs};
 use crate::filter_args::FilterArgs;
 use crate::mcp::context::{RequestScope, VaultContext};
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_SELECTION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_after_selection_hook(hook: impl FnOnce() + 'static) {
+    AFTER_SELECTION_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "find after-selection hook already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_after_selection_hook() {
+    AFTER_SELECTION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
 /// Parameters for `vault.find`.
 ///
 /// Mirrors the agent-relevant slice of `norn find`'s flags: the full find-filter
@@ -207,88 +233,91 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: FindParams) -> Result
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
     let cache = ctx.query_cache(scope)?;
+    cache.read_snapshot(|cache| {
+        // NRN-218: run the ADR 0010 field-universe gate against the warm cache BEFORE
+        // querying, exactly where the direct path gates (`find::run`). A refused
+        // dynamic key crosses back as a `dynamic_field_error` the routed CLI re-emits
+        // byte-identically; the gate is a no-op when the CLI sent no `dynamic_keys`
+        // (the canonical / off-filesystem case), so it costs the happy path nothing.
+        if let Some(refusal) = crate::grammar::gate_dynamic_refusal(
+            cache,
+            &scope.config(),
+            &p.dynamic_keys,
+            crate::grammar::QueryCmd::Find,
+        )? {
+            return Ok(FindOutput {
+                total: 0,
+                returned: 0,
+                truncated: false,
+                starts_at: p.starts_at.unwrap_or(1).max(1),
+                has_diagnostic_errors: false,
+                documents: Vec::new(),
+                dynamic_field_error: Some(refusal),
+            });
+        }
 
-    // NRN-218: run the ADR 0010 field-universe gate against the warm cache BEFORE
-    // querying, exactly where the direct path gates (`find::run`). A refused
-    // dynamic key crosses back as a `dynamic_field_error` the routed CLI re-emits
-    // byte-identically; the gate is a no-op when the CLI sent no `dynamic_keys`
-    // (the canonical / off-filesystem case), so it costs the happy path nothing.
-    if let Some(refusal) = crate::grammar::gate_dynamic_refusal(
-        &cache,
-        &scope.config(),
-        &p.dynamic_keys,
-        crate::grammar::QueryCmd::Find,
-    )? {
-        return Ok(FindOutput {
-            total: 0,
-            returned: 0,
-            truncated: false,
-            starts_at: p.starts_at.unwrap_or(1).max(1),
-            has_diagnostic_errors: false,
-            documents: Vec::new(),
-            dynamic_field_error: Some(refusal),
-        });
-    }
+        let args = FindArgs {
+            filters: FilterArgs {
+                text: p.text,
+                eq: p.eq,
+                not_eq: p.not_eq,
+                r#in: p.r#in,
+                not_in: p.not_in,
+                starts_with: p.starts_with,
+                ends_with: p.ends_with,
+                contains: p.contains,
+                has: p.has,
+                missing: p.missing,
+                before: p.before,
+                after: p.after,
+                on: p.on,
+                path: p.path,
+                links_to: p.links_to,
+                unresolved_links: p.unresolved_links,
+            },
+            // `--all` is a CLI escape hatch gating the missing-predicate help page;
+            // it does not affect query semantics. Set true so the MCP tool never
+            // hits that CLI-only gate — `find::query` does not consult it anyway.
+            all: true,
+            paging: SortPaginateArgs {
+                sort: p.sort,
+                desc: p.desc,
+                // limit: None here means `find::query` applies the CLI default of 10
+                // (see find::query::build_find_query). Honor an explicit limit and
+                // `no_limit` exactly as the CLI does.
+                limit: p.limit,
+                no_limit: p.no_limit,
+                // starts_at default is 1 (1-indexed), matching the CLI flag default.
+                starts_at: p.starts_at.unwrap_or(1),
+            },
+            // `--format` / `--no-pager` are CLI-only output knobs; the MCP tool
+            // always returns the structured document array, so these are irrelevant
+            // to `find::query` (which never renders).
+            format: None,
+            all_cols: p.all_cols,
+            col: p.col,
+            no_pager: false,
+        };
 
-    let args = FindArgs {
-        filters: FilterArgs {
-            text: p.text,
-            eq: p.eq,
-            not_eq: p.not_eq,
-            r#in: p.r#in,
-            not_in: p.not_in,
-            starts_with: p.starts_with,
-            ends_with: p.ends_with,
-            contains: p.contains,
-            has: p.has,
-            missing: p.missing,
-            before: p.before,
-            after: p.after,
-            on: p.on,
-            path: p.path,
-            links_to: p.links_to,
-            unresolved_links: p.unresolved_links,
-        },
-        // `--all` is a CLI escape hatch gating the missing-predicate help page;
-        // it does not affect query semantics. Set true so the MCP tool never
-        // hits that CLI-only gate — `find::query` does not consult it anyway.
-        all: true,
-        paging: SortPaginateArgs {
-            sort: p.sort,
-            desc: p.desc,
-            // limit: None here means `find::query` applies the CLI default of 10
-            // (see find::query::build_find_query). Honor an explicit limit and
-            // `no_limit` exactly as the CLI does.
-            limit: p.limit,
-            no_limit: p.no_limit,
-            // starts_at default is 1 (1-indexed), matching the CLI flag default.
-            starts_at: p.starts_at.unwrap_or(1),
-        },
-        // `--format` / `--no-pager` are CLI-only output knobs; the MCP tool
-        // always returns the structured document array, so these are irrelevant
-        // to `find::query` (which never renders).
-        format: None,
-        all_cols: p.all_cols,
-        col: p.col,
-        no_pager: false,
-    };
-
-    // The WIRE projection (NRN-222): identical per-document JSON to the CLI's
-    // `--format json` except that a document with NO frontmatter block omits
-    // the `frontmatter` key (an empty `---\n---` block keeps `"frontmatter":
-    // null`), so the routed client can rebuild the exact direct-path state.
-    let (documents, envelope) = crate::find::query::query_wire_with_envelope(&cache, &args)?;
-    Ok(FindOutput {
-        total: envelope.total,
-        returned: envelope.returned,
-        truncated: envelope.truncated,
-        starts_at: envelope.starts_at,
-        // The CLI's exit-2 signal (any error-severity diagnostic in the vault),
-        // carried so a routed find reproduces the direct exit code (NRN-222).
-        has_diagnostic_errors: cache.has_diagnostic_errors()?,
-        documents,
-        // No gate refusal on the success path (handled by the early return above).
-        dynamic_field_error: None,
+        // The WIRE projection (NRN-222): identical per-document JSON to the CLI's
+        // `--format json` except that a document with NO frontmatter block omits
+        // the `frontmatter` key (an empty `---\n---` block keeps `"frontmatter":
+        // null`), so the routed client can rebuild the exact direct-path state.
+        let (documents, envelope) = crate::find::query::query_wire_with_envelope(cache, &args)?;
+        #[cfg(test)]
+        run_after_selection_hook();
+        Ok(FindOutput {
+            total: envelope.total,
+            returned: envelope.returned,
+            truncated: envelope.truncated,
+            starts_at: envelope.starts_at,
+            // The CLI's exit-2 signal (any error-severity diagnostic in the vault),
+            // carried so a routed find reproduces the direct exit code (NRN-222).
+            has_diagnostic_errors: cache.has_diagnostic_errors()?,
+            documents,
+            // No gate refusal on the success path (handled by the early return above).
+            dynamic_field_error: None,
+        })
     })
 }
 
@@ -355,6 +384,56 @@ mod tests {
                 "every returned doc is type:note: {doc}"
             );
         }
+    }
+
+    /// NRN-256: one structured find response must bind document selection and
+    /// the later diagnostic query to the same SQLite read generation. The
+    /// writer commits through a second connection while the request is paused
+    /// between those statements; WAL readers must keep seeing the old state.
+    #[test]
+    fn handle_holds_one_snapshot_across_selection_and_diagnostics() {
+        let (_tmp, root) = seeded_vault();
+        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let db_path = {
+            let cache = ctx.query_cache_unscoped().expect("seed query cache");
+            cache.cache_dir.join("cache.db")
+        };
+
+        let (selected_tx, selected_rx) = std::sync::mpsc::sync_channel(0);
+        let (committed_tx, committed_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            selected_rx.recv().expect("selection reached gate");
+            let conn = rusqlite::Connection::open(db_path).expect("open writer connection");
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE documents
+                    SET frontmatter_json = '{\"type\":\"note\",\"title\":\"New Generation\"}'
+                  WHERE path = 'note1.md';
+                 INSERT INTO diagnostics (doc_path, severity, code, message, detail)
+                 VALUES ('note1.md', 'error', 'new-generation', 'new generation', NULL);
+                 COMMIT;",
+            )
+            .expect("commit new cache generation");
+            committed_tx.send(()).expect("release find request");
+        });
+
+        set_after_selection_hook(move || {
+            selected_tx.send(()).expect("release writer");
+            committed_rx.recv().expect("writer committed");
+        });
+        let out = handle(&ctx, FindParams::default()).expect("handle should succeed");
+        writer.join().expect("writer thread");
+
+        let note1 = out
+            .documents
+            .iter()
+            .find(|doc| doc["path"] == "note1.md")
+            .expect("note1 selected");
+        assert_eq!(note1["frontmatter"]["title"], "Note One");
+        assert!(
+            !out.has_diagnostic_errors,
+            "the old document selection must not mix with new diagnostics"
+        );
     }
 
     #[test]

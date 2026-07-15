@@ -70,6 +70,8 @@ pub fn resolve_cache_dir_in(
         .map_err(|e| e.to_string())
 }
 pub(crate) use lock::{acquire_flock, debug_env_usize};
+#[cfg(test)]
+pub(crate) use query_show::set_after_document_row_hook;
 pub(crate) use query_show::{DocumentDeep, IncomingLink};
 
 pub(crate) const SCHEMA_VERSION: u32 = 4;
@@ -120,6 +122,41 @@ pub(crate) struct Cache {
 }
 
 impl Cache {
+    /// Run a structured cache read against one SQLite snapshot.
+    ///
+    /// Callers open/refresh the cache before entering this closure, so freshness
+    /// work never extends the snapshot lifetime. `unchecked_transaction` accepts
+    /// `&Connection`, allowing the existing read primitives to keep taking
+    /// `&Cache`; this transaction is read-only by convention and remains
+    /// WAL-friendly for concurrent writers.
+    pub(crate) fn read_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Self) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        use anyhow::Context as _;
+
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .context("failed to begin cache read snapshot")?;
+        match read(self) {
+            Ok(value) => {
+                transaction
+                    .commit()
+                    .context("failed to close cache read snapshot")?;
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback() {
+                    return Err(error.context(format!(
+                        "failed to roll back cache read snapshot: {rollback_error}"
+                    )));
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Delete the on-disk cache (database + WAL/SHM siblings). Holds the
     /// advisory write lock for the duration. After clear the caller should
     /// drop the `Cache` handle; the next `Cache::open` recreates a fresh

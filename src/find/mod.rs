@@ -78,23 +78,27 @@ pub fn run(
 
     let cache =
         crate::cache_cmd::open_for_query(cwd, &loaded_config.index_options, no_cache_refresh)?;
-    crate::gate_dynamic_query(
-        &cache,
-        loaded_config,
-        dynamic_keys,
-        crate::grammar::QueryCmd::Find,
-    )?;
+    let (selection, has_diagnostic_errors) = cache.read_snapshot(|cache| {
+        crate::gate_dynamic_query(
+            cache,
+            loaded_config,
+            dynamic_keys,
+            crate::grammar::QueryCmd::Find,
+        )?;
 
-    // Shared selection seam: matched docs + deep fetches. The MCP
-    // `vault.find` tool consumes the same `select`/`query` path, so the two
-    // surfaces can't drift on which documents match or what gets fetched.
-    let self::query::Selection { result, deep } = self::query::select(&cache, &args)?;
+        // Shared selection seam: matched docs + deep fetches. The MCP
+        // `vault.find` tool consumes the same `select`/`query` path, so the two
+        // surfaces can't drift on which documents match or what gets fetched.
+        let selection = self::query::select(cache, &args)?;
+        Ok((selection, cache.has_diagnostic_errors()?))
+    })?;
+    let self::query::Selection { result, deep } = selection;
 
     // Shared print seam with the daemon-routed path (`route_find`).
     let palette = crate::output::palette::resolve(color);
     emit(&result, &deep, &args, &palette)?;
 
-    let exit = if cache.has_diagnostic_errors()? { 2 } else { 0 };
+    let exit = if has_diagnostic_errors { 2 } else { 0 };
     Ok(exit)
 }
 
