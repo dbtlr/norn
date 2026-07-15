@@ -34,7 +34,7 @@ norn apply plan.json --out report.json
 5. Re-read each source document and verify its hash and `expected_old_value` checks as its operation class runs.
 6. Write the changes, preserving each document's Markdown body.
 
-`--dry-run` walks steps 1–4 without writing. A precondition failure (hash drift, an `expected_old_value` mismatch, or a failed edit anchor) aborts the apply with an error (stderr, exit 1, no report). Preconditions are verified per operation class before that class writes; the section/body edit ops go further — every target's hash and transform is validated before any edit is written, so the edit batch as a whole either applies or aborts. To re-check the vault after applying, run [`norn validate`](validate.md) as a follow-up.
+`--dry-run` walks steps 1–5 without writing — it performs the hash and `expected_old_value` re-check (step 5), stopping short only of the writes in step 6. A precondition failure (hash drift, an `expected_old_value` mismatch, or a failed edit anchor) aborts the apply with an error (stderr, exit 1, no report). Preconditions are verified per operation class before that class writes; the section/body edit ops go further — every target's hash and transform is validated before any edit is written, so the edit batch as a whole either applies or aborts. To re-check the vault after applying, run [`norn validate`](validate.md) as a follow-up.
 
 ## Plan input
 

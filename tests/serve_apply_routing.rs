@@ -64,6 +64,12 @@ enum PlanKind {
     /// A structurally valid plan with an unsupported `schema_version` → the
     /// CLIENT-side preflight refusal (must NOT route).
     BadVersion,
+    /// An owner-set precondition (NRN-264) whose expected path set does not match
+    /// the on-disk owners → a pre-write REFUSAL carrying a populated
+    /// `preconditions[]`. The routed path must render the SAME full "apply
+    /// refused" report the direct arm does (expected/actual path sets, not-run
+    /// ops), not the envelope-only `emit_refusal`.
+    OwnerMismatch,
 }
 
 /// JSON plan text for `kind`, templated to `vault_root`.
@@ -83,6 +89,10 @@ fn plan_json(kind: PlanKind, vault_root: &str) -> String {
         ),
         PlanKind::MissingFrontmatter => format!(
             r##"{{"schema_version":2,"vault_root":{root},"operations":[{{"kind":"create_document","fields":{{"path":"new.md","new_value":{{"body":"# New\n"}}}}}}]}}"##,
+            root = serde_json::to_string(vault_root).unwrap()
+        ),
+        PlanKind::OwnerMismatch => format!(
+            r##"{{"schema_version":2,"vault_root":{root},"preconditions":[{{"id":"note-owner","kind":"owner_set","selector":{{"stem":"note"}},"expected_paths":["wrong.md"]}}],"operations":[]}}"##,
             root = serde_json::to_string(vault_root).unwrap()
         ),
         PlanKind::BadVersion => format!(
@@ -339,6 +349,27 @@ fn shape_matrix() -> Vec<Shape> {
             2,
             true,
         ),
+        // NRN-264: an owner-set refusal carries a populated `preconditions[]`.
+        // The routed path must render the SAME full "apply refused" report (with
+        // preconditions) the direct arm does — json and records shapes — not the
+        // envelope-only `emit_refusal`. These route (the daemon evaluates the
+        // barrier and crosses the refusal as a report).
+        shape(
+            "json owner-set refusal (with preconditions)",
+            PlanKind::OwnerMismatch,
+            Deliver::File,
+            vec!["--yes", "--format", "json"],
+            2,
+            true,
+        ),
+        shape(
+            "records owner-set refusal (with preconditions)",
+            PlanKind::OwnerMismatch,
+            Deliver::File,
+            vec!["--yes"],
+            2,
+            true,
+        ),
         shape(
             "schema-version mismatch (gated Direct)",
             PlanKind::BadVersion,
@@ -513,6 +544,126 @@ fn routed_out_report_is_byte_identical() {
     assert_eq!(
         served, 1,
         "the --out apply must route once, served {served}"
+    );
+}
+
+/// NRN-264: a routed owner-set MISMATCH renders the FULL refused report (the
+/// `preconditions[]` with expected/actual path sets), byte-identical to the
+/// direct arm, and honors `--out`. Before the fix the routed arm collapsed the
+/// refusal through `emit_refusal` — dropping `preconditions[]` and ignoring
+/// `--out` — so routed and direct diverged.
+#[test]
+fn routed_owner_set_refusal_renders_preconditions_and_honors_out() {
+    let seed = seeded_vault_files();
+    let daemon = spawn_ready_daemon_with_log(&[]);
+
+    let direct_vault = fresh_vault();
+    let routed_vault = fresh_vault();
+    write_vault(direct_vault.path(), &seed);
+    write_vault(routed_vault.path(), &seed);
+
+    // 1. stdout `--format json`: routed report must equal direct byte-for-byte,
+    //    and must carry the populated preconditions.
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    let d_plan = plan_json(PlanKind::OwnerMismatch, &canonical(direct_vault.path()));
+    let (d_out, d_err, d_code) = run_apply(
+        direct_cache.path(),
+        direct_state.path(),
+        direct_vault.path(),
+        &d_plan,
+        Deliver::File,
+        &["--yes", "--format", "json"],
+    );
+    let r_plan = plan_json(PlanKind::OwnerMismatch, &canonical(routed_vault.path()));
+    let (r_out, r_err, r_code) = run_apply(
+        &daemon.cache_home,
+        &daemon.state_home,
+        routed_vault.path(),
+        &r_plan,
+        Deliver::File,
+        &["--yes", "--format", "json"],
+    );
+
+    assert_eq!(
+        d_code,
+        2,
+        "direct owner-set refusal exits 2; stderr: {}",
+        String::from_utf8_lossy(&d_err)
+    );
+    assert_eq!(
+        r_code,
+        2,
+        "routed owner-set refusal exits 2; stderr: {}",
+        String::from_utf8_lossy(&r_err)
+    );
+    assert_eq!(
+        redact(&r_out),
+        redact(&d_out),
+        "routed owner-set refusal stdout must match direct\nrouted: {}\ndirect: {}",
+        String::from_utf8_lossy(&r_out),
+        String::from_utf8_lossy(&d_out),
+    );
+
+    // The full report (not just the envelope) crossed: preconditions[0] carries
+    // the expected/actual path sets, identical between routed and direct.
+    let d_report: serde_json::Value = serde_json::from_slice(&d_out).expect("direct json report");
+    let r_report: serde_json::Value = serde_json::from_slice(&r_out).expect("routed json report");
+    assert_eq!(r_report["outcome"], "refused");
+    assert_eq!(
+        r_report["preconditions"][0]["expected_paths"],
+        serde_json::json!(["wrong.md"]),
+    );
+    assert_eq!(
+        r_report["preconditions"][0]["actual_paths"],
+        serde_json::json!(["note.md"]),
+    );
+    assert_eq!(
+        r_report["preconditions"][0]["expected_paths"],
+        d_report["preconditions"][0]["expected_paths"],
+    );
+    assert_eq!(
+        r_report["preconditions"][0]["actual_paths"],
+        d_report["preconditions"][0]["actual_paths"],
+    );
+
+    // 2. `--out`: the full refused report is WRITTEN to the file on the routed
+    //    path (the direct arm honors --out for a refused report; the routed arm
+    //    must too), byte-identical to direct.
+    let d_out_dir = TempDir::new().unwrap();
+    let d_out_file = d_out_dir.path().join("report.json");
+    let r_out_dir = TempDir::new().unwrap();
+    let r_out_file = r_out_dir.path().join("report.json");
+
+    let direct_cache2 = TempDir::new().unwrap();
+    let direct_state2 = TempDir::new().unwrap();
+    let (_d_stdout, _d_err, d_code) = run_apply(
+        direct_cache2.path(),
+        direct_state2.path(),
+        direct_vault.path(),
+        &d_plan,
+        Deliver::File,
+        &["--yes", "--out", d_out_file.to_str().unwrap()],
+    );
+    let (_r_stdout, _r_err, r_code) = run_apply(
+        &daemon.cache_home,
+        &daemon.state_home,
+        routed_vault.path(),
+        &r_plan,
+        Deliver::File,
+        &["--yes", "--out", r_out_file.to_str().unwrap()],
+    );
+    assert_eq!(d_code, 2, "direct --out refusal exits 2");
+    assert_eq!(r_code, 2, "routed --out refusal exits 2");
+
+    let d_written = std::fs::read(&d_out_file).expect("direct wrote --out report");
+    let r_written = std::fs::read(&r_out_file).expect("routed wrote --out report");
+    assert_eq!(
+        redact(&r_written),
+        redact(&d_written),
+        "routed --out refused report must match direct\nrouted: {}\ndirect: {}",
+        String::from_utf8_lossy(&r_written),
+        String::from_utf8_lossy(&d_written),
     );
 }
 

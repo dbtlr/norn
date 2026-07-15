@@ -91,7 +91,17 @@ pub fn emit(
         {
             return emit_lock_timeout_stash(plan_path, raw, state_dir);
         }
-        return emit_refusal(&report, matches!(format, ApplyFormat::Json));
+        // An owner-set refusal (NRN-264) carries a populated `preconditions[]`
+        // (expected/actual path sets, not-run ops). The direct arm renders that
+        // through the FULL `render_report` — the "apply refused" block WITH the
+        // preconditions, honoring `--out`. `emit_refusal` would drop all of it and
+        // print only the `ApplyError` envelope, breaking this module's routed==
+        // direct byte-for-byte promise. Fall through to the shared render path for
+        // precondition-carrying refusals; keep the plain envelope for envelope-only
+        // refusals (schema / expansion / create-path validation).
+        if !report.preconditions.iter().any(|p| p.error.is_some()) {
+            return emit_refusal(&report, matches!(format, ApplyFormat::Json));
+        }
     }
 
     let exit = report.exit_code();

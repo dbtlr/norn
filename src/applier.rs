@@ -35,7 +35,7 @@ use crate::telemetry::event::{
     ATTR_STATUS, ATTR_TARGET,
 };
 use crate::telemetry::Event;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::{BTreeSet, HashMap};
 
@@ -114,22 +114,33 @@ pub(crate) fn apply_migration_plan(
     sink: &mut crate::telemetry::EventSink,
 ) -> Result<ApplyReport> {
     let vault_root = Utf8PathBuf::from(&plan.vault_root);
-    let canonical_plan_root = vault_root
+    // The index root is the vault actually being operated on, so it always
+    // exists; a canonicalize failure here is a genuine internal error. Like every
+    // pre-write barrier below, cross it through `refuse_plan_level` so the routed/
+    // MCP surface gets a coded, report-shaped refusal rather than a bare Err.
+    let canonical_index_root = match index.root.as_std_path().canonicalize() {
+        Ok(root) => root,
+        Err(e) => {
+            let error = anyhow::Error::new(e)
+                .context(format!("cannot canonicalize vault root {}", index.root));
+            return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
+        }
+    };
+    // The plan's `vault_root` is author-supplied: if it does not canonicalize to
+    // the index root — whether it names a DIFFERENT directory or does not exist at
+    // all — that is a `vault-root-mismatch` refusal. Keep the coded error even
+    // when the plan root can't be canonicalized, so a bare IO failure never
+    // launders it into a generic `internal-error`.
+    let plan_root_matches = vault_root
         .as_std_path()
         .canonicalize()
-        .with_context(|| format!("cannot canonicalize vault root {vault_root}"))?;
-    let canonical_index_root = index
-        .root
-        .as_std_path()
-        .canonicalize()
-        .with_context(|| format!("cannot canonicalize vault root {}", index.root))?;
-    if canonical_plan_root != canonical_index_root {
-        return Err(anyhow::anyhow!(
-            crate::standards::apply::ApplyError::VaultRootMismatch {
-                plan: vault_root,
-                cwd: index.root.clone(),
-            }
-        ));
+        .is_ok_and(|canonical_plan_root| canonical_plan_root == canonical_index_root);
+    if !plan_root_matches {
+        let error = anyhow::anyhow!(crate::standards::apply::ApplyError::VaultRootMismatch {
+            plan: vault_root.clone(),
+            cwd: index.root.clone(),
+        });
+        return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
     }
 
     // ------------------------------------------------------------------
@@ -172,27 +183,43 @@ pub(crate) fn apply_migration_plan(
     // Resolve every create template before the single owner-set barrier. The
     // concrete paths flow into the delegate, so allocation is performed once
     // under the mutation lock and cannot drift between checking and writing.
-    let resolved_creates = resolve_create_paths(
+    // Create-path resolution (`{{seq}}` allocation, vault-root containment,
+    // duplicate op ids, missing stems) is pure and pre-write, so any failure is
+    // provably byte-identical — cross it as a coded refusal on the routed/MCP
+    // surface, exactly like the expand() barrier above.
+    let resolved_creates = match resolve_create_paths(
         plan,
         index,
         &canonical_index_root,
         &mut all_changes,
         &provenance,
-    )?;
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error),
+    };
     let owner_index = if plan.preconditions.is_empty() {
         None
     } else {
-        Some(crate::graph::build_index_with_options(
-            &index.root,
-            &ctx.owner_index_options,
-        )?)
+        match crate::graph::build_index_with_options(&index.root, &ctx.owner_index_options) {
+            Ok(owner_index) => Some(owner_index),
+            Err(error) => {
+                return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error.into())
+            }
+        }
     };
-    let preconditions = evaluate_owner_preconditions(
+    // Owner-precondition VALIDATION errors (duplicate precondition id, empty
+    // stem/eq selector, a `stem_from_operation` referencing a missing/non-create
+    // op) are raised before the barrier writes anything — cross them as coded
+    // refusals too. The owner-set MISMATCH case is Ok(...) and handled below.
+    let preconditions = match evaluate_owner_preconditions(
         plan,
         owner_index.as_ref().unwrap_or(index),
         &resolved_creates.stems_by_operation,
         &resolved_creates.changes_by_stem,
-    )?;
+    ) {
+        Ok(preconditions) => preconditions,
+        Err(error) => return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error),
+    };
     if preconditions
         .iter()
         .any(|precondition| precondition.status == PreconditionStatus::Failed)
@@ -511,12 +538,7 @@ fn evaluate_owner_preconditions(
                                     precondition.id()
                                 );
                             }
-                            index
-                                .documents
-                                .iter()
-                                .filter(|document| document.stem.eq_ignore_ascii_case(stem))
-                                .map(|document| document.path.to_string())
-                                .collect::<Vec<_>>()
+                            scan_by_stem(index, stem)
                         }
                         OwnerSelector::StemFromOperation {
                             stem_from_operation,
@@ -528,12 +550,7 @@ fn evaluate_owner_preconditions(
                                     stem_from_operation
                                 )
                             })?;
-                            index
-                                .documents
-                                .iter()
-                                .filter(|document| document.stem.eq_ignore_ascii_case(stem))
-                                .map(|document| document.path.to_string())
-                                .collect::<Vec<_>>()
+                            scan_by_stem(index, stem)
                         }
                         OwnerSelector::Eq { eq } => {
                             if eq.is_empty() {
@@ -542,20 +559,26 @@ fn evaluate_owner_preconditions(
                                     precondition.id()
                                 );
                             }
+                            // Parse each `field:value` predicate ONCE, before the
+                            // document scan, rather than re-parsing the strings per
+                            // document.
+                            let predicates = eq
+                                .iter()
+                                .map(|predicate| {
+                                    crate::filter_args::parse_field_value(predicate, "owner_set.eq")
+                                })
+                                .collect::<Result<Vec<_>>>()?;
                             index
                                 .documents
                                 .iter()
-                                .filter_map(|document| match document_matches_eq(document, eq) {
-                                    Ok(true) => Some(Ok(document.path.to_string())),
-                                    Ok(false) => None,
-                                    Err(error) => Some(Err(error)),
-                                })
-                                .collect::<Result<Vec<_>>>()?
+                                .filter(|document| document_matches_eq(document, &predicates))
+                                .map(|document| document.path.to_string())
+                                .collect::<Vec<_>>()
                         }
                     };
                     actual_paths.sort();
                     actual_paths.dedup();
-                    let mismatch = expected_paths != actual_paths;
+                    let mismatch = owner_paths_mismatch(&expected_paths, &actual_paths);
                     ApplyReportPrecondition {
                         id: id.clone(),
                         status: if mismatch {
@@ -583,7 +606,7 @@ fn evaluate_owner_preconditions(
     // can both observe an empty on-disk owner set. Refuse that internally
     // contradictory plan at the same barrier instead of letting operation order
     // manufacture duplicates.
-    for (index, precondition) in plan.preconditions.iter().enumerate() {
+    for (position, precondition) in plan.preconditions.iter().enumerate() {
         let PlanPrecondition::OwnerSet {
             selector:
                 OwnerSelector::StemFromOperation {
@@ -602,7 +625,7 @@ fn evaluate_owner_preconditions(
             .get(&normalized_stem)
             .is_some_and(|changes| changes.len() > 1)
         {
-            let result = &mut results[index];
+            let result = &mut results[position];
             result.status = PreconditionStatus::Failed;
             result.error = Some(crate::apply_report::ApplyError {
                 code: "owner-claim-conflict".to_string(),
@@ -618,61 +641,68 @@ fn evaluate_owner_preconditions(
     Ok(results)
 }
 
-fn document_matches_eq(document: &crate::core::Document, eq: &[String]) -> Result<bool> {
+/// Vault-relative paths of every document whose stem matches `stem`, folding
+/// ASCII case (so `Foo` matches a `foo` selector). Shared by the `stem` and
+/// `stem_from_operation` selectors — they differ only in how the `&str` stem is
+/// obtained, so they resolve it and then run this one scan.
+fn scan_by_stem(index: &GraphIndex, stem: &str) -> Vec<String> {
+    index
+        .documents
+        .iter()
+        .filter(|document| document.stem.eq_ignore_ascii_case(stem))
+        .map(|document| document.path.to_string())
+        .collect()
+}
+
+/// True when the expected and actual owner path-sets differ, comparing ASCII
+/// case-insensitively to stay consistent with the `eq_ignore_ascii_case` stem
+/// selection above: an author-supplied `foo.md` and an on-disk `Foo.md` denote
+/// the same owner (and are the same file on a case-insensitive filesystem like
+/// macOS), so they must not spuriously refuse a legitimate apply. Non-ASCII
+/// characters are left unfolded, matching `eq_ignore_ascii_case`'s ASCII-only
+/// scope. Both inputs are already individually sorted+deduped; folding can
+/// reorder or collide entries, so re-normalize before comparing.
+fn owner_paths_mismatch(expected: &[String], actual: &[String]) -> bool {
+    fn folded(paths: &[String]) -> Vec<String> {
+        let mut folded: Vec<String> = paths.iter().map(|p| p.to_ascii_lowercase()).collect();
+        folded.sort();
+        folded.dedup();
+        folded
+    }
+    folded(expected) != folded(actual)
+}
+
+/// True when `document`'s frontmatter satisfies every parsed `field:value`
+/// predicate. Equality routes through `cache::canonical::canonicalize_scalar` —
+/// the SAME canonicalizer the `find --eq` query path binds through — so owner-set
+/// eq and `find --eq` share one tested definition of scalar equality (numbers
+/// compare by SQL affinity: `2` and `2.0` are DISTINCT, matching `find --eq` and
+/// unlike the former hand-rolled `numbers_match`; strings have wikilink brackets
+/// collapsed). An array field matches if ANY element canonicalizes equal, the
+/// same array-awareness the query's `document_fields` rows give `find --eq`.
+fn document_matches_eq(
+    document: &crate::core::Document,
+    predicates: &[(String, serde_json::Value)],
+) -> bool {
     let Some(frontmatter) = document.frontmatter.as_ref() else {
-        return Ok(false);
+        return false;
     };
-    for predicate in eq {
-        let (field, expected) = crate::filter_args::parse_field_value(predicate, "owner_set.eq")?;
-        let Some(actual) = frontmatter.get(&field) else {
-            return Ok(false);
+    for (field, expected) in predicates {
+        let expected_canonical = crate::cache::canonical::canonicalize_scalar(expected);
+        let Some(actual) = frontmatter.get(field) else {
+            return false;
         };
         let matches = match actual {
-            serde_json::Value::Array(values) => values
-                .iter()
-                .any(|value| owner_eq_value_matches(value, &expected)),
-            value => owner_eq_value_matches(value, &expected),
+            serde_json::Value::Array(values) => values.iter().any(|value| {
+                crate::cache::canonical::canonicalize_scalar(value) == expected_canonical
+            }),
+            value => crate::cache::canonical::canonicalize_scalar(value) == expected_canonical,
         };
         if !matches {
-            return Ok(false);
+            return false;
         }
     }
-    Ok(true)
-}
-
-fn owner_eq_value_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
-    match (actual, expected) {
-        (serde_json::Value::String(actual), serde_json::Value::String(expected)) => {
-            strip_wikilink_brackets(actual) == strip_wikilink_brackets(expected)
-        }
-        (serde_json::Value::Number(actual), serde_json::Value::Number(expected)) => {
-            numbers_match(actual, expected)
-        }
-        _ => actual == expected,
-    }
-}
-
-fn numbers_match(actual: &serde_json::Number, expected: &serde_json::Number) -> bool {
-    let integer = |number: &serde_json::Number| {
-        number
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| number.as_u64().map(i128::from))
-    };
-    match (integer(actual), integer(expected)) {
-        (Some(actual), Some(expected)) => actual == expected,
-        (Some(integer), None) => expected.as_f64().is_some_and(|float| {
-            float.is_finite() && float.fract() == 0.0 && float as i128 == integer
-        }),
-        (None, Some(integer)) => actual.as_f64().is_some_and(|float| {
-            float.is_finite() && float.fract() == 0.0 && float as i128 == integer
-        }),
-        (None, None) => actual.as_f64() == expected.as_f64(),
-    }
-}
-
-fn strip_wikilink_brackets(value: &str) -> String {
-    value.replace("[[", "").replace("]]", "")
+    true
 }
 
 struct ResolvedCreatePaths {
@@ -885,6 +915,34 @@ fn build_refusal_report(
 /// structured `error` envelope. `outcome = refused` (exit 2). Mirrors
 /// [`build_refusal_report`] but keys off `plan.operations` rather than expanded
 /// changes, since expansion is exactly what failed.
+/// Cross a PRE-WRITE, plan-level refusal (vault-root containment, create-path
+/// resolution, owner-precondition validation) the same way the expand() barrier
+/// does: under `refuse_as_report` (the daemon/MCP surface, ADR 0011) return a
+/// coded, report-shaped refusal so a routed apply reconstructs the exact exit-2
+/// refusal the direct arm renders; otherwise (the CLI) propagate the bare `Err`
+/// so the arm renders the structured envelope itself and exits 2. `error` already
+/// carries its stable coded form (`ApplyError::from_anyhow` recovers the typed
+/// `vault-root-mismatch` / `containment-*` codes; anything else is
+/// `internal-error` + the `{e:#}` message, exactly what the CLI's `Err` path
+/// renders).
+fn refuse_plan_level(
+    plan: &MigrationPlan,
+    dry_run: bool,
+    refuse_as_report: bool,
+    error: anyhow::Error,
+) -> Result<ApplyReport> {
+    if refuse_as_report {
+        Ok(build_plan_refusal_report(
+            plan,
+            dry_run,
+            0,
+            crate::apply_report::ApplyError::from_anyhow(&error),
+        ))
+    } else {
+        Err(error)
+    }
+}
+
 fn build_plan_refusal_report(
     plan: &MigrationPlan,
     dry_run: bool,
@@ -893,7 +951,7 @@ fn build_plan_refusal_report(
 ) -> ApplyReport {
     use crate::apply_report::ApplyOutcome;
 
-    let ops: Vec<ApplyReportOp> = plan
+    let mut ops: Vec<ApplyReportOp> = plan
         .operations
         .iter()
         .enumerate()
@@ -918,6 +976,26 @@ fn build_plan_refusal_report(
             }
         })
         .collect();
+
+    // A refused report MUST carry a coded error (reconstruct_wire_report enforces
+    // it). A preconditions-only plan (zero operations, e.g. a vault-root or
+    // owner-validation refusal) — or an out-of-range `failed_op_idx` — would
+    // otherwise mark no op failed and lose the code, so synthesize one failed op.
+    if !ops.iter().any(|op| op.status == OpStatus::Failed) {
+        ops.push(ApplyReportOp {
+            op_id: ops.len().to_string(),
+            kind: "apply".to_string(),
+            status: OpStatus::Failed,
+            from: None,
+            path: envelope.path.clone(),
+            stem: None,
+            summary: envelope.message.clone(),
+            error: Some(envelope.clone()),
+            footnote: None,
+            cascade: None,
+            link_impact: None,
+        });
+    }
 
     let failed = ops.iter().filter(|o| o.status == OpStatus::Failed).count();
     let remaining = ops.iter().filter(|o| o.status == OpStatus::NotRun).count();
@@ -2348,6 +2426,279 @@ mod tests {
             std::fs::read_to_string(root.join("doc.md")).unwrap(),
             doc,
             "file must be byte-identical after the refusal"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // NRN-264 re-review FIX #1: the three PRE-WRITE barriers between expansion
+    // and the owner-set evaluation (vault-root containment, create-path
+    // resolution, owner-precondition validation) must ALSO honor
+    // `refuse_as_report`, crossing as coded, report-shaped refusals on the
+    // routed/MCP surface — not escaping as bare transport errors — while the CLI
+    // surface (`refuse_as_report: false`) keeps propagating the bare `Err`.
+    // ------------------------------------------------------------------
+
+    fn refuse_report_ctx(refuse_as_report: bool) -> ApplyContext {
+        ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+            refuse_as_report,
+            owner_index_options: Default::default(),
+        }
+    }
+
+    /// (i) A `create_document` path with a `..` component is a pre-write
+    /// containment refusal. Routed: `Ok(refused)` carrying `containment-parent-
+    /// traversal`. CLI: bare `Err`.
+    #[test]
+    fn create_path_parent_traversal_refuses_as_report_under_refuse_as_report() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations: vec![MigrationOp {
+                kind: "create_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({
+                    "path": "../escape.md",
+                    "new_value": { "frontmatter": { "type": "note" }, "body": "# X\n" }
+                }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+
+        let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
+            .expect("a pre-write create-path refusal must return a report, not Err");
+        assert_eq!(report.outcome, crate::apply_report::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        let err = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .expect("refused report carries a coded error");
+        assert_eq!(err.code, "containment-parent-traversal");
+        // Byte-identical: nothing escaped the vault.
+        assert!(!tmp.path().join("escape.md").exists());
+        assert!(!tmp.path().parent().unwrap().join("escape.md").exists());
+
+        // CLI surface: bare Err.
+        let err = apply_migration_plan(&plan, &index, refuse_report_ctx(false), &mut test_sink())
+            .expect_err("the CLI surface keeps propagating the bare Err");
+        assert_eq!(
+            crate::apply_report::ApplyError::from_anyhow(&err).code,
+            "containment-parent-traversal"
+        );
+    }
+
+    /// (ii) A `{{seq}}`-twice create template is a pre-write create-path
+    /// resolution refusal (bare anyhow → `internal-error`). Routed: `Ok(refused)`;
+    /// CLI: bare `Err`.
+    #[test]
+    fn create_path_double_seq_refuses_as_report_under_refuse_as_report() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations: vec![MigrationOp {
+                kind: "create_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({
+                    "path": "MMR-{{seq}}-{{seq}}.md",
+                    "new_value": { "frontmatter": { "type": "note" }, "body": "# X\n" }
+                }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+
+        let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
+            .expect("a `{{seq}}`-twice refusal must return a report, not Err");
+        assert_eq!(report.outcome, crate::apply_report::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        let err = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .expect("refused report carries a coded error");
+        assert_eq!(err.code, "internal-error");
+        assert!(
+            err.message.contains("only supported once"),
+            "message carries the bare error prose: {}",
+            err.message
+        );
+
+        // CLI surface: bare Err with the same prose.
+        let err = apply_migration_plan(&plan, &index, refuse_report_ctx(false), &mut test_sink())
+            .expect_err("the CLI surface keeps propagating the bare Err");
+        assert!(err.to_string().contains("only supported once"));
+    }
+
+    /// (iii) A `stem_from_operation` selector referencing an op id no create
+    /// operation carries is an owner-precondition VALIDATION refusal (bare anyhow
+    /// → `internal-error`). Routed: `Ok(refused)`; CLI: bare `Err`. (The owner-set
+    /// MISMATCH path is already `Ok(refused)` on both surfaces.)
+    #[test]
+    fn owner_precondition_bad_op_ref_refuses_as_report_under_refuse_as_report() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            preconditions: vec![crate::migration_plan::PlanPrecondition::OwnerSet {
+                id: "owner".into(),
+                selector: crate::migration_plan::OwnerSelector::StemFromOperation {
+                    stem_from_operation: "does-not-exist".into(),
+                },
+                expected_paths: vec![],
+            }],
+            operations: vec![MigrationOp {
+                kind: "create_document".into(),
+                id: Some("create-real".into()),
+                requires: vec![],
+                fields: serde_json::json!({
+                    "path": "made.md",
+                    "new_value": { "frontmatter": { "type": "note" }, "body": "# X\n" }
+                }),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+
+        let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
+            .expect("an owner-precondition validation refusal must return a report, not Err");
+        assert_eq!(report.outcome, crate::apply_report::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        let err = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .expect("refused report carries a coded error");
+        assert_eq!(err.code, "internal-error");
+        assert!(
+            err.message.contains("missing or non-create operation"),
+            "message carries the bare error prose: {}",
+            err.message
+        );
+        // Byte-identical: no doc was created.
+        assert!(!tmp.path().join("made.md").exists());
+
+        // CLI surface: bare Err.
+        let err = apply_migration_plan(&plan, &index, refuse_report_ctx(false), &mut test_sink())
+            .expect_err("the CLI surface keeps propagating the bare Err");
+        assert!(err.to_string().contains("missing or non-create operation"));
+    }
+
+    /// (iv) A plan whose `vault_root` does not resolve to the index root is a
+    /// pre-write `vault-root-mismatch` refusal. Routed: `Ok(refused)` KEEPING the
+    /// `vault-root-mismatch` code even for a nonexistent plan root (a bare
+    /// canonicalize failure must not launder it to `internal-error`). CLI: bare
+    /// `Err`.
+    #[test]
+    fn vault_root_mismatch_refuses_as_report_under_refuse_as_report() {
+        let (tmp, index) = synth_vault();
+        // A plan root that does not exist on disk (so canonicalize() itself fails).
+        let bogus_root = tmp.path().join("nonexistent-vault");
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root: bogus_root.to_string_lossy().to_string(),
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations: vec![MigrationOp {
+                kind: "move_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({"src": "a.md", "dst": "renamed.md"}),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+
+        let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
+            .expect("a vault-root-mismatch must return a report, not Err");
+        assert_eq!(report.outcome, crate::apply_report::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        let err = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .expect("refused report carries a coded error");
+        assert_eq!(
+            err.code, "vault-root-mismatch",
+            "a nonexistent plan root keeps the vault-root-mismatch code"
+        );
+        // Byte-identical: the real vault is untouched.
+        assert!(tmp.path().join("a.md").exists());
+        assert!(!tmp.path().join("renamed.md").exists());
+
+        // CLI surface: bare Err carrying the same code.
+        let err = apply_migration_plan(&plan, &index, refuse_report_ctx(false), &mut test_sink())
+            .expect_err("the CLI surface keeps propagating the bare Err");
+        assert_eq!(
+            crate::apply_report::ApplyError::from_anyhow(&err).code,
+            "vault-root-mismatch"
+        );
+    }
+
+    /// NRN-264 re-review FIX #5: the expected-vs-actual owner path-set comparison
+    /// folds ASCII case to stay consistent with the `eq_ignore_ascii_case` stem
+    /// selection — an on-disk `Foo.md` with a `foo` stem selector and an
+    /// author-supplied expected `foo.md` MATCHES (passes), rather than spuriously
+    /// refusing over the case difference.
+    #[test]
+    fn owner_set_stem_expected_path_is_case_insensitive() {
+        let tmp = tempfile::Builder::new()
+            .prefix("applier-nrn264-case-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Foo.md"), "---\ntype: note\n---\n# Foo\n").unwrap();
+        let index = crate::graph::build_index(Utf8Path::from_path(root).unwrap()).unwrap();
+
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root: root.to_string_lossy().to_string(),
+            generator: None,
+            generated_at: None,
+            preconditions: vec![crate::migration_plan::PlanPrecondition::OwnerSet {
+                id: "foo-owner".into(),
+                selector: crate::migration_plan::OwnerSelector::Stem { stem: "foo".into() },
+                // Author-supplied lowercase path vs the on-disk `Foo.md`.
+                expected_paths: vec!["foo.md".into()],
+            }],
+            operations: Vec::new(),
+            skipped: vec![],
+            plan_footnote: None,
+        };
+
+        let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
+            .expect("apply returns a report");
+        assert_eq!(
+            report.outcome,
+            crate::apply_report::ApplyOutcome::Applied,
+            "a case-only path difference must not refuse; report: {report:?}"
+        );
+        assert_eq!(
+            report.preconditions[0].status,
+            crate::apply_report::PreconditionStatus::Passed
         );
     }
 }
