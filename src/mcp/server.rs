@@ -1279,15 +1279,11 @@ mod tests {
         );
     }
 
-    /// Read-during-write snapshot honesty: while a post-apply increment commit is
-    /// parked mid-chunks (all file chunks committed, before the op resolves), a
-    /// concurrent warm read through the server succeeds, sees a consistent committed
-    /// snapshot, and completes WITHOUT waiting for the writer — the read serves off
-    /// its own pooled (WAL) connection while the write connection is idle at the
-    /// gate. Proven by construction: the read returns before the gate is released,
-    /// so it never depended on the parked writer.
+    /// A public read arriving while an older increment is parked in TEMP triggers
+    /// a liveness refresh. That refresh publishes the newer disk snapshot and
+    /// supersedes the old staged job, which can never overwrite it afterward.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn warm_read_during_a_gated_increment_sees_consistent_state_without_waiting() {
+    async fn warm_read_preempts_and_supersedes_an_older_staged_increment() {
         use crate::mcp::writer_queue::Outcome;
         use std::time::Duration;
 
@@ -1329,37 +1325,59 @@ mod tests {
         let (reached, release) = ctx.install_increment_gate(&generation);
         let handle = ctx.test_submit_increment_commit(&generation, &changed);
 
-        // Boundary 1: delta committed (cache == 4, disk == 5). Release to the next.
+        // Boundary 1: delta is staged only; main remains the old three-doc snapshot.
         reached.recv().expect("increment boundary 1");
-        release.send(()).unwrap();
-        // Boundary 2: epsilon committed too, so cache == disk == 5, but the op is
-        // still parked here — the write connection is idle at the gate.
-        reached.recv().expect("increment boundary 2");
 
-        // A concurrent warm read now probes Fresh (cache == disk) and serves off its
-        // own pooled connection — it must NOT block on the parked writer. The
-        // timeout turns a wrong "it waits" into a fast failure instead of a hang.
-        let read = tokio::time::timeout(
-            Duration::from_secs(10),
-            server.run_wrapped(tool_names::COUNT, |ctx, scope| {
-                body_doc_count(ctx, scope).map(Json)
-            }),
-        )
+        // Advance disk beyond the staged parse. The public read must refresh to
+        // this six-doc state, not let the older five-doc staging publish later.
+        std::fs::write(root.join("zeta.md"), "---\ntype: note\n---\nZeta\n").unwrap();
+        let arrivals_base = ctx.current_refresh_arrivals();
+        let read_server = server.clone();
+        let read = tokio::spawn(async move {
+            read_server
+                .run_wrapped(tool_names::COUNT, |ctx, scope| {
+                    body_doc_count(ctx, scope).map(Json)
+                })
+                .await
+        });
+
+        let ctx_wait = Arc::clone(&ctx);
+        tokio::task::spawn_blocking(move || {
+            while ctx_wait.current_refresh_arrivals() < arrivals_base + 1 {
+                std::thread::yield_now();
+            }
+        })
         .await
-        .expect("read must not wait on the parked writer (fresh probe serves it)")
-        .expect("concurrent read succeeds");
+        .unwrap();
+
+        // Release the bulk boundary. Queue priority runs the read's refresh
+        // before the next bulk chunk; successful refresh discards the old job.
+        release.send(()).unwrap();
+        let read = tokio::time::timeout(Duration::from_secs(10), read)
+            .await
+            .expect("the preempting refresh must complete")
+            .expect("read task must not panic")
+            .expect("concurrent read succeeds");
         assert_eq!(
             read.inner().0,
-            5,
-            "the read sees a consistent committed snapshot (all five docs), no torn read"
+            6,
+            "the read sees the complete newer refresh snapshot"
         );
 
-        // Only NOW release the final boundary — proof the read completed while the
-        // writer was still parked, i.e. without waiting for it.
-        release.send(()).unwrap();
         assert!(
             matches!(handle.wait(), Outcome::Done(Ok(()))),
-            "the increment commit still completes cleanly after the read"
+            "the superseded increment finishes cleanly without publishing"
+        );
+        let count = server
+            .run_wrapped(tool_names::COUNT, |ctx, scope| {
+                body_doc_count(ctx, scope).map(Json)
+            })
+            .await
+            .expect("post-supersession read succeeds");
+        assert_eq!(
+            count.inner().0,
+            6,
+            "the old staged job must never overwrite the newer refreshed main state"
         );
     }
 

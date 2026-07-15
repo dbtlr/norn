@@ -57,6 +57,23 @@ fn field_row_values(frontmatter: Option<&serde_json::Value>, field: &str) -> Vec
     }
 }
 
+/// Expand one document's declared frontmatter fields into their canonical EAV
+/// rows. The incremental publisher uses this same authority while staging rows
+/// in TEMP, so its eventual publication cannot drift from rebuild/re-shred
+/// semantics.
+pub(crate) fn expanded_rows(
+    frontmatter: Option<&serde_json::Value>,
+    index_set: &BTreeSet<String>,
+) -> Vec<(String, SqlValue)> {
+    let mut rows = Vec::new();
+    for field in index_set {
+        for value in field_row_values(frontmatter, field) {
+            rows.push((field.clone(), value));
+        }
+    }
+    rows
+}
+
 /// Delete every `document_fields` row for `path`. Callers rewriting a
 /// document's rows call this before `insert_rows`; callers dropping a
 /// document entirely (delete/move/rename) call this alone.
@@ -76,13 +93,11 @@ pub(crate) fn insert_rows(
     frontmatter: Option<&serde_json::Value>,
     index_set: &BTreeSet<String>,
 ) -> Result<(), CacheError> {
-    for field in index_set {
-        for value in field_row_values(frontmatter, field) {
-            tx.execute(
-                "INSERT INTO document_fields (path, key, value) VALUES (?, ?, ?)",
-                params![path, field, value],
-            )?;
-        }
+    for (field, value) in expanded_rows(frontmatter, index_set) {
+        tx.execute(
+            "INSERT INTO document_fields (path, key, value) VALUES (?, ?, ?)",
+            params![path, field, value],
+        )?;
     }
     Ok(())
 }

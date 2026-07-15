@@ -157,6 +157,7 @@ impl crate::cache::Cache {
             index_set: index_set.clone(),
             index_set_hash: index_set_hash.to_string(),
             index_authoritative: true,
+            increment_publication_epoch: 0,
         })
     }
 
@@ -245,6 +246,7 @@ fn open_impl(
                     index_set: index_set.clone(),
                     index_set_hash: index_set_hash.to_string(),
                     index_authoritative: authoritative,
+                    increment_publication_epoch: 0,
                 });
             }
             InspectResult::RebuildNeeded(reason) => {
@@ -446,6 +448,7 @@ fn open_fresh(
         index_set: identity.index_set.clone(),
         index_set_hash: identity.index_set_hash.to_string(),
         index_authoritative: identity.authoritative,
+        increment_publication_epoch: 0,
     })
 }
 

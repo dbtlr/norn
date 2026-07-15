@@ -148,12 +148,13 @@
 //! [`VaultContext::commit_apply_increments`], which parses the whole vault ONCE
 //! **on the request thread** (no lock, off the writer thread — NRN-252 review)
 //! into an `IncrementCommit`, then runs the commit as ONE **bulk** op on the
-//! per-vault writer queue — a chunked closure that only commits row updates in
-//! file-coherent chunks (~50ms each, WriteLock per chunk) and a final global
-//! links rewrite, guarded by a `still_valid` predicate that drops the op if the
-//! generation dies. Doing the parse on the request thread keeps every writer-queue
-//! chunk bounded, so a liveness refresh queued behind the commit is not stalled
-//! O(parse). The tool AWAITS it, so the report returns with the cache current.
+//! per-vault writer queue — a chunked closure that stages job-scoped document rows
+//! and the full resolved links set in non-shadowing TEMP tables (~50ms chunks),
+//! yields once more at ready-to-publish, then swaps all affected main rows in one
+//! short transaction. A `still_valid` predicate drops the op if the generation
+//! dies. Doing the parse on the request thread keeps every writer-queue chunk
+//! bounded, so a liveness refresh queued behind the commit is not stalled O(parse).
+//! The tool AWAITS it, so the report returns with the cache current.
 //! Without this, the next read's freshness refresh would pay a full detect scan
 //! AND a whole-vault rebuild (changes exist); with it, that refresh finds zero
 //! changes. Failure is degraded, never propagated — the mutation already landed
@@ -418,9 +419,9 @@ pub(crate) struct Generation {
     #[cfg(test)]
     last_refresh_report: Mutex<Option<crate::cache::IndexReport>>,
     /// Test-only: a reusable gate the increment-commit op signals + waits on at
-    /// EACH chunk boundary (after a chunk commits, before the next), so a test can
-    /// observe intermediate committed state, interleave a liveness op, or turn the
-    /// generation stale mid-commit — all without sleeps.
+    /// EACH chunk boundary (after TEMP staging, before the next entry), so a test
+    /// can observe main staying old, interleave a liveness op, or turn the
+    /// generation stale mid-stage — all without sleeps.
     #[cfg(test)]
     increment_gate: Mutex<Option<TestGate>>,
 }
@@ -971,7 +972,7 @@ impl RefreshArrival {
 ///   cleared) and BEFORE its scan, so a test can hold a refresh "in flight" while
 ///   a new requester arrives;
 /// - the increment-commit gate (`increment_gate`) is REUSABLE — the commit op
-///   hits it at EVERY chunk boundary (after a chunk commits, before the next), so
+///   hits it at EVERY chunk boundary (after TEMP staging, before the next), so
 ///   a test can step a multi-chunk commit one boundary at a time.
 ///
 /// In both: `reached.recv()` unblocks when the op reaches the gate; the test
@@ -1062,7 +1063,14 @@ fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<R
             .write_cache
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let report = write_cache.index_incremental(vault_root, &ChangeDetectOptions::default());
+        let report =
+            match write_cache.index_incremental(vault_root, &ChangeDetectOptions::default()) {
+                Ok(report) => match write_cache.supersede_staged_increments_after_refresh() {
+                    Ok(()) => Ok(report),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
         // Test-only: capture the report so the NRN-158 acceptance test can assert
         // it is empty (zero changes ⇒ no whole-vault rebuild) after an increment.
         #[cfg(test)]
@@ -1083,12 +1091,12 @@ fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<R
 ///
 /// It is a chunked closure driving an ALREADY-PARSED [`IncrementCommit`] (the
 /// whole-vault parse ran on the caller thread, off the writer thread — NRN-252
-/// review): each invocation commits ONE file-coherent chunk (or the final global
-/// links rewrite). Each chunk acquires and releases the WriteLock around its own
-/// transaction, so external CLI processes and this daemon's liveness ops
-/// interleave at boundaries. Returns [`ChunkOutcome::More`] while work remains,
-/// [`ChunkOutcome::Done`] with the terminal `Result` on completion or the first
-/// chunk error.
+/// review): bulk invocations stage one bounded chunk in connection-private TEMP;
+/// the terminal invocation alone acquires the WriteLock and publishes all main
+/// rows atomically. External CLI processes and this daemon's liveness ops can
+/// interleave at every staging boundary, including immediately before publish.
+/// Returns [`ChunkOutcome::More`] while work remains, [`ChunkOutcome::Done`] with
+/// the terminal `Result` on completion or the first chunk error.
 fn run_increment_chunk(
     generation: &Generation,
     vault_root: &Utf8Path,
@@ -1777,6 +1785,28 @@ impl VaultContext {
             return;
         };
 
+        // Reserve publication authority on the dedicated writer connection
+        // BEFORE parsing. A refresh can now supersede this job even during the
+        // parse/pre-first-chunk window, and an external publication changes the
+        // baseline captured by the reservation.
+        let reservation = match self.submit_increment_reservation(slot, &generation).wait() {
+            Outcome::Done(Ok(reservation)) => reservation,
+            Outcome::Done(Err(error)) => {
+                let err: anyhow::Error = error.into();
+                self.evict_generation_on_corruption(generation.number, &err);
+                self.note_both_surfaces(scope, INCREMENT_FAILED_NOTE);
+                return;
+            }
+            Outcome::Dropped => {
+                self.note_both_surfaces(scope, INCREMENT_DROPPED_NOTE);
+                return;
+            }
+            Outcome::Panicked => {
+                self.note_both_surfaces(scope, INCREMENT_PANICKED_NOTE);
+                return;
+            }
+        };
+
         // Build the whole-vault parse (the IncrementCommit driver) HERE, on the
         // request's spawn_blocking thread (post-apply, under the mutation lock),
         // NOT on the writer thread (NRN-252 review). The parse is O(vault) and
@@ -1790,9 +1820,11 @@ impl VaultContext {
             changed_paths,
             generation.index_identity.alias_field.as_deref(),
             &generation.index_identity.ignore,
+            &reservation,
         ) {
             Ok(commit) => commit,
             Err(error) => {
+                self.discard_increment_reservation(slot, &generation, reservation);
                 // The parse failed, but the mutation ALREADY landed on disk — so
                 // degrade rather than fail the tool: the next read's refresh heals
                 // the cache. A corruption-class parse error still evicts +
@@ -1827,6 +1859,40 @@ impl VaultContext {
         }
     }
 
+    fn submit_increment_reservation(
+        &self,
+        slot: &WarmSlot,
+        generation: &Arc<Generation>,
+    ) -> Handle<Result<crate::cache::IncrementReservation, CacheError>> {
+        let generation = Arc::clone(generation);
+        slot.queue.submit_liveness(move || {
+            generation
+                .write_cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .reserve_increment_commit()
+        })
+    }
+
+    fn discard_increment_reservation(
+        &self,
+        slot: &WarmSlot,
+        generation: &Arc<Generation>,
+        reservation: crate::cache::IncrementReservation,
+    ) {
+        let generation = Arc::clone(generation);
+        let _ = slot
+            .queue
+            .submit_liveness(move || {
+                generation
+                    .write_cache
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .discard_increment_reservation(&reservation)
+            })
+            .wait();
+    }
+
     /// Emit an operator note on BOTH surfaces (NRN-215 pattern): the daemon's own
     /// stderr keeps the signal for an operator tailing `norn serve`, and the
     /// per-request note buffer carries it to the caller (forwarded by
@@ -1842,9 +1908,9 @@ impl VaultContext {
     /// PARSED `commit` chunk by chunk, and return its queue handle. The op runs
     /// `'static` on the writer thread, so it captures owned / `Arc` state; the
     /// whole-vault parse already happened on the caller thread (NRN-252 review),
-    /// so the op only ever commits file-coherent chunks (each: lock → tx →
-    /// commit) plus the final links rewrite — every chunk bounded, preemptible by
-    /// a liveness op at its boundary.
+    /// so the op only stages bounded TEMP chunks before one terminal atomic
+    /// publication — every staging chunk preemptible by a liveness op at its
+    /// boundary.
     fn submit_increment_commit(
         &self,
         slot: &WarmSlot,
@@ -2148,7 +2214,7 @@ impl VaultContext {
 
     /// Test-only: install a per-chunk gate on `generation`'s increment op and hand
     /// back the test's `(reached_rx, release_tx)` ends. The op signals `reached`
-    /// after each chunk commits and blocks on `release`, so a test steps a
+    /// after each TEMP chunk (and at ready-to-publish) and blocks on `release`, so a test steps a
     /// multi-chunk commit one boundary at a time.
     #[cfg(test)]
     pub(crate) fn install_increment_gate(
@@ -2179,13 +2245,18 @@ impl VaultContext {
     ) -> Handle<Result<(), CacheError>> {
         match &self.mode {
             Mode::Warm(slot) => {
-                // Mirror `commit_apply_increments`: parse on THIS (test) thread,
-                // then submit the prebuilt driver.
+                // Mirror `commit_apply_increments`: reserve on the writer, parse
+                // on THIS (test) thread, then submit the prebuilt driver.
+                let reservation = match self.submit_increment_reservation(slot, generation).wait() {
+                    Outcome::Done(Ok(reservation)) => reservation,
+                    other => panic!("test increment reservation failed: {other:?}"),
+                };
                 let commit = crate::cache::Cache::begin_increment_commit(
                     &self.vault_root,
                     changed_paths,
                     generation.index_identity.alias_field.as_deref(),
                     &generation.index_identity.ignore,
+                    &reservation,
                 )
                 .expect("test increment parse should succeed");
                 self.submit_increment_commit(slot, generation, commit)
@@ -4820,11 +4891,10 @@ mod tests {
         );
     }
 
-    /// File coherence: with a 0ms budget forcing one file per chunk, a file
-    /// present mid-stream carries its new content in full, and a not-yet-committed
-    /// file is entirely absent — never a mix.
+    /// Atomic publication: every staging boundary exposes the entire old main
+    /// snapshot; only the terminal short transaction switches readers to new.
     #[test]
-    fn increment_commits_files_coherently_across_chunks() {
+    fn increment_publishes_all_files_atomically_after_staging() {
         // 0ms budget ⇒ one whole file per chunk. Process-global but inert: it only
         // makes other increments chunk more finely, never changes correctness.
         std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
@@ -4850,31 +4920,49 @@ mod tests {
         let (reached, release) = ctx.install_increment_gate(&generation);
         let handle = ctx.test_submit_increment_commit(&generation, &changed);
 
-        // Boundary 1: alpha's chunk committed; delta's has NOT started.
+        // Boundary 1: alpha is staged, but main is still entirely old.
         reached.recv().expect("boundary 1");
         {
             let cache = generation.test_read_conn();
             assert!(
                 body_of(&cache, "alpha.md")
                     .as_deref()
-                    .is_some_and(|b| b.contains("REVISED")),
-                "alpha must be fully swapped to its new body at boundary 1"
+                    .is_some_and(|b| b.contains("Alpha body")),
+                "alpha must remain old while staging"
             );
             assert!(
                 !doc_present(&cache, "delta.md"),
-                "delta must be ABSENT until its own chunk commits (file coherence)"
+                "delta must remain absent while staging"
             );
         }
         release.send(()).unwrap();
 
-        // Boundary 2: delta's chunk committed.
+        // Boundary 2: all document rows are staged; main is still old.
         reached.recv().expect("boundary 2");
         {
             let cache = generation.test_read_conn();
             assert!(
-                doc_present(&cache, "delta.md"),
-                "delta present after its own chunk commits"
+                body_of(&cache, "alpha.md")
+                    .as_deref()
+                    .is_some_and(|b| b.contains("Alpha body")),
+                "alpha must remain old until terminal publication"
             );
+            assert!(
+                !doc_present(&cache, "delta.md"),
+                "delta must remain absent until terminal publication"
+            );
+        }
+        release.send(()).unwrap();
+
+        // Boundary 3 is the explicit ready-to-publish yield. Even here readers
+        // still see the complete old snapshot.
+        reached.recv().expect("ready-to-publish boundary");
+        {
+            let cache = generation.test_read_conn();
+            assert!(body_of(&cache, "alpha.md")
+                .as_deref()
+                .is_some_and(|b| b.contains("Alpha body")));
+            assert!(!doc_present(&cache, "delta.md"));
         }
         release.send(()).unwrap();
 
@@ -4882,10 +4970,79 @@ mod tests {
             matches!(handle.wait(), Outcome::Done(Ok(()))),
             "the increment commit must complete cleanly"
         );
+        {
+            let cache = generation.test_read_conn();
+            assert!(
+                body_of(&cache, "alpha.md")
+                    .as_deref()
+                    .is_some_and(|b| b.contains("REVISED")),
+                "terminal publication switches alpha to new"
+            );
+            assert!(
+                doc_present(&cache, "delta.md"),
+                "terminal publication adds delta in the same snapshot"
+            );
+        }
         assert_eq!(
             ctx.detect_change_count(),
             0,
             "a completed increment leaves detect empty"
+        );
+    }
+
+    /// Reservation closes the pre-first-chunk authority window: a successful
+    /// refresh on the SAME dedicated writer connection after parsing invalidates
+    /// the reservation, so the older driver completes without publishing.
+    #[test]
+    fn refresh_between_increment_parse_and_first_chunk_supersedes_reservation() {
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        ctx.begin_request().expect("begin_request");
+        {
+            let cache = ctx.query_cache_unscoped().expect("query_cache");
+            assert_eq!(doc_count(&cache), 3);
+        }
+        let generation = ctx.current_generation().expect("current generation");
+        let Mode::Warm(slot) = &ctx.mode else {
+            unreachable!()
+        };
+
+        let reservation = match ctx.submit_increment_reservation(slot, &generation).wait() {
+            Outcome::Done(Ok(reservation)) => reservation,
+            other => panic!("reservation failed: {other:?}"),
+        };
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntype: note\n---\nOLDER PARSED BODY\n",
+        )
+        .unwrap();
+        let commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["alpha.md".into()],
+            generation.index_identity.alias_field.as_deref(),
+            &generation.index_identity.ignore,
+            &reservation,
+        )
+        .expect("parse older increment");
+
+        std::fs::write(
+            root.join("alpha.md"),
+            "---\ntype: note\n---\nNEWER REFRESH BODY\n",
+        )
+        .unwrap();
+        assert!(matches!(ctx.test_refresh_current(), RefreshOutcome::Served));
+
+        assert!(matches!(
+            ctx.submit_increment_commit(slot, &generation, commit)
+                .wait(),
+            Outcome::Done(Ok(()))
+        ));
+        let cache = generation.test_read_conn();
+        assert!(
+            body_of(&cache, "alpha.md")
+                .as_deref()
+                .is_some_and(|body| body.contains("NEWER REFRESH BODY")),
+            "the older parsed driver must not overwrite the newer refresh"
         );
     }
 
@@ -4929,6 +5086,10 @@ mod tests {
         // A LATER increment boundary still arrives — proof the liveness op ran
         // BETWEEN two chunks, not after the whole op.
         reached.recv().expect("boundary 2 after the liveness op");
+        release.send(()).unwrap();
+
+        // Explicit boundary immediately before terminal publication.
+        reached.recv().expect("ready-to-publish boundary");
         release.send(()).unwrap();
 
         assert!(
@@ -4984,16 +5145,17 @@ mod tests {
             .join()
             .expect("commit_apply_increments must not panic");
 
-        // The remaining chunk never ran — only delta committed.
+        // Staging was invisible and generation death prevents terminal
+        // publication, so neither addition appears in the dead generation.
         {
             let cache = generation.test_read_conn();
             assert!(
-                doc_present(&cache, "delta.md"),
-                "delta (committed before the death) is present"
+                !doc_present(&cache, "delta.md"),
+                "staged delta must never become visible after generation death"
             );
             assert!(
                 !doc_present(&cache, "epsilon.md"),
-                "epsilon's chunk must NOT run after the generation died"
+                "epsilon must remain unpublished after generation death"
             );
         }
 
@@ -5002,6 +5164,13 @@ mod tests {
             notes.iter().any(|n| n.contains("abandoned")),
             "a dropped increment must leave the deferred operator note, got {notes:?}"
         );
+
+        // A later request opens a healthy generation and heals from disk.
+        ctx.begin_request()
+            .expect("begin request after invalidation");
+        let healed = ctx.query_cache_unscoped().expect("healed cache");
+        assert!(doc_present(&healed, "delta.md"));
+        assert!(doc_present(&healed, "epsilon.md"));
     }
 
     /// Eviction targeting (NRN-253 review): a corruption-class increment failure

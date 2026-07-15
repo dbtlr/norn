@@ -49,7 +49,7 @@ pub(crate) use identity::{
 };
 #[cfg(test)]
 pub(crate) use writer::IndexReport;
-pub(crate) use writer::{increment_chunk_budget, IncrementCommit};
+pub(crate) use writer::{increment_chunk_budget, IncrementCommit, IncrementReservation};
 
 /// Resolve a vault's on-disk cache directory under an EXPLICIT cache home,
 /// with the SAME identity mapping production opens use (`identity::cache_dir_in`,
@@ -119,6 +119,8 @@ pub(crate) struct Cache {
     pub(crate) index_set: std::collections::BTreeSet<String>,
     pub(crate) index_set_hash: String,
     pub(crate) index_authoritative: bool,
+    /// Same-connection publication authority for reserved incremental jobs.
+    pub(crate) increment_publication_epoch: u64,
 }
 
 impl Cache {
