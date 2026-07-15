@@ -17,6 +17,23 @@ Honors `$XDG_CACHE_HOME` when set. The directory is created at `0700` and the da
 
 The cache identity is derived from the canonical path of the vault root (symlinks resolved). Querying via the symlinked path or its resolved target hits the same cache.
 
+### Channels: `live` vs `dev`
+
+The database is namespaced by **channel** so a binary built from a cargo tree can never read, migrate, or overwrite the cache the installed binary uses — a stray dev build must not silently rebuild an installed client's cache to a newer schema and lock it out.
+
+```text
+~/.cache/norn/<hash>/cache.db        # live channel (installed binary)
+~/.cache/norn/<hash>/dev/cache.db    # dev channel  (cargo build tree)
+```
+
+The channel is resolved once per process:
+
+1. `NORN_CACHE_CHANNEL` — set it to exactly `live` or `dev` to force the channel. Any other value (including empty) is a hard error.
+2. Otherwise **`dev`** when the running executable sits under a cargo `target` directory — detected by a `target`-named ancestor that contains a `CACHEDIR.TAG` (cargo always writes one), so unrelated paths that merely contain the word "target" don't trip it.
+3. Otherwise **`live`**.
+
+Only the database moves. The per-vault **write lock** (`<hash>/.lock`) and vault-level state stay shared across channels, so a dev and a live binary mutating the same vault still serialize against each other. `norn cache status` prints a `channel:` line and the `dev/` segment shows up in the reported path; correct isolation is otherwise silent.
+
 ## Surface
 
 ```text
@@ -25,7 +42,7 @@ norn cache index --rebuild     # full rebuild from scratch
 norn cache index --force-hash  # skip mtime cheap-check; hash every file
 norn cache rebuild             # explicit alias for `index --rebuild`
 norn cache clear               # delete the cache; next command rebuilds
-norn cache status              # path, size, doc/link/file counts, schema version
+norn cache status              # channel, path, size, doc/link/file counts, schema version
 norn cache prune               # cross-vault GC; --dry-run to preview
 ```
 
