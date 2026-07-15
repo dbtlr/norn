@@ -225,6 +225,7 @@ const INCREMENT_STAGING_TABLES: &[&str] = &[
     "norn_increment_headings",
     "norn_increment_document_fields",
     "norn_increment_documents",
+    "norn_increment_files",
     "norn_increment_paths",
 ];
 
@@ -233,18 +234,19 @@ const INCREMENT_STAGING_TABLES: &[&str] = &[
 /// performs the whole-vault parse WITHOUT holding the WriteLock — then advanced
 /// one chunk at a time by [`Cache::commit_increment_chunk`].
 ///
-/// The parse (`fresh_index`) is the authority: disk is truth, so a changed path
-/// still present is re-parsed and upserted while a gone path is dropped,
-/// regardless of what the caller believed the change was. `fresh_docs` maps a
-/// vault-relative path to its index in `fresh_index.documents` for O(1) lookup.
+/// `fresh_index` is an authority overlay: generation N supplies every unrelated
+/// document/file while the post-mutation disk parse supplies only affected
+/// paths. Links are then re-resolved over that composed graph. This prevents an
+/// unrelated concurrent disk edit from entering or invalidating an increment.
 pub(crate) struct IncrementCommit {
     job_id: i64,
     publication_epoch: u64,
     fresh_index: GraphIndex,
     fresh_docs: HashMap<Utf8PathBuf, usize>,
+    fresh_files: HashMap<Utf8PathBuf, usize>,
     affected_paths: std::collections::BTreeSet<Utf8PathBuf>,
     parsed_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
-    baseline_validated: bool,
+    file_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
     pending: VecDeque<Utf8PathBuf>,
     pending_links: VecDeque<(usize, usize)>,
     next_link_sequence: i64,
@@ -283,30 +285,78 @@ impl crate::cache::Cache {
         alias_field: Option<&str>,
         files_ignore: &[String],
         reservation: &IncrementReservation,
+        mut baseline: GraphIndex,
     ) -> Result<IncrementCommit, CacheError> {
         let options = crate::graph::IndexOptions {
             ignore: files_ignore.to_vec(),
             alias_field: alias_field.map(|s| s.to_string()),
             ..Default::default()
         };
-        let fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
-        let fresh_docs: HashMap<Utf8PathBuf, usize> = fresh_index
-            .documents
-            .iter()
-            .enumerate()
-            .map(|(i, d)| (d.path.clone(), i))
-            .collect();
+        let disk_index = crate::graph::build_index_with_options(vault_root, &options)?;
+
         // Sort + dedup so chunk boundaries are deterministic and a path is never
         // staged twice.
         let mut pending: Vec<Utf8PathBuf> = changed_paths.to_vec();
         pending.sort();
         pending.dedup();
         let affected_paths: std::collections::BTreeSet<_> = pending.iter().cloned().collect();
-        let parsed_metadata = affected_paths
+
+        // Generation N is authoritative for everything outside this mutation.
+        // Only affected paths cross from the post-mutation disk parse into the
+        // overlay; ignored destinations and deletions are therefore represented
+        // by absence without consulting their current filesystem existence.
+        baseline
+            .documents
+            .retain(|doc| !affected_paths.contains(&doc.path));
+        baseline
+            .files
+            .retain(|file| !affected_paths.contains(&file.path));
+        baseline.documents.extend(
+            disk_index
+                .documents
+                .iter()
+                .filter(|doc| affected_paths.contains(&doc.path))
+                .cloned(),
+        );
+        baseline.files.extend(
+            disk_index
+                .files
+                .iter()
+                .filter(|file| affected_paths.contains(&file.path))
+                .cloned(),
+        );
+        baseline.documents.sort_by(|a, b| a.path.cmp(&b.path));
+        baseline.files.sort_by(|a, b| a.path.cmp(&b.path));
+        crate::links::resolve_links(&baseline.files, &mut baseline.documents);
+        let fresh_index = baseline;
+        let fresh_docs: HashMap<Utf8PathBuf, usize> = fresh_index
+            .documents
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.path.clone(), i))
+            .collect();
+        let fresh_files: HashMap<Utf8PathBuf, usize> = fresh_index
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, file)| (file.path.clone(), i))
+            .collect();
+        let parsed_metadata: HashMap<Utf8PathBuf, (i64, i64)> = affected_paths
             .iter()
             .filter_map(|path| {
                 let &index = fresh_docs.get(path)?;
                 metadata_for_parsed_bytes(vault_root, &fresh_index.documents[index])
+                    .map(|metadata| (path.clone(), metadata))
+            })
+            .collect();
+        let file_metadata = affected_paths
+            .iter()
+            .filter_map(|path| {
+                fresh_files.get(path)?;
+                parsed_metadata
+                    .get(path)
+                    .copied()
+                    .or_else(|| stable_file_metadata(vault_root, path))
                     .map(|metadata| (path.clone(), metadata))
             })
             .collect();
@@ -321,9 +371,10 @@ impl crate::cache::Cache {
             publication_epoch: reservation.publication_epoch,
             fresh_index,
             fresh_docs,
+            fresh_files,
             affected_paths,
             parsed_metadata,
-            baseline_validated: false,
+            file_metadata,
             pending: pending.into_iter().collect(),
             pending_links,
             next_link_sequence: 0,
@@ -384,14 +435,6 @@ impl crate::cache::Cache {
         commit: &mut IncrementCommit,
         budget: Duration,
     ) -> Result<bool, CacheError> {
-        if !commit.baseline_validated {
-            if !self.parsed_sources_match_unchanged_main(commit)? {
-                let _ = self.cleanup_staged_increment(commit.job_id);
-                commit.phase = IncrementPhase::Superseded;
-                return Ok(false);
-            }
-            commit.baseline_validated = true;
-        }
         if commit.publication_epoch != self.increment_publication_epoch
             || !self.staged_increment_exists(commit.job_id)?
         {
@@ -455,14 +498,27 @@ impl crate::cache::Cache {
                 let Some(&(mtime_ns, size_bytes)) = commit.parsed_metadata.get(&path) else {
                     tx.rollback()?;
                     let _ = self.cleanup_staged_increment(commit.job_id);
-                    commit.phase = IncrementPhase::Superseded;
-                    return Ok(false);
+                    return Err(CacheError::IncrementSourceDrift { path });
                 };
                 stage_document(
                     &tx,
                     commit.job_id,
                     &commit.fresh_index.documents[i],
                     &self.index_set,
+                    mtime_ns,
+                    size_bytes,
+                )?;
+            }
+            if let Some(&i) = commit.fresh_files.get(&path) {
+                let Some(&(mtime_ns, size_bytes)) = commit.file_metadata.get(&path) else {
+                    tx.rollback()?;
+                    let _ = self.cleanup_staged_increment(commit.job_id);
+                    return Err(CacheError::IncrementSourceDrift { path });
+                };
+                stage_file(
+                    &tx,
+                    commit.job_id,
+                    &commit.fresh_index.files[i],
                     mtime_ns,
                     size_bytes,
                 )?;
@@ -476,37 +532,6 @@ impl crate::cache::Cache {
             commit.phase = IncrementPhase::Links;
         }
         Ok(true)
-    }
-
-    fn parsed_sources_match_unchanged_main(
-        &self,
-        commit: &IncrementCommit,
-    ) -> Result<bool, CacheError> {
-        let mut stmt = self.conn.prepare("SELECT path, hash FROM main.documents")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                Utf8PathBuf::from(row.get::<_, String>(0)?),
-                row.get::<_, String>(1)?,
-            ))
-        })?;
-        let mut main_hashes = HashMap::new();
-        for row in rows {
-            let (path, hash) = row?;
-            main_hashes.insert(path, hash);
-        }
-        for (path, &index) in &commit.fresh_docs {
-            if commit.affected_paths.contains(path) {
-                continue;
-            }
-            if main_hashes.remove(path).as_deref()
-                != Some(commit.fresh_index.documents[index].hash.as_str())
-            {
-                return Ok(false);
-            }
-        }
-        Ok(main_hashes
-            .keys()
-            .all(|path| commit.affected_paths.contains(path)))
     }
 
     fn stage_increment_links(
@@ -540,11 +565,6 @@ impl crate::cache::Cache {
     }
 
     fn publish_increment(&mut self, commit: &mut IncrementCommit) -> Result<(), CacheError> {
-        if !affected_sources_still_match(&self.vault_root, commit) {
-            let _ = self.cleanup_staged_increment(commit.job_id);
-            commit.phase = IncrementPhase::Superseded;
-            return Ok(());
-        }
         let _lock = crate::cache::lock::WriteLock::acquire(
             &self.cache_dir,
             crate::cache::lock::write_lock_timeout(),
@@ -576,6 +596,13 @@ impl crate::cache::Cache {
             commit.phase = IncrementPhase::Superseded;
             return Ok(());
         }
+        // Validate source bytes only after publication authority. An intervening
+        // cache publication supersedes this job cleanly; otherwise this is the
+        // last filesystem read before the atomic main-row replacement.
+        if let Err(error) = affected_sources_still_match(&self.vault_root, commit) {
+            tx.rollback()?;
+            return Err(error);
+        }
         tx.execute("DELETE FROM main.links", [])?;
         for table in ["diagnostics", "block_ids", "headings", "document_fields"] {
             tx.execute(
@@ -594,6 +621,17 @@ impl crate::cache::Cache {
         tx.execute(
             "DELETE FROM main.documents WHERE path IN \
              (SELECT path FROM temp.norn_increment_paths WHERE job_id = ?)",
+            [job_id],
+        )?;
+        tx.execute(
+            "DELETE FROM main.files WHERE path IN \
+             (SELECT path FROM temp.norn_increment_paths WHERE job_id = ?)",
+            [job_id],
+        )?;
+        tx.execute(
+            "INSERT INTO main.files (path, ext, size_bytes, mtime_ns) \
+             SELECT path, ext, size_bytes, mtime_ns FROM temp.norn_increment_files \
+             WHERE job_id = ? ORDER BY path",
             [job_id],
         )?;
         tx.execute(
@@ -688,6 +726,14 @@ fn ensure_increment_staging_tables(conn: &rusqlite::Connection) -> Result<(), Ca
          CREATE TEMP TABLE IF NOT EXISTS norn_increment_paths (
              job_id INTEGER NOT NULL,
              path TEXT NOT NULL,
+             PRIMARY KEY (job_id, path)
+         );
+         CREATE TEMP TABLE IF NOT EXISTS norn_increment_files (
+             job_id INTEGER NOT NULL,
+             path TEXT NOT NULL,
+             ext TEXT NOT NULL,
+             size_bytes INTEGER NOT NULL,
+             mtime_ns INTEGER NOT NULL,
              PRIMARY KEY (job_id, path)
          );
          CREATE TEMP TABLE IF NOT EXISTS norn_increment_documents (
@@ -865,6 +911,27 @@ fn stage_document(
     Ok(())
 }
 
+fn stage_file(
+    tx: &Transaction,
+    job_id: i64,
+    file: &VaultFile,
+    mtime_ns: i64,
+    size_bytes: i64,
+) -> Result<(), CacheError> {
+    tx.execute(
+        "INSERT INTO temp.norn_increment_files
+         (job_id, path, ext, size_bytes, mtime_ns) VALUES (?, ?, ?, ?, ?)",
+        params![
+            job_id,
+            file.path.as_str(),
+            file.extension.as_deref().unwrap_or(""),
+            size_bytes,
+            mtime_ns,
+        ],
+    )?;
+    Ok(())
+}
+
 fn metadata_for_parsed_bytes(vault_root: &Utf8Path, doc: &Document) -> Option<(i64, i64)> {
     let path = vault_root.join(&doc.path);
     let before_mtime = mtime_ns(&path)?;
@@ -881,19 +948,36 @@ fn metadata_for_parsed_bytes(vault_root: &Utf8Path, doc: &Document) -> Option<(i
     Some((after_mtime, after_size))
 }
 
-fn affected_sources_still_match(vault_root: &Utf8Path, commit: &IncrementCommit) -> bool {
-    commit.affected_paths.iter().all(|path| {
+fn stable_file_metadata(vault_root: &Utf8Path, path: &Utf8Path) -> Option<(i64, i64)> {
+    let absolute = vault_root.join(path);
+    let before = (mtime_ns(&absolute)?, size_bytes(&absolute)?);
+    let after = (mtime_ns(&absolute)?, size_bytes(&absolute)?);
+    (before == after).then_some(after)
+}
+
+fn affected_sources_still_match(
+    vault_root: &Utf8Path,
+    commit: &IncrementCommit,
+) -> Result<(), CacheError> {
+    for path in &commit.affected_paths {
+        // Only parsed Markdown bytes need a final hash guard. An affected path
+        // absent from the overlay is an authoritative deletion or ignored
+        // destination; its current filesystem existence is intentionally
+        // irrelevant to this publication.
+        let Some(&index) = commit.fresh_docs.get(path) else {
+            continue;
+        };
         let absolute = vault_root.join(path);
-        match commit.fresh_docs.get(path) {
-            Some(&index) => std::fs::read(absolute.as_std_path())
-                .ok()
-                .is_some_and(|bytes| {
-                    blake3::hash(&bytes).to_hex().as_str()
-                        == commit.fresh_index.documents[index].hash
-                }),
-            None => !absolute.exists(),
+        let matches = std::fs::read(absolute.as_std_path())
+            .ok()
+            .is_some_and(|bytes| {
+                blake3::hash(&bytes).to_hex().as_str() == commit.fresh_index.documents[index].hash
+            });
+        if !matches {
+            return Err(CacheError::IncrementSourceDrift { path: path.clone() });
         }
-    })
+    }
+    Ok(())
 }
 
 fn stage_link(tx: &Transaction, job_id: i64, sequence: i64, link: &Link) -> Result<(), CacheError> {
@@ -1829,6 +1913,10 @@ mod tests {
     fn snapshot_owned_rows(conn: &rusqlite::Connection) -> OwnedSnapshot {
         [
             (
+                "files",
+                "SELECT path, ext, size_bytes, mtime_ns FROM files ORDER BY path",
+            ),
+            (
                 "documents",
                 "SELECT path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes \
                  FROM documents ORDER BY path",
@@ -1929,6 +2017,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
         let mut chunks = 0usize;
@@ -2058,6 +2147,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
         while cache
@@ -2101,6 +2191,7 @@ mod tests {
             staged_writer.alias_field.as_deref(),
             &staged_writer.files_ignore,
             &reservation,
+            staged_writer.load_graph_index().unwrap(),
         )
         .unwrap();
         assert!(
@@ -2158,6 +2249,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
         while cache
@@ -2215,6 +2307,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &older_reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
 
@@ -2226,6 +2319,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &newer_reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
 
@@ -2264,6 +2358,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
 
@@ -2306,6 +2401,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
         while !matches!(commit.phase, IncrementPhase::Ready) {
@@ -2342,13 +2438,19 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
         std::fs::write(root.join("doc.md"), rewritten).unwrap();
-        while cache
-            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
-            .unwrap()
-        {}
+        let error = loop {
+            match cache.commit_increment_chunk(&root, &mut commit, Duration::ZERO) {
+                Ok(true) => {}
+                Ok(false) => panic!("affected source drift must not complete successfully"),
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(error, CacheError::IncrementSourceDrift { .. }));
+        assert_eq!(cache.staged_increment_job_count(), 0);
         assert!(
             cache.detect_change_count(&root) > 0,
             "a rewrite after parse must remain detectable rather than blessed fresh"
@@ -2356,7 +2458,7 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_source_drift_cannot_publish_links_from_a_different_generation() {
+    fn unrelated_source_drift_stays_outside_overlay_while_affected_change_publishes() {
         let tmp = TempDir::new().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
             .unwrap()
@@ -2375,6 +2477,7 @@ mod tests {
             cache.alias_field.as_deref(),
             &cache.files_ignore,
             &reservation,
+            cache.load_graph_index().unwrap(),
         )
         .unwrap();
         while cache
@@ -2391,7 +2494,114 @@ mod tests {
             .unwrap();
         assert_eq!(
             new_links, 0,
-            "unrelated B drift must supersede A's job, not publish B-new links beside B-old rows"
+            "unrelated B disk drift must not enter overlay links"
         );
+        let old_links: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE source_path = 'b.md' AND target_raw = 'old-target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_links, 1, "overlay keeps cached B links");
+        let a_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'a.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            a_body.contains("A changed"),
+            "affected A must still publish despite unrelated B drift"
+        );
+    }
+
+    #[test]
+    fn increment_updates_affected_files_with_documents_and_links() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let reservation = cache.reserve_increment_commit().unwrap();
+        std::fs::remove_file(root.join("other.md")).unwrap();
+        std::fs::write(root.join("new.md"), "---\n---\n[[asset.png]]\n").unwrap();
+        std::fs::write(root.join("asset.png"), b"png").unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["other.md".into(), "new.md".into(), "asset.png".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+            cache.load_graph_index().unwrap(),
+        )
+        .unwrap();
+        while cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap()
+        {}
+        for path in ["new.md", "asset.png"] {
+            let count: i64 = cache
+                .conn
+                .query_row("SELECT COUNT(*) FROM files WHERE path = ?", [path], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "affected file {path} must publish");
+        }
+        let deleted: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'other.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn move_into_ignored_destination_publishes_source_removal() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir_all(root.join("Archive")).unwrap();
+        std::fs::write(root.join("a.md"), "---\n---\nA\n").unwrap();
+        let ignore = vec!["Archive/**".to_string()];
+        let mut cache = crate::cache::Cache::open_with_index(
+            &root,
+            None,
+            &ignore,
+            &std::collections::BTreeSet::new(),
+            "ignore-proof",
+        )
+        .unwrap();
+        cache.rebuild(&root).unwrap();
+        let reservation = cache.reserve_increment_commit().unwrap();
+        std::fs::rename(root.join("a.md"), root.join("Archive/a.md")).unwrap();
+        let mut commit = crate::cache::Cache::begin_increment_commit(
+            &root,
+            &["a.md".into(), "Archive/a.md".into()],
+            cache.alias_field.as_deref(),
+            &cache.files_ignore,
+            &reservation,
+            cache.load_graph_index().unwrap(),
+        )
+        .unwrap();
+        while cache
+            .commit_increment_chunk(&root, &mut commit, Duration::ZERO)
+            .unwrap()
+        {}
+        let remaining: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE path = 'a.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "ignored destination move removes source");
     }
 }

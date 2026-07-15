@@ -414,7 +414,7 @@ pub fn handle(
 
     // Warm mode: commit the created document's cache increment (awaited) so the
     // next read stays cheap; a no-op in cold mode (NRN-252 / NRN-158).
-    ctx.commit_apply_increments(scope, &apply_report.touched_paths());
+    ctx.commit_apply_increments(scope, &apply_report.touched_paths(), index);
 
     // NRN-101: an incremental `{{seq}}` target is resolved at apply time inside
     // the applier (under the lock). Render + post-create validate against the

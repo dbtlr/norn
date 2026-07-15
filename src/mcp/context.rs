@@ -1769,6 +1769,7 @@ impl VaultContext {
         &self,
         scope: &RequestScope,
         changed_paths: &[Utf8PathBuf],
+        baseline: crate::core::GraphIndex,
     ) {
         let Mode::Warm(slot) = &self.mode else {
             return; // cold: no queue, nothing to commit
@@ -1821,13 +1822,17 @@ impl VaultContext {
         // defeating the ~50ms preemption bound a liveness refresh queued behind it
         // relies on. It is read-only over post-apply disk state and needs only the
         // generation's index config (alias_field / files.ignore), no cache
-        // connection, so it belongs off the writer thread.
+        // connection, so it belongs off the writer thread. The caller supplies
+        // the coherent pre-apply graph it already used for planning; reusing it
+        // avoids both duplicate O(vault) reconstruction and a second read-pool
+        // checkout while that mutation may still own the sole pooled handle.
         let commit = match crate::cache::Cache::begin_increment_commit(
             &self.vault_root,
             changed_paths,
             generation.index_identity.alias_field.as_deref(),
             &generation.index_identity.ignore,
             &reservation,
+            baseline,
         ) {
             Ok(commit) => commit,
             Err(error) => {
@@ -2264,12 +2269,17 @@ impl VaultContext {
                     Outcome::Done(Ok(reservation)) => reservation,
                     other => panic!("test increment reservation failed: {other:?}"),
                 };
+                let baseline = generation
+                    .checkout_read()
+                    .load_graph_index()
+                    .expect("test baseline load should succeed");
                 let commit = crate::cache::Cache::begin_increment_commit(
                     &self.vault_root,
                     changed_paths,
                     generation.index_identity.alias_field.as_deref(),
                     &generation.index_identity.ignore,
                     &reservation,
+                    baseline,
                 )
                 .expect("test increment parse should succeed");
                 self.submit_increment_commit(slot, generation, commit)
@@ -4857,6 +4867,7 @@ mod tests {
     /// and runs no whole-vault rebuild.
     #[test]
     fn warm_mutation_commits_increment_so_next_read_sees_no_changes() {
+        let _cap = ReadPoolCapGuard::pin(1);
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
 
@@ -5021,6 +5032,10 @@ mod tests {
             Outcome::Done(Ok(reservation)) => reservation,
             other => panic!("reservation failed: {other:?}"),
         };
+        let baseline = generation
+            .checkout_read()
+            .load_graph_index()
+            .expect("baseline load");
         std::fs::write(
             root.join("alpha.md"),
             "---\ntype: note\n---\nOLDER PARSED BODY\n",
@@ -5032,6 +5047,7 @@ mod tests {
             generation.index_identity.alias_field.as_deref(),
             &generation.index_identity.ignore,
             &reservation,
+            baseline,
         )
         .expect("parse older increment");
 
@@ -5151,10 +5167,11 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
         let scope = ctx.begin_request().expect("begin_request");
-        {
+        let baseline = {
             let cache = ctx.query_cache(&scope).expect("query_cache");
             assert_eq!(doc_count(&cache), 3);
-        }
+            cache.load_graph_index().expect("pre-apply baseline")
+        };
         let generation = ctx.current_generation().expect("a current generation");
 
         std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta\n").unwrap();
@@ -5170,7 +5187,7 @@ mod tests {
         let ctx_worker = Arc::clone(&ctx);
         let changed_worker = changed.clone();
         let worker = std::thread::spawn(move || {
-            ctx_worker.commit_apply_increments(&scope, &changed_worker);
+            ctx_worker.commit_apply_increments(&scope, &changed_worker, baseline);
             scope.take_operator_notes()
         });
 
@@ -5230,16 +5247,18 @@ mod tests {
         let (_tmp, root) = make_seeded_vault();
         let ctx = VaultContext::open_warm(&root).expect("open_warm");
         let scope = ctx.begin_request().expect("begin_request");
-        {
-            let _cache = ctx.query_cache(&scope).expect("build cache");
-        }
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("build cache")
+            .load_graph_index()
+            .expect("pre-apply baseline");
         let generation = ctx.current_generation().expect("current generation");
         generation
             .inject_increment_panic
             .store(true, Ordering::Release);
         std::fs::write(root.join("delta.md"), "---\n---\nDelta\n").unwrap();
 
-        ctx.commit_apply_increments(&scope, &["delta.md".into()]);
+        ctx.commit_apply_increments(&scope, &["delta.md".into()], baseline);
 
         assert!(scope
             .take_operator_notes()
@@ -5253,6 +5272,37 @@ mod tests {
                 .staged_increment_job_count(),
             0,
             "panicked bulk must schedule reservation cleanup"
+        );
+    }
+
+    #[test]
+    fn affected_source_drift_degrades_post_apply_increment() {
+        std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+        let (_tmp, root) = make_seeded_vault();
+        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let scope = ctx.begin_request().expect("begin_request");
+        let baseline = ctx
+            .query_cache(&scope)
+            .expect("build cache")
+            .load_graph_index()
+            .expect("pre-apply baseline");
+        let generation = ctx.current_generation().expect("current generation");
+        std::fs::write(root.join("alpha.md"), "---\n---\nPARSED ALPHA\n").unwrap();
+        let (reached, release) = ctx.install_increment_gate(&generation);
+        let worker_ctx = Arc::clone(&ctx);
+        let worker = std::thread::spawn(move || {
+            worker_ctx.commit_apply_increments(&scope, &["alpha.md".into()], baseline);
+            scope.take_operator_notes()
+        });
+        reached.recv().expect("first staging boundary");
+        std::fs::write(root.join("alpha.md"), "---\n---\nDRIFTED ALPHA\n").unwrap();
+        release.send(()).unwrap();
+        reached.recv().expect("ready boundary");
+        release.send(()).unwrap();
+        let notes = worker.join().unwrap();
+        assert!(
+            notes.iter().any(|note| note.contains("failed")),
+            "affected drift must produce the deferred-cache note: {notes:?}"
         );
     }
 
@@ -5288,6 +5338,10 @@ mod tests {
         }
         let gen2 = ctx.current_generation().expect("generation 2 current");
         assert_eq!(gen2.number, 2, "the reopen produced generation 2");
+        let baseline = gen2
+            .test_read_conn()
+            .load_graph_index()
+            .expect("generation 2 pre-apply baseline");
 
         // Inject a SQLITE_CORRUPT failure into generation 2's increment commit.
         let corrupt = rusqlite::Error::SqliteFailure(
@@ -5299,7 +5353,7 @@ mod tests {
         // A real changed file so the commit has work to submit; the increment
         // runs on generation 2 and fails with the injected corruption.
         std::fs::write(root.join("delta.md"), "---\ntype: note\n---\nDelta\n").unwrap();
-        ctx.commit_apply_increments(&scope, &["delta.md".into()]);
+        ctx.commit_apply_increments(&scope, &["delta.md".into()], baseline);
 
         // The floor must now exclude generation 2: a fresh request reopens to 3.
         ctx.begin_request().expect("begin_request after eviction");

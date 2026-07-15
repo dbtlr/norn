@@ -297,7 +297,7 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: SetParams) -> Result<
     // chunked writer-queue op (awaited) — the next read then finds the cache
     // current instead of paying a detect scan + rebuild (NRN-252 / NRN-158). A
     // no-op in cold mode.
-    ctx.commit_apply_increments(scope, &apply_report.touched_paths());
+    ctx.commit_apply_increments(scope, &apply_report.touched_paths(), index);
 
     Ok(build_report(&outcome, true, &trace_id))
 }

@@ -210,7 +210,7 @@ pub fn handle(
 
     // Warm mode: commit the rewritten backlink files' cache increments as a
     // chunked writer-queue op, awaited; no-op in cold mode (NRN-252 / NRN-158).
-    ctx.commit_apply_increments(scope, &report.touched_paths);
+    ctx.commit_apply_increments(scope, &report.touched_paths, index);
 
     Ok(report)
 }
