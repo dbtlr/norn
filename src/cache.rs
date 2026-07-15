@@ -18,6 +18,7 @@ pub(crate) use query::DocumentQuery;
 
 pub(crate) mod canonical;
 mod change_detection;
+pub(crate) mod channel;
 mod document_fields;
 #[cfg(test)]
 mod eav_acceptance;
@@ -112,7 +113,15 @@ pub(crate) const LOCK_CONTENTION_NOTE: &str =
 pub(crate) struct Cache {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) vault_root: camino::Utf8PathBuf,
+    /// Directory holding this handle's `cache.db` — channel-specific: the vault
+    /// entry dir on the live channel, its `dev/` subdir on the dev channel
+    /// (NRN-269).
     pub(crate) cache_dir: camino::Utf8PathBuf,
+    /// The channel-independent vault entry dir (`<cache_home>/norn/<hash>`) that
+    /// holds the shared write lock (`.lock`). Equal to `cache_dir` on the live
+    /// channel; `cache_dir`'s parent on the dev channel. A dev and a live binary
+    /// against the same vault serialize on this one lock.
+    pub(crate) lock_dir: camino::Utf8PathBuf,
     pub(crate) alias_field: Option<String>,
     /// Compiled-out-of `files.ignore`: path globs whose matching files are
     /// excluded from the graph at cache-build time — never parsed, indexed, or
@@ -177,7 +186,7 @@ impl Cache {
     /// drop the `Cache` handle; the next `Cache::open` recreates a fresh
     /// database with the current schema and identity meta rows.
     pub fn clear(&mut self) -> Result<(), CacheError> {
-        let _lock = lock::WriteLock::acquire(&self.cache_dir, std::time::Duration::from_secs(5))?;
+        let _lock = lock::WriteLock::acquire(&self.lock_dir, std::time::Duration::from_secs(5))?;
         let db_path = self.cache_dir.join("cache.db");
         // Detach the live connection from the on-disk database so the file
         // can be removed cleanly on platforms (notably Windows) where an
@@ -206,6 +215,18 @@ impl Cache {
     #[doc(hidden)]
     pub fn conn(&self) -> &rusqlite::Connection {
         &self.conn
+    }
+
+    /// The cache channel this handle opened under, inferred from its layout:
+    /// dev caches live in a `dev/` subdir of the shared entry dir, live caches
+    /// sit directly in it. Drives the `norn cache status` channel line.
+    pub(crate) fn channel_label(&self) -> &'static str {
+        let channel = if self.cache_dir == self.lock_dir {
+            channel::Channel::Live
+        } else {
+            channel::Channel::Dev
+        };
+        channel.as_str()
     }
 
     /// Configured frontmatter field name used for alias parsing, if any.

@@ -132,7 +132,7 @@ fn reshred_all(tx: &Transaction, index_set: &BTreeSet<String>) -> Result<(), Cac
 /// already reconciled while this one was waiting.
 pub(crate) fn reshred_if_needed(
     conn: &mut Connection,
-    cache_dir: &Utf8Path,
+    lock_dir: &Utf8Path,
     index_set: &BTreeSet<String>,
     index_set_hash: &str,
 ) -> Result<(), CacheError> {
@@ -140,7 +140,7 @@ pub(crate) fn reshred_if_needed(
         return Ok(());
     }
 
-    let _lock = WriteLock::acquire(cache_dir, std::time::Duration::from_secs(5))?;
+    let _lock = WriteLock::acquire(lock_dir, std::time::Duration::from_secs(5))?;
 
     // Re-check inside the lock: another process may have already reconciled
     // the hash while we were waiting for it to release.

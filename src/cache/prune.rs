@@ -215,8 +215,19 @@ fn max_opt(a: Option<SystemTime>, b: Option<SystemTime>) -> Option<SystemTime> {
 }
 
 /// Read `meta.vault_root` from an entry's cache.db, read-only. None on any failure.
+///
+/// Falls back to the dev-channel database (`<entry>/dev/cache.db`, NRN-269) when
+/// the live database is absent or unreadable, so a dev-only entry recovers its
+/// root and ages out by mtime under the normal retention policy rather than
+/// being misclassified `Unreadable` and evicted immediately. The whole entry
+/// dir (live db, `dev/`, lock) is removed together on eviction, so both channels
+/// age as one unit.
 fn read_cache_root(entry_dir: &Utf8Path) -> Option<String> {
-    let db = entry_dir.join("cache.db");
+    read_root_from_db(&entry_dir.join("cache.db"))
+        .or_else(|| read_root_from_db(&entry_dir.join("dev").join("cache.db")))
+}
+
+fn read_root_from_db(db: &Utf8Path) -> Option<String> {
     let conn = rusqlite::Connection::open_with_flags(
         db.as_std_path(),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

@@ -6,7 +6,7 @@ use camino::Utf8Path;
 use rusqlite::Connection;
 
 use crate::cache::error::CacheError;
-use crate::cache::identity::cache_dir_for;
+use crate::cache::identity::cache_layout_for;
 
 /// Lock-wait applied to every cache connection immediately after open.
 ///
@@ -142,16 +142,17 @@ impl crate::cache::Cache {
         index_set: &BTreeSet<String>,
         index_set_hash: &str,
     ) -> Result<Self, CacheError> {
-        let (canonical, cache_dir) = cache_dir_for(vault_root)?;
-        let db_path = cache_dir.join("cache.db");
+        let layout = cache_layout_for(vault_root)?;
+        let db_path = layout.db_dir.join("cache.db");
         let conn = Connection::open(db_path.as_std_path())?;
         conn.busy_timeout(CACHE_BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(crate::cache::Cache {
             conn,
-            vault_root: canonical,
-            cache_dir,
+            vault_root: layout.canonical,
+            cache_dir: layout.db_dir,
+            lock_dir: layout.entry_dir,
             alias_field: alias_field.map(|s| s.to_string()),
             files_ignore: files_ignore.to_vec(),
             index_set: index_set.clone(),
@@ -175,6 +176,30 @@ impl crate::cache::Cache {
     pub(crate) fn set_query_only(&self) -> Result<(), CacheError> {
         self.conn.pragma_update(None, "query_only", "ON")?;
         Ok(())
+    }
+
+    /// Test-only: open a non-authoritative cache for an EXPLICIT channel under a
+    /// private cache home, bypassing both `XDG_CACHE_HOME` and the
+    /// once-per-process channel resolution. Lets a single test process exercise
+    /// live and dev channels against the same vault to prove isolation.
+    #[cfg(test)]
+    pub(crate) fn open_at_channel(
+        cache_home: &Utf8Path,
+        vault_root: &Utf8Path,
+        channel: crate::cache::channel::Channel,
+    ) -> Result<Self, CacheError> {
+        let layout =
+            crate::cache::identity::cache_layout_in_channel(cache_home, vault_root, channel)?;
+        let (index_set, index_set_hash) =
+            crate::standards::resolved_index_set(&crate::standards::VaultConfig::default());
+        open_layout(
+            layout,
+            None,
+            &[],
+            &index_set,
+            &index_set_hash,
+            /* authoritative */ false,
+        )
     }
 }
 
@@ -203,9 +228,37 @@ fn open_impl(
     index_set_hash: &str,
     authoritative: bool,
 ) -> Result<crate::cache::Cache, CacheError> {
-    let (canonical, cache_dir) = cache_dir_for(vault_root)?;
+    let layout = cache_layout_for(vault_root)?;
+    open_layout(
+        layout,
+        alias_field,
+        files_ignore,
+        index_set,
+        index_set_hash,
+        authoritative,
+    )
+}
 
-    // Ensure cache directory exists at 0700.
+/// The rest of the open flow once the on-disk [`CacheLayout`] is resolved.
+/// Split from [`open_impl`] so a test-only opener can supply a layout for an
+/// explicit channel + private cache home without defeating the once-per-process
+/// channel resolution.
+fn open_layout(
+    layout: crate::cache::identity::CacheLayout,
+    alias_field: Option<&str>,
+    files_ignore: &[String],
+    index_set: &BTreeSet<String>,
+    index_set_hash: &str,
+    authoritative: bool,
+) -> Result<crate::cache::Cache, CacheError> {
+    let canonical = layout.canonical;
+    let cache_dir = layout.db_dir;
+    let lock_dir = layout.entry_dir;
+
+    // Ensure both the shared entry dir (holds the write lock) and the
+    // channel-specific database dir exist at 0700. For the live channel these
+    // are the same directory; `create_dir_secure` is idempotent.
+    create_dir_secure(&lock_dir)?;
     create_dir_secure(&cache_dir)?;
 
     let db_path = cache_dir.join("cache.db");
@@ -217,6 +270,7 @@ fn open_impl(
             InspectResult::Fresh => {
                 return open_fresh(
                     &cache_dir,
+                    &lock_dir,
                     &db_path,
                     &canonical,
                     &CacheIdentity {
@@ -232,7 +286,7 @@ fn open_impl(
                 if authoritative {
                     crate::cache::document_fields::reshred_if_needed(
                         &mut conn,
-                        &cache_dir,
+                        &lock_dir,
                         index_set,
                         index_set_hash,
                     )?;
@@ -241,6 +295,7 @@ fn open_impl(
                     conn,
                     vault_root: canonical,
                     cache_dir,
+                    lock_dir,
                     alias_field: alias_field_owned,
                     files_ignore: files_ignore.to_vec(),
                     index_set: index_set.clone(),
@@ -428,6 +483,7 @@ fn inspect_existing_cache(
 
 fn open_fresh(
     cache_dir: &Utf8Path,
+    lock_dir: &Utf8Path,
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
     identity: &CacheIdentity,
@@ -443,6 +499,7 @@ fn open_fresh(
         conn,
         vault_root: canonical_root.to_owned(),
         cache_dir: cache_dir.to_owned(),
+        lock_dir: lock_dir.to_owned(),
         alias_field: identity.alias_field.map(|s| s.to_string()),
         files_ignore: identity.files_ignore.to_vec(),
         index_set: identity.index_set.clone(),
@@ -565,6 +622,59 @@ mod tests {
         let cache = crate::cache::Cache::open(&root).unwrap();
         assert!(cache.cache_dir.exists());
         assert!(cache.cache_dir.join("cache.db").exists());
+    }
+
+    /// NRN-269: a dev-channel open against a vault whose live cache already
+    /// exists must not read, migrate, or write the live database — it builds its
+    /// own under `dev/`, leaving the live db byte-for-byte unchanged, and a live
+    /// open afterward still works. Reproduces the incident where a dev binary
+    /// silently migrated (schema-rebuilt) the installed client's cache.
+    #[test]
+    fn dev_open_does_not_touch_live_db() {
+        use crate::cache::channel::Channel;
+
+        let (_tmp, root) = make_vault();
+        let home_tmp = TempDir::new().unwrap();
+        let home = Utf8PathBuf::from_path_buf(home_tmp.path().to_path_buf()).unwrap();
+
+        // Plant a live cache under the private home, then simulate the installed
+        // client's on-disk db being at an OLDER schema by stamping schema_version
+        // down — the exact condition that triggers the silent rebuild.
+        let live = crate::cache::Cache::open_at_channel(&home, &root, Channel::Live).unwrap();
+        let live_db = live.cache_dir.join("cache.db");
+        live.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '4')",
+                [],
+            )
+            .unwrap();
+        drop(live);
+
+        let live_bytes_before = std::fs::read(live_db.as_std_path()).unwrap();
+        assert!(!live_bytes_before.is_empty());
+
+        // Dev open of the SAME vault: must land under `dev/` and never touch the
+        // live db (no schema migration, no rebuild, no write).
+        let dev = crate::cache::Cache::open_at_channel(&home, &root, Channel::Dev).unwrap();
+        assert_eq!(dev.cache_dir, dev.lock_dir.join("dev"));
+        assert!(dev.cache_dir.join("cache.db").exists());
+        assert_eq!(dev.channel_label(), "dev");
+        // Shared write lock stays at the vault entry dir for both channels.
+        assert_eq!(dev.lock_dir, live_db.parent().unwrap());
+        drop(dev);
+
+        // The live db is byte-for-byte identical: dev open did not migrate it.
+        let live_bytes_after = std::fs::read(live_db.as_std_path()).unwrap();
+        assert_eq!(
+            live_bytes_before, live_bytes_after,
+            "dev-channel open must not migrate or rewrite the live cache db"
+        );
+
+        // And the live (still schema-4-stamped) cache reopens fine — an ordinary
+        // live open self-heals its own db without dev having interfered.
+        let live_again = crate::cache::Cache::open_at_channel(&home, &root, Channel::Live).unwrap();
+        assert_eq!(live_again.channel_label(), "live");
+        assert_eq!(live_again.cache_dir, live_again.lock_dir);
     }
 
     #[test]

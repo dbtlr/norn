@@ -6,6 +6,9 @@ use crate::cache::error::CacheError;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheStatus {
+    /// Cache isolation channel: `live` (installed binary) or `dev` (cargo build
+    /// tree). Dev caches nest under a `dev/` segment of `cache_path` (NRN-269).
+    pub channel: String,
     pub cache_path: camino::Utf8PathBuf,
     pub size_bytes: u64,
     pub doc_count: u64,
@@ -48,6 +51,7 @@ impl crate::cache::Cache {
             )
             .ok();
         Ok(CacheStatus {
+            channel: self.channel_label().to_string(),
             cache_path: db_path,
             size_bytes,
             doc_count,

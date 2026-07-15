@@ -265,6 +265,7 @@ pub fn run_status(
             println!("{}", serde_json::to_string_pretty(&status)?);
         }
         CacheOutputFormat::Text => {
+            println!("channel:           {}", status.channel);
             println!("cache path:        {}", status.cache_path);
             println!("size:              {} bytes", status.size_bytes);
             println!("documents:         {}", status.doc_count);
