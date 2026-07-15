@@ -296,6 +296,29 @@ impl crate::cache::Cache {
             .map(|file| (file.path.clone(), file))
             .collect();
 
+        // The parse is authoritative for affected Markdown content, so its
+        // metadata must describe those same parsed bytes. A path can drift
+        // after `build_index_with_options` returns; publishing later live
+        // metadata would otherwise bless unparsed bytes as fresh. Validate and
+        // capture metadata before opening the publication transaction. On
+        // drift, retain the previous coherent snapshot so a later refresh can
+        // detect and heal it.
+        let mut parsed_metadata = std::collections::HashMap::new();
+        for path in &affected_paths {
+            if let Some(doc) = fresh_docs.get(path) {
+                let metadata = metadata_for_parsed_bytes(vault_root, doc)
+                    .ok_or_else(|| CacheError::IncrementSourceDrift { path: path.clone() })?;
+                parsed_metadata.insert(path.clone(), metadata);
+            } else if !graph_intentionally_ignores(path, &self.files_ignore) {
+                match std::fs::symlink_metadata(vault_root.join(path).as_std_path()) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) | Err(_) => {
+                        return Err(CacheError::IncrementSourceDrift { path: path.clone() });
+                    }
+                }
+            }
+        }
+
         let tx = self.conn.transaction()?;
         let mut report = IndexReport::default();
 
@@ -303,11 +326,30 @@ impl crate::cache::Cache {
             let path = change_path(change);
             tx.execute("DELETE FROM files WHERE path = ?", [path.as_str()])?;
             if let Some(file) = fresh_files.get(path) {
-                insert_file(&tx, vault_root, file)?;
+                let &(mtime_ns, size_bytes) =
+                    parsed_metadata
+                        .get(path)
+                        .ok_or_else(|| CacheError::IncrementSourceDrift {
+                            path: path.to_owned(),
+                        })?;
+                insert_file_with_metadata(&tx, file, mtime_ns, size_bytes)?;
             }
             crate::cache::invalidation::drop_document(&tx, path)?;
             if let Some(doc) = fresh_docs.get(path) {
-                insert_document(&tx, vault_root, doc, &mut report, &self.index_set)?;
+                let &(mtime_ns, size_bytes) =
+                    parsed_metadata
+                        .get(path)
+                        .ok_or_else(|| CacheError::IncrementSourceDrift {
+                            path: path.to_owned(),
+                        })?;
+                insert_document_with_metadata(
+                    &tx,
+                    doc,
+                    &mut report,
+                    &self.index_set,
+                    mtime_ns,
+                    size_bytes,
+                )?;
             }
         }
 
@@ -1361,13 +1403,24 @@ fn insert_document(
     report: &mut IndexReport,
     index_set: &std::collections::BTreeSet<String>,
 ) -> Result<(), CacheError> {
+    let absolute = vault_root.join(&doc.path);
+    let mtime_ns = mtime_ns(&absolute).unwrap_or(0);
+    let size_bytes = size_bytes(&absolute).unwrap_or(0);
+    insert_document_with_metadata(tx, doc, report, index_set, mtime_ns, size_bytes)
+}
+
+fn insert_document_with_metadata(
+    tx: &rusqlite::Transaction,
+    doc: &Document,
+    report: &mut IndexReport,
+    index_set: &std::collections::BTreeSet<String>,
+    mtime_ns: i64,
+    size_bytes: i64,
+) -> Result<(), CacheError> {
     let frontmatter_json = doc
         .frontmatter
         .as_ref()
         .map(|v| serde_json::to_string(v).unwrap_or_default());
-    let absolute = vault_root.join(&doc.path);
-    let mtime_ns = mtime_ns(&absolute).unwrap_or(0);
-    let size_bytes = size_bytes(&absolute).unwrap_or(0);
 
     tx.execute(
         "INSERT INTO documents
@@ -1568,13 +1621,22 @@ fn insert_file(
     vault_root: &Utf8Path,
     file: &VaultFile,
 ) -> Result<(), CacheError> {
-    let ext = file.extension.as_deref().unwrap_or("");
     let absolute = vault_root.join(&file.path);
     let size = size_bytes(&absolute).unwrap_or(0);
     let mtime = mtime_ns(&absolute).unwrap_or(0);
+    insert_file_with_metadata(tx, file, mtime, size)
+}
+
+fn insert_file_with_metadata(
+    tx: &rusqlite::Transaction,
+    file: &VaultFile,
+    mtime_ns: i64,
+    size_bytes: i64,
+) -> Result<(), CacheError> {
+    let ext = file.extension.as_deref().unwrap_or("");
     tx.execute(
         "INSERT OR REPLACE INTO files (path, ext, size_bytes, mtime_ns) VALUES (?, ?, ?, ?)",
-        params![file.path.as_str(), ext, size, mtime],
+        params![file.path.as_str(), ext, size_bytes, mtime_ns],
     )?;
     Ok(())
 }
@@ -1811,6 +1873,98 @@ mod tests {
             stored,
             graph_fingerprint(&cache.load_graph_index().unwrap())
         );
+    }
+
+    #[test]
+    fn incremental_refresh_never_blesses_post_parse_bytes_with_parsed_document() {
+        let (_tmp, root) = make_vault_with_one_doc();
+        let mut cache = crate::cache::Cache::open(&root).unwrap();
+        cache.rebuild(&root).unwrap();
+        let baseline_fingerprint: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        std::fs::remove_file(root.join("doc.md")).unwrap();
+        let recreated = root.join("doc.md");
+        install_after_increment_detect_hook({
+            let recreated = recreated.clone();
+            move || {
+                std::fs::write(&recreated, "---\n---\nPARSED BODY\n").unwrap();
+            }
+        });
+        install_after_increment_parse_hook(move || {
+            std::fs::write(&recreated, "---\n---\nLATEST BODY\n").unwrap();
+        });
+
+        let error = cache
+            .index_incremental(&root, &Default::default())
+            .expect_err("post-parse drift must not publish parsed body with later metadata");
+        assert!(
+            matches!(
+                error,
+                CacheError::IncrementSourceDrift { ref path }
+                    if path == Utf8Path::new("doc.md")
+            ),
+            "unexpected error: {error:?}"
+        );
+
+        let cached_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cached_body, "# Heading\n\nbody [link](other.md)\n",
+            "a drifted parse must leave the previous coherent snapshot intact"
+        );
+        let cached_link_count: i64 = cache
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM links
+                 WHERE source_path = 'doc.md' AND target_raw = 'other.md'
+                   AND resolved_path = 'other.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cached_link_count, 1,
+            "a drifted parse must not partially publish global links"
+        );
+        let stored_fingerprint: String = cache
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_fingerprint, baseline_fingerprint);
+        assert_eq!(
+            stored_fingerprint,
+            graph_fingerprint(&cache.load_graph_index().unwrap()),
+            "files, documents, links, and fingerprint must remain coherent"
+        );
+
+        let retry = cache.index_incremental(&root, &Default::default()).unwrap();
+        assert_eq!(retry.doc_count, 1, "the next refresh must heal the drift");
+        let healed_body: String = cache
+            .conn
+            .query_row(
+                "SELECT body_text FROM documents WHERE path = 'doc.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(healed_body, "LATEST BODY\n");
     }
 
     #[test]
