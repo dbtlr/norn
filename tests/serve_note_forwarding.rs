@@ -79,31 +79,33 @@ fn run_norn(
     (out.stdout, out.stderr, out.status.code().unwrap_or(-1))
 }
 
-/// Find the single per-vault cache dir under `<cache_home>/norn/` (the one
-/// holding `cache.db`) and return its `.lock` path. The daemon's `run/` and
-/// `log/` subdirs never hold a `cache.db`, so this is unambiguous.
-fn cache_lock_path(cache_home: &Path) -> PathBuf {
-    let tree = cache_home.join("norn");
-    let mut hits: Vec<PathBuf> = std::fs::read_dir(&tree)
-        .unwrap_or_else(|e| panic!("read {tree:?}: {e}"))
-        .filter_map(|entry| {
-            let dir = entry.ok()?.path();
-            dir.join("cache.db").exists().then(|| dir.join(".lock"))
-        })
-        .collect();
-    assert_eq!(
-        hits.len(),
-        1,
-        "expected exactly one vault cache dir under {tree:?}, got {hits:?}"
+/// Resolve the vault's `.lock` path under `<cache_home>/norn/` through the
+/// SAME identity + channel seam production opens use (NRN-269): the lock lives
+/// in the channel-independent vault entry dir, while the database sits in the
+/// channel-resolved db dir (a `dev/` subdir when running from the cargo target
+/// tree, as this suite and the spawned `norn` children both do). Asserts the
+/// resolved db exists so the flock we hold is for the cache the warm-up run
+/// actually built.
+fn cache_lock_path(cache_home: &Path, vault: &Path) -> PathBuf {
+    let home = camino::Utf8Path::from_path(cache_home).expect("utf8 cache home");
+    let vault = camino::Utf8Path::from_path(vault).expect("utf8 vault root");
+    let entry_dir = norn_run::resolve_cache_lock_dir_in(home, vault)
+        .unwrap_or_else(|e| panic!("resolve cache lock dir: {e}"));
+    let db_dir = norn_run::resolve_cache_dir_in(home, vault)
+        .unwrap_or_else(|e| panic!("resolve cache db dir: {e}"));
+    let db = db_dir.join("cache.db");
+    assert!(
+        db.as_std_path().exists(),
+        "the warm-up run must have built the cache at {db}"
     );
-    hits.pop().unwrap()
+    entry_dir.join(".lock").into_std_path_buf()
 }
 
 /// Hold an exclusive flock on the vault's cache `.lock` — the same advisory
 /// lock `Cache::index_incremental` acquires — so the next implicit refresh
 /// times out through the real contention path.
-fn hold_cache_lock(cache_home: &Path) -> File {
-    let path = cache_lock_path(cache_home);
+fn hold_cache_lock(cache_home: &Path, vault: &Path) -> File {
+    let path = cache_lock_path(cache_home, vault);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -173,7 +175,7 @@ fn routed_contended_read_forwards_the_note_byte_identically() {
     // refresh times out and the command proceeds against current cache state
     // with the stderr note.
     stage_staleness(vault.path(), "staged for the direct contended run");
-    let held_direct = hold_cache_lock(direct_cache.path());
+    let held_direct = hold_cache_lock(direct_cache.path(), vault.path());
     let (d_stdout, d_stderr, d_code) =
         run_norn(direct_cache.path(), direct_state.path(), vault.path(), args);
     drop(held_direct);
@@ -239,7 +241,7 @@ fn routed_contended_read_forwards_the_note_byte_identically() {
     // and the routed CLI re-emits it — the full (stdout, stderr, exit) triple
     // must equal the contended DIRECT triple, byte for byte.
     stage_staleness(vault.path(), "restaged for the routed contended run");
-    let held_daemon = hold_cache_lock(&cache_home);
+    let held_daemon = hold_cache_lock(&cache_home, vault.path());
     let (r_stdout, r_stderr, r_code) = run_norn(&cache_home, &state_home, vault.path(), args);
     drop(held_daemon);
     assert_eq!(r_code, d_code, "routed contended exit must match direct");

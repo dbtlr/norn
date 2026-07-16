@@ -74,6 +74,24 @@ pub fn resolve_cache_dir_in(
         .map(|(_canonical, dir)| dir)
         .map_err(|e| e.to_string())
 }
+
+/// Sibling of [`resolve_cache_dir_in`] for the vault ENTRY dir — the
+/// channel-independent `<cache_home>/norn/<hash>` directory holding the shared
+/// write lock (`.lock`), which is the entry dir itself on the live channel and
+/// the parent of the `dev/` db dir on the dev channel (NRN-269). Cross-crate
+/// test-harness seam: contention tests hold the vault's real write lock through
+/// it instead of re-encoding the on-disk layout. Same posture as
+/// [`resolve_cache_dir_in`]: pure function of its arguments, stringified error,
+/// not part of the stable public API.
+#[doc(hidden)]
+pub fn resolve_cache_lock_dir_in(
+    cache_home: &camino::Utf8Path,
+    vault_root: &camino::Utf8Path,
+) -> Result<camino::Utf8PathBuf, String> {
+    identity::cache_layout_in(cache_home, vault_root)
+        .map(|layout| layout.entry_dir)
+        .map_err(|e| e.to_string())
+}
 pub(crate) use lock::{acquire_flock, debug_env_usize};
 #[cfg(test)]
 pub(crate) use query_show::set_after_document_row_hook;
