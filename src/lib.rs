@@ -1,3 +1,18 @@
+//! The `norn` crate root and dispatch hub.
+//!
+//! `cli_main` is the binary entry: it runs the `grammar` normalization pass,
+//! lets clap (`cli.rs`) parse the result, and hands the parsed `Command` to
+//! `run`. `run` opens config and cache once, then matches one arm per verb —
+//! each arm either does the work in-process (the CLI-direct surface) or
+//! delegates into a command module under `src/<verb>/`. Before the direct work,
+//! a routable command consults its route seam (`try_route_read`,
+//! `try_route_<verb>`, `route_count`/`route_find`/`route_get`/`route_repair`);
+//! a live `serve` daemon answers through the same MCP handlers, otherwise the
+//! seam returns `None` and the direct arm runs. `run` returns the process exit
+//! code that `cli_main` maps to `process::exit` (broken pipe → 0, `Err` → 1,
+//! refusals carry their own code). The module tree declared below is the whole
+//! crate; `docs/development.md` has the architecture map.
+
 pub mod applier;
 mod apply;
 pub mod apply_report;

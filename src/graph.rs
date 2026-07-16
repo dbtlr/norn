@@ -1,3 +1,12 @@
+//! Vault walking and graph-index construction.
+//!
+//! The build side of the crate: `build` walks the vault root under the
+//! configured ignore globs and produces a `GraphIndex` of `core::Document`s
+//! with their frontmatter, links, and headings; `aliases` resolves the
+//! configured alias field; `pattern` matches path globs. `config_loader`
+//! supplies the `IndexOptions`; the cache writer consumes the built index. The
+//! parsing modules (`frontmatter`, `links`) do the per-file work this drives.
+
 mod aliases;
 mod build;
 mod pattern;

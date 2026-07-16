@@ -1,3 +1,11 @@
+//! The clap command surface for the `norn` binary.
+//!
+//! Declarations only: the `Cli` parser, the `Command` enum with one variant per
+//! verb, every `*Args` struct, and the `*Format` value enums. `lib.rs::run`
+//! matches on the `Command` this produces; `grammar.rs` normalizes argv before
+//! clap parses it here; `mcp/parity_gate.rs` walks this derive-generated tree to
+//! enforce CLI↔MCP parity. No command logic lives in this file.
+
 use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 

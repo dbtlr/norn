@@ -1,3 +1,11 @@
+//! Shell-completion and manpage generation for `norn completions`.
+//!
+//! Generates completion scripts and man pages straight off the derive-generated
+//! clap `Cli`, so they never fall out of sync with the real command surface.
+//! `run_init` writes a script to stdout; the `install` submodule places it in
+//! the shell's completion directory. Driven by the `Completions` arm in
+//! `lib.rs`; a `LocalOnly` command with no MCP twin.
+
 use anyhow::Result;
 use clap::CommandFactory;
 use clap_complete::generate;

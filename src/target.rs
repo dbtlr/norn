@@ -1,3 +1,11 @@
+//! Target resolution and backlink lookup over a built graph.
+//!
+//! `resolve_target_path` turns a user-supplied target (an exact path or a stem)
+//! into a single vault path, erroring on an ambiguous stem; `backlinks`
+//! collects the links across the index that resolve to a given path. The
+//! mutation appliers (`applier.rs`) and `delete` use these to find what points
+//! at a document before they move or remove it.
+
 use crate::core::{GraphIndex, Link};
 use anyhow::{bail, Result};
 use camino::Utf8PathBuf;

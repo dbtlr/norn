@@ -1,3 +1,10 @@
+//! Frontmatter field tally for `norn init`.
+//!
+//! `tally_from_keys` counts how often each frontmatter key appears across the
+//! vault and returns the top fields sorted by frequency. `init.rs` calls it to
+//! scan a vault and scaffold a starter `.norn/config.yaml` that reflects the
+//! fields already in use. Pure counting over borrowed key lists, no I/O.
+
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

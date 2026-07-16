@@ -1,3 +1,12 @@
+//! The repair-specific apply orchestrator.
+//!
+//! `apply_repair_plan` runs a `RepairPlan`'s changes in ordered passes —
+//! document creation, moves, deletes, link rewrites, file edits — over the
+//! low-level primitives in `standards::apply`, collecting per-op results and
+//! skip reasons. The `repair` and `new` commands drive it; the general `apply`
+//! command uses `applier.rs` instead. Containment and mutation-lock checks live
+//! in the primitives it calls, not here.
+
 use std::fs;
 use std::time::Duration;
 

@@ -1,3 +1,12 @@
+//! Post-validation finding filters for `validate` and `repair`.
+//!
+//! `filter_findings` narrows a validated finding set by code (exact or glob),
+//! severity, path glob, field, and confidence, using the `--code` / `--path` /
+//! confidence flags off `ValidateArgs` and `RepairArgs`. The `validate` and
+//! `repair` command arms call it after the engine runs, so an operator sees or
+//! repairs only the subset they asked for. Filtering only; it never re-runs a
+//! check.
+
 use std::collections::BTreeSet;
 
 use crate::core::display;

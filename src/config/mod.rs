@@ -1,3 +1,12 @@
+//! The `norn config` subcommands.
+//!
+//! `show`, `validate`, `migrate`, and `edit` for the vault's
+//! `.norn/config.yaml`. `Discovery` resolves the config file, vault root, and
+//! cache path once so the four subcommands report consistent resolution. The
+//! `Config` arm in `lib.rs` dispatches here; `config_loader` handles the load
+//! path commands actually run against. `config edit` is `LocalOnly`; the read
+//! subcommands are a tracked MCP gap (NRN-189).
+
 pub mod edit;
 pub mod migrate;
 pub mod show;

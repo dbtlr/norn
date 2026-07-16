@@ -1,3 +1,12 @@
+//! Vault root and config resolution.
+//!
+//! Resolves which directory `norn` operates on (precedence: `-C/--cwd`, then
+//! `NORN_ROOT`, then the process cwd) and loads `.norn/config.yaml` into a
+//! `LoadedConfig` — index options, validate/repair config, the full
+//! `VaultConfig`, and pre-compiled path patterns. `lib.rs::run` calls this once
+//! per invocation before opening the cache; the command arms read the resolved
+//! config from the returned struct.
+
 use std::fs;
 
 use crate::graph::IndexOptions;
