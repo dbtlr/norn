@@ -40,7 +40,7 @@ pub mod prompt;
 mod query;
 mod repair;
 mod repair_apply;
-mod rewrite_wikilink_cmd;
+mod rewrite_wikilink;
 mod route_wire;
 mod self_update;
 mod seq_alloc;
@@ -62,7 +62,7 @@ use crate::config_loader::{effective_cwd, load_config};
 use crate::core::GraphIndex;
 use crate::graph::{concise_diagnostics, has_errors};
 use crate::output::primitives::is_broken_pipe;
-use crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs;
+use crate::rewrite_wikilink::RewriteWikilinkRunArgs;
 use crate::standards::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 use anyhow::Result;
@@ -1214,10 +1214,10 @@ fn try_route_delete(
 /// The cleanest cascade command to route: BOTH surfaces apply the raw
 /// `{old, new}` (no stem-resolution divergence), so no on-disk guard is needed —
 /// every input routes, including an unresolvable OLD (a `target-not-found` coded
-/// refusal). `--out` is reproduced client-side in `rewrite_wikilink_cmd::route::emit`.
+/// refusal). `--out` is reproduced client-side in `rewrite_wikilink::route::emit`.
 #[cfg(unix)]
 fn try_route_rewrite_wikilink(
-    args: &crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs,
+    args: &crate::rewrite_wikilink::RewriteWikilinkRunArgs,
     cwd: &camino::Utf8Path,
     explicit_config: bool,
     no_cache_refresh: bool,
@@ -1233,11 +1233,11 @@ fn try_route_rewrite_wikilink(
         matches!(args.format, crate::cli::RewriteWikilinkFormat::Json),
     )?;
 
-    let arguments = crate::rewrite_wikilink_cmd::route::to_mcp_arguments(args, confirm);
+    let arguments = crate::rewrite_wikilink::route::to_mcp_arguments(args, confirm);
     let dry_run = !confirm;
     // The emit closure needs the run args (old/new/format/out); clone the small
     // owned fields it reads into a captured copy.
-    let emit_args = crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs {
+    let emit_args = crate::rewrite_wikilink::RewriteWikilinkRunArgs {
         old: args.old.clone(),
         new: args.new.clone(),
         dry_run: args.dry_run,
@@ -1255,14 +1255,14 @@ fn try_route_rewrite_wikilink(
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
-        move |report| crate::rewrite_wikilink_cmd::route::emit(report, &emit_args),
+        move |report| crate::rewrite_wikilink::route::emit(report, &emit_args),
     )
 }
 
 /// Non-Unix build: `rewrite-wikilink` always runs Direct.
 #[cfg(not(unix))]
 fn try_route_rewrite_wikilink(
-    args: &crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs,
+    args: &crate::rewrite_wikilink::RewriteWikilinkRunArgs,
     cwd: &camino::Utf8Path,
     explicit_config: bool,
     no_cache_refresh: bool,
@@ -1545,7 +1545,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             ) {
                 return result;
             }
-            rewrite_wikilink_cmd::run(
+            rewrite_wikilink::run(
                 run_args,
                 &cwd,
                 no_cache_refresh,
