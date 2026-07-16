@@ -172,9 +172,9 @@ pub fn run_prune(
 
 fn render_prune_text(report: &PruneReport) {
     let verb = if report.dry_run {
-        "would be evicted"
+        "planned"
     } else {
-        "evicted"
+        "performed"
     };
     let freed = if report.dry_run {
         "would be freed"
@@ -191,6 +191,9 @@ fn render_prune_text(report: &PruneReport) {
         if tree.skipped_locked > 0 {
             notes.push(format!("{} skipped: locked", tree.skipped_locked));
         }
+        if tree.skipped_errors > 0 {
+            notes.push(format!("{} skipped: error", tree.skipped_errors));
+        }
         if tree.kept_unknown > 0 {
             notes.push(format!("{} kept: root unknown", tree.kept_unknown));
         }
@@ -202,10 +205,12 @@ fn render_prune_text(report: &PruneReport) {
         println!(
             "{label}  {} {} {verb}, {} {freed}{notes}",
             tree.evicted.len(),
+            // "evictions", not "entries": one entry can emit a dev-stale row
+            // plus a terminal row in the same sweep.
             if tree.evicted.len() == 1 {
-                "entry"
+                "eviction"
             } else {
-                "entries"
+                "evictions"
             },
             format_bytes(tree.bytes_freed),
         );
@@ -231,6 +236,10 @@ fn render_prune_text(report: &PruneReport) {
                     None => "aged".to_string(),
                 },
                 EvictReason::OverCap => "over cap".to_string(),
+                EvictReason::DevStale => match e.age_days {
+                    Some(d) => format!("dev stale {d}d"),
+                    None => "dev stale".to_string(),
+                },
             };
             println!("  [{tree}] {root}  {reason}  {}", format_bytes(e.bytes));
         }
