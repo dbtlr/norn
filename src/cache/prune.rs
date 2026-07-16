@@ -72,6 +72,11 @@ pub(crate) fn lazy_sweep(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) {
             // Enabled but no state tree: degenerate env; retries next invocation.
             return;
         };
+        // Channel-resolution failure (invalid NORN_CACHE_CHANNEL): skip the
+        // sweep this invocation rather than protect the wrong own-db path.
+        let Ok(exempt_own_db_subpath) = own_db_subpath() else {
+            return;
+        };
         let opts = PruneOptions {
             retention: cache_cfg
                 .as_ref()
@@ -80,7 +85,7 @@ pub(crate) fn lazy_sweep(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) {
             cap_bytes: CACHE_TREE_SIZE_CAP_BYTES,
             dry_run: false,
             exempt_hash: crate::cache::vault_identity_hash(cwd),
-            exempt_own_db_subpath: own_db_subpath(),
+            exempt_own_db_subpath,
         };
         let report = sweep(&cache_tree, &state_tree, &opts);
         if report.cache.skipped_locked > 0 {
@@ -182,17 +187,17 @@ pub(crate) struct PruneOptions {
 /// a single-vault user's own in-use db is never reaped, while its leftover
 /// stale dbs (old schema, legacy bare, peer channel) still age out on the 48h
 /// clock.
-pub(crate) fn own_db_subpath() -> Utf8PathBuf {
+pub(crate) fn own_db_subpath() -> Result<Utf8PathBuf, crate::cache::error::CacheError> {
     let seg = crate::cache::identity::schema_segment();
-    match crate::cache::channel::channel() {
-        Ok(ch) => match ch.db_subdir() {
-            Some(sub) => Utf8Path::new(sub).join(seg),
-            None => Utf8PathBuf::from(seg),
-        },
-        // Invalid channel env → assume the live current db; the worst case is a
-        // dev binary's own db being reaped, which merely costs one rebuild.
-        Err(_) => Utf8PathBuf::from(seg),
-    }
+    // Propagate a channel-resolution failure (an invalid `NORN_CACHE_CHANNEL`)
+    // rather than guessing the live layout: guessing would protect the wrong
+    // path and leave the invoking binary's real own db unprotected. `run_prune`
+    // surfaces the error; `lazy_sweep` skips the sweep (best-effort posture).
+    let ch = crate::cache::channel::channel()?;
+    Ok(match ch.db_subdir() {
+        Some(sub) => Utf8Path::new(sub).join(seg),
+        None => Utf8PathBuf::from(seg),
+    })
 }
 
 /// One scanned tree entry with everything classification needs.
@@ -518,8 +523,11 @@ impl StaleDb {
         }
     }
 
-    /// Remove this unit from disk. Returns whether the primary `cache.db` is
-    /// gone afterward (removed or already absent). Never removes the entry, the
+    /// Remove this unit from disk. Returns whether ALL of the unit's db files
+    /// are gone afterward (each removed or already absent) — a failed removal of
+    /// the main db OR any `-wal`/`-shm` sidecar returns `false`, so the caller
+    /// records an error skip and no bytes-freed row, keeping accounting honest
+    /// (a sidecar left on disk was never freed). Never removes the entry, the
     /// shared lock, or another db; an emptied non-entry channel dir (`dev/`) is
     /// cleaned up opportunistically.
     fn remove(&self, entry_dir: &Utf8Path) -> bool {
@@ -537,14 +545,17 @@ impl StaleDb {
                 removed
             }
             StaleDb::LegacyBare(root) => {
-                let db = root.join("cache.db");
-                let removed = match std::fs::remove_file(db.as_std_path()) {
-                    Ok(()) => true,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                    Err(_) => false,
-                };
-                let _ = std::fs::remove_file(root.join("cache.db-wal").as_std_path());
-                let _ = std::fs::remove_file(root.join("cache.db-shm").as_std_path());
+                // All-or-nothing over the db + its sidecars, matching
+                // `remove_dir_all`'s semantics for the SchemaDir arm: any file
+                // that resists deletion (and isn't already gone) fails the unit.
+                let mut removed = true;
+                for name in DB_FILES {
+                    match std::fs::remove_file(root.join(name).as_std_path()) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => removed = false,
+                    }
+                }
                 // Drop a now-empty channel dir (e.g. `dev/`) — never the entry
                 // itself. `remove_dir` only succeeds on an empty dir, so a root
                 // still holding other content stays.
@@ -1811,6 +1822,65 @@ mod tests {
         );
         assert_eq!(report.cache.bytes_freed, 0);
         assert!(entry.as_std_path().exists());
+    }
+
+    /// NRN-286: a legacy bare unit whose SIDECAR resists deletion fails the whole
+    /// unit — error skip, no eviction row, no bytes claimed for a file still on
+    /// disk (accounting honesty). Provoked portably by planting a `cache.db-wal`
+    /// that is a non-empty DIRECTORY, so `remove_file` errors on it even though
+    /// the real `cache.db` unlinks fine.
+    #[test]
+    fn legacy_bare_sidecar_removal_failure_counts_as_error_skip() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = mint_cache_entry(&cache_tree, H1, live_root); // H1/v{schema} keeps entry + root
+                                                                  // Legacy bare at the entry root: a real cache.db plus a `cache.db-wal`
+                                                                  // that is a non-empty directory (undeletable by remove_file).
+        std::fs::write(entry.join("cache.db").as_std_path(), b"legacy").unwrap();
+        let wal_dir = entry.join("cache.db-wal");
+        std::fs::create_dir_all(wal_dir.as_std_path()).unwrap();
+        std::fs::write(wal_dir.join("blocker").as_std_path(), b"x").unwrap();
+        backdate_dir(&entry, Duration::from_secs(3 * 86_400)); // past TTL, within retention
+                                                               // backdate_dir sets file mtimes only; age the sidecar dir itself too so
+                                                               // the unit's newest-mtime is genuinely past the TTL.
+        let old = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - Duration::from_secs(3 * 86_400),
+        );
+        filetime::set_file_mtime(wal_dir.as_std_path(), old).unwrap();
+
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+
+        assert_eq!(
+            report.cache.skipped_errors, 1,
+            "the undeletable sidecar must count as one error skip"
+        );
+        assert!(
+            report
+                .cache
+                .evicted
+                .iter()
+                .all(|e| e.reason != EvictReason::StaleDb),
+            "no stale-db eviction row for a unit that did not fully remove"
+        );
+        assert_eq!(
+            report.cache.bytes_freed, 0,
+            "no bytes claimed while a sidecar remains on disk"
+        );
+        assert!(
+            wal_dir.as_std_path().exists(),
+            "the undeletable sidecar stays"
+        );
+        assert!(
+            entry
+                .join(schema_seg())
+                .join("cache.db")
+                .as_std_path()
+                .exists(),
+            "the current-schema db survives"
+        );
     }
 
     /// NRN-272 (G4): a held entry `.lock` blocks dev eviction — the writer-
