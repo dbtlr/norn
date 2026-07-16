@@ -925,12 +925,14 @@ fn warm_begin_request_makes_config_and_cache_same_generation() {
     write_config(&root, "links:\n  alias_field: aliases\n");
 
     // ONE request, in a tool's access order: begin_request, THEN read config,
-    // THEN open the cache.
-    ctx.begin_request()
+    // THEN open the cache — through the SAME scope, so the config read and the
+    // cache open are provably bound to the one request the scope represents.
+    let scope = ctx
+        .begin_request()
         .expect("begin_request after config change");
-    let config_alias = ctx.config().index_options.alias_field.clone();
+    let config_alias = scope.config().index_options.alias_field.clone();
     let _cache = ctx
-        .query_cache_unscoped()
+        .query_cache(&scope)
         .expect("query_cache after config change");
     assert_eq!(
         config_alias.as_deref(),
@@ -1661,8 +1663,14 @@ fn warm_generation_open_errors_when_queue_shuts_down() {
 
     // Once shutdown is committed, release the blocker; the writer's next pick
     // then observes shutdown and DROPS the queued open op. Guaranteed to
-    // terminate: the dropper sets the flag.
+    // terminate: the dropper sets the flag. Bounded so a shutdown regression
+    // fails fast with a diagnostic instead of hanging a headless CI run.
+    let poll_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !watch.is_shutting_down() {
+        assert!(
+            std::time::Instant::now() < poll_deadline,
+            "timed out waiting for queue shutdown to commit (watch.is_shutting_down() never became true)"
+        );
         std::thread::yield_now();
     }
     release_tx.send(()).unwrap();
@@ -2158,6 +2166,40 @@ fn coalesced_waiters_on_a_locktimeout_refresh_all_observe_contention() {
 
 // ---- Post-apply increment commit (NRN-252 / NRN-158) --------------------
 
+/// Test-only: RAII guard for the process-global `NORN_CACHE_INCREMENT_BUDGET_MS`
+/// override, mirroring `ReadPoolCapGuard` (env/generation.rs): a shared static
+/// lock serializes the tests below that pin this process-global var so they
+/// can't clobber each other's override mid-test (parallel `cargo test` runs
+/// them concurrently by default), and the PRIOR value — present or absent — is
+/// restored on drop, including on an unwinding panic, since the guard lives in
+/// the test's stack frame and `Drop` still runs during unwind.
+struct IncrementBudgetGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prior: Option<String>,
+}
+
+impl IncrementBudgetGuard {
+    const ENV: &'static str = "NORN_CACHE_INCREMENT_BUDGET_MS";
+
+    /// Pin the budget override to `budget_ms` for the guard's life.
+    fn pin(budget_ms: &str) -> Self {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var(Self::ENV).ok();
+        std::env::set_var(Self::ENV, budget_ms);
+        Self { _lock: lock, prior }
+    }
+}
+
+impl Drop for IncrementBudgetGuard {
+    fn drop(&mut self) {
+        match &self.prior {
+            Some(v) => std::env::set_var(Self::ENV, v),
+            None => std::env::remove_var(Self::ENV),
+        }
+    }
+}
+
 fn doc_present(cache: &Cache, path: &str) -> bool {
     let n: i64 = cache
         .conn()
@@ -2237,7 +2279,7 @@ fn warm_mutation_commits_increment_so_next_read_sees_no_changes() {
 fn increment_publishes_all_files_atomically_after_staging() {
     // 0ms budget ⇒ one whole file per chunk. Process-global but inert: it only
     // makes other increments chunk more finely, never changes correctness.
-    std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+    let _budget = IncrementBudgetGuard::pin("0");
 
     let (_tmp, root) = make_seeded_vault();
     let ctx = VaultEnv::open_warm(&root).expect("open_warm");
@@ -2440,7 +2482,7 @@ fn refresh_waiters_succeed_when_post_refresh_temp_cleanup_fails() {
 /// flight runs BETWEEN two increment chunks, not after all of them.
 #[test]
 fn liveness_op_preempts_increment_between_chunks() {
-    std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+    let _budget = IncrementBudgetGuard::pin("0");
 
     let (_tmp, root) = make_seeded_vault();
     let ctx = VaultEnv::open_warm(&root).expect("open_warm");
@@ -2493,7 +2535,7 @@ fn liveness_op_preempts_increment_between_chunks() {
 /// (never fails) with the deferred operator note.
 #[test]
 fn increment_dropped_on_generation_death_tool_still_succeeds() {
-    std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+    let _budget = IncrementBudgetGuard::pin("0");
 
     let (_tmp, root) = make_seeded_vault();
     let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
@@ -2608,7 +2650,7 @@ fn panicked_increment_cleans_its_reserved_temp_job() {
 
 #[test]
 fn affected_source_drift_degrades_post_apply_increment() {
-    std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
+    let _budget = IncrementBudgetGuard::pin("0");
     let (_tmp, root) = make_seeded_vault();
     let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
     let scope = ctx.begin_request().expect("begin_request");
