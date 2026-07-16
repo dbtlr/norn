@@ -113,7 +113,7 @@ impl<T> MutationResult<T> {
     /// READ tool uses it to map its not-found / all-missed-section signal to
     /// `isError: true` while still returning its records + diagnostics. `is_error`
     /// must be derived at the single call site from the tool's own report
-    /// ([`ShowReport::has_error`](crate::show::ShowReport::has_error) for get) —
+    /// ([`ShowReport::has_error`](crate::get::ShowReport::has_error) for get) —
     /// the same predicate the CLI derives its exit code from, so the two surfaces
     /// cannot disagree.
     pub fn from_flag(value: T, is_error: bool) -> Self {

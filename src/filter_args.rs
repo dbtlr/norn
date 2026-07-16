@@ -95,7 +95,7 @@ pub fn resolve_links_to(
 ) -> Result<Vec<camino::Utf8PathBuf>> {
     let mut resolved = Vec::with_capacity(raw.len());
     for target in raw {
-        let r = crate::show::target::resolve_target(cache, target)?;
+        let r = crate::get::target::resolve_target(cache, target)?;
         match r.paths.as_slice() {
             [path] => resolved.push(path.clone()),
             [] => return Err(anyhow!("no document matched: {target}")),

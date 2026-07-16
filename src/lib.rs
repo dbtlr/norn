@@ -46,7 +46,7 @@ mod seq_alloc;
 mod serve;
 mod service;
 mod set;
-mod show;
+mod get;
 mod standards;
 mod target;
 mod telemetry;
@@ -196,7 +196,7 @@ fn stdin_carries_redirected_payload() -> bool {
 ///   signal — NRN-222), and the SAME projected per-document JSON `--format json`
 ///   emits; the client rebuilds a `FindResult` + deep/raw and renders via `find::emit`.
 /// - `get` — `vault.get` ships each full serialized `ShowRecord` plus `notes`
-///   (NRN-214); the client rebuilds a `ShowReport` and renders via `show::emit`,
+///   (NRN-214); the client rebuilds a `ShowReport` and renders via `get::emit`,
 ///   applying the CLI's client-side `--col` narrowing. `--format markdown`
 ///   travels in a dedicated exact-source envelope; `--section` stays Direct
 ///   (see `route_get`).
@@ -651,11 +651,11 @@ fn route_get(
             cwd,
             CallSpec {
                 tool: "vault.get",
-                arguments: crate::show::route::to_mcp_arguments(args),
+                arguments: crate::get::route::to_mcp_arguments(args),
                 on_tool_error: crate::service::OnToolError::AcceptWithPayload,
                 verbose,
             },
-            crate::show::route::reconstruct_markdown,
+            crate::get::route::reconstruct_markdown,
             |routed| {
                 use std::io::Write as _;
 
@@ -693,7 +693,7 @@ fn route_get(
         cwd,
         CallSpec {
             tool: "vault.get",
-            arguments: crate::show::route::to_mcp_arguments(args),
+            arguments: crate::get::route::to_mcp_arguments(args),
             // vault.get flags a not-found target as `isError: true` while still
             // shipping the full structuredContent (NRN-214); accept it so the
             // routed client derives the CLI's exit-1 from the wire notes instead
@@ -701,8 +701,8 @@ fn route_get(
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
-        |structured| crate::show::route::reconstruct(structured, args),
-        |report| crate::show::emit(&report, args),
+        |structured| crate::get::route::reconstruct(structured, args),
+        |report| crate::get::emit(&report, args),
     )
 }
 
@@ -1647,7 +1647,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 &loaded_config.index_options,
                 no_cache_refresh,
             )?;
-            let report = cache.read_snapshot(|cache| show::run(cache, &args))?;
+            let report = cache.read_snapshot(|cache| get::run(cache, &args))?;
 
             // `markdown` is the one principled divergence: a single, byte-faithful
             // document straight from disk. It is selection-bound (meaningful only
@@ -1698,7 +1698,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // Shared print seam with the daemon-routed path (`route_get`), so
             // routed and direct `get` cannot drift on rendering, warnings, note
             // forwarding, or the exit-1 signal.
-            show::emit(&report, &args)
+            get::emit(&report, &args)
         }
         Command::Find(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;

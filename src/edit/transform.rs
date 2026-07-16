@@ -234,7 +234,7 @@ fn splice(body: &str, range: std::ops::Range<usize>, replacement: &str) -> Strin
 
 /// Byte ranges describing a section addressed by exact heading text.
 ///
-/// `pub(crate)` so `norn get --section` (`show::mod`) can resolve the same
+/// `pub(crate)` so `norn get --section` (`get::mod`) can resolve the same
 /// span `edit`'s section ops use — read mirrors write, same boundary and
 /// failure semantics.
 pub(crate) struct SectionSpan {

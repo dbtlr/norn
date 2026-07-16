@@ -1,6 +1,6 @@
 //! `vault.get` — structured document fetch.
 //!
-//! The pure handler reuses [`crate::show::run`], the exact code path behind
+//! The pure handler reuses [`crate::get::run`], the exact code path behind
 //! `norn get`. It returns the same [`ShowReport`] struct the CLI renders, so the
 //! MCP surface and the CLI can never drift on resolution, link projection, or
 //! facet selection.
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::cli::{GetArgs, GetFormat as CliGetFormat, SortPaginateArgs};
 use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
-use crate::show::{SectionFailure, ShowReport};
+use crate::get::{SectionFailure, ShowReport};
 
 /// Default for [`GetParams::starts_at`] — the CLI's `--starts-at` default (1).
 /// serde's numeric default is 0; get's paging is 1-indexed, so the absent-field
@@ -197,7 +197,7 @@ impl GetOutput {
 /// the routed client — which re-renders from the wire value — needs the key
 /// presence to carry the distinction. The CLI `--format json` output is
 /// untouched (it serializes the record directly, conflating as before).
-pub(crate) fn record_to_wire_json(record: &crate::show::ShowRecord) -> Result<serde_json::Value> {
+pub(crate) fn record_to_wire_json(record: &crate::get::ShowRecord) -> Result<serde_json::Value> {
     let mut v = serde_json::to_value(record)?;
     crate::route_wire::strip_absent_frontmatter(&mut v, record.frontmatter.is_none());
     Ok(v)
@@ -314,11 +314,11 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: GetParams) -> Result<
         all_cols: p.all_cols,
         col,
         section: p.section,
-        // Records is `norn get`'s default format and the one `show::run` uses to
+        // Records is `norn get`'s default format and the one `get::run` uses to
         // decide the `--section` slice is CONSUMED (Json/Jsonl/Records consume
         // it; Paths/Markdown ignore it). The MCP wrapper serializes the returned
         // `ShowReport` to JSON regardless, so this governs which facets
-        // `show::run` loads (body, sections), not a textual rendering.
+        // `get::run` loads (body, sections), not a textual rendering.
         format: match p.format {
             GetRepresentation::Structured => CliGetFormat::Records,
             GetRepresentation::Markdown => CliGetFormat::Markdown,
@@ -327,7 +327,7 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: GetParams) -> Result<
 
     // Section hard-fail signal (F1/F2, mirroring the CLI's exit-1 contract):
     // when `--section` is requested and NONE of the requested headings resolve
-    // for a target, `show::run` records it in `ShowReport::section_failures`
+    // for a target, `get::run` records it in `ShowReport::section_failures`
     // (the structured twin of the CLI's `error:` note). The MCP surface maps
     // that list to `GetOutput::section_failures` — an ADDITIVE field — rather
     // than bailing the whole call: a batch keeps every good target's records
@@ -336,7 +336,7 @@ pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: GetParams) -> Result<
     // whose name contained `--section`). A plain missing target (no sections)
     // still yields zero records without erroring (NRN-183 exit-signal asymmetry
     // is tracked separately and unchanged here).
-    cache.read_snapshot(|cache| crate::show::run(cache, &args))
+    cache.read_snapshot(|cache| crate::get::run(cache, &args))
 }
 
 #[cfg(test)]
@@ -601,7 +601,7 @@ mod tests {
     }
 
     /// The `sections` object an MCP `vault.get` returns must be byte-for-byte the
-    /// object `norn get --format json` emits — same slice seam (`show::run`),
+    /// object `norn get --format json` emits — same slice seam (`get::run`),
     /// same keyed shape.
     #[test]
     fn section_object_matches_cli_json_slice() {
@@ -642,9 +642,9 @@ mod tests {
             section: vec!["Task Description".into()],
             format: crate::cli::GetFormat::Json,
         };
-        let cli_report = crate::show::run(&cache, &cli_args).unwrap();
+        let cli_report = crate::get::run(&cache, &cli_args).unwrap();
         let cli_json: serde_json::Value =
-            serde_json::from_str(&crate::show::render::render_json(&cli_report)).unwrap();
+            serde_json::from_str(&crate::get::render::render_json(&cli_report)).unwrap();
         assert_eq!(
             mcp_sections, cli_json[0]["sections"],
             "MCP sections object must equal the CLI --format json sections object"

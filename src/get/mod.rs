@@ -286,7 +286,7 @@ pub fn emit(report: &ShowReport, args: &GetArgs) -> Result<i32> {
         crate::cli::GetFormat::Jsonl => render::render_jsonl_with_col(report, &args.col),
         crate::cli::GetFormat::Paths => render::render_paths(report),
         crate::cli::GetFormat::Records => render::render_records_with_col(report, &args.col),
-        crate::cli::GetFormat::Markdown => unreachable!("markdown is handled before show::emit"),
+        crate::cli::GetFormat::Markdown => unreachable!("markdown is handled before get::emit"),
     };
     let stdout = std::io::stdout();
     let mut stdout_lock = stdout.lock();

@@ -5,7 +5,7 @@
 //! as the FULL serialized [`ShowRecord`] (the tool's `col` opts facets IN but
 //! does NOT narrow — NRN-173), plus the run's `notes` (NRN-214). The client
 //! rebuilds a [`ShowReport`] from that payload and renders it through the SAME
-//! `show::render::*_with_col` seams the direct path uses, applying the CLI's
+//! `get::render::*_with_col` seams the direct path uses, applying the CLI's
 //! client-side `--col` narrowing itself — so routed and direct output are
 //! byte-for-byte equal.
 //!
@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 
 use crate::cli::GetArgs;
 use crate::route_wire::{insert_paging, json_type, take_vec};
-use crate::show::{ShowRecord, ShowReport};
+use crate::get::{ShowRecord, ShowReport};
 
 /// Translate parsed `norn get` args into the `vault.get` tool's parameter object
 /// (the `GetParams` shape in `src/mcp/tools/get.rs`).
@@ -260,7 +260,7 @@ mod tests {
         args.col = cols.clone();
         let routed = reconstruct(&wire, &args).unwrap();
 
-        use crate::show::render::{
+        use crate::get::render::{
             render_json_with_col, render_jsonl_with_col, render_paths, render_records_with_col,
         };
         assert_eq!(
@@ -355,7 +355,7 @@ mod tests {
             json!(["vault: another cache operation is in progress; using current cache state"]),
         );
         let routed = reconstruct(&wire, &base_args()).unwrap();
-        use crate::show::render::render_records_with_col;
+        use crate::get::render::render_records_with_col;
         assert_eq!(
             render_records_with_col(&report, &[]),
             render_records_with_col(&routed, &[]),

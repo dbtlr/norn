@@ -17,7 +17,7 @@ use serde_json::Value;
 /// - The target doesn't resolve to any doc.
 /// - The target resolves to multiple docs (ambiguous stem).
 pub fn resolve_target(cache: &Cache, raw: &str) -> Result<Utf8PathBuf> {
-    let resolved = crate::show::target::resolve_target(cache, raw)?;
+    let resolved = crate::get::target::resolve_target(cache, raw)?;
     match resolved.paths.len() {
         0 => {
             // F4: a DOC token that is itself shaped like a field assignment
