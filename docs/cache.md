@@ -37,7 +37,7 @@ Detection is not purely path-based: a binary copied out of its build tree (e.g. 
 
 Only the database moves. The per-vault **write lock** (`<hash>/.lock`) and vault-level state stay shared across channels *and* schema versions, so a dev and a live binary (of any schema) mutating the same vault still serialize against each other. `norn cache status` prints a `channel:` line and the `dev/` and `v<schema>/` segments show up in the reported path; correct isolation is otherwise silent.
 
-Every database *except the live current-schema one* reclaims itself: the prune sweep evicts any db location left idle for ~48h on its own clock — independent of the entry's overall freshness. That covers a `dev/` database of any schema, a live database of a non-current schema (`v<N>/` left behind by a newer or older binary), and a legacy bare `cache.db` at a channel root (the pre-schema-segment layout). An abandoned dev build or an obsolete-schema database therefore never pins disk inside a still-active `live` entry.
+Every database *except the one a norn binary is actively using* reclaims itself: the prune sweep evicts any db location left idle for ~48h on its own clock — independent of the entry's overall freshness. That covers a `dev/` database of any schema, a live database of a non-current schema (`v<N>/` left behind by a newer or older binary), and a legacy bare `cache.db` at a channel root (the pre-schema-segment layout). This runs even inside the current vault's own entry (which is otherwise exempt from whole-entry eviction) — it protects only the invoking binary's own current database, so a single-vault user's leftover stale databases still age out. An abandoned dev build or an obsolete-schema database therefore never pins disk inside a still-active `live` entry.
 
 ## Surface
 
@@ -67,7 +67,7 @@ The current `schema_version` is `5`. Version 5 adds an atomically maintained gra
 
 ## Lifecycle
 
-The cache tree is self-maintaining. Every `norn` invocation runs a cross-vault prune sweep at most once per 24h (throttled by the `~/.cache/norn/.last-prune` marker): cache entries whose vault root no longer exists, that are unreadable or empty, that are older than the retention window (default 90d), or that push the tree over its internal 1 GiB cap are deleted. The current vault's entries never are. State entries (`~/.local/state/norn/`, the mutation event stream) are removed only when their vault root is gone (or the entry is empty) — they are a record, not a rebuildable cache. Opt out per vault with `cache: { prune: manual }` in `.norn/config.yaml`; run the sweep on demand with [`norn cache prune`](commands/cache.md#pruning).
+The cache tree is self-maintaining. Every `norn` invocation runs a cross-vault prune sweep at most once per 24h (throttled by the `~/.cache/norn/.last-prune` marker): cache entries whose vault root no longer exists, that are unreadable or empty, that are older than the retention window (default 90d), or that push the tree over its internal 1 GiB cap are deleted. The current vault's entry is never deleted as a whole (though its stale non-current-schema databases still reclaim on the 48h TTL, sparing only the database in use). State entries (`~/.local/state/norn/`, the mutation event stream) are removed only when their vault root is gone (or the entry is empty) — they are a record, not a rebuildable cache. Opt out per vault with `cache: { prune: manual }` in `.norn/config.yaml`; run the sweep on demand with [`norn cache prune`](commands/cache.md#pruning).
 
 ## `--force-hash`
 
