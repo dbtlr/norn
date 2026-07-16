@@ -218,13 +218,13 @@ impl Generation {
 /// [`ReadPool`] may open, before clamping to the host's available parallelism —
 /// see [`read_pool_cap`]. A small fixed cap: enough concurrency for realistic
 /// read fan-out without unbounded connection growth against one `cache.db`.
-pub(in crate::env) const READ_POOL_MAX: usize = 8;
+const READ_POOL_MAX: usize = 8;
 
 /// Debug/test-only override for [`read_pool_cap`] (read via
 /// [`debug_env_usize`](crate::cache::debug_env_usize), so release builds ignore it
 /// entirely). Lets a test force a tiny cap to prove wait-at-cap behavior
 /// deterministically.
-pub(in crate::env) const READ_POOL_CAP_ENV: &str = "NORN_READ_POOL_CAP";
+const READ_POOL_CAP_ENV: &str = "NORN_READ_POOL_CAP";
 
 /// The per-generation read-connection cap: `min(READ_POOL_MAX, available
 /// parallelism)`, floored at 1. Now that warm mode has retired `call_lock`
@@ -314,7 +314,7 @@ pub(in crate::env) struct ReadPool {
 }
 
 /// The mutable interior of a [`ReadPool`], guarded as a unit.
-pub(in crate::env) struct ReadPoolInner {
+struct ReadPoolInner {
     /// Connections available for immediate checkout (LIFO).
     idle: Vec<Cache>,
     /// Total connections owned by the pool (idle + checked-out). Gates growth

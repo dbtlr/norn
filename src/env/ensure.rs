@@ -29,7 +29,7 @@ pub(in crate::env) fn device_inode(meta: &std::fs::Metadata) -> (u64, u64) {
 /// The identity `(dev, ino)` of the live `<cache_dir>/cache.db` for `vault_root`,
 /// or `None` when the file (or the cache dir) is absent / unstatable. Used by the
 /// ground-shift check to compare against the identity captured at open.
-pub(in crate::env) fn current_db_identity(vault_root: &Utf8Path) -> Option<(u64, u64)> {
+fn current_db_identity(vault_root: &Utf8Path) -> Option<(u64, u64)> {
     let (_canonical, cache_dir) = cache_dir_for(vault_root).ok()?;
     let db_path = cache_dir.join("cache.db");
     let meta = std::fs::metadata(db_path.as_std_path()).ok()?;
@@ -45,7 +45,7 @@ pub(in crate::env) fn current_db_identity(vault_root: &Utf8Path) -> Option<(u64,
 /// A free function (not a `&self` method) so the writer-queue open op, which runs
 /// `'static` on the writer thread, can call it with the same inputs the
 /// per-request fast path uses (NRN-252).
-pub(in crate::env) fn generation_is_fresh(
+fn generation_is_fresh(
     generation: &Generation,
     floor: &AtomicU64,
     vault_root: &Utf8Path,
@@ -89,7 +89,7 @@ pub(in crate::env) fn generation_still_current_guard(
 /// mode; a stable connection is reused across requests.
 ///
 /// Runs `'static`, so it takes owned / `Arc` state rather than `&self` / `&slot`.
-pub(in crate::env) fn open_or_adopt(
+fn open_or_adopt(
     shared: &SharedSlot,
     vault_root: &Utf8Path,
     config: &LoadedConfig,
@@ -175,7 +175,7 @@ pub(in crate::env) fn map_open_outcome(
 ///   between create and capture, on a just-created cache — self-heals via a later
 ///   ground-shift and is accepted as negligible (a brand-new cache is not a clear
 ///   target in practice).
-pub(in crate::env) fn open_generation(
+fn open_generation(
     vault_root: &Utf8Path,
     config: &LoadedConfig,
     number: u64,
@@ -289,7 +289,7 @@ pub(in crate::env) fn open_generation(
 
 /// Create the cache directory (0700 on unix) if absent, so the sentinel and
 /// `cache.db` can be opened. Mirrors the security posture `Cache::open` applies.
-pub(in crate::env) fn ensure_cache_dir(cache_dir: &Utf8Path) -> Result<()> {
+fn ensure_cache_dir(cache_dir: &Utf8Path) -> Result<()> {
     std::fs::create_dir_all(cache_dir.as_std_path())?;
     #[cfg(unix)]
     {

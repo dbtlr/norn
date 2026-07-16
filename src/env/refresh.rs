@@ -142,22 +142,21 @@ pub(in crate::env) fn fingerprint_config(path: &Utf8Path) -> Result<ConfigFinger
 /// Marker strings a refresh ticket resolves to when its op never produced a
 /// result — the queue dropped it on shutdown, or it panicked. Every waiter
 /// surfaces these as an error (never a hang).
-pub(in crate::env) const REFRESH_QUEUE_SHUTDOWN: &str =
+const REFRESH_QUEUE_SHUTDOWN: &str =
     "warm writer queue is shutting down; freshness refresh abandoned";
 
-pub(in crate::env) const REFRESH_PANICKED: &str =
-    "warm writer queue panicked while running a freshness refresh";
+const REFRESH_PANICKED: &str = "warm writer queue panicked while running a freshness refresh";
 
 /// Operator notes for a DEGRADED post-apply increment commit (NRN-252 / NRN-158).
 /// The mutation already succeeded on disk, so these never fail the tool call —
 /// they announce that the cache update was deferred and the next read's freshness
 /// refresh will heal it (files remain the source of truth). Emitted on BOTH
 /// surfaces: the daemon's own stderr and the per-request note buffer.
-pub(in crate::env) const INCREMENT_FAILED_NOTE: &str = "norn serve: post-apply cache increment failed; the cache update was deferred and the next read's refresh will heal it";
+const INCREMENT_FAILED_NOTE: &str = "norn serve: post-apply cache increment failed; the cache update was deferred and the next read's refresh will heal it";
 
-pub(in crate::env) const INCREMENT_DROPPED_NOTE: &str = "norn serve: post-apply cache increment abandoned (generation evicted or queue shutdown); the next read's refresh will heal the cache";
+const INCREMENT_DROPPED_NOTE: &str = "norn serve: post-apply cache increment abandoned (generation evicted or queue shutdown); the next read's refresh will heal the cache";
 
-pub(in crate::env) const INCREMENT_PANICKED_NOTE: &str =
+const INCREMENT_PANICKED_NOTE: &str =
     "norn serve: post-apply cache increment panicked; the next read's refresh will heal the cache";
 
 /// A coalescing ticket for ONE freshness-refresh execution on a generation's
@@ -181,7 +180,7 @@ pub(in crate::env) struct RefreshTicket {
 /// waiter reads the same outcome class. Making illegal states unrepresentable
 /// (no `resolved` bool + `Option` result + `Option` reason triple) is what
 /// prevents a later waiter from silently reading a failed refresh as served.
-pub(in crate::env) enum Resolution {
+enum Resolution {
     /// No outcome delivered yet; waiters block on the condvar.
     Pending,
     /// The op never produced a result (queue drop / panic) — every waiter fails.
@@ -192,7 +191,7 @@ pub(in crate::env) enum Resolution {
 
 /// The terminal class of a completed refresh, shared across all coalesced
 /// waiters.
-pub(in crate::env) enum DoneClass {
+enum DoneClass {
     /// Clean refresh (or no changes) — `Served` for everyone.
     Ok,
     /// Timed out on the cache write lock — `LockContention` for everyone (each
@@ -207,7 +206,7 @@ pub(in crate::env) enum DoneClass {
     Failed(Option<CacheError>),
 }
 
-pub(in crate::env) struct RefreshTicketState {
+struct RefreshTicketState {
     /// Flipped true (under the generation's `refresh_pending` lock, so an
     /// arriving requester's started-check and join are atomic against it) when
     /// the op begins on the writer thread. A started refresh may have begun
@@ -376,7 +375,7 @@ pub(in crate::env) struct TestGate {
 /// Clear a generation's pending-refresh slot IFF it still points at `ticket`.
 /// Used by the submitter's drop/panic backstop so a superseded ticket never
 /// lingers in the slot.
-pub(in crate::env) fn clear_pending_if(generation: &Generation, ticket: &Arc<RefreshTicket>) {
+fn clear_pending_if(generation: &Generation, ticket: &Arc<RefreshTicket>) {
     let mut pending = generation
         .refresh_pending
         .lock()
@@ -397,11 +396,7 @@ pub(in crate::env) fn clear_pending_if(generation: &Generation, ticket: &Arc<Ref
 /// way a requester is only ever served by a refresh whose scan starts at or
 /// after its arrival. It then runs `index_incremental` and resolves the ticket
 /// with the concrete result.
-pub(in crate::env) fn run_refresh_op(
-    generation: &Generation,
-    vault_root: &Utf8Path,
-    ticket: &Arc<RefreshTicket>,
-) {
+fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<RefreshTicket>) {
     // Start transition: mark started and clear the pending slot atomically under
     // the pending lock (lock order: pending → ticket state, matching the arrival
     // path, so the join decision cannot straddle it).
@@ -485,7 +480,7 @@ pub(in crate::env) fn run_refresh_op(
 /// interleave at every staging boundary, including immediately before publish.
 /// Returns [`ChunkOutcome::More`] while work remains, [`ChunkOutcome::Done`] with
 /// the terminal `Result` on completion or the first chunk error.
-pub(in crate::env) fn run_increment_chunk(
+fn run_increment_chunk(
     generation: &Generation,
     vault_root: &Utf8Path,
     driver: &mut crate::cache::IncrementCommit,

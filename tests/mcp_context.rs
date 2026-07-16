@@ -9,10 +9,10 @@
 //!
 //! `Cache` and `VaultEnv` are `pub(crate)` — the integration test binary
 //! cannot hold them directly. The unit-level contracts (open succeeds, alias
-//! field propagates, per-call freshness) live in `#[cfg(test)]` blocks inside
-//! `src/mcp/context.rs`. This file tests the observable contract: the server
-//! starts successfully against a real vault with seeded docs and responds to
-//! the MCP `initialize` handshake.
+//! field propagates, per-call freshness) live in `src/env/tests.rs` (the
+//! vault-env seam's own unit suite). This file tests the observable contract:
+//! the server starts successfully against a real vault with seeded docs and
+//! responds to the MCP `initialize` handshake.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
