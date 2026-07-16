@@ -47,6 +47,8 @@ A cache entry is evicted when any of these holds:
 - it is older than the retention window (default 90d, measured by the newest file mtime in the entry);
 - the cache tree as a whole exceeds its internal 1 GiB cap — oldest entries first, until under.
 
+Additionally, an entry's dev-channel database (`<hash>/dev/cache.db`) is evicted on its own 48h TTL, independent of the entry's overall freshness — only the `dev/` subtree is removed; the live database, the shared lock, and the entry itself stay. A single entry can therefore emit a `dev-stale` row plus a terminal row (e.g. `empty`, once the dev eviction leaves it with nothing else) in the same sweep — per-hash uniqueness of the evicted list is not a contract.
+
 State entries are different: they hold the mutation event stream — the record of what norn changed, not a rebuildable acceleration structure — so they are evicted only when their vault root no longer exists (or the entry is empty), never by age or size. The current vault's entries are never evicted, in either tree.
 
 Flags:
@@ -71,7 +73,7 @@ would be evicted:
   [state] /home/user/old-vault  dead root  12.4 KiB
 ```
 
-`--format json` emits a stable object — `{dry_run, cache: {scanned, evicted: [{root, hash, reason, age_days, bytes}], skipped_locked, kept_unknown, bytes_freed}, state: {…}, total_bytes_freed}` — with kebab-case reasons (`dead-root`, `unreadable`, `empty`, `aged`, `over-cap`).
+`--format json` emits a stable object — `{dry_run, cache: {scanned, evicted: [{root, hash, reason, age_days, bytes}], skipped_locked, kept_unknown, bytes_freed}, state: {…}, total_bytes_freed}` — with kebab-case reasons (`dead-root`, `unreadable`, `empty`, `aged`, `over-cap`, `dev-stale`).
 
 ### Lazy sweep
 
