@@ -299,17 +299,14 @@ fn open_layout(
     let lock_dir = layout.entry_dir;
     let channel = layout.channel;
 
-    // Ensure the shared entry dir (holds the write lock) and the schema-
-    // qualified database dir both exist at 0700. The db dir is now always
-    // nested below the entry (`<entry>/v{schema}` on live, `<entry>/dev/
-    // v{schema}` on dev), so secure the entry, any intermediate channel dir,
-    // and the leaf schema dir explicitly rather than relying on umask.
-    if lock_dir != cache_dir {
-        create_dir_secure(&lock_dir)?;
-        if let Some(parent) = cache_dir.parent() {
-            if parent != lock_dir {
-                create_dir_secure(parent)?;
-            }
+    // The db dir is always nested below the entry (`<entry>/v{schema}` on live,
+    // `<entry>/dev/v{schema}` on dev), so the entry dir is never the db dir.
+    // Secure the entry, any intermediate channel dir, and the leaf schema dir
+    // explicitly at 0700 rather than relying on umask.
+    create_dir_secure(&lock_dir)?;
+    if let Some(parent) = cache_dir.parent() {
+        if parent != lock_dir {
+            create_dir_secure(parent)?;
         }
     }
     create_dir_secure(&cache_dir)?;

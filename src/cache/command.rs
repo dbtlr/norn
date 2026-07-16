@@ -284,6 +284,7 @@ pub fn run_prune(
         cap_bytes: crate::cache::prune::CACHE_TREE_SIZE_CAP_BYTES,
         dry_run: args.dry_run,
         exempt_hash,
+        exempt_own_db_subpath: crate::cache::prune::own_db_subpath(),
     };
     let report = crate::cache::prune::sweep(&cache_tree, &state_tree, &opts);
     if !args.dry_run {
