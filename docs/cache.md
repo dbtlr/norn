@@ -34,6 +34,8 @@ The channel is resolved once per process:
 
 Only the database moves. The per-vault **write lock** (`<hash>/.lock`) and vault-level state stay shared across channels, so a dev and a live binary mutating the same vault still serialize against each other. `norn cache status` prints a `channel:` line and the `dev/` segment shows up in the reported path; correct isolation is otherwise silent.
 
+A `dev/` database reclaims itself: the prune sweep evicts a dev cache left idle for ~48h on its own clock — independent of the entry's overall freshness — so an abandoned dev build never pins disk inside a still-active `live` entry.
+
 ## Surface
 
 ```text
