@@ -39,7 +39,7 @@ fn gather_findings(
     crate::config_loader::LoadedConfig,
 )> {
     let loaded_config = load_config(ctx.cwd, ctx.config_path)?;
-    let mut index = crate::cache_cmd::load_graph_index(
+    let mut index = crate::cache::command::load_graph_index(
         ctx.cwd,
         &loaded_config.index_options,
         ctx.no_cache_refresh,

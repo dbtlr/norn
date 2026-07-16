@@ -77,7 +77,7 @@ pub fn run(
     }
 
     let cache =
-        crate::cache_cmd::open_for_query(cwd, &loaded_config.index_options, no_cache_refresh)?;
+        crate::cache::command::open_for_query(cwd, &loaded_config.index_options, no_cache_refresh)?;
     let (selection, has_diagnostic_errors) = cache.read_snapshot(|cache| {
         crate::gate_dynamic_query(
             cache,

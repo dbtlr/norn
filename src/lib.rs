@@ -9,7 +9,6 @@ mod cache;
 // function, no env read. `#[doc(hidden)]` seam, not stable public API — see
 // `cache::resolve_cache_dir_in`.
 pub use cache::{resolve_cache_dir_in, resolve_cache_lock_dir_in};
-mod cache_cmd;
 mod cli;
 mod completions;
 mod config;
@@ -1570,16 +1569,16 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             match &cache_command.command {
                 CacheSubcommand::Index(args) => {
-                    crate::cache_cmd::run_index(&cwd, &loaded_config.index_options, args)?
+                    crate::cache::command::run_index(&cwd, &loaded_config.index_options, args)?
                 }
                 CacheSubcommand::Rebuild => {
-                    crate::cache_cmd::run_rebuild(&cwd, &loaded_config.index_options)?
+                    crate::cache::command::run_rebuild(&cwd, &loaded_config.index_options)?
                 }
-                CacheSubcommand::Clear => crate::cache_cmd::run_clear(&cwd)?,
+                CacheSubcommand::Clear => crate::cache::command::run_clear(&cwd)?,
                 CacheSubcommand::Status(args) => {
-                    crate::cache_cmd::run_status(&cwd, &loaded_config.index_options, args)?
+                    crate::cache::command::run_status(&cwd, &loaded_config.index_options, args)?
                 }
-                CacheSubcommand::Prune(args) => crate::cache_cmd::run_prune(
+                CacheSubcommand::Prune(args) => crate::cache::command::run_prune(
                     &cwd,
                     loaded_config.vault_config.cache.as_ref(),
                     args,
@@ -1601,7 +1600,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         },
         Command::Validate(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1643,7 +1642,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Get(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1714,7 +1713,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Count(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1734,7 +1733,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Describe(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1816,7 +1815,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -2076,7 +2075,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -2279,7 +2278,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -2287,7 +2286,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             trim_diagnostics(&mut index, verbose);
 
             // Open a Cache for resolve_target (needs document query, not just index).
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -2513,13 +2512,13 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
             )?;
             trim_diagnostics(&mut index, verbose);
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,

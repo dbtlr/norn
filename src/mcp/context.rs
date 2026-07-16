@@ -180,7 +180,7 @@ use crate::cache::{
     cache_dir_for, Cache, CacheError, ChangeDetectOptions, Freshness, FreshnessProbe,
     StatSweepProbe,
 };
-use crate::cache_cmd::open_for_query;
+use crate::cache::command::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
 use crate::mcp::writer_queue::{
     ChunkOutcome, Handle, Outcome, ValidityGuard, WriterProgressState, WriterQueue,
@@ -1558,7 +1558,7 @@ impl VaultContext {
     ///
     /// - **Cold:** `query_cache` opens a fresh [`Cache`] via `open_for_query`
     ///   (integrity_check + incremental refresh), and the reader reconstructs the
-    ///   index from it — the exact sequence `cache_cmd::load_graph_index` runs
+    ///   index from it — the exact sequence `cache::command::load_graph_index` runs
     ///   for a direct `norn` CLI invocation, byte-for-byte.
     /// - **Warm:** `query_cache` runs the per-request self-heal pipeline
     ///   (ground-shift → reopen-if-absent → incremental freshness) against the
@@ -3264,7 +3264,7 @@ mod tests {
     /// Equivalence (the load-bearing NRN-130 invariant): a WARM graph-index build
     /// (reusing the daemon's held connection, verify-once) must produce a
     /// structurally identical `GraphIndex` to the COLD fresh-open path
-    /// (`cache_cmd::load_graph_index`, integrity_check every call) on the same
+    /// (`cache::command::load_graph_index`, integrity_check every call) on the same
     /// vault state.
     ///
     /// The fingerprint comparison alone cannot catch a reader that silently
@@ -3288,7 +3288,7 @@ mod tests {
 
         // Cold: the exact entry point a direct CLI invocation / cold MCP uses.
         let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
-        let cold = crate::cache_cmd::load_graph_index(&root, &cold_config.index_options, false)
+        let cold = crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
             .expect("cold load_graph_index");
 
         // Pin the cold build against the fixture (reader-omission guard).
@@ -3342,7 +3342,7 @@ mod tests {
     /// `documents`, so a no-change refresh never prepares DML against the view;
     /// shadowing `documents` itself would make the refresh see phantom-new files
     /// and error trying to write through the view.)
-    /// (Red-proofed: pointing the warm arm back at `cache_cmd::load_graph_index`
+    /// (Red-proofed: pointing the warm arm back at `cache::command::load_graph_index`
     /// makes this test fail.)
     #[test]
     fn warm_load_graph_index_uses_the_held_connection() {
@@ -3398,7 +3398,7 @@ mod tests {
         // Control: a genuinely cold open on the same vault state does not see
         // the per-connection shadow.
         let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
-        let cold = crate::cache_cmd::load_graph_index(&root, &cold_config.index_options, false)
+        let cold = crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
             .expect("cold load_graph_index");
         assert_eq!(
             alpha_headings(&cold),
@@ -3539,7 +3539,7 @@ mod tests {
 
         // Control: a cold open on the same state sees everything for real.
         let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
-        let cold = crate::cache_cmd::load_graph_index(&root, &cold_config.index_options, false)
+        let cold = crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
             .expect("cold load_graph_index");
         assert_eq!(cold.documents.len(), 4);
         assert_eq!(

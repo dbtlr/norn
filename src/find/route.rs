@@ -641,7 +641,7 @@ mod tests {
 
         // Direct side: the same signal `find::run` exits on.
         let cache =
-            crate::cache_cmd::open_for_query(&root, &crate::graph::IndexOptions::default(), false)
+            crate::cache::command::open_for_query(&root, &crate::graph::IndexOptions::default(), false)
                 .unwrap();
         let direct_exit = if cache.has_diagnostic_errors().unwrap() {
             2
