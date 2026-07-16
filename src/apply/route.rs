@@ -2,7 +2,7 @@
 //!
 //! `apply` ships the PARSED plan over the wire, never a path: the CLI reads the
 //! plan source (file or stdin), parses it exactly as the direct arm does
-//! ([`crate::apply_cmd::preamble`] — a schema-version mismatch refuses exit 2
+//! ([`crate::apply::preamble`] — a schema-version mismatch refuses exit 2
 //! BEFORE any wire activity, byte-identical to Direct), then re-serializes the
 //! [`MigrationPlan`] into the `vault.apply` `plan` argument. YAML input parses
 //! client-side and routes the same way — the daemon applies the identical
@@ -116,7 +116,7 @@ pub fn emit(
 }
 
 /// Reproduce (and, since NRN-231 review F5, SHARE with) the direct arm's
-/// lock-timeout stash branch (`apply_cmd::run_direct`'s `MutationLockTimeout`
+/// lock-timeout stash branch (`apply::run_direct`'s `MutationLockTimeout`
 /// arm): stash a stdin plan and print the `retry with:` hint, or print just the
 /// error for a file plan. Exit 2. The direct arm calls straight into this, so
 /// the prose strings and the stdin-vs-file branch exist exactly once.

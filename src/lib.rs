@@ -1,5 +1,5 @@
 pub mod applier;
-mod apply_cmd;
+mod apply;
 pub mod apply_report;
 mod audit;
 mod cache;
@@ -56,7 +56,7 @@ mod validate_filter;
 
 use std::process;
 
-use crate::apply_cmd::ApplyRunArgs;
+use crate::apply::ApplyRunArgs;
 use crate::cli::{CacheSubcommand, Cli, Command, ConfigSubcommand};
 use crate::config_loader::{effective_cwd, load_config};
 use crate::core::GraphIndex;
@@ -1276,13 +1276,13 @@ fn try_route_rewrite_wikilink(
 /// to run the direct path.
 ///
 /// **The plan crosses as the PARSED value, never a path.** The caller has already
-/// run [`crate::apply_cmd::preamble`] (read + parse + schema-check, byte-identical
+/// run [`crate::apply::preamble`] (read + parse + schema-check, byte-identical
 /// to Direct — a schema mismatch refuses exit 2 BEFORE this is reached), so the
 /// wire only ever carries a valid, correctly-versioned [`MigrationPlan`],
 /// re-serialized into the `vault.apply` `plan` argument. YAML input routes the
 /// same way — the daemon applies the identical struct. `raw` (the plan's RAW
 /// bytes) and `state_dir` (already resolved + swept before routing) are threaded
-/// in for the CLI-owned lock-timeout stash (see `apply_cmd::route::emit`).
+/// in for the CLI-owned lock-timeout stash (see `apply::route::emit`).
 ///
 /// **Routing runs BEFORE the direct arm's local mutation lock** (same reason as
 /// `set`/`delete`): the daemon acquires the SAME per-vault lock in-process, so a
@@ -1306,7 +1306,7 @@ fn try_route_rewrite_wikilink(
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn try_route_apply(
-    args: &crate::apply_cmd::ApplyRunArgs,
+    args: &crate::apply::ApplyRunArgs,
     plan: &crate::migration_plan::MigrationPlan,
     raw: &str,
     state_dir: &camino::Utf8Path,
@@ -1337,14 +1337,14 @@ fn try_route_apply(
         cwd,
         CallSpec {
             tool: "vault.apply",
-            arguments: crate::apply_cmd::route::to_mcp_arguments(plan, confirm, args.parents),
+            arguments: crate::apply::route::to_mcp_arguments(plan, confirm, args.parents),
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
         move |report| {
-            crate::apply_cmd::route::emit(
+            crate::apply::route::emit(
                 report,
                 format,
                 out.as_deref(),
@@ -1360,7 +1360,7 @@ fn try_route_apply(
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
 fn try_route_apply(
-    args: &crate::apply_cmd::ApplyRunArgs,
+    args: &crate::apply::ApplyRunArgs,
     plan: &crate::migration_plan::MigrationPlan,
     raw: &str,
     state_dir: &camino::Utf8Path,
@@ -1481,10 +1481,10 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // on stderr) byte-identically to Direct, BEFORE any wire activity; a
             // parse failure propagates as the `Err` arm (outcome → lazy_sweep runs
             // exactly as today).
-            match apply_cmd::preamble(&run_args) {
+            match apply::preamble(&run_args) {
                 Err(e) => Err(e),
-                Ok(apply_cmd::Preamble::Refused(code)) => Ok(code),
-                Ok(apply_cmd::Preamble::Ready { raw, plan }) => {
+                Ok(apply::Preamble::Refused(code)) => Ok(code),
+                Ok(apply::Preamble::Ready { raw, plan }) => {
                     // Resolve the state dir and sweep stale pending plans BEFORE
                     // routing (design: the sweep runs exactly as it did before
                     // Direct); the state dir also feeds the CLI-owned lock-timeout
@@ -1511,7 +1511,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                         return result;
                     }
 
-                    apply_cmd::run_direct(
+                    apply::run_direct(
                         &run_args,
                         plan,
                         &raw,
