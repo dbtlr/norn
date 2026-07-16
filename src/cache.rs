@@ -138,9 +138,9 @@ pub(crate) struct Cache {
     pub(crate) cache_dir: camino::Utf8PathBuf,
     /// The channel- and schema-independent vault entry dir
     /// (`<cache_home>/norn/<hash>`) that holds the shared write lock (`.lock`).
-    /// Always an ancestor of `cache_dir` (its grandparent on dev, great-parent
-    /// via the schema segment on live). A dev and a live binary against the same
-    /// vault serialize on this one lock.
+    /// Always an ancestor of `cache_dir`: its parent on live (`<entry>/v{schema}`)
+    /// and its grandparent on dev (`<entry>/dev/v{schema}`). A dev and a live
+    /// binary against the same vault serialize on this one lock.
     pub(crate) lock_dir: camino::Utf8PathBuf,
     /// The cache channel this handle opened under, carried from the resolved
     /// [`identity::CacheLayout`] rather than re-derived from path geometry.
