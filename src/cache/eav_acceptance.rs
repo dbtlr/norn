@@ -32,9 +32,10 @@
 //! The `#[ignore]`d timing curve at the bottom of this file lives here for
 //! the same internals-access reason, but also for a sharper one: an
 //! earlier CLI-subprocess version of it measured `Cache::open`'s
-//! unconditional `PRAGMA integrity_check` (see `src/cache/open.rs`) far
+//! `PRAGMA integrity_check` (see `src/cache/open.rs`) far
 //! more than the query plan — that pragma scans the *entire* on-disk
-//! database on every open and dominated at 50k docs (routed appeared
+//! database and, before NRN-275 relocated it off the direct read path, ran
+//! on every open and dominated at 50k docs (routed appeared
 //! *slower* than scan purely because the routed cache's `document_fields`
 //! table made the database bigger). Timing `Cache::documents_matching`
 //! directly on an already-open connection isolates exactly what NRN-79's

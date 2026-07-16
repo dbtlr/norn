@@ -77,6 +77,10 @@ clap_mangen = "0.3"
 filetime = "0.2.29"
 mockito = "1.5"
 rmcp = { version = "2.1.0", features = ["client"] }
+# Integration tests corrupt a specific cache table's b-tree root page to prove
+# the query-time rebuild-on-corruption seam (NRN-275); same version/features as
+# the runtime dependency, so the lockfile is unaffected.
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"
 
 [profile.dist]

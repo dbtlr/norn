@@ -10,9 +10,9 @@ use crate::cache::identity::cache_layout_for;
 
 /// Lock-wait applied to every cache connection immediately after open.
 ///
-/// A fresh open runs schema DDL and an inspecting open runs the
-/// `journal_mode` / `integrity_check` pragmas — both take brief write locks
-/// on the SQLite file. When two threads or processes open the same cache at
+/// A fresh open runs schema DDL and an inspecting open runs the `journal_mode`
+/// pragma (and, on a verifying open, `integrity_check`) — both take brief write
+/// locks on the SQLite file. When two threads or processes open the same cache at
 /// once (two concurrent `norn` invocations, or the `two_simultaneous_rebuilds`
 /// concurrency test's two rebuild threads), SQLite's default zero lock-wait
 /// makes the loser return `SQLITE_BUSY` immediately rather than waiting. A 5s
@@ -48,8 +48,9 @@ impl crate::cache::Cache {
     /// Open the cache for a vault, passing the configured `links.alias_field`
     /// value. When `alias_field` differs from the value stored in the
     /// `links_alias_field` meta row (including the disabled/empty case), the
-    /// cache is silently rebuilt so resolved links stay consistent with
-    /// current config.
+    /// cache is rebuilt — automatically, but with an operator-visible `vault:`
+    /// stderr notice ([`emit_rebuild_message`]) — so resolved links stay
+    /// consistent with current config.
     ///
     /// Resolves the same (empty) index set `open_with_index` would compute
     /// for an unconfigured vault, but — unlike `open_with_index` — does NOT
@@ -71,6 +72,7 @@ impl crate::cache::Cache {
             &index_set,
             &index_set_hash,
             /* authoritative */ false,
+            /* verify */ true,
         )
     }
 
@@ -101,6 +103,38 @@ impl crate::cache::Cache {
             index_set,
             index_set_hash,
             /* authoritative */ true,
+            /* verify */ true,
+        )
+    }
+
+    /// Authoritative open that TRUSTS the on-disk cache bytes: it skips the
+    /// per-open `PRAGMA integrity_check` the verifying [`open_with_index`] pays
+    /// (NRN-275). The check was an O(db-size) scan on every open — ~34ms of a
+    /// direct CLI read against a 29MB cache — that dominated the query it guarded.
+    ///
+    /// Byte corruption is not ignored, only relocated: it surfaces as
+    /// `SQLITE_CORRUPT` / `SQLITE_NOTADB` when a later query reads a bad page, and
+    /// the direct read path (`crate::cache::command::load_graph_index` /
+    /// `open_for_query`) evicts + rebuilds + retries once on that error, since the
+    /// cache is a rebuildable derived artifact. Gross corruption that leaves the
+    /// `meta` rows unreadable is still caught at open (the schema/identity meta
+    /// SELECTs fail → rebuild). Use this ONLY on the direct one-shot read path;
+    /// the warm daemon, `cache status`, and rebuild keep the verifying open.
+    pub fn open_with_index_trusting(
+        vault_root: &Utf8Path,
+        alias_field: Option<&str>,
+        files_ignore: &[String],
+        index_set: &BTreeSet<String>,
+        index_set_hash: &str,
+    ) -> Result<Self, CacheError> {
+        open_impl(
+            vault_root,
+            alias_field,
+            files_ignore,
+            index_set,
+            index_set_hash,
+            /* authoritative */ true,
+            /* verify */ false,
         )
     }
 
@@ -121,11 +155,12 @@ impl crate::cache::Cache {
     /// stats the path and fails the generation open if the companion's `(dev,
     /// ino)` differs from the sentinel-captured identity, so a split-brain
     /// generation never escapes; a swap after that check is caught by the next
-    /// request's ground-shift check. The primary `open_with_index` already ran
-    /// `PRAGMA integrity_check`, reconciled schema version / vault identity /
-    /// alias-field drift, and rebuilt if needed — so the bytes this companion
-    /// attaches to are known-good under the held sentinel. Re-running the
-    /// O(db-size) integrity check on the same file would verify nothing new.
+    /// request's ground-shift check. The daemon's primary open is a VERIFYING
+    /// `open_with_index` (NRN-275), which already ran `PRAGMA integrity_check`,
+    /// reconciled schema version / vault identity / alias-field drift, and rebuilt
+    /// if needed — so the bytes this companion attaches to are known-good under the
+    /// held sentinel. Re-running the O(db-size) integrity check would verify nothing
+    /// new.
     /// The companion still applies the operational pragmas every connection
     /// needs (WAL journal mode, busy timeout, foreign keys) — those are
     /// per-connection, not per-file.
@@ -200,6 +235,7 @@ impl crate::cache::Cache {
             &index_set,
             &index_set_hash,
             /* authoritative */ false,
+            /* verify */ true,
         )
     }
 }
@@ -228,6 +264,7 @@ fn open_impl(
     index_set: &BTreeSet<String>,
     index_set_hash: &str,
     authoritative: bool,
+    verify: bool,
 ) -> Result<crate::cache::Cache, CacheError> {
     let layout = cache_layout_for(vault_root)?;
     open_layout(
@@ -237,6 +274,7 @@ fn open_impl(
         index_set,
         index_set_hash,
         authoritative,
+        verify,
     )
 }
 
@@ -251,6 +289,7 @@ fn open_layout(
     index_set: &BTreeSet<String>,
     index_set_hash: &str,
     authoritative: bool,
+    verify: bool,
 ) -> Result<crate::cache::Cache, CacheError> {
     let canonical = layout.canonical;
     let cache_dir = layout.db_dir;
@@ -269,7 +308,7 @@ fn open_layout(
     let alias_field_owned: Option<String> = alias_field.map(|s| s.to_string());
 
     loop {
-        let action = inspect_existing_cache(&db_path, &canonical, alias_field)?;
+        let action = inspect_existing_cache(&db_path, &canonical, alias_field, verify)?;
         match action {
             InspectResult::Fresh => {
                 return open_fresh(
@@ -353,6 +392,7 @@ fn inspect_existing_cache(
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
     alias_field: Option<&str>,
+    verify: bool,
 ) -> Result<InspectResult, CacheError> {
     if !db_path.as_std_path().exists() {
         return Ok(InspectResult::Fresh);
@@ -377,43 +417,42 @@ fn inspect_existing_cache(
         )));
     }
 
-    // PRAGMA integrity_check
+    // PRAGMA integrity_check — verifying opens only (NRN-275).
     //
-    // Acceptance-benchmark trace hook (NRN-83). When `NORN_TRACE_INTEGRITY_CHECK`
-    // is set, emit one stable stderr marker per `integrity_check` execution. This
-    // gives an out-of-process harness a deterministic, cross-process count of how
-    // many times a code path actually pays the O(db-size) check: a live daemon
-    // opens-once/verifies-once, so N routed reads share ONE marker, whereas N
-    // direct invocations each reopen and produce N markers.
+    // The O(db-size) scan no longer runs on every open. The direct one-shot read
+    // path opens TRUSTING (`open_with_index_trusting`, `verify = false`) and skips
+    // it — that scan was ~34ms of every direct CLI invocation and dwarfed the query
+    // it guarded. It still runs on VERIFYING opens (`verify = true`): the warm
+    // daemon's per-generation open, `cache status`, and the cache-command opens.
+    // Byte corruption the trusting path skips instead surfaces as SQLITE_CORRUPT /
+    // SQLITE_NOTADB during a later query, where the read path evicts + rebuilds +
+    // retries once (see `crate::cache::command`); the meta SELECTs below still catch
+    // gross corruption that leaves the header unreadable, on both paths.
     //
-    // Contract:
-    // - Opt-in diagnostic, OFF by default: with the env var unset (every normal
-    //   environment) this emits nothing and changes no behavior.
-    // - When enabled, routed and direct stderr INTENTIONALLY diverge — revealing
-    //   where the check runs is the hook's entire purpose, so the byte-identical
-    //   routing guarantee does not hold under trace.
-    // - Never enable it in an environment that asserts on norn's stderr (the
-    //   routing byte-identity proofs, log-diffing pipelines).
-    //
-    // Deliberately available in RELEASE builds, unlike the debug-gated
-    // `NORN_CACHE_LOCK_TIMEOUT_MS` (src/cache/lock.rs): that override CHANGES
-    // timing behavior, so an inherited value in a production environment must
-    // be impossible; this hook is pure observability — it alters no timing, no
-    // outcome, no output when unset — and the `--release` acceptance benchmark
-    // needs it in the optimized binary it measures.
-    if std::env::var_os("NORN_TRACE_INTEGRITY_CHECK").is_some() {
-        eprintln!("norn trace: integrity_check");
-    }
-    let integrity: Result<String, _> = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0));
-    match integrity {
-        Ok(s) if s == "ok" => {}
-        Ok(s) => {
-            return Ok(InspectResult::RebuildNeeded(RebuildReason::Corrupted(s)));
+    // Trace hook (NRN-83): when `NORN_TRACE_INTEGRITY_CHECK` is set, emit one stable
+    // stderr marker per `integrity_check` execution — a deterministic cross-process
+    // count of how many times a path pays the check. A live daemon opens-once /
+    // verifies-once, so N routed reads share ONE marker; direct trusting reads now
+    // pay ZERO. Opt-in and OFF by default (unset → no output, no behavior change);
+    // deliberately available in RELEASE builds for the `--release` acceptance
+    // benchmark, since it alters no timing or outcome. Never enable it where
+    // norn's stderr is asserted byte-for-byte.
+    if verify {
+        if std::env::var_os("NORN_TRACE_INTEGRITY_CHECK").is_some() {
+            eprintln!("norn trace: integrity_check");
         }
-        Err(e) => {
-            return Ok(InspectResult::RebuildNeeded(RebuildReason::Corrupted(
-                format!("integrity_check failed: {e}"),
-            )));
+        let integrity: Result<String, _> =
+            conn.query_row("PRAGMA integrity_check", [], |r| r.get(0));
+        match integrity {
+            Ok(s) if s == "ok" => {}
+            Ok(s) => {
+                return Ok(InspectResult::RebuildNeeded(RebuildReason::Corrupted(s)));
+            }
+            Err(e) => {
+                return Ok(InspectResult::RebuildNeeded(RebuildReason::Corrupted(
+                    format!("integrity_check failed: {e}"),
+                )));
+            }
         }
     }
 
@@ -518,7 +557,18 @@ fn open_fresh(
 }
 
 fn emit_rebuild_message(reason: &RebuildReason) {
-    let msg = match reason {
+    eprintln!("vault: {}", rebuild_message(reason));
+}
+
+/// The operator-facing one-line reason a cache rebuild is happening — emitted to
+/// stderr (prefixed `vault:`) by [`emit_rebuild_message`] on the schema-drift,
+/// identity-drift, and `alias_field` config-drift rebuild paths (the ones an OPEN
+/// detects via its meta SELECTs). The trusting open's query-time corruption path
+/// does NOT route through here — it re-opens straight into the Fresh arm — and
+/// prints its own notice in `crate::cache::command`. A pure function so the notice
+/// content is unit-testable without capturing process stderr.
+fn rebuild_message(reason: &RebuildReason) -> String {
+    match reason {
         RebuildReason::Corrupted(detail) => format!("cache is corrupted ({detail}); rebuilding"),
         RebuildReason::SchemaOlder { found } => {
             format!(
@@ -544,8 +594,7 @@ fn emit_rebuild_message(reason: &RebuildReason) {
                 "cache was built with links.alias_field = {cached_disp}, current config is {current_disp}; rebuilding"
             )
         }
-    };
-    eprintln!("vault: {msg}");
+    }
 }
 
 fn create_dir_secure(dir: &Utf8Path) -> Result<(), CacheError> {
@@ -872,9 +921,39 @@ mod tests {
     }
 
     #[test]
-    fn open_with_alias_field_drift_rebuilds_silently() {
+    fn alias_field_drift_emits_operator_visible_rebuild_notice() {
+        // The alias_field config-drift rebuild is NOT silent: it emits a
+        // `vault:`-prefixed stderr notice naming the config key, the cached and
+        // current values, and the action. Lock the operator-facing content so it
+        // can't regress to a truly silent rebuild.
+        let msg = super::rebuild_message(&super::RebuildReason::AliasFieldDrift {
+            cached: "aliases".to_string(),
+            current: String::new(),
+        });
+        assert!(
+            msg.contains("links.alias_field"),
+            "notice must name the config key: {msg}"
+        );
+        assert!(
+            msg.contains("aliases"),
+            "notice must show the cached value: {msg}"
+        );
+        assert!(
+            msg.contains("<disabled>"),
+            "notice must render the empty current value as <disabled>: {msg}"
+        );
+        assert!(
+            msg.contains("rebuilding"),
+            "notice must state the action: {msg}"
+        );
+    }
+
+    #[test]
+    fn open_with_alias_field_drift_rebuilds_and_updates_meta() {
         // 1. Build cache with alias_field = None
-        // 2. Reopen with alias_field = Some("aliases") — expect a silent rebuild
+        // 2. Reopen with alias_field = Some("aliases") — expect an automatic
+        //    rebuild (operator-visible via emit_rebuild_message; content asserted
+        //    by alias_field_drift_emits_operator_visible_rebuild_notice)
         // 3. Verify the meta row `links_alias_field` now contains "aliases"
         let dir = tempfile::Builder::new()
             .prefix("vault-cache-alias-drift-")

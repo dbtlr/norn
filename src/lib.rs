@@ -121,10 +121,27 @@ pub fn cli_main() {
         None => (cmd.get_matches(), Vec::new()),
     };
     let cli = Cli::from_arg_matches(&matches).expect("clap-derive contract: parse from matches");
+    // Captured before `run` consumes `cli`: the error seam below needs the vault
+    // root to self-heal a corrupt cache (NRN-275).
+    let cwd_arg = cli.cwd.clone();
     match run(cli, &dynamic_keys) {
         Ok(exit_code) => process::exit(exit_code),
         Err(error) if is_broken_pipe(&error) => process::exit(0),
         Err(error) => {
+            // NRN-275: the trusting direct-read open skips integrity_check, so page
+            // corruption first touched at QUERY time — after `open_for_query`
+            // returned its handle, outside the in-place retry in `cache::command` —
+            // surfaces here as the command's error. The common open/refresh
+            // corruption already self-heals in-process; this residual seam evicts
+            // under the write lock so the NEXT invocation opens Fresh and rebuilds
+            // from the vault. This run still fails closed with the error. A routed
+            // (daemon) error never carries a raw rusqlite code, so routed paths —
+            // which own their own generation eviction — are naturally excluded.
+            if crate::cache::command::is_cache_corruption(&error) {
+                if let Ok(cwd) = effective_cwd(cwd_arg.as_ref()) {
+                    crate::cache::command::evict_corrupt_cache_after_error(&cwd);
+                }
+            }
             eprintln!("{error:#}");
             process::exit(1);
         }
