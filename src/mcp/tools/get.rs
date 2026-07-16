@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{GetArgs, GetFormat as CliGetFormat, SortPaginateArgs};
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::get::{SectionFailure, ShowReport};
 use crate::mcp::mutation_result::MutationResult;
 
@@ -210,7 +210,7 @@ pub(crate) fn record_to_wire_json(record: &crate::get::ShowRecord) -> Result<ser
 /// still returning every good target's records + the diagnostics. This is the
 /// single function the `#[tool]` wrapper calls.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: GetParams,
 ) -> Result<MutationResult<GetOutput>> {
@@ -267,7 +267,7 @@ pub fn handle_output(
 
 /// Pure handler for `vault.get`. Opens a fresh query cache (per-call freshness),
 /// constructs [`GetArgs`] with `norn get`'s defaults, and runs the show path.
-pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: GetParams) -> Result<ShowReport> {
+pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: GetParams) -> Result<ShowReport> {
     // The per-call served marker (routing proofs) is emitted by the server
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn handle_returns_single_record_for_seeded_doc() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -432,7 +432,7 @@ mod tests {
             "---\ngeneration: old\n---\n# Old Heading\nbody\n",
         )
         .unwrap();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let db_path = {
             let cache = ctx.query_cache_unscoped().expect("seed query cache");
             cache.cache_dir.join("cache.db")
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn handle_document_hash_facet_surfaces_in_envelope() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let expected = blake3::hash(&std::fs::read(root.join("note.md")).unwrap())
             .to_hex()
             .to_string();
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn handle_col_projection_parses_like_cli() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // `.body` facet must load the body, mirroring `norn get --col .body`.
         let report = handle(
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn handle_missing_target_yields_zero_records_with_note() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -606,7 +606,7 @@ mod tests {
     #[test]
     fn section_object_matches_cli_json_slice() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn section_partial_miss_warns_and_omits_but_succeeds() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn section_all_missing_reported_structurally_not_bailed() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle_output(
             &ctx,
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn section_multi_target_isolates_failure_keeps_good_target() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // doc.md has "## Task Description"; a.md has no such heading.
         let out = handle_output(
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn section_missing_target_named_like_section_is_not_a_section_failure() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle_output(
             &ctx,
@@ -813,7 +813,7 @@ mod tests {
             "---\ntype: note\n---\n## Dup\nfirst\n## Dup\nsecond\n## Other\nkeep\n",
         )
         .unwrap();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle_output(
             &ctx,
@@ -850,7 +850,7 @@ mod tests {
     #[test]
     fn limit_and_no_limit_together_is_params_error() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle(
             &ctx,
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn no_limit_alone_returns_all_targets() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn sort_desc_orders_records() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -916,7 +916,7 @@ mod tests {
     #[test]
     fn limit_and_starts_at_page_records() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -938,7 +938,7 @@ mod tests {
     #[test]
     fn all_cols_loads_body() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let with = handle(
             &ctx,
@@ -985,7 +985,7 @@ mod tests {
     #[test]
     fn missing_target_maps_to_iserror_with_notes() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,
@@ -1014,7 +1014,7 @@ mod tests {
     #[test]
     fn resolved_target_is_not_error() {
         let (_tmp, root) = sectioned_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,
@@ -1038,7 +1038,7 @@ mod tests {
     #[test]
     fn markdown_zero_targets_is_explicit_error() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,

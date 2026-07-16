@@ -619,7 +619,7 @@ mod tests {
         .unwrap();
 
         // Daemon side: the REAL tool projection.
-        let ctx = crate::env::VaultContext::open(&root, None).unwrap();
+        let ctx = crate::env::VaultEnv::open(&root, None).unwrap();
         let scope = ctx.begin_request().unwrap();
         let out = crate::mcp::tools::find::handle(
             &ctx,

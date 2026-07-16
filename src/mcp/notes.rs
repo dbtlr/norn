@@ -3,7 +3,7 @@
 //! Some daemon-side operations produce operator notes that the DIRECT (non-daemon)
 //! path would print to the CLI's stderr — the canonical case is the write-lock
 //! contention note (`crate::cache::LOCK_CONTENTION_NOTE`) that
-//! `VaultContext::query_cache_warm` emits when the implicit refresh times out and
+//! `VaultEnv::query_cache_warm` emits when the implicit refresh times out and
 //! the read proceeds against the current cache state. When a read is ROUTED
 //! through the warm `norn serve` daemon, that note would otherwise land on the
 //! daemon's own stderr — invisible to the caller — so the operator loses the

@@ -3,11 +3,11 @@
 //!
 //! # Two modes: cold (stdio) and warm (daemon)
 //!
-//! [`VaultContext`] holds a parsed [`LoadedConfig`] and hands out a cache handle
-//! per tool call via [`VaultContext::query_cache`]. It has two modes, chosen at
+//! [`VaultEnv`] holds a parsed [`LoadedConfig`] and hands out a cache handle
+//! per tool call via [`VaultEnv::query_cache`]. It has two modes, chosen at
 //! construction, that differ in how much they hold open across calls.
 //!
-//! ## Cold mode — [`VaultContext::open`] (stdio `norn mcp`)
+//! ## Cold mode — [`VaultEnv::open`] (stdio `norn mcp`)
 //!
 //! Config is parsed once at startup and held for the process lifetime; a config
 //! change requires a server restart, exactly like the CLI re-reads config fresh
@@ -19,9 +19,9 @@
 //! than a per-open scan. This matches the CLI's per-invocation behavior exactly
 //! and needs no filesystem watcher.
 //!
-//! ## Warm mode — [`VaultContext::open_warm`] (daemon `norn serve`)
+//! ## Warm mode — [`VaultEnv::open_warm`] (daemon `norn serve`)
 //!
-//! A long-lived daemon holds one `VaultContext` open across many requests, so
+//! A long-lived daemon holds one `VaultEnv` open across many requests, so
 //! re-opening and re-refreshing on every call is wasteful. Warm mode instead
 //! **verifies trust once** (the first `integrity_check` when the cache is first
 //! opened) and then **continuously maintains** it with a cheap per-request
@@ -74,7 +74,7 @@ pub(crate) use request_scope::RequestScope;
 
 /// Cold (stdio) vs warm (daemon) behavior for `query_cache`.
 // The warm variant is naturally large (it owns the held cache state); exactly
-// one `Mode` exists per long-lived `VaultContext`, so the size gap is irrelevant.
+// one `Mode` exists per long-lived `VaultEnv`, so the size gap is irrelevant.
 #[allow(clippy::large_enum_variant)]
 enum Mode {
     Cold,
@@ -91,7 +91,7 @@ enum Mode {
 /// [`Mode`] that selects the per-call cache strategy. In warm mode the cache
 /// binding itself is NOT interior-mutable — it is an immutable `Arc<Generation>`
 /// swapped as a whole. See the module docs for the full design.
-pub(crate) struct VaultContext {
+pub(crate) struct VaultEnv {
     /// Absolute path to the vault root, as passed via `--cwd`.
     pub(crate) vault_root: Utf8PathBuf,
     /// Parsed and compiled config. Behind a `Mutex<Arc<..>>` so warm mode can
@@ -101,7 +101,7 @@ pub(crate) struct VaultContext {
     mode: Mode,
 }
 
-impl VaultContext {
+impl VaultEnv {
     /// Open a COLD vault context (stdio `norn mcp`). Reads and parses the config
     /// once; fails fast if the config file exists but is unreadable/malformed.
     ///
@@ -321,7 +321,7 @@ mod tests {
     /// (and its pooled connections) was reused; a higher number ⇒ it was reopened.
     /// Monotonic generation numbers can't false-positive the way a recycled
     /// connection pointer could, so this is a strictly more robust reopen proof.
-    fn gen_number(ctx: &VaultContext) -> u64 {
+    fn gen_number(ctx: &VaultEnv) -> u64 {
         ctx.current_generation().map(|g| g.number).unwrap_or(0)
     }
 
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn open_succeeds_and_exposes_vault_root() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("VaultContext::open should succeed");
+        let ctx = VaultEnv::open(&root, None).expect("VaultEnv::open should succeed");
         assert_eq!(
             ctx.vault_root, root,
             "vault_root should match the cwd passed in"
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn open_without_config_file_yields_default_config() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open should succeed without config");
+        let ctx = VaultEnv::open(&root, None).expect("open should succeed without config");
         // Default config has no alias_field configured.
         assert!(
             ctx.config().index_options.alias_field.is_none(),
@@ -395,7 +395,7 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         write_config(&root, "links:\n  alias_field: aliases\n");
 
-        let ctx = VaultContext::open(&root, None).expect("open with config should succeed");
+        let ctx = VaultEnv::open(&root, None).expect("open with config should succeed");
         assert_eq!(
             ctx.config().index_options.alias_field.as_deref(),
             Some("aliases"),
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn query_cache_returns_usable_cache_and_indexes_seeded_docs() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open should succeed");
+        let ctx = VaultEnv::open(&root, None).expect("open should succeed");
 
         let cache = ctx
             .query_cache_unscoped()
@@ -425,7 +425,7 @@ mod tests {
     fn query_cache_reflects_vault_changes_on_subsequent_calls() {
         let (tmp, root) = make_seeded_vault();
 
-        let ctx = VaultContext::open(&root, None).expect("open should succeed");
+        let ctx = VaultEnv::open(&root, None).expect("open should succeed");
 
         // First call — 3 docs.
         {
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn warm_reuses_one_connection_across_calls() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
 
         let ptr1 = {
             ctx.begin_request().expect("begin_request");
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn warm_reflects_vault_changes_on_subsequent_calls() {
         let (tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
 
         {
             ctx.begin_request().expect("begin_request");
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn warm_self_heals_when_cache_db_disappears() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
 
         {
             ctx.begin_request().expect("begin_request");
@@ -578,7 +578,7 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         std::fs::write(root.join("alpha.md"), "---\ntype: note\n---\nAlpha body\n").unwrap();
 
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
         {
             ctx.begin_request().expect("begin_request");
             let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
@@ -613,7 +613,7 @@ mod tests {
             "---\ntype: note\n---\nArchived\n",
         )
         .unwrap();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
 
         let archived_count = |cache: &Cache| -> i64 {
             cache
@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn warm_non_index_config_change_swaps_without_reopen() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
 
         {
             ctx.begin_request().expect("begin_request");
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn warm_index_relevant_config_change_reopens() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
 
         {
             ctx.begin_request().expect("begin_request");
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn warm_config_parse_error_fails_then_recovers() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
 
         // First call — clean, no config file yet.
         {
@@ -787,7 +787,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm should succeed");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm should succeed");
         write_config(&root, "links:\n  alias_field: original\n");
         let config_path = config_yaml_path(&root);
 
@@ -899,7 +899,7 @@ mod tests {
         );
 
         // Warm: through the daemon context, reusing the held connection.
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         let warm = ctx
             .load_graph_index_unscoped()
@@ -934,7 +934,7 @@ mod tests {
             "---\ntype: note\nstatus: active\n---\n# Alpha\n\nAlpha body\n",
         )
         .unwrap();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         let alpha_headings = |index: &crate::core::GraphIndex| -> usize {
             index
                 .documents
@@ -995,7 +995,7 @@ mod tests {
     #[test]
     fn warm_load_graph_index_refreshes_between_calls() {
         let (tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         let idx1 = ctx
@@ -1044,7 +1044,7 @@ mod tests {
             "---\ntype: note\nstatus: active\n---\n# Alpha\n\nAlpha body\n",
         )
         .unwrap();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         let alpha_headings = |index: &crate::core::GraphIndex| -> usize {
             index
                 .documents
@@ -1145,7 +1145,7 @@ mod tests {
             "---\ntype: note\n---\nArchived\n",
         )
         .unwrap();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         let before = ctx
@@ -1188,7 +1188,7 @@ mod tests {
     #[test]
     fn warm_begin_request_makes_config_and_cache_same_generation() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Establish warm state with no alias.
         ctx.begin_request().expect("begin_request");
@@ -1228,7 +1228,7 @@ mod tests {
     #[test]
     fn warm_same_length_config_rewrite_detected_by_content_hash() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Config A.
         write_config(&root, "links:\n  alias_field: aaaaaa\n");
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn warm_evicts_state_on_sqlite_corruption_error() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Hold this request's scope: it binds generation 1, and the corruption
         // seam keys the floor bump off the SCOPE's bound generation (NRN-253).
@@ -1314,7 +1314,7 @@ mod tests {
     #[test]
     fn warm_keeps_state_on_non_corruption_error() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         let scope = ctx.begin_request().expect("begin_request");
         {
             let _c = ctx.query_cache(&scope).expect("first warm query_cache");
@@ -1341,7 +1341,7 @@ mod tests {
     #[test]
     fn warm_corruption_error_does_not_invalidate_a_newer_current_generation() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Request 1's scope binds generation 1 — and is HELD to completion, exactly
         // as an in-flight request would hold it while draining.
@@ -1402,7 +1402,7 @@ mod tests {
     #[test]
     fn request_scopes_isolate_operator_notes() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Two requests' scopes alive at the same time on one context.
         let scope_a = ctx.begin_request().expect("begin_request A");
@@ -1439,7 +1439,7 @@ mod tests {
     #[test]
     fn warm_recovers_from_panic_holding_the_cache_guard() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
 
         ctx.begin_request().expect("begin_request");
         {
@@ -1508,7 +1508,7 @@ mod tests {
         use std::sync::Barrier;
 
         let (_tmp, root) = make_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
 
         // First request opens generation 1; hold its scope to attribute the
         // corruption below to the generation it bound.
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn warm_reopen_drains_and_drops_prior_generation() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         let scope1 = ctx.begin_request().expect("begin_request");
         let gen1_cache = ctx.query_cache(&scope1).expect("first warm query_cache");
@@ -1638,7 +1638,7 @@ mod tests {
         let _cap = ReadPoolCapGuard::pin(8);
 
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let _c = ctx.query_cache_unscoped().expect("warm up");
@@ -1667,7 +1667,7 @@ mod tests {
     #[test]
     fn sequential_checkout_reuses_pooled_connection() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let _c = ctx.query_cache_unscoped().expect("warm up");
@@ -1706,7 +1706,7 @@ mod tests {
         let _cap = ReadPoolCapGuard::pin(1);
 
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let _c = ctx.query_cache_unscoped().expect("warm up");
@@ -1803,7 +1803,7 @@ mod tests {
     #[test]
     fn pooled_connection_is_query_only() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         let cache = ctx.query_cache_unscoped().expect("query_cache");
 
@@ -1847,7 +1847,7 @@ mod tests {
     #[test]
     fn warm_later_queued_open_op_adopts_first_ops_generation() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Cold start opens generation 1; hold its scope for the corruption below.
         let scope = ctx.begin_request().expect("begin_request");
@@ -1904,7 +1904,7 @@ mod tests {
     #[test]
     fn warm_generation_open_errors_when_queue_shuts_down() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Establish generation 1 so the slot is warm.
         ctx.begin_request().expect("begin_request");
@@ -1961,7 +1961,7 @@ mod tests {
     #[test]
     fn warm_fresh_vault_probe_runs_no_refresh() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // First request: the cache is unbuilt, so the probe reports Stale and one
         // refresh (the rebuild) runs.
@@ -1995,7 +1995,7 @@ mod tests {
     #[test]
     fn warm_added_file_runs_exactly_one_refresh_and_is_seen() {
         let (tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         {
@@ -2026,7 +2026,7 @@ mod tests {
     #[test]
     fn warm_deletion_only_change_detected_by_probe() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         {
@@ -2058,7 +2058,7 @@ mod tests {
     #[test]
     fn warm_first_touch_unbuilt_cache_still_builds() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         let cache = ctx.query_cache_unscoped().expect("first warm query_cache");
@@ -2085,7 +2085,7 @@ mod tests {
     #[test]
     fn refresh_runs_on_write_connection_not_the_held_read_guard() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
 
         // Establish generation 1 (its cold-start refresh already ran).
         ctx.begin_request().expect("begin_request");
@@ -2123,7 +2123,7 @@ mod tests {
     #[test]
     fn concurrent_refresh_requesters_coalesce_to_one_execution() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         {
@@ -2177,7 +2177,7 @@ mod tests {
     #[test]
     fn requester_arriving_during_a_started_refresh_gets_its_own_refresh() {
         let (tmp, root) = make_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
 
         ctx.begin_request().expect("begin_request");
         {
@@ -2261,7 +2261,7 @@ mod tests {
     #[test]
     fn refresh_corruption_error_survives_ticket_and_evicts_generation() {
         let (tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         ctx.begin_request().expect("begin_request");
         {
@@ -2332,7 +2332,7 @@ mod tests {
     /// arrivals land before the op starts and share one ticket.
     #[cfg(test)]
     fn two_coalesced_arrivals_over_injected_refresh(
-        ctx: &VaultContext,
+        ctx: &VaultEnv,
         gen: &Arc<Generation>,
         inject: CacheError,
     ) -> (RefreshArrival, RefreshArrival, mpsc::Sender<()>) {
@@ -2375,7 +2375,7 @@ mod tests {
     #[test]
     fn coalesced_waiters_on_a_failed_refresh_all_observe_failure() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
@@ -2409,7 +2409,7 @@ mod tests {
     #[test]
     fn coalesced_waiters_on_a_locktimeout_refresh_all_observe_contention() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let _c = ctx.query_cache_unscoped().expect("first warm query_cache");
@@ -2465,7 +2465,7 @@ mod tests {
     fn warm_mutation_commits_increment_so_next_read_sees_no_changes() {
         let _cap = ReadPoolCapGuard::pin(1);
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Open the generation and build the cache (3 seeded docs).
         ctx.begin_request().expect("begin_request");
@@ -2517,7 +2517,7 @@ mod tests {
         std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
 
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let cache = ctx.query_cache_unscoped().expect("query_cache");
@@ -2613,7 +2613,7 @@ mod tests {
     #[test]
     fn refresh_between_increment_parse_and_first_chunk_supersedes_reservation() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let cache = ctx.query_cache_unscoped().expect("query_cache");
@@ -2675,7 +2675,7 @@ mod tests {
     #[test]
     fn refresh_waiters_succeed_when_post_refresh_temp_cleanup_fails() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         let _cache = ctx.query_cache_unscoped().expect("build cache");
         drop(_cache);
@@ -2720,7 +2720,7 @@ mod tests {
         std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
 
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         ctx.begin_request().expect("begin_request");
         {
             let cache = ctx.query_cache_unscoped().expect("query_cache");
@@ -2773,7 +2773,7 @@ mod tests {
         std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
 
         let (_tmp, root) = make_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
         let scope = ctx.begin_request().expect("begin_request");
         let baseline = {
             let cache = ctx.query_cache(&scope).expect("query_cache");
@@ -2853,7 +2853,7 @@ mod tests {
     #[test]
     fn panicked_increment_cleans_its_reserved_temp_job() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
         let scope = ctx.begin_request().expect("begin_request");
         let baseline = ctx
             .query_cache(&scope)
@@ -2887,7 +2887,7 @@ mod tests {
     fn affected_source_drift_degrades_post_apply_increment() {
         std::env::set_var("NORN_CACHE_INCREMENT_BUDGET_MS", "0");
         let (_tmp, root) = make_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
         let scope = ctx.begin_request().expect("begin_request");
         let baseline = ctx
             .query_cache(&scope)
@@ -2920,7 +2920,7 @@ mod tests {
     #[test]
     fn increment_with_old_bound_baseline_does_not_target_new_generation() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         let scope = ctx.begin_request().expect("begin_request");
         let baseline = ctx
@@ -2961,7 +2961,7 @@ mod tests {
     #[test]
     fn increment_corruption_evicts_generation_it_ran_on() {
         let (_tmp, root) = make_seeded_vault();
-        let ctx = VaultContext::open_warm(&root).expect("open_warm");
+        let ctx = VaultEnv::open_warm(&root).expect("open_warm");
 
         // Open generation 1, then invalidate it so the mutation request binds 2.
         ctx.begin_request().expect("begin_request generation 1");

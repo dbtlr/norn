@@ -8,10 +8,10 @@ use super::*;
 /// Three things previously lived context-global (or slot-global) and were only
 /// safe because `call_lock` guaranteed at most one request per vault ran at a
 /// time; NRN-253 moves each into this per-request value, threaded explicitly to
-/// the tool body alongside `&VaultContext`:
+/// the tool body alongside `&VaultEnv`:
 ///
 /// - **The bound config** (`config`). A request binds the current
-///   `Arc<LoadedConfig>` at its boundary ([`VaultContext::begin_request`]) and
+///   `Arc<LoadedConfig>` at its boundary ([`VaultEnv::begin_request`]) and
 ///   reads it via [`RequestScope::config`] for its whole life, so a concurrent
 ///   request's `begin_request` swapping the stored config cannot split-brain this
 ///   one between two reads (NRN-251's `(generation, config)` binding, now
@@ -21,8 +21,8 @@ use super::*;
 ///   `run_wrapped` into exactly this request's tool envelope — concurrent
 ///   requests can no longer interleave notes into each other's envelopes.
 /// - **The bound generation** (`bound_generation`). Stamped by
-///   [`query_cache_warm`](VaultContext::query_cache_warm) when the request binds
-///   its generation, read by [`note_tool_error`](VaultContext::note_tool_error)
+///   [`query_cache_warm`](VaultEnv::query_cache_warm) when the request binds
+///   its generation, read by [`note_tool_error`](VaultEnv::note_tool_error)
 ///   to key corruption invalidation off the generation THIS request used — not
 ///   whichever generation happens to be `current` when the error surfaces. Warm-
 ///   only; inert (stays 0) in cold mode. `0` means "no generation bound yet".
@@ -69,7 +69,7 @@ impl RequestScope {
     }
 
     /// The config bound at this request's boundary. Tool bodies read config
-    /// through here (not `VaultContext::config`) so it stays request-stable.
+    /// through here (not `VaultEnv::config`) so it stays request-stable.
     pub(crate) fn config(&self) -> Arc<LoadedConfig> {
         Arc::clone(&self.config)
     }

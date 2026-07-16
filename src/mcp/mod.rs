@@ -4,12 +4,12 @@
 //! [`McpServer`], serve it over stdio, and wait. Later tasks add the actual
 //! read/mutation tools.
 //!
-//! Task 2 adds a warm [`VaultContext`] that the server holds across tool calls:
+//! Task 2 adds a warm [`VaultEnv`] that the server holds across tool calls:
 //! config is parsed once at startup; the cache is re-opened per tool call so
 //! each call gets the CLI's per-invocation freshness check without a filesystem
 //! watcher.
 //!
-//! The vault env seam itself — [`VaultContext`](crate::env::VaultContext) and
+//! The vault env seam itself — [`VaultEnv`](crate::env::VaultEnv) and
 //! [`RequestScope`](crate::env::RequestScope) — lives in [`crate::env`], not
 //! here. It is surface-neutral (the CLI direct path will adopt it too); this
 //! module keeps only the MCP adapter concerns (server, tools, writer queue).
@@ -57,7 +57,7 @@ pub(crate) fn to_mcp_error(e: anyhow::Error) -> rmcp::ErrorData {
 }
 
 use self::server::McpServer;
-use crate::env::VaultContext;
+use crate::env::VaultEnv;
 
 /// Run the MCP stdio server. Owns its own multi-thread tokio runtime and blocks
 /// until the client disconnects. Fails fast with a non-zero exit if the vault
@@ -69,7 +69,7 @@ pub fn run(
 ) -> anyhow::Result<()> {
     // Build vault context before entering the async runtime — any config error
     // surfaces here as a clean anyhow chain before the server starts listening.
-    let ctx = VaultContext::open(cwd, config_path)
+    let ctx = VaultEnv::open(cwd, config_path)
         .with_context(|| format!("failed to open vault at {cwd}"))?;
     let ctx = Arc::new(ctx);
 
@@ -79,7 +79,7 @@ pub fn run(
     runtime.block_on(serve(ctx))
 }
 
-async fn serve(ctx: Arc<VaultContext>) -> anyhow::Result<()> {
+async fn serve(ctx: Arc<VaultEnv>) -> anyhow::Result<()> {
     let service = McpServer::new(ctx).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())

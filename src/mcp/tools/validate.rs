@@ -2,7 +2,7 @@
 //!
 //! The pure handler drives the same pipeline as `norn validate`:
 //!
-//! 1. Reconstruct the `GraphIndex` via `VaultContext::load_graph_index` (warm-
+//! 1. Reconstruct the `GraphIndex` via `VaultEnv::load_graph_index` (warm-
 //!    connection reuse under the daemon, fresh open in cold mode) with an
 //!    implicit incremental cache refresh. `files.ignore` is enforced at
 //!    cache-build time, so the index arrives already filtered.
@@ -31,7 +31,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::standards::engine::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 
@@ -110,18 +110,14 @@ pub struct ValidateOutput {
 
 /// Pure handler for `vault.validate`.
 ///
-/// Reconstructs the graph index via `VaultContext::load_graph_index` — warm-
+/// Reconstructs the graph index via `VaultEnv::load_graph_index` — warm-
 /// connection reuse under the daemon, a fresh open in cold mode, with the same
 /// lock-timeout-tolerant cache refresh either way. `files.ignore` is enforced
 /// at cache-build time (`Cache::open_with_index`, NRN-117), so the loaded index
 /// is already filtered — consistent with `norn validate` on vaults that
 /// configure `files.ignore`.
-pub fn handle(
-    ctx: &VaultContext,
-    scope: &RequestScope,
-    p: ValidateParams,
-) -> Result<ValidateOutput> {
-    // Route through VaultContext::load_graph_index — the graph-index entry point
+pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: ValidateParams) -> Result<ValidateOutput> {
+    // Route through VaultEnv::load_graph_index — the graph-index entry point
     // for daemon-served tools. It reuses the warm connection when served by the
     // daemon (verify-once) and opens fresh in cold mode, but applies `files.ignore`
     // via `Cache::open_with_index` in both, so the index is filtered identically
@@ -208,7 +204,7 @@ mod tests {
     #[test]
     fn handle_broken_link_returns_link_target_missing_finding() {
         let (_tmp, root) = vault_with_broken_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
 
@@ -272,7 +268,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
 
         let findings = out
@@ -289,7 +285,7 @@ mod tests {
     #[test]
     fn handle_code_filter_narrows_findings() {
         let (_tmp, root) = vault_with_broken_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // Filter to only link-target-missing codes.
         let out = handle(
@@ -323,7 +319,7 @@ mod tests {
     #[test]
     fn handle_summary_returns_grouped_rollup() {
         let (_tmp, root) = vault_with_broken_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -368,7 +364,7 @@ mod tests {
     #[test]
     fn summary_mode_omits_findings_key_in_serialized_output() {
         let (_tmp, root) = vault_with_broken_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let summary_out = handle(
             &ctx,
@@ -406,7 +402,7 @@ mod tests {
     #[test]
     fn handle_without_summary_omits_rollup() {
         let (_tmp, root) = vault_with_broken_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(&ctx, ValidateParams::default()).expect("handle should succeed");
         assert!(
@@ -422,7 +418,7 @@ mod tests {
     #[test]
     fn handle_non_matching_code_filter_returns_empty() {
         let (_tmp, root) = vault_with_broken_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // Filter to a code that never appears in this vault.
         let out = handle(
@@ -453,7 +449,7 @@ mod tests {
     /// `templates/` surfaced as a `link-target-missing` finding even when the
     /// vault config declared `files.ignore: ["templates/**"]`.
     ///
-    /// Today the handler routes through `VaultContext::load_graph_index`, which
+    /// Today the handler routes through `VaultEnv::load_graph_index`, which
     /// opens the cache with the config's ignore patterns; `files.ignore` is
     /// enforced at cache-BUILD time (the scan gate, NRN-117), so ignored docs
     /// never enter the rows the index is reconstructed from — same behavior as
@@ -487,7 +483,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let out = handle(&ctx, ValidateParams::default())
             .expect("handle should succeed on ignored vault");
 
@@ -538,7 +534,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let out = handle(&ctx, ValidateParams::default())
             .expect("handle should succeed on vault with non-ignored broken link");
 

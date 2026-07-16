@@ -17,7 +17,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{FindArgs, SortPaginateArgs};
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::filter_args::FilterArgs;
 
 #[cfg(test)]
@@ -228,7 +228,7 @@ pub struct FindOutput {
 /// Pure handler for `vault.find`. Opens a fresh query cache (per-call freshness),
 /// constructs [`FindArgs`] with `norn find`'s exact defaults (notably `limit`
 /// → 10 when omitted), and runs the shared `find::query` seam.
-pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: FindParams) -> Result<FindOutput> {
+pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: FindParams) -> Result<FindOutput> {
     // The per-call served marker (routing proofs) is emitted by the server
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn handle_eq_type_note_returns_seeded_notes() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn handle_holds_one_snapshot_across_selection_and_diagnostics() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let db_path = {
             let cache = ctx.query_cache_unscoped().expect("seed query cache");
             cache.cache_dir.join("cache.db")
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn handle_removed_raw_col_emits_no_structured_key() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn handle_known_dynamic_field_passes_gate() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn handle_unknown_dynamic_field_is_refused() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn handle_starts_with_filters_by_prefix() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn handle_no_filter_dumps_with_default_limit() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // No predicate, no limit → all 3 (well under the default-10 cap).
         let out = handle(&ctx, FindParams::default()).expect("handle should succeed");
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn handle_limit_one_caps_results() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn handle_envelope_full_result_is_untruncated() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn handle_envelope_echoes_paging_offset() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn handle_envelope_past_end_page_is_empty_but_truncated() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(
             &ctx,

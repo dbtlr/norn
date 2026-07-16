@@ -22,7 +22,7 @@
 //! Every evict/re-open trigger — cold start / first touch, ground-shift
 //! (out-of-band `cache clear` / `prune` / `rm`), cache-identity change /
 //! corruption, and an index-relevant config change — routes through the ONE
-//! single-flight path [`VaultContext::ensure_current`], which opens generation
+//! single-flight path [`VaultEnv::ensure_current`], which opens generation
 //! N+1 and swaps the slot's current pointer. The open itself is a **writer-queue
 //! liveness op** (ADR 0013 Phase 2, NRN-252): a stale `ensure_current` submits a
 //! generation-open op and blocks on it, and the per-vault writer thread runs opens
@@ -150,7 +150,7 @@ pub(crate) struct Generation {
     /// Holds the single in-flight-or-queued [`RefreshTicket`] that arriving
     /// requesters may join, or `None` when no refresh is pending (or the pending
     /// one has already started its scan). Guarded so the join decision is atomic
-    /// against an op's start transition — see [`arrive_refresh`](VaultContext::arrive_refresh).
+    /// against an op's start transition — see [`arrive_refresh`](VaultEnv::arrive_refresh).
     pub(in crate::env) refresh_pending: Mutex<Option<Arc<RefreshTicket>>>,
     /// Test-only: total freshness-refresh executions that actually reached
     /// `index_incremental` on this generation. Drives the coalescing /
@@ -567,7 +567,7 @@ pub(in crate::env) struct WarmSlot {
     /// The per-vault writer queue: the single serialization point for generation
     /// opens and freshness refreshes — subsuming the former `open` single-flight
     /// mutex — and, in a later commit, apply increments (ADR 0013, NRN-252). A
-    /// stale [`ensure_current`](VaultContext::ensure_current) submits a
+    /// stale [`ensure_current`](VaultEnv::ensure_current) submits a
     /// generation-open LIVENESS op and blocks on it; the queue runs opens one at a
     /// time, so N concurrent stale callers coalesce to one open and the rest adopt.
     /// The per-request freshness refresh is likewise a LIVENESS op on this queue,
@@ -575,7 +575,7 @@ pub(in crate::env) struct WarmSlot {
     pub(in crate::env) queue: WriterQueue,
 }
 
-/// A cache handle handed out by [`VaultContext::query_cache`], serving both
+/// A cache handle handed out by [`VaultEnv::query_cache`], serving both
 /// modes behind one type. Derefs into the underlying [`Cache`] so callers read
 /// `cache.conn()` / pass `&cache` uniformly.
 // `Owned` carries a whole `Cache` (a SQLite connection) so it dwarfs the warm
@@ -630,7 +630,7 @@ impl DerefMut for CacheHandle {
 /// the guard is dropped while the thread is PANICKING (a tool body panicked
 /// mid-work, possibly mid-mutation), it bumps the slot's invalidation floor above
 /// this generation's number, so the next request reopens through
-/// [`ensure_current`](VaultContext::ensure_current) and re-verifies integrity —
+/// [`ensure_current`](VaultEnv::ensure_current) and re-verifies integrity —
 /// exactly the trust-restoring self-heal the old poison-evict path gave, now
 /// routed through the one open path. On a normal drop it does nothing (the pooled
 /// connection is returned by [`PooledConn::drop`] regardless).

@@ -19,7 +19,7 @@
 //!   status ping performs one bounded map lookup and coherent progress snapshot
 //!   without opening the vault or touching its filesystem. Long vault work runs
 //!   on `spawn_blocking` threads (see `mcp::server`), keeping async workers free.
-//! - **Verify-once per vault.** Each vault's warm [`crate::env::VaultContext`]
+//! - **Verify-once per vault.** Each vault's warm [`crate::env::VaultEnv`]
 //!   checks integrity once, then self-heals per request — so warm queries skip
 //!   the repeated integrity check the one-shot CLI pays.
 

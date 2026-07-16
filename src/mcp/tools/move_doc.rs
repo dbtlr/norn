@@ -33,7 +33,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.move`.
@@ -113,7 +113,7 @@ impl MoveOutput {
 
 /// Build the MCP output envelope for `vault.move`.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: MoveParams,
 ) -> Result<MutationResult<MoveOutput>> {
@@ -161,7 +161,7 @@ pub fn handle_output(
 /// apply with `dry_run = false`. Destination parent-directory creation
 /// (`--parents`) happens inside `apply_migration_plan`, not here (NRN-234).
 pub fn handle(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: MoveParams,
 ) -> Result<crate::apply_report::ApplyReport> {
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn dry_run_default_writes_nothing() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn confirm_moves_and_rewrites_backlink() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn confirm_no_link_rewrite_leaves_backlink() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -481,7 +481,7 @@ mod tests {
     fn force_overwrites_existing_destination() {
         let (_tmp, root) = seeded_vault();
         // `b.md` already exists; moving `a.md` onto it must be refused by default.
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let refused = handle(
             &ctx,
             MoveParams {
@@ -497,7 +497,7 @@ mod tests {
         );
 
         // With force, the same move is allowed (destination overwritten).
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let report = handle(
             &ctx,
             MoveParams {
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn dry_run_parents_creates_nothing() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn confirm_refusal_is_structured_and_coded() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn dry_run_refusal_is_structured_but_not_is_error() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn confirm_parents_creates_missing_dst_dirs() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn confirm_bare_stem_resolves_and_moves() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -689,7 +689,7 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/a.md"), "---\ntype: note\n---\nAnother A\n").unwrap();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,

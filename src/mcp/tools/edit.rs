@@ -13,7 +13,7 @@
 
 use crate::edit::ops::EditOp;
 use crate::edit::report::EditReport;
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::mutation_result::MutationResult;
 use anyhow::Result;
 use camino::Utf8PathBuf;
@@ -76,7 +76,7 @@ impl EditOutput {
 /// project the report into the typed [`EditOutput`]. The single function the
 /// `#[tool]` wrapper calls.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: EditParams,
 ) -> Result<MutationResult<EditOutput>> {
@@ -120,7 +120,7 @@ pub fn handle_output(
 /// **Safety invariant:** when `!confirm`, this acquires NO lock and never calls
 /// the applier — it returns `build_report(.., applied = false, ..)` and leaves
 /// the file untouched.
-pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: EditParams) -> Result<EditReport> {
+pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: EditParams) -> Result<EditReport> {
     let cwd = ctx.vault_root.clone();
 
     if p.edits.is_empty() {
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn confirm_anchor_not_found_is_structured_refusal() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let mr = handle_output(
             &ctx,
             EditParams {
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn dry_run_uses_one_snapshot_for_graph_and_target_resolution() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let scope = ctx.begin_request().expect("begin request");
         let (_canonical, cache_dir) = crate::cache::cache_dir_for(&root).unwrap();
         let db_path = cache_dir.join("cache.db");
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn expected_hash_drift_reports_resolved_path() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let mr = handle_output(
             &ctx,
             EditParams {
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn dry_run_anchor_refusal_is_not_error() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let mr = handle_output(
             &ctx,
             EditParams {

@@ -33,7 +33,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.rewrite_wikilink`.
@@ -83,7 +83,7 @@ impl RewriteWikilinkOutput {
 
 /// Build the MCP output envelope for `vault.rewrite_wikilink`.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: RewriteWikilinkParams,
 ) -> Result<MutationResult<RewriteWikilinkOutput>> {
@@ -127,7 +127,7 @@ pub fn handle_output(
 /// load — then build the same plan, open a real event sink, and apply with
 /// `dry_run = false`.
 pub fn handle(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: RewriteWikilinkParams,
 ) -> Result<crate::apply_report::ApplyReport> {
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn dry_run_default_writes_nothing() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn confirm_refusal_is_structured_and_coded() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn confirm_rewrites_body_and_frontmatter() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,

@@ -54,7 +54,7 @@
 use anyhow::Result;
 
 use crate::describe::DescribeOutput;
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::filter_args::FilterArgs;
 
 /// Parameters for `vault.describe`.
@@ -176,7 +176,7 @@ fn params_to_filter_args(params: &DescribeParams) -> FilterArgs {
 /// distinct entry point so the server registration and the tests both read
 /// as calling "the" handler.
 pub fn handle(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     params: &DescribeParams,
 ) -> Result<DescribeOutput> {
@@ -187,7 +187,7 @@ pub fn handle(
 /// [`crate::describe::describe`] core — the same call the CLI makes for
 /// `norn describe --data`, so the MCP `data` section cannot drift from it.
 pub fn handle_with(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     params: &DescribeParams,
 ) -> Result<DescribeOutput> {
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn handle_returns_folders_path_rules_and_schema() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
@@ -356,7 +356,7 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         std::fs::write(root.join("top.md"), "---\ntype: note\n---\nbody\n").unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
         // No config → no path rules. The top-level doc folds to "".
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn describe_surfaces_creatable_rule_and_inbox() {
         let (_tmp, root) = vault_with_creatable_rule();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(&ctx, &DescribeParams::default()).expect("handle should succeed");
 
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn describe_data_matches_cli_summarize() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // MCP path with data: true
         let params = DescribeParams {
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn describe_data_respects_filter() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let params = DescribeParams {
             data: true,
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn describe_without_data_flag_omits_summary() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let out = handle_with(&ctx, &DescribeParams::default()).expect("handle");
         assert!(out.data.is_none(), "no data flag ⇒ no summary section");
     }

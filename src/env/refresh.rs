@@ -3,12 +3,12 @@
 //! ### The per-request pipeline
 //!
 //! The pipeline is split across two entry points so it runs ONCE per request in
-//! a fixed order, no matter which tool is calling. [`VaultContext::begin_request`]
+//! a fixed order, no matter which tool is calling. [`VaultEnv::begin_request`]
 //! runs steps 0–1 at the per-request seam (the server calls it before every tool
-//! body — see `mcp::server`); [`VaultContext::query_cache`] runs steps 2–4 when a
+//! body — see `mcp::server`); [`VaultEnv::query_cache`] runs steps 2–4 when a
 //! tool actually opens the cache. Tools that reconstruct a graph index instead of
 //! running a `query_cache` filter (validate, repair, set, edit, delete, move,
-//! rewrite, apply, new) go through [`VaultContext::load_graph_index`], a thin
+//! rewrite, apply, new) go through [`VaultEnv::load_graph_index`], a thin
 //! composition over `query_cache` plus the cache reader — so in warm mode those
 //! tools bind the SAME generation and are served verify-once too, not cold-opened
 //! per request (NRN-130). Putting root-liveness + config-freshness in
@@ -62,7 +62,7 @@
 //!    trust semantics the always-refresh pipeline carried. `LockTimeout` still
 //!    serves anyway with the NRN-215 both-surfaces note; any other error
 //!    propagates with its concrete type intact (so corruption stays classifiable
-//!    by [`note_tool_error`](VaultContext::note_tool_error)). The probe is the
+//!    by [`note_tool_error`](VaultEnv::note_tool_error)). The probe is the
 //!    named interface a Phase 3 watcher-events impl slots behind; the stat sweep
 //!    remains the permanent demoted-mode fallback. Warm mode RETIRES `call_lock`
 //!    (NRN-253): tool bodies no longer serialize, so this probe/refresh
@@ -74,7 +74,7 @@
 //!
 //! A warm MUTATION additionally commits its OWN cache increments after applying.
 //! Each mutation tool feeds the changed-file set to
-//! [`VaultContext::commit_apply_increments`], which parses the whole vault ONCE
+//! [`VaultEnv::commit_apply_increments`], which parses the whole vault ONCE
 //! **on the request thread** (no lock, off the writer thread — NRN-252 review)
 //! into an `IncrementCommit`, then runs the commit as ONE **bulk** op on the
 //! per-vault writer queue — a chunked closure that stages job-scoped document rows
@@ -548,7 +548,7 @@ pub(in crate::env) fn config_yaml_path(vault_root: &Utf8Path) -> Utf8PathBuf {
     vault_root.join(".norn/config.yaml")
 }
 
-impl VaultContext {
+impl VaultEnv {
     /// Per-request entry seam (FIX-1): runs the warm pipeline's root-liveness
     /// (step 0) and config-freshness (step 1) once per request, BEFORE the tool
     /// body reads `config()` or opens the cache. No-op in cold mode (config is

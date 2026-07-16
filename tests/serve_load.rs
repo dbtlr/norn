@@ -151,7 +151,7 @@ fn concurrent_same_vault_first_touch() {
 /// correct results. Before this commit `call_lock` serialized every warm tool body
 /// one-at-a-time per vault; now warm reads run concurrently and a mutation
 /// interleaves with them. This is the daemon-level proof; the fine-grained overlap
-/// / coalescing seams are unit-tested against `VaultContext` (NRN-256 owns the
+/// / coalescing seams are unit-tested against `VaultEnv` (NRN-256 owns the
 /// benchmark, so this stays a handful of calls, not a load run).
 #[test]
 fn concurrent_reads_and_a_mutation_on_one_warm_vault_all_succeed() {

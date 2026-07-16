@@ -302,7 +302,7 @@ pub(in crate::env) fn ensure_cache_dir(cache_dir: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-impl VaultContext {
+impl VaultEnv {
     /// The ONE single-flight generation-open path (steps 2–3). Returns the
     /// current generation, opening N+1 when the current one is absent, ground-
     /// shifted, invalidated (below the floor), or opened under a now-different

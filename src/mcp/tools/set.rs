@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use camino::Utf8PathBuf;
 
 use crate::cli::{SetArgs, SetFormat};
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::mutation_result::MutationResult;
 use crate::set::report::{build_report, SetReport};
 
@@ -136,7 +136,7 @@ impl SetOutput {
 /// project the report into the typed [`SetOutput`]. The single function the
 /// `#[tool]` wrapper calls.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: SetParams,
 ) -> Result<MutationResult<SetOutput>> {
@@ -181,7 +181,7 @@ pub fn handle_output(
 /// **Safety invariant:** when `!confirm`, this acquires NO lock and never calls
 /// the applier — it returns `build_report(.., applied = false, ..)` and leaves
 /// the file untouched.
-pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: SetParams) -> Result<SetReport> {
+pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: SetParams) -> Result<SetReport> {
     let cwd = ctx.vault_root.clone();
 
     // CONFIRM locks BEFORE any read that feeds the write; dry-run never locks.
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn dry_run_default_writes_nothing() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn dry_run_uses_one_snapshot_for_graph_and_target_resolution() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (_canonical, cache_dir) = crate::cache::cache_dir_for(&root).unwrap();
         let db_path = cache_dir.join("cache.db");
 
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn confirm_writes_the_change() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn confirm_replaces_body() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn dry_run_body_writes_nothing() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn confirm_field_coerces_and_writes() {
         let (_tmp, root) = seeded_vault_with_wikilink_schema();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // Coercing --field path: bare stem is wrapped into a wikilink and written.
         let report = handle(
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn confirm_push_appends_to_list() {
         let (_tmp, root) = seeded_vault_with_tags();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn confirm_pop_removes_from_list() {
         let (_tmp, root) = seeded_vault_with_tags();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn confirm_push_duplicate_key_accumulates_all_members() {
         let (_tmp, root) = seeded_vault_with_tags();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -709,7 +709,7 @@ mod tests {
             "---\ntype: task\nstatus: backlog\ntags:\n  - alpha\n  - beta\n  - gamma\n---\nTask body\n",
         )
         .unwrap();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn push_json_shaped_value_is_literal_string_not_parsed() {
         let (_tmp, root) = seeded_vault_with_tags();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -772,7 +772,7 @@ mod tests {
     fn confirm_push_absent_key_creates_single_element_array() {
         // seeded_vault has no `tags` field at all.
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -799,7 +799,7 @@ mod tests {
     #[test]
     fn confirm_pop_absent_value_is_silent_noop() {
         let (_tmp, root) = seeded_vault_with_tags();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,

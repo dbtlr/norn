@@ -3,7 +3,7 @@
 //! Each tool is split into two layers:
 //!
 //! 1. A **pure handler** (`handle`) plus its param struct, here in `tools/`.
-//!    The handler takes `&VaultContext` and the deserialized params, runs the
+//!    The handler takes `&VaultEnv` and the deserialized params, runs the
 //!    same underlying norn code path the CLI uses, and returns the report type
 //!    directly (`anyhow::Result<…>`). It carries no rmcp machinery, so it is
 //!    unit-testable against a seeded temp vault with the `pub(crate)` cache
@@ -29,7 +29,7 @@ macro_rules! scoped_shim {
     ($(fn $name:ident($params:ty) -> $ret:ty;)+) => {
         $(
             fn $name(
-                ctx: &$crate::env::VaultContext,
+                ctx: &$crate::env::VaultEnv,
                 p: $params,
             ) -> anyhow::Result<$ret> {
                 let scope = ctx.begin_request()?;

@@ -3,7 +3,7 @@
 use super::*;
 
 /// A typed error the warm daemon can downcast to decide whether to evict the
-/// whole `VaultContext`. Kept intentionally small and `anyhow`-downcastable.
+/// whole `VaultEnv`. Kept intentionally small and `anyhow`-downcastable.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WarmContextError {
     /// The vault root can no longer be canonicalized (deleted, unmounted,
@@ -34,7 +34,7 @@ pub(in crate::env) fn is_sqlite_corruption(err: &anyhow::Error) -> bool {
     })
 }
 
-impl VaultContext {
+impl VaultEnv {
     /// Corruption-eviction seam (FIX-3): inspect a failed tool's error chain and,
     /// in warm mode, invalidate the current generation when the failure is a
     /// SQLite corruption-class error (`DatabaseCorrupt` / `NotADatabase`). The

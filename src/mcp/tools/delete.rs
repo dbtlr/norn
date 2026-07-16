@@ -33,7 +33,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.delete`.
@@ -102,7 +102,7 @@ impl DeleteOutput {
 
 /// Build the MCP output envelope for `vault.delete`.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: DeleteParams,
 ) -> Result<MutationResult<DeleteOutput>> {
@@ -146,7 +146,7 @@ pub fn handle_output(
 /// and preflight — then run the same plan, open a real event sink, and apply
 /// with `dry_run = false`.
 pub fn handle(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: DeleteParams,
 ) -> Result<crate::apply_report::ApplyReport> {
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn dry_run_default_does_not_delete() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn confirm_deletes_with_allow_broken_links() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn confirm_refusal_is_structured_and_coded() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn confirm_deletes_with_rewrite_to_redirects_links() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn link_impact_identical_between_dry_run_and_confirm() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let dry_run_result = handle_output(
             &ctx,
@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn confirm_bare_stem_resolves_and_deletes() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -532,7 +532,7 @@ mod tests {
             "---\ntype: note\n---\nAnother doc\n",
         )
         .unwrap();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle_output(
             &ctx,

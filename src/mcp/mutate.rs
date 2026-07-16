@@ -14,11 +14,11 @@
 //! never block or fail a mutation.
 //!
 //! The post-apply cache-increment commit is NOT wrapped here: every warm
-//! mutation tool calls [`VaultContext::commit_apply_increments`] directly with
+//! mutation tool calls [`VaultEnv::commit_apply_increments`] directly with
 //! the apply report's touched-path set (NRN-252 / NRN-158), so there is no
 //! one-line passthrough to keep in sync.
 
-use crate::env::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mutation_lock::MutationLock;
 use crate::telemetry::{Clock, EventSink, IdGen};
 use camino::Utf8Path;
@@ -222,7 +222,7 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
 /// Use this ONLY on the confirm/apply path. Dry-run must keep `EventSink::discard`
 /// directly (the CLI's dry-run branch does the same) so a plan-only call persists
 /// nothing.
-pub(crate) fn open_mutation_event_sink(ctx: &VaultContext, scope: &RequestScope) -> EventSink {
+pub(crate) fn open_mutation_event_sink(ctx: &VaultEnv, scope: &RequestScope) -> EventSink {
     let ids = IdGen::new();
     let clock = Clock::System;
     let start_ts = clock.now_rfc3339();
@@ -259,7 +259,7 @@ pub(crate) fn open_mutation_event_sink(ctx: &VaultContext, scope: &RequestScope)
 
 #[cfg(test)]
 mod lock_ordering_tests {
-    use crate::env::VaultContext;
+    use crate::env::VaultEnv;
     use camino::Utf8PathBuf;
     use fs2::FileExt;
     use tempfile::TempDir;
@@ -333,9 +333,9 @@ mod lock_ordering_tests {
         std::env::set_var("NORN_MUTATION_LOCK_TIMEOUT_MS", "150");
 
         let (_tmp, root, held, _cleanup) = contended_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
-        type Case = (&'static str, Box<dyn Fn(&VaultContext) -> anyhow::Error>);
+        type Case = (&'static str, Box<dyn Fn(&VaultEnv) -> anyhow::Error>);
         let cases: Vec<Case> = vec![
             (
                 "set",
@@ -492,11 +492,11 @@ mod lock_ordering_tests {
         std::env::set_var("NORN_MUTATION_LOCK_TIMEOUT_MS", "150");
 
         let (_tmp, root, held, _cleanup) = contended_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         type Case = (
             &'static str,
-            Box<dyn Fn(&VaultContext) -> (bool, serde_json::Value)>,
+            Box<dyn Fn(&VaultEnv) -> (bool, serde_json::Value)>,
         );
         let cases: Vec<Case> = vec![
             (
