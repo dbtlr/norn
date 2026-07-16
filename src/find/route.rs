@@ -640,9 +640,12 @@ mod tests {
         let routed_exit = if routed.has_diagnostic_errors { 2 } else { 0 };
 
         // Direct side: the same signal `find::run` exits on.
-        let cache =
-            crate::cache::command::open_for_query(&root, &crate::graph::IndexOptions::default(), false)
-                .unwrap();
+        let cache = crate::cache::command::open_for_query(
+            &root,
+            &crate::graph::IndexOptions::default(),
+            false,
+        )
+        .unwrap();
         let direct_exit = if cache.has_diagnostic_errors().unwrap() {
             2
         } else {

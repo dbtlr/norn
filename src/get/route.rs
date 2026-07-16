@@ -23,8 +23,8 @@ use camino::Utf8PathBuf;
 use serde_json::{Map, Value};
 
 use crate::cli::GetArgs;
-use crate::route_wire::{insert_paging, json_type, take_vec};
 use crate::get::{ShowRecord, ShowReport};
+use crate::route_wire::{insert_paging, json_type, take_vec};
 
 /// Translate parsed `norn get` args into the `vault.get` tool's parameter object
 /// (the `GetParams` shape in `src/mcp/tools/get.rs`).

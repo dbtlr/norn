@@ -22,6 +22,7 @@ mod filter;
 mod filter_args;
 mod find;
 mod frontmatter;
+mod get;
 mod grammar;
 mod graph;
 mod help;
@@ -46,7 +47,6 @@ mod seq_alloc;
 mod serve;
 mod service;
 mod set;
-mod get;
 mod standards;
 mod target;
 mod telemetry;
@@ -1343,14 +1343,7 @@ fn try_route_apply(
         dry_run,
         crate::apply_report::reconstruct_wire_report,
         move |report| {
-            crate::apply::route::emit(
-                report,
-                format,
-                out.as_deref(),
-                &plan_path,
-                &raw,
-                &state_dir,
-            )
+            crate::apply::route::emit(report, format, out.as_deref(), &plan_path, &raw, &state_dir)
         },
     )
 }
@@ -2208,9 +2201,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     // The renderer reads the delete op's index-derived `link_impact`
                     // (NRN-237) and apply-time `cascade` straight off the report —
                     // the same report the routed path reconstructs, so both match.
-                    crate::delete::render_delete_records(
-                        &mut out, &report, &args.doc, dry_run,
-                    )?;
+                    crate::delete::render_delete_records(&mut out, &report, &args.doc, dry_run)?;
                 }
             }
 

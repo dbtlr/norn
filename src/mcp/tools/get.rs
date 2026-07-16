@@ -9,9 +9,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{GetArgs, GetFormat as CliGetFormat, SortPaginateArgs};
+use crate::get::{SectionFailure, ShowReport};
 use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
-use crate::get::{SectionFailure, ShowReport};
 
 /// Default for [`GetParams::starts_at`] — the CLI's `--starts-at` default (1).
 /// serde's numeric default is 0; get's paging is 1-indexed, so the absent-field

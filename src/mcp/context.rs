@@ -176,11 +176,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 
+use crate::cache::command::open_for_query;
 use crate::cache::{
     cache_dir_for, Cache, CacheError, ChangeDetectOptions, Freshness, FreshnessProbe,
     StatSweepProbe,
 };
-use crate::cache::command::open_for_query;
 use crate::config_loader::{load_config, LoadedConfig};
 use crate::mcp::writer_queue::{
     ChunkOutcome, Handle, Outcome, ValidityGuard, WriterProgressState, WriterQueue,
@@ -3288,8 +3288,9 @@ mod tests {
 
         // Cold: the exact entry point a direct CLI invocation / cold MCP uses.
         let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
-        let cold = crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
-            .expect("cold load_graph_index");
+        let cold =
+            crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
+                .expect("cold load_graph_index");
 
         // Pin the cold build against the fixture (reader-omission guard).
         assert_eq!(cold.documents.len(), 3, "three seeded docs");
@@ -3398,8 +3399,9 @@ mod tests {
         // Control: a genuinely cold open on the same vault state does not see
         // the per-connection shadow.
         let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
-        let cold = crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
-            .expect("cold load_graph_index");
+        let cold =
+            crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
+                .expect("cold load_graph_index");
         assert_eq!(
             alpha_headings(&cold),
             1,
@@ -3539,8 +3541,9 @@ mod tests {
 
         // Control: a cold open on the same state sees everything for real.
         let cold_config = load_config(&root.to_path_buf(), None).expect("load_config");
-        let cold = crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
-            .expect("cold load_graph_index");
+        let cold =
+            crate::cache::command::load_graph_index(&root, &cold_config.index_options, false)
+                .expect("cold load_graph_index");
         assert_eq!(cold.documents.len(), 4);
         assert_eq!(
             alpha_headings(&cold),
