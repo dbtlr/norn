@@ -333,7 +333,7 @@ fn render_prune_text(report: &PruneReport) {
         println!(
             "{label}  {} {} {verb}, {} {freed}{notes}",
             tree.evicted.len(),
-            // "evictions", not "entries": one entry can emit a dev-stale row
+            // "evictions", not "entries": one entry can emit a stale-db row
             // plus a terminal row in the same sweep.
             if tree.evicted.len() == 1 {
                 "eviction"
@@ -364,9 +364,9 @@ fn render_prune_text(report: &PruneReport) {
                     None => "aged".to_string(),
                 },
                 EvictReason::OverCap => "over cap".to_string(),
-                EvictReason::DevStale => match e.age_days {
-                    Some(d) => format!("dev stale {d}d"),
-                    None => "dev stale".to_string(),
+                EvictReason::StaleDb => match e.age_days {
+                    Some(d) => format!("stale db {d}d"),
+                    None => "stale db".to_string(),
                 },
             };
             println!("  [{tree}] {root}  {reason}  {}", format_bytes(e.bytes));

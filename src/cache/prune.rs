@@ -16,12 +16,16 @@ use serde::{Serialize, Serializer};
 pub(crate) const CACHE_TREE_SIZE_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 /// Lazy-sweep throttle: at most one sweep per interval.
 pub(crate) const PRUNE_THROTTLE: Duration = Duration::from_secs(24 * 3_600);
-/// Dev-channel cache TTL (48h). A `dev/` database (NRN-269) untouched for
-/// longer than this is evicted on its own clock — the whole entry's freshness
-/// spans both channels, so a stale ~29MB dev build inside a live-active entry
-/// would otherwise never age out. Shorter than the entry retention window
-/// because a dev cache rebuilds cheaply from its cargo tree.
-pub(crate) const DEV_CACHE_TTL: Duration = Duration::from_secs(48 * 3_600);
+/// Stale-database TTL (48h). Every database location under an entry EXCEPT the
+/// live current-schema one (`<entry>/v{current}`) is aged on its own clock and
+/// evicted past this window (NRN-286): dev databases of any schema (NRN-269),
+/// live databases of non-current schema versions (`<entry>/vN`, N != current),
+/// and legacy bare `cache.db` files at either channel root. The whole entry's
+/// freshness would otherwise span every channel and schema, so a stale ~29MB
+/// build or an obsolete-schema db inside a live-active entry would never age
+/// out. Shorter than the entry retention window because these all rebuild
+/// cheaply from source.
+pub(crate) const STALE_DB_TTL: Duration = Duration::from_secs(48 * 3_600);
 /// Marker file (in the cache tree root) recording the last lazy-sweep decision.
 pub(crate) const PRUNE_MARKER: &str = ".last-prune";
 
@@ -103,7 +107,7 @@ pub(crate) enum EvictReason {
     Empty,
     Aged,
     OverCap,
-    DevStale,
+    StaleDb,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,12 +197,15 @@ fn is_lock_file(name: &str) -> bool {
 /// mtime is locking metadata, not cache freshness, and any flock acquisition
 /// (including the sweep's own) perturbs it.
 fn measure(dir: &Utf8Path) -> (u64, Option<SystemTime>, usize) {
-    measure_skipping(dir, None)
+    measure_excluding(dir, &[])
 }
 
-/// `measure`, excluding one immediate child by name. Used by dry-run dev
-/// eviction to project an entry's post-removal measure without touching disk.
-fn measure_skipping(dir: &Utf8Path, skip_top: Option<&str>) -> (u64, Option<SystemTime>, usize) {
+/// `measure`, skipping any file at or under one of `excluded` (each an exact
+/// file path or a directory prefix). Backs dry-run projection of an entry's
+/// post-eviction measure without touching disk — the stale-db TTL pass passes
+/// the schema dirs / legacy db files it would remove so a dry run classifies
+/// and accounts exactly like a real sweep.
+fn measure_excluding(dir: &Utf8Path, excluded: &[Utf8PathBuf]) -> (u64, Option<SystemTime>, usize) {
     let mut bytes = 0u64;
     let mut newest: Option<SystemTime> = None;
     let mut files = 0usize;
@@ -206,19 +213,21 @@ fn measure_skipping(dir: &Utf8Path, skip_top: Option<&str>) -> (u64, Option<Syst
         return (0, None, 0);
     };
     for e in entries.flatten() {
-        if let Some(skip) = skip_top {
-            if e.file_name().to_str() == Some(skip) {
-                continue;
-            }
+        let Ok(path) = Utf8PathBuf::from_path_buf(e.path()) else {
+            continue;
+        };
+        if excluded
+            .iter()
+            .any(|ex| path == *ex || path.starts_with(ex))
+        {
+            continue;
         }
         let Ok(md) = e.metadata() else { continue };
         if md.is_dir() {
-            if let Ok(sub) = Utf8PathBuf::from_path_buf(e.path()) {
-                let (b, m, f) = measure(&sub);
-                bytes += b;
-                newest = max_opt(newest, m);
-                files += f;
-            }
+            let (b, m, f) = measure_excluding(&path, excluded);
+            bytes += b;
+            newest = max_opt(newest, m);
+            files += f;
         } else {
             bytes += md.len();
             if !e.file_name().to_str().is_some_and(is_lock_file) {
@@ -237,22 +246,50 @@ fn max_opt(a: Option<SystemTime>, b: Option<SystemTime>) -> Option<SystemTime> {
     }
 }
 
-/// Read `meta.vault_root` from an entry's cache.db, read-only. None on any failure.
+/// Recover `meta.vault_root` for an entry, read-only, by probing candidate db
+/// paths in a fixed, documented order and returning the first that reads
+/// (NRN-286):
 ///
-/// Falls back to the dev-channel database (`<entry>/dev/cache.db`, NRN-269)
-/// only when the live database is ABSENT, so a dev-only entry recovers its root
-/// and ages out by mtime under the normal retention policy rather than being
-/// misclassified `Unreadable` and evicted immediately. A PRESENT-but-unreadable
-/// (corrupt) live db deliberately does not fall back: the entry stays
-/// `Unreadable` and evicts promptly, and no second SQLite open is paid on a
-/// known-corrupt db. The whole entry dir (live db, `dev/`, lock) is removed
-/// together on eviction, so both channels age as one unit.
+///   1. current live schema dir  — `<entry>/v{current}/cache.db`
+///   2. other live schema dirs   — `<entry>/vN/cache.db` (N != current), highest N first
+///   3. legacy live bare db      — `<entry>/cache.db`
+///   4. current dev schema dir   — `<entry>/dev/v{current}/cache.db`
+///   5. other dev schema dirs    — `<entry>/dev/vN/cache.db`, highest N first
+///   6. legacy dev bare db       — `<entry>/dev/cache.db`
+///
+/// Policy on corruption (NRN-269 spirit, relaxed): the candidate list is
+/// bounded, so a present-but-corrupt db in a preferred slot does NOT strand the
+/// whole entry as `Unreadable` — it simply falls through to the next candidate.
+/// This is safe because the whole entry dir is removed together on eviction, so
+/// every channel and schema ages as one unit, and there is no risk of endless
+/// fallback opens.
 fn read_cache_root(entry_dir: &Utf8Path) -> Option<String> {
-    let live_db = entry_dir.join("cache.db");
-    if live_db.as_std_path().exists() {
-        return read_root_from_db(&live_db);
+    cache_root_candidates(entry_dir)
+        .into_iter()
+        .find_map(|db| read_root_from_db(&db))
+}
+
+/// The ordered `meta.vault_root` recovery candidates for an entry — see
+/// [`read_cache_root`] for the order and rationale.
+fn cache_root_candidates(entry_dir: &Utf8Path) -> Vec<Utf8PathBuf> {
+    let current = crate::cache::identity::schema_segment();
+    let dev = entry_dir.join("dev");
+    let mut out = Vec::new();
+    // 1 + 2: live channel, current schema first then other schemas.
+    out.push(entry_dir.join(&current).join("cache.db"));
+    for dir in other_schema_dirs(entry_dir, &current) {
+        out.push(dir.join("cache.db"));
     }
-    read_root_from_db(&entry_dir.join("dev").join("cache.db"))
+    // 3: legacy bare live db.
+    out.push(entry_dir.join("cache.db"));
+    // 4 + 5: dev channel, current schema first then other schemas.
+    out.push(dev.join(&current).join("cache.db"));
+    for dir in other_schema_dirs(&dev, &current) {
+        out.push(dir.join("cache.db"));
+    }
+    // 6: legacy bare dev db.
+    out.push(dev.join("cache.db"));
+    out
 }
 
 fn read_root_from_db(db: &Utf8Path) -> Option<String> {
@@ -338,22 +375,167 @@ fn age_days(newest: Option<SystemTime>, now: SystemTime) -> Option<u64> {
         .map(|d| d.as_secs() / 86_400)
 }
 
-/// Newest mtime among an entry's dev-channel database files (`dev/cache.db`
-/// plus its `-wal`/`-shm` sidecars when present), or `None` when the dev db is
-/// absent. Presence is gated on `dev/cache.db` itself — a bare `dev/` dir or
-/// stray sidecar is not a dev cache.
-fn dev_db_newest_mtime(entry_dir: &Utf8Path) -> Option<SystemTime> {
-    let dev = entry_dir.join("dev");
-    if !dev.join("cache.db").as_std_path().exists() {
+/// The three files that make up a single SQLite cache database.
+const DB_FILES: [&str; 3] = ["cache.db", "cache.db-wal", "cache.db-shm"];
+
+/// A schema-dir name is exactly `v` + one or more decimal digits (`v5`, `v12`).
+/// Returns the parsed version, or `None` for anything else. Strict on purpose:
+/// only genuine schema dirs are recognized as stale-db locations or root-
+/// recovery candidates.
+fn schema_version_of(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix('v')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let mut newest: Option<SystemTime> = None;
-    for name in ["cache.db", "cache.db-wal", "cache.db-shm"] {
-        if let Ok(md) = std::fs::metadata(dev.join(name).as_std_path()) {
-            newest = max_opt(newest, md.modified().ok());
+    digits.parse::<u32>().ok()
+}
+
+/// Schema dirs directly under `root` other than `current`, highest version
+/// first (deterministic); each is gated on containing a `cache.db`. A missing
+/// `root` yields empty.
+fn other_schema_dirs(root: &Utf8Path, current: &str) -> Vec<Utf8PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root.as_std_path()) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(u32, Utf8PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_owned();
+            if name == current {
+                return None;
+            }
+            let v = schema_version_of(&name)?;
+            let dir = Utf8PathBuf::from_path_buf(e.path()).ok()?;
+            if !dir.join("cache.db").as_std_path().exists() {
+                return None;
+            }
+            Some((v, dir))
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    dirs.into_iter().map(|(_, d)| d).collect()
+}
+
+/// One removable stale-database unit inside an entry (NRN-286).
+enum StaleDb {
+    /// A whole schema directory (`<entry>/vN` or `<entry>/dev/vN`); the whole
+    /// dir is the removable unit.
+    SchemaDir(Utf8PathBuf),
+    /// A legacy bare `cache.db` at a channel root (`<entry>` or `<entry>/dev`);
+    /// only the db + WAL/SHM sidecars are removed, never the root (which holds
+    /// the shared lock and/or other dbs).
+    LegacyBare(Utf8PathBuf),
+}
+
+impl StaleDb {
+    /// The directory that directly contains this unit's `cache.db`.
+    fn db_root(&self) -> &Utf8Path {
+        match self {
+            StaleDb::SchemaDir(d) => d,
+            StaleDb::LegacyBare(root) => root,
         }
     }
-    newest
+
+    /// Newest mtime among this unit's db files, gated on `cache.db` existing —
+    /// `None` when the primary db file is absent (a bare dir or stray sidecar is
+    /// not a cache).
+    fn newest_mtime(&self) -> Option<SystemTime> {
+        let root = self.db_root();
+        if !root.join("cache.db").as_std_path().exists() {
+            return None;
+        }
+        let mut newest: Option<SystemTime> = None;
+        for name in DB_FILES {
+            if let Ok(md) = std::fs::metadata(root.join(name).as_std_path()) {
+                newest = max_opt(newest, md.modified().ok());
+            }
+        }
+        newest
+    }
+
+    /// Total on-disk bytes of this unit.
+    fn bytes(&self) -> u64 {
+        match self {
+            StaleDb::SchemaDir(d) => measure(d).0,
+            StaleDb::LegacyBare(root) => DB_FILES
+                .iter()
+                .filter_map(|n| std::fs::metadata(root.join(n).as_std_path()).ok())
+                .map(|md| md.len())
+                .sum(),
+        }
+    }
+
+    /// Paths a dry run must exclude to project the entry's post-removal measure:
+    /// the schema dir itself (as a prefix) or each legacy sidecar file.
+    fn excluded_paths(&self) -> Vec<Utf8PathBuf> {
+        match self {
+            StaleDb::SchemaDir(d) => vec![d.clone()],
+            StaleDb::LegacyBare(root) => DB_FILES.iter().map(|n| root.join(n)).collect(),
+        }
+    }
+
+    /// Remove this unit from disk. Returns whether the primary `cache.db` is
+    /// gone afterward (removed or already absent). Never removes the entry, the
+    /// shared lock, or another db; an emptied non-entry channel dir (`dev/`) is
+    /// cleaned up opportunistically.
+    fn remove(&self, entry_dir: &Utf8Path) -> bool {
+        match self {
+            StaleDb::SchemaDir(d) => {
+                let removed = std::fs::remove_dir_all(d.as_std_path()).is_ok();
+                // Drop a now-empty channel dir (e.g. `dev/`) — never the entry
+                // itself. `remove_dir` only succeeds on an empty dir, so a dir
+                // still holding another schema stays.
+                if let Some(parent) = d.parent() {
+                    if parent != entry_dir {
+                        let _ = std::fs::remove_dir(parent.as_std_path());
+                    }
+                }
+                removed
+            }
+            StaleDb::LegacyBare(root) => {
+                let db = root.join("cache.db");
+                let removed = match std::fs::remove_file(db.as_std_path()) {
+                    Ok(()) => true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                    Err(_) => false,
+                };
+                let _ = std::fs::remove_file(root.join("cache.db-wal").as_std_path());
+                let _ = std::fs::remove_file(root.join("cache.db-shm").as_std_path());
+                removed
+            }
+        }
+    }
+}
+
+/// Every stale-database unit inside an entry: all db locations EXCEPT the live
+/// current-schema dir (`<entry>/v{current}`). Covers live non-current schema
+/// dirs, dev schema dirs of any version, and legacy bare `cache.db` files at
+/// either channel root.
+fn scan_stale_dbs(entry_dir: &Utf8Path) -> Vec<StaleDb> {
+    let current = crate::cache::identity::schema_segment();
+    let dev = entry_dir.join("dev");
+    let mut out = Vec::new();
+    // Live channel: non-current schema dirs (current is exempt).
+    out.extend(
+        other_schema_dirs(entry_dir, &current)
+            .into_iter()
+            .map(StaleDb::SchemaDir),
+    );
+    // Legacy bare live db.
+    if entry_dir.join("cache.db").as_std_path().exists() {
+        out.push(StaleDb::LegacyBare(entry_dir.to_owned()));
+    }
+    // Dev channel: schema dirs of ANY version ("" so none is treated as current).
+    out.extend(
+        other_schema_dirs(&dev, "")
+            .into_iter()
+            .map(StaleDb::SchemaDir),
+    );
+    // Legacy bare dev db.
+    if dev.join("cache.db").as_std_path().exists() {
+        out.push(StaleDb::LegacyBare(dev));
+    }
+    out
 }
 
 /// Count a skipped entry toward `counter` exactly once per sweep: the dev-TTL
@@ -374,88 +556,126 @@ struct SkipSets {
     errored: HashSet<String>,
 }
 
-/// Evict a stale `dev/` subtree from an entry, holding the shared entry `.lock`
-/// (the same zero-timeout flock `evict_cache_entry` uses) so an in-flight dev
-/// writer blocks the eviction. Only `dev/` is removed — never the live db, the
-/// shared `.lock`, nor the entry itself. The in-memory `Entry` is re-measured
-/// (real run) or projected without touching disk (dry-run) so the remaining
-/// classification passes see the shrunk entry identically on both paths: a now
-/// dev-only entry falls through to the Empty policy this same sweep, and dev
-/// bytes leave the cap-pass survivor total. A held lock is a locked skip; a
-/// lock we can't open or a failed removal is an error skip — either way `dev/`
-/// stays, and a failed removal still re-measures, since part of the subtree
-/// may be gone.
-fn evict_dev_dir(
+/// Whether a stale-db unit's newest mtime has aged past [`STALE_DB_TTL`].
+fn stale_db_past_ttl(sdb: &StaleDb, now: SystemTime) -> bool {
+    sdb.newest_mtime()
+        .and_then(|m| now.duration_since(m).ok())
+        .map(|age| age > STALE_DB_TTL)
+        .unwrap_or(false)
+}
+
+/// Generalized stale-database TTL pass (NRN-286), replacing the dev-only pass.
+/// Every db location under an entry EXCEPT the live current-schema dir is aged
+/// independently at [`STALE_DB_TTL`] and removed when past it, holding the
+/// shared entry `.lock` (the same zero-timeout flock `evict_cache_entry` uses)
+/// so an in-flight writer blocks the eviction. Only the stale db's dir/files
+/// are removed — never the live current-schema db, the shared `.lock`, nor the
+/// entry itself. The in-memory `Entry` is re-measured (real run) or projected
+/// without touching disk (dry-run) so the remaining classification passes see
+/// the shrunk entry identically on both paths: a now-empty entry falls through
+/// to the Empty policy this same sweep, and stale bytes leave the cap-pass
+/// survivor total. A held lock is a locked skip; a lock we can't open or a
+/// failed removal is an error skip — each counted once per entry.
+fn evict_stale_dbs(
     report: &mut TreeReport,
     entry: &mut Entry,
-    dev_mtime: SystemTime,
     now: SystemTime,
     dry_run: bool,
     skips: &mut SkipSets,
 ) {
-    // Pre-lock sample; authoritative for dry-run only (a preview races with
-    // live writers by nature — it reports the state it observed).
-    let mut dev_mtime = dev_mtime;
-    let mut dev_bytes = measure(&entry.dir.join("dev")).0;
+    let stale = scan_stale_dbs(&entry.dir);
+    if stale.is_empty() {
+        return;
+    }
+
     if dry_run {
-        // Simulate the shrink: project the entry's measure as if dev/ were
-        // gone, so dry-run classifies and accounts exactly like a real sweep.
-        let (bytes, newest, files) = measure_skipping(&entry.dir, Some("dev"));
-        entry.bytes = bytes;
-        entry.newest_mtime = newest;
-        entry.file_count = files;
-    } else {
-        match crate::cache::acquire_flock(&entry.dir.join(".lock"), Duration::ZERO) {
-            Ok(_held) => {
-                // TOCTOU guard: a writer can refresh dev/ between the pre-lock
-                // sample and acquisition. Re-sample under the lock and abort
-                // (no eviction, no counters) if the dev db is now gone or no
-                // longer past the TTL.
-                let Some(fresh_mtime) = dev_db_newest_mtime(&entry.dir) else {
-                    return;
-                };
-                let still_stale = now
-                    .duration_since(fresh_mtime)
-                    .map(|age| age > DEV_CACHE_TTL)
-                    .unwrap_or(false);
-                if !still_stale {
-                    return;
-                }
-                dev_mtime = fresh_mtime;
-                let dev_dir = entry.dir.join("dev");
-                dev_bytes = measure(&dev_dir).0;
-                let removed = std::fs::remove_dir_all(dev_dir.as_std_path()).is_ok();
-                // Re-measure actual disk state whether or not removal fully
-                // succeeded: a failed remove_dir_all can still have deleted
-                // part of the subtree, and later passes must see the truth.
-                let (bytes, newest, files) = measure(&entry.dir);
-                entry.bytes = bytes;
-                entry.newest_mtime = newest;
-                entry.file_count = files;
-                if !removed {
-                    mark_skipped(&mut report.skipped_errors, &mut skips.errored, &entry.hash);
-                    return;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                mark_skipped(&mut report.skipped_locked, &mut skips.locked, &entry.hash);
-                return;
-            }
-            // A lock we can't even open (permissions, IO): error skip.
-            Err(_) => {
-                mark_skipped(&mut report.skipped_errors, &mut skips.errored, &entry.hash);
-                return;
+        // Pre-lock sample is authoritative for a preview (it races live writers
+        // by nature). Project the entry's measure as if every past-TTL unit
+        // were gone, so dry-run classifies and accounts exactly like a real run.
+        let mut excluded: Vec<Utf8PathBuf> = Vec::new();
+        for sdb in &stale {
+            let Some(mtime) = sdb.newest_mtime() else {
+                continue;
+            };
+            if now
+                .duration_since(mtime)
+                .map(|age| age > STALE_DB_TTL)
+                .unwrap_or(false)
+            {
+                let bytes = sdb.bytes();
+                report.bytes_freed += bytes;
+                report.evicted.push(EvictedEntry {
+                    root: entry.root.clone(),
+                    hash: entry.hash.clone(),
+                    reason: EvictReason::StaleDb,
+                    age_days: age_days(Some(mtime), now),
+                    bytes,
+                });
+                excluded.extend(sdb.excluded_paths());
             }
         }
+        if !excluded.is_empty() {
+            let (bytes, newest, files) = measure_excluding(&entry.dir, &excluded);
+            entry.bytes = bytes;
+            entry.newest_mtime = newest;
+            entry.file_count = files;
+        }
+        return;
     }
-    report.bytes_freed += dev_bytes;
-    report.evicted.push(EvictedEntry {
-        root: entry.root.clone(),
-        hash: entry.hash.clone(),
-        reason: EvictReason::DevStale,
-        age_days: age_days(Some(dev_mtime), now),
-        bytes: dev_bytes,
-    });
+
+    // Real run: skip locking entirely when no unit is a candidate pre-lock.
+    if !stale.iter().any(|s| stale_db_past_ttl(s, now)) {
+        return;
+    }
+    match crate::cache::acquire_flock(&entry.dir.join(".lock"), Duration::ZERO) {
+        Ok(_held) => {
+            let mut had_error = false;
+            for sdb in &stale {
+                // TOCTOU guard: a writer can refresh a db between the pre-lock
+                // sample and acquisition. Re-sample under the lock and skip this
+                // unit if it is now gone or no longer past the TTL.
+                let Some(mtime) = sdb.newest_mtime() else {
+                    continue;
+                };
+                if now
+                    .duration_since(mtime)
+                    .map(|age| age > STALE_DB_TTL)
+                    .unwrap_or(false)
+                {
+                    let bytes = sdb.bytes();
+                    if sdb.remove(&entry.dir) {
+                        report.bytes_freed += bytes;
+                        report.evicted.push(EvictedEntry {
+                            root: entry.root.clone(),
+                            hash: entry.hash.clone(),
+                            reason: EvictReason::StaleDb,
+                            age_days: age_days(Some(mtime), now),
+                            bytes,
+                        });
+                    } else {
+                        had_error = true;
+                    }
+                }
+            }
+            // Re-measure actual disk state whether or not every removal fully
+            // succeeded: a failed remove can still have deleted part of a
+            // subtree, and later passes must see the truth.
+            let (bytes, newest, files) = measure(&entry.dir);
+            entry.bytes = bytes;
+            entry.newest_mtime = newest;
+            entry.file_count = files;
+            if had_error {
+                mark_skipped(&mut report.skipped_errors, &mut skips.errored, &entry.hash);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            mark_skipped(&mut report.skipped_locked, &mut skips.locked, &entry.hash);
+        }
+        // A lock we can't even open (permissions, IO): error skip.
+        Err(_) => {
+            mark_skipped(&mut report.skipped_errors, &mut skips.errored, &entry.hash);
+        }
+    }
 }
 
 /// Try-evict one cache entry: skip if its write lock is held. Returns
@@ -503,33 +723,19 @@ pub(crate) fn sweep(
     // Entries an eviction attempt failed on this sweep; keeps the skip
     // counters reporting distinct entries, not attempts.
     let mut skips = SkipSets::default();
-    // Dev-channel TTL pass (NRN-272): independently of the entry's own
-    // freshness, evict a `dev/` db whose newest mtime has aged past
-    // DEV_CACHE_TTL, removing only the dev subtree. Runs regardless of the
-    // invoking binary's channel; the exempt (current-invocation) vault is never
-    // touched. A now dev-only entry falls through to the Empty/dead-root
-    // policies below via the re-measure in evict_dev_dir.
+    // Stale-database TTL pass (NRN-286): independently of the entry's own
+    // freshness, evict every db location except the live current-schema dir
+    // whose newest mtime has aged past STALE_DB_TTL — dev dbs of any schema,
+    // live dbs of non-current schemas, and legacy bare cache.db files. Runs
+    // regardless of the invoking binary's channel; the exempt (current-
+    // invocation) vault is never touched, including its stale dbs. A now-empty
+    // entry falls through to the Empty/dead-root policies below via the
+    // re-measure in evict_stale_dbs.
     for entry in &mut cache_entries {
         if exempt(entry) {
             continue;
         }
-        let Some(dev_mtime) = dev_db_newest_mtime(&entry.dir) else {
-            continue;
-        };
-        let stale = now
-            .duration_since(dev_mtime)
-            .map(|age| age > DEV_CACHE_TTL)
-            .unwrap_or(false);
-        if stale {
-            evict_dev_dir(
-                &mut cache_report,
-                entry,
-                dev_mtime,
-                now,
-                opts.dry_run,
-                &mut skips,
-            );
-        }
+        evict_stale_dbs(&mut cache_report, entry, now, opts.dry_run, &mut skips);
     }
     let mut survivors: Vec<Entry> = Vec::new();
     for entry in cache_entries {
@@ -692,19 +898,33 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
-    /// Mint a cache entry: <tree>/<hash>/cache.db with a real schema and a
-    /// meta.vault_root row pointing at `root`.
+    fn schema_seg() -> String {
+        crate::cache::identity::schema_segment()
+    }
+
+    /// Mint the CURRENT-schema cache db for a vault at
+    /// `<tree>/<hash>/v{schema}/cache.db`, with a real schema and a
+    /// `meta.vault_root` row pointing at `root`. Returns the ENTRY dir
+    /// (`<tree>/<hash>`) — its `.lock` lives there and callers backdate/measure
+    /// the whole entry. The db itself sits one `v{schema}` level below.
     fn mint_cache_entry(tree: &Utf8Path, hash: &str, root: &str) -> Utf8PathBuf {
-        let dir = tree.join(hash);
-        std::fs::create_dir_all(dir.as_std_path()).unwrap();
-        let conn = rusqlite::Connection::open(dir.join("cache.db").as_std_path()).unwrap();
+        let entry = tree.join(hash);
+        mint_db_at(&entry.join(schema_seg()), root);
+        entry
+    }
+
+    /// Mint a real cache db (DDL + `meta.vault_root`) at `db_dir/cache.db`,
+    /// creating `db_dir`. Used to plant dbs at arbitrary schema/channel/legacy
+    /// locations inside an entry.
+    fn mint_db_at(db_dir: &Utf8Path, root: &str) {
+        std::fs::create_dir_all(db_dir.as_std_path()).unwrap();
+        let conn = rusqlite::Connection::open(db_dir.join("cache.db").as_std_path()).unwrap();
         conn.execute_batch(crate::cache::schema::DDL).unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('vault_root', ?)",
             rusqlite::params![root],
         )
         .unwrap();
-        dir
     }
 
     fn mint_state_entry(tree: &Utf8Path, hash: &str, root: Option<&str>) -> Utf8PathBuf {
@@ -725,11 +945,20 @@ mod tests {
         measure(&tree.join(hash)).0
     }
 
-    /// Backdate every immediate file in `dir` to `dur` in the past.
+    /// Backdate every file in `dir` (recursively) to `dur` in the past. Recurses
+    /// so a db nested under a `v{schema}` segment is aged along with files
+    /// written directly into the entry.
     fn backdate_dir(dir: &Utf8Path, dur: Duration) {
         let t = filetime::FileTime::from_system_time(std::time::SystemTime::now() - dur);
         for f in std::fs::read_dir(dir.as_std_path()).unwrap().flatten() {
-            filetime::set_file_mtime(f.path(), t).unwrap();
+            let path = f.path();
+            if f.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+                if let Ok(sub) = Utf8PathBuf::from_path_buf(path.clone()) {
+                    backdate_dir(&sub, dur);
+                }
+            } else {
+                filetime::set_file_mtime(&path, t).unwrap();
+            }
         }
     }
 
@@ -842,17 +1071,17 @@ mod tests {
         assert_eq!(h2_entry.reason, EvictReason::Empty);
     }
 
-    /// NRN-269: an entry holding ONLY a dev-channel database (no live
-    /// `cache.db`) recovers its vault root from `dev/cache.db` and classifies
-    /// normally — here dead-root, since the recorded vault is gone. Without the
-    /// fallback it would be misclassified `Unreadable`.
+    /// An entry holding ONLY a dev-channel database (no live db) recovers its
+    /// vault root from the dev schema dir (`<entry>/dev/v{schema}/cache.db`,
+    /// candidate 4) and classifies normally — here dead-root, since the recorded
+    /// vault is gone. Without candidate probing it would be misclassified
+    /// `Unreadable`.
     #[test]
     fn dev_only_entry_classifies_by_its_dev_root() {
         let trees = TempDir::new().unwrap();
         let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
         let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
-        // Mint the db inside dev/ by minting a nested entry, then re-homing:
-        // <tree>/<H1>/dev/cache.db with a dead recorded root.
+        // <tree>/<H1>/dev/v{schema}/cache.db with a dead recorded root, no live db.
         let entry = cache_tree.join(H1);
         std::fs::create_dir_all(entry.as_std_path()).unwrap();
         mint_cache_entry(&entry, "dev", "/nonexistent/vault/gone");
@@ -866,24 +1095,58 @@ mod tests {
         );
     }
 
-    /// NRN-269: a PRESENT-but-corrupt live db must stay `Unreadable` (and evict
-    /// promptly) even when a healthy dev db sits alongside — the fallback is
-    /// gated on the live db being absent, not merely unreadable.
+    /// NRN-286 (relaxed NRN-269 policy): a present-but-corrupt db in a preferred
+    /// recovery slot must NOT strand the whole entry as `Unreadable` — the bounded
+    /// candidate list simply falls through to the next readable db. Here the
+    /// current live db (`v{schema}`, candidate 1) is corrupt and the legacy bare
+    /// db (candidate 3) is healthy with a dead root, so the entry recovers that
+    /// root and classifies dead-root, never Unreadable.
     #[test]
-    fn corrupt_live_db_stays_unreadable_despite_healthy_dev_db() {
+    fn corrupt_preferred_db_falls_through_to_next_candidate() {
         let trees = TempDir::new().unwrap();
         let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
         let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
-        let live_vault = TempDir::new().unwrap();
-        let live_root = live_vault.path().to_str().unwrap();
         let entry = cache_tree.join(H1);
-        // Healthy dev db recording a LIVE root...
-        mint_cache_entry(&entry, "dev", live_root);
-        // ...but the live-channel db is corrupt.
-        std::fs::write(entry.join("cache.db").as_std_path(), b"not sqlite").unwrap();
+        // Corrupt current-schema live db (candidate 1)...
+        std::fs::create_dir_all(entry.join(schema_seg()).as_std_path()).unwrap();
+        std::fs::write(
+            entry.join(schema_seg()).join("cache.db").as_std_path(),
+            b"not sqlite",
+        )
+        .unwrap();
+        // ...healthy legacy bare db recording a dead root (candidate 3).
+        mint_db_at(&entry, "/nonexistent/vault/gone");
         let report = sweep(&cache_tree, &state_tree, &opts(90));
         assert_eq!(hashes(&report.cache.evicted), vec![H1]);
-        assert_eq!(report.cache.evicted[0].reason, EvictReason::Unreadable);
+        assert_eq!(
+            report.cache.evicted[0].reason,
+            EvictReason::DeadRoot,
+            "a corrupt preferred db must fall through, not strand the entry Unreadable"
+        );
+        assert_eq!(
+            report.cache.evicted[0].root.as_deref(),
+            Some("/nonexistent/vault/gone")
+        );
+    }
+
+    /// NRN-286: `read_cache_root` probes candidates in the documented order and
+    /// returns the FIRST readable db's root — the current live schema dir wins
+    /// over every other db present.
+    #[test]
+    fn root_recovery_probes_candidates_in_documented_order() {
+        let trees = TempDir::new().unwrap();
+        let entry = Utf8PathBuf::from_path_buf(trees.path().join(H1)).unwrap();
+        // Current live schema dir (candidate 1) records the winning root.
+        mint_db_at(&entry.join(schema_seg()), "/vault/current-live");
+        // A legacy bare db (candidate 3) and a dev db (candidate 4) record other
+        // roots that must NOT win while candidate 1 is readable.
+        mint_db_at(&entry, "/vault/legacy-live");
+        mint_db_at(&entry.join("dev").join(schema_seg()), "/vault/dev");
+        assert_eq!(
+            read_cache_root(&entry).as_deref(),
+            Some("/vault/current-live"),
+            "the current live schema dir must win the recovery order"
+        );
     }
 
     #[test]
@@ -1099,9 +1362,9 @@ mod tests {
         assert!(!cache_tree.join(H1).as_std_path().exists());
     }
 
-    /// NRN-272 (a): a dev db aged past DEV_CACHE_TTL inside a live-active entry
-    /// is evicted (`dev-stale`) while the live db and shared `.lock` survive
-    /// byte-identical and the entry itself is kept.
+    /// NRN-272/286 (a): a dev db aged past STALE_DB_TTL inside a live-active
+    /// entry is evicted (`stale-db`) while the live current-schema db and shared
+    /// `.lock` survive byte-identical and the entry itself is kept.
     #[test]
     fn stale_dev_db_evicted_live_db_and_lock_survive() {
         let trees = TempDir::new().unwrap();
@@ -1110,7 +1373,7 @@ mod tests {
         let live_vault = TempDir::new().unwrap();
         let live_root = live_vault.path().to_str().unwrap();
         let entry = mint_cache_entry(&cache_tree, H1, live_root);
-        let live_db = entry.join("cache.db");
+        let live_db = entry.join(schema_seg()).join("cache.db");
         let live_bytes = std::fs::read(live_db.as_std_path()).unwrap();
         std::fs::write(entry.join(".lock").as_std_path(), b"live-lock").unwrap();
         // Dev db aged well past the 48h TTL.
@@ -1123,8 +1386,8 @@ mod tests {
             .cache
             .evicted
             .iter()
-            .find(|e| e.hash == H1 && e.reason == EvictReason::DevStale)
-            .expect("stale dev db must be evicted as dev-stale");
+            .find(|e| e.hash == H1 && e.reason == EvictReason::StaleDb)
+            .expect("stale dev db must be evicted as stale-db");
         assert!(dev_evict.bytes > 0);
         assert!(!entry.join("dev").as_std_path().exists(), "dev/ removed");
         assert!(live_db.as_std_path().exists(), "live db kept");
@@ -1157,11 +1420,14 @@ mod tests {
                 .cache
                 .evicted
                 .iter()
-                .all(|e| e.reason != EvictReason::DevStale),
-            "a fresh dev db must not be dev-stale evicted"
+                .all(|e| e.reason != EvictReason::StaleDb),
+            "a fresh dev db must not be stale-db evicted"
         );
         assert!(
-            dev.join("cache.db").as_std_path().exists(),
+            dev.join(schema_seg())
+                .join("cache.db")
+                .as_std_path()
+                .exists(),
             "fresh dev db retained"
         );
     }
@@ -1183,13 +1449,16 @@ mod tests {
         let report = sweep(&cache_tree, &state_tree, &o);
         assert!(report.cache.evicted.is_empty(), "exempt entry untouched");
         assert!(
-            dev.join("cache.db").as_std_path().exists(),
+            dev.join(schema_seg())
+                .join("cache.db")
+                .as_std_path()
+                .exists(),
             "exempt dev db kept"
         );
     }
 
     /// NRN-272 (d): a dev-only entry whose dev db ages out is fully reclaimed —
-    /// the dev-stale eviction empties it and the existing Empty policy removes
+    /// the stale-db eviction empties it and the existing Empty policy removes
     /// the entry on the same sweep.
     #[test]
     fn dev_only_entry_reclaimed_after_dev_ttl() {
@@ -1209,8 +1478,8 @@ mod tests {
                 .cache
                 .evicted
                 .iter()
-                .any(|e| e.hash == H1 && e.reason == EvictReason::DevStale),
-            "dev db evicted as dev-stale"
+                .any(|e| e.hash == H1 && e.reason == EvictReason::StaleDb),
+            "dev db evicted as stale-db"
         );
         assert!(
             report
@@ -1252,15 +1521,15 @@ mod tests {
                 .cache
                 .evicted
                 .iter()
-                .any(|e| e.hash == H1 && e.reason == EvictReason::DevStale),
+                .any(|e| e.hash == H1 && e.reason == EvictReason::StaleDb),
             "a live-channel sweep still evicts a foreign stale dev db"
         );
         assert!(!entry1.join("dev").as_std_path().exists(), "dev/ removed");
     }
 
     /// NRN-272 (G1): dry-run must predict exactly what a real sweep does when
-    /// dev-stale eviction interacts with the entry-level policies. Entry A is
-    /// dev-stale AND aged (dev row + whole-entry row, no double-counting);
+    /// stale-db eviction interacts with the entry-level policies. Entry A is
+    /// stale-db AND aged (dev row + whole-entry row, no double-counting);
     /// entry B is dev-only (dev row + Empty fall-through). Locks are pre-minted
     /// and backdated so lock-file creation can't skew the real run's mtimes.
     #[test]
@@ -1310,13 +1579,13 @@ mod tests {
             .iter()
             .map(|(_, r, _)| r.as_str())
             .map(|r| match r {
-                "DevStale" => "DevStale",
+                "StaleDb" => "StaleDb",
                 "Aged" => "Aged",
                 "Empty" => "Empty",
                 other => panic!("unexpected reason {other}"),
             })
             .collect();
-        assert_eq!(reasons.iter().filter(|r| **r == "DevStale").count(), 2);
+        assert_eq!(reasons.iter().filter(|r| **r == "StaleDb").count(), 2);
         assert_eq!(reasons.iter().filter(|r| **r == "Aged").count(), 1);
         assert_eq!(reasons.iter().filter(|r| **r == "Empty").count(), 1);
         assert!(!a.as_std_path().exists() && !b.as_std_path().exists());
@@ -1367,11 +1636,12 @@ mod tests {
         );
     }
 
-    /// NRN-272 (CR3): a dev/ removal that fails for a non-lock reason counts
-    /// as an error skip, not a locked skip — the dev db stays, the entry is
+    /// NRN-272/286 (CR3): a stale-db removal that fails for a non-lock reason
+    /// counts as an error skip, not a locked skip — the db stays, the entry is
     /// re-measured (removal-failure path) and classifies normally: no eviction
     /// rows, no bytes freed. Unix-gated: the failure is provoked by stripping
-    /// write permission from dev/ so its contents can't be unlinked.
+    /// write permission from the dev schema dir so its `cache.db` can't be
+    /// unlinked.
     #[cfg(unix)]
     #[test]
     fn unremovable_dev_dir_counts_as_error_skip() {
@@ -1384,19 +1654,27 @@ mod tests {
         let entry = mint_cache_entry(&cache_tree, H1, live_root);
         let dev = mint_cache_entry(&entry, "dev", live_root);
         backdate_dir(&dev, Duration::from_secs(3 * 86_400));
-        // Read-only dev dir: unlinking its contents fails, so remove_dir_all fails.
-        std::fs::set_permissions(dev.as_std_path(), std::fs::Permissions::from_mode(0o555))
-            .unwrap();
+        // Read-only dev schema dir: unlinking its cache.db fails, so
+        // remove_dir_all of the schema dir fails.
+        let dev_schema = dev.join(schema_seg());
+        std::fs::set_permissions(
+            dev_schema.as_std_path(),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
 
         let report = sweep(&cache_tree, &state_tree, &opts(90));
 
         // Restore before TempDir drop so cleanup succeeds even on panic-free exit.
-        std::fs::set_permissions(dev.as_std_path(), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(
+            dev_schema.as_std_path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         assert_eq!(report.cache.skipped_errors, 1, "one error-skipped entry");
         assert_eq!(report.cache.skipped_locked, 0, "not misreported as locked");
         assert!(
-            dev.join("cache.db").as_std_path().exists(),
+            dev_schema.join("cache.db").as_std_path().exists(),
             "dev db still present"
         );
         assert!(
@@ -1419,7 +1697,7 @@ mod tests {
         let entry = mint_cache_entry(&cache_tree, H1, "/nonexistent/vault/gone");
         let dev = mint_cache_entry(&entry, "dev", "/nonexistent/vault/gone");
         backdate_dir(&dev, Duration::from_secs(3 * 86_400));
-        let dev_db = dev.join("cache.db");
+        let dev_db = dev.join(schema_seg()).join("cache.db");
         let dev_bytes = std::fs::read(dev_db.as_std_path()).unwrap();
         let _held = crate::cache::acquire_flock(&entry.join(".lock"), Duration::ZERO).unwrap();
         let report = sweep(&cache_tree, &state_tree, &opts(90));
@@ -1435,6 +1713,107 @@ mod tests {
             std::fs::read(dev_db.as_std_path()).unwrap(),
             dev_bytes,
             "dev db byte-identical under a held writer lock"
+        );
+        assert!(entry.as_std_path().exists());
+    }
+
+    /// NRN-286: a LIVE database at a non-current schema version (`<entry>/vN`,
+    /// N != current) aged past STALE_DB_TTL is evicted as `stale-db`, while the
+    /// live current-schema db (`<entry>/v{current}`) and the entry survive. This
+    /// is the self-healing downgrade case: an obsolete-schema db left behind by
+    /// a newer binary ages out instead of pinning disk forever.
+    #[test]
+    fn stale_non_current_live_schema_dir_evicted_current_survives() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        // Current-schema live db (fresh) + a non-current schema dir (aged past TTL).
+        let entry = mint_cache_entry(&cache_tree, H1, live_root);
+        let old_schema = "v1";
+        assert_ne!(
+            old_schema,
+            schema_seg(),
+            "fixture must be a non-current schema"
+        );
+        let old_dir = entry.join(old_schema);
+        mint_db_at(&old_dir, live_root);
+        backdate_dir(&old_dir, Duration::from_secs(3 * 86_400));
+
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+
+        assert!(
+            report
+                .cache
+                .evicted
+                .iter()
+                .any(|e| e.hash == H1 && e.reason == EvictReason::StaleDb),
+            "the non-current schema db must be evicted as stale-db"
+        );
+        assert!(
+            !old_dir.as_std_path().exists(),
+            "the stale schema dir is removed"
+        );
+        assert!(
+            entry
+                .join(schema_seg())
+                .join("cache.db")
+                .as_std_path()
+                .exists(),
+            "the current-schema live db survives"
+        );
+        assert!(entry.as_std_path().exists(), "the entry survives");
+    }
+
+    /// NRN-286 migration + GC: a legacy bare `<entry>/cache.db` (the pre-schema-
+    /// segment layout) aged past STALE_DB_TTL is evicted as `stale-db` while the
+    /// current-schema db built beside it survives. Only the legacy db's files
+    /// are removed — the shared lock and the current db are untouched.
+    #[test]
+    fn legacy_bare_db_evicted_after_ttl_current_survives() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = mint_cache_entry(&cache_tree, H1, live_root); // <H1>/v{current}
+        std::fs::write(entry.join(".lock").as_std_path(), b"lock").unwrap();
+        // Legacy bare db at the entry root, aged past the TTL.
+        mint_db_at(&entry, live_root); // writes <H1>/cache.db (+ no schema segment)
+        let legacy_db = entry.join("cache.db");
+        // Backdate only the legacy db files (not the current schema dir).
+        let t = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - Duration::from_secs(3 * 86_400),
+        );
+        filetime::set_file_mtime(legacy_db.as_std_path(), t).unwrap();
+
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+
+        assert!(
+            report
+                .cache
+                .evicted
+                .iter()
+                .any(|e| e.hash == H1 && e.reason == EvictReason::StaleDb),
+            "the legacy bare db must be evicted as stale-db"
+        );
+        assert!(
+            !legacy_db.as_std_path().exists(),
+            "the legacy bare cache.db is removed"
+        );
+        assert!(
+            entry
+                .join(schema_seg())
+                .join("cache.db")
+                .as_std_path()
+                .exists(),
+            "the current-schema db survives"
+        );
+        assert_eq!(
+            std::fs::read(entry.join(".lock").as_std_path()).unwrap(),
+            b"lock",
+            "the shared .lock is untouched"
         );
         assert!(entry.as_std_path().exists());
     }
