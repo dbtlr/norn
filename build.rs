@@ -206,6 +206,12 @@ fn emit_build_id(manifest_dir: &Path) -> std::io::Result<()> {
 fn emit_baked_channel(manifest_dir: &Path) {
     println!("cargo:rerun-if-env-changed=NORN_BUILD_CHANNEL");
     println!("cargo:rerun-if-env-changed=CI");
+    // `CARGO_HOME`/`HOME` also feed the decision (via `under_cargo_home`);
+    // declare them so a changed value can't leave a stale bake behind. The
+    // remaining input, `.git` presence, has no rerun directive: it only
+    // changes when the checkout itself is created or destroyed.
+    println!("cargo:rerun-if-env-changed=CARGO_HOME");
+    println!("cargo:rerun-if-env-changed=HOME");
 
     let build_channel_env = env::var("NORN_BUILD_CHANNEL").ok();
     let has_git_entry = manifest_dir.join(".git").symlink_metadata().is_ok();

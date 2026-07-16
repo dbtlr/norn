@@ -155,7 +155,11 @@ fn detect_dev_from_exe() -> bool {
 /// `/var/folders/.../T` staging dir reached through `/tmp` ->
 /// `/private/tmp`); the literal well-known roots are checked alongside it
 /// since the canonicalized value alone won't cover every temp location a
-/// caller might use directly (e.g. `/var/tmp`).
+/// caller might use directly (e.g. `/var/tmp`). This assumes `TMPDIR` is not
+/// an ancestor of real install locations: a pathological `TMPDIR` (e.g.
+/// `$HOME`) silently pulls installed binaries under it onto the dev channel —
+/// the safe misclassification direction, but an isolated cache with no
+/// diagnostic.
 fn temp_dir_prefixes() -> Vec<Utf8PathBuf> {
     let mut prefixes = Vec::new();
     let temp = std::env::temp_dir();

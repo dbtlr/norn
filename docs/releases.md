@@ -60,6 +60,8 @@ mise exec -- just dist-build-local # cargo dist build (local artifacts only)
 
 `dist plan` asserts the configuration is sane. `dist build` confirms artifacts assemble locally. Neither publishes.
 
+Distributable binaries must come from CI (where `CI` is set) or a build with `NORN_BUILD_CHANNEL=live`: a plain local build from a source checkout bakes the `dev` cache channel into the binary (see [cache.md](cache.md)), so a locally-built artifact shipped to users would run on an isolated, TTL-pruned cache namespace instead of the live one.
+
 Tagging triggers `.github/workflows/release.yml`, which builds binaries for each target, packages them with completions and the man page, generates the shell installer, creates the GitHub Release, and uploads assets.
 
 Initial release targets:
