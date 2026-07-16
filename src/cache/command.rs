@@ -276,12 +276,27 @@ pub fn run_rebuild(vault_root: &Utf8Path, options: &IndexOptions) -> Result<()> 
 /// dir was already absent ("already clear" is success, not an error). `2` if
 /// another process holds the write lock — the clear is refused and nothing is
 /// deleted, mirroring the exit-2 convention other lock-contention refusals use
-/// (see `CacheError::MutationLockTimeout` call sites).
+/// (see `CacheError::MutationLockTimeout` call sites). Any OTHER filesystem
+/// failure (a permission error checking or removing the entry, a lock-file
+/// open failure that isn't the concurrent-deletion race below) is a real
+/// error and propagates as one — never silently downgraded to "already
+/// clear" or misreported as contention.
 pub fn run_clear(vault_root: &Utf8Path) -> Result<i32> {
     let layout = crate::cache::identity::cache_layout_for(vault_root)?;
-    if !layout.entry_dir.as_std_path().exists() {
-        eprintln!("vault: cache cleared");
-        return Ok(0);
+    // `Path::exists()` swallows every stat failure (including a permission
+    // error) into `false`, which would misreport a real problem as "already
+    // clear". `try_exists()` keeps `Ok(false)` for a genuine absence but
+    // surfaces anything else as an `Err` we propagate.
+    match layout.entry_dir.as_std_path().try_exists() {
+        Ok(false) => {
+            eprintln!("vault: cache cleared");
+            return Ok(0);
+        }
+        Ok(true) => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("checking cache entry at {}", layout.entry_dir)))
+        }
     }
     let lock_path = layout.entry_dir.join(".lock");
     match crate::cache::acquire_flock(&lock_path, std::time::Duration::ZERO) {
@@ -294,6 +309,15 @@ pub fn run_clear(vault_root: &Utf8Path) -> Result<i32> {
                         .context(format!("clearing cache at {}", layout.entry_dir)))
                 }
             }
+            eprintln!("vault: cache cleared");
+            Ok(0)
+        }
+        // The entry dir vanished between the `try_exists` check above and this
+        // acquire (a concurrent clear/prune won the race): opening the lock
+        // file inside `acquire_flock` fails `NotFound` because its parent
+        // directory is gone, before the lock loop ever runs. Same outcome as
+        // the up-front absence check: already clear.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("vault: cache cleared");
             Ok(0)
         }

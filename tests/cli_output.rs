@@ -3044,6 +3044,76 @@ fn cache_clear_refused_while_entry_lock_held() {
     fs::remove_dir_all(&cache_home).ok();
 }
 
+/// A permission failure while checking the entry dir must surface as a real
+/// error — never silently downgraded to "already clear" (the bug `exists()`
+/// would cause, since it maps every stat failure to `false`) and never
+/// misreported as lock contention.
+#[test]
+#[cfg(unix)]
+fn cache_clear_surfaces_real_error_when_entry_check_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_cache_dir();
+    let cache_home = temp_cache_dir();
+    fs::create_dir_all(&root).expect("vault dir should be created");
+    fs::create_dir_all(&cache_home).expect("cache home should be created");
+    fs::write(root.join("a.md"), "---\ntitle: A\n---\nbody\n").expect("a.md should write");
+
+    let envs = [("XDG_CACHE_HOME", cache_home.to_str().unwrap())];
+    vault_success_env(&["-C", root.to_str().unwrap(), "cache", "index"], &envs);
+
+    let cache_home_utf8 = camino::Utf8Path::from_path(&cache_home).expect("utf8 cache home");
+    let root_utf8 = camino::Utf8Path::from_path(&root).expect("utf8 vault root");
+    let entry_dir = norn_run::resolve_cache_lock_dir_in(cache_home_utf8, root_utf8)
+        .unwrap_or_else(|e| panic!("resolve entry dir: {e}"));
+    let norn_dir = entry_dir
+        .parent()
+        .expect("entry dir must have a parent (<cache_home>/norn)")
+        .to_path_buf();
+
+    // Strip all permissions (including traversal/execute) from the entry's
+    // parent so a stat on the entry dir fails with a permission error rather
+    // than NotFound.
+    fs::set_permissions(norn_dir.as_std_path(), fs::Permissions::from_mode(0o000))
+        .expect("chmod norn dir should succeed");
+
+    // Skip when unix perms are not enforced (e.g. running as root): if the
+    // entry dir is still statable despite the chmod, this test cannot
+    // exercise the failure path.
+    let perms_enforced = fs::metadata(entry_dir.as_std_path()).is_err();
+    if !perms_enforced {
+        fs::set_permissions(norn_dir.as_std_path(), fs::Permissions::from_mode(0o755))
+            .expect("restoring norn dir permissions should succeed");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&cache_home).ok();
+        return;
+    }
+
+    let (_stdout, stderr, exit_code) =
+        vault_env(&["-C", root.to_str().unwrap(), "cache", "clear"], &envs);
+
+    // Restore permissions immediately so cleanup can proceed regardless of
+    // the assertions below.
+    fs::set_permissions(norn_dir.as_std_path(), fs::Permissions::from_mode(0o755))
+        .expect("restoring norn dir permissions should succeed");
+
+    assert_ne!(
+        exit_code, 0,
+        "a permission failure checking the entry must be a real error, not success; stderr: {stderr}"
+    );
+    assert_ne!(
+        exit_code, 2,
+        "a permission failure must not be misreported as lock contention; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "a permission failure must be reported on stderr"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(&cache_home).ok();
+}
+
 #[test]
 fn cache_rebuild_repopulates_after_adding_documents() {
     let root = temp_cache_dir();
