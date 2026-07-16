@@ -7,7 +7,7 @@
 //! (the 7 read tools) and `mutate_router` (the 7 mutation tools) — merged
 //! together by `McpServer::new` into one served surface (see `routers`).
 //!
-//! Task 2 wires in a warm [`VaultContext`] so tool implementations can call
+//! Task 2 wires in a warm [`VaultEnv`] so tool implementations can call
 //! `self.ctx.query_cache()` to open a fresh cache handle on each invocation —
 //! getting the CLI's per-invocation freshness check without a filesystem watcher.
 //!
@@ -27,9 +27,9 @@ use super::notes::Noted;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
-use super::context::{RequestScope, VaultContext};
 use super::to_mcp_error;
 use crate::describe::DescribeOutput;
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::tools::apply::ApplyOutput;
 use crate::mcp::tools::audit::AuditOutput;
 use crate::mcp::tools::count::CountEnvelope;
@@ -96,7 +96,7 @@ pub(crate) mod tool_names {
 pub struct McpServer {
     /// Warm vault context: config held for the server lifetime; cache opened
     /// fresh per tool call via `self.ctx.query_cache()`.
-    pub(crate) ctx: Arc<VaultContext>,
+    pub(crate) ctx: Arc<VaultEnv>,
     /// COLD-mode cold-open serialization lock (NRN-55).
     ///
     /// `run_wrapped` acquires this ONLY when the context is cold (stdio
@@ -111,7 +111,7 @@ pub struct McpServer {
     /// former per-request dependency is now per-request state or structurally
     /// synchronized: config binding + note buffer live on the request's
     /// [`RequestScope`], cache opens flow through the generational single-flight
-    /// path (`VaultContext::ensure_current`, ADR 0013, NRN-251), the freshness
+    /// path (`VaultEnv::ensure_current`, ADR 0013, NRN-251), the freshness
     /// refresh is a ticket-coalesced writer-queue op (NRN-252), and reads check out
     /// `query_only` connections from the per-generation pool. So warm tool bodies
     /// run concurrently — verified-fresh reads overlap, stale readers coalesce onto
@@ -132,7 +132,7 @@ impl McpServer {
     /// Build the server: the `#[tool]` methods are split into two routers —
     /// `read_router()` (7 read tools) and `mutate_router()` (7 mutation tools) —
     /// which this merges into one served surface (see `routers`).
-    pub fn new(ctx: Arc<VaultContext>) -> Self {
+    pub fn new(ctx: Arc<VaultEnv>) -> Self {
         let mut routers = Self::routers().into_iter();
         // `routers` always yields at least the read router; merge the rest in.
         let mut router = routers
@@ -154,7 +154,7 @@ impl McpServer {
     /// Build the server for the warm host daemon (`norn serve`): identical
     /// surface to [`new`](Self::new), plus the per-call served markers on
     /// stderr that the routing proofs count (see `emit_serve_markers`).
-    pub fn new_daemon(ctx: Arc<VaultContext>) -> Self {
+    pub fn new_daemon(ctx: Arc<VaultEnv>) -> Self {
         Self {
             emit_serve_markers: true,
             ..Self::new(ctx)
@@ -201,7 +201,7 @@ impl McpServer {
     async fn run_wrapped<R, F>(&self, tool: &'static str, f: F) -> Result<Noted<R>, rmcp::ErrorData>
     where
         R: Send + 'static,
-        F: FnOnce(&VaultContext, &RequestScope) -> anyhow::Result<R> + Send + 'static,
+        F: FnOnce(&VaultEnv, &RequestScope) -> anyhow::Result<R> + Send + 'static,
     {
         // Cold mode keeps the NRN-55 cold-open DDL-race guard; warm mode retired it
         // (NRN-253) so independent reads run concurrently. `Option<MutexGuard>` binds
@@ -289,7 +289,7 @@ impl McpServer {
     ) -> Result<Noted<Json<T>>, rmcp::ErrorData>
     where
         T: serde::Serialize + schemars::JsonSchema + Send + 'static,
-        F: FnOnce(&VaultContext, &RequestScope) -> anyhow::Result<T> + Send + 'static,
+        F: FnOnce(&VaultEnv, &RequestScope) -> anyhow::Result<T> + Send + 'static,
     {
         self.run_wrapped(tool, move |ctx, scope| f(ctx, scope).map(Json))
             .await
@@ -718,7 +718,7 @@ mod tests {
     const CONCURRENCY_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
     async fn wait_for_refresh_arrivals(
-        ctx: Arc<VaultContext>,
+        ctx: Arc<VaultEnv>,
         target: u64,
         timeout_message: &'static str,
     ) {
@@ -808,7 +808,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_cold_start_calls_all_succeed() {
         let (_tmp, root) = cold_seeded_vault();
-        let ctx = Arc::new(VaultContext::open(&root, None).expect("VaultContext::open"));
+        let ctx = Arc::new(VaultEnv::open(&root, None).expect("VaultEnv::open"));
         let server = McpServer::new(ctx);
 
         const N: usize = 8;
@@ -875,7 +875,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
         let server = McpServer::new(ctx);
 
         let out1 = server
@@ -934,7 +934,7 @@ mod tests {
         use rmcp::handler::server::tool::IntoCallToolResult;
 
         let (_tmp, root) = cold_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
         let server = McpServer::new(ctx);
 
         // A note-free request forwards nothing.
@@ -994,7 +994,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_request_notes_do_not_leak_into_the_next_request() {
         let (_tmp, root) = cold_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
         let server = McpServer::new(ctx);
 
         // A request records a note into its OWN scope, then its body fails: the
@@ -1032,7 +1032,7 @@ mod tests {
             .tempdir()
             .unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        let ctx = Arc::new(VaultContext::open(&root, None).expect("VaultContext::open"));
+        let ctx = Arc::new(VaultEnv::open(&root, None).expect("VaultEnv::open"));
         let server = McpServer::new(ctx);
 
         let info = server.get_info();
@@ -1052,9 +1052,9 @@ mod tests {
     /// Seed a warm vault and build its first generation, returning the context, a
     /// (non-daemon) server over it, and the temp dir. The warm-up read pays the
     /// first-touch build so later reads probe against a live generation.
-    async fn warm_server_ready() -> (TempDir, Arc<VaultContext>, McpServer) {
+    async fn warm_server_ready() -> (TempDir, Arc<VaultEnv>, McpServer) {
         let (tmp, root) = cold_seeded_vault();
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
         let server = McpServer::new(Arc::clone(&ctx));
         server
             .get(Parameters(crate::mcp::tools::get::GetParams {
@@ -1069,7 +1069,7 @@ mod tests {
 
     /// Count documents through the current warm generation's pooled read
     /// connection — the read every proof body runs.
-    fn body_doc_count(ctx: &VaultContext, scope: &RequestScope) -> anyhow::Result<i64> {
+    fn body_doc_count(ctx: &VaultEnv, scope: &RequestScope) -> anyhow::Result<i64> {
         let cache = ctx.query_cache(scope)?;
         Ok(cache
             .conn()
@@ -1090,7 +1090,7 @@ mod tests {
         // Pin the cap at K so all K checkouts fit: the default cap
         // (min(8, parallelism)) could be < K on a small CI host, deadlocking the
         // barrier. The shared guard serializes the override against the context suite.
-        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(K);
+        let _cap = crate::env::ReadPoolCapGuard::pin(K);
 
         let (_tmp, ctx, server) = warm_server_ready().await;
         assert_eq!(
@@ -1156,7 +1156,7 @@ mod tests {
         // Both readers hold a pooled connection across the refresh wait, so the cap
         // must allow >= 2. The shared guard also isolates this test from the
         // process-global cap=1 wait-at-cap proof running elsewhere in the suite.
-        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
+        let _cap = crate::env::ReadPoolCapGuard::pin(4);
 
         let (tmp, ctx, server) = warm_server_ready().await;
         let baseline = ctx.current_refresh_exec_count();
@@ -1239,7 +1239,7 @@ mod tests {
     async fn count_arriving_after_refresh_started_runs_later_refresh_and_sees_midflight_edit() {
         // Both readers hold a pooled connection across the refresh wait, so the cap
         // must allow >= 2 (default could be 1 on a single-core host).
-        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
+        let _cap = crate::env::ReadPoolCapGuard::pin(4);
 
         let (tmp, ctx, server) = warm_server_ready().await;
         let baseline = ctx.current_refresh_exec_count();
@@ -1337,7 +1337,7 @@ mod tests {
             )
             .unwrap();
         }
-        let ctx = Arc::new(VaultContext::open_warm(&root).expect("open_warm"));
+        let ctx = Arc::new(VaultEnv::open_warm(&root).expect("open_warm"));
         let server = McpServer::new(Arc::clone(&ctx));
 
         // Build generation 1 over the three seeded docs (cache == disk == 3).

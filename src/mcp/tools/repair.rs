@@ -2,7 +2,7 @@
 //!
 //! The pure handler drives the same pipeline as `norn repair --plan`:
 //!
-//! 1. Load the `GraphIndex` via `VaultContext::load_graph_index` (warm-connection
+//! 1. Load the `GraphIndex` via `VaultEnv::load_graph_index` (warm-connection
 //!    reuse under the daemon, fresh open in cold mode; incremental refresh either
 //!    way). `files.ignore` is enforced at cache-build time, so the index arrives
 //!    already filtered — same result as the CLI's load path.
@@ -30,7 +30,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{ConfidenceArg, RepairArgs, ValidateTriageArgs};
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::planner::findings::plan_from_findings;
 use crate::repair::skip_reasons::code_matches_any;
 use crate::standards::{validate_with_compiled, ConfidenceFilter, RepairPlanFilters};
@@ -123,11 +123,11 @@ pub struct RepairOutput {
 /// Mirrors `repair::run_plan` exactly up to the `MigrationPlan` in-memory
 /// construction — with NO filesystem writes (no `fs::write`, no apply).
 ///
-/// Loads the graph index via `VaultContext::load_graph_index` (warm-connection
+/// Loads the graph index via `VaultEnv::load_graph_index` (warm-connection
 /// reuse under the daemon, fresh open in cold mode). `files.ignore` is enforced
 /// at cache-build time (`Cache::open_with_index`, NRN-117), so the index is
 /// already filtered, matching the CLI's `norn repair` behaviour.
-pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: RepairParams) -> Result<RepairOutput> {
+pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: RepairParams) -> Result<RepairOutput> {
     // Load the graph index via the daemon-served entry point: warm-connection
     // reuse (verify-once) under the daemon, fresh open in cold mode, with
     // `files.ignore` applied identically — matching `norn repair` (NRN-130).
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn handle_fixable_link_returns_plan_with_at_least_one_operation() {
         let (_tmp, root) = vault_with_fixable_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let out = handle(&ctx, RepairParams::default()).expect("handle should succeed");
 
@@ -367,7 +367,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let out = handle(&ctx, RepairParams::default()).expect("handle should succeed");
 
         assert!(
@@ -414,7 +414,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let out = handle(&ctx, RepairParams::default()).expect("handle should succeed");
         assert!(
             out.has_diagnostic_errors,
@@ -430,7 +430,7 @@ mod tests {
         let source_before =
             std::fs::read_to_string(root.join("source.md")).expect("read source.md before");
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         handle(&ctx, RepairParams::default()).expect("handle should succeed");
 
         let source_after =

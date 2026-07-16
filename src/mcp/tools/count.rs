@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{CountArgs, CountFormat};
 use crate::count::CountOutput;
+use crate::env::{RequestScope, VaultEnv};
 use crate::filter_args::FilterArgs;
-use crate::mcp::context::{RequestScope, VaultContext};
 
 /// Parameters for `vault.count`.
 ///
@@ -225,7 +225,7 @@ impl CountEnvelope {
 
 /// Pure handler for `vault.count`. Opens a fresh query cache (per-call freshness),
 /// constructs [`CountArgs`] with `norn count`'s defaults, and runs the count path.
-pub fn handle(ctx: &VaultContext, scope: &RequestScope, p: CountParams) -> Result<CountEnvelope> {
+pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: CountParams) -> Result<CountEnvelope> {
     // The per-call served marker (NRN-94 review F6) is emitted by the server
     // layer (`McpServer::run_wrapped`), daemon-gated — never by this handler,
     // so a stdio `norn mcp` process writes no marker.
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn handle_no_filter_returns_total_three() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let envelope = handle(&ctx, CountParams::default()).expect("handle should succeed");
 
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn handle_grouped_by_type_returns_correct_counts() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let envelope = handle(
             &ctx,
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn handle_multi_key_by_nests_groups() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let envelope = handle(
             &ctx,
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn handle_empty_by_segment_errors() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let err = handle(
             &ctx,
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn handle_known_dynamic_field_passes_gate() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let envelope = handle(
             &ctx,
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn handle_unknown_dynamic_field_is_refused() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let envelope = handle(
             &ctx,
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn handle_eq_filter_narrows_count() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let envelope = handle(
             &ctx,

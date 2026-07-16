@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::{NewArgs, NewFormat};
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.new`.
@@ -154,7 +154,7 @@ impl NewOutput {
 
 /// Build the MCP output envelope for `vault.new`.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: NewParams,
 ) -> Result<MutationResult<NewOutput>> {
@@ -203,7 +203,7 @@ pub fn handle_output(
 ///   5. Build single-change `RepairPlan`, apply via `apply_repair_plan_with_context`.
 ///   6. `build_report(plan, applied=true, trace_id)`.
 pub fn handle(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: NewParams,
 ) -> Result<crate::new::report::NewReport> {
@@ -506,7 +506,7 @@ validate:
         let norn_dir = root.join(".norn");
         std::fs::create_dir_all(&norn_dir).unwrap();
         std::fs::write(norn_dir.join("config.yaml"), CONFIG_WITH_SEQ_RULE).unwrap();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let call = |confirm: bool| -> serde_json::Value {
             let report = handle(
@@ -541,7 +541,7 @@ validate:
     #[test]
     fn dry_run_default_writes_nothing() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let new_path = "notes/new-doc.md";
 
         // The parent "notes/" does not exist; use parents:true so preflight passes.
@@ -576,7 +576,7 @@ validate:
     #[test]
     fn confirm_creates_the_file() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let new_path = "notes/new-doc.md";
 
         let report = handle(
@@ -616,7 +616,7 @@ validate:
     #[test]
     fn dry_run_flat_path_writes_nothing() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let new_path = "flat-doc.md";
 
         let report = handle(
@@ -642,7 +642,7 @@ validate:
     #[test]
     fn confirm_report_has_frontmatter_created() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let report = handle(
             &ctx,
@@ -670,7 +670,7 @@ validate:
     #[test]
     fn field_override_is_applied() {
         let (_tmp, root) = seeded_vault();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         handle(
             &ctx,
@@ -713,7 +713,7 @@ validate:
     #[test]
     fn mcp_new_by_rule_dry_run_returns_derived_path() {
         let (_tmp, root) = vault_with_rule();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let mut vars = std::collections::BTreeMap::new();
         vars.insert("workspace".to_string(), "norn".to_string());
@@ -761,7 +761,7 @@ validate:
         let (_tmp, root) = vault_with_rule();
 
         // ── dry-run ───────────────────────────────────────────────────────────
-        let ctx_dry = VaultContext::open(&root, None).expect("open ctx for dry-run");
+        let ctx_dry = VaultEnv::open(&root, None).expect("open ctx for dry-run");
         let mut vars = std::collections::BTreeMap::new();
         vars.insert("workspace".to_string(), "norn".to_string());
 
@@ -792,7 +792,7 @@ validate:
         );
 
         // ── confirm: drain dry-run first, then send confirm ───────────────────
-        let ctx_confirm = VaultContext::open(&root, None).expect("open ctx for confirm");
+        let ctx_confirm = VaultEnv::open(&root, None).expect("open ctx for confirm");
         let report_confirm = handle(
             &ctx_confirm,
             NewParams {
@@ -838,7 +838,7 @@ validate:
         let (_tmp, root) = seeded_vault();
         // Pre-create the target so preflight refuses.
         std::fs::write(root.join("exists.md"), "---\ntype: note\n---\nbody\n").unwrap();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let mr = handle_output(
             &ctx,
@@ -910,7 +910,7 @@ validate:
             .expect("CLI warnings must be an array");
 
         // ── MCP side: the SAME vault, the SAME Mode-A + title input ──────────
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let mcp_report = handle(
             &ctx,
             NewParams {
@@ -971,7 +971,7 @@ validate:
     /// Run a `vault.new` confirm call and return `(code, message)` from the
     /// structured refusal envelope — failing the test outright if the call
     /// was NOT a coded refusal (bare `Err`, or a successful create).
-    fn refusal_code_and_message(ctx: &VaultContext, p: NewParams) -> (String, String) {
+    fn refusal_code_and_message(ctx: &VaultEnv, p: NewParams) -> (String, String) {
         let mr =
             handle_output(ctx, p).expect("a coded refusal returns Ok(MutationResult), not Err");
         assert!(
@@ -995,7 +995,7 @@ validate:
     #[test]
     fn resolve_both_path_and_rule_is_coded_refusal() {
         let (_tmp, root) = vault_with_config("validate: {}\n");
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1013,7 +1013,7 @@ validate:
     #[test]
     fn resolve_unknown_rule_is_coded_refusal() {
         let (_tmp, root) = vault_with_config("validate: {}\n");
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1032,7 +1032,7 @@ validate:
         let (_tmp, root) = vault_with_config(
             "validate:\n  rules:\n    - name: no-target-rule\n      match:\n        path: \"**/*.md\"\n      frontmatter_defaults:\n        type: note\n",
         );
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1053,7 +1053,7 @@ validate:
     #[test]
     fn resolve_generate_path_missing_var_is_coded_refusal() {
         let (_tmp, root) = vault_with_rule();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1076,7 +1076,7 @@ validate:
     #[test]
     fn resolve_generate_path_missing_title_is_coded_refusal() {
         let (_tmp, root) = vault_with_rule();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let mut vars = std::collections::BTreeMap::new();
         vars.insert("workspace".to_string(), "norn".to_string());
         let (code, message) = refusal_code_and_message(
@@ -1100,7 +1100,7 @@ validate:
         let (_tmp, root) = vault_with_config(
             "validate:\n  rules:\n    - name: bad-template\n      target: \"notes/{{bogus}}.md\"\n",
         );
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1124,7 +1124,7 @@ validate:
         let (_tmp, root) = vault_with_config(
             "validate:\n  rules:\n    - name: scaffolded\n      target: \"fixed.md\"\n      body: \"hello {{bogus}}\"\n",
         );
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1147,7 +1147,7 @@ validate:
         let (_tmp, root) = vault_with_config(
             "validate:\n  rules:\n    - name: seq-bad\n      target: \"{{seq}}/note.md\"\n",
         );
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1168,7 +1168,7 @@ validate:
     #[test]
     fn resolve_no_inbox_configured_is_coded_refusal() {
         let (_tmp, root) = vault_with_config("validate: {}\n");
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1185,7 +1185,7 @@ validate:
     #[test]
     fn resolve_inbox_requires_title_is_coded_refusal() {
         let (_tmp, root) = vault_with_config("inbox:\n  path: Inbox\n");
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1202,7 +1202,7 @@ validate:
     #[test]
     fn synth_invalid_field_format_is_coded_refusal() {
         let (_tmp, root) = vault_with_config("validate: {}\n");
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1226,7 +1226,7 @@ validate:
     #[test]
     fn synth_invalid_field_json_is_coded_refusal() {
         let (_tmp, root) = vault_with_config("validate: {}\n");
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1250,7 +1250,7 @@ validate:
         let (_tmp, root) = vault_with_config(
             "validate:\n  rules:\n    - name: r\n      match:\n        path: \"**/*.md\"\n      field_types:\n        bad_date: date\n",
         );
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1275,7 +1275,7 @@ validate:
         let (_tmp, root) = vault_with_config(
             "validate:\n  rules:\n    - name: r\n      match:\n        path: \"**/*.md\"\n      frontmatter_defaults:\n        foo: \"{{nope}}\"\n",
         );
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let (code, message) = refusal_code_and_message(
             &ctx,
             NewParams {
@@ -1297,7 +1297,7 @@ validate:
     #[test]
     fn synth_path_ignored_is_coded_refusal() {
         let (_tmp, root) = vault_with_config("files:\n  ignore:\n    - \"scratch/**\"\n");
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let mr = handle_output(
             &ctx,
             NewParams {

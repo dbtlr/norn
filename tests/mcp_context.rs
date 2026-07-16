@@ -1,18 +1,18 @@
 //! Integration test for the warm vault context used by the MCP server (NRN-33, Task 2).
 //!
-//! We exercise `VaultContext` at the process level — seed a temp vault, start
+//! We exercise `VaultEnv` at the process level — seed a temp vault, start
 //! `norn mcp` with `--cwd` pointing at it, pipe an MCP `initialize` request
 //! over stdin, and assert the server responds with a valid JSON-RPC
 //! `InitializeResult` (exit code 0 when stdin closes).
 //!
 //! Why process-level rather than in-process unit tests?
 //!
-//! `Cache` and `VaultContext` are `pub(crate)` — the integration test binary
+//! `Cache` and `VaultEnv` are `pub(crate)` — the integration test binary
 //! cannot hold them directly. The unit-level contracts (open succeeds, alias
-//! field propagates, per-call freshness) live in `#[cfg(test)]` blocks inside
-//! `src/mcp/context.rs`. This file tests the observable contract: the server
-//! starts successfully against a real vault with seeded docs and responds to
-//! the MCP `initialize` handshake.
+//! field propagates, per-call freshness) live in `src/env/tests.rs` (the
+//! vault-env seam's own unit suite). This file tests the observable contract:
+//! the server starts successfully against a real vault with seeded docs and
+//! responds to the MCP `initialize` handshake.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -109,7 +109,7 @@ fn mcp_server_starts_against_seeded_vault_and_handles_initialize() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // The server must exit 0 (no crash during VaultContext::open).
+    // The server must exit 0 (no crash during VaultEnv::open).
     assert!(
         output.status.success(),
         "norn mcp exited non-zero ({})\nstdout: {}\nstderr: {}",

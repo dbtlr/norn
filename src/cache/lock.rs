@@ -59,7 +59,7 @@ pub(crate) fn debug_env_duration_ms(
 /// `#[cfg(debug_assertions)]`, compiled out entirely, so no production environment
 /// can alter the value. Debug builds (what `cargo test` builds) honor `var` when it
 /// parses to a `usize`, read at every call so a test scopes the override to itself.
-/// Used by the per-generation read-pool cap (`crate::mcp::context`): tests force a
+/// Used by the per-generation read-pool cap (`crate::env`): tests force a
 /// tiny cap to prove wait-at-cap behavior deterministically.
 #[cfg_attr(not(debug_assertions), allow(unused_variables))]
 pub(crate) fn debug_env_usize(var: &str, default: usize) -> usize {

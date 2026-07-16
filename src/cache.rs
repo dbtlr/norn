@@ -104,7 +104,7 @@ pub(crate) const SCHEMA_VERSION: u32 = 5;
 /// acquire the write lock in time (`CacheError::LockTimeout`) and the query
 /// proceeds against the current cache state. Shared by the direct read path
 /// (`cache::command::load_graph_index` / `open_for_query`) and the warm daemon
-/// (`mcp::context::query_cache_warm`) so the two surfaces cannot drift on the
+/// (`crate::env::VaultEnv::query_cache_warm`) so the two surfaces cannot drift on the
 /// wording, and so a routed read can forward this exact text to the CLI's stderr
 /// byte-identically to a direct run (NRN-215).
 pub(crate) const LOCK_CONTENTION_NOTE: &str =

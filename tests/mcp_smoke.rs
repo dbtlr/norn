@@ -2,7 +2,7 @@
 //!
 //! Originally this drove `McpServer` via an in-process `tokio::io::duplex`
 //! transport using `#[path]` to pull server.rs into the test binary. Task 2
-//! wired a `VaultContext` into `McpServer`, which transitively depends on
+//! wired a `VaultEnv` into `McpServer`, which transitively depends on
 //! `pub(crate)` types (`Cache`, `CacheError`, etc.) that cannot be named or
 //! used from an external integration-test binary. The test is therefore
 //! rewritten as a process-level test: spawn the `norn mcp` binary against a

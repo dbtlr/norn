@@ -33,6 +33,7 @@ mod count;
 pub mod delete;
 mod describe;
 mod edit;
+mod env;
 mod filter;
 mod filter_args;
 mod find;

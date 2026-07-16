@@ -15,8 +15,9 @@ use anyhow::Context as _;
 use camino::Utf8Path;
 
 /// Ensure the run directory exists with mode 0700 (owner-only) — it holds the
-/// control socket and the advisory lock. Mirrors the cache dir's security
-/// posture (`mcp::context::ensure_cache_dir`).
+/// control socket and the advisory lock. Mirrors the security posture the
+/// vault-env seam applies to its own cache directory (0700, created on first
+/// touch; see the private `ensure_cache_dir` helper in `env::ensure`).
 pub(crate) fn ensure_run_dir(run_dir: &Utf8Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(run_dir.as_std_path())
         .with_context(|| format!("failed to create run dir {run_dir}"))?;

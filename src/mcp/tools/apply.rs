@@ -40,7 +40,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultEnv};
 use crate::mcp::mutation_result::MutationResult;
 use crate::migration_plan::MIGRATION_PLAN_SCHEMA_VERSION;
 
@@ -95,7 +95,7 @@ impl ApplyOutput {
 
 /// Build the MCP output envelope for `vault.apply`.
 pub fn handle_output(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: ApplyParams,
 ) -> Result<MutationResult<ApplyOutput>> {
@@ -142,7 +142,7 @@ pub fn handle_output(
 /// index, open a real event sink, apply with `dry_run = false` — the same
 /// path `norn apply --yes` takes.
 pub fn handle(
-    ctx: &VaultContext,
+    ctx: &VaultEnv,
     scope: &RequestScope,
     p: ApplyParams,
 ) -> Result<crate::apply_report::ApplyReport> {
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn compose_repair_dry_run_applies_nothing() {
         let (_tmp, root) = vault_with_fixable_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // Produce a real MigrationPlan via the repair handler.
         let repair_out = crate::mcp::tools::repair::handle(
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn compose_repair_confirm_applies_fix() {
         let (_tmp, root) = vault_with_fixable_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // Produce the plan.
         let repair_out = crate::mcp::tools::repair::handle(
@@ -399,7 +399,7 @@ mod tests {
             .to_hex()
             .to_string();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
         "schema_version": 2,
             "vault_root": root.to_string(),
@@ -447,7 +447,7 @@ mod tests {
             .to_hex()
             .to_string();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
         "schema_version": 2,
             "vault_root": root.to_string(),
@@ -514,7 +514,7 @@ mod tests {
         let doc = "---\ntype: note\n---\n# A\n";
         std::fs::write(root.join("a.md"), doc).unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         // Non-empty WRONG document_hash: hydration only fills empty hashes, so
         // this survives to the CAS check and refuses with stale-document-hash.
         let plan = serde_json::json!({
@@ -577,7 +577,7 @@ mod tests {
         std::fs::write(root.join("other/a.md"), "# Other A\n").unwrap();
         let before = std::fs::read(root.join("a.md")).unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
             "schema_version": 2,
             "vault_root": root.to_string(),
@@ -639,7 +639,7 @@ mod tests {
         std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
         "schema_version": 2,
             "vault_root": root.to_string(),
@@ -698,7 +698,7 @@ mod tests {
         std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
         "schema_version": 2,
             "vault_root": root.to_string(),
@@ -748,7 +748,7 @@ mod tests {
         use rmcp::handler::server::tool::IntoCallToolResult;
 
         let (_tmp, root) = vault_with_fixable_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan_value = crate::mcp::tools::repair::handle(
             &ctx,
             &ctx.begin_request().unwrap(),
@@ -792,7 +792,7 @@ mod tests {
         std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
         "schema_version": 2,
             "vault_root": root.to_string(),
@@ -845,7 +845,7 @@ mod tests {
         std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
         std::fs::write(root.join("a.md"), "---\ntype: note\n---\n# A\n").unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
         "schema_version": 2,
             "vault_root": root.to_string(),
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn malformed_plan_is_rejected() {
         let (_tmp, root) = vault_with_fixable_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let garbage = serde_json::json!({
             "not_a_plan": true,
@@ -917,7 +917,7 @@ mod tests {
     #[test]
     fn wrong_schema_version_is_rejected() {
         let (_tmp, root) = vault_with_fixable_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         // A structurally valid plan but wrong schema_version.
         let bad_version = serde_json::json!({
@@ -954,7 +954,7 @@ mod tests {
     #[test]
     fn empty_json_plan_is_rejected() {
         let (_tmp, root) = vault_with_fixable_link();
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
 
         let result = handle(
             &ctx,
@@ -984,7 +984,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".norn")).unwrap();
         std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = || {
             serde_json::json!({
             "schema_version": 2,
@@ -1066,7 +1066,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".norn")).unwrap();
         std::fs::write(root.join(".norn/config.yaml"), "validate: {}\n").unwrap();
 
-        let ctx = VaultContext::open(&root, None).expect("open ctx");
+        let ctx = VaultEnv::open(&root, None).expect("open ctx");
         let plan = serde_json::json!({
         "schema_version": 2,
             "vault_root": root.to_string(),

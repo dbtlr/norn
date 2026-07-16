@@ -3,7 +3,7 @@
 //! One `norn serve` daemon serves many vaults over a single socket, naming a
 //! vault per connection via the `hello` frame. This module owns the map from a
 //! vault's identity hash to its long-lived [`McpServer`] (which wraps a
-//! verify-once warm [`VaultContext`], per ADR 0005: integrity is checked once
+//! verify-once warm [`VaultEnv`], per ADR 0005: integrity is checked once
 //! per vault, then maintained by the context's per-request self-heal).
 //!
 //! # Map shape and why
@@ -28,7 +28,7 @@
 //! The identity hash is derived by the daemon itself from the `hello`'s
 //! `vault_root` via [`crate::cache::vault_identity`] — a client-supplied hash is
 //! never trusted. Distinct vaults hash to distinct keys, so their `McpServer`s
-//! (each its own warm [`VaultContext`]) never contend. Warm requests do not take
+//! (each its own warm [`VaultEnv`]) never contend. Warm requests do not take
 //! the server's `call_lock` at all — it is the cold-only NRN-55 guard (NRN-253) —
 //! so even concurrent requests to the SAME warm vault run in parallel.
 //!
@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use camino::Utf8Path;
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::mcp::context::VaultContext;
+use crate::env::VaultEnv;
 use crate::mcp::server::McpServer;
 use crate::mcp::writer_queue::WriterProgressState;
 use crate::service::{ServingState, WriterProgress};
@@ -373,7 +373,7 @@ fn open_server(
     canonical: &Utf8Path,
     progress: Arc<WriterProgressState>,
 ) -> anyhow::Result<McpServer> {
-    let ctx = VaultContext::open_warm_with_progress(canonical, progress)?;
+    let ctx = VaultEnv::open_warm_with_progress(canonical, progress)?;
     eprintln!("norn serve: opened vault {canonical}");
     // `new_daemon`: the daemon path emits the per-call served markers the
     // routing proofs count; a stdio `norn mcp` (plain `new`) never does.
