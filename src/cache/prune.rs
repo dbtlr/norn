@@ -216,15 +216,20 @@ fn max_opt(a: Option<SystemTime>, b: Option<SystemTime>) -> Option<SystemTime> {
 
 /// Read `meta.vault_root` from an entry's cache.db, read-only. None on any failure.
 ///
-/// Falls back to the dev-channel database (`<entry>/dev/cache.db`, NRN-269) when
-/// the live database is absent or unreadable, so a dev-only entry recovers its
-/// root and ages out by mtime under the normal retention policy rather than
-/// being misclassified `Unreadable` and evicted immediately. The whole entry
-/// dir (live db, `dev/`, lock) is removed together on eviction, so both channels
-/// age as one unit.
+/// Falls back to the dev-channel database (`<entry>/dev/cache.db`, NRN-269)
+/// only when the live database is ABSENT, so a dev-only entry recovers its root
+/// and ages out by mtime under the normal retention policy rather than being
+/// misclassified `Unreadable` and evicted immediately. A PRESENT-but-unreadable
+/// (corrupt) live db deliberately does not fall back: the entry stays
+/// `Unreadable` and evicts promptly, and no second SQLite open is paid on a
+/// known-corrupt db. The whole entry dir (live db, `dev/`, lock) is removed
+/// together on eviction, so both channels age as one unit.
 fn read_cache_root(entry_dir: &Utf8Path) -> Option<String> {
-    read_root_from_db(&entry_dir.join("cache.db"))
-        .or_else(|| read_root_from_db(&entry_dir.join("dev").join("cache.db")))
+    let live_db = entry_dir.join("cache.db");
+    if live_db.as_std_path().exists() {
+        return read_root_from_db(&live_db);
+    }
+    read_root_from_db(&entry_dir.join("dev").join("cache.db"))
 }
 
 fn read_root_from_db(db: &Utf8Path) -> Option<String> {
@@ -640,6 +645,50 @@ mod tests {
             .find(|e| e.hash == H2)
             .expect("H2 must be evicted");
         assert_eq!(h2_entry.reason, EvictReason::Empty);
+    }
+
+    /// NRN-269: an entry holding ONLY a dev-channel database (no live
+    /// `cache.db`) recovers its vault root from `dev/cache.db` and classifies
+    /// normally — here dead-root, since the recorded vault is gone. Without the
+    /// fallback it would be misclassified `Unreadable`.
+    #[test]
+    fn dev_only_entry_classifies_by_its_dev_root() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        // Mint the db inside dev/ by minting a nested entry, then re-homing:
+        // <tree>/<H1>/dev/cache.db with a dead recorded root.
+        let entry = cache_tree.join(H1);
+        std::fs::create_dir_all(entry.as_std_path()).unwrap();
+        mint_cache_entry(&entry, "dev", "/nonexistent/vault/gone");
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+        assert_eq!(hashes(&report.cache.evicted), vec![H1]);
+        assert_eq!(report.cache.evicted[0].reason, EvictReason::DeadRoot);
+        assert_eq!(
+            report.cache.evicted[0].root.as_deref(),
+            Some("/nonexistent/vault/gone"),
+            "the root must be recovered from the dev-channel db"
+        );
+    }
+
+    /// NRN-269: a PRESENT-but-corrupt live db must stay `Unreadable` (and evict
+    /// promptly) even when a healthy dev db sits alongside — the fallback is
+    /// gated on the live db being absent, not merely unreadable.
+    #[test]
+    fn corrupt_live_db_stays_unreadable_despite_healthy_dev_db() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = cache_tree.join(H1);
+        // Healthy dev db recording a LIVE root...
+        mint_cache_entry(&entry, "dev", live_root);
+        // ...but the live-channel db is corrupt.
+        std::fs::write(entry.join("cache.db").as_std_path(), b"not sqlite").unwrap();
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+        assert_eq!(hashes(&report.cache.evicted), vec![H1]);
+        assert_eq!(report.cache.evicted[0].reason, EvictReason::Unreadable);
     }
 
     #[test]

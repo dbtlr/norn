@@ -153,6 +153,7 @@ impl crate::cache::Cache {
             vault_root: layout.canonical,
             cache_dir: layout.db_dir,
             lock_dir: layout.entry_dir,
+            channel: layout.channel,
             alias_field: alias_field.map(|s| s.to_string()),
             files_ignore: files_ignore.to_vec(),
             index_set: index_set.clone(),
@@ -254,11 +255,14 @@ fn open_layout(
     let canonical = layout.canonical;
     let cache_dir = layout.db_dir;
     let lock_dir = layout.entry_dir;
+    let channel = layout.channel;
 
     // Ensure both the shared entry dir (holds the write lock) and the
-    // channel-specific database dir exist at 0700. For the live channel these
-    // are the same directory; `create_dir_secure` is idempotent.
-    create_dir_secure(&lock_dir)?;
+    // channel-specific database dir exist at 0700. On the live channel they
+    // are the same directory — create once.
+    if lock_dir != cache_dir {
+        create_dir_secure(&lock_dir)?;
+    }
     create_dir_secure(&cache_dir)?;
 
     let db_path = cache_dir.join("cache.db");
@@ -271,6 +275,7 @@ fn open_layout(
                 return open_fresh(
                     &cache_dir,
                     &lock_dir,
+                    channel,
                     &db_path,
                     &canonical,
                     &CacheIdentity {
@@ -296,6 +301,7 @@ fn open_layout(
                     vault_root: canonical,
                     cache_dir,
                     lock_dir,
+                    channel,
                     alias_field: alias_field_owned,
                     files_ignore: files_ignore.to_vec(),
                     index_set: index_set.clone(),
@@ -484,6 +490,7 @@ fn inspect_existing_cache(
 fn open_fresh(
     cache_dir: &Utf8Path,
     lock_dir: &Utf8Path,
+    channel: crate::cache::channel::Channel,
     db_path: &Utf8Path,
     canonical_root: &Utf8Path,
     identity: &CacheIdentity,
@@ -500,6 +507,7 @@ fn open_fresh(
         vault_root: canonical_root.to_owned(),
         cache_dir: cache_dir.to_owned(),
         lock_dir: lock_dir.to_owned(),
+        channel,
         alias_field: identity.alias_field.map(|s| s.to_string()),
         files_ignore: identity.files_ignore.to_vec(),
         index_set: identity.index_set.clone(),

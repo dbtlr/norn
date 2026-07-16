@@ -28,8 +28,8 @@ The database is namespaced by **channel** so a binary built from a cargo tree ca
 
 The channel is resolved once per process:
 
-1. `NORN_CACHE_CHANNEL` — set it to exactly `live` or `dev` to force the channel. Any other value (including empty) is a hard error.
-2. Otherwise **`dev`** when the running executable sits under a cargo `target` directory — detected by a `target`-named ancestor that contains a `CACHEDIR.TAG` (cargo always writes one), so unrelated paths that merely contain the word "target" don't trip it.
+1. `NORN_CACHE_CHANNEL` — set it to exactly `live` or `dev` to force the channel. Any other non-empty value is a hard error; an empty value counts as unset. Note that forcing `live` from a build-tree binary deliberately re-enables cross-channel access — including the older-schema silent rebuild the channel split exists to prevent — and is an escape hatch for exactly that debugging purpose.
+2. Otherwise **`dev`** when the running executable sits under a cargo build tree — detected by any ancestor directory containing a `CACHEDIR.TAG` file (cargo writes one into every target directory root, whatever its name, so custom `CARGO_TARGET_DIR` locations are covered; installed binaries under `~/.cargo/bin` or system prefixes have no tagged ancestor). If the executable's own path can't be resolved, norn fails toward `dev` — the safe direction is an isolated cache.
 3. Otherwise **`live`**.
 
 Only the database moves. The per-vault **write lock** (`<hash>/.lock`) and vault-level state stay shared across channels, so a dev and a live binary mutating the same vault still serialize against each other. `norn cache status` prints a `channel:` line and the `dev/` segment shows up in the reported path; correct isolation is otherwise silent.

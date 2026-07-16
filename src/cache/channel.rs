@@ -9,11 +9,12 @@
 //!
 //! Resolution order (resolved once per process; see [`channel`]):
 //!   1. `NORN_CACHE_CHANNEL` env var — exactly `live` or `dev`; any other
-//!      value (including empty) is a hard error, since an explicitly-set
-//!      invalid value is a bad invocation, not something to paper over.
-//!   2. Else `dev` iff the running executable sits under a cargo `target`
-//!      directory (a `target`-named ancestor containing a `CACHEDIR.TAG`,
-//!      which cargo always writes).
+//!      non-empty value is a hard error (an explicitly-set invalid value is a
+//!      bad invocation, not something to paper over); empty counts as unset.
+//!   2. Else `dev` iff the running executable sits under a cargo build tree
+//!      (any ancestor containing a `CACHEDIR.TAG` file, which cargo writes
+//!      into every target directory root regardless of its name), failing
+//!      toward `dev` when the exe path itself can't be resolved.
 //!   3. Else `live`.
 
 use std::sync::OnceLock;
@@ -68,17 +69,18 @@ pub(crate) fn channel() -> Result<Channel, CacheError> {
 }
 
 /// Pure resolution given the (optional) env value and whether the executable
-/// was detected under a cargo target dir. Factored out for unit tests so the
+/// was detected under a cargo build tree. Factored out for unit tests so the
 /// once-per-process [`channel`] cache never has to be defeated.
 ///
-/// `Err(value)` carries the offending env value verbatim for the error message.
+/// A set-but-empty env value counts as unset (standard env-var convention) and
+/// falls through to detection. `Err(value)` carries the offending non-empty
+/// env value verbatim for the error message.
 fn resolve_channel(env: Option<String>, exe_under_target: bool) -> Result<Channel, String> {
-    if let Some(raw) = env {
-        return match raw.as_str() {
-            "live" => Ok(Channel::Live),
-            "dev" => Ok(Channel::Dev),
-            _ => Err(raw),
-        };
+    match env.as_deref() {
+        Some("live") => return Ok(Channel::Live),
+        Some("dev") => return Ok(Channel::Dev),
+        Some("") | None => {}
+        Some(_) => return Err(env.unwrap()),
     }
     if exe_under_target {
         Ok(Channel::Dev)
@@ -87,26 +89,43 @@ fn resolve_channel(env: Option<String>, exe_under_target: bool) -> Result<Channe
     }
 }
 
-/// Whether `std::env::current_exe()` sits under a cargo target directory.
-/// Best-effort: an unresolvable / non-UTF-8 exe path reports `false` (live).
+/// Whether `std::env::current_exe()` sits under a cargo build tree.
+///
+/// Fails toward `dev`: an unresolvable or non-UTF-8 exe path yields `true`,
+/// because the dangerous misclassification direction is a dev binary landing
+/// on the live channel (it can silently migrate the installed client's cache);
+/// a live binary landing on dev merely gets a harmlessly isolated cache.
 fn detect_dev_from_exe() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
-        .map(|exe| {
-            exe_under_cargo_target(&exe, |dir| dir.join("CACHEDIR.TAG").as_std_path().exists())
-        })
-        .unwrap_or(false)
+    detect_dev(
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+            .as_deref(),
+        |dir| dir.join("CACHEDIR.TAG").as_std_path().exists(),
+    )
 }
 
-/// Walk `exe`'s ancestors for a directory named `target` that `probe` confirms
-/// contains a `CACHEDIR.TAG`. Cargo writes that tag into every target dir, so
-/// the tag probe rejects false positives from unrelated path components merely
-/// named `target`. `probe` is injected so tests exercise the walk without a
-/// real filesystem.
-fn exe_under_cargo_target(exe: &Utf8Path, probe: impl Fn(&Utf8Path) -> bool) -> bool {
-    exe.ancestors()
-        .any(|ancestor| ancestor.file_name() == Some("target") && probe(ancestor))
+/// Detection core behind [`detect_dev_from_exe`], with the (possibly
+/// unresolvable) exe path and filesystem probe injected for unit tests.
+/// `None` — the exe path couldn't be resolved — reports dev (fail-safe; see
+/// [`detect_dev_from_exe`]).
+fn detect_dev(exe: Option<&Utf8Path>, probe: impl Fn(&Utf8Path) -> bool) -> bool {
+    match exe {
+        Some(exe) => exe_under_cargo_build_tree(exe, probe),
+        None => true,
+    }
+}
+
+/// Walk `exe`'s ancestors for one that `probe` confirms contains a
+/// `CACHEDIR.TAG` file. Cargo writes the tag into every target directory root
+/// regardless of its name, so this catches custom `CARGO_TARGET_DIR` /
+/// `build.target-dir` locations whose leaf is not named `target`. Standard
+/// installs stay live: `~/.cargo` itself carries no tag (the tagged
+/// `registry/` and `git/` dirs are siblings of `bin/`, not ancestors), and
+/// system prefixes like `/usr/local/bin` have no tagged ancestor. `probe` is
+/// injected so tests exercise the walk without a real filesystem.
+fn exe_under_cargo_build_tree(exe: &Utf8Path, probe: impl Fn(&Utf8Path) -> bool) -> bool {
+    exe.ancestors().any(probe)
 }
 
 #[cfg(test)]
@@ -138,11 +157,13 @@ mod tests {
     }
 
     #[test]
-    fn env_empty_value_errors() {
-        // An explicitly-set empty value is a bad invocation, not "unset".
+    fn env_empty_value_falls_through_to_detection() {
+        // A set-but-empty value counts as unset (standard env-var convention):
+        // detection decides, in both directions.
+        assert_eq!(resolve_channel(Some(String::new()), true), Ok(Channel::Dev));
         assert_eq!(
-            resolve_channel(Some(String::new()), true),
-            Err(String::new())
+            resolve_channel(Some(String::new()), false),
+            Ok(Channel::Live)
         );
     }
 
@@ -159,26 +180,37 @@ mod tests {
     #[test]
     fn detection_requires_cachedir_tag() {
         let exe = Utf8Path::new("/home/u/proj/target/debug/norn");
-        // A plain `target` ancestor without the tag is not a cargo target dir.
-        assert!(!exe_under_cargo_target(exe, |_| false));
-        // With the tag present cargo target dir is confirmed.
-        assert!(exe_under_cargo_target(exe, |dir| dir == "/home/u/proj/target"));
+        // No tagged ancestor anywhere: not a cargo build tree, even with a
+        // `target`-named path component.
+        assert!(!exe_under_cargo_build_tree(exe, |_| false));
+        // With the tag present on the target root, the build tree is confirmed.
+        assert!(exe_under_cargo_build_tree(exe, |dir| dir == "/home/u/proj/target"));
     }
 
     #[test]
-    fn detection_ignores_unrelated_target_component() {
-        // A directory literally named `target` deep in an installed path must
-        // not trip detection unless it carries a CACHEDIR.TAG.
-        let exe = Utf8Path::new("/opt/target/bin/norn");
-        assert!(!exe_under_cargo_target(exe, |_| false));
+    fn detection_covers_custom_named_target_dir() {
+        // CARGO_TARGET_DIR / build.target-dir may point anywhere; cargo still
+        // writes CACHEDIR.TAG into the root, so the leaf name is irrelevant.
+        let exe = Utf8Path::new("/home/u/builds/norn-out/debug/norn");
+        assert!(exe_under_cargo_build_tree(exe, |dir| dir == "/home/u/builds/norn-out"));
+        // And absent the tag, the same path is not a build tree.
+        assert!(!exe_under_cargo_build_tree(exe, |_| false));
     }
 
     #[test]
-    fn detection_matches_only_target_named_dir() {
-        // The tag probe is only consulted for `target`-named ancestors, so a
-        // tag elsewhere never triggers a match.
-        let exe = Utf8Path::new("/home/u/proj/build/debug/norn");
-        assert!(!exe_under_cargo_target(exe, |_| true));
+    fn detection_untagged_install_path_is_live() {
+        // A standard install location has no tagged ancestor (~/.cargo carries
+        // no CACHEDIR.TAG; registry/ and git/ are siblings of bin/, not
+        // ancestors), so the default stays live.
+        let exe = Utf8Path::new("/home/u/.cargo/bin/norn");
+        assert!(!exe_under_cargo_build_tree(exe, |_| false));
+    }
+
+    #[test]
+    fn detection_unresolvable_exe_fails_toward_dev() {
+        // current_exe() failure / non-UTF-8 path: the fail-safe direction is
+        // dev (an isolated cache), never live (cross-channel migration risk).
+        assert!(detect_dev(None, |_| false));
     }
 
     #[test]

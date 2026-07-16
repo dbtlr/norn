@@ -70,6 +70,9 @@ pub(crate) struct CacheLayout {
     pub(crate) entry_dir: Utf8PathBuf,
     /// Directory holding `cache.db` for the resolved channel.
     pub(crate) db_dir: Utf8PathBuf,
+    /// The channel this layout was resolved for — stored rather than re-derived
+    /// from path geometry, so a label can never silently drift from the layout.
+    pub(crate) channel: Channel,
 }
 
 /// Resolve the full cache layout for a vault under the process channel.
@@ -107,6 +110,7 @@ pub(crate) fn cache_layout_in_channel(
         canonical,
         entry_dir,
         db_dir,
+        channel,
     })
 }
 

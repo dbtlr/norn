@@ -140,6 +140,9 @@ pub(crate) struct Cache {
     /// channel; `cache_dir`'s parent on the dev channel. A dev and a live binary
     /// against the same vault serialize on this one lock.
     pub(crate) lock_dir: camino::Utf8PathBuf,
+    /// The cache channel this handle opened under, carried from the resolved
+    /// [`identity::CacheLayout`] rather than re-derived from path geometry.
+    pub(crate) channel: channel::Channel,
     pub(crate) alias_field: Option<String>,
     /// Compiled-out-of `files.ignore`: path globs whose matching files are
     /// excluded from the graph at cache-build time — never parsed, indexed, or
@@ -235,16 +238,10 @@ impl Cache {
         &self.conn
     }
 
-    /// The cache channel this handle opened under, inferred from its layout:
-    /// dev caches live in a `dev/` subdir of the shared entry dir, live caches
-    /// sit directly in it. Drives the `norn cache status` channel line.
+    /// The cache channel this handle opened under. Drives the
+    /// `norn cache status` channel line.
     pub(crate) fn channel_label(&self) -> &'static str {
-        let channel = if self.cache_dir == self.lock_dir {
-            channel::Channel::Live
-        } else {
-            channel::Channel::Dev
-        };
-        channel.as_str()
+        self.channel.as_str()
     }
 
     /// Configured frontmatter field name used for alias parsing, if any.
