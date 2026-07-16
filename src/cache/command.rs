@@ -26,7 +26,7 @@ pub fn load_graph_index(
 ) -> Result<GraphIndex> {
     let index = retry_once_on_corruption(
         || load_graph_index_attempt(vault_root, options, no_cache_refresh),
-        || evict_cache_db(vault_root),
+        || notice_and_evict(vault_root),
     )?;
     Ok(index)
 }
@@ -74,7 +74,7 @@ pub fn open_for_query(
 ) -> Result<Cache> {
     let cache = retry_once_on_corruption(
         || open_for_query_attempt(vault_root, options, no_cache_refresh),
-        || evict_cache_db(vault_root),
+        || notice_and_evict(vault_root),
     )?;
     Ok(cache)
 }
@@ -131,7 +131,12 @@ fn retry_once_on_corruption<T>(
 /// concrete `rusqlite::Error` is usually wrapped (in `CacheError::Sqlite`, then
 /// `anyhow`), so walk the whole chain and downcast each cause — the same
 /// classification the warm daemon's eviction seam uses.
-fn is_cache_corruption(err: &anyhow::Error) -> bool {
+///
+/// `pub(crate)` so the top-level CLI error seam (`crate::cli_main`) can classify a
+/// command's error and self-heal a cache whose corruption first surfaced at query
+/// time — after `open_for_query` already returned — which the in-place retry below
+/// cannot reach (see [`evict_corrupt_cache_after_error`]).
+pub(crate) fn is_cache_corruption(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
             .downcast_ref::<rusqlite::Error>()
@@ -145,14 +150,58 @@ fn is_cache_corruption(err: &anyhow::Error) -> bool {
     })
 }
 
+/// The `vault:` stderr notice that a corrupt cache was discarded and will be
+/// rebuilt from the vault. Mirrors the `emit_rebuild_message` notice the
+/// schema/identity/alias rebuild paths print (NRN-275): the trusting open's retry
+/// re-opens straight into the Fresh arm, so `emit_rebuild_message` never fires for
+/// this path and this is the only operator-visible signal a rebuild happened.
+const CORRUPTION_REBUILD_NOTICE: &str =
+    "vault: cache is corrupted; discarding it — rebuilding from the vault";
+
+/// Emit the corruption notice, then evict — the eviction seam the in-place retry
+/// uses (the read is retried immediately after, rebuilding in this same process).
+fn notice_and_evict(vault_root: &Utf8Path) -> Result<()> {
+    eprintln!("{CORRUPTION_REBUILD_NOTICE}");
+    evict_cache_db(vault_root)
+}
+
+/// Top-level self-heal for a corruption that first surfaced at QUERY time —
+/// after `open_for_query` / `load_graph_index` already returned a handle, so the
+/// command ran its SQL outside the in-place retry above and failed. Called from
+/// the CLI error seam: emit the notice and evict so the NEXT invocation opens
+/// Fresh and rebuilds from the vault (this invocation still fails closed with the
+/// error). Best-effort — a lock timeout or a racing eviction is swallowed, since
+/// the caller is already on the error path and the next open re-detects the state.
+pub(crate) fn evict_corrupt_cache_after_error(vault_root: &Utf8Path) {
+    eprintln!("{CORRUPTION_REBUILD_NOTICE}");
+    let _ = evict_cache_db(vault_root);
+}
+
 /// Evict a vault's cache database — delete `cache.db` and its WAL/SHM sidecars —
 /// so the next open takes the Fresh path and the incremental refresh rebuilds it
-/// from the vault. Used by the rebuild-on-corruption retry.
+/// from the vault. Used by the rebuild-on-corruption retry and the error seam.
+///
+/// Holds the shared cache write lock across the unlink, exactly as [`Cache::clear`]
+/// does: a concurrent process mid-refresh holds this same lock, so taking it here
+/// closes the race where we would otherwise unlink `cache.db` out from under an
+/// in-flight writer, leaving it writing to an orphaned inode. `NotFound` on the
+/// primary db is tolerated (a concurrent eviction won the race), matching the
+/// already-tolerant WAL/SHM removals.
 fn evict_cache_db(vault_root: &Utf8Path) -> Result<()> {
-    let (_canonical, cache_dir) = crate::cache::cache_dir_for(vault_root)?;
-    let db_path = cache_dir.join("cache.db");
-    if db_path.as_std_path().exists() {
-        std::fs::remove_file(db_path.as_std_path())?;
+    let layout = crate::cache::identity::cache_layout_for(vault_root)?;
+    let _lock = crate::cache::lock::WriteLock::acquire(
+        &layout.entry_dir,
+        std::time::Duration::from_secs(5),
+    )?;
+    let db_path = layout.db_dir.join("cache.db");
+    match std::fs::remove_file(db_path.as_std_path()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("evicting corrupt cache at {db_path}"))
+            )
+        }
     }
     let _ = std::fs::remove_file(db_path.with_extension("db-wal").as_std_path());
     let _ = std::fs::remove_file(db_path.with_extension("db-shm").as_std_path());
