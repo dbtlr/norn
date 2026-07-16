@@ -2794,10 +2794,8 @@ fn cache_index_creates_cache_and_status_reports_documents() {
     // NRN-269: a binary run from the cargo target tree resolves to the dev
     // channel, and its cache.db nests under a `dev/` segment.
     assert_eq!(status["channel"], "dev");
-    assert!(status["cache_path"]
-        .as_str()
-        .unwrap()
-        .contains("/dev/cache.db"));
+    assert!(std::path::Path::new(status["cache_path"].as_str().unwrap())
+        .ends_with(PathBuf::from("dev").join("cache.db")));
 
     fs::remove_dir_all(&root).ok();
     fs::remove_dir_all(&cache_home).ok();
