@@ -54,6 +54,8 @@ cargo install --git https://github.com/dbtlr/norn --tag v0.26.1 norn-run
 
 `norn` tracks the latest stable Rust toolchain (see `mise.toml`). See `docs/development.md` for the full MSRV policy.
 
+Installing from a local clone with `cargo install --path .` instead needs `NORN_BUILD_CHANNEL=live` set (or use `just install`, which sets it) so the installed binary lands on the `live` cache channel rather than auto-baking `dev` for the checkout — see [`docs/cache.md`](cache.md#channels-live-vs-dev). `cargo install --git` and the release artifacts above are unaffected.
+
 ## Manual binary download
 
 Releases include pre-built archives at:

@@ -22,7 +22,7 @@ build-release:
     cargo build -p norn-run --release
 
 install:
-    cargo install --path .
+    NORN_BUILD_CHANNEL=live cargo install --path .
 
 verify: fmt-check test
 
