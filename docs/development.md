@@ -67,6 +67,10 @@ src/
 
 The pure-parsing modules (`core`, `frontmatter`, `links`) still depend on each other only through `core` and are unit-tested in isolation.
 
+## Command module convention
+
+Every CLI command lives at `src/<verb>/mod.rs`, with the module name matching the CLI verb exactly (`src/move/mod.rs` for `norn move`, declared with the raw identifier `r#move` since `move` is a reserved keyword). Internal files within a command module follow a `route.rs` / `render.rs` / `synth.rs` / `report.rs` naming pattern depending on what the command needs: `route.rs` for daemon-routing translation, `render.rs` for output rendering, `synth.rs` for plan synthesis, `report.rs` for report types. The bare `foo.rs` plus sibling `foo/` idiom is reserved for the large non-command engines (`cache.rs` + `cache/`, `frontmatter.rs` + `frontmatter/`, and `graph.rs` + `graph/`), which aren't CLI commands themselves and don't need a verb-shaped name. New commands should follow the `src/<verb>/mod.rs` scheme from the start rather than the older `_cmd`/`_doc`-suffixed naming some modules historically used.
+
 ## MSRV policy
 
 The project tracks **latest stable** Rust. The toolchain pin in `mise.toml` and the `dtolnay/rust-toolchain` action in CI move in lockstep when a new stable lands; update both in one commit and note the bump in the CHANGELOG.
