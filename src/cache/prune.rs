@@ -122,6 +122,9 @@ pub(crate) struct TreeReport {
     pub scanned: usize,
     pub evicted: Vec<EvictedEntry>,
     pub skipped_locked: usize,
+    /// Entries an eviction attempt failed on for a non-lock reason
+    /// (permissions, IO); distinct entries, like `skipped_locked`.
+    pub skipped_errors: usize,
     pub kept_unknown: usize,
     pub bytes_freed: u64,
 }
@@ -185,8 +188,10 @@ fn is_lock_file(name: &str) -> bool {
 }
 
 /// Recursive size / newest-mtime / file-count walk. Best-effort: unreadable
-/// children contribute nothing. norn's own lock files contribute bytes and
-/// mtime but are excluded from the file count.
+/// children contribute nothing. norn's own lock files contribute bytes but
+/// are excluded from the file count AND from newest-mtime — a lock file's
+/// mtime is locking metadata, not cache freshness, and any flock acquisition
+/// (including the sweep's own) perturbs it.
 fn measure(dir: &Utf8Path) -> (u64, Option<SystemTime>, usize) {
     measure_skipping(dir, None)
 }
@@ -218,8 +223,8 @@ fn measure_skipping(dir: &Utf8Path, skip_top: Option<&str>) -> (u64, Option<Syst
             bytes += md.len();
             if !e.file_name().to_str().is_some_and(is_lock_file) {
                 files += 1;
+                newest = max_opt(newest, md.modified().ok());
             }
-            newest = max_opt(newest, md.modified().ok());
         }
     }
     (bytes, newest, files)
@@ -351,13 +356,22 @@ fn dev_db_newest_mtime(entry_dir: &Utf8Path) -> Option<SystemTime> {
     newest
 }
 
-/// Count a blocked entry toward `skipped_locked` exactly once per sweep: the
-/// dev-TTL pass and the entry pass can both hit the same held `.lock`, and the
-/// counter reports distinct blocked entries, not blocked attempts.
-fn mark_locked(report: &mut TreeReport, locked: &mut HashSet<String>, hash: &str) {
-    if locked.insert(hash.to_owned()) {
-        report.skipped_locked += 1;
+/// Count a skipped entry toward `counter` exactly once per sweep: the dev-TTL
+/// pass and the entry pass can both fail on the same entry, and the counters
+/// report distinct entries, not attempts. `skipped_locked` is reserved for a
+/// genuinely held lock (WouldBlock); `skipped_errors` covers everything else
+/// (a lock file we can't open, a removal that failed).
+fn mark_skipped(counter: &mut usize, seen: &mut HashSet<String>, hash: &str) {
+    if seen.insert(hash.to_owned()) {
+        *counter += 1;
     }
+}
+
+/// Per-sweep dedup sets backing `skipped_locked` / `skipped_errors`.
+#[derive(Default)]
+struct SkipSets {
+    locked: HashSet<String>,
+    errored: HashSet<String>,
 }
 
 /// Evict a stale `dev/` subtree from an entry, holding the shared entry `.lock`
@@ -367,19 +381,22 @@ fn mark_locked(report: &mut TreeReport, locked: &mut HashSet<String>, hash: &str
 /// (real run) or projected without touching disk (dry-run) so the remaining
 /// classification passes see the shrunk entry identically on both paths: a now
 /// dev-only entry falls through to the Empty policy this same sweep, and dev
-/// bytes leave the cap-pass survivor total. A held lock or failed removal is a
-/// best-effort skip (counted as a locked skip), leaving `dev/` in place — a
-/// failed removal still re-measures, since part of the subtree may be gone.
+/// bytes leave the cap-pass survivor total. A held lock is a locked skip; a
+/// lock we can't open or a failed removal is an error skip — either way `dev/`
+/// stays, and a failed removal still re-measures, since part of the subtree
+/// may be gone.
 fn evict_dev_dir(
     report: &mut TreeReport,
     entry: &mut Entry,
     dev_mtime: SystemTime,
     now: SystemTime,
     dry_run: bool,
-    locked: &mut HashSet<String>,
+    skips: &mut SkipSets,
 ) {
-    let dev_dir = entry.dir.join("dev");
-    let (dev_bytes, _, _) = measure(&dev_dir);
+    // Pre-lock sample; authoritative for dry-run only (a preview races with
+    // live writers by nature — it reports the state it observed).
+    let mut dev_mtime = dev_mtime;
+    let mut dev_bytes = measure(&entry.dir.join("dev")).0;
     if dry_run {
         // Simulate the shrink: project the entry's measure as if dev/ were
         // gone, so dry-run classifies and accounts exactly like a real sweep.
@@ -390,6 +407,23 @@ fn evict_dev_dir(
     } else {
         match crate::cache::acquire_flock(&entry.dir.join(".lock"), Duration::ZERO) {
             Ok(_held) => {
+                // TOCTOU guard: a writer can refresh dev/ between the pre-lock
+                // sample and acquisition. Re-sample under the lock and abort
+                // (no eviction, no counters) if the dev db is now gone or no
+                // longer past the TTL.
+                let Some(fresh_mtime) = dev_db_newest_mtime(&entry.dir) else {
+                    return;
+                };
+                let still_stale = now
+                    .duration_since(fresh_mtime)
+                    .map(|age| age > DEV_CACHE_TTL)
+                    .unwrap_or(false);
+                if !still_stale {
+                    return;
+                }
+                dev_mtime = fresh_mtime;
+                let dev_dir = entry.dir.join("dev");
+                dev_bytes = measure(&dev_dir).0;
                 let removed = std::fs::remove_dir_all(dev_dir.as_std_path()).is_ok();
                 // Re-measure actual disk state whether or not removal fully
                 // succeeded: a failed remove_dir_all can still have deleted
@@ -399,14 +433,17 @@ fn evict_dev_dir(
                 entry.newest_mtime = newest;
                 entry.file_count = files;
                 if !removed {
-                    mark_locked(report, locked, &entry.hash);
+                    mark_skipped(&mut report.skipped_errors, &mut skips.errored, &entry.hash);
                     return;
                 }
             }
-            // WouldBlock, or a lock we can't even open (permissions, IO):
-            // best-effort locked-skip either way.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                mark_skipped(&mut report.skipped_locked, &mut skips.locked, &entry.hash);
+                return;
+            }
+            // A lock we can't even open (permissions, IO): error skip.
             Err(_) => {
-                mark_locked(report, locked, &entry.hash);
+                mark_skipped(&mut report.skipped_errors, &mut skips.errored, &entry.hash);
                 return;
             }
         }
@@ -422,7 +459,10 @@ fn evict_dev_dir(
 }
 
 /// Try-evict one cache entry: skip if its write lock is held. Returns
-/// Ok(true) on eviction, Ok(false) on locked-skip.
+/// Ok(true) on eviction, Ok(false) on a genuinely held lock (WouldBlock),
+/// Err for any other failure (a lock we can't open, a removal that failed);
+/// the sweep stays best-effort and never escalates, but reports the two
+/// skip kinds separately.
 fn evict_cache_entry(entry: &Entry) -> std::io::Result<bool> {
     match crate::cache::acquire_flock(&entry.dir.join(".lock"), Duration::ZERO) {
         Ok(_held) => {
@@ -430,9 +470,7 @@ fn evict_cache_entry(entry: &Entry) -> std::io::Result<bool> {
             Ok(true)
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
-        // A lock we can't even open (permissions, IO): treat as locked-skip;
-        // the sweep is best-effort and never escalates.
-        Err(_) => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -462,9 +500,9 @@ pub(crate) fn sweep(
         scanned: cache_entries.len(),
         ..Default::default()
     };
-    // Entries whose .lock blocked an eviction attempt this sweep; keeps
-    // skipped_locked counting distinct entries, not attempts.
-    let mut locked: HashSet<String> = HashSet::new();
+    // Entries an eviction attempt failed on this sweep; keeps the skip
+    // counters reporting distinct entries, not attempts.
+    let mut skips = SkipSets::default();
     // Dev-channel TTL pass (NRN-272): independently of the entry's own
     // freshness, evict a `dev/` db whose newest mtime has aged past
     // DEV_CACHE_TTL, removing only the dev subtree. Runs regardless of the
@@ -489,7 +527,7 @@ pub(crate) fn sweep(
                 dev_mtime,
                 now,
                 opts.dry_run,
-                &mut locked,
+                &mut skips,
             );
         }
     }
@@ -525,7 +563,7 @@ pub(crate) fn sweep(
                 reason,
                 now,
                 opts.dry_run,
-                &mut locked,
+                &mut skips,
             ),
             None => survivors.push(entry),
         }
@@ -555,7 +593,7 @@ pub(crate) fn sweep(
                 EvictReason::OverCap,
                 now,
                 opts.dry_run,
-                &mut locked,
+                &mut skips,
             );
         }
     }
@@ -605,16 +643,19 @@ fn evict_into(
     reason: EvictReason,
     now: SystemTime,
     dry_run: bool,
-    locked: &mut HashSet<String>,
+    skips: &mut SkipSets,
 ) {
     if !dry_run {
         match evict_cache_entry(&entry) {
             Ok(true) => {}
             Ok(false) => {
-                mark_locked(report, locked, &entry.hash);
+                mark_skipped(&mut report.skipped_locked, &mut skips.locked, &entry.hash);
                 return;
             }
-            Err(_) => return, // best-effort: a failed removal is silently skipped
+            Err(_) => {
+                mark_skipped(&mut report.skipped_errors, &mut skips.errored, &entry.hash);
+                return;
+            }
         }
     }
     push_evicted(report, entry, reason, now);
@@ -1279,6 +1320,51 @@ mod tests {
         assert_eq!(reasons.iter().filter(|r| **r == "Aged").count(), 1);
         assert_eq!(reasons.iter().filter(|r| **r == "Empty").count(), 1);
         assert!(!a.as_std_path().exists() && !b.as_std_path().exists());
+    }
+
+    /// Parity variant with NO pre-existing `.lock`: the real run's flock
+    /// acquisition creates the lock file with mtime=now, and if that timestamp
+    /// counted toward entry freshness an otherwise-aged entry would be kept by
+    /// the real sweep while dry-run predicted Aged. Lock-file mtimes are
+    /// locking metadata, not cache freshness — excluded from newest_mtime.
+    #[test]
+    fn dry_run_matches_real_run_without_preexisting_lock() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let past = Duration::from_secs(100 * 86_400);
+        // Live db + stale dev db, everything aged past retention; no .lock.
+        let a = mint_cache_entry(&cache_tree, H1, live_root);
+        let a_dev = mint_cache_entry(&a, "dev", live_root);
+        backdate_dir(&a_dev, past);
+        backdate_dir(&a, past);
+
+        let rows = |report: &PruneReport| {
+            let mut v: Vec<(String, String)> = report
+                .cache
+                .evicted
+                .iter()
+                .map(|e| (e.hash.clone(), format!("{:?}", e.reason)))
+                .collect();
+            v.sort();
+            v
+        };
+        let mut o = opts(90);
+        o.dry_run = true;
+        let dry = sweep(&cache_tree, &state_tree, &o);
+        let real = sweep(&cache_tree, &state_tree, &opts(90));
+        assert_eq!(
+            rows(&dry),
+            rows(&real),
+            "lock-file creation during the real sweep must not defeat parity"
+        );
+        assert_eq!(dry.cache.bytes_freed, real.cache.bytes_freed);
+        assert!(
+            !a.as_std_path().exists(),
+            "the aged entry must be reclaimed by the real run"
+        );
     }
 
     /// NRN-272 (G4): a held entry `.lock` blocks dev eviction — the writer-

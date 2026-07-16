@@ -191,6 +191,9 @@ fn render_prune_text(report: &PruneReport) {
         if tree.skipped_locked > 0 {
             notes.push(format!("{} skipped: locked", tree.skipped_locked));
         }
+        if tree.skipped_errors > 0 {
+            notes.push(format!("{} skipped: error", tree.skipped_errors));
+        }
         if tree.kept_unknown > 0 {
             notes.push(format!("{} kept: root unknown", tree.kept_unknown));
         }
@@ -202,10 +205,12 @@ fn render_prune_text(report: &PruneReport) {
         println!(
             "{label}  {} {} {verb}, {} {freed}{notes}",
             tree.evicted.len(),
+            // "evictions", not "entries": one entry can emit a dev-stale row
+            // plus a terminal row in the same sweep.
             if tree.evicted.len() == 1 {
-                "entry"
+                "eviction"
             } else {
-                "entries"
+                "evictions"
             },
             format_bytes(tree.bytes_freed),
         );
