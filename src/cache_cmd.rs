@@ -172,9 +172,9 @@ pub fn run_prune(
 
 fn render_prune_text(report: &PruneReport) {
     let verb = if report.dry_run {
-        "would be evicted"
+        "planned"
     } else {
-        "evicted"
+        "performed"
     };
     let freed = if report.dry_run {
         "would be freed"

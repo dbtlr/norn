@@ -64,8 +64,8 @@ norn cache prune --dry-run
 ```
 
 ```text
-cache  2 evictions would be evicted, 410.2 MiB would be freed
-state  1 eviction would be evicted, 12.4 KiB would be freed
+cache  2 evictions planned, 410.2 MiB would be freed
+state  1 eviction planned, 12.4 KiB would be freed
 
 would be evicted:
   [cache] /home/user/old-vault  dead root  398.0 MiB

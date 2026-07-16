@@ -1367,6 +1367,46 @@ mod tests {
         );
     }
 
+    /// NRN-272 (CR3): a dev/ removal that fails for a non-lock reason counts
+    /// as an error skip, not a locked skip — the dev db stays, the entry is
+    /// re-measured (removal-failure path) and classifies normally: no eviction
+    /// rows, no bytes freed. Unix-gated: the failure is provoked by stripping
+    /// write permission from dev/ so its contents can't be unlinked.
+    #[cfg(unix)]
+    #[test]
+    fn unremovable_dev_dir_counts_as_error_skip() {
+        use std::os::unix::fs::PermissionsExt;
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = mint_cache_entry(&cache_tree, H1, live_root);
+        let dev = mint_cache_entry(&entry, "dev", live_root);
+        backdate_dir(&dev, Duration::from_secs(3 * 86_400));
+        // Read-only dev dir: unlinking its contents fails, so remove_dir_all fails.
+        std::fs::set_permissions(dev.as_std_path(), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+
+        // Restore before TempDir drop so cleanup succeeds even on panic-free exit.
+        std::fs::set_permissions(dev.as_std_path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert_eq!(report.cache.skipped_errors, 1, "one error-skipped entry");
+        assert_eq!(report.cache.skipped_locked, 0, "not misreported as locked");
+        assert!(
+            dev.join("cache.db").as_std_path().exists(),
+            "dev db still present"
+        );
+        assert!(
+            report.cache.evicted.is_empty(),
+            "the re-measured entry classifies normally: nothing evicted"
+        );
+        assert_eq!(report.cache.bytes_freed, 0);
+        assert!(entry.as_std_path().exists());
+    }
+
     /// NRN-272 (G4): a held entry `.lock` blocks dev eviction — the writer-
     /// exclusion property. Dead root makes the entry pass attempt a whole-entry
     /// eviction on the same lock too, pinning skipped_locked to count distinct
