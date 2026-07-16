@@ -18,7 +18,7 @@
 //! The CLI's `Command::Move` dispatch in `main.rs`:
 //! 1. Acquires the mutation lock (`is_apply` driven by TTY / `--yes`).
 //! 2. Loads config + graph index.
-//! 3. Runs `move_doc::preflight_and_plan` for the single-file path (exit 2 on
+//! 3. Runs `r#move::preflight_and_plan` for the single-file path (exit 2 on
 //!    refusal).
 //! 4. Builds a one-op `MigrationPlan` (kind `move_document` or `move_folder`).
 //! 5. Opens an event sink, emits `invocation_started`, applies via
