@@ -417,8 +417,8 @@ pub enum CacheSubcommand {
     Rebuild,
     #[command(
         disable_help_flag = true,
-        about = "Delete the cache database",
-        long_about = "Delete the cache database.\n\nRemoves the cache.db file and its WAL/SHM siblings. The next cache-aware command auto-recreates a fresh database."
+        about = "Delete the entire cache entry, without opening it first",
+        long_about = "Delete the entire cache entry, without opening it first.\n\nRemoves the vault's whole cache entry directory — every channel and schema-version database, plus any legacy leftovers — never the state tree (the mutation event stream). Resolves the entry purely from the vault's identity, so it works even against a broken cache (corrupt file, undecodable meta) that can't be opened. Refuses (exit 2, nothing deleted) only while another process holds the cache lock. The next cache-aware command auto-recreates a fresh database."
     )]
     Clear,
     #[command(

@@ -204,34 +204,6 @@ impl Cache {
         }
     }
 
-    /// Delete the on-disk cache (database + WAL/SHM siblings). Holds the
-    /// advisory write lock for the duration. After clear the caller should
-    /// drop the `Cache` handle; the next `Cache::open` recreates a fresh
-    /// database with the current schema and identity meta rows.
-    pub fn clear(&mut self) -> Result<(), CacheError> {
-        let _lock = lock::WriteLock::acquire(&self.lock_dir, std::time::Duration::from_secs(5))?;
-        let db_path = self.cache_dir.join("cache.db");
-        // Detach the live connection from the on-disk database so the file
-        // can be removed cleanly on platforms (notably Windows) where an
-        // open handle blocks deletion. Replace with an in-memory connection
-        // so `&mut self.conn` remains usable until the caller drops us.
-        drop(std::mem::replace(
-            &mut self.conn,
-            rusqlite::Connection::open_in_memory()?,
-        ));
-        if db_path.as_std_path().exists() {
-            std::fs::remove_file(db_path.as_std_path()).map_err(|e| CacheError::Io {
-                path: db_path.clone(),
-                source: e,
-            })?;
-        }
-        let wal = self.cache_dir.join("cache.db-wal");
-        let shm = self.cache_dir.join("cache.db-shm");
-        let _ = std::fs::remove_file(wal.as_std_path());
-        let _ = std::fs::remove_file(shm.as_std_path());
-        Ok(())
-    }
-
     /// Crate-internal connection accessor for production primitives and
     /// for tests (including cross-crate integration tests) that need direct
     /// SQL access. Not part of the stable public API — treat as `#[doc(hidden)]`.

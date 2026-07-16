@@ -110,6 +110,32 @@ fn vault_error_stdout(args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout should be UTF-8")
 }
 
+/// Like [`vault_success_env`] but does not assert on the exit status — the
+/// caller inspects `(stdout, stderr, exit_code)` itself. Used for the cache
+/// clear lock-contention test, where a non-zero exit is the expected outcome.
+fn vault_env(args: &[&str], envs: &[(&str, &str)]) -> (String, String, i32) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
+    command.args(args);
+    let _cache_dir = if envs.iter().any(|(k, _)| *k == "XDG_CACHE_HOME") {
+        // Caller controls the cache tree; still isolate the state tree.
+        let dir = tempfile::tempdir().expect("temp state dir should be created");
+        command.env("XDG_STATE_HOME", dir.path().join("state"));
+        dir
+    } else {
+        isolate_cache(&mut command)
+    };
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().expect("vault command should run");
+
+    (
+        String::from_utf8(output.stdout).expect("stdout should be UTF-8"),
+        String::from_utf8(output.stderr).expect("stderr should be UTF-8"),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
 fn temp_cache_dir() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2831,6 +2857,188 @@ fn cache_clear_removes_cache_and_next_status_reports_empty() {
         0,
         "expected freshly-recreated cache to report zero documents; got: {status}"
     );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(&cache_home).ok();
+}
+
+/// NRN-270: `cache clear` deletes the WHOLE entry dir — every channel and
+/// schema-version database sharing the vault's entry, not just the one this
+/// test binary's own channel built. Simulates a second (live-channel) schema
+/// database sitting in the same entry and proves it is gone too.
+#[test]
+fn cache_clear_removes_entire_entry_dir_all_channels() {
+    let root = temp_cache_dir();
+    let cache_home = temp_cache_dir();
+    fs::create_dir_all(&root).expect("vault dir should be created");
+    fs::create_dir_all(&cache_home).expect("cache home should be created");
+    fs::write(root.join("a.md"), "---\ntitle: A\n---\nbody\n").expect("a.md should write");
+
+    let envs = [("XDG_CACHE_HOME", cache_home.to_str().unwrap())];
+    vault_success_env(&["-C", root.to_str().unwrap(), "cache", "index"], &envs);
+
+    let cache_home_utf8 = camino::Utf8Path::from_path(&cache_home).expect("utf8 cache home");
+    let root_utf8 = camino::Utf8Path::from_path(&root).expect("utf8 vault root");
+    let entry_dir = norn_run::resolve_cache_lock_dir_in(cache_home_utf8, root_utf8)
+        .unwrap_or_else(|e| panic!("resolve entry dir: {e}"));
+    assert!(
+        entry_dir.as_std_path().exists(),
+        "cache index must have created the entry dir"
+    );
+
+    // A leftover live-channel schema database sharing the entry — the test
+    // binary itself only ever builds the `dev/v5` one.
+    let fake_live_db_dir = entry_dir.join("v5");
+    fs::create_dir_all(fake_live_db_dir.as_std_path()).expect("fake live db dir should create");
+    fs::write(
+        fake_live_db_dir.join("cache.db").as_std_path(),
+        b"fake live-channel cache bytes",
+    )
+    .expect("fake live cache.db should write");
+
+    vault_success_env(&["-C", root.to_str().unwrap(), "cache", "clear"], &envs);
+
+    assert!(
+        !entry_dir.as_std_path().exists(),
+        "cache clear must remove the whole entry dir, including other channels/schemas"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(&cache_home).ok();
+}
+
+/// Regression test for the escape-hatch failure (NRN-270): `cache clear`
+/// against an undecodable database must succeed WITHOUT opening/rebuilding
+/// it first. Before this fix, `run_clear` opened the cache via `Cache::open`
+/// before deleting — against a database this broken, that open would have to
+/// run the corruption self-heal (evict + rebuild) just to report success, and
+/// against a cache whose meta claimed an unsupported schema it used to
+/// hard-error and delete nothing at all.
+#[test]
+fn clear_succeeds_against_undecodable_cache_no_open() {
+    let root = temp_cache_dir();
+    let cache_home = temp_cache_dir();
+    fs::create_dir_all(&root).expect("vault dir should be created");
+    fs::create_dir_all(&cache_home).expect("cache home should be created");
+    fs::write(root.join("a.md"), "---\ntitle: A\n---\nbody\n").expect("a.md should write");
+
+    let envs = [("XDG_CACHE_HOME", cache_home.to_str().unwrap())];
+    vault_success_env(&["-C", root.to_str().unwrap(), "cache", "index"], &envs);
+
+    let cache_home_utf8 = camino::Utf8Path::from_path(&cache_home).expect("utf8 cache home");
+    let root_utf8 = camino::Utf8Path::from_path(&root).expect("utf8 vault root");
+    let db_dir = norn_run::resolve_cache_dir_in(cache_home_utf8, root_utf8)
+        .unwrap_or_else(|e| panic!("resolve cache db dir: {e}"));
+    let db_path = db_dir.join("cache.db");
+    assert!(
+        db_path.as_std_path().exists(),
+        "cache index must have built cache.db"
+    );
+
+    // Gross byte garbage: not a valid SQLite file at all, and undecodable by
+    // any meta read.
+    fs::write(
+        db_path.as_std_path(),
+        b"not a sqlite database, deliberately broken",
+    )
+    .expect("corrupting cache.db should write");
+
+    let (_stdout, stderr) =
+        vault_success_env(&["-C", root.to_str().unwrap(), "cache", "clear"], &envs);
+    assert!(
+        !stderr.contains("rebuil") && !stderr.contains("corrupt"),
+        "clear must never open/rebuild the cache; got stderr: {stderr}"
+    );
+
+    let entry_dir = norn_run::resolve_cache_lock_dir_in(cache_home_utf8, root_utf8)
+        .unwrap_or_else(|e| panic!("resolve entry dir: {e}"));
+    assert!(
+        !entry_dir.as_std_path().exists(),
+        "clear must remove the entry dir even though the db was undecodable"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(&cache_home).ok();
+}
+
+/// Clearing a vault whose cache entry dir was never created (no prior `cache
+/// index`/`rebuild`/`status`) is success — "already clear" is not an error.
+#[test]
+fn cache_clear_when_entry_dir_absent_exits_zero() {
+    let root = temp_cache_dir();
+    let cache_home = temp_cache_dir();
+    fs::create_dir_all(&root).expect("vault dir should be created");
+    fs::create_dir_all(&cache_home).expect("cache home should be created");
+    fs::write(root.join("a.md"), "---\ntitle: A\n---\nbody\n").expect("a.md should write");
+
+    let envs = [("XDG_CACHE_HOME", cache_home.to_str().unwrap())];
+
+    // vault_success_env asserts a zero exit status internally.
+    vault_success_env(&["-C", root.to_str().unwrap(), "cache", "clear"], &envs);
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(&cache_home).ok();
+}
+
+/// While another process holds the shared entry `.lock`, `cache clear` must
+/// refuse (non-zero exit, contention reported on stderr) rather than delete
+/// anything out from under the lock holder.
+#[test]
+fn cache_clear_refused_while_entry_lock_held() {
+    let root = temp_cache_dir();
+    let cache_home = temp_cache_dir();
+    fs::create_dir_all(&root).expect("vault dir should be created");
+    fs::create_dir_all(&cache_home).expect("cache home should be created");
+    fs::write(root.join("a.md"), "---\ntitle: A\n---\nbody\n").expect("a.md should write");
+
+    let envs = [("XDG_CACHE_HOME", cache_home.to_str().unwrap())];
+    vault_success_env(&["-C", root.to_str().unwrap(), "cache", "index"], &envs);
+
+    let cache_home_utf8 = camino::Utf8Path::from_path(&cache_home).expect("utf8 cache home");
+    let root_utf8 = camino::Utf8Path::from_path(&root).expect("utf8 vault root");
+    let entry_dir = norn_run::resolve_cache_lock_dir_in(cache_home_utf8, root_utf8)
+        .unwrap_or_else(|e| panic!("resolve entry dir: {e}"));
+    let db_dir = norn_run::resolve_cache_dir_in(cache_home_utf8, root_utf8)
+        .unwrap_or_else(|e| panic!("resolve cache db dir: {e}"));
+    let db_path = db_dir.join("cache.db");
+    assert!(
+        db_path.as_std_path().exists(),
+        "cache index must have built cache.db"
+    );
+
+    let lock_path = entry_dir.join(".lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path.as_std_path())
+        .unwrap_or_else(|e| panic!("open lock file {lock_path}: {e}"));
+    fs2::FileExt::try_lock_exclusive(&lock_file)
+        .unwrap_or_else(|e| panic!("flock {lock_path}: {e}"));
+
+    let (_stdout, stderr, exit_code) =
+        vault_env(&["-C", root.to_str().unwrap(), "cache", "clear"], &envs);
+
+    assert_ne!(
+        exit_code, 0,
+        "clear must refuse (non-zero exit) while the entry lock is held"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "a refused clear must report the contention on stderr"
+    );
+    assert!(
+        db_path.as_std_path().exists(),
+        "clear must not delete anything while refused"
+    );
+    assert!(
+        entry_dir.as_std_path().exists(),
+        "clear must not delete the entry dir while refused"
+    );
+
+    fs2::FileExt::unlock(&lock_file).ok();
+    drop(lock_file);
 
     fs::remove_dir_all(&root).ok();
     fs::remove_dir_all(&cache_home).ok();
