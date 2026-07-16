@@ -6,7 +6,7 @@
 //! hold the append-only mutation event stream and are evicted only when their
 //! vault root no longer exists (or the entry is empty).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -188,6 +188,12 @@ fn is_lock_file(name: &str) -> bool {
 /// children contribute nothing. norn's own lock files contribute bytes and
 /// mtime but are excluded from the file count.
 fn measure(dir: &Utf8Path) -> (u64, Option<SystemTime>, usize) {
+    measure_skipping(dir, None)
+}
+
+/// `measure`, excluding one immediate child by name. Used by dry-run dev
+/// eviction to project an entry's post-removal measure without touching disk.
+fn measure_skipping(dir: &Utf8Path, skip_top: Option<&str>) -> (u64, Option<SystemTime>, usize) {
     let mut bytes = 0u64;
     let mut newest: Option<SystemTime> = None;
     let mut files = 0usize;
@@ -195,6 +201,11 @@ fn measure(dir: &Utf8Path) -> (u64, Option<SystemTime>, usize) {
         return (0, None, 0);
     };
     for e in entries.flatten() {
+        if let Some(skip) = skip_top {
+            if e.file_name().to_str() == Some(skip) {
+                continue;
+            }
+        }
         let Ok(md) = e.metadata() else { continue };
         if md.is_dir() {
             if let Ok(sub) = Utf8PathBuf::from_path_buf(e.path()) {
@@ -340,46 +351,65 @@ fn dev_db_newest_mtime(entry_dir: &Utf8Path) -> Option<SystemTime> {
     newest
 }
 
+/// Count a blocked entry toward `skipped_locked` exactly once per sweep: the
+/// dev-TTL pass and the entry pass can both hit the same held `.lock`, and the
+/// counter reports distinct blocked entries, not blocked attempts.
+fn mark_locked(report: &mut TreeReport, locked: &mut HashSet<String>, hash: &str) {
+    if locked.insert(hash.to_owned()) {
+        report.skipped_locked += 1;
+    }
+}
+
 /// Evict a stale `dev/` subtree from an entry, holding the shared entry `.lock`
 /// (the same zero-timeout flock `evict_cache_entry` uses) so an in-flight dev
 /// writer blocks the eviction. Only `dev/` is removed — never the live db, the
-/// shared `.lock`, nor the entry itself. On a real (non-dry-run) removal the
-/// in-memory `Entry` is re-measured so the remaining classification passes see
-/// accurate size/mtime/count; a now dev-only entry then falls through to the
-/// Empty policy this same sweep. A held lock or failed removal is a best-effort
-/// skip (counted as a locked skip), leaving `dev/` in place.
+/// shared `.lock`, nor the entry itself. The in-memory `Entry` is re-measured
+/// (real run) or projected without touching disk (dry-run) so the remaining
+/// classification passes see the shrunk entry identically on both paths: a now
+/// dev-only entry falls through to the Empty policy this same sweep, and dev
+/// bytes leave the cap-pass survivor total. A held lock or failed removal is a
+/// best-effort skip (counted as a locked skip), leaving `dev/` in place — a
+/// failed removal still re-measures, since part of the subtree may be gone.
 fn evict_dev_dir(
     report: &mut TreeReport,
     entry: &mut Entry,
     dev_mtime: SystemTime,
     now: SystemTime,
     dry_run: bool,
+    locked: &mut HashSet<String>,
 ) {
     let dev_dir = entry.dir.join("dev");
     let (dev_bytes, _, _) = measure(&dev_dir);
-    if !dry_run {
-        match crate::cache::acquire_flock(&entry.dir.join(".lock"), Duration::ZERO) {
-            Ok(_held) => {
-                if std::fs::remove_dir_all(dev_dir.as_std_path()).is_err() {
-                    return; // best-effort: a failed removal is silently skipped
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                report.skipped_locked += 1;
-                return;
-            }
-            // A lock we can't even open (permissions, IO): treat as locked-skip.
-            Err(_) => {
-                report.skipped_locked += 1;
-                return;
-            }
-        }
-        // Re-measure so the remaining passes classify the shrunk entry correctly
-        // and its size is not double-counted if the entry is later evicted whole.
-        let (bytes, newest, files) = measure(&entry.dir);
+    if dry_run {
+        // Simulate the shrink: project the entry's measure as if dev/ were
+        // gone, so dry-run classifies and accounts exactly like a real sweep.
+        let (bytes, newest, files) = measure_skipping(&entry.dir, Some("dev"));
         entry.bytes = bytes;
         entry.newest_mtime = newest;
         entry.file_count = files;
+    } else {
+        match crate::cache::acquire_flock(&entry.dir.join(".lock"), Duration::ZERO) {
+            Ok(_held) => {
+                let removed = std::fs::remove_dir_all(dev_dir.as_std_path()).is_ok();
+                // Re-measure actual disk state whether or not removal fully
+                // succeeded: a failed remove_dir_all can still have deleted
+                // part of the subtree, and later passes must see the truth.
+                let (bytes, newest, files) = measure(&entry.dir);
+                entry.bytes = bytes;
+                entry.newest_mtime = newest;
+                entry.file_count = files;
+                if !removed {
+                    mark_locked(report, locked, &entry.hash);
+                    return;
+                }
+            }
+            // WouldBlock, or a lock we can't even open (permissions, IO):
+            // best-effort locked-skip either way.
+            Err(_) => {
+                mark_locked(report, locked, &entry.hash);
+                return;
+            }
+        }
     }
     report.bytes_freed += dev_bytes;
     report.evicted.push(EvictedEntry {
@@ -432,6 +462,9 @@ pub(crate) fn sweep(
         scanned: cache_entries.len(),
         ..Default::default()
     };
+    // Entries whose .lock blocked an eviction attempt this sweep; keeps
+    // skipped_locked counting distinct entries, not attempts.
+    let mut locked: HashSet<String> = HashSet::new();
     // Dev-channel TTL pass (NRN-272): independently of the entry's own
     // freshness, evict a `dev/` db whose newest mtime has aged past
     // DEV_CACHE_TTL, removing only the dev subtree. Runs regardless of the
@@ -450,7 +483,14 @@ pub(crate) fn sweep(
             .map(|age| age > DEV_CACHE_TTL)
             .unwrap_or(false);
         if stale {
-            evict_dev_dir(&mut cache_report, entry, dev_mtime, now, opts.dry_run);
+            evict_dev_dir(
+                &mut cache_report,
+                entry,
+                dev_mtime,
+                now,
+                opts.dry_run,
+                &mut locked,
+            );
         }
     }
     let mut survivors: Vec<Entry> = Vec::new();
@@ -479,7 +519,14 @@ pub(crate) fn sweep(
             }
         };
         match reason {
-            Some(reason) => evict_into(&mut cache_report, entry, reason, now, opts.dry_run),
+            Some(reason) => evict_into(
+                &mut cache_report,
+                entry,
+                reason,
+                now,
+                opts.dry_run,
+                &mut locked,
+            ),
             None => survivors.push(entry),
         }
     }
@@ -508,6 +555,7 @@ pub(crate) fn sweep(
                 EvictReason::OverCap,
                 now,
                 opts.dry_run,
+                &mut locked,
             );
         }
     }
@@ -557,12 +605,13 @@ fn evict_into(
     reason: EvictReason,
     now: SystemTime,
     dry_run: bool,
+    locked: &mut HashSet<String>,
 ) {
     if !dry_run {
         match evict_cache_entry(&entry) {
             Ok(true) => {}
             Ok(false) => {
-                report.skipped_locked += 1;
+                mark_locked(report, locked, &entry.hash);
                 return;
             }
             Err(_) => return, // best-effort: a failed removal is silently skipped
@@ -806,10 +855,7 @@ mod tests {
         let old = mint_cache_entry(&cache_tree, H1, live_root);
         mint_cache_entry(&cache_tree, H2, live_root);
         // Backdate every file in H1 beyond the retention window.
-        let past = std::time::SystemTime::now() - Duration::from_secs(100 * 86_400);
-        for f in std::fs::read_dir(old.as_std_path()).unwrap().flatten() {
-            filetime::set_file_mtime(f.path(), filetime::FileTime::from_system_time(past)).unwrap();
-        }
+        backdate_dir(&old, Duration::from_secs(100 * 86_400));
         let report = sweep(&cache_tree, &state_tree, &opts(90));
         assert_eq!(hashes(&report.cache.evicted), vec![H1]);
         assert!(matches!(report.cache.evicted[0].reason, EvictReason::Aged));
@@ -826,11 +872,8 @@ mod tests {
         for (i, h) in [H1, H2, H3].iter().enumerate() {
             let dir = mint_cache_entry(&cache_tree, h, live_root);
             std::fs::write(dir.join("pad").as_std_path(), vec![0u8; 1000]).unwrap();
-            let age = Duration::from_secs((30 - i as u64 * 10) * 86_400); // 30d, 20d, 10d
-            let t = filetime::FileTime::from_system_time(std::time::SystemTime::now() - age);
-            for f in std::fs::read_dir(dir.as_std_path()).unwrap().flatten() {
-                filetime::set_file_mtime(f.path(), t).unwrap();
-            }
+            backdate_dir(&dir, Duration::from_secs((30 - i as u64 * 10) * 86_400));
+            // 30d, 20d, 10d
         }
         // Entry sizes are dominated by the real cache.db (tens of KB), so
         // compute the cap from measured sizes, never from the pad constant:
@@ -873,11 +916,8 @@ mod tests {
         for (i, h) in [H1, H2, H3].iter().enumerate() {
             let dir = mint_cache_entry(&cache_tree, h, live_root);
             std::fs::write(dir.join("pad").as_std_path(), vec![0u8; 1000]).unwrap();
-            let age = Duration::from_secs((30 - i as u64 * 10) * 86_400); // 30d, 20d, 10d
-            let t = filetime::FileTime::from_system_time(std::time::SystemTime::now() - age);
-            for f in std::fs::read_dir(dir.as_std_path()).unwrap().flatten() {
-                filetime::set_file_mtime(f.path(), t).unwrap();
-            }
+            backdate_dir(&dir, Duration::from_secs((30 - i as u64 * 10) * 86_400));
+            // 30d, 20d, 10d
         }
         let s2 = entry_size(&cache_tree, H2);
         let s3 = entry_size(&cache_tree, H3);
@@ -954,14 +994,10 @@ mod tests {
         )
         .unwrap();
         // Backdate every file under H3's state entry beyond the 90d retention window.
-        let past = std::time::SystemTime::now() - Duration::from_secs(100 * 86_400);
-        let ft = filetime::FileTime::from_system_time(past);
-        for f in std::fs::read_dir(state_tree.join(H3).join("events").as_std_path())
-            .unwrap()
-            .flatten()
-        {
-            filetime::set_file_mtime(f.path(), ft).unwrap();
-        }
+        backdate_dir(
+            &state_tree.join(H3).join("events"),
+            Duration::from_secs(100 * 86_400),
+        );
         // Truly empty state entry → evicted.
         mint_state_entry(&state_tree, H4, None);
         let report = sweep(&cache_tree, &state_tree, &opts(90));
@@ -1179,6 +1215,102 @@ mod tests {
             "a live-channel sweep still evicts a foreign stale dev db"
         );
         assert!(!entry1.join("dev").as_std_path().exists(), "dev/ removed");
+    }
+
+    /// NRN-272 (G1): dry-run must predict exactly what a real sweep does when
+    /// dev-stale eviction interacts with the entry-level policies. Entry A is
+    /// dev-stale AND aged (dev row + whole-entry row, no double-counting);
+    /// entry B is dev-only (dev row + Empty fall-through). Locks are pre-minted
+    /// and backdated so lock-file creation can't skew the real run's mtimes.
+    #[test]
+    fn dry_run_matches_real_run_for_dev_stale_entries() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let past = Duration::from_secs(100 * 86_400);
+        // A: live db + dev db, everything aged past retention AND the dev TTL.
+        let a = mint_cache_entry(&cache_tree, H1, live_root);
+        std::fs::write(a.join(".lock").as_std_path(), b"").unwrap();
+        let a_dev = mint_cache_entry(&a, "dev", live_root);
+        backdate_dir(&a_dev, past);
+        backdate_dir(&a, past);
+        // B: dev-only, dev db aged past the TTL.
+        let b = cache_tree.join(H2);
+        std::fs::create_dir_all(b.as_std_path()).unwrap();
+        std::fs::write(b.join(".lock").as_std_path(), b"").unwrap();
+        let b_dev = mint_cache_entry(&b, "dev", live_root);
+        backdate_dir(&b_dev, past);
+        backdate_dir(&b, past);
+
+        let rows = |report: &PruneReport| {
+            let mut v: Vec<(String, String, u64)> = report
+                .cache
+                .evicted
+                .iter()
+                .map(|e| (e.hash.clone(), format!("{:?}", e.reason), e.bytes))
+                .collect();
+            v.sort();
+            v
+        };
+        let mut o = opts(90);
+        o.dry_run = true;
+        let dry = sweep(&cache_tree, &state_tree, &o);
+        assert!(a.as_std_path().exists() && b.as_std_path().exists());
+        let real = sweep(&cache_tree, &state_tree, &opts(90));
+        assert_eq!(rows(&dry), rows(&real), "dry-run must mirror the real run");
+        assert_eq!(
+            dry.cache.bytes_freed, real.cache.bytes_freed,
+            "dev bytes must not double-count in dry-run"
+        );
+        // Sanity: the expected reason pairs actually occurred.
+        let reasons: Vec<&str> = rows(&real)
+            .iter()
+            .map(|(_, r, _)| r.as_str())
+            .map(|r| match r {
+                "DevStale" => "DevStale",
+                "Aged" => "Aged",
+                "Empty" => "Empty",
+                other => panic!("unexpected reason {other}"),
+            })
+            .collect();
+        assert_eq!(reasons.iter().filter(|r| **r == "DevStale").count(), 2);
+        assert_eq!(reasons.iter().filter(|r| **r == "Aged").count(), 1);
+        assert_eq!(reasons.iter().filter(|r| **r == "Empty").count(), 1);
+        assert!(!a.as_std_path().exists() && !b.as_std_path().exists());
+    }
+
+    /// NRN-272 (G4): a held entry `.lock` blocks dev eviction — the writer-
+    /// exclusion property. Dead root makes the entry pass attempt a whole-entry
+    /// eviction on the same lock too, pinning skipped_locked to count distinct
+    /// blocked entries (exactly 1), not blocked attempts (G3).
+    #[test]
+    fn held_entry_lock_blocks_dev_eviction_and_counts_once() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let entry = mint_cache_entry(&cache_tree, H1, "/nonexistent/vault/gone");
+        let dev = mint_cache_entry(&entry, "dev", "/nonexistent/vault/gone");
+        backdate_dir(&dev, Duration::from_secs(3 * 86_400));
+        let dev_db = dev.join("cache.db");
+        let dev_bytes = std::fs::read(dev_db.as_std_path()).unwrap();
+        let _held = crate::cache::acquire_flock(&entry.join(".lock"), Duration::ZERO).unwrap();
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+        assert!(
+            report.cache.evicted.is_empty(),
+            "nothing evicted under lock"
+        );
+        assert_eq!(
+            report.cache.skipped_locked, 1,
+            "one blocked entry counts once, not per attempt"
+        );
+        assert_eq!(
+            std::fs::read(dev_db.as_std_path()).unwrap(),
+            dev_bytes,
+            "dev db byte-identical under a held writer lock"
+        );
+        assert!(entry.as_std_path().exists());
     }
 
     #[test]
