@@ -57,18 +57,31 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Resolved on-disk layout for a vault's cache, split by channel.
+/// The on-disk directory segment naming this binary's cache schema version:
+/// `v{SCHEMA_VERSION}` (e.g. `v5`). The cache database lives under this segment
+/// of its channel dir, so a binary only ever opens its own channel+schema path
+/// and cross-version comparison is impossible by construction (NRN-286). Always
+/// derived from the constant — never hardcode the literal.
+pub(crate) fn schema_segment() -> String {
+    format!("v{}", crate::cache::SCHEMA_VERSION)
+}
+
+/// Resolved on-disk layout for a vault's cache, split by channel then schema
+/// version.
 ///
-/// The `entry_dir` (`<cache_home>/norn/<hash>`) is channel-independent: the
-/// write lock (`.lock`) and shared vault-level state live there, so a dev and a
-/// live binary mutating the same vault still serialize against each other. Only
-/// the database moves — `db_dir` is the entry dir for the live channel and a
-/// `dev/` subdir of it for the dev channel (NRN-269).
+/// The `entry_dir` (`<cache_home>/norn/<hash>`) is channel- and
+/// schema-independent: the write lock (`.lock`) and shared vault-level state
+/// live there, so a dev and a live binary (of any schema) mutating the same
+/// vault still serialize against each other. Only the database moves — `db_dir`
+/// is `<entry>/v{schema}` for the live channel and `<entry>/dev/v{schema}` for
+/// the dev channel (NRN-269 gave the channel split; NRN-286 added the schema
+/// segment).
 pub(crate) struct CacheLayout {
     pub(crate) canonical: Utf8PathBuf,
-    /// `<cache_home>/norn/<hash>` — write lock + shared state, all channels.
+    /// `<cache_home>/norn/<hash>` — write lock + shared state, all channels and
+    /// schema versions.
     pub(crate) entry_dir: Utf8PathBuf,
-    /// Directory holding `cache.db` for the resolved channel.
+    /// Directory holding `cache.db` for the resolved channel + schema version.
     pub(crate) db_dir: Utf8PathBuf,
     /// The channel this layout was resolved for — stored rather than re-derived
     /// from path geometry, so a label can never silently drift from the layout.
@@ -102,10 +115,11 @@ pub(crate) fn cache_layout_in_channel(
 ) -> Result<CacheLayout, CacheError> {
     let (canonical, hash) = vault_identity(vault_root)?;
     let entry_dir = cache_home.join("norn").join(hash);
-    let db_dir = match channel.db_subdir() {
+    let channel_dir = match channel.db_subdir() {
         Some(sub) => entry_dir.join(sub),
         None => entry_dir.clone(),
     };
+    let db_dir = channel_dir.join(schema_segment());
     Ok(CacheLayout {
         canonical,
         entry_dir,
@@ -115,10 +129,10 @@ pub(crate) fn cache_layout_in_channel(
 }
 
 /// Returns the vault's canonical root plus the directory holding its `cache.db`
-/// for the process channel. Format: `<XDG_CACHE_HOME>/norn/<hash>/` on the live
-/// channel, `<XDG_CACHE_HOME>/norn/<hash>/dev/` on the dev channel; defaults to
-/// `~/.cache/…` when `XDG_CACHE_HOME` is unset. The write lock does NOT live
-/// here on the dev channel — see [`CacheLayout`].
+/// for the process channel. Format: `<XDG_CACHE_HOME>/norn/<hash>/v{schema}/` on
+/// the live channel, `<XDG_CACHE_HOME>/norn/<hash>/dev/v{schema}/` on the dev
+/// channel; defaults to `~/.cache/…` when `XDG_CACHE_HOME` is unset. The write
+/// lock does NOT live here — it stays at the entry dir; see [`CacheLayout`].
 pub fn cache_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
     let layout = cache_layout_for(vault_root)?;
     Ok((layout.canonical, layout.db_dir))
@@ -258,9 +272,10 @@ mod tests {
         assert!(dir.as_str().ends_with("/events"));
     }
 
-    /// Path derivation per channel: the live db sits directly in the vault
-    /// entry dir; the dev db nests under a `dev/` segment of the SAME entry dir;
-    /// and the write-lock (entry) dir is byte-identical across both channels.
+    /// Path derivation per channel + schema version: the live db sits under a
+    /// `v{schema}` segment of the vault entry dir; the dev db nests under
+    /// `dev/v{schema}`; and the write-lock (entry) dir is byte-identical across
+    /// both channels and schema versions.
     #[test]
     fn cache_layout_splits_db_but_shares_entry_across_channels() {
         let tmp = TempDir::new().unwrap();
@@ -271,12 +286,14 @@ mod tests {
         let live = cache_layout_in_channel(&home, &root, Channel::Live).unwrap();
         let dev = cache_layout_in_channel(&home, &root, Channel::Dev).unwrap();
 
+        let schema = schema_segment();
         // Entry dir (lock lives here) is identical for both channels.
         assert_eq!(live.entry_dir, dev.entry_dir);
-        // Live db is the entry dir; dev db nests under `dev/`.
-        assert_eq!(live.db_dir, live.entry_dir);
-        assert_eq!(dev.db_dir, dev.entry_dir.join("dev"));
+        // Live db is `<entry>/v{schema}`; dev db is `<entry>/dev/v{schema}`.
+        assert_eq!(live.db_dir, live.entry_dir.join(&schema));
+        assert_eq!(dev.db_dir, dev.entry_dir.join("dev").join(&schema));
         assert_ne!(live.db_dir, dev.db_dir);
+        // The lock/entry dir stays the 64-hex vault hash, unqualified.
         assert_eq!(live.entry_dir.file_name().unwrap().len(), 64);
     }
 

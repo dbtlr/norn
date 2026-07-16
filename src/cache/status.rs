@@ -7,7 +7,8 @@ use crate::cache::error::CacheError;
 #[derive(Debug, Clone, Serialize)]
 pub struct CacheStatus {
     /// Cache isolation channel: `live` (installed binary) or `dev` (cargo build
-    /// tree). Dev caches nest under a `dev/` segment of `cache_path` (NRN-269).
+    /// tree). `cache_path` is schema-qualified — `<entry>/v{schema}/cache.db` on
+    /// live, `<entry>/dev/v{schema}/cache.db` on dev (NRN-269 + NRN-286).
     pub channel: String,
     pub cache_path: camino::Utf8PathBuf,
     pub size_bytes: u64,

@@ -132,14 +132,15 @@ pub(crate) const LOCK_CONTENTION_NOTE: &str =
 pub(crate) struct Cache {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) vault_root: camino::Utf8PathBuf,
-    /// Directory holding this handle's `cache.db` — channel-specific: the vault
-    /// entry dir on the live channel, its `dev/` subdir on the dev channel
-    /// (NRN-269).
+    /// Directory holding this handle's `cache.db` — channel- and schema-
+    /// specific: `<entry>/v{schema}` on the live channel, `<entry>/dev/v{schema}`
+    /// on the dev channel (NRN-269 split by channel, NRN-286 by schema version).
     pub(crate) cache_dir: camino::Utf8PathBuf,
-    /// The channel-independent vault entry dir (`<cache_home>/norn/<hash>`) that
-    /// holds the shared write lock (`.lock`). Equal to `cache_dir` on the live
-    /// channel; `cache_dir`'s parent on the dev channel. A dev and a live binary
-    /// against the same vault serialize on this one lock.
+    /// The channel- and schema-independent vault entry dir
+    /// (`<cache_home>/norn/<hash>`) that holds the shared write lock (`.lock`).
+    /// Always an ancestor of `cache_dir` (its grandparent on dev, great-parent
+    /// via the schema segment on live). A dev and a live binary against the same
+    /// vault serialize on this one lock.
     pub(crate) lock_dir: camino::Utf8PathBuf,
     /// The cache channel this handle opened under, carried from the resolved
     /// [`identity::CacheLayout`] rather than re-derived from path geometry.
