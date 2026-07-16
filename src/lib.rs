@@ -31,7 +31,7 @@ mod init_scan;
 mod links;
 mod mcp;
 pub mod migration_plan;
-pub mod move_doc;
+pub mod r#move;
 mod mutation_lock;
 mod new;
 mod output;
@@ -1080,7 +1080,7 @@ fn routed_confirm(dry_run: bool, yes: bool, format_is_json: bool) -> Option<bool
 /// beside `foo.md`) all route and resolve identically to Direct. An
 /// unresolvable or ambiguous source still refuses (a coded `target-not-found`
 /// / `target-ambiguous`), reconstructed byte-identically on the wire. See
-/// `move_doc::route`.
+/// `r#move::route`.
 #[cfg(unix)]
 fn try_route_move(
     args: &crate::cli::MoveArgs,
@@ -1115,13 +1115,13 @@ fn try_route_move(
         cwd,
         CallSpec {
             tool: "vault.move",
-            arguments: crate::move_doc::route::to_mcp_arguments(args, confirm),
+            arguments: crate::r#move::route::to_mcp_arguments(args, confirm),
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
-        move |report| crate::move_doc::route::emit(report, format, &src, &dst, is_folder, dry_run),
+        move |report| crate::r#move::route::emit(report, format, &src, &dst, is_folder, dry_run),
     )
 }
 
@@ -1853,7 +1853,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // handles a not-yet-existing `-p`/`--parents` subtree) still runs
             // inside the apply orchestrator before any write, on dry-run too.
             let move_plan = if !is_folder {
-                let cfg = crate::move_doc::PreflightConfig {
+                let cfg = crate::r#move::PreflightConfig {
                     src: &args.src,
                     dst: &args.dst,
                     force: args.force,
@@ -1862,7 +1862,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     vault_root: &cwd,
                     index: &index,
                 };
-                match crate::move_doc::preflight_and_plan(cfg) {
+                match crate::r#move::preflight_and_plan(cfg) {
                     Ok(plan) => Some(plan),
                     Err(e) => {
                         // NRN-229: structured envelope on stdout for `--format
@@ -2016,10 +2016,10 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 }
                 crate::cli::MoveFormat::Records => {
                     if is_folder {
-                        crate::move_doc::render_folder_apply_tty(&mut out, &report, dry_run)?;
+                        crate::r#move::render_folder_apply_tty(&mut out, &report, dry_run)?;
                     } else {
                         let applied = !dry_run && exit == 0;
-                        crate::move_doc::render_move_apply_tty(
+                        crate::r#move::render_move_apply_tty(
                             &mut out, &args.src, &args.dst, link_total, link_files, applied,
                         )?;
                     }

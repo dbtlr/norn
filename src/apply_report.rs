@@ -359,7 +359,7 @@ impl ApplyError {
         // so a CLI JSON consumer gets the same stable code an MCP client sees via
         // `mcp::mutate::refusal_from_error`. Previously these `anyhow::bail!`-ed
         // into a bare string laundered to `internal-error`.
-        if let Some(mv) = e.downcast_ref::<crate::move_doc::MovePreflightError>() {
+        if let Some(mv) = e.downcast_ref::<crate::r#move::MovePreflightError>() {
             return Self {
                 code: mv.code().to_string(),
                 message: mv.to_string(),
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn from_anyhow_recovers_the_preflight_refusal_codes() {
         let e: anyhow::Error =
-            crate::move_doc::MovePreflightError::DestinationExists("b.md".into()).into();
+            crate::r#move::MovePreflightError::DestinationExists("b.md".into()).into();
         assert_eq!(ApplyError::from_anyhow(&e).code, "destination-exists");
 
         let e: anyhow::Error = crate::delete_doc::DeletePreflightError::RewriteToSelf.into();

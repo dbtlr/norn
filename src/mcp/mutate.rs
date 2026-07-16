@@ -161,7 +161,7 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
     // discarding the type — so the code laundered to `internal-error` (or, on a
     // committing routed apply, `post-send-uncertain`). Recovered here, each
     // becomes a coded, structured `refused` report.
-    if let Some(mv) = e.downcast_ref::<crate::move_doc::MovePreflightError>() {
+    if let Some(mv) = e.downcast_ref::<crate::r#move::MovePreflightError>() {
         return Some(Envelope {
             code: mv.code().to_string(),
             message: mv.to_string(),
@@ -774,14 +774,14 @@ mod refusal_tests {
     #[test]
     fn move_preflight_error_yields_its_code() {
         let e: anyhow::Error =
-            crate::move_doc::MovePreflightError::SourceMissing("a.md".into()).into();
+            crate::r#move::MovePreflightError::SourceMissing("a.md".into()).into();
         assert_eq!(
             refusal_from_error(&e)
                 .expect("a MovePreflightError is a recognized refusal")
                 .code,
             "target-not-found"
         );
-        let e: anyhow::Error = crate::move_doc::MovePreflightError::SamePath("a.md".into()).into();
+        let e: anyhow::Error = crate::r#move::MovePreflightError::SamePath("a.md".into()).into();
         assert_eq!(
             refusal_from_error(&e).expect("recognized").code,
             "source-destination-same"
