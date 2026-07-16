@@ -366,7 +366,7 @@ impl ApplyError {
                 path: None,
             };
         }
-        if let Some(del) = e.downcast_ref::<crate::delete_doc::DeletePreflightError>() {
+        if let Some(del) = e.downcast_ref::<crate::delete::DeletePreflightError>() {
             return Self {
                 code: del.code().to_string(),
                 message: del.to_string(),
@@ -538,7 +538,7 @@ mod tests {
             crate::r#move::MovePreflightError::DestinationExists("b.md".into()).into();
         assert_eq!(ApplyError::from_anyhow(&e).code, "destination-exists");
 
-        let e: anyhow::Error = crate::delete_doc::DeletePreflightError::RewriteToSelf.into();
+        let e: anyhow::Error = crate::delete::DeletePreflightError::RewriteToSelf.into();
         assert_eq!(ApplyError::from_anyhow(&e).code, "rewrite-to-self");
 
         let e: anyhow::Error =

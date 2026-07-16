@@ -20,7 +20,7 @@
 //! The CLI's `Command::Delete` dispatch in `main.rs`:
 //! 1. Acquires the mutation lock.
 //! 2. Loads config + graph index.
-//! 3. Runs `delete_doc::preflight_and_plan` (exit 2 on refusal — e.g. incoming
+//! 3. Runs `delete::preflight_and_plan` (exit 2 on refusal — e.g. incoming
 //!    links present without `--allow-broken-links` or `--rewrite-to`).
 //! 4. Builds a one-op `delete_document` `MigrationPlan` with the same
 //!    `{path, rewrite_to, allow_broken_links}` fields.
@@ -173,7 +173,7 @@ pub fn handle(
     // Preflight: resolve the doc + enforce the backlinks policy. Refuse early
     // (the CLI exits 2): incoming-links-present without --rewrite-to /
     // --allow-broken-links, ambiguous/missing target, bad rewrite_to, etc.
-    let cfg = crate::delete_doc::PreflightConfig {
+    let cfg = crate::delete::PreflightConfig {
         doc: &p.target,
         allow_broken_links: p.allow_broken_links,
         rewrite_to: p.rewrite_to.as_deref(),
@@ -192,7 +192,7 @@ pub fn handle(
     // "doc.md") via `resolve_target_path`; the raw `target` may not match a
     // real filesystem path at all. `rewrite_to` stays the RAW value — the
     // applier resolves it only for `link_impact.redirect_to`, matching the CLI.
-    let outcome = crate::delete_doc::preflight_and_plan(cfg)?;
+    let outcome = crate::delete::preflight_and_plan(cfg)?;
     let delete_change = outcome.plan.expect_change("delete_document");
 
     // Build the one-op MigrationPlan, matching the CLI's fields exactly.

@@ -16,7 +16,7 @@ mod config;
 mod config_loader;
 mod core;
 mod count;
-pub mod delete_doc;
+pub mod delete;
 mod describe;
 mod edit;
 mod filter;
@@ -1159,7 +1159,7 @@ fn try_route_move(
 /// (NRN-237): the applier attaches the records renderer's index-derived
 /// incoming-link data to the `delete_document` op as `link_impact`, so it rides
 /// the wire `ApplyReport` and the routed path renders byte-identically. See
-/// `delete_doc::route`.
+/// `delete::route`.
 #[cfg(unix)]
 fn try_route_delete(
     args: &crate::cli::DeleteArgs,
@@ -1185,13 +1185,13 @@ fn try_route_delete(
         cwd,
         CallSpec {
             tool: "vault.delete",
-            arguments: crate::delete_doc::route::to_mcp_arguments(args, confirm),
+            arguments: crate::delete::route::to_mcp_arguments(args, confirm),
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
-        move |report| crate::delete_doc::route::emit(report, format, &doc, dry_run),
+        move |report| crate::delete::route::emit(report, format, &doc, dry_run),
     )
 }
 
@@ -2088,14 +2088,14 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // Backlinks-present + no --rewrite-to + no --allow-broken-links → exit 2.
             // Extract incoming-link data for TTY rendering.
             // ----------------------------------------------------------------
-            let cfg = crate::delete_doc::PreflightConfig {
+            let cfg = crate::delete::PreflightConfig {
                 doc: &args.doc,
                 allow_broken_links: args.allow_broken_links,
                 rewrite_to: args.rewrite_to.as_deref(),
                 vault_root: &cwd,
                 index: &index,
             };
-            let outcome = match crate::delete_doc::preflight_and_plan(cfg) {
+            let outcome = match crate::delete::preflight_and_plan(cfg) {
                 Ok(o) => o,
                 Err(e) => {
                     // NRN-229: structured envelope on stdout for `--format json`
@@ -2138,7 +2138,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     requires: vec![],
                     fields: serde_json::json!({
                         // NRN-57: use the RESOLVED path (stem or exact path
-                        // both land here via delete_doc::preflight_and_plan),
+                        // both land here via delete::preflight_and_plan),
                         // not the raw CLI arg — the raw arg may be a bare stem
                         // that isn't in the index verbatim, which previously
                         // caused every stem-addressed delete to fail with a
@@ -2209,7 +2209,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     // The renderer reads the delete op's index-derived `link_impact`
                     // (NRN-237) and apply-time `cascade` straight off the report —
                     // the same report the routed path reconstructs, so both match.
-                    crate::delete_doc::render_delete_records(
+                    crate::delete::render_delete_records(
                         &mut out, &report, &args.doc, dry_run,
                     )?;
                 }

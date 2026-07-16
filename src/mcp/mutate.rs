@@ -168,7 +168,7 @@ pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_repor
             path: None,
         });
     }
-    if let Some(del) = e.downcast_ref::<crate::delete_doc::DeletePreflightError>() {
+    if let Some(del) = e.downcast_ref::<crate::delete::DeletePreflightError>() {
         return Some(Envelope {
             code: del.code().to_string(),
             message: del.to_string(),
@@ -792,7 +792,7 @@ mod refusal_tests {
     #[test]
     fn delete_preflight_error_yields_its_code() {
         let e: anyhow::Error =
-            crate::delete_doc::DeletePreflightError::IncomingLinksRefused { count: 2 }.into();
+            crate::delete::DeletePreflightError::IncomingLinksRefused { count: 2 }.into();
         assert_eq!(
             refusal_from_error(&e)
                 .expect("a DeletePreflightError is a recognized refusal")
