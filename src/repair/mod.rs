@@ -1,3 +1,12 @@
+//! The `norn repair` command.
+//!
+//! Runs the validate engine, filters the findings, and turns them into a
+//! `MigrationPlan` via `planner::findings`. `run_plan` emits the plan for
+//! review (`--plan` mode); `run_summary` rolls it up. The `Repair` arm in
+//! `lib.rs` dispatches here, and `route.rs` forwards a routable repair to the
+//! daemon; `repair_apply.rs` executes the plan the apply step accepts.
+//! `render` formats the output, `skip_reasons` explains unrepaired findings.
+
 pub mod render;
 pub mod route;
 pub mod skip_reasons;

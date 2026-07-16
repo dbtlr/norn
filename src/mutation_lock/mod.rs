@@ -1,3 +1,12 @@
+//! The per-vault mutation lock every mutating surface acquires.
+//!
+//! A single advisory flock, next to the vault's cache, that serializes
+//! mutations across the CLI, the MCP server, and the daemon so two writers can
+//! never race one vault. Callers acquire it for the duration of an apply and
+//! get a typed `CacheError::MutationLockTimeout` on contention, which the
+//! refusal seams turn into a `mutation-lock-timeout` code. `pending` sweeps
+//! stale pending markers before acquire.
+
 pub mod pending;
 
 use crate::cache::{acquire_flock, CacheError};

@@ -334,6 +334,14 @@ impl ApplyError {
     /// `internal-error` code for anything unrecognized so a JSON consumer ALWAYS
     /// gets `{ code, message }`, never a bare exit + prose. This is the single
     /// seam that turns the CLI/MCP `Err` path into a structured envelope.
+    //
+    // Adding a refusal code (stopgap until the CodedError trait, NRN-236):
+    //   1. Give the typed error a `code()` returning a stable kebab-case string.
+    //   2. Add a downcast arm HERE (the CLI JSON seam).
+    //   3. Add the matching arm in `mcp::mutate::refusal_from_error` (the MCP
+    //      seam) — the two ladders are maintained by hand and must agree.
+    //   4. Add the row to docs/errors.md.
+    // NRN-236 replaces both ladders with a single trait-object lookup.
     pub fn from_anyhow(e: &anyhow::Error) -> Self {
         if let Some(rich) = e.downcast_ref::<crate::standards::apply::ApplyError>() {
             return Self::from_rich(rich);

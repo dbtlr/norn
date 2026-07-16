@@ -1,3 +1,11 @@
+//! The serializable graph types and diagnostics at the center of the crate.
+//!
+//! `Document`, `Link`, `GraphIndex`, and the `Diagnostic` / `SourceSpan`
+//! machinery every other module speaks in. The parsing modules
+//! (`frontmatter`, `links`, `graph`) build these; the cache serializes them;
+//! commands read them. Pure data with no I/O, so it is the shared vocabulary
+//! rather than a dependency on any surface. `display` renders them for output.
+
 pub(crate) mod display;
 
 use camino::Utf8PathBuf;

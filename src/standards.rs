@@ -1,3 +1,13 @@
+//! The validate engine, vault config, and repair rules.
+//!
+//! Where declared standards become findings and fixes. `config` parses and
+//! compiles the `VaultConfig` (validate rules, repair settings, retention);
+//! `engine` plus `checks` and `predicates` run the rules over a `GraphIndex`
+//! and emit `findings`; `repair` maps a finding to a fix; `apply` holds the
+//! low-level, containment-checked write primitives every mutation path calls.
+//! `config_loader` loads the config; `validate`, `repair`, and the appliers are
+//! the consumers.
+
 pub(crate) mod apply;
 mod checks;
 mod config;
