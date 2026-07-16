@@ -943,7 +943,7 @@ mod tests {
 
             // Derive the target path via the same resolver the CLI uses, to
             // confirm its output is byte-identical to the stored resolved_path.
-            let resolved = crate::show::target::resolve_target(&cache, "hub").unwrap();
+            let resolved = crate::get::target::resolve_target(&cache, "hub").unwrap();
             assert_eq!(resolved.paths, vec![Utf8PathBuf::from("hub.md")]);
 
             let query = DocumentQuery {

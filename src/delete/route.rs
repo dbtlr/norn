@@ -85,7 +85,7 @@ pub fn emit(
             out.write_all(b"\n")?;
         }
         DeleteFormat::Records => {
-            crate::delete_doc::render_delete_records(&mut out, &report, doc, dry_run)?;
+            crate::delete::render_delete_records(&mut out, &report, doc, dry_run)?;
         }
     }
     Ok(exit)

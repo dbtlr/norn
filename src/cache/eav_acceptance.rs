@@ -79,7 +79,7 @@ validate:
 "#;
 
     /// Resolve `MIMIR_CONFIG` into an authoritative, rebuilt cache over
-    /// `root`. Mirrors what `crate::cache_cmd::open_for_query` does in
+    /// `root`. Mirrors what `crate::cache::command::open_for_query` does in
     /// production: parse config, resolve the index set, open with it.
     fn open_mimir(root: &Utf8PathBuf) -> Cache {
         let cfg = crate::standards::parse_config(

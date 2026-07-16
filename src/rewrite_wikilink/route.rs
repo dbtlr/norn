@@ -3,7 +3,7 @@
 //! `rewrite-wikilink` wraps the same [`ApplyReport`] on the wire as `move` /
 //! `delete`, rebuilt via [`crate::apply_report::reconstruct_wire_report`]. It is
 //! the CLEANEST cascade command to route: unlike `move`/`delete`, BOTH the CLI
-//! arm (`rewrite_wikilink_cmd::run`) and `vault.rewrite_wikilink` build the plan
+//! arm (`rewrite_wikilink::run`) and `vault.rewrite_wikilink` build the plan
 //! from the RAW `{old, new}` (the expander resolves OLD internally, identically
 //! on both paths), so there is no stem-resolution divergence and NO on-disk gate
 //! is needed — every input routes, including an unresolvable OLD (a
@@ -19,7 +19,7 @@ use serde_json::{Map, Value};
 
 use crate::apply_report::{emit_refusal, ApplyOutcome, ApplyReport};
 use crate::cli::RewriteWikilinkFormat;
-use crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs;
+use crate::rewrite_wikilink::RewriteWikilinkRunArgs;
 
 /// Translate the `norn rewrite-wikilink` run args into the
 /// `vault.rewrite_wikilink` tool's parameter object (`RewriteWikilinkParams`).
@@ -35,7 +35,7 @@ pub fn to_mcp_arguments(args: &RewriteWikilinkRunArgs, confirm: bool) -> Value {
 }
 
 /// Render a reconstructed rewrite-wikilink [`ApplyReport`] exactly as
-/// `rewrite_wikilink_cmd::render_report` does, returning the process exit code.
+/// `rewrite_wikilink::render_report` does, returning the process exit code.
 ///
 /// - **refused** (`target-not-found`, OLD unresolvable): the pretty `ApplyError`
 ///   envelope on stdout for json, or `error: <message>` on stderr for records —
@@ -73,7 +73,7 @@ pub fn emit(report: ApplyReport, args: &RewriteWikilinkRunArgs) -> anyhow::Resul
         }
         RewriteWikilinkFormat::Records => {
             // `render_records` is module-private; a submodule may reach it.
-            crate::rewrite_wikilink_cmd::render_records(&report, &args.old, &args.new, &mut out)?;
+            crate::rewrite_wikilink::render_records(&report, &args.old, &args.new, &mut out)?;
             if !report.dry_run {
                 writeln!(out, "trace: {}", report.trace_id)?;
             }

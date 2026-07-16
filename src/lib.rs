@@ -1,5 +1,5 @@
 pub mod applier;
-mod apply_cmd;
+mod apply;
 pub mod apply_report;
 mod audit;
 mod cache;
@@ -9,20 +9,20 @@ mod cache;
 // function, no env read. `#[doc(hidden)]` seam, not stable public API — see
 // `cache::resolve_cache_dir_in`.
 pub use cache::{resolve_cache_dir_in, resolve_cache_lock_dir_in};
-mod cache_cmd;
 mod cli;
 mod completions;
 mod config;
 mod config_loader;
 mod core;
 mod count;
-pub mod delete_doc;
+pub mod delete;
 mod describe;
 mod edit;
 mod filter;
 mod filter_args;
 mod find;
 mod frontmatter;
+mod get;
 mod grammar;
 mod graph;
 mod help;
@@ -31,7 +31,7 @@ mod init_scan;
 mod links;
 mod mcp;
 pub mod migration_plan;
-pub mod move_doc;
+pub mod r#move;
 mod mutation_lock;
 mod new;
 mod output;
@@ -40,14 +40,13 @@ pub mod prompt;
 mod query;
 mod repair;
 mod repair_apply;
-mod rewrite_wikilink_cmd;
+mod rewrite_wikilink;
 mod route_wire;
 mod self_update;
 mod seq_alloc;
 mod serve;
 mod service;
 mod set;
-mod show;
 mod standards;
 mod target;
 mod telemetry;
@@ -56,13 +55,13 @@ mod validate_filter;
 
 use std::process;
 
-use crate::apply_cmd::ApplyRunArgs;
+use crate::apply::ApplyRunArgs;
 use crate::cli::{CacheSubcommand, Cli, Command, ConfigSubcommand};
 use crate::config_loader::{effective_cwd, load_config};
 use crate::core::GraphIndex;
 use crate::graph::{concise_diagnostics, has_errors};
 use crate::output::primitives::is_broken_pipe;
-use crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs;
+use crate::rewrite_wikilink::RewriteWikilinkRunArgs;
 use crate::standards::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 use anyhow::Result;
@@ -197,7 +196,7 @@ fn stdin_carries_redirected_payload() -> bool {
 ///   signal — NRN-222), and the SAME projected per-document JSON `--format json`
 ///   emits; the client rebuilds a `FindResult` + deep/raw and renders via `find::emit`.
 /// - `get` — `vault.get` ships each full serialized `ShowRecord` plus `notes`
-///   (NRN-214); the client rebuilds a `ShowReport` and renders via `show::emit`,
+///   (NRN-214); the client rebuilds a `ShowReport` and renders via `get::emit`,
 ///   applying the CLI's client-side `--col` narrowing. `--format markdown`
 ///   travels in a dedicated exact-source envelope; `--section` stays Direct
 ///   (see `route_get`).
@@ -652,11 +651,11 @@ fn route_get(
             cwd,
             CallSpec {
                 tool: "vault.get",
-                arguments: crate::show::route::to_mcp_arguments(args),
+                arguments: crate::get::route::to_mcp_arguments(args),
                 on_tool_error: crate::service::OnToolError::AcceptWithPayload,
                 verbose,
             },
-            crate::show::route::reconstruct_markdown,
+            crate::get::route::reconstruct_markdown,
             |routed| {
                 use std::io::Write as _;
 
@@ -694,7 +693,7 @@ fn route_get(
         cwd,
         CallSpec {
             tool: "vault.get",
-            arguments: crate::show::route::to_mcp_arguments(args),
+            arguments: crate::get::route::to_mcp_arguments(args),
             // vault.get flags a not-found target as `isError: true` while still
             // shipping the full structuredContent (NRN-214); accept it so the
             // routed client derives the CLI's exit-1 from the wire notes instead
@@ -702,8 +701,8 @@ fn route_get(
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
-        |structured| crate::show::route::reconstruct(structured, args),
-        |report| crate::show::emit(&report, args),
+        |structured| crate::get::route::reconstruct(structured, args),
+        |report| crate::get::emit(&report, args),
     )
 }
 
@@ -1080,7 +1079,7 @@ fn routed_confirm(dry_run: bool, yes: bool, format_is_json: bool) -> Option<bool
 /// beside `foo.md`) all route and resolve identically to Direct. An
 /// unresolvable or ambiguous source still refuses (a coded `target-not-found`
 /// / `target-ambiguous`), reconstructed byte-identically on the wire. See
-/// `move_doc::route`.
+/// `r#move::route`.
 #[cfg(unix)]
 fn try_route_move(
     args: &crate::cli::MoveArgs,
@@ -1115,13 +1114,13 @@ fn try_route_move(
         cwd,
         CallSpec {
             tool: "vault.move",
-            arguments: crate::move_doc::route::to_mcp_arguments(args, confirm),
+            arguments: crate::r#move::route::to_mcp_arguments(args, confirm),
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
-        move |report| crate::move_doc::route::emit(report, format, &src, &dst, is_folder, dry_run),
+        move |report| crate::r#move::route::emit(report, format, &src, &dst, is_folder, dry_run),
     )
 }
 
@@ -1159,7 +1158,7 @@ fn try_route_move(
 /// (NRN-237): the applier attaches the records renderer's index-derived
 /// incoming-link data to the `delete_document` op as `link_impact`, so it rides
 /// the wire `ApplyReport` and the routed path renders byte-identically. See
-/// `delete_doc::route`.
+/// `delete::route`.
 #[cfg(unix)]
 fn try_route_delete(
     args: &crate::cli::DeleteArgs,
@@ -1185,13 +1184,13 @@ fn try_route_delete(
         cwd,
         CallSpec {
             tool: "vault.delete",
-            arguments: crate::delete_doc::route::to_mcp_arguments(args, confirm),
+            arguments: crate::delete::route::to_mcp_arguments(args, confirm),
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
-        move |report| crate::delete_doc::route::emit(report, format, &doc, dry_run),
+        move |report| crate::delete::route::emit(report, format, &doc, dry_run),
     )
 }
 
@@ -1214,10 +1213,10 @@ fn try_route_delete(
 /// The cleanest cascade command to route: BOTH surfaces apply the raw
 /// `{old, new}` (no stem-resolution divergence), so no on-disk guard is needed —
 /// every input routes, including an unresolvable OLD (a `target-not-found` coded
-/// refusal). `--out` is reproduced client-side in `rewrite_wikilink_cmd::route::emit`.
+/// refusal). `--out` is reproduced client-side in `rewrite_wikilink::route::emit`.
 #[cfg(unix)]
 fn try_route_rewrite_wikilink(
-    args: &crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs,
+    args: &crate::rewrite_wikilink::RewriteWikilinkRunArgs,
     cwd: &camino::Utf8Path,
     explicit_config: bool,
     no_cache_refresh: bool,
@@ -1233,11 +1232,11 @@ fn try_route_rewrite_wikilink(
         matches!(args.format, crate::cli::RewriteWikilinkFormat::Json),
     )?;
 
-    let arguments = crate::rewrite_wikilink_cmd::route::to_mcp_arguments(args, confirm);
+    let arguments = crate::rewrite_wikilink::route::to_mcp_arguments(args, confirm);
     let dry_run = !confirm;
     // The emit closure needs the run args (old/new/format/out); clone the small
     // owned fields it reads into a captured copy.
-    let emit_args = crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs {
+    let emit_args = crate::rewrite_wikilink::RewriteWikilinkRunArgs {
         old: args.old.clone(),
         new: args.new.clone(),
         dry_run: args.dry_run,
@@ -1255,14 +1254,14 @@ fn try_route_rewrite_wikilink(
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
-        move |report| crate::rewrite_wikilink_cmd::route::emit(report, &emit_args),
+        move |report| crate::rewrite_wikilink::route::emit(report, &emit_args),
     )
 }
 
 /// Non-Unix build: `rewrite-wikilink` always runs Direct.
 #[cfg(not(unix))]
 fn try_route_rewrite_wikilink(
-    args: &crate::rewrite_wikilink_cmd::RewriteWikilinkRunArgs,
+    args: &crate::rewrite_wikilink::RewriteWikilinkRunArgs,
     cwd: &camino::Utf8Path,
     explicit_config: bool,
     no_cache_refresh: bool,
@@ -1276,13 +1275,13 @@ fn try_route_rewrite_wikilink(
 /// to run the direct path.
 ///
 /// **The plan crosses as the PARSED value, never a path.** The caller has already
-/// run [`crate::apply_cmd::preamble`] (read + parse + schema-check, byte-identical
+/// run [`crate::apply::preamble`] (read + parse + schema-check, byte-identical
 /// to Direct — a schema mismatch refuses exit 2 BEFORE this is reached), so the
 /// wire only ever carries a valid, correctly-versioned [`MigrationPlan`],
 /// re-serialized into the `vault.apply` `plan` argument. YAML input routes the
 /// same way — the daemon applies the identical struct. `raw` (the plan's RAW
 /// bytes) and `state_dir` (already resolved + swept before routing) are threaded
-/// in for the CLI-owned lock-timeout stash (see `apply_cmd::route::emit`).
+/// in for the CLI-owned lock-timeout stash (see `apply::route::emit`).
 ///
 /// **Routing runs BEFORE the direct arm's local mutation lock** (same reason as
 /// `set`/`delete`): the daemon acquires the SAME per-vault lock in-process, so a
@@ -1306,7 +1305,7 @@ fn try_route_rewrite_wikilink(
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn try_route_apply(
-    args: &crate::apply_cmd::ApplyRunArgs,
+    args: &crate::apply::ApplyRunArgs,
     plan: &crate::migration_plan::MigrationPlan,
     raw: &str,
     state_dir: &camino::Utf8Path,
@@ -1337,21 +1336,14 @@ fn try_route_apply(
         cwd,
         CallSpec {
             tool: "vault.apply",
-            arguments: crate::apply_cmd::route::to_mcp_arguments(plan, confirm, args.parents),
+            arguments: crate::apply::route::to_mcp_arguments(plan, confirm, args.parents),
             on_tool_error: crate::service::OnToolError::AcceptWithPayload,
             verbose,
         },
         dry_run,
         crate::apply_report::reconstruct_wire_report,
         move |report| {
-            crate::apply_cmd::route::emit(
-                report,
-                format,
-                out.as_deref(),
-                &plan_path,
-                &raw,
-                &state_dir,
-            )
+            crate::apply::route::emit(report, format, out.as_deref(), &plan_path, &raw, &state_dir)
         },
     )
 }
@@ -1360,7 +1352,7 @@ fn try_route_apply(
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
 fn try_route_apply(
-    args: &crate::apply_cmd::ApplyRunArgs,
+    args: &crate::apply::ApplyRunArgs,
     plan: &crate::migration_plan::MigrationPlan,
     raw: &str,
     state_dir: &camino::Utf8Path,
@@ -1481,10 +1473,10 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // on stderr) byte-identically to Direct, BEFORE any wire activity; a
             // parse failure propagates as the `Err` arm (outcome → lazy_sweep runs
             // exactly as today).
-            match apply_cmd::preamble(&run_args) {
+            match apply::preamble(&run_args) {
                 Err(e) => Err(e),
-                Ok(apply_cmd::Preamble::Refused(code)) => Ok(code),
-                Ok(apply_cmd::Preamble::Ready { raw, plan }) => {
+                Ok(apply::Preamble::Refused(code)) => Ok(code),
+                Ok(apply::Preamble::Ready { raw, plan }) => {
                     // Resolve the state dir and sweep stale pending plans BEFORE
                     // routing (design: the sweep runs exactly as it did before
                     // Direct); the state dir also feeds the CLI-owned lock-timeout
@@ -1511,7 +1503,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                         return result;
                     }
 
-                    apply_cmd::run_direct(
+                    apply::run_direct(
                         &run_args,
                         plan,
                         &raw,
@@ -1545,7 +1537,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             ) {
                 return result;
             }
-            rewrite_wikilink_cmd::run(
+            rewrite_wikilink::run(
                 run_args,
                 &cwd,
                 no_cache_refresh,
@@ -1570,16 +1562,16 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
             match &cache_command.command {
                 CacheSubcommand::Index(args) => {
-                    crate::cache_cmd::run_index(&cwd, &loaded_config.index_options, args)?
+                    crate::cache::command::run_index(&cwd, &loaded_config.index_options, args)?
                 }
                 CacheSubcommand::Rebuild => {
-                    crate::cache_cmd::run_rebuild(&cwd, &loaded_config.index_options)?
+                    crate::cache::command::run_rebuild(&cwd, &loaded_config.index_options)?
                 }
-                CacheSubcommand::Clear => crate::cache_cmd::run_clear(&cwd)?,
+                CacheSubcommand::Clear => crate::cache::command::run_clear(&cwd)?,
                 CacheSubcommand::Status(args) => {
-                    crate::cache_cmd::run_status(&cwd, &loaded_config.index_options, args)?
+                    crate::cache::command::run_status(&cwd, &loaded_config.index_options, args)?
                 }
-                CacheSubcommand::Prune(args) => crate::cache_cmd::run_prune(
+                CacheSubcommand::Prune(args) => crate::cache::command::run_prune(
                     &cwd,
                     loaded_config.vault_config.cache.as_ref(),
                     args,
@@ -1601,7 +1593,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         },
         Command::Validate(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1643,12 +1635,12 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Get(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
             )?;
-            let report = cache.read_snapshot(|cache| show::run(cache, &args))?;
+            let report = cache.read_snapshot(|cache| get::run(cache, &args))?;
 
             // `markdown` is the one principled divergence: a single, byte-faithful
             // document straight from disk. It is selection-bound (meaningful only
@@ -1699,7 +1691,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // Shared print seam with the daemon-routed path (`route_get`), so
             // routed and direct `get` cannot drift on rendering, warnings, note
             // forwarding, or the exit-1 signal.
-            show::emit(&report, &args)
+            get::emit(&report, &args)
         }
         Command::Find(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
@@ -1714,7 +1706,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Count(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1734,7 +1726,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Describe(args) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1816,7 +1808,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -1853,7 +1845,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // handles a not-yet-existing `-p`/`--parents` subtree) still runs
             // inside the apply orchestrator before any write, on dry-run too.
             let move_plan = if !is_folder {
-                let cfg = crate::move_doc::PreflightConfig {
+                let cfg = crate::r#move::PreflightConfig {
                     src: &args.src,
                     dst: &args.dst,
                     force: args.force,
@@ -1862,7 +1854,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     vault_root: &cwd,
                     index: &index,
                 };
-                match crate::move_doc::preflight_and_plan(cfg) {
+                match crate::r#move::preflight_and_plan(cfg) {
                     Ok(plan) => Some(plan),
                     Err(e) => {
                         // NRN-229: structured envelope on stdout for `--format
@@ -2016,10 +2008,10 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 }
                 crate::cli::MoveFormat::Records => {
                     if is_folder {
-                        crate::move_doc::render_folder_apply_tty(&mut out, &report, dry_run)?;
+                        crate::r#move::render_folder_apply_tty(&mut out, &report, dry_run)?;
                     } else {
                         let applied = !dry_run && exit == 0;
-                        crate::move_doc::render_move_apply_tty(
+                        crate::r#move::render_move_apply_tty(
                             &mut out, &args.src, &args.dst, link_total, link_files, applied,
                         )?;
                     }
@@ -2076,7 +2068,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -2088,14 +2080,14 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // Backlinks-present + no --rewrite-to + no --allow-broken-links → exit 2.
             // Extract incoming-link data for TTY rendering.
             // ----------------------------------------------------------------
-            let cfg = crate::delete_doc::PreflightConfig {
+            let cfg = crate::delete::PreflightConfig {
                 doc: &args.doc,
                 allow_broken_links: args.allow_broken_links,
                 rewrite_to: args.rewrite_to.as_deref(),
                 vault_root: &cwd,
                 index: &index,
             };
-            let outcome = match crate::delete_doc::preflight_and_plan(cfg) {
+            let outcome = match crate::delete::preflight_and_plan(cfg) {
                 Ok(o) => o,
                 Err(e) => {
                     // NRN-229: structured envelope on stdout for `--format json`
@@ -2138,7 +2130,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     requires: vec![],
                     fields: serde_json::json!({
                         // NRN-57: use the RESOLVED path (stem or exact path
-                        // both land here via delete_doc::preflight_and_plan),
+                        // both land here via delete::preflight_and_plan),
                         // not the raw CLI arg — the raw arg may be a bare stem
                         // that isn't in the index verbatim, which previously
                         // caused every stem-addressed delete to fail with a
@@ -2209,9 +2201,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                     // The renderer reads the delete op's index-derived `link_impact`
                     // (NRN-237) and apply-time `cascade` straight off the report —
                     // the same report the routed path reconstructs, so both match.
-                    crate::delete_doc::render_delete_records(
-                        &mut out, &report, &args.doc, dry_run,
-                    )?;
+                    crate::delete::render_delete_records(&mut out, &report, &args.doc, dry_run)?;
                 }
             }
 
@@ -2279,7 +2269,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -2287,7 +2277,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             trim_diagnostics(&mut index, verbose);
 
             // Open a Cache for resolve_target (needs document query, not just index).
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
@@ -2513,13 +2503,13 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             };
 
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            let mut index = crate::cache_cmd::load_graph_index(
+            let mut index = crate::cache::command::load_graph_index(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,
             )?;
             trim_diagnostics(&mut index, verbose);
-            let cache = crate::cache_cmd::open_for_query(
+            let cache = crate::cache::command::open_for_query(
                 &cwd,
                 &loaded_config.index_options,
                 no_cache_refresh,

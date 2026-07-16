@@ -1984,7 +1984,7 @@ mod tests {
         std::fs::write(root.join("d.md"), "---\ntype: note\n---\nsee [[a]]\n").unwrap();
         let index = crate::graph::build_index(&root).unwrap();
 
-        let cfg = crate::move_doc::PreflightConfig {
+        let cfg = crate::r#move::PreflightConfig {
             src: "a.md",
             dst: "b.md",
             force: false,
@@ -1993,7 +1993,7 @@ mod tests {
             vault_root: &root,
             index: &index,
         };
-        let plan = crate::move_doc::preflight_and_plan(cfg).unwrap();
+        let plan = crate::r#move::preflight_and_plan(cfg).unwrap();
 
         let create_ctx = CreateApplyContext {
             parents: false,

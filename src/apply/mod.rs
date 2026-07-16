@@ -136,8 +136,11 @@ pub fn run_direct(
     // 5. Build GraphIndex
     // ------------------------------------------------------------------
     let loaded_config = crate::config_loader::load_config(cwd, config_path)?;
-    let index =
-        crate::cache_cmd::load_graph_index(cwd, &loaded_config.index_options, no_cache_refresh)?;
+    let index = crate::cache::command::load_graph_index(
+        cwd,
+        &loaded_config.index_options,
+        no_cache_refresh,
+    )?;
 
     // ------------------------------------------------------------------
     // 6. Determine whether to apply

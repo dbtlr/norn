@@ -19,6 +19,7 @@ pub(crate) use query::DocumentQuery;
 pub(crate) mod canonical;
 mod change_detection;
 pub(crate) mod channel;
+pub(crate) mod command;
 mod document_fields;
 #[cfg(test)]
 mod eav_acceptance;
@@ -102,7 +103,7 @@ pub(crate) const SCHEMA_VERSION: u32 = 5;
 /// The single operator note emitted when the implicit incremental refresh cannot
 /// acquire the write lock in time (`CacheError::LockTimeout`) and the query
 /// proceeds against the current cache state. Shared by the direct read path
-/// (`cache_cmd::load_graph_index` / `open_for_query`) and the warm daemon
+/// (`cache::command::load_graph_index` / `open_for_query`) and the warm daemon
 /// (`mcp::context::query_cache_warm`) so the two surfaces cannot drift on the
 /// wording, and so a routed read can forward this exact text to the CLI's stderr
 /// byte-identically to a direct run (NRN-215).

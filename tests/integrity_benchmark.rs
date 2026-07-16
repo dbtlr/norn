@@ -19,8 +19,8 @@
 //!
 //!   * A **direct** invocation reopens the cache every time. `count`/`find`/`get`
 //!     open it once per call → one marker per call. `set` (unlike the reads)
-//!     opens the cache TWICE per direct call — `crate::cache_cmd::load_graph_index`
-//!     (the planning `GraphIndex`) and `crate::cache_cmd::open_for_query` (target
+//!     opens the cache TWICE per direct call — `crate::cache::command::load_graph_index`
+//!     (the planning `GraphIndex`) and `crate::cache::command::open_for_query` (target
 //!     resolution) are two separate `Cache::open_with_index` calls in the direct
 //!     dispatch (`src/lib.rs`, `Command::Set`; tracked as seed NRN-s15) — so the
 //!     harness asserts EXACTLY two markers per direct `set` call, a hard pin
@@ -312,8 +312,8 @@ fn integrity_check_acceptance_50k() {
     //
     // Unlike the single-open reads, the direct `set` dispatch pays
     // integrity_check EXACTLY TWICE per call: `src/lib.rs`'s `Command::Set` arm
-    // opens the cache once via `cache_cmd::load_graph_index` (the planning
-    // `GraphIndex`) and again via `cache_cmd::open_for_query` (target
+    // opens the cache once via `cache::command::load_graph_index` (the planning
+    // `GraphIndex`) and again via `cache::command::open_for_query` (target
     // resolution) — two separate `Cache::open_with_index` sites. The value 2 is
     // pinned hard (not first-call-captured) so uniform drift in EITHER
     // direction fails loudly: a 2→3 regression (a third open) AND a 2→1

@@ -890,7 +890,7 @@ pub struct GetArgs {
 
     // ── Sort / limit / paging (shared with `find`) ─────────────────────
     // get's default --limit is None → return every named target (truncating
-    // a named set would surprise); sort is applied in-memory in show::run.
+    // a named set would surprise); sort is applied in-memory in get::run.
     #[command(flatten)]
     pub paging: SortPaginateArgs,
 

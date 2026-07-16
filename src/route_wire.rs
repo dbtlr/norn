@@ -1,5 +1,5 @@
 //! Wire-translation helpers shared by the CLI→daemon route seams
-//! (`count::route`, `find::route`, `show::route`).
+//! (`count::route`, `find::route`, `get::route`).
 //!
 //! One home for the arg→MCP-parameter mapping and the envelope-reading
 //! primitives, so the routed commands cannot drift from each other — a new

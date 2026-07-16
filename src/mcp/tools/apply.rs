@@ -16,7 +16,7 @@
 //!
 //! ## How it mirrors `norn apply` (non-TTY / `--format json` path)
 //!
-//! `apply_cmd::run`:
+//! `apply::run`:
 //! 1. Reads + parses the plan from a file.
 //! 2. Validates `plan.schema_version == MIGRATION_PLAN_SCHEMA_VERSION` → exit 2
 //!    on mismatch. (No hash check — apply doesn't check the plan hash.)

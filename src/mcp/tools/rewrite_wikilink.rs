@@ -15,7 +15,7 @@
 //!
 //! ## How it mirrors the CLI `norn rewrite-wikilink` (non-TTY path)
 //!
-//! The CLI's `rewrite_wikilink_cmd::run`:
+//! The CLI's `rewrite_wikilink::run`:
 //! 1. Acquires the mutation lock.
 //! 2. Loads config + graph index.
 //! 3. Builds a one-op `rewrite_wikilink` `MigrationPlan` (`{old, new}`).

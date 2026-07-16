@@ -55,7 +55,7 @@ pub(crate) use build::{
     is_ignored, is_markdown,
 };
 // Test-only re-export: build_index is a default-options convenience used solely
-// in #[cfg(test)] callers across norn (move_doc, delete_doc, set/validate,
+// in #[cfg(test)] callers across norn (r#move, delete, set/validate,
 // repair_apply, cache/reader).
 #[cfg(test)]
 pub(crate) use build::build_index;

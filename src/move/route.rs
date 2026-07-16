@@ -6,7 +6,7 @@
 //! (`{ "report": <ApplyReport>, ... }`) that
 //! [`crate::apply_report::reconstruct_wire_report`] rebuilds into the native
 //! [`ApplyReport`], which this module renders through the SAME
-//! `move_doc::{render_move_apply_tty, render_folder_apply_tty}` and the SAME
+//! `r#move::{render_move_apply_tty, render_folder_apply_tty}` and the SAME
 //! JSON projection the direct arm uses — so a routed `norn move` and a direct
 //! one are byte-for-byte equal on stdout, stderr, and exit code (the load-bearing
 //! isomorphism, ADR 0005).
@@ -109,7 +109,7 @@ pub fn emit(
         }
         MoveFormat::Records => {
             if is_folder {
-                crate::move_doc::render_folder_apply_tty(&mut out, &report, dry_run)?;
+                crate::r#move::render_folder_apply_tty(&mut out, &report, dry_run)?;
             } else {
                 // Single-file cascade counts come from the move_document op's
                 // cascade (dry-run: forecast; live: actuals) — the same source
@@ -121,7 +121,7 @@ pub fn emit(
                     .and_then(|o| o.cascade.as_ref())
                     .map_or((0, 0), |c| (c.applied, c.files));
                 let applied = !dry_run && exit == 0;
-                crate::move_doc::render_move_apply_tty(
+                crate::r#move::render_move_apply_tty(
                     &mut out, src, dst, link_total, link_files, applied,
                 )?;
             }

@@ -18,7 +18,7 @@
 //! The CLI's `Command::Move` dispatch in `main.rs`:
 //! 1. Acquires the mutation lock (`is_apply` driven by TTY / `--yes`).
 //! 2. Loads config + graph index.
-//! 3. Runs `move_doc::preflight_and_plan` for the single-file path (exit 2 on
+//! 3. Runs `r#move::preflight_and_plan` for the single-file path (exit 2 on
 //!    refusal).
 //! 4. Builds a one-op `MigrationPlan` (kind `move_document` or `move_folder`).
 //! 5. Opens an event sink, emits `invocation_started`, applies via
@@ -206,7 +206,7 @@ pub fn handle(
     // wrong on-disk entry. The destination stays the RAW `p.to` — the CLI never
     // stem-resolves destinations either.
     let resolved_src = if !is_folder {
-        let cfg = crate::move_doc::PreflightConfig {
+        let cfg = crate::r#move::PreflightConfig {
             src: &p.from,
             dst: &p.to,
             force: p.force,
@@ -219,7 +219,7 @@ pub fn handle(
         // so `handle_output` recovers its `.code()` via `refusal_from_error` and
         // returns a coded, structured refusal instead of laundering to
         // `internal-error`. The `Display` prose is unchanged.
-        let plan = crate::move_doc::preflight_and_plan(cfg)?;
+        let plan = crate::r#move::preflight_and_plan(cfg)?;
         Some(plan.expect_change("move_document").path.to_string())
     } else {
         None
