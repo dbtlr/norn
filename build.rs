@@ -33,6 +33,30 @@
 //! live under `src/`), plus the `src/` dir and `Cargo.lock` so additions,
 //! removals, and dep changes are caught too. A no-change rebuild touches none
 //! of these, so it neither re-runs this script nor changes the id.
+//!
+//! # Baked cache channel (`NORN_BAKED_CHANNEL`)
+//!
+//! Companion problem to the build fingerprint, same shape of fix: runtime
+//! channel detection (`src/cache/channel.rs`) walks the executable's own
+//! ancestors for a cargo `CACHEDIR.TAG`, which cannot survive the binary
+//! being copied elsewhere — copying strips all build-tree ancestry. This
+//! bakes a *default* channel into the binary at compile time instead, so
+//! channel identity travels with the binary rather than living in its path
+//! (NRN-285; see `channel.rs`'s module doc for where this slots into the
+//! full resolution order).
+//!
+//! `NORN_BUILD_CHANNEL=live` / `=dev` bakes that value outright and is a hard
+//! build error on any other non-empty value — an explicit override that
+//! can't be honored is a bad invocation, not something to silently ignore.
+//! Left unset, the auto rule bakes `dev` iff the tree being built is a `.git`
+//! checkout (worktrees included — `.git` is a file there, not a directory)
+//! that is neither a `cargo install --git` checkout (those build from a
+//! cargo-managed clone under `CARGO_HOME`, which must stay `live`) nor a CI
+//! release build (`CI` set — cargo-dist's GitHub Actions release artifacts
+//! must also stay `live`). Anything else — notably a crates.io/tarball
+//! source checkout with no `.git` at all — bakes nothing, leaving
+//! `option_env!("NORN_BAKED_CHANNEL")` `None` and deferring entirely to
+//! runtime detection.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -81,6 +105,10 @@ fn main() -> std::io::Result<()> {
     // docs) and export it for `env!("NORN_BUILD_ID")` in the daemon pong and
     // the routing gate.
     emit_build_id(&manifest_dir)?;
+
+    // Baked cache channel (see module docs): export it for
+    // `option_env!("NORN_BAKED_CHANNEL")` in `src/cache/channel.rs`.
+    emit_baked_channel(&manifest_dir);
 
     // `build.rs` is not part of the fingerprint (it produces no wire schema),
     // but its own edits must still re-run it. The per-file `src/` and
@@ -168,4 +196,77 @@ fn emit_build_id(manifest_dir: &Path) -> std::io::Result<()> {
     // the reliable rerun trigger for edits.
     println!("cargo:rerun-if-changed={}", src_dir.display());
     Ok(())
+}
+
+/// Read `NORN_BUILD_CHANNEL` and `CARGO_HOME`/`CI`, decide whether to bake a
+/// channel (see module docs), and either emit `NORN_BAKED_CHANNEL` or panic
+/// on an invalid override. The decision itself lives in [`bake_channel`],
+/// a pure function of these inputs; this is only the imperative shell that
+/// gathers them from the real environment.
+fn emit_baked_channel(manifest_dir: &Path) {
+    println!("cargo:rerun-if-env-changed=NORN_BUILD_CHANNEL");
+    println!("cargo:rerun-if-env-changed=CI");
+    // `CARGO_HOME`/`HOME` also feed the decision (via `under_cargo_home`);
+    // declare them so a changed value can't leave a stale bake behind. The
+    // remaining input, `.git` presence, has no rerun directive: it only
+    // changes when the checkout itself is created or destroyed.
+    println!("cargo:rerun-if-env-changed=CARGO_HOME");
+    println!("cargo:rerun-if-env-changed=HOME");
+
+    let build_channel_env = env::var("NORN_BUILD_CHANNEL").ok();
+    let has_git_entry = manifest_dir.join(".git").symlink_metadata().is_ok();
+    // `cargo install --git` builds from a clone under `CARGO_HOME` (default
+    // `$HOME/.cargo`) — that clone has a `.git` dir too, so it must be
+    // excluded here or it would wrongly auto-bake `dev`.
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+    let under_cargo_home = cargo_home.is_some_and(|home| manifest_dir.starts_with(home));
+    let ci_set = env::var("CI").is_ok_and(|v| !v.is_empty());
+
+    match bake_channel(
+        build_channel_env.as_deref(),
+        has_git_entry,
+        under_cargo_home,
+        ci_set,
+    ) {
+        Ok(Some(channel)) => println!("cargo:rustc-env=NORN_BAKED_CHANNEL={channel}"),
+        // Nothing baked: emit nothing, so `option_env!` sees `None` and
+        // runtime detection (`src/cache/channel.rs`) decides instead.
+        Ok(None) => {}
+        Err(value) => panic!(
+            "NORN_BUILD_CHANNEL must be exactly \"live\" or \"dev\" (or unset); got {value:?}"
+        ),
+    }
+}
+
+/// Pure decision behind [`emit_baked_channel`]: which channel (if any) to
+/// bake, given the `NORN_BUILD_CHANNEL` override and the three auto-rule
+/// facts about the checkout being built. Factored out so the environment/
+/// filesystem reads stay in the imperative shell above.
+///
+/// - `Some("live"|"dev")` from the override bakes that value outright.
+/// - Any other non-empty override value is `Err` (the offending value,
+///   verbatim, for the panic message) — an override that can't be honored is
+///   a bad invocation, not something to paper over.
+/// - Unset/empty override falls to the auto rule: `dev` iff the checkout has
+///   a `.git` entry, is not under `CARGO_HOME`, and `CI` is unset — else
+///   nothing is baked (deferring to runtime detection).
+fn bake_channel(
+    build_channel_env: Option<&str>,
+    has_git_entry: bool,
+    under_cargo_home: bool,
+    ci_set: bool,
+) -> Result<Option<&'static str>, String> {
+    match build_channel_env {
+        Some("live") => return Ok(Some("live")),
+        Some("dev") => return Ok(Some("dev")),
+        Some("") | None => {}
+        Some(other) => return Err(other.to_string()),
+    }
+    if has_git_entry && !under_cargo_home && !ci_set {
+        Ok(Some("dev"))
+    } else {
+        Ok(None)
+    }
 }

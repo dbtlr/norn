@@ -47,7 +47,7 @@ Build outputs:
 
 - Debug binary: `target/debug/norn`
 - Release binary: `target/release/norn`
-- `cargo install --path .` installs to `~/.cargo/bin/norn`
+- `cargo install --path .` installs to `~/.cargo/bin/norn` — set `NORN_BUILD_CHANNEL=live` (or run `just install`, which sets it) so the installed binary bakes the `live` cache channel; see [Vault cache: channels](cache.md#channels-live-vs-dev) for why this matters and what happens if you don't.
 
 ## Architecture map
 
