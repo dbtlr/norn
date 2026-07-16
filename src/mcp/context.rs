@@ -12,15 +12,17 @@
 //! Config is parsed once at startup and held for the process lifetime; a config
 //! change requires a server restart, exactly like the CLI re-reads config fresh
 //! on every invocation. The cache is deliberately **not** held: each tool call
-//! opens a fresh [`Cache`] via `open_for_query`, paying that opener's
-//! `PRAGMA integrity_check` plus the cheap incremental freshness refresh every
-//! time. This matches the CLI's per-invocation behavior exactly and needs no
-//! filesystem watcher. This is `norn mcp`'s v1 behavior and is unchanged.
+//! opens a fresh [`Cache`] via `open_for_query` — the TRUSTING open (NRN-275),
+//! which skips `PRAGMA integrity_check` and pays only the cheap incremental
+//! freshness refresh, exactly like the direct CLI. Byte corruption is caught by
+//! rebuild-on-corruption (the read helpers evict + rebuild + retry once) rather
+//! than a per-open scan. This matches the CLI's per-invocation behavior exactly
+//! and needs no filesystem watcher.
 //!
 //! ## Warm mode — [`VaultContext::open_warm`] (daemon `norn serve`)
 //!
 //! A long-lived daemon holds one `VaultContext` open across many requests, so
-//! re-paying `integrity_check` on every call is wasteful. Warm mode instead
+//! re-opening and re-refreshing on every call is wasteful. Warm mode instead
 //! **verifies trust once** (the first `integrity_check` when the cache is first
 //! opened) and then **continuously maintains** it with a cheap per-request
 //! self-heal pipeline, upholding the ADR-0005 trust invariant: reading through
@@ -1532,8 +1534,9 @@ impl VaultContext {
     /// shape (`let cache = ctx.query_cache()?;`) via a `Deref`/`DerefMut`-into-
     /// `Cache` handle, so tool code does not fork on mode.
     ///
-    /// - Cold: opens a fresh [`Cache`] via `open_for_query` (integrity_check +
-    ///   incremental refresh every call), exactly as before.
+    /// - Cold: opens a fresh [`Cache`] via `open_for_query` (the trusting open +
+    ///   incremental refresh every call; rebuild-on-corruption, no per-open
+    ///   integrity_check — NRN-275), exactly like the direct CLI.
     /// - Warm: runs the verify-once + per-request self-heal pipeline (see module
     ///   docs) and hands out an owned guard into the bound generation's connection.
     pub(crate) fn query_cache(&self, scope: &RequestScope) -> Result<CacheHandle> {
@@ -1557,8 +1560,9 @@ impl VaultContext {
     /// followed by the cache reader's `load_graph_index`:
     ///
     /// - **Cold:** `query_cache` opens a fresh [`Cache`] via `open_for_query`
-    ///   (integrity_check + incremental refresh), and the reader reconstructs the
-    ///   index from it — the exact sequence `cache::command::load_graph_index` runs
+    ///   (the trusting open + incremental refresh; NRN-275), and the reader
+    ///   reconstructs the index from it — the exact sequence
+    ///   `cache::command::load_graph_index` runs
     ///   for a direct `norn` CLI invocation, byte-for-byte.
     /// - **Warm:** `query_cache` runs the per-request self-heal pipeline
     ///   (ground-shift → reopen-if-absent → incremental freshness) against the
@@ -1582,12 +1586,12 @@ impl VaultContext {
     /// of `cache.db` is detected by open-time verification plus error-time
     /// eviction ([`note_tool_error`](Self::note_tool_error) invalidates the
     /// current generation on any SQLite corruption-class error, and the next
-    /// request reopens and re-verifies), NOT by a per-call recheck the way a cold
-    /// open would.
+    /// request reopens and re-verifies).
     /// The source of truth remains the Markdown files: a plan built from a
     /// corrupt index is caught by the apply-time snapshot checks or surfaces as
-    /// an error that triggers the eviction path. Direct (non-daemon) invocations
-    /// keep the full per-call verification.
+    /// an error that triggers the eviction path. Cold (stdio `norn mcp`) and
+    /// direct (non-daemon) invocations no longer verify per call (NRN-275): they
+    /// open TRUSTING and rely on rebuild-on-corruption instead.
     ///
     /// Config freshness / root-liveness (steps 0–1) already ran in
     /// [`begin_request`](Self::begin_request) at the per-request seam, exactly as

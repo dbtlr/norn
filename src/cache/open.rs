@@ -114,7 +114,7 @@ impl crate::cache::Cache {
     ///
     /// Byte corruption is not ignored, only relocated: it surfaces as
     /// `SQLITE_CORRUPT` / `SQLITE_NOTADB` when a later query reads a bad page, and
-    /// the direct read path (`crate::cache_cmd::load_graph_index` /
+    /// the direct read path (`crate::cache::command::load_graph_index` /
     /// `open_for_query`) evicts + rebuilds + retries once on that error, since the
     /// cache is a rebuildable derived artifact. Gross corruption that leaves the
     /// `meta` rows unreadable is still caught at open (the schema/identity meta
@@ -426,7 +426,7 @@ fn inspect_existing_cache(
     // daemon's per-generation open, `cache status`, and the cache-command opens.
     // Byte corruption the trusting path skips instead surfaces as SQLITE_CORRUPT /
     // SQLITE_NOTADB during a later query, where the read path evicts + rebuilds +
-    // retries once (see `crate::cache_cmd`); the meta SELECTs below still catch
+    // retries once (see `crate::cache::command`); the meta SELECTs below still catch
     // gross corruption that leaves the header unreadable, on both paths.
     //
     // Trace hook (NRN-83): when `NORN_TRACE_INTEGRITY_CHECK` is set, emit one stable
@@ -561,8 +561,11 @@ fn emit_rebuild_message(reason: &RebuildReason) {
 }
 
 /// The operator-facing one-line reason a cache rebuild is happening — emitted to
-/// stderr (prefixed `vault:`) by [`emit_rebuild_message`] on every rebuild path,
-/// including the `alias_field` config-drift rebuild. A pure function so the notice
+/// stderr (prefixed `vault:`) by [`emit_rebuild_message`] on the schema-drift,
+/// identity-drift, and `alias_field` config-drift rebuild paths (the ones an OPEN
+/// detects via its meta SELECTs). The trusting open's query-time corruption path
+/// does NOT route through here — it re-opens straight into the Fresh arm — and
+/// prints its own notice in `crate::cache::command`. A pure function so the notice
 /// content is unit-testable without capturing process stderr.
 fn rebuild_message(reason: &RebuildReason) -> String {
     match reason {
@@ -946,9 +949,11 @@ mod tests {
     }
 
     #[test]
-    fn open_with_alias_field_drift_rebuilds_silently() {
+    fn open_with_alias_field_drift_rebuilds_and_updates_meta() {
         // 1. Build cache with alias_field = None
-        // 2. Reopen with alias_field = Some("aliases") — expect a silent rebuild
+        // 2. Reopen with alias_field = Some("aliases") — expect an automatic
+        //    rebuild (operator-visible via emit_rebuild_message; content asserted
+        //    by alias_field_drift_emits_operator_visible_rebuild_notice)
         // 3. Verify the meta row `links_alias_field` now contains "aliases"
         let dir = tempfile::Builder::new()
             .prefix("vault-cache-alias-drift-")
