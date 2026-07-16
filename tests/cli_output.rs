@@ -3020,13 +3020,13 @@ fn cache_clear_refused_while_entry_lock_held() {
     let (_stdout, stderr, exit_code) =
         vault_env(&["-C", root.to_str().unwrap(), "cache", "clear"], &envs);
 
-    assert_ne!(
-        exit_code, 0,
-        "clear must refuse (non-zero exit) while the entry lock is held"
+    assert_eq!(
+        exit_code, 2,
+        "clear must refuse with the lock-contention exit code while the entry lock is held"
     );
     assert!(
-        !stderr.is_empty(),
-        "a refused clear must report the contention on stderr"
+        stderr.contains("locked"),
+        "a refused clear must name the contention on stderr, got: {stderr}"
     );
     assert!(
         db_path.as_std_path().exists(),
