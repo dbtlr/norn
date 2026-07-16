@@ -1,7 +1,7 @@
 //! NRN-83/232 acceptance benchmark — the daemon initiative's founding-bug proof,
 //! extended from reads to routed WRITES.
 //!
-//! The founding bug: `Cache::open` runs `PRAGMA integrity_check` on every open,
+//! The founding bug: `Cache::open` ran `PRAGMA integrity_check` on every open,
 //! an O(db-size) cost that dwarfs the actual query at scale. ADR 0005's
 //! resolution relocated the check to the warm `norn serve` daemon
 //! (open-once / verify-once); routed reads inherit the already-verified state.
@@ -10,6 +10,16 @@
 //! scale for BOTH halves of the daemon's traffic — reads and writes — in one
 //! daemon lifetime, re-runnably.
 //!
+//! **NRN-275 update.** The per-open `integrity_check` is gone from the DIRECT
+//! read path entirely: `norn find`/`count`/`get`/`set` now open TRUSTING
+//! (`Cache::open_with_index_trusting`) and skip the scan, relying on
+//! rebuild-on-corruption instead — so a direct call now pays ZERO markers, not
+//! one-per-open. The daemon KEEPS the verifying open per generation, so its
+//! open-once / verify-once invariant is unchanged: exactly ONE marker across a
+//! whole warm lifetime. The contrast this harness pins therefore shifts from
+//! "direct per-call vs daemon-once" to "direct never vs daemon-once-per-
+//! generation" — the daemon's single marker is still the structural gate.
+//!
 //! ## The structural (non-timing) acceptance observable
 //!
 //! `src/cache/open.rs` emits one `norn trace: integrity_check` stderr line per
@@ -17,26 +27,26 @@
 //! Because a `Cache::open` on an EXISTING db always runs the check, this marker
 //! is a deterministic, cross-process count of how many times a code path pays it:
 //!
-//!   * A **direct** invocation reopens the cache every time. `count`/`find`/`get`
-//!     open it once per call → one marker per call. `set` (unlike the reads)
-//!     opens the cache TWICE per direct call — `crate::cache::command::load_graph_index`
-//!     (the planning `GraphIndex`) and `crate::cache::command::open_for_query` (target
-//!     resolution) are two separate `Cache::open_with_index` calls in the direct
-//!     dispatch (`src/lib.rs`, `Command::Set`; tracked as seed NRN-s15) — so the
-//!     harness asserts EXACTLY two markers per direct `set` call, a hard pin
-//!     that fails on drift in either direction (a third open, or the two opens
-//!     collapsing into one).
-//!   * The **warm daemon** opens the cache once and holds it → ONE marker across
-//!     every routed call, no matter how many reads OR writes arrive. `vault.set`
-//!     collapses the same two needs (index + query cache) into a SINGLE
-//!     `ctx.query_cache()` + `cache.load_graph_index()` call over its resident
-//!     connection (NRN-130), so the routed write path never re-pays the check
-//!     the direct path pays twice.
+//!   * A **direct** invocation reopens the cache every time but opens TRUSTING
+//!     (NRN-275): `count`/`find`/`get` and `set` alike skip `integrity_check`, so
+//!     they pay ZERO markers per call. `set` still opens the cache twice
+//!     (`crate::cache::command::load_graph_index` for the planning `GraphIndex`
+//!     and `crate::cache::command::open_for_query` for target resolution — two
+//!     opens in `src/lib.rs`'s `Command::Set` arm, tracked as seed NRN-s15), but
+//!     both are trusting opens, so the marker count is zero either way. The
+//!     direct-side assertions therefore pin ZERO, which fails loudly if a
+//!     verifying open ever creeps back onto the hot path.
+//!   * The **warm daemon** opens the cache once per generation with a VERIFYING
+//!     open and holds it → ONE marker across every routed call, no matter how
+//!     many reads OR writes arrive. `vault.set` collapses the index + query-cache
+//!     needs into a SINGLE `ctx.query_cache()` + `cache.load_graph_index()` call
+//!     over its resident connection (NRN-130), so no routed call re-pays the
+//!     check the daemon paid once at generation open.
 //!
 //! So the acceptance criterion is asserted structurally, not by timing: after N
 //! routed reads AND M routed writes (plus one post-apply verification read) the
 //! daemon's stderr carries exactly ONE integrity_check marker total, while each
-//! direct call carries its own (constant, per-shape) non-zero count. Timings are
+//! direct call carries ZERO (NRN-275 moved the scan off the direct path). Timings are
 //! collected as supporting operator evidence, printed as a table under
 //! `--nocapture`. The `count_served` markers (one per tools/call the daemon
 //! actually serves) prove the routed calls were genuinely served warm and did
@@ -285,9 +295,11 @@ fn integrity_check_acceptance_50k() {
         .unwrap_or_else(|e| panic!("cache.db must exist at {cache_db} after the build: {e}"))
         .len();
 
-    // ---- Direct baseline: each call reopens → pays integrity_check -------
-    // This is ALSO the no-daemon regression guard (deliverable 3): a direct read
-    // at 50k docs must STILL verify — exactly one integrity_check marker per call.
+    // ---- Direct baseline: each call reopens TRUSTING → pays NO integrity_check --
+    // NRN-275 moved the O(db-size) scan off the direct read path: a direct read at
+    // 50k docs must pay ZERO integrity_check markers (trust is re-established by
+    // rebuild-on-corruption, not a per-open scan). This is the no-daemon
+    // regression guard that a verifying open never creeps back onto the hot path.
     let mut direct_medians: Vec<(&str, Duration)> = Vec::new();
     let mut direct_integrity_total = 0usize;
     for (label, args) in read_shapes() {
@@ -296,9 +308,9 @@ fn integrity_check_acceptance_50k() {
             let r = run_norn(&cache_home, &state_home, vault, &args);
             assert_eq!(r.code, 0, "direct {label} must exit 0");
             assert_eq!(
-                r.integrity_markers, 1,
-                "direct {label} at {n} docs must pay EXACTLY one integrity_check \
-                 (trust preserved on the no-daemon path)"
+                r.integrity_markers, 0,
+                "direct {label} at {n} docs must pay ZERO integrity_check \
+                 (NRN-275: the trusting open skips the per-open scan)"
             );
             direct_integrity_total += r.integrity_markers;
             samples.push(r.elapsed);
@@ -310,17 +322,13 @@ fn integrity_check_acceptance_50k() {
     // This MUST run before the daemon spawns below — a live socket would route
     // these calls instead of exercising the no-daemon direct write path.
     //
-    // Unlike the single-open reads, the direct `set` dispatch pays
-    // integrity_check EXACTLY TWICE per call: `src/lib.rs`'s `Command::Set` arm
-    // opens the cache once via `cache::command::load_graph_index` (the planning
-    // `GraphIndex`) and again via `cache::command::open_for_query` (target
-    // resolution) — two separate `Cache::open_with_index` sites. The value 2 is
-    // pinned hard (not first-call-captured) so uniform drift in EITHER
-    // direction fails loudly: a 2→3 regression (a third open) AND a 2→1
-    // improvement (the two opens collapsed, e.g. mirroring the daemon-side
-    // NRN-130 consolidation — a change this benchmark should celebrate by
-    // updating the pin, not absorb silently). Tracked as seed NRN-s15.
-    const DIRECT_SET_MARKERS_PER_CALL: usize = 2;
+    // The direct `set` dispatch still opens the cache twice (`src/lib.rs`'s
+    // `Command::Set` arm: `cache::command::load_graph_index` for the planning
+    // `GraphIndex` and `cache::command::open_for_query` for target resolution —
+    // two sites, seed NRN-s15), but both are now TRUSTING opens (NRN-275), so the
+    // per-call marker count is ZERO. The pin is hard so a verifying open creeping
+    // back onto either direct-set site fails loudly.
+    const DIRECT_SET_MARKERS_PER_CALL: usize = 0;
     let mut direct_set_samples = Vec::with_capacity(iters);
     for i in 0..iters {
         let args = set_args(DIRECT_SET_DOC, i);
@@ -329,9 +337,9 @@ fn integrity_check_acceptance_50k() {
         assert_eq!(r.code, 0, "direct set (iter {i}) must exit 0");
         assert_eq!(
             r.integrity_markers, DIRECT_SET_MARKERS_PER_CALL,
-            "direct set (iter {i}) must pay integrity_check exactly TWICE \
-             (load_graph_index + open_for_query in src/lib.rs's Command::Set arm; \
-             NRN-s15) — trust preserved on the no-daemon write path; got {}",
+            "direct set (iter {i}) must pay ZERO integrity_check (NRN-275: both the \
+             load_graph_index and open_for_query opens in src/lib.rs's Command::Set \
+             arm are trusting opens); got {}",
             r.integrity_markers
         );
         direct_set_samples.push(r.elapsed);
@@ -542,13 +550,12 @@ fn integrity_check_acceptance_50k() {
         std::fs::read_to_string(&daemon_stderr).unwrap_or_default()
     );
 
-    // Regression guard tally: direct reads verified every time. (The direct-set
-    // side needs no tally here — its per-call count is hard-pinned to
+    // Regression guard tally: no direct read paid integrity_check (NRN-275). (The
+    // direct-set side needs no tally here — its per-call count is hard-pinned to
     // DIRECT_SET_MARKERS_PER_CALL inside the loop above.)
     assert_eq!(
-        direct_integrity_total,
-        iters * read_shapes().len(),
-        "every direct read must have paid integrity_check (no-daemon trust guard)"
+        direct_integrity_total, 0,
+        "no direct read must pay integrity_check (NRN-275 moved the scan off the hot path)"
     );
 
     // Supporting timing evidence only — NOT an acceptance gate. The structural
@@ -603,9 +610,9 @@ fn integrity_check_acceptance_50k() {
     println!("--------------------------------------------------------------------------");
     println!(
         "integrity_check markers  : direct reads = {} ({} per call), direct writes = {} \
-         ({} per call), daemon = {} (verify-once across reads+writes)",
+         ({} per call), daemon = {} (verify-once per generation across reads+writes)",
         direct_integrity_total,
-        1,
+        0,
         direct_set_integrity_total,
         DIRECT_SET_MARKERS_PER_CALL,
         daemon_markers
