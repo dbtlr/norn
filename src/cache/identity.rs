@@ -3,6 +3,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use sha2::{Digest, Sha256};
 
+use crate::cache::channel::{channel, Channel};
 use crate::cache::error::CacheError;
 
 /// Resolves the vault root to its canonical form (symlinks resolved) and
@@ -56,26 +57,83 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Returns the cache directory path for a given vault root.
-/// Format: `<XDG_CACHE_HOME>/norn/<sha256-of-canonical-root>/`, defaulting
-/// to `~/.cache/norn/<hash>/` when `XDG_CACHE_HOME` is unset.
-pub fn cache_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
-    let base = xdg_cache_home()?;
-    cache_dir_in(&base, vault_root)
+/// Resolved on-disk layout for a vault's cache, split by channel.
+///
+/// The `entry_dir` (`<cache_home>/norn/<hash>`) is channel-independent: the
+/// write lock (`.lock`) and shared vault-level state live there, so a dev and a
+/// live binary mutating the same vault still serialize against each other. Only
+/// the database moves — `db_dir` is the entry dir for the live channel and a
+/// `dev/` subdir of it for the dev channel (NRN-269).
+pub(crate) struct CacheLayout {
+    pub(crate) canonical: Utf8PathBuf,
+    /// `<cache_home>/norn/<hash>` — write lock + shared state, all channels.
+    pub(crate) entry_dir: Utf8PathBuf,
+    /// Directory holding `cache.db` for the resolved channel.
+    pub(crate) db_dir: Utf8PathBuf,
+    /// The channel this layout was resolved for — stored rather than re-derived
+    /// from path geometry, so a label can never silently drift from the layout.
+    pub(crate) channel: Channel,
 }
 
-/// The same identity mapping as [`cache_dir_for`] with the cache-home base
-/// passed explicitly instead of read from the environment — a pure function of
-/// its arguments (plus the vault-root canonicalization). Test harnesses that
-/// manage a private cache home resolve through this without any process-env
+/// Resolve the full cache layout for a vault under the process channel.
+pub(crate) fn cache_layout_for(vault_root: &Utf8Path) -> Result<CacheLayout, CacheError> {
+    let base = xdg_cache_home()?;
+    cache_layout_in(&base, vault_root)
+}
+
+/// [`cache_layout_for`] with the cache-home base passed explicitly. The channel
+/// is still resolved from the process (it is a property of the running binary,
+/// not of the cache home), so an explicit-home test harness observes the same
+/// channel split production does.
+pub(crate) fn cache_layout_in(
+    cache_home: &Utf8Path,
+    vault_root: &Utf8Path,
+) -> Result<CacheLayout, CacheError> {
+    cache_layout_in_channel(cache_home, vault_root, channel()?)
+}
+
+/// [`cache_layout_in`] with the channel supplied explicitly, bypassing the
+/// once-per-process resolution. Lets in-process tests exercise both channels
+/// against a private cache home without fighting the global `OnceLock`.
+pub(crate) fn cache_layout_in_channel(
+    cache_home: &Utf8Path,
+    vault_root: &Utf8Path,
+    channel: Channel,
+) -> Result<CacheLayout, CacheError> {
+    let (canonical, hash) = vault_identity(vault_root)?;
+    let entry_dir = cache_home.join("norn").join(hash);
+    let db_dir = match channel.db_subdir() {
+        Some(sub) => entry_dir.join(sub),
+        None => entry_dir.clone(),
+    };
+    Ok(CacheLayout {
+        canonical,
+        entry_dir,
+        db_dir,
+        channel,
+    })
+}
+
+/// Returns the vault's canonical root plus the directory holding its `cache.db`
+/// for the process channel. Format: `<XDG_CACHE_HOME>/norn/<hash>/` on the live
+/// channel, `<XDG_CACHE_HOME>/norn/<hash>/dev/` on the dev channel; defaults to
+/// `~/.cache/…` when `XDG_CACHE_HOME` is unset. The write lock does NOT live
+/// here on the dev channel — see [`CacheLayout`].
+pub fn cache_dir_for(vault_root: &Utf8Path) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
+    let layout = cache_layout_for(vault_root)?;
+    Ok((layout.canonical, layout.db_dir))
+}
+
+/// The same identity + channel mapping as [`cache_dir_for`] with the cache-home
+/// base passed explicitly instead of read from the environment. Test harnesses
+/// that manage a private cache home resolve through this without any process-env
 /// mutation.
 pub(crate) fn cache_dir_in(
     cache_home: &Utf8Path,
     vault_root: &Utf8Path,
 ) -> Result<(Utf8PathBuf, Utf8PathBuf), CacheError> {
-    let (canonical, hash) = vault_identity(vault_root)?;
-    let dir = cache_home.join("norn").join(hash);
-    Ok((canonical, dir))
+    let layout = cache_layout_in(cache_home, vault_root)?;
+    Ok((layout.canonical, layout.db_dir))
 }
 
 /// Root of the global cache tree: `<XDG_CACHE_HOME>/norn/`.
@@ -198,6 +256,28 @@ mod tests {
         let (_, dir) = events_dir_for(&root).unwrap();
         assert!(dir.as_str().contains("/norn/"));
         assert!(dir.as_str().ends_with("/events"));
+    }
+
+    /// Path derivation per channel: the live db sits directly in the vault
+    /// entry dir; the dev db nests under a `dev/` segment of the SAME entry dir;
+    /// and the write-lock (entry) dir is byte-identical across both channels.
+    #[test]
+    fn cache_layout_splits_db_but_shares_entry_across_channels() {
+        let tmp = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let home = Utf8PathBuf::from_path_buf(home.path().to_path_buf()).unwrap();
+
+        let live = cache_layout_in_channel(&home, &root, Channel::Live).unwrap();
+        let dev = cache_layout_in_channel(&home, &root, Channel::Dev).unwrap();
+
+        // Entry dir (lock lives here) is identical for both channels.
+        assert_eq!(live.entry_dir, dev.entry_dir);
+        // Live db is the entry dir; dev db nests under `dev/`.
+        assert_eq!(live.db_dir, live.entry_dir);
+        assert_eq!(dev.db_dir, dev.entry_dir.join("dev"));
+        assert_ne!(live.db_dir, dev.db_dir);
+        assert_eq!(live.entry_dir.file_name().unwrap().len(), 64);
     }
 
     #[test]

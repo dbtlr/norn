@@ -18,6 +18,7 @@ pub(crate) use query::DocumentQuery;
 
 pub(crate) mod canonical;
 mod change_detection;
+pub(crate) mod channel;
 mod document_fields;
 #[cfg(test)]
 mod eav_acceptance;
@@ -73,6 +74,24 @@ pub fn resolve_cache_dir_in(
         .map(|(_canonical, dir)| dir)
         .map_err(|e| e.to_string())
 }
+
+/// Sibling of [`resolve_cache_dir_in`] for the vault ENTRY dir — the
+/// channel-independent `<cache_home>/norn/<hash>` directory holding the shared
+/// write lock (`.lock`), which is the entry dir itself on the live channel and
+/// the parent of the `dev/` db dir on the dev channel (NRN-269). Cross-crate
+/// test-harness seam: contention tests hold the vault's real write lock through
+/// it instead of re-encoding the on-disk layout. Same posture as
+/// [`resolve_cache_dir_in`]: pure function of its arguments, stringified error,
+/// not part of the stable public API.
+#[doc(hidden)]
+pub fn resolve_cache_lock_dir_in(
+    cache_home: &camino::Utf8Path,
+    vault_root: &camino::Utf8Path,
+) -> Result<camino::Utf8PathBuf, String> {
+    identity::cache_layout_in(cache_home, vault_root)
+        .map(|layout| layout.entry_dir)
+        .map_err(|e| e.to_string())
+}
 pub(crate) use lock::{acquire_flock, debug_env_usize};
 #[cfg(test)]
 pub(crate) use query_show::set_after_document_row_hook;
@@ -112,7 +131,18 @@ pub(crate) const LOCK_CONTENTION_NOTE: &str =
 pub(crate) struct Cache {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) vault_root: camino::Utf8PathBuf,
+    /// Directory holding this handle's `cache.db` — channel-specific: the vault
+    /// entry dir on the live channel, its `dev/` subdir on the dev channel
+    /// (NRN-269).
     pub(crate) cache_dir: camino::Utf8PathBuf,
+    /// The channel-independent vault entry dir (`<cache_home>/norn/<hash>`) that
+    /// holds the shared write lock (`.lock`). Equal to `cache_dir` on the live
+    /// channel; `cache_dir`'s parent on the dev channel. A dev and a live binary
+    /// against the same vault serialize on this one lock.
+    pub(crate) lock_dir: camino::Utf8PathBuf,
+    /// The cache channel this handle opened under, carried from the resolved
+    /// [`identity::CacheLayout`] rather than re-derived from path geometry.
+    pub(crate) channel: channel::Channel,
     pub(crate) alias_field: Option<String>,
     /// Compiled-out-of `files.ignore`: path globs whose matching files are
     /// excluded from the graph at cache-build time — never parsed, indexed, or
@@ -177,7 +207,7 @@ impl Cache {
     /// drop the `Cache` handle; the next `Cache::open` recreates a fresh
     /// database with the current schema and identity meta rows.
     pub fn clear(&mut self) -> Result<(), CacheError> {
-        let _lock = lock::WriteLock::acquire(&self.cache_dir, std::time::Duration::from_secs(5))?;
+        let _lock = lock::WriteLock::acquire(&self.lock_dir, std::time::Duration::from_secs(5))?;
         let db_path = self.cache_dir.join("cache.db");
         // Detach the live connection from the on-disk database so the file
         // can be removed cleanly on platforms (notably Windows) where an
@@ -206,6 +236,12 @@ impl Cache {
     #[doc(hidden)]
     pub fn conn(&self) -> &rusqlite::Connection {
         &self.conn
+    }
+
+    /// The cache channel this handle opened under. Drives the
+    /// `norn cache status` channel line.
+    pub(crate) fn channel_label(&self) -> &'static str {
+        self.channel.as_str()
     }
 
     /// Configured frontmatter field name used for alias parsing, if any.

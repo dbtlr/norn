@@ -25,6 +25,9 @@ pub enum CacheError {
     #[error("cache schema version {found} is newer than this binary supports (expected {expected}); upgrade norn")]
     SchemaNewer { found: u32, expected: u32 },
 
+    #[error("invalid {env} value {value:?}: expected \"live\" or \"dev\"", env = crate::cache::channel::CHANNEL_ENV)]
+    InvalidCacheChannel { value: String },
+
     #[error("vault root could not be canonicalized: {path}")]
     CannotCanonicalize {
         path: Utf8PathBuf,

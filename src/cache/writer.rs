@@ -176,7 +176,7 @@ impl crate::cache::Cache {
     /// Used by `norn cache rebuild` and the implicit rebuild after a self-heal trigger.
     pub fn rebuild(&mut self, vault_root: &Utf8Path) -> Result<IndexReport, CacheError> {
         let _lock = crate::cache::lock::WriteLock::acquire(
-            &self.cache_dir,
+            &self.lock_dir,
             crate::cache::lock::write_lock_timeout(),
         )?;
         let start = std::time::Instant::now();
@@ -239,7 +239,7 @@ impl crate::cache::Cache {
             return self.rebuild(vault_root);
         }
         let _lock = crate::cache::lock::WriteLock::acquire(
-            &self.cache_dir,
+            &self.lock_dir,
             crate::cache::lock::write_lock_timeout(),
         )?;
         let start = std::time::Instant::now();
@@ -982,7 +982,7 @@ impl crate::cache::Cache {
 
     fn publish_increment(&mut self, commit: &mut IncrementCommit) -> Result<(), CacheError> {
         let _lock = crate::cache::lock::WriteLock::acquire(
-            &self.cache_dir,
+            &self.lock_dir,
             crate::cache::lock::write_lock_timeout(),
         )?;
         if !self.staged_increment_exists(commit.job_id)? {
