@@ -24,7 +24,19 @@ pub fn load_graph_index(
     options: &IndexOptions,
     no_cache_refresh: bool,
 ) -> Result<GraphIndex> {
-    let mut cache = Cache::open_with_index(
+    let index = retry_once_on_corruption(
+        || load_graph_index_attempt(vault_root, options, no_cache_refresh),
+        || evict_cache_db(vault_root),
+    )?;
+    Ok(index)
+}
+
+fn load_graph_index_attempt(
+    vault_root: &Utf8Path,
+    options: &IndexOptions,
+    no_cache_refresh: bool,
+) -> Result<GraphIndex> {
+    let mut cache = Cache::open_with_index_trusting(
         vault_root,
         options.alias_field.as_deref(),
         &options.ignore,
@@ -46,8 +58,7 @@ pub fn load_graph_index(
     // them are unresolved. No read-time retain is needed or wanted; the earlier
     // one only dropped in-memory docs (not the SQLite rows count/find/get read)
     // and never retracted already-resolved links (NRN-117, ADR 0007).
-    let index = cache.load_graph_index()?;
-    Ok(index)
+    cache.load_graph_index()
 }
 
 /// Open the per-vault cache for query commands. Runs the implicit
@@ -61,7 +72,19 @@ pub fn open_for_query(
     options: &IndexOptions,
     no_cache_refresh: bool,
 ) -> Result<Cache> {
-    let mut cache = Cache::open_with_index(
+    let cache = retry_once_on_corruption(
+        || open_for_query_attempt(vault_root, options, no_cache_refresh),
+        || evict_cache_db(vault_root),
+    )?;
+    Ok(cache)
+}
+
+fn open_for_query_attempt(
+    vault_root: &Utf8Path,
+    options: &IndexOptions,
+    no_cache_refresh: bool,
+) -> Result<Cache> {
+    let mut cache = Cache::open_with_index_trusting(
         vault_root,
         options.alias_field.as_deref(),
         &options.ignore,
@@ -78,6 +101,62 @@ pub fn open_for_query(
         }
     }
     Ok(cache)
+}
+
+/// Run a cache-backed read, rebuilding the cache once if it surfaces SQLite
+/// corruption. NRN-275 removed the per-open `PRAGMA integrity_check` from the
+/// direct read path (`Cache::open_with_index_trusting`), so byte corruption now
+/// surfaces as `SQLITE_CORRUPT` / `SQLITE_NOTADB` while a query reads a bad page
+/// rather than at open. The cache is a rebuildable derived artifact: on the first
+/// corruption we run `on_corruption` (evict the database) and retry the read
+/// ONCE — the retry opens a Fresh db and the mandatory incremental refresh
+/// reconstructs it from the vault, re-establishing trust. A second corruption (a
+/// fault the rebuild could not clear) propagates instead of looping.
+fn retry_once_on_corruption<T>(
+    mut attempt: impl FnMut() -> Result<T>,
+    mut on_corruption: impl FnMut() -> Result<()>,
+) -> Result<T> {
+    match attempt() {
+        Err(err) if is_cache_corruption(&err) => {
+            on_corruption()?;
+            attempt()
+        }
+        other => other,
+    }
+}
+
+/// Does this error chain carry a SQLite corruption-class failure
+/// (`SQLITE_CORRUPT` / `SQLITE_NOTADB`)? These are the codes SQLite raises when a
+/// query reads structurally malformed bytes — the signal to evict + rebuild. The
+/// concrete `rusqlite::Error` is usually wrapped (in `CacheError::Sqlite`, then
+/// `anyhow`), so walk the whole chain and downcast each cause — the same
+/// classification the warm daemon's eviction seam uses.
+fn is_cache_corruption(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(|e| e.sqlite_error_code())
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                )
+            })
+    })
+}
+
+/// Evict a vault's cache database — delete `cache.db` and its WAL/SHM sidecars —
+/// so the next open takes the Fresh path and the incremental refresh rebuilds it
+/// from the vault. Used by the rebuild-on-corruption retry.
+fn evict_cache_db(vault_root: &Utf8Path) -> Result<()> {
+    let (_canonical, cache_dir) = crate::cache::cache_dir_for(vault_root)?;
+    let db_path = cache_dir.join("cache.db");
+    if db_path.as_std_path().exists() {
+        std::fs::remove_file(db_path.as_std_path())?;
+    }
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal").as_std_path());
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm").as_std_path());
+    Ok(())
 }
 
 pub fn run_index(
@@ -287,4 +366,238 @@ pub fn run_status(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// A synthesized `SQLITE_CORRUPT` failure wrapped exactly as production wraps
+    /// it: `rusqlite::Error` → `CacheError::Sqlite` → `anyhow`. Proves the chain
+    /// walk reaches the concrete code through both layers.
+    fn corrupt_err() -> anyhow::Error {
+        let sqlite = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        );
+        anyhow::Error::new(CacheError::Sqlite(sqlite))
+    }
+
+    fn notadb_err() -> anyhow::Error {
+        let sqlite = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTADB),
+            None,
+        );
+        anyhow::Error::new(CacheError::Sqlite(sqlite))
+    }
+
+    #[test]
+    fn is_cache_corruption_classifies_sqlite_codes() {
+        assert!(is_cache_corruption(&corrupt_err()));
+        assert!(is_cache_corruption(&notadb_err()));
+
+        // A non-corruption sqlite failure (BUSY) must NOT classify as corruption.
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        assert!(!is_cache_corruption(&anyhow::Error::new(
+            CacheError::Sqlite(busy)
+        )));
+
+        // A plain non-sqlite error must NOT classify as corruption.
+        assert!(!is_cache_corruption(&anyhow::anyhow!("unrelated failure")));
+
+        // A CacheError variant that carries no sqlite cause must NOT classify.
+        assert!(!is_cache_corruption(&anyhow::Error::new(
+            CacheError::LockTimeout
+        )));
+    }
+
+    #[test]
+    fn retry_once_on_corruption_passes_success_through_without_eviction() {
+        let attempts = Cell::new(0usize);
+        let evicts = Cell::new(0usize);
+        let out = retry_once_on_corruption(
+            || {
+                attempts.set(attempts.get() + 1);
+                Ok(7)
+            },
+            || {
+                evicts.set(evicts.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(attempts.get(), 1, "success must not retry");
+        assert_eq!(evicts.get(), 0, "success must not evict");
+    }
+
+    #[test]
+    fn retry_once_on_corruption_evicts_rebuilds_and_succeeds() {
+        let attempts = Cell::new(0usize);
+        let evicts = Cell::new(0usize);
+        let out = retry_once_on_corruption(
+            || {
+                let n = attempts.get();
+                attempts.set(n + 1);
+                if n == 0 {
+                    Err(corrupt_err())
+                } else {
+                    Ok(42)
+                }
+            },
+            || {
+                evicts.set(evicts.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(out.unwrap(), 42, "the retry after eviction must succeed");
+        assert_eq!(attempts.get(), 2, "corruption must drive exactly one retry");
+        assert_eq!(evicts.get(), 1, "the retry must evict exactly once");
+    }
+
+    #[test]
+    fn retry_once_on_corruption_fails_closed_on_re_corruption() {
+        // A second corruption (the rebuild could not clear the fault) must
+        // propagate the error rather than loop — fail closed.
+        let attempts = Cell::new(0usize);
+        let evicts = Cell::new(0usize);
+        let out: Result<i32> = retry_once_on_corruption(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(corrupt_err())
+            },
+            || {
+                evicts.set(evicts.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(out.is_err(), "a second corruption must propagate");
+        assert!(
+            is_cache_corruption(&out.unwrap_err()),
+            "the propagated error must still be the corruption-class error"
+        );
+        assert_eq!(attempts.get(), 2, "exactly one retry, then propagate");
+        assert_eq!(evicts.get(), 1, "eviction runs once, not per attempt");
+    }
+
+    #[test]
+    fn retry_once_on_corruption_does_not_evict_on_non_corruption_error() {
+        let attempts = Cell::new(0usize);
+        let evicts = Cell::new(0usize);
+        let out: Result<i32> = retry_once_on_corruption(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(anyhow::anyhow!("lock contention or similar"))
+            },
+            || {
+                evicts.set(evicts.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(out.is_err());
+        assert_eq!(attempts.get(), 1, "a non-corruption error must not retry");
+        assert_eq!(evicts.get(), 0, "a non-corruption error must not evict");
+    }
+
+    /// Build + populate a cache for a fresh temp vault, then drop it (checkpoints
+    /// and removes the WAL/SHM sidecars). Returns the vault root, its tempdir
+    /// guard, and the resolved `cache.db` path.
+    fn build_populated_cache() -> (tempfile::TempDir, camino::Utf8PathBuf, camino::Utf8PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        // A named `vault/` subdir, not the tempdir root: `TempDir` names itself
+        // `.tmpXXXX` and the scanner treats a hidden root as ignored (walks zero
+        // files), so building at the root would populate an empty cache.
+        let root = base.join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.md"), "---\ntitle: A\n---\n# A\nbody\n").unwrap();
+        std::fs::write(root.join("b.md"), "# B\n[[a]]\n").unwrap();
+
+        let options = IndexOptions::default();
+        let mut cache = Cache::open_with_index(
+            &root,
+            None,
+            &[],
+            &options.resolved_index_set,
+            &options.resolved_index_set_hash,
+        )
+        .unwrap();
+        cache.rebuild(&root).unwrap();
+        let db_path = cache.cache_dir.join("cache.db");
+        drop(cache);
+        // Last connection closed → main db is authoritative; drop any sidecars.
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal").as_std_path());
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm").as_std_path());
+        (tmp, root, db_path)
+    }
+
+    #[test]
+    fn load_graph_index_rebuilds_on_data_page_corruption() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let (_tmp, root, db_path) = build_populated_cache();
+
+        // Zero the `documents` table's b-tree root page. The `meta` rows stay
+        // readable, so the trusting open's inspect REUSES the cache (skipping the
+        // integrity_check that used to catch this), and the corruption instead
+        // surfaces when the refresh/load reads the malformed `documents` page.
+        let (page_size, rootpage): (i64, i64) = {
+            let conn = rusqlite::Connection::open(db_path.as_std_path()).unwrap();
+            let page_size = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .unwrap();
+            let rootpage = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = 'documents'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (page_size, rootpage)
+        };
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(db_path.as_std_path())
+                .unwrap();
+            f.seek(SeekFrom::Start(((rootpage - 1) * page_size) as u64))
+                .unwrap();
+            f.write_all(&vec![0u8; page_size as usize]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // The read must evict → rebuild → retry and succeed with the real docs.
+        let options = IndexOptions::default();
+        let index = load_graph_index(&root, &options, false).unwrap();
+        assert!(
+            index.documents.len() >= 2,
+            "rebuilt index must be repopulated from the vault, got {} docs",
+            index.documents.len()
+        );
+    }
+
+    #[test]
+    fn load_graph_index_rebuilds_on_gross_scribble() {
+        let (_tmp, root, db_path) = build_populated_cache();
+
+        // Whole-file garbage: the header/meta are unreadable, so the open's
+        // inspect catches it (schema/identity SELECTs fail) and rebuilds — the
+        // trusting path still self-heals gross corruption without integrity_check.
+        std::fs::write(
+            db_path.as_std_path(),
+            b"this is not a sqlite database at all",
+        )
+        .unwrap();
+
+        let options = IndexOptions::default();
+        let index = load_graph_index(&root, &options, false).unwrap();
+        assert!(
+            index.documents.len() >= 2,
+            "gross corruption must still self-heal into a repopulated index, got {} docs",
+            index.documents.len()
+        );
+    }
 }
