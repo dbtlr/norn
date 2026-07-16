@@ -231,6 +231,10 @@ fn render_prune_text(report: &PruneReport) {
                     None => "aged".to_string(),
                 },
                 EvictReason::OverCap => "over cap".to_string(),
+                EvictReason::DevStale => match e.age_days {
+                    Some(d) => format!("dev stale {d}d"),
+                    None => "dev stale".to_string(),
+                },
             };
             println!("  [{tree}] {root}  {reason}  {}", format_bytes(e.bytes));
         }

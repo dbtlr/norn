@@ -16,6 +16,12 @@ use serde::{Serialize, Serializer};
 pub(crate) const CACHE_TREE_SIZE_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 /// Lazy-sweep throttle: at most one sweep per interval.
 pub(crate) const PRUNE_THROTTLE: Duration = Duration::from_secs(24 * 3_600);
+/// Dev-channel cache TTL (48h). A `dev/` database (NRN-269) untouched for
+/// longer than this is evicted on its own clock — the whole entry's freshness
+/// spans both channels, so a stale ~29MB dev build inside a live-active entry
+/// would otherwise never age out. Shorter than the entry retention window
+/// because a dev cache rebuilds cheaply from its cargo tree.
+pub(crate) const DEV_CACHE_TTL: Duration = Duration::from_secs(48 * 3_600);
 /// Marker file (in the cache tree root) recording the last lazy-sweep decision.
 pub(crate) const PRUNE_MARKER: &str = ".last-prune";
 
@@ -97,6 +103,7 @@ pub(crate) enum EvictReason {
     Empty,
     Aged,
     OverCap,
+    DevStale,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,6 +322,75 @@ fn age_days(newest: Option<SystemTime>, now: SystemTime) -> Option<u64> {
         .map(|d| d.as_secs() / 86_400)
 }
 
+/// Newest mtime among an entry's dev-channel database files (`dev/cache.db`
+/// plus its `-wal`/`-shm` sidecars when present), or `None` when the dev db is
+/// absent. Presence is gated on `dev/cache.db` itself — a bare `dev/` dir or
+/// stray sidecar is not a dev cache.
+fn dev_db_newest_mtime(entry_dir: &Utf8Path) -> Option<SystemTime> {
+    let dev = entry_dir.join("dev");
+    if !dev.join("cache.db").as_std_path().exists() {
+        return None;
+    }
+    let mut newest: Option<SystemTime> = None;
+    for name in ["cache.db", "cache.db-wal", "cache.db-shm"] {
+        if let Ok(md) = std::fs::metadata(dev.join(name).as_std_path()) {
+            newest = max_opt(newest, md.modified().ok());
+        }
+    }
+    newest
+}
+
+/// Evict a stale `dev/` subtree from an entry, holding the shared entry `.lock`
+/// (the same zero-timeout flock `evict_cache_entry` uses) so an in-flight dev
+/// writer blocks the eviction. Only `dev/` is removed — never the live db, the
+/// shared `.lock`, nor the entry itself. On a real (non-dry-run) removal the
+/// in-memory `Entry` is re-measured so the remaining classification passes see
+/// accurate size/mtime/count; a now dev-only entry then falls through to the
+/// Empty policy this same sweep. A held lock or failed removal is a best-effort
+/// skip (counted as a locked skip), leaving `dev/` in place.
+fn evict_dev_dir(
+    report: &mut TreeReport,
+    entry: &mut Entry,
+    dev_mtime: SystemTime,
+    now: SystemTime,
+    dry_run: bool,
+) {
+    let dev_dir = entry.dir.join("dev");
+    let (dev_bytes, _, _) = measure(&dev_dir);
+    if !dry_run {
+        match crate::cache::acquire_flock(&entry.dir.join(".lock"), Duration::ZERO) {
+            Ok(_held) => {
+                if std::fs::remove_dir_all(dev_dir.as_std_path()).is_err() {
+                    return; // best-effort: a failed removal is silently skipped
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                report.skipped_locked += 1;
+                return;
+            }
+            // A lock we can't even open (permissions, IO): treat as locked-skip.
+            Err(_) => {
+                report.skipped_locked += 1;
+                return;
+            }
+        }
+        // Re-measure so the remaining passes classify the shrunk entry correctly
+        // and its size is not double-counted if the entry is later evicted whole.
+        let (bytes, newest, files) = measure(&entry.dir);
+        entry.bytes = bytes;
+        entry.newest_mtime = newest;
+        entry.file_count = files;
+    }
+    report.bytes_freed += dev_bytes;
+    report.evicted.push(EvictedEntry {
+        root: entry.root.clone(),
+        hash: entry.hash.clone(),
+        reason: EvictReason::DevStale,
+        age_days: age_days(Some(dev_mtime), now),
+        bytes: dev_bytes,
+    });
+}
+
 /// Try-evict one cache entry: skip if its write lock is held. Returns
 /// Ok(true) on eviction, Ok(false) on locked-skip.
 fn evict_cache_entry(entry: &Entry) -> std::io::Result<bool> {
@@ -356,6 +432,27 @@ pub(crate) fn sweep(
         scanned: cache_entries.len(),
         ..Default::default()
     };
+    // Dev-channel TTL pass (NRN-272): independently of the entry's own
+    // freshness, evict a `dev/` db whose newest mtime has aged past
+    // DEV_CACHE_TTL, removing only the dev subtree. Runs regardless of the
+    // invoking binary's channel; the exempt (current-invocation) vault is never
+    // touched. A now dev-only entry falls through to the Empty/dead-root
+    // policies below via the re-measure in evict_dev_dir.
+    for entry in &mut cache_entries {
+        if exempt(entry) {
+            continue;
+        }
+        let Some(dev_mtime) = dev_db_newest_mtime(&entry.dir) else {
+            continue;
+        };
+        let stale = now
+            .duration_since(dev_mtime)
+            .map(|age| age > DEV_CACHE_TTL)
+            .unwrap_or(false);
+        if stale {
+            evict_dev_dir(&mut cache_report, entry, dev_mtime, now, opts.dry_run);
+        }
+    }
     let mut survivors: Vec<Entry> = Vec::new();
     for entry in cache_entries {
         if exempt(&entry) {
@@ -536,6 +633,14 @@ mod tests {
 
     fn entry_size(tree: &Utf8Path, hash: &str) -> u64 {
         measure(&tree.join(hash)).0
+    }
+
+    /// Backdate every immediate file in `dir` to `dur` in the past.
+    fn backdate_dir(dir: &Utf8Path, dur: Duration) {
+        let t = filetime::FileTime::from_system_time(std::time::SystemTime::now() - dur);
+        for f in std::fs::read_dir(dir.as_std_path()).unwrap().flatten() {
+            filetime::set_file_mtime(f.path(), t).unwrap();
+        }
     }
 
     const H1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -915,6 +1020,165 @@ mod tests {
         let report2 = sweep(&cache_tree, &state_tree, &opts(90));
         assert_eq!(hashes(&report2.cache.evicted), vec![H1]);
         assert!(!cache_tree.join(H1).as_std_path().exists());
+    }
+
+    /// NRN-272 (a): a dev db aged past DEV_CACHE_TTL inside a live-active entry
+    /// is evicted (`dev-stale`) while the live db and shared `.lock` survive
+    /// byte-identical and the entry itself is kept.
+    #[test]
+    fn stale_dev_db_evicted_live_db_and_lock_survive() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = mint_cache_entry(&cache_tree, H1, live_root);
+        let live_db = entry.join("cache.db");
+        let live_bytes = std::fs::read(live_db.as_std_path()).unwrap();
+        std::fs::write(entry.join(".lock").as_std_path(), b"live-lock").unwrap();
+        // Dev db aged well past the 48h TTL.
+        let dev = mint_cache_entry(&entry, "dev", live_root);
+        backdate_dir(&dev, Duration::from_secs(3 * 86_400));
+
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+
+        let dev_evict = report
+            .cache
+            .evicted
+            .iter()
+            .find(|e| e.hash == H1 && e.reason == EvictReason::DevStale)
+            .expect("stale dev db must be evicted as dev-stale");
+        assert!(dev_evict.bytes > 0);
+        assert!(!entry.join("dev").as_std_path().exists(), "dev/ removed");
+        assert!(live_db.as_std_path().exists(), "live db kept");
+        assert_eq!(
+            std::fs::read(live_db.as_std_path()).unwrap(),
+            live_bytes,
+            "live db byte-identical"
+        );
+        assert_eq!(
+            std::fs::read(entry.join(".lock").as_std_path()).unwrap(),
+            b"live-lock",
+            "shared .lock byte-identical"
+        );
+        assert!(entry.as_std_path().exists(), "live-active entry survives");
+    }
+
+    /// NRN-272 (b): a fresh dev db (mtime within the TTL) is retained.
+    #[test]
+    fn fresh_dev_db_retained() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = mint_cache_entry(&cache_tree, H1, live_root);
+        let dev = mint_cache_entry(&entry, "dev", live_root); // fresh
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+        assert!(
+            report
+                .cache
+                .evicted
+                .iter()
+                .all(|e| e.reason != EvictReason::DevStale),
+            "a fresh dev db must not be dev-stale evicted"
+        );
+        assert!(
+            dev.join("cache.db").as_std_path().exists(),
+            "fresh dev db retained"
+        );
+    }
+
+    /// NRN-272 (c): the exempt (current-invocation) vault's stale dev db is NOT
+    /// evicted — the exemption covers the dev channel too.
+    #[test]
+    fn exempt_vault_stale_dev_db_not_evicted() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = mint_cache_entry(&cache_tree, H1, live_root);
+        let dev = mint_cache_entry(&entry, "dev", live_root);
+        backdate_dir(&dev, Duration::from_secs(3 * 86_400));
+        let mut o = opts(90);
+        o.exempt_hash = Some(H1.to_string());
+        let report = sweep(&cache_tree, &state_tree, &o);
+        assert!(report.cache.evicted.is_empty(), "exempt entry untouched");
+        assert!(
+            dev.join("cache.db").as_std_path().exists(),
+            "exempt dev db kept"
+        );
+    }
+
+    /// NRN-272 (d): a dev-only entry whose dev db ages out is fully reclaimed —
+    /// the dev-stale eviction empties it and the existing Empty policy removes
+    /// the entry on the same sweep.
+    #[test]
+    fn dev_only_entry_reclaimed_after_dev_ttl() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        let entry = cache_tree.join(H1);
+        std::fs::create_dir_all(entry.as_std_path()).unwrap();
+        // Dev-only: no live cache.db, dev db aged past the TTL.
+        let dev = mint_cache_entry(&entry, "dev", live_root);
+        backdate_dir(&dev, Duration::from_secs(3 * 86_400));
+        let report = sweep(&cache_tree, &state_tree, &opts(90));
+        assert!(
+            report
+                .cache
+                .evicted
+                .iter()
+                .any(|e| e.hash == H1 && e.reason == EvictReason::DevStale),
+            "dev db evicted as dev-stale"
+        );
+        assert!(
+            report
+                .cache
+                .evicted
+                .iter()
+                .any(|e| e.hash == H1 && e.reason == EvictReason::Empty),
+            "now-empty entry reclaimed via the Empty policy"
+        );
+        assert!(
+            !entry.as_std_path().exists(),
+            "dev-only entry fully reclaimed"
+        );
+    }
+
+    /// NRN-272 (e): dev-TTL eviction is channel-agnostic — a sweep that exempts
+    /// the invoker's own current vault (as a live-channel invocation does) still
+    /// evicts a stale dev db belonging to a different vault.
+    #[test]
+    fn dev_ttl_eviction_applies_under_any_channel() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        // A different vault's entry carrying a stale dev db.
+        let other_vault = TempDir::new().unwrap();
+        let other_root = other_vault.path().to_str().unwrap();
+        let entry1 = mint_cache_entry(&cache_tree, H1, other_root);
+        let dev1 = mint_cache_entry(&entry1, "dev", other_root);
+        backdate_dir(&dev1, Duration::from_secs(3 * 86_400));
+        // The invoker's own current (live) vault — exempt.
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        mint_cache_entry(&cache_tree, H2, live_root);
+        let mut o = opts(90);
+        o.exempt_hash = Some(H2.to_string());
+        let report = sweep(&cache_tree, &state_tree, &o);
+        assert!(
+            report
+                .cache
+                .evicted
+                .iter()
+                .any(|e| e.hash == H1 && e.reason == EvictReason::DevStale),
+            "a live-channel sweep still evicts a foreign stale dev db"
+        );
+        assert!(!entry1.join("dev").as_std_path().exists(), "dev/ removed");
     }
 
     #[test]
