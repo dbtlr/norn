@@ -45,10 +45,11 @@ pub(crate) const CHANNEL_ENV: &str = "NORN_CACHE_CHANNEL";
 /// The cache isolation channel a process resolves to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Channel {
-    /// The installed binary's namespace: `<cache_home>/norn/<hash>/cache.db`.
+    /// The installed binary's namespace:
+    /// `<cache_home>/norn/<hash>/v{schema}/cache.db`.
     Live,
     /// A cargo-build-tree binary's namespace, nested inside the same vault
-    /// entry: `<cache_home>/norn/<hash>/dev/cache.db`.
+    /// entry: `<cache_home>/norn/<hash>/dev/v{schema}/cache.db`.
     Dev,
 }
 
@@ -61,10 +62,12 @@ impl Channel {
         }
     }
 
-    /// Subdirectory (relative to the shared vault entry dir) that houses this
-    /// channel's database, or `None` when the database sits directly in the
-    /// entry dir. The write lock and vault-level state stay in the entry dir
-    /// regardless of channel, so only the database moves.
+    /// Channel subdirectory (relative to the shared vault entry dir) under
+    /// which this channel's schema dirs nest, or `None` when the schema dirs
+    /// sit directly in the entry dir. The database itself lives one level
+    /// deeper, under a `v{schema}` segment (see `identity::schema_segment`).
+    /// The write lock and vault-level state stay in the entry dir regardless of
+    /// channel, so only the database moves.
     pub(crate) fn db_subdir(self) -> Option<&'static str> {
         match self {
             Channel::Live => None,

@@ -24,9 +24,12 @@ const CACHE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 
 impl crate::cache::Cache {
     /// Open the cache for a vault. Creates the cache directory and database
-    /// if missing; inspects an existing cache file and either reuses it,
-    /// rebuilds it (corruption / older schema / identity drift), or hard-errors
-    /// (schema newer than this binary supports).
+    /// if missing; inspects an existing cache file and either reuses it or
+    /// rebuilds it (corruption or identity drift). A binary only ever opens its
+    /// own channel+schema path (`<entry>/[dev/]v{schema}/cache.db`, NRN-286), so
+    /// there is no cross-version comparison and no "schema newer than this
+    /// binary supports" case: a mismatched `schema_version` inside this binary's
+    /// own schema dir can only mean a foreign or damaged db and rebuilds.
     ///
     /// Thin wrapper around [`Cache::open_with_config`] that passes
     /// `alias_field = None`. Test and bootstrap call sites that don't have
@@ -296,11 +299,18 @@ fn open_layout(
     let lock_dir = layout.entry_dir;
     let channel = layout.channel;
 
-    // Ensure both the shared entry dir (holds the write lock) and the
-    // channel-specific database dir exist at 0700. On the live channel they
-    // are the same directory — create once.
+    // Ensure the shared entry dir (holds the write lock) and the schema-
+    // qualified database dir both exist at 0700. The db dir is now always
+    // nested below the entry (`<entry>/v{schema}` on live, `<entry>/dev/
+    // v{schema}` on dev), so secure the entry, any intermediate channel dir,
+    // and the leaf schema dir explicitly rather than relying on umask.
     if lock_dir != cache_dir {
         create_dir_secure(&lock_dir)?;
+        if let Some(parent) = cache_dir.parent() {
+            if parent != lock_dir {
+                create_dir_secure(parent)?;
+            }
+        }
     }
     create_dir_secure(&cache_dir)?;
 
@@ -363,7 +373,6 @@ fn open_layout(
                 let _ = std::fs::remove_file(wal.as_std_path());
                 let _ = std::fs::remove_file(shm.as_std_path());
             }
-            InspectResult::HardError(err) => return Err(err),
         }
     }
 }
@@ -376,14 +385,11 @@ enum InspectResult {
     Reuse(Connection),
     /// Cache is recoverable by rebuild.
     RebuildNeeded(RebuildReason),
-    /// Cache state cannot be safely interpreted; abort.
-    HardError(CacheError),
 }
 
 #[derive(Debug)]
 enum RebuildReason {
     Corrupted(String),
-    SchemaOlder { found: u32 },
     IdentityDrift { cached: String, current: String },
     AliasFieldDrift { cached: String, current: String },
 }
@@ -456,7 +462,16 @@ fn inspect_existing_cache(
         }
     }
 
-    // Schema version check
+    // Schema-version corruption backstop (NRN-286).
+    //
+    // The db path is already schema-qualified (`<entry>/[dev/]v{schema}/cache.db`),
+    // so a binary only ever opens the db in its own schema dir. The stored
+    // `schema_version` meta row must therefore equal this binary's
+    // SCHEMA_VERSION; any other value inside our own schema dir can only mean a
+    // foreign or damaged database was dropped there — rebuild it. There is no
+    // "newer than this binary supports" case anymore: a genuinely newer binary
+    // writes to ITS OWN `v{newer}` dir, which we never open (its stale-schema
+    // db ages out via the prune TTL pass instead).
     let sv: Result<String, _> = conn.query_row(
         "SELECT value FROM meta WHERE key = 'schema_version'",
         [],
@@ -470,16 +485,13 @@ fn inspect_existing_cache(
             )));
         }
     };
-    if found_version > crate::cache::SCHEMA_VERSION {
-        return Ok(InspectResult::HardError(CacheError::SchemaNewer {
-            found: found_version,
-            expected: crate::cache::SCHEMA_VERSION,
-        }));
-    }
-    if found_version < crate::cache::SCHEMA_VERSION {
-        return Ok(InspectResult::RebuildNeeded(RebuildReason::SchemaOlder {
-            found: found_version,
-        }));
+    if found_version != crate::cache::SCHEMA_VERSION {
+        return Ok(InspectResult::RebuildNeeded(RebuildReason::Corrupted(
+            format!(
+                "schema_version {found_version} in a v{} schema dir",
+                crate::cache::SCHEMA_VERSION
+            ),
+        )));
     }
 
     // Identity check
@@ -570,12 +582,6 @@ fn emit_rebuild_message(reason: &RebuildReason) {
 fn rebuild_message(reason: &RebuildReason) -> String {
     match reason {
         RebuildReason::Corrupted(detail) => format!("cache is corrupted ({detail}); rebuilding"),
-        RebuildReason::SchemaOlder { found } => {
-            format!(
-                "cache schema is v{found}, expected v{}; rebuilding",
-                crate::cache::SCHEMA_VERSION
-            )
-        }
         RebuildReason::IdentityDrift { cached, current } => {
             format!("cache was built against {cached}, current vault is {current}; rebuilding")
         }
@@ -710,14 +716,16 @@ mod tests {
         let live_bytes_before = std::fs::read(live_db.as_std_path()).unwrap();
         assert!(!live_bytes_before.is_empty());
 
-        // Dev open of the SAME vault: must land under `dev/` and never touch the
-        // live db (no schema migration, no rebuild, no write).
+        // Dev open of the SAME vault: must land under `dev/v{schema}` and never
+        // touch the live db (no schema migration, no rebuild, no write).
+        let schema = crate::cache::identity::schema_segment();
         let dev = crate::cache::Cache::open_at_channel(&home, &root, Channel::Dev).unwrap();
-        assert_eq!(dev.cache_dir, dev.lock_dir.join("dev"));
+        assert_eq!(dev.cache_dir, dev.lock_dir.join("dev").join(&schema));
         assert!(dev.cache_dir.join("cache.db").exists());
         assert_eq!(dev.channel_label(), "dev");
-        // Shared write lock stays at the vault entry dir for both channels.
-        assert_eq!(dev.lock_dir, live_db.parent().unwrap());
+        // Shared write lock stays at the vault entry dir for both channels —
+        // two levels above the dev db (`<entry>/dev/v{schema}/cache.db`).
+        assert_eq!(dev.lock_dir, live_db.parent().unwrap().parent().unwrap());
         drop(dev);
 
         // The live db is byte-for-byte identical: dev open did not migrate it.
@@ -731,7 +739,8 @@ mod tests {
         // live open self-heals its own db without dev having interfered.
         let live_again = crate::cache::Cache::open_at_channel(&home, &root, Channel::Live).unwrap();
         assert_eq!(live_again.channel_label(), "live");
-        assert_eq!(live_again.cache_dir, live_again.lock_dir);
+        // Live db dir is the entry's own `v{schema}` segment (NRN-286).
+        assert_eq!(live_again.cache_dir, live_again.lock_dir.join(&schema));
     }
 
     #[test]
@@ -850,8 +859,14 @@ mod tests {
         assert_eq!(v.parse::<u32>().unwrap(), crate::cache::SCHEMA_VERSION);
     }
 
+    /// NRN-286: a db carrying a NEWER `schema_version` than this binary — which
+    /// can only appear inside our own schema dir as a foreign/damaged file, never
+    /// as a legitimate future cache (that lives in its own `v{newer}` dir we
+    /// never open) — must rebuild in place, NOT hard-error. The retired
+    /// `SchemaNewer` "upgrade norn" lockout is gone: a version downgrade
+    /// self-heals instead of locking the binary out.
     #[test]
-    fn open_with_newer_schema_returns_hard_error() {
+    fn open_with_foreign_newer_schema_rebuilds_not_errors() {
         let (_tmp, root) = make_vault();
         let cache = crate::cache::Cache::open(&root).unwrap();
         cache
@@ -863,15 +878,50 @@ mod tests {
             .unwrap();
         drop(cache);
 
-        let result = crate::cache::Cache::open(&root);
-        match result {
-            Err(crate::cache::CacheError::SchemaNewer { found, expected }) => {
-                assert_eq!(found, 999);
-                assert_eq!(expected, crate::cache::SCHEMA_VERSION);
-            }
-            Err(other) => panic!("expected SchemaNewer, got {:?}", other),
-            Ok(_) => panic!("expected SchemaNewer, got Ok(Cache)"),
-        }
+        let cache2 = crate::cache::Cache::open(&root).expect("must rebuild, not error");
+        let v: String = cache2
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v.parse::<u32>().unwrap(), crate::cache::SCHEMA_VERSION);
+    }
+
+    /// NRN-286 migration: an entry holding ONLY a legacy bare `<entry>/cache.db`
+    /// (the pre-schema-segment layout) is left byte-identical — a fresh open
+    /// builds the current db at `<entry>/v{schema}/cache.db` beside it and never
+    /// reads or migrates the legacy file (the prune TTL pass ages it out later).
+    #[test]
+    fn open_leaves_legacy_bare_db_untouched_and_builds_schema_dir() {
+        use crate::cache::channel::Channel;
+
+        let (_tmp, root) = make_vault();
+        let home_tmp = TempDir::new().unwrap();
+        let home = Utf8PathBuf::from_path_buf(home_tmp.path().to_path_buf()).unwrap();
+
+        // Resolve the layout to plant a legacy bare db at the entry root.
+        let layout =
+            crate::cache::identity::cache_layout_in_channel(&home, &root, Channel::Live).unwrap();
+        std::fs::create_dir_all(layout.entry_dir.as_std_path()).unwrap();
+        let legacy_db = layout.entry_dir.join("cache.db");
+        std::fs::write(legacy_db.as_std_path(), b"legacy-cache-bytes").unwrap();
+        let legacy_bytes_before = std::fs::read(legacy_db.as_std_path()).unwrap();
+
+        // Live open builds the schema-qualified db; the legacy file is untouched.
+        let cache = crate::cache::Cache::open_at_channel(&home, &root, Channel::Live).unwrap();
+        assert_eq!(cache.cache_dir, layout.db_dir);
+        assert!(cache.cache_dir.join("cache.db").exists());
+        assert_ne!(cache.cache_dir.join("cache.db"), legacy_db);
+        drop(cache);
+
+        assert_eq!(
+            std::fs::read(legacy_db.as_std_path()).unwrap(),
+            legacy_bytes_before,
+            "legacy bare cache.db must be left byte-for-byte untouched"
+        );
     }
 
     #[test]
