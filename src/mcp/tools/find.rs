@@ -17,8 +17,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{FindArgs, SortPaginateArgs};
+use crate::env::{RequestScope, VaultContext};
 use crate::filter_args::FilterArgs;
-use crate::mcp::context::{RequestScope, VaultContext};
 
 #[cfg(test)]
 thread_local! {

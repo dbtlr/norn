@@ -8,8 +8,12 @@
 //! config is parsed once at startup; the cache is re-opened per tool call so
 //! each call gets the CLI's per-invocation freshness check without a filesystem
 //! watcher.
+//!
+//! The vault env seam itself — [`VaultContext`](crate::env::VaultContext) and
+//! [`RequestScope`](crate::env::RequestScope) — lives in [`crate::env`], not
+//! here. It is surface-neutral (the CLI direct path will adopt it too); this
+//! module keeps only the MCP adapter concerns (server, tools, writer queue).
 
-pub mod context;
 pub mod mutate;
 pub mod mutation_result;
 pub mod notes;
@@ -52,8 +56,8 @@ pub(crate) fn to_mcp_error(e: anyhow::Error) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(e.to_string(), data)
 }
 
-use self::context::VaultContext;
 use self::server::McpServer;
+use crate::env::VaultContext;
 
 /// Run the MCP stdio server. Owns its own multi-thread tokio runtime and blocks
 /// until the client disconnects. Fails fast with a non-zero exit if the vault

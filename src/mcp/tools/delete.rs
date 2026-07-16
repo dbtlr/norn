@@ -33,7 +33,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.delete`.

@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use camino::Utf8Path;
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::mcp::context::VaultContext;
+use crate::env::VaultContext;
 use crate::mcp::server::McpServer;
 use crate::mcp::writer_queue::WriterProgressState;
 use crate::service::{ServingState, WriterProgress};

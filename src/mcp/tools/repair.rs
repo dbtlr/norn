@@ -30,7 +30,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{ConfidenceArg, RepairArgs, ValidateTriageArgs};
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::planner::findings::plan_from_findings;
 use crate::repair::skip_reasons::code_matches_any;
 use crate::standards::{validate_with_compiled, ConfidenceFilter, RepairPlanFilters};

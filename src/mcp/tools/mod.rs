@@ -23,13 +23,13 @@
 /// &scope, p)`. ONE definition instead of a hand-rolled copy per tool test
 /// module (the `query_cache_unscoped` precedent, applied to handlers).
 ///
-/// [`RequestScope`]: crate::mcp::context::RequestScope
+/// [`RequestScope`]: crate::env::RequestScope
 #[cfg(test)]
 macro_rules! scoped_shim {
     ($(fn $name:ident($params:ty) -> $ret:ty;)+) => {
         $(
             fn $name(
-                ctx: &$crate::mcp::context::VaultContext,
+                ctx: &$crate::env::VaultContext,
                 p: $params,
             ) -> anyhow::Result<$ret> {
                 let scope = ctx.begin_request()?;

@@ -13,7 +13,7 @@
 
 use crate::edit::ops::EditOp;
 use crate::edit::report::EditReport;
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 use anyhow::Result;
 use camino::Utf8PathBuf;

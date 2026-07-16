@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::{CountArgs, CountFormat};
 use crate::count::CountOutput;
+use crate::env::{RequestScope, VaultContext};
 use crate::filter_args::FilterArgs;
-use crate::mcp::context::{RequestScope, VaultContext};
 
 /// Parameters for `vault.count`.
 ///

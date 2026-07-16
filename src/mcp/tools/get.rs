@@ -9,8 +9,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{GetArgs, GetFormat as CliGetFormat, SortPaginateArgs};
+use crate::env::{RequestScope, VaultContext};
 use crate::get::{SectionFailure, ShowReport};
-use crate::mcp::context::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Default for [`GetParams::starts_at`] — the CLI's `--starts-at` default (1).

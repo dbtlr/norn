@@ -27,9 +27,9 @@ use super::notes::Noted;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
-use super::context::{RequestScope, VaultContext};
 use super::to_mcp_error;
 use crate::describe::DescribeOutput;
+use crate::env::{RequestScope, VaultContext};
 use crate::mcp::tools::apply::ApplyOutput;
 use crate::mcp::tools::audit::AuditOutput;
 use crate::mcp::tools::count::CountEnvelope;
@@ -1090,7 +1090,7 @@ mod tests {
         // Pin the cap at K so all K checkouts fit: the default cap
         // (min(8, parallelism)) could be < K on a small CI host, deadlocking the
         // barrier. The shared guard serializes the override against the context suite.
-        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(K);
+        let _cap = crate::env::ReadPoolCapGuard::pin(K);
 
         let (_tmp, ctx, server) = warm_server_ready().await;
         assert_eq!(
@@ -1156,7 +1156,7 @@ mod tests {
         // Both readers hold a pooled connection across the refresh wait, so the cap
         // must allow >= 2. The shared guard also isolates this test from the
         // process-global cap=1 wait-at-cap proof running elsewhere in the suite.
-        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
+        let _cap = crate::env::ReadPoolCapGuard::pin(4);
 
         let (tmp, ctx, server) = warm_server_ready().await;
         let baseline = ctx.current_refresh_exec_count();
@@ -1239,7 +1239,7 @@ mod tests {
     async fn count_arriving_after_refresh_started_runs_later_refresh_and_sees_midflight_edit() {
         // Both readers hold a pooled connection across the refresh wait, so the cap
         // must allow >= 2 (default could be 1 on a single-core host).
-        let _cap = crate::mcp::context::ReadPoolCapGuard::pin(4);
+        let _cap = crate::env::ReadPoolCapGuard::pin(4);
 
         let (tmp, ctx, server) = warm_server_ready().await;
         let baseline = ctx.current_refresh_exec_count();

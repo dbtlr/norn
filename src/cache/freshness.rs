@@ -4,7 +4,7 @@
 //! routes it through the coalesced liveness refresh first, then serves. Splitting
 //! the cheap read-side PROBE from the write-side REFRESH is what lets concurrent
 //! reads of an unchanged vault skip the writer queue entirely (they previously
-//! each submitted a refresh op) — see `crate::mcp::context`'s per-request
+//! each submitted a refresh op) — see `crate::env`'s per-request
 //! pipeline for how the two halves compose.
 //!
 //! [`FreshnessProbe`] is the named interface. Today's only implementation is the

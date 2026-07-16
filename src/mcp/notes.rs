@@ -13,7 +13,7 @@
 //! [`Noted<R>`] carries those notes alongside ANY tool's structured output. It is
 //! produced in one place — the shared tool funnel
 //! [`McpServer::run_wrapped`](crate::mcp::server) — which drains the request's
-//! notes off its own [`RequestScope`](crate::mcp::context::RequestScope) (NRN-253:
+//! notes off its own [`RequestScope`](crate::env::RequestScope) (NRN-253:
 //! a fresh per-request note buffer, so notes are structurally bound to the request
 //! that produced them and cannot leak across concurrent requests — no shared
 //! context buffer to clear) and wraps the tool's own result. On serialization it

@@ -31,7 +31,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::standards::engine::validate_with_compiled;
 use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 

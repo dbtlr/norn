@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::{NewArgs, NewFormat};
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 
 /// Parameters for `vault.new`.

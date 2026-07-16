@@ -1,6 +1,6 @@
 //! `vault.audit` — read the per-vault mutation event stream over MCP.
 
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::telemetry::read::{self, Filter};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

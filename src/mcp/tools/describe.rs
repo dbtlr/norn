@@ -54,8 +54,8 @@
 use anyhow::Result;
 
 use crate::describe::DescribeOutput;
+use crate::env::{RequestScope, VaultContext};
 use crate::filter_args::FilterArgs;
-use crate::mcp::context::{RequestScope, VaultContext};
 
 /// Parameters for `vault.describe`.
 ///

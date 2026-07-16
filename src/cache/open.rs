@@ -154,7 +154,7 @@ impl crate::cache::Cache {
     /// that inode from being freed — but an fd does NOT pin the PATH from being
     /// replaced, so a racing `cache clear` could still unlink+recreate `cache.db`
     /// and bind this by-path open to a DIFFERENT inode. The caller closes that
-    /// hole itself: after this open, `open_generation` (in `crate::mcp::context`)
+    /// hole itself: after this open, `open_generation` (in `crate::env`)
     /// stats the path and fails the generation open if the companion's `(dev,
     /// ino)` differs from the sentinel-captured identity, so a split-brain
     /// generation never escapes; a swap after that check is caught by the next

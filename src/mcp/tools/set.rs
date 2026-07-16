@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use camino::Utf8PathBuf;
 
 use crate::cli::{SetArgs, SetFormat};
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::mcp::mutation_result::MutationResult;
 use crate::set::report::{build_report, SetReport};
 

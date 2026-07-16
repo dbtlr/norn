@@ -18,7 +18,7 @@
 //! the apply report's touched-path set (NRN-252 / NRN-158), so there is no
 //! one-line passthrough to keep in sync.
 
-use crate::mcp::context::{RequestScope, VaultContext};
+use crate::env::{RequestScope, VaultContext};
 use crate::mutation_lock::MutationLock;
 use crate::telemetry::{Clock, EventSink, IdGen};
 use camino::Utf8Path;
@@ -259,7 +259,7 @@ pub(crate) fn open_mutation_event_sink(ctx: &VaultContext, scope: &RequestScope)
 
 #[cfg(test)]
 mod lock_ordering_tests {
-    use crate::mcp::context::VaultContext;
+    use crate::env::VaultContext;
     use camino::Utf8PathBuf;
     use fs2::FileExt;
     use tempfile::TempDir;
