@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.48.0 - 2026-07-16
+
+**Release theme:** the cache you can trust — the serve daemon becomes truly concurrent (a read pool over WAL snapshots, a two-class writer queue, atomic cache publication), direct reads get ~3× faster by moving the integrity scan off the hot path, and the cache's on-disk identity becomes channel- and schema-qualified so no binary — dev build, newer version, or downgrade — can ever corrupt, migrate, or lock another binary out of its cache. The `cache clear` escape hatch now works against any broken cache state.
+
 ### Breaking changes
 
 - **The document `.raw` structural facet is removed from `find` and `get`.** Requesting `--col .raw` now follows the existing unknown-facet warning path and never emits a `raw` records field or JSON/JSONL key; MCP `vault.find` / `vault.get` callers must likewise remove `.raw` from `col` requests. To read one document byte-for-byte, migrate to `norn get TARGET --format markdown` or `vault.get { targets: ["TARGET"], format: "markdown" }`. Markdown remains single-document only; there is no multi-document replacement.
