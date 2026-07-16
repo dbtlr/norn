@@ -89,6 +89,9 @@ pub(crate) fn acquire_mutation_lock(cwd: &Utf8Path) -> anyhow::Result<Option<Mut
 /// [`ApplyError::from_anyhow`](crate::apply_report::ApplyError::from_anyhow),
 /// which ALWAYS produces an envelope (falling back to `internal-error`): here a
 /// non-refusal must stay a non-refusal.
+// Adding a refusal code: register it in BOTH this ladder and
+// `apply_report::ApplyError::from_anyhow`, and add the row to docs/errors.md.
+// See the checklist there. Superseded when the CodedError trait lands (NRN-236).
 pub(crate) fn refusal_from_error(e: &anyhow::Error) -> Option<crate::apply_report::ApplyError> {
     use crate::apply_report::ApplyError as Envelope;
     use crate::standards::apply::{ApplyError as RichApplyError, ContainmentError};
