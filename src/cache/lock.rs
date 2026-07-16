@@ -108,7 +108,13 @@ pub(crate) fn acquire_flock(
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(_) => {
+            // Genuine contention: the platform's non-blocking lock call maps to
+            // `ErrorKind::WouldBlock` (EWOULDBLOCK/EAGAIN under `flock(2)`'s
+            // `LOCK_NB`, per `fs2::lock_contended_error`). Only this class waits
+            // out the deadline before reporting timeout; at `Duration::ZERO`
+            // (the callers that must never block, e.g. `cache clear`) the very
+            // first contended attempt already reports timeout.
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if std::time::Instant::now() >= deadline {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
@@ -117,6 +123,13 @@ pub(crate) fn acquire_flock(
                 }
                 std::thread::sleep(interval);
             }
+            // Any other failure is a real fault (e.g. a filesystem/locking
+            // error), not contention — propagate it immediately rather than
+            // waiting out the deadline and collapsing it into a synthesized
+            // `WouldBlock`, which would misreport it as another process
+            // holding the lock (every caller distinguishes `WouldBlock` from
+            // everything else to decide "contention" vs "real error").
+            Err(e) => return Err(e),
         }
     }
 }
@@ -203,5 +216,26 @@ mod tests {
         let _held = acquire_flock(&path, std::time::Duration::from_millis(200)).unwrap();
         let result = acquire_flock(&path, std::time::Duration::from_millis(100));
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    /// Pins the property a zero-timeout caller (`cache clear`, NRN-270) relies
+    /// on: a lock-file open failure that ISN'T contention (here, the parent
+    /// directory never existed) must surface with its own real `ErrorKind`
+    /// rather than being collapsed into the synthesized `WouldBlock` "lock
+    /// timeout" the contention path returns. This exercises the `open(...)?`
+    /// step specifically; see the module doc on why a genuine non-`WouldBlock`
+    /// failure from `try_lock_exclusive` itself isn't practical to synthesize
+    /// portably in a unit test (it would need OS-level fault injection).
+    #[test]
+    fn acquire_flock_missing_parent_dir_is_not_found_not_would_block() {
+        let tmp = TempDir::new().unwrap();
+        let path =
+            Utf8PathBuf::from_path_buf(tmp.path().join("never-created").join(".lock")).unwrap();
+        let result = acquire_flock(&path, std::time::Duration::ZERO);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::NotFound,
+            "a missing parent dir must propagate as NotFound, not collapse into WouldBlock"
+        );
     }
 }

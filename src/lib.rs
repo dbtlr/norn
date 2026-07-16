@@ -1592,24 +1592,32 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         }
         Command::Cache(cache_command) => {
             let loaded_config = load_config(&cwd, config_path.as_ref())?;
-            match &cache_command.command {
+            // `clear` is the only subcommand whose exit code varies (2 on lock
+            // contention, NRN-270); every other subcommand still exits 0.
+            let exit_code = match &cache_command.command {
                 CacheSubcommand::Index(args) => {
-                    crate::cache::command::run_index(&cwd, &loaded_config.index_options, args)?
+                    crate::cache::command::run_index(&cwd, &loaded_config.index_options, args)?;
+                    0
                 }
                 CacheSubcommand::Rebuild => {
-                    crate::cache::command::run_rebuild(&cwd, &loaded_config.index_options)?
+                    crate::cache::command::run_rebuild(&cwd, &loaded_config.index_options)?;
+                    0
                 }
                 CacheSubcommand::Clear => crate::cache::command::run_clear(&cwd)?,
                 CacheSubcommand::Status(args) => {
-                    crate::cache::command::run_status(&cwd, &loaded_config.index_options, args)?
+                    crate::cache::command::run_status(&cwd, &loaded_config.index_options, args)?;
+                    0
                 }
-                CacheSubcommand::Prune(args) => crate::cache::command::run_prune(
-                    &cwd,
-                    loaded_config.vault_config.cache.as_ref(),
-                    args,
-                )?,
-            }
-            Ok(0)
+                CacheSubcommand::Prune(args) => {
+                    crate::cache::command::run_prune(
+                        &cwd,
+                        loaded_config.vault_config.cache.as_ref(),
+                        args,
+                    )?;
+                    0
+                }
+            };
+            Ok(exit_code)
         }
         Command::Config(cfg) => match cfg.command {
             ConfigSubcommand::Show(args) => {

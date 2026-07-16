@@ -46,12 +46,14 @@ norn cache index               # incremental update (default)
 norn cache index --rebuild     # full rebuild from scratch
 norn cache index --force-hash  # skip mtime cheap-check; hash every file
 norn cache rebuild             # explicit alias for `index --rebuild`
-norn cache clear               # delete the cache; next command rebuilds
+norn cache clear               # delete the whole cache entry (all channels/schemas); next command rebuilds
 norn cache status              # channel, path, size, doc/link/file counts, schema version
 norn cache prune               # cross-vault GC; --dry-run to preview
 ```
 
 Every cache subcommand accepts the global `-C` and `--config` flags; `status` accepts `--format text|json` like other query commands.
+
+`cache clear` is the one exception to "every cache subcommand opens the cache": it deletes the vault's whole entry dir (every channel and schema database, plus legacy leftovers) purely from the vault's identity, without opening the database — the escape hatch that must work even when the cache is too broken to open at all. It refuses (exit `2`, nothing deleted) only while another process holds the entry lock. See [Clearing](commands/cache.md#clearing) for details.
 
 ## When the cache rebuilds automatically
 

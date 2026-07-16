@@ -13,7 +13,7 @@ Manage the SQLite-backed vault graph cache — a per-vault, disposable read-acce
 |---|---|
 | `norn cache index` | Update the cache incrementally (the default refresh). |
 | `norn cache rebuild` | Rebuild the cache from scratch. |
-| `norn cache clear` | Delete the cache database; the next command rebuilds it. |
+| `norn cache clear` | Delete the vault's entire cache entry (every channel and schema database) without opening it first; the next command rebuilds. |
 | `norn cache status` | Show cache path, size, document and link counts, and schema version. |
 | `norn cache prune` | Evict dead, aged, and over-cap cache entries across all vaults. |
 
@@ -35,6 +35,18 @@ norn cache index --force-hash
 ## Refresh model
 
 Query commands refresh the cache implicitly before reading. Pass the global `--no-cache-refresh` to skip that step for a single command. The cache is disposable — a missing or corrupt cache rebuilds silently, so treat cache errors as bugs to report, not states to program around.
+
+## Clearing
+
+`norn cache clear` is the operator escape hatch: it deletes the vault's entire cache entry — every channel (`live`/`dev`) and every schema-version database sharing the entry, plus any legacy layout leftovers — in one step. It never touches the state tree (the mutation event stream is not disposable).
+
+Unlike every other cache subcommand, `clear` never opens the cache first. It resolves the entry dir purely from the vault's identity (the same canonical-path hash `Cache::open` uses internally) and deletes it directly, so it works against ANY broken cache state — a corrupt `cache.db`, an undecodable `meta` row, a permission-damaged file — without needing a successful open. Opening first would defeat the point of an escape hatch: a full rebuild could run just to delete the result, and a cache broken enough to need clearing is exactly the case where an open is most likely to fail.
+
+`clear` still takes the shared entry `.lock` (a zero-timeout attempt, not the 5s used elsewhere) so it can't race a concurrent writer:
+
+- A missing entry dir is success ("already clear"), not an error.
+- If another process holds the lock, `clear` refuses immediately — exit code `2`, nothing deleted — rather than deleting out from under an in-flight writer.
+- Otherwise the whole entry dir is removed and the command exits `0`.
 
 ## Pruning
 

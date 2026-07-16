@@ -181,12 +181,13 @@ pub(crate) fn evict_corrupt_cache_after_error(vault_root: &Utf8Path) {
 /// so the next open takes the Fresh path and the incremental refresh rebuilds it
 /// from the vault. Used by the rebuild-on-corruption retry and the error seam.
 ///
-/// Holds the shared cache write lock across the unlink, exactly as [`Cache::clear`]
-/// does: a concurrent process mid-refresh holds this same lock, so taking it here
-/// closes the race where we would otherwise unlink `cache.db` out from under an
-/// in-flight writer, leaving it writing to an orphaned inode. `NotFound` on the
-/// primary db is tolerated (a concurrent eviction won the race), matching the
-/// already-tolerant WAL/SHM removals.
+/// Holds the shared cache write lock across the unlink: a concurrent process
+/// mid-refresh holds this same lock, so taking it here closes the race where we
+/// would otherwise unlink `cache.db` out from under an in-flight writer, leaving
+/// it writing to an orphaned inode. `NotFound` on the primary db is tolerated (a
+/// concurrent eviction won the race), matching the already-tolerant WAL/SHM
+/// removals. Compare [`run_clear`], which deletes the whole entry dir up front
+/// (a zero-timeout lock, no open) rather than rebuilding in-process afterward.
 fn evict_cache_db(vault_root: &Utf8Path) -> Result<()> {
     let layout = crate::cache::identity::cache_layout_for(vault_root)?;
     let _lock = crate::cache::lock::WriteLock::acquire(
@@ -257,13 +258,77 @@ pub fn run_rebuild(vault_root: &Utf8Path, options: &IndexOptions) -> Result<()> 
     Ok(())
 }
 
-pub fn run_clear(vault_root: &Utf8Path) -> Result<()> {
-    // `clear` discards the database entirely; the next open recreates with
-    // whatever alias_field is then in scope, so we don't need to pass one here.
-    let mut cache = Cache::open(vault_root)?;
-    cache.clear()?;
-    eprintln!("vault: cache cleared");
-    Ok(())
+/// Delete the vault's ENTIRE cache entry dir — every channel, every
+/// schema-version database, and any legacy layout leftovers — WITHOUT opening
+/// the cache first (NRN-270). `clear` is the operator escape hatch: it must
+/// work against ANY broken cache state (a corrupt `cache.db`, an undecodable
+/// `meta` row, a permission-damaged file), so it can never route through
+/// `Cache::open`/SQLite — opening first is exactly what leaves the escape
+/// hatch unable to fire when it's needed most. The entry dir is resolved
+/// purely from the vault's canonical-path identity (the same mapping
+/// `Cache::open` uses internally, with no SQLite involved), and the shared
+/// entry `.lock` is taken with a zero-timeout flock — the same primitive
+/// `prune`'s `evict_cache_entry` uses — so a concurrent writer blocks the
+/// clear instead of racing it. The vault-level STATE tree (the mutation event
+/// stream) is never touched; only the cache entry dir is removed.
+///
+/// Returns the process exit code: `0` on success, including when the entry
+/// dir was already absent ("already clear" is success, not an error). `2` if
+/// another process holds the write lock — the clear is refused and nothing is
+/// deleted, mirroring the exit-2 convention other lock-contention refusals use
+/// (see `CacheError::MutationLockTimeout` call sites). Any OTHER filesystem
+/// failure (a permission error checking or removing the entry, a lock-file
+/// open failure that isn't the concurrent-deletion race below) is a real
+/// error and propagates as one — never silently downgraded to "already
+/// clear" or misreported as contention.
+pub fn run_clear(vault_root: &Utf8Path) -> Result<i32> {
+    let layout = crate::cache::identity::cache_layout_for(vault_root)?;
+    // `Path::exists()` swallows every stat failure (including a permission
+    // error) into `false`, which would misreport a real problem as "already
+    // clear". `try_exists()` keeps `Ok(false)` for a genuine absence but
+    // surfaces anything else as an `Err` we propagate.
+    match layout.entry_dir.as_std_path().try_exists() {
+        Ok(false) => {
+            eprintln!("vault: cache cleared");
+            return Ok(0);
+        }
+        Ok(true) => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("checking cache entry at {}", layout.entry_dir)))
+        }
+    }
+    let lock_path = layout.entry_dir.join(".lock");
+    match crate::cache::acquire_flock(&lock_path, std::time::Duration::ZERO) {
+        Ok(_held) => {
+            match std::fs::remove_dir_all(layout.entry_dir.as_std_path()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::Error::new(e)
+                        .context(format!("clearing cache at {}", layout.entry_dir)))
+                }
+            }
+            eprintln!("vault: cache cleared");
+            Ok(0)
+        }
+        // The entry dir vanished between the `try_exists` check above and this
+        // acquire (a concurrent clear/prune won the race): opening the lock
+        // file inside `acquire_flock` fails `NotFound` because its parent
+        // directory is gone, before the lock loop ever runs. Same outcome as
+        // the up-front absence check: already clear.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("vault: cache cleared");
+            Ok(0)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            eprintln!("error: cache is locked by another norn process; refusing to clear");
+            Ok(2)
+        }
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("acquiring cache lock at {lock_path}")))
+        }
+    }
 }
 
 pub fn run_prune(
