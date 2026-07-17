@@ -97,6 +97,14 @@ pub(crate) fn maybe_spawn_sweep(cwd: &Utf8Path, config_path: Option<&Utf8PathBuf
 /// backgrounded: stdio null'd, and on unix its own process group so it survives
 /// the parent (`process_group(0)`). Best-effort — a spawn failure is swallowed;
 /// the marker was already touched, so the throttle self-corrects next interval.
+///
+/// The spawned child is reaped by a detached per-spawn thread that `wait()`s on
+/// it (NRN-287): a long-lived parent (the `norn serve` daemon) would otherwise
+/// accumulate zombies — its dropped `Child` is never waited on, and concurrent
+/// requests can burst-spawn several. The thread is portable and correct for both
+/// parents: in the short-lived CLI it dies at process exit (the child, in its own
+/// process group, reparents to init and is reaped there); in the daemon it lives
+/// just long enough to reap its one child.
 fn spawn_detached_sweep(cwd: &Utf8Path, config_path: Option<&Utf8PathBuf>) {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -119,7 +127,12 @@ fn spawn_detached_sweep(cwd: &Utf8Path, config_path: Option<&Utf8PathBuf>) {
         // the in-flight sweep.
         cmd.process_group(0);
     }
-    let _ = cmd.spawn();
+    if let Ok(mut child) = cmd.spawn() {
+        // Reap the child so a long-lived parent (the daemon) never leaks a zombie.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 /// Body of the detached `cache sweep` child (NRN-287), with the cache/state tree
@@ -271,7 +284,8 @@ pub(crate) fn own_db_subpath() -> Result<Utf8PathBuf, crate::cache::error::Cache
     // Propagate a channel-resolution failure (an invalid `NORN_CACHE_CHANNEL`)
     // rather than guessing the live layout: guessing would protect the wrong
     // path and leave the invoking binary's real own db unprotected. `run_prune`
-    // surfaces the error; `lazy_sweep` skips the sweep (best-effort posture).
+    // surfaces the error; the detached sweep child (`run_sweep_in`) skips the
+    // sweep (best-effort posture).
     let ch = crate::cache::channel::channel()?;
     Ok(match ch.db_subdir() {
         Some(sub) => Utf8Path::new(sub).join(seg),
