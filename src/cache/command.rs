@@ -301,9 +301,8 @@ pub fn run_clear(vault_root: &Utf8Path) -> Result<i32> {
     let lock_path = layout.entry_dir.join(".lock");
     match crate::cache::acquire_flock(&lock_path, std::time::Duration::ZERO) {
         Ok(_held) => {
-            match std::fs::remove_dir_all(layout.entry_dir.as_std_path()) {
+            match remove_entry_dir_retrying(&layout.entry_dir) {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     return Err(anyhow::Error::new(e)
                         .context(format!("clearing cache at {}", layout.entry_dir)))
@@ -327,6 +326,65 @@ pub fn run_clear(vault_root: &Utf8Path) -> Result<i32> {
         }
         Err(e) => {
             Err(anyhow::Error::new(e).context(format!("acquiring cache lock at {lock_path}")))
+        }
+    }
+}
+
+/// Bounded attempts for the entry-dir removal in [`run_clear`]. A single sweep
+/// child holds the entry lock (and can create a file under the entry) only
+/// transiently, so a short retry wins the race; the extra attempts are pure
+/// safety margin.
+const CLEAR_REMOVE_MAX_ATTEMPTS: u32 = 5;
+/// Pause between entry-dir removal attempts — long enough for a racing sweep
+/// child's brief entry-level pass to finish, short enough to stay imperceptible.
+const CLEAR_REMOVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// `remove_dir_all(entry_dir)` for `cache clear`, retrying a bounded number of
+/// times on `ENOTEMPTY` (`os error 66` on macOS / `39` on Linux).
+///
+/// `cache clear` holds the entry `.lock` across the removal, and the detached
+/// cross-vault GC sweep (NRN-287) honors that same flock for every ENTRY-level
+/// mutation (`prune::evict_cache_entry`, `prune::evict_stale_dbs`). But clear's
+/// own `remove_dir_all` UNLINKS that `.lock` file partway through the walk
+/// (unlink-while-open is fine on unix — the held fd keeps the flock), which
+/// briefly reopens the mutual-exclusion window: a sweep child scanning the
+/// entry can now create a fresh `.lock` (a new inode it latches) inside a
+/// subdir clear has already emptied, so the follow-up `rmdir` fails
+/// `ENOTEMPTY`. The child holds the entry lock only for one measure/remove
+/// pass, so a short bounded retry clears the just-created file and succeeds.
+/// A `NotFound` top dir is success ("already clear"); any other error
+/// propagates.
+fn remove_entry_dir_retrying(entry_dir: &Utf8Path) -> std::io::Result<()> {
+    remove_dir_all_retrying(
+        || std::fs::remove_dir_all(entry_dir.as_std_path()),
+        CLEAR_REMOVE_MAX_ATTEMPTS,
+        CLEAR_REMOVE_RETRY_DELAY,
+    )
+}
+
+/// The retry core, generic over the removal so it is unit-testable without a
+/// real racing filesystem: retry on `ENOTEMPTY` up to `max_attempts`, treat
+/// `NotFound` as success, propagate anything else immediately.
+fn remove_dir_all_retrying<F>(
+    mut remove: F,
+    max_attempts: u32,
+    delay: std::time::Duration,
+) -> std::io::Result<()>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match remove() {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::DirectoryNotEmpty && attempt < max_attempts =>
+            {
+                std::thread::sleep(delay);
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -647,6 +705,92 @@ mod tests {
         let _ = std::fs::remove_file(db_path.with_extension("db-wal").as_std_path());
         let _ = std::fs::remove_file(db_path.with_extension("db-shm").as_std_path());
         (tmp, root, db_path)
+    }
+
+    /// A synthesized `ENOTEMPTY` error, matching what `remove_dir_all` raises
+    /// when a concurrent process creates a file inside a dir mid-removal.
+    fn dir_not_empty() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty)
+    }
+
+    /// The entry-dir removal retries on `ENOTEMPTY` (the NRN-287 clear-vs-sweep
+    /// race) and succeeds once the racing file is gone. Semantics chosen:
+    /// `cache clear` keeps its zero-timeout, refuse-on-contention flock (a
+    /// genuinely held entry lock still exits 2, covered by the integration test
+    /// `cache_clear_refused_while_entry_lock_held`); the transient `ENOTEMPTY`
+    /// that a short-lived sweep child causes is retried rather than surfaced.
+    #[test]
+    fn remove_dir_all_retrying_recovers_from_transient_enotempty() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                let n = calls.get();
+                calls.set(n + 1);
+                // Fail ENOTEMPTY on the first two attempts, then succeed.
+                if n < 2 {
+                    Err(dir_not_empty())
+                } else {
+                    Ok(())
+                }
+            },
+            5,
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            out.is_ok(),
+            "a transient ENOTEMPTY must be retried to success"
+        );
+        assert_eq!(calls.get(), 3, "two retries, then the succeeding attempt");
+    }
+
+    #[test]
+    fn remove_dir_all_retrying_treats_not_found_as_success() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+            5,
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            out.is_ok(),
+            "an already-absent entry dir is 'already clear'"
+        );
+        assert_eq!(calls.get(), 1, "NotFound must not retry");
+    }
+
+    #[test]
+    fn remove_dir_all_retrying_gives_up_after_the_bound() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                calls.set(calls.get() + 1);
+                Err(dir_not_empty())
+            },
+            3,
+            std::time::Duration::ZERO,
+        );
+        let err = out.expect_err("a persistent ENOTEMPTY must eventually propagate");
+        assert_eq!(err.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        assert_eq!(calls.get(), 3, "exactly max_attempts tries, then propagate");
+    }
+
+    #[test]
+    fn remove_dir_all_retrying_propagates_other_errors_immediately() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            },
+            5,
+            std::time::Duration::ZERO,
+        );
+        let err = out.expect_err("a non-ENOTEMPTY error must not be swallowed");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(calls.get(), 1, "a real error must not retry");
     }
 
     #[test]
