@@ -115,6 +115,13 @@ pub(crate) struct VaultEnv {
     /// a cloned `Arc`. This is the config `Arc` a request binds at its boundary.
     config: Mutex<Arc<LoadedConfig>>,
     mode: Mode,
+    /// Cold-mode only: skip the per-call incremental cache refresh, honoring a
+    /// one-shot `--no-cache-refresh` (NRN-291). Always `false` in warm mode (the
+    /// daemon continuously maintains freshness) and in the stdio `norn mcp`
+    /// server (which always refreshes per call). Only [`VaultEnv::open_cold`]
+    /// sets it non-`false`, and only [`query_cache`](Self::query_cache)'s cold
+    /// branch reads it.
+    cold_no_cache_refresh: bool,
 }
 
 impl VaultEnv {
@@ -125,11 +132,26 @@ impl VaultEnv {
     /// `LoadedConfig::default()` when no `.norn/config.yaml` is found, so the
     /// server starts cleanly against unconfigured vaults.
     pub(crate) fn open(cwd: &Utf8Path, config_path: Option<&Utf8PathBuf>) -> Result<Self> {
+        Self::open_cold(cwd, config_path, false)
+    }
+
+    /// Open a COLD vault context that also honors a one-shot `--no-cache-refresh`
+    /// (NRN-291). Identical to [`open`](Self::open) except the flag threads into
+    /// [`query_cache`](Self::query_cache)'s cold branch, so the generic dispatch
+    /// (`crate::dispatch`) reproduces the pre-NRN-291 direct path's
+    /// `cache::command::load_graph_index(..., no_cache_refresh)` behavior when a
+    /// forced-direct `--no-cache-refresh` repair executes locally.
+    pub(crate) fn open_cold(
+        cwd: &Utf8Path,
+        config_path: Option<&Utf8PathBuf>,
+        no_cache_refresh: bool,
+    ) -> Result<Self> {
         let config = load_config(&cwd.to_path_buf(), config_path)?;
         Ok(Self {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
             mode: Mode::Cold,
+            cold_no_cache_refresh: no_cache_refresh,
         })
     }
 
@@ -161,6 +183,7 @@ impl VaultEnv {
         Ok(Self {
             vault_root: cwd.to_path_buf(),
             config: Mutex::new(Arc::new(config)),
+            cold_no_cache_refresh: false,
             mode: Mode::Warm(WarmSlot {
                 shared: Arc::new(SharedSlot {
                     current: Mutex::new(None),
@@ -217,7 +240,11 @@ impl VaultEnv {
         match &self.mode {
             Mode::Cold => {
                 let config = scope.config();
-                let cache = open_for_query(&self.vault_root, &config.index_options, false)?;
+                let cache = open_for_query(
+                    &self.vault_root,
+                    &config.index_options,
+                    self.cold_no_cache_refresh,
+                )?;
                 Ok(CacheHandle::Owned(cache))
             }
             Mode::Warm(slot) => self.query_cache_warm(slot, scope),

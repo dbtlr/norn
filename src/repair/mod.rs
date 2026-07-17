@@ -1,14 +1,16 @@
 //! The `norn repair` command.
 //!
 //! Runs the validate engine, filters the findings, and turns them into a
-//! `MigrationPlan` via `planner::findings`. `run_plan` emits the plan for
-//! review (`--plan` mode); `run_summary` rolls it up. The `Repair` arm in
-//! `lib.rs` dispatches here, and `route.rs` forwards a routable repair to the
-//! daemon; `repair_apply.rs` executes the plan the apply step accepts.
-//! `render` formats the output, `skip_reasons` explains unrepaired findings.
+//! `MigrationPlan` via `planner::findings`. [`filtered_findings`] + [`build_plan`]
+//! are the surface-neutral finding→plan orchestration (NRN-291), shared by the
+//! cold `<RepairParams as Request>::execute` path (MCP handler + routed daemon)
+//! and the CLI-local paths here. `norn repair --plan` routes through the generic
+//! `crate::dispatch` (the `Repair` arm in `lib.rs`) and renders via [`emit_plan`];
+//! bare `norn repair` stays CLI-local via [`run_summary`]. `repair_apply.rs`
+//! executes the plan the apply step accepts. `render` formats the output,
+//! `skip_reasons` explains unrepaired findings.
 
 pub mod render;
-pub mod route;
 pub mod skip_reasons;
 
 use std::collections::BTreeMap;
@@ -28,7 +30,7 @@ use crate::repair::skip_reasons::code_matches_any;
 use crate::standards::{validate_with_compiled, Finding};
 use crate::validate_filter::filter_findings;
 
-/// Shared context the dispatcher hands to `run_plan` / `run_summary`.
+/// Shared context the dispatcher hands to `run_summary` (bare `norn repair`).
 pub struct RepairRunContext<'a> {
     pub cwd: &'a Utf8PathBuf,
     pub config_path: Option<&'a Utf8PathBuf>,
@@ -70,8 +72,13 @@ pub(crate) fn build_plan(
     config: &LoadedConfig,
     index: &GraphIndex,
 ) -> MigrationPlan {
-    let mut plan =
-        plan_from_findings(vault_root, params.plan_filters(), findings, &config.repair, index);
+    let mut plan = plan_from_findings(
+        vault_root,
+        params.plan_filters(),
+        findings,
+        &config.repair,
+        index,
+    );
 
     // --skip-reason narrows the skipped set only (planner does not apply it).
     // The MigrationPlan SkippedFinding `reason` carries the kebab-case reason code.
@@ -85,9 +92,9 @@ pub(crate) fn build_plan(
 
 /// Load config + the CLI-direct graph index for a `norn repair` invocation, with
 /// the standard non-verbose diagnostic trim. The CLI-local index-loading seam
-/// shared by [`run_plan`] and [`run_summary`]; the cold `execute()` path loads
-/// via `VaultEnv::load_graph_index` instead (NRN-291), so this stays the
-/// CLI-only loader.
+/// for [`run_summary`]; the cold `execute()` path loads via
+/// `VaultEnv::load_graph_index` instead (NRN-291), so this stays the CLI-only
+/// loader.
 fn load_cli_index(ctx: &RepairRunContext<'_>) -> Result<(GraphIndex, LoadedConfig)> {
     let loaded_config = load_config(ctx.cwd, ctx.config_path)?;
     let mut index = crate::cache::command::load_graph_index(
@@ -99,27 +106,9 @@ fn load_cli_index(ctx: &RepairRunContext<'_>) -> Result<(GraphIndex, LoadedConfi
     Ok((index, loaded_config))
 }
 
-/// `norn repair --plan` — generate a MigrationPlan from current findings and
-/// render it as report / json / paths. Read-only.
-pub fn run_plan(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32> {
-    let params = RepairParams::from_args(args);
-    let (index, loaded_config) = load_cli_index(ctx)?;
-    let findings = filtered_findings(&params, &index, &loaded_config)?;
-    let plan = build_plan(&params, ctx.cwd.clone(), findings, &loaded_config, &index);
-
-    // The exit-code signal: any error-severity diagnostic anywhere in the FULL
-    // index, independent of the triage filters just applied to `plan` — the
-    // SAME predicate `crate::exit_code_for` derives from, so the shared
-    // `emit_plan` (used by both this direct path and the routed path, NRN-231)
-    // reproduces it without needing the `GraphIndex` itself.
-    let has_diagnostic_errors = crate::graph::has_errors(&index);
-
-    emit_plan(&plan, args, ctx.cwd, has_diagnostic_errors)
-}
-
 /// Render `plan` to stdout / `--out`, and derive the exit code — the SHARED
-/// post-plan-construction step for both `norn repair --plan` (direct) and the
-/// routed path (`vault.repair` reconstructed via `repair::route`, NRN-231).
+/// post-plan-construction step for both `norn repair --plan` (via the generic
+/// `crate::dispatch` render closure) and the CLI-local paths here (NRN-291).
 /// Byte-identical by construction: both callers funnel through this one
 /// function rather than duplicating the render/write logic.
 ///
