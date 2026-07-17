@@ -295,7 +295,7 @@ fn dry_run_with_stale_marker_does_not_sweep() {
 #[test]
 fn prune_manual_config_disables_lazy_sweep() {
     let env = setup();
-    clear_marker(&env); // let the lazy path reach the config decision
+    clear_marker(&env); // let the trigger path fire so the marker assertion is meaningful
     let cfg_dir = env.live_vault.path().join(".norn");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::write(
@@ -303,22 +303,39 @@ fn prune_manual_config_disables_lazy_sweep() {
         "version: 1\ncache:\n  prune: manual\n",
     )
     .unwrap();
-    let out = norn(&env, env.live_vault.path(), &["cache", "status"]);
-    assert!(out.status.success());
-    // The parent spawns a detached child regardless; in manual mode the child
-    // acquires the sweep lock, reads the config, and exits WITHOUT sweeping.
-    // Give a (buggy) child time to wrongly evict before asserting survival.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(tree_entries(&env.cache_home), 1, "one dead entry seeded");
+
+    // The manual-disable decision lives in the sweep CHILD: it acquires the lock,
+    // reads the config, and exits WITHOUT sweeping. Invoke the hidden `cache
+    // sweep` SYNCHRONOUSLY (it IS the foreground process here) so the negative
+    // assertion is deterministic — no sleep-and-hope. In manual mode it must not
+    // evict, so the dead entry survives (same shape as
+    // `cache_sweep_child_evicts_and_is_silent`, inverted by config).
+    let out = norn(&env, env.live_vault.path(), &["cache", "sweep"]);
+    assert!(
+        out.status.success(),
+        "sweep child exits 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(
         tree_entries(&env.cache_home),
-        2,
-        "manual mode: dead entry survives"
+        1,
+        "manual mode: the sweep child evicts nothing, dead entry survives"
     );
+
+    // Trigger-side invariant (still meaningful): any command touches the marker at
+    // spawn time regardless of the child's later config decision — the stampede
+    // guard advances the throttle even when the sweep is disabled.
+    let out = norn(&env, env.live_vault.path(), &["cache", "status"]);
+    assert!(out.status.success());
     assert!(
         env.cache_home.join("norn").join(".last-prune").exists(),
         "marker still touched at spawn time even in manual mode"
     );
-    // Explicit prune still works in manual mode.
+
+    // Explicit prune still works in manual mode (config only disables the lazy
+    // trigger). `cache status` above minted the live vault's exempt entry; the
+    // dead one goes, the live one stays.
     let out = norn(&env, env.live_vault.path(), &["cache", "prune"]);
     assert!(out.status.success());
     assert_eq!(tree_entries(&env.cache_home), 1);
