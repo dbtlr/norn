@@ -28,6 +28,10 @@ pub(crate) const PRUNE_THROTTLE: Duration = Duration::from_secs(24 * 3_600);
 pub(crate) const STALE_DB_TTL: Duration = Duration::from_secs(48 * 3_600);
 /// Marker file (in the cache tree root) recording the last lazy-sweep decision.
 pub(crate) const PRUNE_MARKER: &str = ".last-prune";
+/// Advisory lock (in the cache tree root) serializing detached sweep children:
+/// a second spawner that finds it held no-ops (NRN-287). Not 64-hex, so
+/// `scan_tree` never treats it as a vault entry.
+pub(crate) const SWEEP_LOCK: &str = ".sweep.lock";
 
 /// Record a sweep decision: create/refresh the marker file's mtime. Best-effort.
 pub(crate) fn touch_marker(cache_tree: &Utf8Path) {
@@ -36,73 +40,148 @@ pub(crate) fn touch_marker(cache_tree: &Utf8Path) {
     let _ = std::fs::write(marker.as_std_path(), b"");
 }
 
-/// Per-invocation lazy GC. Best-effort end to end: never errors, never
-/// fails the command. Steady-state cost is one stat (the marker check
-/// runs before any config load). If the marker can't be written (e.g.
-/// read-only cache home), the config probe repeats each invocation.
-pub(crate) fn lazy_sweep(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) {
+/// Marker-staleness decision, factored out so it is unit-testable without
+/// filesystem or process creation. `true` = a sweep is due.
+///
+/// `mtime` is the marker's modification time when the marker exists and its
+/// mtime is readable, or `None` when the mtime can't be read. An unreadable
+/// mtime or clock skew biases toward NOT sweeping — a missed sweep
+/// self-corrects within one throttle interval; a runaway sweep doesn't.
+fn marker_says_due(mtime: Option<SystemTime>, now: SystemTime) -> bool {
+    match mtime.and_then(|m| now.duration_since(m).ok()) {
+        Some(age) => age >= PRUNE_THROTTLE,
+        // Unreadable mtime / clock skew: bias to skip (not due).
+        None => false,
+    }
+}
+
+/// Whether a sweep is due for `cache_tree`: the marker is absent (or un-stat-able)
+/// or verifiably stale past [`PRUNE_THROTTLE`]. One stat in steady state; touches
+/// no config, spawns no process — the spawn decision, separable from the spawn
+/// action for testing.
+fn sweep_due(cache_tree: &Utf8Path, now: SystemTime) -> bool {
+    let marker = cache_tree.join(PRUNE_MARKER);
+    match std::fs::metadata(marker.as_std_path()) {
+        // Marker present: sweep only if verifiably stale.
+        Ok(md) => marker_says_due(md.modified().ok(), now),
+        // Absent (or un-stat-able): due.
+        Err(_) => true,
+    }
+}
+
+/// Per-invocation throttled GC TRIGGER. Best-effort end to end: never errors,
+/// never affects the command's outcome, exit code, or output. Steady-state cost
+/// is one stat (the marker check runs before any config load).
+///
+/// When the marker is stale or absent, the throttle marker is touched FIRST —
+/// the spawn-time touch is the stampede guard: a killed or crashed sweep child
+/// must NOT cause every subsequent command to retry the crawl (the 2026-07-17
+/// incident) — then a detached sweep child is spawned and this returns without
+/// waiting. Config (retention, `lazy_prune_enabled`, exempt identity) loads
+/// INSIDE the child; a disabled vault therefore pays at most one spawn+probe per
+/// throttle interval, matching the previous "one config probe per interval".
+pub(crate) fn maybe_spawn_sweep(cwd: &Utf8Path, config_path: Option<&Utf8PathBuf>) {
     let Ok(cache_tree) = crate::cache::cache_tree_root() else {
         return;
     };
-    let marker = cache_tree.join(PRUNE_MARKER);
-    if let Ok(md) = std::fs::metadata(marker.as_std_path()) {
-        // Marker exists: sweep only if it is verifiably stale. An unreadable
-        // mtime or clock skew biases toward skipping — a missed sweep
-        // self-corrects within one throttle interval; a runaway sweep doesn't.
-        let stale = md
-            .modified()
-            .ok()
-            .and_then(|m| SystemTime::now().duration_since(m).ok())
-            .map(|d| d >= PRUNE_THROTTLE)
-            .unwrap_or(false);
-        if !stale {
-            return;
-        }
+    if !sweep_due(&cache_tree, SystemTime::now()) {
+        return;
     }
-    // Marker stale or absent: load this vault's cache config, best-effort.
-    let cache_cfg = crate::config_loader::load_config(cwd, config_path)
-        .ok()
-        .and_then(|c| c.vault_config.cache);
-    let enabled = cache_cfg
-        .as_ref()
-        .map(|c| c.lazy_prune_enabled())
-        .unwrap_or(true);
-    if enabled {
-        let Ok(state_tree) = crate::cache::state_tree_root() else {
-            // Enabled but no state tree: degenerate env; retries next invocation.
-            return;
-        };
-        // Channel-resolution failure (invalid NORN_CACHE_CHANNEL): skip the
-        // sweep this invocation rather than protect the wrong own-db path.
-        let Ok(exempt_own_db_subpath) = own_db_subpath() else {
-            return;
-        };
-        let opts = PruneOptions {
-            retention: cache_cfg
-                .as_ref()
-                .and_then(|c| c.retention)
-                .unwrap_or(crate::standards::DEFAULT_CACHE_RETENTION),
-            cap_bytes: CACHE_TREE_SIZE_CAP_BYTES,
-            dry_run: false,
-            exempt_hash: crate::cache::vault_identity_hash(cwd),
-            exempt_own_db_subpath,
-        };
-        let report = sweep(&cache_tree, &state_tree, &opts);
-        if report.cache.skipped_locked > 0 {
-            eprintln!(
-                "warn: cache prune skipped {} locked entr{}",
-                report.cache.skipped_locked,
-                if report.cache.skipped_locked == 1 {
-                    "y"
-                } else {
-                    "ies"
-                }
-            );
-        }
-    }
-    // Touched after sweep OR manual-skip: manual vaults also pay at most
-    // one config probe per throttle interval.
+    // Stampede guard: touch BEFORE spawning so a crashed/killed sweep can't
+    // cause per-command retries.
     touch_marker(&cache_tree);
+    spawn_detached_sweep(cwd, config_path);
+}
+
+/// Fire-and-forget a detached `norn cache sweep` child for `cwd`, fully
+/// backgrounded: stdio null'd, and on unix its own process group so it survives
+/// the parent (`process_group(0)`). Best-effort — a spawn failure is swallowed;
+/// the marker was already touched, so the throttle self-corrects next interval.
+fn spawn_detached_sweep(cwd: &Utf8Path, config_path: Option<&Utf8PathBuf>) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    // Global flags before the subcommand; the child re-loads config from these.
+    cmd.arg("--cwd").arg(cwd.as_std_path());
+    if let Some(cfg) = config_path {
+        cmd.arg("--config").arg(cfg.as_std_path());
+    }
+    cmd.arg("cache").arg("sweep");
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // New process group/session leader: detach from the parent's group so a
+        // SIGINT to the foreground command (or the parent exiting) doesn't kill
+        // the in-flight sweep.
+        cmd.process_group(0);
+    }
+    let _ = cmd.spawn();
+}
+
+/// Body of the detached `cache sweep` child (NRN-287), with the cache/state tree
+/// roots injected so it is unit-testable against an isolated tree without env
+/// mutation. Returns whether the sweep actually ran (`false` = the sweep lock was
+/// held by another child, or lazy prune is disabled for this vault).
+///
+/// Acquires the cache-tree-root advisory sweep lock with a zero timeout: if a
+/// peer child already holds it, this no-ops immediately (the second spawner does
+/// nothing). Then loads the decision from `cache_cfg`: a `manual`-mode vault
+/// exits without sweeping (the parent already touched the marker). Silent — no
+/// stdout, and the previous inline `skipped_locked` stderr warning is dropped:
+/// the child is detached with null'd stdio and no user tty to read it.
+fn run_sweep_in(
+    cache_tree: &Utf8Path,
+    state_tree: &Utf8Path,
+    vault_root: &Utf8Path,
+    cache_cfg: Option<&crate::standards::CacheConfig>,
+) -> bool {
+    let _ = std::fs::create_dir_all(cache_tree.as_std_path());
+    // Zero-timeout advisory lock: a held lock means a peer sweep is running —
+    // no-op. A lock we can't even open (permissions/IO) is also a no-op
+    // (best-effort posture).
+    let lock_path = cache_tree.join(SWEEP_LOCK);
+    let _lock = match crate::cache::acquire_flock(&lock_path, Duration::ZERO) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let enabled = cache_cfg.map(|c| c.lazy_prune_enabled()).unwrap_or(true);
+    if !enabled {
+        return false;
+    }
+    // Channel-resolution failure (invalid NORN_CACHE_CHANNEL): skip rather than
+    // protect the wrong own-db path.
+    let Ok(exempt_own_db_subpath) = own_db_subpath() else {
+        return false;
+    };
+    let opts = PruneOptions {
+        retention: cache_cfg
+            .and_then(|c| c.retention)
+            .unwrap_or(crate::standards::DEFAULT_CACHE_RETENTION),
+        cap_bytes: CACHE_TREE_SIZE_CAP_BYTES,
+        dry_run: false,
+        exempt_hash: crate::cache::vault_identity_hash(vault_root),
+        exempt_own_db_subpath,
+    };
+    let _report = sweep(cache_tree, state_tree, &opts);
+    true
+}
+
+/// The hidden `norn cache sweep` subcommand entry point (NRN-287): resolve the
+/// real cache/state tree roots and run the detached sweep body. Best-effort —
+/// a tree-root resolution failure is a silent no-op, never an error. The config
+/// (`cache_cfg`) is loaded by the dispatcher for the invoking vault.
+pub(crate) fn run_sweep(vault_root: &Utf8Path, cache_cfg: Option<&crate::standards::CacheConfig>) {
+    let (Ok(cache_tree), Ok(state_tree)) = (
+        crate::cache::cache_tree_root(),
+        crate::cache::state_tree_root(),
+    ) else {
+        return;
+    };
+    let _ = run_sweep_in(&cache_tree, &state_tree, vault_root, cache_cfg);
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -2097,5 +2176,134 @@ mod tests {
         assert_eq!(report.cache.scanned, 0);
         assert_eq!(report.state.scanned, 0);
         assert_eq!(report.total_bytes_freed(), 0);
+    }
+
+    // ---- NRN-287: detached sweep trigger + child ----
+
+    /// The spawn DECISION, unit-tested without filesystem or process creation:
+    /// a fresh marker is not due; a marker aged past the throttle is; an
+    /// unreadable/skewed mtime biases to NOT due (skip).
+    #[test]
+    fn marker_says_due_decision_matrix() {
+        let now = SystemTime::now();
+        // Fresh (well inside the throttle window): not due.
+        let fresh = now - Duration::from_secs(3_600);
+        assert!(!marker_says_due(Some(fresh), now));
+        // Stale (past the throttle): due.
+        let stale = now - (PRUNE_THROTTLE + Duration::from_secs(3_600));
+        assert!(marker_says_due(Some(stale), now));
+        // Exactly at the boundary: due (>=).
+        let boundary = now - PRUNE_THROTTLE;
+        assert!(marker_says_due(Some(boundary), now));
+        // Unreadable mtime / clock skew (future mtime → duration_since errs): skip.
+        assert!(!marker_says_due(None, now));
+        let future = now + Duration::from_secs(3_600);
+        assert!(!marker_says_due(Some(future), now));
+    }
+
+    /// `sweep_due` over a real (isolated) cache-tree root: absent marker → due;
+    /// fresh marker → not due; stale marker → due. No process is spawned.
+    #[test]
+    fn sweep_due_reads_the_marker() {
+        let tmp = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let now = SystemTime::now();
+        // Absent marker: due.
+        assert!(sweep_due(&cache_tree, now));
+        // Fresh marker: not due.
+        touch_marker(&cache_tree);
+        assert!(!sweep_due(&cache_tree, now));
+        // Backdate past the throttle: due.
+        let stale = now - (PRUNE_THROTTLE + Duration::from_secs(3_600));
+        filetime::set_file_mtime(
+            cache_tree.join(PRUNE_MARKER).as_std_path(),
+            filetime::FileTime::from_system_time(stale),
+        )
+        .unwrap();
+        assert!(sweep_due(&cache_tree, now));
+    }
+
+    /// The detached sweep body evicts a dead-root entry from an isolated cache
+    /// tree, and reports it ran.
+    #[test]
+    fn run_sweep_in_evicts_dead_root_entry() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        let live_vault = TempDir::new().unwrap();
+        let live_root = live_vault.path().to_str().unwrap();
+        mint_cache_entry(&cache_tree, H1, live_root);
+        mint_cache_entry(&cache_tree, H2, "/nonexistent/vault/gone");
+
+        let swept = run_sweep_in(
+            &cache_tree,
+            &state_tree,
+            live_vault.path().try_into().unwrap(),
+            None,
+        );
+        assert!(swept, "an enabled, unlocked sweep must run");
+        assert!(
+            cache_tree.join(H1).as_std_path().exists(),
+            "live entry kept"
+        );
+        assert!(
+            !cache_tree.join(H2).as_std_path().exists(),
+            "dead-root entry evicted"
+        );
+    }
+
+    /// A held sweep lock makes the body a no-op: the second spawner does nothing,
+    /// leaving even a dead-root entry in place.
+    #[test]
+    fn run_sweep_in_no_ops_when_lock_held() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        mint_cache_entry(&cache_tree, H2, "/nonexistent/vault/gone");
+
+        // Hold the sweep lock, as a peer child would.
+        std::fs::create_dir_all(cache_tree.as_std_path()).unwrap();
+        let _held =
+            crate::cache::acquire_flock(&cache_tree.join(SWEEP_LOCK), Duration::ZERO).unwrap();
+
+        let live_vault = TempDir::new().unwrap();
+        let swept = run_sweep_in(
+            &cache_tree,
+            &state_tree,
+            live_vault.path().try_into().unwrap(),
+            None,
+        );
+        assert!(!swept, "a held sweep lock must no-op");
+        assert!(
+            cache_tree.join(H2).as_std_path().exists(),
+            "the dead entry must survive while a peer sweep holds the lock"
+        );
+    }
+
+    /// `manual` prune mode disables the child: it acquires the lock, sees the
+    /// config, and exits without sweeping.
+    #[test]
+    fn run_sweep_in_respects_manual_disable() {
+        let trees = TempDir::new().unwrap();
+        let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+        let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+        mint_cache_entry(&cache_tree, H2, "/nonexistent/vault/gone");
+
+        let manual = crate::standards::CacheConfig {
+            retention: None,
+            prune: Some("manual".to_string()),
+        };
+        let live_vault = TempDir::new().unwrap();
+        let swept = run_sweep_in(
+            &cache_tree,
+            &state_tree,
+            live_vault.path().try_into().unwrap(),
+            Some(&manual),
+        );
+        assert!(!swept, "manual mode must not sweep");
+        assert!(
+            cache_tree.join(H2).as_std_path().exists(),
+            "manual mode leaves the dead entry in place"
+        );
     }
 }

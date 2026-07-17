@@ -423,6 +423,12 @@ fn specs() -> Vec<Spec> {
             },
         },
         Spec {
+            cli: "cache sweep",
+            parity: LocalOnly {
+                why: "internal detached cross-vault cache/state GC child (NRN-287); hidden",
+            },
+        },
+        Spec {
             cli: "config edit",
             parity: LocalOnly {
                 why: "opens the config in $EDITOR — a local interactive action",

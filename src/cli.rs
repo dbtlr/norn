@@ -432,6 +432,13 @@ pub enum CacheSubcommand {
         long_about = "Evict dead, aged, and over-cap cache entries across all vaults.\n\nScans the global cache tree (~/.cache/norn/) and state tree (~/.local/state/norn/). Cache entries are evicted when their vault root no longer exists, they are unreadable or empty (lock-file-only entries count as empty), they exceed the retention window (default 90d), or the tree exceeds its 1 GiB cap (oldest first). State entries (the mutation event stream) are evicted only when their vault root no longer exists (or the entry is empty). The current vault's entries are never evicted."
     )]
     Prune(CachePruneArgs),
+    #[command(
+        hide = true,
+        disable_help_flag = true,
+        about = "Internal: run the detached cross-vault cache GC sweep (NRN-287)",
+        long_about = "Internal, hidden. Spawned detached by the lazy-GC trigger to run the cross-vault cache/state sweep off the request path. Not intended for direct use; `norn cache prune` is the operator-facing surface."
+    )]
+    Sweep,
 }
 
 #[derive(Debug, Parser)]
