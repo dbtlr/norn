@@ -52,46 +52,51 @@ use crate::validate_filter::ValidateFilterOptions;
 /// one params type, three surfaces. CLI-only knobs (`--plan`, `--format`,
 /// `--out`) are deliberately absent: they never cross the wire and are handled
 /// entirely adapter-side (see `from_args`).
+///
+/// Each field carries `skip_serializing_if` so a default (unfiltered) request
+/// serializes to the minimal `{}` wire shape — the empty filters are the
+/// default, and the `#[serde(default)]`s make the omitted and explicit-empty
+/// forms deserialize identically, so nothing is lost by dropping them.
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, Default)]
 pub struct RepairParams {
     /// Filter findings by code before planning. Comma-separated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code: Vec<String>,
 
     /// Filter findings by severity (`warning` or `error`). Comma-separated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub severity: Vec<String>,
 
     /// Filter findings by frontmatter field name. Comma-separated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub field: Vec<String>,
 
     /// Filter findings by validate rule name. Comma-separated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rule: Vec<String>,
 
     /// Filter findings by vault-relative path glob. Comma-separated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<String>,
 
     /// Filter link findings by link target. Comma-separated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target: Vec<String>,
 
     /// Filter link findings by unresolved reason. Comma-separated.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reason: Vec<String>,
 
     /// Confidence band filter for closest-match proposals.
     /// `high` keeps only High-confidence rewrites (drops Medium proposals).
     /// Omit to receive all bands (default).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<ConfidenceBand>,
 
     /// Filter the skipped-findings list by reason code.
     /// Glob patterns accepted. Comma-separated, repeatable.
     /// Omit to receive all skipped findings.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_reason: Vec<String>,
 }
 
@@ -355,6 +360,47 @@ mod tests {
         let v = wire_arguments(&args);
         assert_eq!(v["confidence"], "high");
         assert_eq!(v["skip_reason"], json!(["low-confidence", "no-match"]));
+    }
+
+    /// An all-default (unfiltered) request serializes to the minimal `{}` wire
+    /// shape: every field's `skip_serializing_if` drops its default, so a routed
+    /// `repair --plan` with no triage filters carries no arguments — the wire
+    /// shape the pre-NRN-291 `to_mcp_arguments` emitted (migrated coverage).
+    #[test]
+    fn wire_omits_defaults() {
+        let v = serde_json::to_value(RepairParams::default()).unwrap();
+        assert_eq!(
+            v,
+            json!({}),
+            "an all-default request must serialize to {{}}"
+        );
+    }
+
+    /// The omitted and explicit-empty wire forms deserialize identically — the
+    /// `#[serde(default)]`s guarantee dropping the defaults on the way OUT loses
+    /// nothing on the way IN, so `wire_omits_defaults`'s minimal shape round-trips.
+    #[test]
+    fn wire_defaults_deserialize_from_empty_object() {
+        let from_empty: RepairParams = serde_json::from_value(json!({})).unwrap();
+        let from_explicit: RepairParams = serde_json::from_value(json!({
+            "code": [],
+            "severity": [],
+            "field": [],
+            "rule": [],
+            "path": [],
+            "target": [],
+            "reason": [],
+            "confidence": null,
+            "skip_reason": [],
+        }))
+        .unwrap();
+        // Both parse to the all-default request (compare via their canonical
+        // re-serialization, which is `{}` for each).
+        assert_eq!(
+            serde_json::to_value(&from_empty).unwrap(),
+            serde_json::to_value(&from_explicit).unwrap(),
+        );
+        assert_eq!(serde_json::to_value(&from_empty).unwrap(), json!({}));
     }
 
     /// `--plan` / `--format` / `--out` are CLI-only knobs with no `RepairParams`
