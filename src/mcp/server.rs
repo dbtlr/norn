@@ -761,6 +761,22 @@ mod tests {
         );
     }
 
+    /// NRN-291 TOOL-name triple-sync guard. `<RepairParams as Request>::TOOL` is
+    /// the wire tool a `repair --plan` dispatches to; `tool_names::REPAIR` is the
+    /// served marker the catalog guard above pins to the `#[tool(name = ...)]`
+    /// attribute (the rmcp macro requires a string literal, so it cannot share a
+    /// const). Asserting the two here closes the third edge — Request::TOOL ↔
+    /// tool_names::REPAIR ↔ the `#[tool]` literal — so a rename to any one of the
+    /// three fails deterministically instead of silently misrouting dispatch.
+    #[test]
+    fn request_tool_const_matches_served_marker() {
+        assert_eq!(
+            <crate::mcp::tools::repair::RepairParams as crate::dispatch::Request>::TOOL,
+            tool_names::REPAIR,
+            "RepairParams::TOOL must equal tool_names::REPAIR",
+        );
+    }
+
     /// Seed a temp vault with several docs and NO pre-built cache. Cold start is
     /// the point: the race window is `Cache::open_with_config`'s
     /// inspect/DDL/recreate sequence, which only runs the first time the cache is
