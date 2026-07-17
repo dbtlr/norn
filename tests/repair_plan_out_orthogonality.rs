@@ -67,11 +67,22 @@ fn run_plan(root: &Path, config_path: &Path, extra_args: &[&str]) -> std::proces
         "--plan",
     ]);
     cmd.args(extra_args);
+    prewrite_prune_marker(cache_dir.path());
     cmd.env("XDG_CACHE_HOME", cache_dir.path())
         .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1");
 
     cmd.output().expect("vault command should execute")
+}
+
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
 }
 
 /// --out alone: file is written with JSON, stdout is silent.

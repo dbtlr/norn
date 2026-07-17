@@ -22,6 +22,16 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 #[test]
 fn binary_copied_out_of_build_tree_resolves_dev_channel() {
     let bin_src = Path::new(env!("CARGO_BIN_EXE_norn"));
@@ -43,6 +53,8 @@ fn binary_copied_out_of_build_tree_resolves_dev_channel() {
 
     let vault = TempDir::new().expect("temp dir for fixture vault");
     std::fs::write(vault.path().join("a.md"), "---\ntype: note\n---\nbody\n").unwrap();
+
+    prewrite_prune_marker(&cache_home);
 
     let out = Command::new(&bin_dst)
         .env_remove("NORN_CACHE_CHANNEL")

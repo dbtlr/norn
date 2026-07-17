@@ -121,6 +121,16 @@ enum Deliver {
     Stdin,
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Run `norn apply` against `vault`, delivering `plan_text` per `deliver`.
 fn run_apply(
     cache: &Path,
@@ -130,6 +140,7 @@ fn run_apply(
     deliver: Deliver,
     extra_args: &[&str],
 ) -> (Vec<u8>, Vec<u8>, i32) {
+    prewrite_prune_marker(cache);
     // Plan files live in their OWN tempdir so they never pollute the vault's
     // `dir_snapshot`.
     let plan_dir = TempDir::new().unwrap();
@@ -913,6 +924,7 @@ fn routed_stdin_apply_under_held_lock_stashes_and_exits_2() {
         // The direct client also needs the short timeout to time out fast.
         let plan_dir = TempDir::new().unwrap();
         let _ = plan_dir;
+        prewrite_prune_marker(direct_cache.path());
         let mut cmd = Command::new(norn_bin());
         cmd.env("XDG_CACHE_HOME", direct_cache.path())
             .env("XDG_STATE_HOME", direct_state.path())

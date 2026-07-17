@@ -26,6 +26,16 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 fn line(value: serde_json::Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(&value).unwrap();
     bytes.push(b'\n');
@@ -35,6 +45,7 @@ fn line(value: serde_json::Value) -> Vec<u8> {
 /// Pre-build the cache so vault.set can resolve documents (warm path).
 /// Mirrors the pattern used in mcp_set.rs.
 fn prebuild_cache(vault: &TempDir) {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let status = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -53,6 +64,7 @@ fn prebuild_cache(vault: &TempDir) {
 fn vault_audit_listed_in_tools_list() {
     let vault = tempfile::tempdir().unwrap();
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -121,6 +133,7 @@ fn vault_audit_listed_in_tools_list() {
 fn vault_audit_status_schema_advertises_enum() {
     let vault = tempfile::tempdir().unwrap();
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -220,6 +233,7 @@ fn vault_audit_status_enum_filters_and_rejects_typos() {
 
     // ── Session 1: a confirmed set produces an `applied` action event ─────────
     {
+        prewrite_prune_marker(&vault.path().join(".xdg-cache"));
         let mut child = Command::new(norn_bin())
             .arg("--cwd")
             .arg(vault.path())
@@ -261,6 +275,7 @@ fn vault_audit_status_enum_filters_and_rejects_typos() {
 
     // ── Session 2: three audit reads — applied (hit), failed (miss), bogus (err)
     {
+        prewrite_prune_marker(&vault.path().join(".xdg-cache"));
         let mut child = Command::new(norn_bin())
             .arg("--cwd")
             .arg(vault.path())
@@ -373,6 +388,7 @@ fn vault_audit_returns_a_persisted_mutation() {
     // acquire the call_lock before vault.set (which flushes an event file), so
     // the audit returns empty even when a mutation was queued ahead of it.
     {
+        prewrite_prune_marker(&vault.path().join(".xdg-cache"));
         let mut child = Command::new(norn_bin())
             .arg("--cwd")
             .arg(vault.path())
@@ -443,6 +459,7 @@ fn vault_audit_returns_a_persisted_mutation() {
 
     // ── Session 2: vault.audit must surface the mutation from session 1 ──────
     {
+        prewrite_prune_marker(&vault.path().join(".xdg-cache"));
         let mut child = Command::new(norn_bin())
             .arg("--cwd")
             .arg(vault.path())

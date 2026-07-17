@@ -17,6 +17,16 @@ fn vault_root(prefix: &str) -> PathBuf {
     path
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Runs `norn repair plan --format report` with isolated XDG cache/state trees and NO_COLOR.
 /// Returns the raw stdout string.
 fn run_plan(root: &Path, config_path: &Path, extra_args: &[&str]) -> String {
@@ -37,6 +47,7 @@ fn run_plan(root: &Path, config_path: &Path, extra_args: &[&str]) -> String {
         "report",
     ]);
     cmd.args(extra_args);
+    prewrite_prune_marker(cache_dir.path());
     cmd.env("XDG_CACHE_HOME", cache_dir.path())
         .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1");
@@ -545,6 +556,7 @@ fn piped_default_is_json_explicit_format_overrides() {
         .prefix("norn-piped-default-")
         .tempdir()
         .expect("cache temp dir should be created");
+    prewrite_prune_marker(cache_dir.path());
 
     // No --format flag → piped → JSON envelope
     let piped = Command::new(env!("CARGO_BIN_EXE_norn"))

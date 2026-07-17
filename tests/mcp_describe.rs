@@ -33,6 +33,16 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Vault with docs under `Workspaces/norn/notes/` + a config declaring a notes
 /// path rule (`type: note`) and a status schema. Cache is pre-built so the MCP
 /// server's first tool call doesn't race a concurrent cold-start rebuild.
@@ -69,6 +79,7 @@ fn seeded_vault() -> TempDir {
     )
     .unwrap();
 
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let rebuild = Command::new(norn_bin())
         .arg("--cwd")
         .arg(tmp.path())
@@ -97,6 +108,7 @@ fn line(value: serde_json::Value) -> Vec<u8> {
 fn lists_and_calls_vault_describe() {
     let vault = seeded_vault();
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -258,6 +270,7 @@ fn seeded_vault_with_creatable_rule() -> TempDir {
     )
     .unwrap();
 
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let rebuild = Command::new(norn_bin())
         .arg("--cwd")
         .arg(tmp.path())
@@ -295,6 +308,7 @@ fn seeded_vault_with_creatable_rule() -> TempDir {
 fn vault_describe_returns_creatable_rules_and_inbox() {
     let vault = seeded_vault_with_creatable_rule();
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())

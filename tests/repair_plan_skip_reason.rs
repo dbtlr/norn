@@ -20,6 +20,16 @@ fn vault_root() -> PathBuf {
     path
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Runs `vault` with the given args. Isolates the XDG cache and state trees
 /// so tests don't share SQLite state and never read or sweep the developer's
 /// real cache/state trees.
@@ -31,6 +41,7 @@ fn vault_json(args: &[&str]) -> Value {
         .prefix("norn-cache-")
         .tempdir()
         .expect("cache temp dir should be created");
+    prewrite_prune_marker(cache_dir.path());
     command.env("XDG_CACHE_HOME", cache_dir.path());
     command.env("XDG_STATE_HOME", cache_dir.path().join("state"));
 

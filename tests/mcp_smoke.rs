@@ -66,10 +66,21 @@ fn tools_list_request() -> Vec<u8> {
     bytes
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 #[test]
 fn server_initializes_and_lists_tools() {
     let vault = make_minimal_vault();
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())

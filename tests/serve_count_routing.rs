@@ -60,6 +60,7 @@ fn run_count(
     vault: &Path,
     extra_args: &[&str],
 ) -> (Vec<u8>, Vec<u8>, i32) {
+    prewrite_prune_marker(cache_home);
     let out = Command::new(norn_bin())
         .env("XDG_CACHE_HOME", cache_home)
         .env("XDG_STATE_HOME", state_home)
@@ -77,6 +78,16 @@ fn run_count(
         .output()
         .expect("run norn count");
     (out.stdout, out.stderr, out.status.code().unwrap_or(-1))
+}
+
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
 }
 
 /// The arg shapes exercised — one per `CountOutput` variant × format, plus a
@@ -152,6 +163,7 @@ fn routed_dynamic_field_count_matches_direct() {
     let state_home = daemon_root.path().join("s");
     let stderr_path = daemon_root.path().join("err");
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+    prewrite_prune_marker(&cache_home);
     let child = Command::new(norn_bin())
         .arg("serve")
         .env("XDG_CACHE_HOME", &cache_home)
@@ -230,6 +242,7 @@ fn routed_count_is_byte_identical_to_direct() {
     let state_home = daemon_root.path().join("s");
     let stderr_path = daemon_root.path().join("err");
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+    prewrite_prune_marker(&cache_home);
     let child = Command::new(norn_bin())
         .arg("serve")
         .env("XDG_CACHE_HOME", &cache_home)

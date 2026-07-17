@@ -53,6 +53,16 @@ fn plan_json(vault_root: &str, note_rel: &str, document_hash: &str, new_body: &s
     .unwrap()
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Run `norn apply -` feeding `plan` on stdin, with the given extra args.
 /// `XDG_CACHE_HOME`/`XDG_STATE_HOME` are isolated to hidden subdirs of the
 /// vault root so the binary never reads or sweeps the developer's real
@@ -61,6 +71,7 @@ fn run_apply(vault_root: &str, plan: &str, extra: &[&str]) -> std::process::Outp
     let mut args: Vec<&str> = vec!["--cwd", vault_root, "apply", "-"];
     args.extend_from_slice(extra);
     let xdg_root = std::path::Path::new(vault_root);
+    prewrite_prune_marker(&xdg_root.join(".xdg-cache"));
     let mut cmd = Command::new(norn_bin())
         .args(&args)
         .stdin(Stdio::piped())

@@ -21,7 +21,23 @@ fn isolate_cache(command: &mut Command) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp cache dir should be created");
     command.env("XDG_CACHE_HOME", dir.path());
     command.env("XDG_STATE_HOME", dir.path().join("state"));
+    prewrite_prune_marker(dir.path());
     dir
+}
+
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so a norn invocation under this cache home does NOT spawn a detached GC sweep
+/// child (NRN-287): with the marker absent the first command would spawn a real
+/// `norn cache sweep` into the test's temp tree, which can create a file inside
+/// an entry another command (`cache clear`) is removing, outlive the test and
+/// race `TempDir` teardown, or re-create tree paths after teardown. Mirrors
+/// src/cache/prune.rs `PRUNE_MARKER`; the dedicated trigger tests
+/// (tests/cache_prune.rs) pre-write it too and clear it deliberately when they
+/// exercise the sweep.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
 }
 
 fn vault(args: &[&str]) -> String {
@@ -50,10 +66,11 @@ fn vault_success(args: &[&str]) -> (String, String) {
 fn vault_success_env(args: &[&str], envs: &[(&str, &str)]) -> (String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
     command.args(args);
-    let _cache_dir = if envs.iter().any(|(k, _)| *k == "XDG_CACHE_HOME") {
+    let _cache_dir = if let Some((_, cache)) = envs.iter().find(|(k, _)| *k == "XDG_CACHE_HOME") {
         // Caller controls the cache tree; still isolate the state tree.
         let dir = tempfile::tempdir().expect("temp state dir should be created");
         command.env("XDG_STATE_HOME", dir.path().join("state"));
+        prewrite_prune_marker(std::path::Path::new(cache));
         dir
     } else {
         isolate_cache(&mut command)
@@ -116,10 +133,11 @@ fn vault_error_stdout(args: &[&str]) -> String {
 fn vault_env(args: &[&str], envs: &[(&str, &str)]) -> (String, String, i32) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
     command.args(args);
-    let _cache_dir = if envs.iter().any(|(k, _)| *k == "XDG_CACHE_HOME") {
+    let _cache_dir = if let Some((_, cache)) = envs.iter().find(|(k, _)| *k == "XDG_CACHE_HOME") {
         // Caller controls the cache tree; still isolate the state tree.
         let dir = tempfile::tempdir().expect("temp state dir should be created");
         command.env("XDG_STATE_HOME", dir.path().join("state"));
+        prewrite_prune_marker(std::path::Path::new(cache));
         dir
     } else {
         isolate_cache(&mut command)

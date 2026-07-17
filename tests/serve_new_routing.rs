@@ -145,6 +145,16 @@ fn seq_seed() -> Vec<(&'static str, &'static str)> {
 
 // ── Runners ─────────────────────────────────────────────────────────────────
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Run `norn --cwd <vault> new <args>` with the given cache/state homes. Stdin is
 /// forced to `/dev/null` (never a terminal) and stdout is captured (a pipe, never
 /// a terminal), so `new`'s "non-TTY without --yes = implicit dry-run preview"
@@ -156,6 +166,7 @@ fn run_new(
     vault: &Path,
     args: &[&str],
 ) -> (Vec<u8>, Vec<u8>, i32) {
+    prewrite_prune_marker(cache_home);
     let out = Command::new(norn_bin())
         .env("XDG_CACHE_HOME", cache_home)
         .env("XDG_STATE_HOME", state_home)
@@ -181,6 +192,7 @@ fn run_new_with_stdin(
     args: &[&str],
     stdin: &str,
 ) -> (Vec<u8>, Vec<u8>, i32) {
+    prewrite_prune_marker(cache_home);
     let mut child = Command::new(norn_bin())
         .env("XDG_CACHE_HOME", cache_home)
         .env("XDG_STATE_HOME", state_home)

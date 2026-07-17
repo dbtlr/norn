@@ -29,6 +29,16 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Seed `a.md` and `b.md` (b links to `[[a]]`).
 fn seeded_vault() -> TempDir {
     let tmp = tempfile::Builder::new()
@@ -45,6 +55,7 @@ fn seeded_vault() -> TempDir {
 }
 
 fn prebuild_cache(vault: &TempDir) {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let status = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -80,6 +91,7 @@ fn run_move_responses(
     confirm: bool,
     with_tools_list: bool,
 ) -> Vec<serde_json::Value> {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -262,6 +274,7 @@ fn dry_run_alone_moves_nothing() {
     let a_before = std::fs::read_to_string(vault.path().join("a.md")).unwrap();
     let b_before = std::fs::read_to_string(vault.path().join("b.md")).unwrap();
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -431,6 +444,7 @@ fn read_all_event_lines(state_root: &Path) -> Vec<serde_json::Value> {
 /// Spawn `norn mcp`, send `initialize` + one `vault.move` call (caller supplies
 /// `confirm`), close stdin, wait.
 fn run_move_call(vault: &TempDir, state_dir: &Path, confirm: bool) {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())

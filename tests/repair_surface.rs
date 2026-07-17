@@ -60,10 +60,21 @@ fn run(root: &Path, config_path: &Path, extra: &[&str]) -> std::process::Output 
         "repair",
     ]);
     cmd.args(extra);
+    prewrite_prune_marker(cache_dir.path());
     cmd.env("XDG_CACHE_HOME", cache_dir.path())
         .env("XDG_STATE_HOME", cache_dir.path().join("state"))
         .env("NO_COLOR", "1");
     cmd.output().expect("vault command should execute")
+}
+
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
 }
 
 #[test]
@@ -143,6 +154,7 @@ fn bare_repair_prints_findings_summary() {
 #[test]
 fn old_repair_plan_subcommand_is_gone() {
     let xdg = tempfile::tempdir().expect("temp xdg dir should be created");
+    prewrite_prune_marker(&xdg.path().join("cache"));
     let out = Command::new(env!("CARGO_BIN_EXE_norn"))
         .args(["repair", "plan", "--format", "json"])
         .env("NO_COLOR", "1")
@@ -159,6 +171,7 @@ fn old_repair_plan_subcommand_is_gone() {
 #[test]
 fn old_repair_apply_subcommand_is_gone() {
     let xdg = tempfile::tempdir().expect("temp xdg dir should be created");
+    prewrite_prune_marker(&xdg.path().join("cache"));
     let out = Command::new(env!("CARGO_BIN_EXE_norn"))
         .args(["repair", "apply"])
         .env("NO_COLOR", "1")

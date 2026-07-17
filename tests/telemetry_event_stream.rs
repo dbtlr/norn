@@ -36,6 +36,16 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 /// Recursively collect all `events-*.jsonl` files under `dir`.
 fn find_event_files(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
@@ -79,6 +89,7 @@ fn no_event_files(state_root: &Path) -> bool {
 fn move_apply_writes_invocation_and_planned_events_to_stream() {
     let tmp = synth();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -125,6 +136,7 @@ fn move_apply_writes_invocation_and_planned_events_to_stream() {
 fn dry_run_writes_no_events_to_disk() {
     let tmp = synth();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -150,6 +162,7 @@ fn move_emits_applied_action_events() {
     // vault: a.md ; c.md contains [[a]] → move a.md b.md rewrites c.md's backlink.
     let tmp = synth();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -204,6 +217,7 @@ fn move_emits_applied_action_events() {
 fn dry_run_emits_no_action_events() {
     let tmp = synth();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -267,6 +281,7 @@ fn move_with_unwritable_backlinker_emits_failed_action_and_retry() {
     }
 
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(&root)
@@ -359,6 +374,7 @@ fn apply_report_op_tallies_equal_fold_of_on_disk_stream() {
     // vault: a.md ; c.md contains [[a]] → move a.md b.md rewrites c.md's backlink.
     let tmp = synth();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -455,6 +471,7 @@ fn synth_single() -> TempDir {
 fn set_apply_emits_events_and_report_carries_trace_id() {
     let tmp = synth_single();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -505,6 +522,7 @@ fn set_apply_emits_events_and_report_carries_trace_id() {
 fn set_dry_run_writes_no_events() {
     let tmp = synth_single();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -537,6 +555,7 @@ fn set_dry_run_writes_no_events() {
 fn new_apply_emits_events_and_report_carries_trace_id() {
     let tmp = synth_single();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -588,6 +607,7 @@ fn new_apply_emits_events_and_report_carries_trace_id() {
 fn new_records_apply_prints_trace_footer() {
     let tmp = synth_single();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -613,6 +633,7 @@ fn new_records_apply_prints_trace_footer() {
 fn set_report_schema_version_is_2() {
     let tmp = synth_single();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))
@@ -646,6 +667,7 @@ fn set_report_schema_version_is_2() {
 fn dry_run_move_report_keeps_forecast_cascade_and_not_run_status() {
     let tmp = synth();
     let state = TempDir::new().unwrap();
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let out = Command::new(norn_bin())
         .args(["--cwd"])
         .arg(tmp.path().join("vault"))

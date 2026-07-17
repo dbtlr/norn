@@ -28,6 +28,16 @@ fn note(title: &str) -> String {
     format!("---\ntype: note\ntitle: {title}\n---\n{title} body\n")
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(tree.join(".last-prune"), b"");
+}
+
 fn find(conn: &mut Conn, args: serde_json::Value) -> Vec<serde_json::Value> {
     find_documents(&conn.call_tool("vault.find", args))
 }
@@ -90,6 +100,7 @@ fn ground_shift_cache_clear() {
 
     // Clear the cache database under the live daemon, via a CLI child sharing the
     // daemon's XDG dirs (so it targets the SAME per-vault cache.db).
+    prewrite_prune_marker(&daemon.cache_home);
     let clear = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
