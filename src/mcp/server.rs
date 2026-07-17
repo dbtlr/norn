@@ -266,8 +266,18 @@ impl McpServer {
             // The marker fast-path keeps the steady-state per-request cost at one
             // stat, so both the warm daemon and cold `norn mcp` trigger GC
             // server-side without a daemon timer — the daemon otherwise never
-            // swept. Never affects the tool's result. Config re-loads in the
-            // child, so `None` here uses the vault's default config.
+            // swept. Never affects the tool's result. Config re-loads in the child;
+            // `None` here means it re-discovers config from the vault's default
+            // `.norn/config.yaml` plus env + cwd.
+            //
+            // LIMITATION (F5): an explicit non-default `--config` the server was
+            // started with does NOT propagate to the detached sweep. `VaultEnv`
+            // retains only the parsed `LoadedConfig`, not its source path — warm
+            // mode is constructed with `config_path = None` by design (the daemon
+            // wire never carries a custom `--config`; see
+            // `VaultEnv::open_warm_with_progress`), and cold `norn mcp` likewise
+            // does not keep the path — so there is nothing to thread through here.
+            // Env- and cwd-discovered config still reach the child.
             crate::cache::prune::maybe_spawn_sweep(&ctx.vault_root, None);
             (notes, result)
         })
