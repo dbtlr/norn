@@ -14,8 +14,9 @@ fn norn_bin() -> &'static str {
 /// `PRUNE_MARKER`.
 fn prewrite_prune_marker(cache_home: &std::path::Path) {
     let tree = cache_home.join("norn");
-    let _ = std::fs::create_dir_all(&tree);
-    let _ = std::fs::write(tree.join(".last-prune"), b"");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
 }
 
 fn norn_cmd(tmp: &tempfile::TempDir) -> Command {

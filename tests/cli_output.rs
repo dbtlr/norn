@@ -36,8 +36,9 @@ fn isolate_cache(command: &mut Command) -> tempfile::TempDir {
 /// exercise the sweep.
 fn prewrite_prune_marker(cache_home: &std::path::Path) {
     let tree = cache_home.join("norn");
-    let _ = std::fs::create_dir_all(&tree);
-    let _ = std::fs::write(tree.join(".last-prune"), b"");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
 }
 
 fn vault(args: &[&str]) -> String {
@@ -3107,8 +3108,21 @@ fn cache_clear_surfaces_real_error_when_entry_check_fails() {
         return;
     }
 
-    let (_stdout, stderr, exit_code) =
-        vault_env(&["-C", root.to_str().unwrap(), "cache", "clear"], &envs);
+    // Invoke `cache clear` directly rather than via `vault_env`: this test has
+    // deliberately chmod'd the `norn` dir to 0000, so `vault_env`'s throttle-marker
+    // pre-write (`<cache_home>/norn/.last-prune`) would fail — and now correctly
+    // panics (NRN-287 F3 fail-fast). Sweep isolation still holds: the marker was
+    // already written by the `cache index` call above, before the permission strip,
+    // so no detached sweep can spawn against this cache home.
+    let state_dir = tempfile::tempdir().expect("temp state dir should be created");
+    let output = Command::new(env!("CARGO_BIN_EXE_norn"))
+        .args(["-C", root.to_str().unwrap(), "cache", "clear"])
+        .env("XDG_STATE_HOME", state_dir.path().join("state"))
+        .env("XDG_CACHE_HOME", cache_home.to_str().unwrap())
+        .output()
+        .expect("vault command should run");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    let exit_code = output.status.code().unwrap_or(-1);
 
     // Restore permissions immediately so cleanup can proceed regardless of
     // the assertions below.

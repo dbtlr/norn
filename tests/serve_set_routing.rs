@@ -79,8 +79,9 @@ fn seeded_vault_files() -> Vec<(&'static str, &'static str)> {
 /// `PRUNE_MARKER`.
 fn prewrite_prune_marker(cache_home: &Path) {
     let tree = cache_home.join("norn");
-    let _ = std::fs::create_dir_all(&tree);
-    let _ = std::fs::write(tree.join(".last-prune"), b"");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
 }
 
 /// Run `norn --cwd <vault> set <args>` with the given cache/state homes. Stdin is
