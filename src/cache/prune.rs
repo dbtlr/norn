@@ -1248,6 +1248,98 @@ mod tests {
         assert_eq!(h2_entry.reason, EvictReason::Empty);
     }
 
+    /// NRN-287 regression: a sweep triggered by ONE vault must not evict a
+    /// SIBLING vault's cache entry that a live process is mid-creating. The
+    /// multi-vault `norn serve` daemon serves many vaults but exempts only the
+    /// one that triggered the detached sweep; a second vault whose fresh cache the
+    /// daemon is concurrently building looks Empty (dirs created, `cache.db` not
+    /// yet written) or Unreadable (`cache.db` opened, `meta` not yet written) to
+    /// the scanner. The daemon now holds the entry `.lock` across creation
+    /// (`Cache::open` → `open_layout`), so the sweep's zero-timeout eviction flock
+    /// must WouldBlock and SKIP the entry rather than `remove_dir_all` it out from
+    /// under the in-flight open (the CI-only race that surfaced as
+    /// SQLITE_CANTOPEN / ENOENT in `tests/serve_roundtrip.rs`).
+    ///
+    /// Staged deterministically: hold the sibling entry's `.lock` (standing in for
+    /// the daemon's create latch) and run `sweep()` exempting a THIRD, unrelated
+    /// vault — so the sibling is a plain non-exempt entry the sweep would evict but
+    /// for the lock. A genuinely-dead UNLOCKED entry is evicted in the same sweep,
+    /// proving the sweep actually ran. Covers BOTH the Empty (dirs-only) and
+    /// Unreadable (db-without-meta) mid-creation shapes.
+    #[test]
+    fn locked_sibling_entry_survives_a_sweep_it_did_not_trigger() {
+        for mid_creation_shape in ["empty", "unreadable"] {
+            let trees = TempDir::new().unwrap();
+            let cache_tree = Utf8PathBuf::from_path_buf(trees.path().join("cache")).unwrap();
+            let state_tree = Utf8PathBuf::from_path_buf(trees.path().join("state")).unwrap();
+
+            // H1: the exempt vault that triggered the sweep (a live, healthy db).
+            let live_vault = TempDir::new().unwrap();
+            mint_cache_entry(&cache_tree, H1, live_vault.path().to_str().unwrap());
+
+            // H2: a SIBLING vault the daemon is mid-creating on the dev channel,
+            // holding H2's `.lock`. Stage the entry dirs down to the dev schema dir.
+            let sibling = cache_tree.join(H2);
+            let dev_db_dir = sibling.join(dev_subdir()).join(schema_seg());
+            std::fs::create_dir_all(dev_db_dir.as_std_path()).unwrap();
+            if mid_creation_shape == "unreadable" {
+                // cache.db exists but has no `meta` rows yet (root unreadable).
+                std::fs::write(dev_db_dir.join("cache.db").as_std_path(), b"").unwrap();
+            }
+            // The live create latch: an exclusive flock on H2's entry `.lock`, held
+            // for the whole sweep.
+            let held_lock = crate::cache::acquire_flock(
+                &sibling.join(".lock"),
+                std::time::Duration::from_secs(5),
+            )
+            .expect("acquire the sibling entry lock");
+
+            // H3: a genuinely-dead, UNLOCKED entry — must be evicted so we know the
+            // sweep ran.
+            mint_cache_entry(&cache_tree, H3, "/nonexistent/vault/gone");
+
+            let report = sweep(
+                &cache_tree,
+                &state_tree,
+                &PruneOptions {
+                    exempt_hash: Some(H1.to_string()),
+                    ..opts(90)
+                },
+            );
+
+            drop(held_lock);
+
+            assert!(
+                cache_tree.join(H1).as_std_path().exists(),
+                "[{mid_creation_shape}] the exempt vault must survive"
+            );
+            assert!(
+                sibling.as_std_path().exists(),
+                "[{mid_creation_shape}] the locked mid-creation sibling entry must \
+                 survive: a sweep from another vault must not kill it"
+            );
+            assert!(
+                dev_db_dir.as_std_path().exists(),
+                "[{mid_creation_shape}] the sibling's in-flight db dir must survive"
+            );
+            assert!(
+                !cache_tree.join(H3).as_std_path().exists(),
+                "[{mid_creation_shape}] the dead unlocked entry must be evicted — \
+                 proving the sweep actually ran"
+            );
+            assert!(
+                report.cache.skipped_locked >= 1,
+                "[{mid_creation_shape}] the held sibling lock must register as a \
+                 locked skip, got report: {report:?}"
+            );
+            assert!(
+                !hashes(&report.cache.evicted).contains(&H2),
+                "[{mid_creation_shape}] the sibling entry must not appear in the \
+                 evicted set"
+            );
+        }
+    }
+
     /// An entry holding ONLY a dev-channel database (no live db) recovers its
     /// vault root from the dev schema dir (`<entry>/dev/v{schema}/cache.db`,
     /// candidate 4) and classifies normally — here dead-root, since the recorded
