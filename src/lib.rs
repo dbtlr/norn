@@ -1459,6 +1459,13 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         return result;
     }
 
+    // Whether a routed daemon served this invocation. A ROUTED command performs
+    // no local cache-maintenance side effects — the daemon owns its warm cache —
+    // so the tail `lazy_sweep` is skipped for it, reproducing the pre-NRN-291
+    // early-return (a routed read `return`ed here and never reached the sweep;
+    // a direct run fell through to it). Only the dispatch-backed arms set this;
+    // it is the dispatch seam's cache-maintenance contract (see `dispatch.rs`).
+    let mut served_by_daemon = false;
     let outcome = match command {
         Command::Apply(args) => {
             let run_args = ApplyRunArgs {
@@ -1559,7 +1566,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                 // knobs handled entirely in the render closure (`emit_plan`), so
                 // they never reach the wire.
                 let params = crate::mcp::tools::repair::RepairParams::from_args(&args);
-                crate::dispatch::dispatch(
+                let dispatched = crate::dispatch::dispatch(
                     &params,
                     &cwd,
                     config_path.as_ref(),
@@ -1575,7 +1582,13 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
                             serde_json::from_value(report.plan)?;
                         crate::repair::emit_plan(&plan, &args, &cwd, report.has_diagnostic_errors)
                     },
-                )
+                );
+                // A routed run leaves cache maintenance to the daemon: gate the
+                // tail `lazy_sweep` off so a routed `repair --plan` performs no
+                // local prune/GC side effect (NRN-291 sweep parity). A direct run
+                // (`routed == false`) still sweeps, exactly as main's direct path.
+                served_by_daemon = dispatched.routed;
+                dispatched.outcome
             } else {
                 // Bare `norn repair` (summary) has no wire analogue — it stays a
                 // CLI-local path (never routes), but shares the SAME finding→plan
@@ -2775,8 +2788,12 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     // the next invocation. The sweep must remain the last thing before
     // returning `outcome`; do not insert post-dispatch work after it.
     // Explicit `cache prune` is also skipped: it manages the sweep itself,
-    // and a --dry-run must never be followed by a real sweep.
-    if !is_explicit_prune {
+    // and a --dry-run must never be followed by a real sweep. A ROUTED dispatch
+    // is skipped too (`served_by_daemon`): the daemon owns its warm cache's
+    // upkeep, so a routed command performs no local cache-maintenance side
+    // effect — reproducing the pre-NRN-291 early-return that bypassed this tail
+    // (see the dispatch seam's cache-maintenance contract in `dispatch.rs`).
+    if !is_explicit_prune && !served_by_daemon {
         crate::cache::prune::lazy_sweep(&cwd, config_path.as_ref());
     }
     outcome

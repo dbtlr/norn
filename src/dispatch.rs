@@ -39,6 +39,19 @@
 //! mutation verbs migrate (NRN-292+) they add a send-commit policy knob here
 //! (a `Commit` posture for a real apply, mirroring `route_call`) alongside the
 //! adapter-side confirm ladder — the trait grows one method, not a fork.
+//!
+//! ## Cache-maintenance contract (the `routed` bit)
+//!
+//! A ROUTED command performs NO local cache-maintenance side effects — the
+//! daemon owns its warm cache, so it (not this process) is responsible for GC
+//! eviction and the throttled prune sweep. The CLI adapter must therefore skip
+//! the tail `lazy_sweep` (`lib.rs`, the shared `run` tail) whenever a request
+//! routed, exactly reproducing the pre-NRN-291 early-return: on main a routed
+//! read `return`ed at the call site and never reached the sweep, while a DIRECT
+//! (cold local) run fell through to it. [`dispatch`] surfaces which happened via
+//! [`Dispatched::routed`] so the adapter can gate the sweep — and every verb
+//! migrated in NRN-292+ inherits this parity by threading the same bit into the
+//! same gate, rather than each re-deriving it.
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -80,11 +93,31 @@ pub(crate) trait Request: serde::Serialize {
     }
 }
 
+/// The result of a [`dispatch`] call: the rendered `outcome` paired with whether
+/// a live warm daemon `routed` it.
+///
+/// `routed` is the dispatch seam's cache-maintenance contract (see the module
+/// doc): `true` means the daemon served the request and owns its cache upkeep,
+/// so the CLI adapter MUST skip the tail `lazy_sweep`; `false` means a cold local
+/// run, which still sweeps. It is carried alongside `outcome` (rather than folded
+/// into the `Ok`) precisely so a routed FAILURE — a daemon-side refusal, an
+/// unreadable envelope committed post-send — also suppresses the sweep, matching
+/// main's early-return, which skipped the sweep on any routed result, error or
+/// not.
+pub(crate) struct Dispatched {
+    /// Whether a live warm daemon served the request (routed) vs. a cold local
+    /// execution (direct). Gates the CLI adapter's tail `lazy_sweep`.
+    pub(crate) routed: bool,
+    /// The rendered exit code, or the error the top level maps to one.
+    pub(crate) outcome: Result<i32>,
+}
+
 /// Dispatch `req`: serve it from a live warm daemon when one answers this vault
 /// (and no forced-direct flag applies), otherwise execute it locally against a
 /// cold [`VaultEnv`]. Either way the resulting [`Request::Report`] is rendered
 /// by `render` — the surface's one report renderer, shared by both branches so
-/// routed and direct output cannot drift.
+/// routed and direct output cannot drift — and the [`Dispatched`] return carries
+/// the `routed` bit the caller gates its tail cache-maintenance on.
 ///
 /// `render` is `Fn` (not `FnOnce`) because exactly one branch runs it at
 /// runtime but both reference it; a routed run renders inside the skeleton
@@ -98,7 +131,7 @@ pub(crate) fn dispatch<R: Request>(
     explicit_config: bool,
     verbose: bool,
     render: impl Fn(R::Report) -> Result<i32>,
-) -> Result<i32> {
+) -> Dispatched {
     // Beat 2 — DISPATCH. A live warm daemon serves the request over the socket,
     // byte-identically to local execution. Reuses the read-routing skeleton
     // (probe, handshake, build-skew gate, operator-note re-emission,
@@ -108,17 +141,35 @@ pub(crate) fn dispatch<R: Request>(
     #[cfg(unix)]
     {
         if !crate::routing_forced_direct(explicit_config, no_cache_refresh) {
+            let arguments = match serde_json::to_value(req) {
+                Ok(arguments) => arguments,
+                // A request that cannot even serialize never routed — report the
+                // error as a DIRECT outcome so the tail sweep still runs, exactly
+                // as the pre-NRN-291 direct path would have on a local error.
+                Err(error) => {
+                    return Dispatched {
+                        routed: false,
+                        outcome: Err(error.into()),
+                    };
+                }
+            };
             let spec = crate::CallSpec {
                 tool: R::TOOL,
-                arguments: serde_json::to_value(req)?,
+                arguments,
                 on_tool_error: R::on_tool_error(),
                 verbose,
             };
             // `route_read` renders via the `emit` closure on success and returns
             // `None` on any read-safe miss/failure (no daemon, forced pre-send
             // fall-back, unreadable envelope) — falling through to local below.
-            if let Some(result) = crate::route_read(cwd, spec, R::reconstruct, &render) {
-                return result;
+            // A `Some` (Ok OR Err) means the request COMMITTED to routing: the
+            // daemon owns cache upkeep, so mark it routed and let the caller skip
+            // the tail sweep, mirroring main's early-return semantics exactly.
+            if let Some(outcome) = crate::route_read(cwd, spec, R::reconstruct, &render) {
+                return Dispatched {
+                    routed: true,
+                    outcome,
+                };
             }
         }
     }
@@ -127,21 +178,29 @@ pub(crate) fn dispatch<R: Request>(
         let _ = (explicit_config, verbose);
     }
 
-    // Beat 3 — EXECUTE. No daemon (or a forced-direct flag): run the ONE
+    // Beat 3 — EXECUTE (DIRECT). No daemon (or a forced-direct flag): run the ONE
     // implementation locally against a cold VaultEnv. `open_cold` honors
     // `--no-cache-refresh` so the local path reproduces the pre-NRN-291 direct
-    // path's cache-refresh behavior, and `--config` via `config_path`.
-    let env = VaultEnv::open_cold(cwd, config_path, no_cache_refresh)?;
-    let scope = env.begin_request()?;
-    let report = req.execute(&env, &scope);
-    // Cold-path operator notes (fidelity): drain the request scope to stderr,
-    // matching the direct path's own note plumbing. The cold cache open emits
-    // its lock-contention note via `eprintln!` inline during `execute`, so this
-    // drain is normally empty for repair; it stays here so any scope-buffered
-    // note lands on stderr before the rendered output, exactly like the routed
-    // path re-emits daemon-side notes before rendering.
-    for note in scope.take_operator_notes() {
-        eprintln!("{note}");
+    // path's cache-refresh behavior, and `--config` via `config_path`. The result
+    // is captured as `outcome` (NOT `?`-propagated out of `dispatch`) so a cold
+    // failure still returns `routed: false` — the direct path swept on error too.
+    let outcome = (|| -> Result<i32> {
+        let env = VaultEnv::open_cold(cwd, config_path, no_cache_refresh)?;
+        let scope = env.begin_request()?;
+        let report = req.execute(&env, &scope);
+        // Cold-path operator notes (fidelity): drain the request scope to stderr,
+        // matching the direct path's own note plumbing. The cold cache open emits
+        // its lock-contention note via `eprintln!` inline during `execute`, so
+        // this drain is normally empty for repair; it stays here so any
+        // scope-buffered note lands on stderr before the rendered output, exactly
+        // like the routed path re-emits daemon-side notes before rendering.
+        for note in scope.take_operator_notes() {
+            eprintln!("{note}");
+        }
+        render(report?)
+    })();
+    Dispatched {
+        routed: false,
+        outcome,
     }
-    render(report?)
 }

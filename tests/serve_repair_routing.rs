@@ -24,7 +24,7 @@ mod serve_util;
 
 use serve_util::{count_served, norn_bin, spawn_ready_daemon_with_log, write_vault};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
@@ -372,6 +372,83 @@ fn no_daemon_runs_direct() {
         0,
         "repair --plan should exit 0 with no daemon, got {code}; stderr: {}",
         String::from_utf8_lossy(&err)
+    );
+}
+
+/// NRN-291 sweep parity: a ROUTED `repair --plan` performs NO local
+/// cache-maintenance side effect — the daemon owns its warm cache — so the CLI
+/// client must skip the tail `lazy_sweep`, exactly as the pre-NRN-291
+/// early-return bypassed it (on main a routed read `return`ed before the tail).
+/// A DIRECT run (no daemon reachable) still sweeps. The observable proxy is the
+/// prune marker `<XDG_CACHE_HOME>/norn/.last-prune` (src/cache/prune.rs
+/// `PRUNE_MARKER`): `lazy_sweep` creates/touches it when the marker is absent or
+/// stale, so skipping the sweep leaves an absent marker absent. `serve` never
+/// touches the marker (it is dispatched before the cache-opening tail), so the
+/// daemon side cannot mask the routed client's skip.
+#[test]
+fn routed_repair_plan_does_not_touch_prune_marker() {
+    // Mirrors src/cache/prune.rs `PRUNE_MARKER` (crate-private, so hardcoded here).
+    fn prune_marker(cache_home: &Path) -> PathBuf {
+        cache_home.join("norn").join(".last-prune")
+    }
+
+    let vault = fresh_vault();
+    let daemon = spawn_ready_daemon_with_log(&[]);
+
+    // DIRECT control: a fresh cache home with NO daemon reachable. The marker is
+    // absent, so the direct run's tail sweep must CREATE it — proving both that
+    // `lazy_sweep` fires on the direct path and that the marker is the right
+    // observable for "did the sweep run?".
+    let direct_cache = TempDir::new().unwrap();
+    let direct_state = TempDir::new().unwrap();
+    assert!(
+        !prune_marker(direct_cache.path()).exists(),
+        "precondition: direct cache prune marker must be absent before the run"
+    );
+    let (_d_out, d_err, d_code) = run_repair(
+        direct_cache.path(),
+        direct_state.path(),
+        vault.path(),
+        &["--plan", "--format", "json"],
+    );
+    assert_eq!(
+        d_code,
+        0,
+        "direct exit sanity; stderr: {}",
+        String::from_utf8_lossy(&d_err)
+    );
+    assert!(
+        prune_marker(direct_cache.path()).exists(),
+        "a DIRECT `repair --plan` must run the tail sweep, creating the prune marker \
+         (matching main's direct path)"
+    );
+
+    // ROUTED: served by the daemon. The client must SKIP the tail sweep, so the
+    // marker under the daemon's cache home stays absent.
+    assert!(
+        !prune_marker(&daemon.cache_home).exists(),
+        "precondition: daemon cache prune marker must be absent before the routed run"
+    );
+    let (_r_out, r_err, r_code) = run_repair(
+        &daemon.cache_home,
+        &daemon.state_home,
+        vault.path(),
+        &["--plan", "--format", "json"],
+    );
+    assert_eq!(
+        r_code,
+        0,
+        "routed exit sanity; stderr: {}",
+        String::from_utf8_lossy(&r_err)
+    );
+    let served = count_served(&daemon.stderr_path, "vault.repair");
+    assert_eq!(
+        served, 1,
+        "the run must have been served by the daemon, got {served}"
+    );
+    assert!(
+        !prune_marker(&daemon.cache_home).exists(),
+        "a ROUTED `repair --plan` must NOT run the tail sweep — the prune marker must stay absent"
     );
 }
 
