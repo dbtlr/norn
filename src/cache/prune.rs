@@ -7,7 +7,8 @@
 //! vault root no longer exists (or the entry is empty).
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Serialize, Serializer};
@@ -32,12 +33,18 @@ pub(crate) const PRUNE_MARKER: &str = ".last-prune";
 /// a second spawner that finds it held no-ops (NRN-287). Not 64-hex, so
 /// `scan_tree` never treats it as a vault entry.
 pub(crate) const SWEEP_LOCK: &str = ".sweep.lock";
+/// Process-local spawn-claim cooldown: one process attempts at most one sweep
+/// spawn per this window. Far above the due-observation race window (ms), far
+/// below [`PRUNE_THROTTLE`] — it can never suppress a next-interval trigger.
+const SPAWN_CLAIM_COOLDOWN: Duration = Duration::from_secs(60);
 
-/// Record a sweep decision: create/refresh the marker file's mtime. Best-effort.
-pub(crate) fn touch_marker(cache_tree: &Utf8Path) {
+/// Record a sweep decision: create/refresh the marker file's mtime. Returns
+/// whether the marker write landed — the trigger declines to spawn when it
+/// didn't (an unrecordable throttle would otherwise spawn per invocation).
+pub(crate) fn touch_marker(cache_tree: &Utf8Path) -> bool {
     let _ = std::fs::create_dir_all(cache_tree.as_std_path());
     let marker = cache_tree.join(PRUNE_MARKER);
-    let _ = std::fs::write(marker.as_std_path(), b"");
+    std::fs::write(marker.as_std_path(), b"").is_ok()
 }
 
 /// Marker-staleness decision, factored out so it is unit-testable without
@@ -45,13 +52,20 @@ pub(crate) fn touch_marker(cache_tree: &Utf8Path) {
 ///
 /// `mtime` is the marker's modification time when the marker exists and its
 /// mtime is readable, or `None` when the mtime can't be read. An unreadable
-/// mtime or clock skew biases toward NOT sweeping — a missed sweep
-/// self-corrects within one throttle interval; a runaway sweep doesn't.
+/// mtime biases toward NOT sweeping — a missed sweep self-corrects within one
+/// throttle interval; a runaway sweep doesn't. A FUTURE mtime (clock rollback,
+/// or an externally future-dated marker) is due: "not due" would persist until
+/// wall time catches up — unbounded — while the spawn-time marker touch resets
+/// it to now, so treating it as due cannot storm.
 fn marker_says_due(mtime: Option<SystemTime>, now: SystemTime) -> bool {
-    match mtime.and_then(|m| now.duration_since(m).ok()) {
-        Some(age) => age >= PRUNE_THROTTLE,
-        // Unreadable mtime / clock skew: bias to skip (not due).
-        None => false,
+    let Some(m) = mtime else {
+        // Unreadable mtime: bias to skip (not due).
+        return false;
+    };
+    match now.duration_since(m) {
+        Ok(age) => age >= PRUNE_THROTTLE,
+        // Marker mtime is in the future: due (the touch re-grounds it to now).
+        Err(_) => true,
     }
 }
 
@@ -87,9 +101,30 @@ pub(crate) fn maybe_spawn_sweep(cwd: &Utf8Path, config_path: Option<&Utf8PathBuf
     if !sweep_due(&cache_tree, SystemTime::now()) {
         return;
     }
+    // Process-local claim: concurrent requests in one process (the daemon) can
+    // all observe a due marker before any touch lands. The claim lets one of
+    // them spawn and the rest no-op; the cooldown far exceeds the observation
+    // window (milliseconds) and sits far below the 24h throttle, so it never
+    // suppresses a genuine next-interval trigger. Cross-process bursts stay
+    // bounded by the child-side sweep lock (extra children no-op).
+    static LAST_CLAIM: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let Ok(mut last) = LAST_CLAIM.lock() else {
+            return;
+        };
+        if last.is_some_and(|t| t.elapsed() < SPAWN_CLAIM_COOLDOWN) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
     // Stampede guard: touch BEFORE spawning so a crashed/killed sweep can't
-    // cause per-command retries.
-    touch_marker(&cache_tree);
+    // cause per-command retries. If the marker can't be written (e.g. a
+    // read-only cache home), do NOT spawn: without a recordable throttle every
+    // invocation would spawn a doomed child — and a sweep can't evict anything
+    // on a filesystem it can't write to either.
+    if !touch_marker(&cache_tree) {
+        return;
+    }
     spawn_detached_sweep(cwd, config_path);
 }
 
@@ -2288,7 +2323,8 @@ mod tests {
 
     /// The spawn DECISION, unit-tested without filesystem or process creation:
     /// a fresh marker is not due; a marker aged past the throttle is; an
-    /// unreadable/skewed mtime biases to NOT due (skip).
+    /// unreadable mtime biases to NOT due (skip); a FUTURE mtime is due —
+    /// otherwise a clock rollback pins "not due" until wall time catches up.
     #[test]
     fn marker_says_due_decision_matrix() {
         let now = SystemTime::now();
@@ -2301,10 +2337,12 @@ mod tests {
         // Exactly at the boundary: due (>=).
         let boundary = now - PRUNE_THROTTLE;
         assert!(marker_says_due(Some(boundary), now));
-        // Unreadable mtime / clock skew (future mtime → duration_since errs): skip.
+        // Unreadable mtime: skip.
         assert!(!marker_says_due(None, now));
+        // Future mtime (clock rollback / future-dated marker): due — the
+        // spawn-time touch re-grounds the marker to now.
         let future = now + Duration::from_secs(3_600);
-        assert!(!marker_says_due(Some(future), now));
+        assert!(marker_says_due(Some(future), now));
     }
 
     /// `sweep_due` over a real (isolated) cache-tree root: absent marker → due;
@@ -2316,9 +2354,11 @@ mod tests {
         let now = SystemTime::now();
         // Absent marker: due.
         assert!(sweep_due(&cache_tree, now));
-        // Fresh marker: not due.
+        // Fresh marker: not due. Sample `now` AFTER the touch — against the
+        // pre-touch instant the marker's mtime sits in the future, which is
+        // deliberately due (clock-rollback guard).
         touch_marker(&cache_tree);
-        assert!(!sweep_due(&cache_tree, now));
+        assert!(!sweep_due(&cache_tree, SystemTime::now()));
         // Backdate past the throttle: due.
         let stale = now - (PRUNE_THROTTLE + Duration::from_secs(3_600));
         filetime::set_file_mtime(
