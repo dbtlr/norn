@@ -7,6 +7,7 @@ use rusqlite::Connection;
 
 use crate::cache::error::CacheError;
 use crate::cache::identity::cache_layout_for;
+use crate::cache::lock::{write_lock_timeout, WriteLock};
 
 /// Lock-wait applied to every cache connection immediately after open.
 ///
@@ -299,25 +300,38 @@ fn open_layout(
     let lock_dir = layout.entry_dir;
     let channel = layout.channel;
 
-    // The db dir is always nested below the entry (`<entry>/v{schema}` on live,
-    // `<entry>/dev/v{schema}` on dev), so the entry dir is never the db dir.
-    // Secure the entry, any intermediate channel dir, and the leaf schema dir
-    // explicitly at 0700 rather than relying on umask.
-    create_dir_secure(&lock_dir)?;
-    if let Some(parent) = cache_dir.parent() {
-        if parent != lock_dir {
-            create_dir_secure(parent)?;
-        }
-    }
-    create_dir_secure(&cache_dir)?;
+    ensure_cache_dirs(&lock_dir, &cache_dir)?;
 
     let db_path = cache_dir.join("cache.db");
     let alias_field_owned: Option<String> = alias_field.map(|s| s.to_string());
+
+    // Entry `.lock`, held ONLY while this open CREATES (Fresh) or REBUILDS
+    // (RebuildNeeded delete + recreate) the db — never on the Reuse hot path. The
+    // detached cross-process cache GC sweep (NRN-287) evicts an entry it finds
+    // Empty/Unreadable using a zero-timeout flock on this SAME `<entry>/.lock`
+    // (`prune::evict_cache_entry`). A brand-new vault's cache is created dir-by-dir
+    // and DDL'd here holding no lock; a sweep spawned by a SIBLING vault (the
+    // multi-vault `norn serve` daemon serves many vaults, exempting only the one
+    // that triggered the sweep) scans this half-built entry, classifies it
+    // Empty/Unreadable, and `remove_dir_all`s it out from under this in-flight
+    // open — surfacing as SQLITE_CANTOPEN / ENOENT on the current request, not the
+    // cheap "rebuild on next use" the entry-pass race comment assumes. Latching the
+    // lock across creation makes that sweep skip (WouldBlock) a live-creating
+    // entry — the same guard `evict_cache_db` already applies to the unlink path.
+    // Reads stay lock-free: the Reuse arm never latches, and WAL keeps concurrent
+    // reads safe alongside a create.
+    let mut create_lock: Option<WriteLock> = None;
 
     loop {
         let action = inspect_existing_cache(&db_path, &canonical, alias_field, verify)?;
         match action {
             InspectResult::Fresh => {
+                if create_lock.is_none() {
+                    // Latch the entry, then re-inspect under it: a peer process may
+                    // have created a valid db in the window before we latched.
+                    create_lock = Some(acquire_create_lock(&lock_dir, &cache_dir)?);
+                    continue;
+                }
                 return open_fresh(
                     &cache_dir,
                     &lock_dir,
@@ -334,6 +348,11 @@ fn open_layout(
                 );
             }
             InspectResult::Reuse(mut conn) => {
+                // A valid, present db is not Empty/Unreadable, so it is not
+                // sweep-vulnerable: release any create latch we took (a peer won the
+                // create race) BEFORE `reshred_if_needed`, which takes its own
+                // `WriteLock` on this same entry — holding both would self-deadlock.
+                drop(create_lock.take());
                 if authoritative {
                     crate::cache::document_fields::reshred_if_needed(
                         &mut conn,
@@ -357,6 +376,14 @@ fn open_layout(
                 });
             }
             InspectResult::RebuildNeeded(reason) => {
+                if create_lock.is_none() {
+                    // Latch before deleting: the delete + recreate leaves the entry
+                    // momentarily db-less (Empty/Unreadable to a scanner), the same
+                    // sweep-vulnerable window as a fresh create. Re-inspect under
+                    // the lock, then fall through to the delete.
+                    create_lock = Some(acquire_create_lock(&lock_dir, &cache_dir)?);
+                    continue;
+                }
                 emit_rebuild_message(&reason);
                 // Delete and loop back through; next pass takes the Fresh branch.
                 if db_path.as_std_path().exists() {
@@ -372,6 +399,64 @@ fn open_layout(
             }
         }
     }
+}
+
+/// (Re)create the entry dir, any intermediate channel dir, and the leaf schema
+/// db dir, each secured at 0700 (rather than relying on umask). The db dir is
+/// always nested below the entry (`<entry>/v{schema}` on live,
+/// `<entry>/dev/v{schema}` on dev), so the entry dir is never the db dir.
+/// Idempotent — safe to re-run under the entry lock after a concurrent sweep
+/// removed a just-created (empty) entry.
+fn ensure_cache_dirs(lock_dir: &Utf8Path, cache_dir: &Utf8Path) -> Result<(), CacheError> {
+    create_dir_secure(lock_dir)?;
+    if let Some(parent) = cache_dir.parent() {
+        if parent != lock_dir {
+            create_dir_secure(parent)?;
+        }
+    }
+    create_dir_secure(cache_dir)?;
+    Ok(())
+}
+
+/// Latch the entry `.lock` for a create/rebuild and guarantee the db dirs exist
+/// under it (NRN-287). The detached cache GC sweep can `remove_dir_all` a
+/// just-created empty entry in the narrow window between the caller's first
+/// [`ensure_cache_dirs`] and this latch; a bounded retry re-creates and re-latches
+/// so the create always ends up holding the lock over live dirs. Bounded because a
+/// single sweep run removes any entry at most once (it holds this same lock across
+/// its own removal), so one retry already wins the race; the remaining attempts are
+/// pure safety margin. A genuine (non-`NotFound`) lock or IO failure propagates
+/// immediately.
+fn acquire_create_lock(lock_dir: &Utf8Path, cache_dir: &Utf8Path) -> Result<WriteLock, CacheError> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_err: Option<CacheError> = None;
+    for _ in 0..MAX_ATTEMPTS {
+        ensure_cache_dirs(lock_dir, cache_dir)?;
+        match WriteLock::acquire(lock_dir, write_lock_timeout()) {
+            Ok(lock) => {
+                // Now protected against the sweep's eviction flock (it WouldBlocks).
+                // Re-create in case the sweep removed the dirs between the ensure
+                // above and this latch; once held, they cannot vanish again.
+                ensure_cache_dirs(lock_dir, cache_dir)?;
+                return Ok(lock);
+            }
+            // The entry dir was removed between our create and the lock-file open
+            // (`acquire_flock`'s `OpenOptions::create` needs the parent dir, so it
+            // fails `NotFound` rather than `WouldBlock`): re-create and retry rather
+            // than surfacing a spurious open failure.
+            Err(e)
+                if matches!(
+                    &e,
+                    CacheError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound
+                ) =>
+            {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or(CacheError::LockTimeout))
 }
 
 #[derive(Debug)]
@@ -738,6 +823,60 @@ mod tests {
         assert_eq!(live_again.channel_label(), "live");
         // Live db dir is the entry's own `v{schema}` segment (NRN-286).
         assert_eq!(live_again.cache_dir, live_again.lock_dir.join(&schema));
+    }
+
+    /// NRN-287 regression (product side): a FRESH cache create serializes on the
+    /// entry `.lock`. The detached cache GC sweep evicts an Empty/Unreadable entry
+    /// via a zero-timeout flock on `<entry>/.lock` (`prune::evict_cache_entry`); if
+    /// a fresh open created the entry WITHOUT holding that lock, a sweep spawned by
+    /// a SIBLING vault (multi-vault `norn serve`) could `remove_dir_all` the
+    /// half-built entry out from under the in-flight open — the CI-only race that
+    /// surfaced as SQLITE_CANTOPEN / ENOENT in `tests/serve_roundtrip.rs`.
+    ///
+    /// Proven with teeth: hold the entry lock, then a fresh open MUST block until
+    /// it is released. Without the fix (the create path takes no lock) the open
+    /// completes while the lock is held and the first assertion fails.
+    #[test]
+    fn fresh_open_blocks_on_a_held_entry_lock() {
+        use crate::cache::channel::Channel;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (_tmp, root) = make_vault();
+        let home_tmp = TempDir::new().unwrap();
+        let home = Utf8PathBuf::from_path_buf(home_tmp.path().to_path_buf()).unwrap();
+
+        // Resolve the entry dir and hold its `.lock`, standing in for a daemon
+        // mid-creating this vault's cache under the create latch.
+        let layout =
+            crate::cache::identity::cache_layout_in_channel(&home, &root, Channel::Live).unwrap();
+        let entry_dir = layout.entry_dir;
+        std::fs::create_dir_all(entry_dir.as_std_path()).unwrap();
+        let held = crate::cache::acquire_flock(&entry_dir.join(".lock"), Duration::from_secs(5))
+            .expect("hold the entry lock");
+
+        // A fresh open in another thread: no db exists, so it takes the Fresh →
+        // create-latch path and must block on the held lock.
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let ok = crate::cache::Cache::open_at_channel(&home, &root, Channel::Live).is_ok();
+            let _ = done_tx.send(ok);
+        });
+
+        // While the lock is held the open must NOT complete.
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "a fresh open must block while another holder owns the entry lock; it \
+             completed — the create path is not taking the lock (NRN-287 regression)"
+        );
+
+        // Release the lock; the open now acquires it and completes successfully.
+        drop(held);
+        let ok = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the fresh open must complete once the lock is released");
+        assert!(ok, "the fresh open must succeed after acquiring the lock");
+        handle.join().unwrap();
     }
 
     #[test]
