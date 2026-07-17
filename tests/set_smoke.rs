@@ -9,10 +9,22 @@ fn norn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_norn")
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
 /// per-test subdirs of the test tempdir, so the binary never reads or sweeps
 /// the developer's real cache/state trees.
 fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let mut c = Command::new(norn_bin());
     c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
@@ -723,7 +735,15 @@ fn set_bad_positional_fails_fast_without_lock_or_cache() {
     let doc = tmp.path().join("note.md");
     fs::write(&doc, "---\nstatus: draft\n---\nbody\n").unwrap();
 
-    let output = norn_cmd(&tmp)
+    // This test asserts the cache home stays absent (proving the cache was never
+    // loaded and the mutation lock never acquired), so it must NOT go through
+    // `norn_cmd`, whose throttle-marker pre-write (NRN-287) would create
+    // `.xdg-cache/norn/`. A bad-argv error is rejected before dispatch, so this
+    // path never spawns a GC sweep child that would need suppressing anyway.
+    let mut cmd = Command::new(norn_bin());
+    cmd.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
+        .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
+    let output = cmd
         .args([
             "--cwd",
             tmp.path().to_str().unwrap(),

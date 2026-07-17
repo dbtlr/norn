@@ -30,6 +30,17 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Seed `doc.md`, `alt.md` (redirect target), and `linker.md` (links `[[doc]]`).
 fn seeded_vault() -> TempDir {
     let tmp = tempfile::Builder::new()
@@ -55,6 +66,7 @@ fn seeded_vault() -> TempDir {
 }
 
 fn prebuild_cache(vault: &TempDir) {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let status = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -84,6 +96,7 @@ fn run_delete_responses(
     args: serde_json::Value,
     with_tools_list: bool,
 ) -> Vec<serde_json::Value> {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())

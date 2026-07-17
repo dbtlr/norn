@@ -28,6 +28,17 @@ fn note(title: &str) -> String {
     format!("---\ntype: note\ntitle: {title}\n---\n{title} body\n")
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 fn find(conn: &mut Conn, args: serde_json::Value) -> Vec<serde_json::Value> {
     find_documents(&conn.call_tool("vault.find", args))
 }
@@ -48,6 +59,10 @@ fn freshness_sees_external_edit() {
         &[("n1.md", &note("One")), ("n2.md", &note("Two"))],
     );
 
+    // Before the daemon's first request: any served tool call can trigger the
+    // server-side GC sweep, and a stray child racing this test is exactly the
+    // class the marker pre-write suppresses.
+    prewrite_prune_marker(&daemon.cache_home);
     let mut conn = connect_and_hello(&daemon.socket_path, vault.path());
     conn.initialize();
 
@@ -83,6 +98,13 @@ fn ground_shift_cache_clear() {
             ("n3.md", &note("Three")),
         ],
     );
+
+    // Pre-write the sweep-throttle marker BEFORE the daemon's first request: the
+    // baseline `find_notes` below is a live tool call that can itself trigger a
+    // server-side detached sweep (NRN-287), which could then stay active into the
+    // test body and race the `cache clear`. The marker must exist before any such
+    // request; the daemon spawn above is fine (it triggers nothing on its own).
+    prewrite_prune_marker(&daemon.cache_home);
 
     let mut conn = connect_and_hello(&daemon.socket_path, vault.path());
     conn.initialize();
@@ -137,6 +159,9 @@ fn config_index_change_applies() {
         ],
     );
 
+    // Same sweep-isolation posture as the sibling tests: marker before the
+    // daemon's first request.
+    prewrite_prune_marker(&daemon.cache_home);
     let mut conn = connect_and_hello(&daemon.socket_path, vault.path());
     conn.initialize();
 

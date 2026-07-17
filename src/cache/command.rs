@@ -301,9 +301,20 @@ pub fn run_clear(vault_root: &Utf8Path) -> Result<i32> {
     let lock_path = layout.entry_dir.join(".lock");
     match crate::cache::acquire_flock(&lock_path, std::time::Duration::ZERO) {
         Ok(_held) => {
-            match std::fs::remove_dir_all(layout.entry_dir.as_std_path()) {
+            // Coordinate with the detached GC sweep on a lock OUTSIDE the entry we
+            // are about to delete (NRN-287, F2). `clear`'s own `remove_dir_all`
+            // unlinks this entry's `.lock` partway through its walk, briefly
+            // reopening the per-entry mutual-exclusion window a sweep child could
+            // step into. The tree-root `.sweep.lock` — held by EVERY sweep child
+            // for its entire run — lives above the deleted tree, so acquiring it
+            // proves no sweep child is alive anywhere and the removal cannot
+            // interleave with one. Kept SQLite-free (filesystem-only) to preserve
+            // the escape-hatch contract.
+            let sweep_lock_path = clear_sweep_lock_path();
+            match coordinate_and_remove(sweep_lock_path.as_deref(), || {
+                remove_entry_dir_retrying(&layout.entry_dir)
+            }) {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     return Err(anyhow::Error::new(e)
                         .context(format!("clearing cache at {}", layout.entry_dir)))
@@ -327,6 +338,100 @@ pub fn run_clear(vault_root: &Utf8Path) -> Result<i32> {
         }
         Err(e) => {
             Err(anyhow::Error::new(e).context(format!("acquiring cache lock at {lock_path}")))
+        }
+    }
+}
+
+/// Bounded attempts for the entry-dir removal in [`run_clear`]. A single sweep
+/// child holds the entry lock (and can create a file under the entry) only
+/// transiently, so a short retry wins the race; the extra attempts are pure
+/// safety margin.
+const CLEAR_REMOVE_MAX_ATTEMPTS: u32 = 5;
+/// Pause between entry-dir removal attempts — long enough for a racing sweep
+/// child's brief entry-level pass to finish, short enough to stay imperceptible.
+const CLEAR_REMOVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// `remove_dir_all(entry_dir)` for `cache clear`, retrying a bounded number of
+/// times on `ENOTEMPTY` (`os error 66` on macOS / `39` on Linux).
+///
+/// `cache clear` holds the entry `.lock` across the removal, and the detached
+/// cross-vault GC sweep (NRN-287) honors that same flock for every ENTRY-level
+/// mutation (`prune::evict_cache_entry`, `prune::evict_stale_dbs`). But clear's
+/// own `remove_dir_all` UNLINKS that `.lock` file partway through the walk
+/// (unlink-while-open is fine on unix — the held fd keeps the flock), which
+/// briefly reopens the mutual-exclusion window: a sweep child scanning the
+/// entry can now create a fresh `.lock` (a new inode it latches) inside a
+/// subdir clear has already emptied, so the follow-up `rmdir` fails
+/// `ENOTEMPTY`. The child holds the entry lock only for one measure/remove
+/// pass, so a short bounded retry clears the just-created file and succeeds.
+/// A `NotFound` top dir is success ("already clear"); any other error
+/// propagates.
+fn remove_entry_dir_retrying(entry_dir: &Utf8Path) -> std::io::Result<()> {
+    remove_dir_all_retrying(
+        || std::fs::remove_dir_all(entry_dir.as_std_path()),
+        CLEAR_REMOVE_MAX_ATTEMPTS,
+        CLEAR_REMOVE_RETRY_DELAY,
+    )
+}
+
+/// Short timeout `cache clear` waits for the tree-root `.sweep.lock` before
+/// removing an entry (NRN-287, F2). Long enough to win over a sweep child between
+/// its brief entry passes; short enough that clear never blocks minutes behind a
+/// large sweep that holds the lock for its whole run — in which case clear
+/// proceeds on the best-effort fallback (entry lock + bounded `ENOTEMPTY` retry).
+const CLEAR_SWEEP_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The tree-root `.sweep.lock` path `cache clear` coordinates on, resolved
+/// filesystem-only (SQLite-free, matching `run_clear`'s escape-hatch contract).
+/// `None` when the cache tree root can't be resolved — clear then removes without
+/// the coordination, on the `ENOTEMPTY`-retry fallback alone.
+fn clear_sweep_lock_path() -> Option<camino::Utf8PathBuf> {
+    let tree = crate::cache::cache_tree_root().ok()?;
+    let _ = std::fs::create_dir_all(tree.as_std_path());
+    Some(tree.join(crate::cache::prune::SWEEP_LOCK))
+}
+
+/// Remove an entry dir while holding the cross-tree sweep lock when it can be
+/// grabbed briefly. Best-effort by design: a SHORT-timeout acquire of the
+/// tree-root `.sweep.lock` (held for the whole run by every sweep child) excludes
+/// a live sweep across the removal; on timeout — a long sweep is mid-run — the
+/// lock is skipped and `remove` runs anyway, backstopped by its own bounded
+/// `ENOTEMPTY` retry. The acquired file (if any) is held across `remove` and
+/// released after. Generic over the sweep-lock path and the removal so the
+/// acquired and fallback paths are unit-testable without real XDG dirs or a
+/// racing sweep.
+fn coordinate_and_remove<F>(sweep_lock_path: Option<&Utf8Path>, remove: F) -> std::io::Result<()>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    let _sweep =
+        sweep_lock_path.and_then(|p| crate::cache::acquire_flock(p, CLEAR_SWEEP_LOCK_TIMEOUT).ok());
+    remove()
+}
+
+/// The retry core, generic over the removal so it is unit-testable without a
+/// real racing filesystem: retry on `ENOTEMPTY` up to `max_attempts`, treat
+/// `NotFound` as success, propagate anything else immediately.
+fn remove_dir_all_retrying<F>(
+    mut remove: F,
+    max_attempts: u32,
+    delay: std::time::Duration,
+) -> std::io::Result<()>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match remove() {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::DirectoryNotEmpty && attempt < max_attempts =>
+            {
+                std::thread::sleep(delay);
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -647,6 +752,154 @@ mod tests {
         let _ = std::fs::remove_file(db_path.with_extension("db-wal").as_std_path());
         let _ = std::fs::remove_file(db_path.with_extension("db-shm").as_std_path());
         (tmp, root, db_path)
+    }
+
+    /// A synthesized `ENOTEMPTY` error, matching what `remove_dir_all` raises
+    /// when a concurrent process creates a file inside a dir mid-removal.
+    fn dir_not_empty() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::DirectoryNotEmpty)
+    }
+
+    /// The entry-dir removal retries on `ENOTEMPTY` (the NRN-287 clear-vs-sweep
+    /// race) and succeeds once the racing file is gone. Semantics chosen:
+    /// `cache clear` keeps its zero-timeout, refuse-on-contention flock (a
+    /// genuinely held entry lock still exits 2, covered by the integration test
+    /// `cache_clear_refused_while_entry_lock_held`); the transient `ENOTEMPTY`
+    /// that a short-lived sweep child causes is retried rather than surfaced.
+    #[test]
+    fn remove_dir_all_retrying_recovers_from_transient_enotempty() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                let n = calls.get();
+                calls.set(n + 1);
+                // Fail ENOTEMPTY on the first two attempts, then succeed.
+                if n < 2 {
+                    Err(dir_not_empty())
+                } else {
+                    Ok(())
+                }
+            },
+            5,
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            out.is_ok(),
+            "a transient ENOTEMPTY must be retried to success"
+        );
+        assert_eq!(calls.get(), 3, "two retries, then the succeeding attempt");
+    }
+
+    #[test]
+    fn remove_dir_all_retrying_treats_not_found_as_success() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+            5,
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            out.is_ok(),
+            "an already-absent entry dir is 'already clear'"
+        );
+        assert_eq!(calls.get(), 1, "NotFound must not retry");
+    }
+
+    #[test]
+    fn remove_dir_all_retrying_gives_up_after_the_bound() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                calls.set(calls.get() + 1);
+                Err(dir_not_empty())
+            },
+            3,
+            std::time::Duration::ZERO,
+        );
+        let err = out.expect_err("a persistent ENOTEMPTY must eventually propagate");
+        assert_eq!(err.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        assert_eq!(calls.get(), 3, "exactly max_attempts tries, then propagate");
+    }
+
+    #[test]
+    fn remove_dir_all_retrying_propagates_other_errors_immediately() {
+        let calls = Cell::new(0u32);
+        let out = remove_dir_all_retrying(
+            || {
+                calls.set(calls.get() + 1);
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            },
+            5,
+            std::time::Duration::ZERO,
+        );
+        let err = out.expect_err("a non-ENOTEMPTY error must not be swallowed");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(calls.get(), 1, "a real error must not retry");
+    }
+
+    /// NRN-287 F2: when the tree-root `.sweep.lock` is FREE, `cache clear` holds
+    /// it across the entry removal — no sweep child can interleave. Observable
+    /// in-process because `flock` is per-open-fd: a second acquire from THIS
+    /// process still contends, so probing the same lock from inside the removal
+    /// closure proves the coordinator holds it; a clean acquire afterward proves
+    /// clear released it.
+    #[test]
+    fn clear_coordination_holds_free_sweep_lock_across_removal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let sweep = dir.join(".sweep.lock");
+
+        let held_during_removal = Cell::new(false);
+        let out = coordinate_and_remove(Some(&sweep), || {
+            // Inside the removal the coordinator must hold the sweep lock: a
+            // second, zero-timeout acquire from this process contends (WouldBlock).
+            let r = crate::cache::acquire_flock(&sweep, std::time::Duration::ZERO);
+            held_during_removal.set(r.is_err());
+            Ok(())
+        });
+        assert!(out.is_ok());
+        assert!(
+            held_during_removal.get(),
+            "clear must hold the sweep lock across the removal when it is free"
+        );
+        // Released after the coordinator returns: freely acquirable again.
+        assert!(
+            crate::cache::acquire_flock(&sweep, std::time::Duration::ZERO).is_ok(),
+            "clear must release the sweep lock after the removal"
+        );
+    }
+
+    /// NRN-287 F2: when a peer already holds the tree-root `.sweep.lock` for its
+    /// whole run (a long sweep), `cache clear` does NOT block behind it — the
+    /// short-timeout acquire falls back and the removal still runs (best-effort,
+    /// backstopped by the `ENOTEMPTY` retry). Mirrors the integration refusal
+    /// semantics: a genuinely held ENTRY lock still exits 2, but a held SWEEP lock
+    /// only degrades clear to the fallback path.
+    #[test]
+    fn clear_coordination_falls_back_when_sweep_lock_held() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let sweep = dir.join(".sweep.lock");
+
+        // A peer holds the sweep lock for its entire run.
+        let _peer = crate::cache::acquire_flock(&sweep, std::time::Duration::ZERO).unwrap();
+
+        let ran = Cell::new(false);
+        let out = coordinate_and_remove(Some(&sweep), || {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(
+            out.is_ok(),
+            "clear must still proceed on the fallback path under a held sweep lock"
+        );
+        assert!(
+            ran.get(),
+            "the removal must run even when the sweep lock is contended"
+        );
     }
 
     #[test]

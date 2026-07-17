@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn norn(cache_home: &Path, state_home: &Path, vault: &Path, args: &[&str]) -> Output {
+    prewrite_prune_marker(cache_home);
     Command::new(env!("CARGO_BIN_EXE_norn"))
         .env("XDG_CACHE_HOME", cache_home)
         .env("XDG_STATE_HOME", state_home)
@@ -20,6 +21,17 @@ fn norn(cache_home: &Path, state_home: &Path, vault: &Path, args: &[&str]) -> Ou
         .args(args)
         .output()
         .expect("run norn")
+}
+
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
 }
 
 /// Recursively find the single `cache.db` under a private cache home.

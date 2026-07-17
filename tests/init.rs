@@ -13,12 +13,24 @@ fn vault_tempdir() -> TempDir {
         .expect("create non-hidden tempdir")
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Wraps a vault invocation with per-test `XDG_CACHE_HOME` and
 /// `XDG_STATE_HOME` trees so each test gets a fresh SQLite cache and the
 /// binary never reads or sweeps the developer's real cache/state trees.
 /// Mirrors the helper in `tests/cli_output.rs`.
 fn isolate_cache(command: &mut Command) -> TempDir {
     let dir = tempfile::tempdir().expect("temp cache dir should be created");
+    prewrite_prune_marker(dir.path());
     command.env("XDG_CACHE_HOME", dir.path());
     command.env("XDG_STATE_HOME", dir.path().join("state"));
     dir

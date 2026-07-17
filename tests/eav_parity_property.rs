@@ -457,6 +457,17 @@ fn build_query_args(docs: &[GeneratedDoc], rng: &mut Rng) -> Vec<String> {
 
 // ---- CLI execution --------------------------------------------------------
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 fn run_find(root: &std::path::Path, args: &[String]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_norn"));
     command.arg("-C").arg(root).arg("find");
@@ -465,6 +476,7 @@ fn run_find(root: &std::path::Path, args: &[String]) -> Value {
     let cache_dir = tempfile::tempdir().unwrap();
     command.env("XDG_CACHE_HOME", cache_dir.path());
     command.env("XDG_STATE_HOME", cache_dir.path().join("state"));
+    prewrite_prune_marker(cache_dir.path());
     let output = command.output().expect("norn find should run");
     assert!(
         output.status.success(),

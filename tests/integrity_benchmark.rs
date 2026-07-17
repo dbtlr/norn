@@ -110,6 +110,17 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Outcome of one `norn` invocation: exit code plus wall-clock, the count of
 /// integrity_check markers on its OWN stderr (direct runs carry them here), and
 /// captured stdout (used by the post-apply state check to parse `get --format
@@ -124,6 +135,7 @@ struct RunResult {
 /// Run `norn --cwd <vault> <args…>` with a private cache/state home and the
 /// integrity-check trace enabled. Returns the timed result.
 fn run_norn(cache_home: &Path, state_home: &Path, vault: &Path, args: &[&str]) -> RunResult {
+    prewrite_prune_marker(cache_home);
     let start = Instant::now();
     let out = Command::new(norn_bin())
         .env("XDG_CACHE_HOME", cache_home)
@@ -151,6 +163,7 @@ fn run_norn(cache_home: &Path, state_home: &Path, vault: &Path, args: &[&str]) -
 /// stderr captured to `<root>/err`. Returns the guard, the stderr path, and the
 /// tempdir root (kept alive so the socket path stays valid).
 fn spawn_daemon_traced(cache_home: &Path, state_home: &Path) -> (ChildGuard, PathBuf) {
+    prewrite_prune_marker(cache_home);
     let stderr_path = cache_home
         .parent()
         .expect("cache_home has a parent")

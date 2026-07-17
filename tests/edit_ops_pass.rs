@@ -42,10 +42,22 @@ fn edit_plan(vault_root: &str, ops: Vec<serde_json::Value>) -> String {
     .unwrap()
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 fn run_apply(vault_root: &str, plan: &str, extra: &[&str]) -> std::process::Output {
     let mut args: Vec<&str> = vec!["--cwd", vault_root, "apply", "-"];
     args.extend_from_slice(extra);
     let xdg_root = std::path::Path::new(vault_root);
+    prewrite_prune_marker(&xdg_root.join(".xdg-cache"));
     let mut cmd = Command::new(norn_bin())
         .args(&args)
         .stdin(Stdio::piped())

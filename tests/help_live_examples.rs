@@ -11,6 +11,17 @@ use std::process::Command;
 use camino::Utf8PathBuf;
 use tempfile::TempDir;
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
 /// hidden subdirs of the fixture tempdir (hidden so the vault walker skips
 /// them), so the binary never reads or sweeps the developer's real
@@ -19,6 +30,7 @@ use tempfile::TempDir;
 /// one isolated cache — required because the live-examples generator only
 /// opens the cache, never rebuilds it.
 fn norn_bin(fixture_root: &std::path::Path) -> Command {
+    prewrite_prune_marker(&fixture_root.join(".xdg-cache"));
     let mut c = Command::new(env!("CARGO_BIN_EXE_norn"));
     c.env("XDG_CACHE_HOME", fixture_root.join(".xdg-cache"))
         .env("XDG_STATE_HOME", fixture_root.join(".xdg-state"));

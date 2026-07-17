@@ -4,6 +4,17 @@ fn norn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_norn"))
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Create a vault tempdir with a non-hidden prefix so norn's file scanner
 /// doesn't skip it. On macOS, `tempfile::tempdir()` creates dirs named `.tmp*`
 /// (leading dot) which the scanner treats as hidden and skips.
@@ -24,6 +35,7 @@ fn audit_surfaces_a_persisted_mutation() {
     .unwrap();
     let state = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
+    prewrite_prune_marker(cache.path());
     let vault_path = vault.path().to_str().unwrap();
 
     // A real (confirmed) mutation persists an event to the stream.
@@ -75,6 +87,7 @@ fn audit_empty_when_no_mutations() {
     let vault = vault_dir();
     let state = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
+    prewrite_prune_marker(cache.path());
     let out = norn()
         .args([
             "--cwd",
@@ -95,6 +108,8 @@ fn audit_empty_when_no_mutations() {
 fn audit_bad_since_exits_2() {
     let vault = vault_dir();
     let state = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    prewrite_prune_marker(cache.path());
     let out = norn()
         .args([
             "--cwd",
@@ -104,7 +119,7 @@ fn audit_bad_since_exits_2() {
             "nope",
         ])
         .env("XDG_STATE_HOME", state.path())
-        .env("XDG_CACHE_HOME", tempfile::tempdir().unwrap().path())
+        .env("XDG_CACHE_HOME", cache.path())
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));

@@ -34,6 +34,17 @@ fn find_entry_dir(cache_home: &Path) -> PathBuf {
     hits.remove(0)
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 fn norn(
     bin: &Path,
     cache_home: &Path,
@@ -41,6 +52,7 @@ fn norn(
     vault: &Path,
     args: &[&str],
 ) -> std::process::Output {
+    prewrite_prune_marker(cache_home);
     Command::new(bin)
         // Force live so the db path is deterministic (`<entry>/v{schema}/cache.db`);
         // the test binary would otherwise resolve dev.

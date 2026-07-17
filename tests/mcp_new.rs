@@ -31,6 +31,17 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Temp vault with a schema that scaffolds `type: note` on every `.md` doc.
 fn seeded_vault() -> TempDir {
     let tmp = tempfile::Builder::new()
@@ -57,6 +68,7 @@ validate:
 
 /// Pre-build the cache so the first MCP call hits the warm path.
 fn prebuild_cache(vault: &TempDir) {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let status = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -128,6 +140,7 @@ fn dry_run_then_confirm_roundtrip() {
     let dry_path = "dry-only-path.md";
     let confirm_path = "confirm-path.md";
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -312,6 +325,7 @@ fn dry_run_alone_writes_nothing() {
 
     let new_doc_path = "dry-only.md";
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())
@@ -379,6 +393,7 @@ fn dry_run_alone_writes_nothing() {
 /// Spawn `norn mcp` with the given state dir, send `initialize` + one
 /// `vault.new` call (the caller supplies `confirm`), then close stdin and wait.
 fn run_new_call(vault: &TempDir, state_dir: &Path, path: &str, confirm: bool) {
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())

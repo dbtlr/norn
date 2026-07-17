@@ -30,6 +30,17 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Vault with a FIXABLE broken wikilink:
 /// - `target-note.md` exists (stem: `target-note`)
 /// - `source.md` links to `[[target-not]]` (one-char edit → closest-match proposal)
@@ -54,6 +65,7 @@ fn vault_with_fixable_link() -> TempDir {
     )
     .unwrap();
 
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let rebuild = Command::new(norn_bin())
         .arg("--cwd")
         .arg(tmp.path())
@@ -82,6 +94,7 @@ fn line(value: serde_json::Value) -> Vec<u8> {
 fn lists_and_calls_vault_repair() {
     let vault = vault_with_fixable_link();
 
+    prewrite_prune_marker(&vault.path().join(".xdg-cache"));
     let mut child = Command::new(norn_bin())
         .arg("--cwd")
         .arg(vault.path())

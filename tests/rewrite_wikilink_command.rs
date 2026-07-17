@@ -32,10 +32,22 @@ fn norn_bin() -> std::path::PathBuf {
     p
 }
 
+/// Pre-write a FRESH lazy-sweep throttle marker (`<cache_home>/norn/.last-prune`)
+/// so norn invocations under this cache home never spawn a detached GC sweep
+/// child (NRN-287) that could race this test. Mirrors src/cache/prune.rs
+/// `PRUNE_MARKER`.
+fn prewrite_prune_marker(cache_home: &std::path::Path) {
+    let tree = cache_home.join("norn");
+    std::fs::create_dir_all(&tree).expect("NRN-287 sweep isolation: pre-write throttle-marker dir");
+    std::fs::write(tree.join(".last-prune"), b"")
+        .expect("NRN-287 sweep isolation: pre-write throttle marker");
+}
+
 /// Build a `norn` Command with `XDG_CACHE_HOME`/`XDG_STATE_HOME` isolated to
 /// per-test subdirs of the test tempdir, so the binary never reads or sweeps
 /// the developer's real cache/state trees.
 fn norn_cmd(tmp: &tempfile::TempDir) -> Command {
+    prewrite_prune_marker(&tmp.path().join(".xdg-cache"));
     let mut c = Command::new(norn_bin());
     c.env("XDG_CACHE_HOME", tmp.path().join(".xdg-cache"))
         .env("XDG_STATE_HOME", tmp.path().join(".xdg-state"));
