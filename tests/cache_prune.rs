@@ -38,6 +38,17 @@ fn setup() -> Env {
         live_vault,
         _xdg: xdg,
     };
+    // Pre-create a fresh throttle marker BEFORE any norn invocation. The tail GC
+    // trigger now spawns a DETACHED sweep child (NRN-287); if the marker were
+    // absent during the seeding `cache index` below, that child would run
+    // asynchronously AND — because `doomed` is deleted before it runs, so its own
+    // exemption resolves to None — evict the very dead entry we are seeding,
+    // racing the test. A fresh marker suppresses the trigger during setup.
+    // Explicit `cache prune` ignores the marker; only the lazy trigger honors it.
+    // Lazy-trigger tests call `clear_marker` deliberately to let the sweep fire.
+    let tree = env.cache_home.join("norn");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join(".last-prune"), b"").unwrap();
     // Mint a cache entry for a doomed vault, then delete the vault.
     let doomed = TempDir::new().unwrap();
     std::fs::write(doomed.path().join("d.md"), "---\ntype: note\n---\nbody\n").unwrap();
@@ -49,14 +60,6 @@ fn setup() -> Env {
     );
     // Dropping `doomed` deletes the vault root; its cache entry is now dead.
     drop(doomed);
-    // Pre-create a fresh throttle marker so the lazy sweep (which fires on
-    // any invocation when the marker is stale/absent) never interferes with
-    // explicit-prune tests. Explicit `cache prune` ignores the marker; only
-    // the lazy sweep honors it. Lazy-sweep tests call `clear_marker`
-    // deliberately to let the sweep fire.
-    let tree = env.cache_home.join("norn");
-    std::fs::create_dir_all(&tree).unwrap();
-    std::fs::write(tree.join(".last-prune"), b"").unwrap();
     env
 }
 
@@ -70,6 +73,21 @@ fn tree_entries(home: &std::path::Path) -> usize {
     match std::fs::read_dir(tree) {
         Ok(rd) => rd.flatten().filter(|e| e.file_name().len() == 64).count(),
         Err(_) => 0,
+    }
+}
+
+/// The lazy GC trigger now spawns a DETACHED sweep child (NRN-287), so eviction
+/// happens out-of-process and asynchronously. Poll (up to ~10s) for the entry
+/// count to reach `want` before asserting — the marker touch is synchronous, but
+/// the eviction it triggers is not.
+fn wait_for_entries(home: &std::path::Path, want: usize) -> usize {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let n = tree_entries(home);
+        if n == want || std::time::Instant::now() >= deadline {
+            return n;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -156,17 +174,21 @@ fn lazy_sweep_runs_on_any_command_and_touches_marker() {
     let env = setup();
     clear_marker(&env); // setup() pre-creates it; this test needs the sweep to fire
     assert_eq!(tree_entries(&env.cache_home), 1);
-    // Any invocation triggers the throttled sweep (no marker → sweep runs).
+    // Any invocation triggers the throttled GC: it touches the marker
+    // synchronously and spawns a DETACHED sweep child (NRN-287) that evicts
+    // asynchronously.
     let out = norn(&env, env.live_vault.path(), &["cache", "status"]);
     assert!(out.status.success());
-    assert_eq!(
-        tree_entries(&env.cache_home),
-        1,
-        "current vault's fresh entry survives; dead one gone, new one minted"
-    );
     assert!(
         env.cache_home.join("norn").join(".last-prune").exists(),
-        "marker touched"
+        "marker touched synchronously at spawn time"
+    );
+    // The detached sweep evicts the dead entry; the current vault's fresh entry
+    // (minted by `cache status`) is exempt and survives. Poll for the async run.
+    assert_eq!(
+        wait_for_entries(&env.cache_home, 1),
+        1,
+        "current vault's fresh entry survives; dead one gone, new one minted"
     );
     // The surviving entry is the live vault's own (exemption + dead-root eviction).
     let out = norn(
@@ -176,6 +198,30 @@ fn lazy_sweep_runs_on_any_command_and_touches_marker() {
     );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("cache  0"), "nothing left to prune: {text}");
+}
+
+/// The hidden `cache sweep` child (NRN-287) runs the cross-vault GC directly and
+/// synchronously (it IS the foreground process here): it evicts a dead-root
+/// entry and writes NOTHING to stdout.
+#[test]
+fn cache_sweep_child_evicts_and_is_silent() {
+    let env = setup();
+    clear_marker(&env); // irrelevant to the child, but keep the tree pristine
+    assert_eq!(tree_entries(&env.cache_home), 1, "one dead entry seeded");
+    let out = norn(&env, env.live_vault.path(), &["cache", "sweep"]);
+    assert!(
+        out.status.success(),
+        "sweep child exits 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "the detached sweep child must be silent on stdout, got: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // The live vault's own entry is minted by nothing here, so only the dead
+    // entry existed; it is evicted synchronously by the foreground child.
+    assert_eq!(tree_entries(&env.cache_home), 0, "dead entry evicted");
 }
 
 #[test]
@@ -200,12 +246,12 @@ fn stale_marker_fires_lazy_sweep() {
     filetime::set_file_mtime(&marker, filetime::FileTime::from_system_time(stale))
         .expect("backdating marker");
 
-    // `cache status` also mints the live vault's own entry; after the lazy
+    // `cache status` also mints the live vault's own entry; after the detached
     // sweep fires the dead entry is evicted, leaving exactly 1 (live vault's).
     let out = norn(&env, env.live_vault.path(), &["cache", "status"]);
     assert!(out.status.success());
     assert_eq!(
-        tree_entries(&env.cache_home),
+        wait_for_entries(&env.cache_home, 1),
         1,
         "stale marker must trigger sweep: dead entry gone, live vault entry kept"
     );
@@ -259,6 +305,10 @@ fn prune_manual_config_disables_lazy_sweep() {
     .unwrap();
     let out = norn(&env, env.live_vault.path(), &["cache", "status"]);
     assert!(out.status.success());
+    // The parent spawns a detached child regardless; in manual mode the child
+    // acquires the sweep lock, reads the config, and exits WITHOUT sweeping.
+    // Give a (buggy) child time to wrongly evict before asserting survival.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     assert_eq!(
         tree_entries(&env.cache_home),
         2,
@@ -266,7 +316,7 @@ fn prune_manual_config_disables_lazy_sweep() {
     );
     assert!(
         env.cache_home.join("norn").join(".last-prune").exists(),
-        "marker still touched after manual-skip decision"
+        "marker still touched at spawn time even in manual mode"
     );
     // Explicit prune still works in manual mode.
     let out = norn(&env, env.live_vault.path(), &["cache", "prune"]);

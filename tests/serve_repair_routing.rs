@@ -375,18 +375,25 @@ fn no_daemon_runs_direct() {
     );
 }
 
-/// NRN-291 sweep parity: a ROUTED `repair --plan` performs NO local
-/// cache-maintenance side effect — the daemon owns its warm cache — so the CLI
-/// client must skip the tail `lazy_sweep`, exactly as the pre-NRN-291
-/// early-return bypassed it (on main a routed read `return`ed before the tail).
-/// A DIRECT run (no daemon reachable) still sweeps. The observable proxy is the
-/// prune marker `<XDG_CACHE_HOME>/norn/.last-prune` (src/cache/prune.rs
-/// `PRUNE_MARKER`): `lazy_sweep` creates/touches it when the marker is absent or
-/// stale, so skipping the sweep leaves an absent marker absent. `serve` never
-/// touches the marker (it is dispatched before the cache-opening tail), so the
-/// daemon side cannot mask the routed client's skip.
+/// NRN-291 + NRN-287 GC-trigger parity. Two invariants, one observable (the
+/// prune marker `<XDG_CACHE_HOME>/norn/.last-prune`, src/cache/prune.rs
+/// `PRUNE_MARKER`, which `maybe_spawn_sweep` touches at spawn time when the
+/// marker is absent/stale):
+///
+///  * DIRECT (no daemon): the CLI dispatch tail triggers the GC locally, so the
+///    marker is created. (unchanged from NRN-291.)
+///  * ROUTED (served by the daemon): the CLI client still skips its LOCAL tail
+///    trigger (the NRN-291 `served_by_daemon` contract — a routed client performs
+///    no local cache maintenance), BUT under NRN-287 the daemon now triggers the
+///    GC SERVER-SIDE per request (the per-request seam in `run_wrapped`),
+///    closing the gap where a warm daemon never swept. Client and daemon share
+///    this host's cache home, so the marker is present after a routed run —
+///    placed there by the DAEMON, not the client. The marker can no longer
+///    distinguish the client's skip from the daemon's touch; the client-skip
+///    stays enforced in code (`served_by_daemon`) and the daemon's server-side
+///    trigger is what the marker now observes.
 #[test]
-fn routed_repair_plan_does_not_touch_prune_marker() {
+fn direct_gc_runs_client_side_routed_gc_runs_server_side() {
     // Mirrors src/cache/prune.rs `PRUNE_MARKER` (crate-private, so hardcoded here).
     fn prune_marker(cache_home: &Path) -> PathBuf {
         cache_home.join("norn").join(".last-prune")
@@ -396,9 +403,9 @@ fn routed_repair_plan_does_not_touch_prune_marker() {
     let daemon = spawn_ready_daemon_with_log(&[]);
 
     // DIRECT control: a fresh cache home with NO daemon reachable. The marker is
-    // absent, so the direct run's tail sweep must CREATE it — proving both that
-    // `lazy_sweep` fires on the direct path and that the marker is the right
-    // observable for "did the sweep run?".
+    // absent, so the direct run's tail trigger must CREATE it — proving both that
+    // the GC trigger fires on the direct path and that the marker is the right
+    // observable for "did the trigger run?".
     let direct_cache = TempDir::new().unwrap();
     let direct_state = TempDir::new().unwrap();
     assert!(
@@ -419,12 +426,11 @@ fn routed_repair_plan_does_not_touch_prune_marker() {
     );
     assert!(
         prune_marker(direct_cache.path()).exists(),
-        "a DIRECT `repair --plan` must run the tail sweep, creating the prune marker \
-         (matching main's direct path)"
+        "a DIRECT `repair --plan` must run the tail GC trigger, creating the prune marker"
     );
 
-    // ROUTED: served by the daemon. The client must SKIP the tail sweep, so the
-    // marker under the daemon's cache home stays absent.
+    // ROUTED: served by the daemon. The client skips its LOCAL tail trigger, but
+    // the daemon triggers the GC server-side (NRN-287), so the marker IS touched.
     assert!(
         !prune_marker(&daemon.cache_home).exists(),
         "precondition: daemon cache prune marker must be absent before the routed run"
@@ -446,9 +452,13 @@ fn routed_repair_plan_does_not_touch_prune_marker() {
         served, 1,
         "the run must have been served by the daemon, got {served}"
     );
+    // The daemon's per-request seam (NRN-287) touches the marker at spawn time,
+    // synchronously with serving the request — so it is present by the time the
+    // routed client returns.
     assert!(
-        !prune_marker(&daemon.cache_home).exists(),
-        "a ROUTED `repair --plan` must NOT run the tail sweep — the prune marker must stay absent"
+        prune_marker(&daemon.cache_home).exists(),
+        "a ROUTED `repair --plan` must trigger the GC SERVER-SIDE (NRN-287): the \
+         daemon touches the prune marker even though the client skips its local tail"
     );
 }
 
