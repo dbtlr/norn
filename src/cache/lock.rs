@@ -157,6 +157,23 @@ impl WriteLock {
                 }
             })
     }
+
+    /// The `(dev, ino)` identity of the held lock file's underlying inode, read by
+    /// `fstat` on the open fd. Used to verify the lock still guards the CURRENT
+    /// `.lock` path and not a stale, unlinked inode: `flock` can succeed on an fd
+    /// whose path was unlinked and recreated while the caller blocked waiting (a
+    /// sweep holding the entry lock deletes the entry — including `.lock` — then
+    /// releases; the blocked waiter's `flock` then locks the DEAD inode while the
+    /// recreated `.lock` path is a NEW, unprotected inode — the ABA window, NRN-287).
+    /// The caller compares this against `stat(lock_dir/.lock)` and retries on
+    /// mismatch. Unix-only: the ABA hazard is unlink-while-open, which Windows
+    /// does not permit (an open file cannot be deleted).
+    #[cfg(unix)]
+    pub(crate) fn fd_identity(&self) -> std::io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let md = self._file.metadata()?;
+        Ok((md.dev(), md.ino()))
+    }
 }
 
 #[cfg(test)]

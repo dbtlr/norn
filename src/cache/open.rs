@@ -438,7 +438,21 @@ fn acquire_create_lock(lock_dir: &Utf8Path, cache_dir: &Utf8Path) -> Result<Writ
                 // Re-create in case the sweep removed the dirs between the ensure
                 // above and this latch; once held, they cannot vanish again.
                 ensure_cache_dirs(lock_dir, cache_dir)?;
-                return Ok(lock);
+                // ABA guard: `flock` can succeed on a `.lock` fd whose PATH was
+                // unlinked+recreated while we blocked (a sweep held the entry lock,
+                // `remove_dir_all`'d the entry — including `.lock` — then released;
+                // our blocked `flock` then locked the now-DEAD inode, and the
+                // recreated `.lock` path is a NEW, unprotected inode the sweep — or
+                // a peer creator — can freely re-lock). Verify the held fd IS the
+                // current `.lock` before trusting the lock. On a mismatch (or an
+                // absent path), the lock guards a stale inode: drop it and retry
+                // the bounded loop, which re-latches the live `.lock`.
+                if lock_guards_current_path(&lock, lock_dir)? {
+                    return Ok(lock);
+                }
+                drop(lock);
+                last_err = Some(CacheError::LockTimeout);
+                continue;
             }
             // The entry dir was removed between our create and the lock-file open
             // (`acquire_flock`'s `OpenOptions::create` needs the parent dir, so it
@@ -457,6 +471,37 @@ fn acquire_create_lock(lock_dir: &Utf8Path, cache_dir: &Utf8Path) -> Result<Writ
         }
     }
     Err(last_err.unwrap_or(CacheError::LockTimeout))
+}
+
+/// Whether the held create-latch `lock` still guards the CURRENT `<lock_dir>/.lock`
+/// path — i.e. the fd's `(dev, ino)` equals the path's `(dev, ino)` today. `false`
+/// when they differ (the path was recreated as a fresh inode) or the path is now
+/// absent; either means our `flock` landed on a stale, unlinked inode a racing
+/// sweep left behind (the ABA window described in [`WriteLock::fd_identity`]).
+///
+/// Unix verifies via `fstat`/`stat`; the ABA hazard is unlink-while-open, which
+/// only unix permits, so every other platform trusts the acquired lock.
+#[cfg(unix)]
+fn lock_guards_current_path(lock: &WriteLock, lock_dir: &Utf8Path) -> Result<bool, CacheError> {
+    use std::os::unix::fs::MetadataExt;
+    let held = lock.fd_identity().map_err(|e| CacheError::Io {
+        path: lock_dir.join(".lock"),
+        source: e,
+    })?;
+    let lock_path = lock_dir.join(".lock");
+    match std::fs::metadata(lock_path.as_std_path()) {
+        Ok(md) => Ok((md.dev(), md.ino()) == held),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(CacheError::Io {
+            path: lock_path,
+            source: e,
+        }),
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_guards_current_path(_lock: &WriteLock, _lock_dir: &Utf8Path) -> Result<bool, CacheError> {
+    Ok(true)
 }
 
 #[derive(Debug)]
@@ -877,6 +922,84 @@ mod tests {
             .expect("the fresh open must complete once the lock is released");
         assert!(ok, "the fresh open must succeed after acquiring the lock");
         handle.join().unwrap();
+    }
+
+    /// NRN-287 F1 regression: a create-latch acquirer whose blocked `flock`
+    /// resolves onto a DEAD (unlinked) `.lock` inode — because a sweep deleted the
+    /// entry out from under it while it waited — must NOT return that stale lock.
+    /// It re-verifies fd identity and retries, ending up holding a lock whose fd is
+    /// the CURRENT `.lock` inode, not the orphaned one (the ABA window).
+    ///
+    /// Deterministic shape (mirrors `fresh_open_blocks_on_a_held_entry_lock`): the
+    /// main thread holds the entry `.lock` (inode X), a helper thread blocks in
+    /// `acquire_create_lock` having opened `.lock` at inode X, then the main thread
+    /// `remove_dir_all`s the entry (unlinking X — it survives via open fds),
+    /// recreates the entry dir, and releases X. The helper's `flock` then succeeds
+    /// on the dead X; the fd-identity guard sees `.lock` is now absent/re-created,
+    /// drops it, and re-latches the live inode.
+    #[cfg(unix)]
+    #[test]
+    fn create_lock_reacquires_after_entry_deleted_from_under_a_blocked_waiter() {
+        use crate::cache::channel::Channel;
+        use std::os::unix::fs::MetadataExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (_tmp, root) = make_vault();
+        let home_tmp = TempDir::new().unwrap();
+        let home = Utf8PathBuf::from_path_buf(home_tmp.path().to_path_buf()).unwrap();
+
+        let layout =
+            crate::cache::identity::cache_layout_in_channel(&home, &root, Channel::Live).unwrap();
+        let entry_dir = layout.entry_dir.clone();
+        let cache_dir = layout.db_dir.clone();
+        std::fs::create_dir_all(entry_dir.as_std_path()).unwrap();
+        let lock_path = entry_dir.join(".lock");
+
+        // Hold the entry `.lock`, standing in for a sweep child mid-eviction, and
+        // capture the DEAD inode identity we are about to orphan.
+        let held = crate::cache::acquire_flock(&lock_path, Duration::from_secs(5))
+            .expect("hold the entry lock");
+        let dead_ino = std::fs::metadata(lock_path.as_std_path()).unwrap().ino();
+
+        // A create-latch acquirer blocks on the held lock in another thread; it has
+        // opened `.lock` at the dead inode by the time we delete below.
+        let (tx, rx) = mpsc::channel();
+        let entry_c = entry_dir.clone();
+        let cache_c = cache_dir.clone();
+        let handle = std::thread::spawn(move || {
+            let lock = super::acquire_create_lock(&entry_c, &cache_c)
+                .expect("the create latch must complete once the lock is released");
+            let held_ino = lock.fd_identity().unwrap().1;
+            let _ = tx.send(held_ino);
+            // Keep the lock alive until the test inspects the on-disk `.lock`.
+            lock
+        });
+
+        // Let the waiter reach its blocking `flock` on the (still-live) inode.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Simulate the sweep: delete the entry (unlinking `.lock`'s inode) out from
+        // under the blocked waiter, then recreate just the entry dir. Releasing the
+        // lock lets the waiter's `flock` succeed — on the now-DEAD inode.
+        std::fs::remove_dir_all(entry_dir.as_std_path()).unwrap();
+        std::fs::create_dir_all(entry_dir.as_std_path()).unwrap();
+        drop(held);
+
+        let held_ino = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the create latch must complete");
+        let lock = handle.join().unwrap();
+        let current_ino = std::fs::metadata(lock_path.as_std_path()).unwrap().ino();
+        assert_eq!(
+            held_ino, current_ino,
+            "the acquirer must hold the CURRENT `.lock` inode, not the orphaned one"
+        );
+        assert_ne!(
+            held_ino, dead_ino,
+            "the acquirer must NOT return a lock on the unlinked/dead inode (ABA window)"
+        );
+        drop(lock);
     }
 
     #[test]
