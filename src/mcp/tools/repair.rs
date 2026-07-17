@@ -29,12 +29,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{ConfidenceArg, RepairArgs, ValidateTriageArgs};
+use crate::cli::{ConfidenceArg, RepairArgs};
 use crate::env::{RequestScope, VaultEnv};
-use crate::planner::findings::plan_from_findings;
-use crate::repair::skip_reasons::code_matches_any;
-use crate::standards::{validate_with_compiled, ConfidenceFilter, RepairPlanFilters};
-use crate::validate_filter::{filter_findings, ValidateFilterOptions};
+use crate::standards::{ConfidenceFilter, RepairPlanFilters};
+use crate::validate_filter::ValidateFilterOptions;
 
 /// Parameters for `vault.repair`.
 ///
@@ -44,7 +42,14 @@ use crate::validate_filter::{filter_findings, ValidateFilterOptions};
 ///
 /// All fields are optional; omitting them matches `norn repair --plan`
 /// bare defaults (all bands, no triage filters, no skip-reason filter).
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+///
+/// This is also the surface-neutral REQUEST vocabulary (NRN-291): the CLI's
+/// `RepairArgs` convert INTO it via [`RepairParams::from_args`], `Serialize`
+/// carries it over the daemon socket, and `Deserialize` receives it MCP-side —
+/// one params type, three surfaces. CLI-only knobs (`--plan`, `--format`,
+/// `--out`) are deliberately absent: they never cross the wire and are handled
+/// entirely adapter-side (see `from_args`).
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, Default)]
 pub struct RepairParams {
     /// Filter findings by code before planning. Comma-separated.
     #[serde(default)]
@@ -88,7 +93,7 @@ pub struct RepairParams {
 }
 
 /// Confidence band selector for closest-match rewrite proposals.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema, Clone, Copy)]
 pub enum ConfidenceBand {
     /// Include only High-confidence proposals (drop Medium).
     #[serde(rename = "high")]
@@ -100,7 +105,11 @@ pub enum ConfidenceBand {
 /// `plan` is the `MigrationPlan` serialized to `serde_json::Value`.  It is
 /// structurally identical to the JSON written by `norn repair --plan --out plan.json`
 /// and can be fed to `vault.apply` (Task 12) unchanged.
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+///
+/// `Deserialize` is implemented so the routed CLI client can rebuild this exact
+/// report from the daemon's `structuredContent` envelope (NRN-291): the wire
+/// value IS a serialized `RepairOutput`, so reconstruction is plain serde.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepairOutput {
     /// The full `MigrationPlan` as a JSON object.  Fields:
     /// `schema_version` (u32), `vault_root` (string), `operations` (array),
@@ -142,80 +151,12 @@ pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: RepairParams) -> Result<R
     // `repair --plan` reproduces the direct exit code (NRN-231).
     let has_diagnostic_errors = crate::graph::has_errors(&index);
 
-    // Collect all validation findings using the context's current config.
-    let findings = validate_with_compiled(
-        &index,
-        &config.validate,
-        &config.compiled,
-        config.index_options.alias_field.as_deref(),
-    );
-
-    // Build a RepairArgs equivalent from the MCP params for the shared filter helpers.
-    // We construct it inline — only the triage and confidence fields are used by
-    // `plan_filters` and `filter_findings`; `plan`, `format`, `out` are
-    // irrelevant to the in-memory plan path.
-    let fake_args = RepairArgs {
-        plan: true,
-        format: None,
-        out: None,
-        confidence: p.confidence.map(|c| match c {
-            ConfidenceBand::High => ConfidenceArg::High,
-        }),
-        skip_reason: p.skip_reason.clone(),
-        triage: ValidateTriageArgs {
-            code: p.code.clone(),
-            severity: p.severity.clone(),
-            field: p.field.clone(),
-            rule: p.rule.clone(),
-            path: p.path.clone(),
-            target: p.target.clone(),
-            reason: p.reason.clone(),
-        },
-    };
-
-    // Apply triage filters (same as `repair::gather_findings` → `filter_findings`).
-    let filter_opts = ValidateFilterOptions {
-        codes: &fake_args.triage.code,
-        severities: &fake_args.triage.severity,
-        fields: &fake_args.triage.field,
-        rules: &fake_args.triage.rule,
-        paths: &fake_args.triage.path,
-        targets: &fake_args.triage.target,
-        reasons: &fake_args.triage.reason,
-    };
-    let filtered_findings = filter_findings(findings, &filter_opts)?;
-
-    // Build the RepairPlanFilters from the triage args (mirrors `repair::plan_filters`).
-    let plan_filters = RepairPlanFilters {
-        code: normalized_filter_values(&fake_args.triage.code),
-        severity: normalized_filter_values(&fake_args.triage.severity),
-        field: normalized_filter_values(&fake_args.triage.field),
-        rule: normalized_filter_values(&fake_args.triage.rule),
-        path: normalized_filter_values(&fake_args.triage.path),
-        target: normalized_filter_values(&fake_args.triage.target),
-        reason: normalized_filter_values(&fake_args.triage.reason),
-        skip_reason: normalized_filter_values(&fake_args.skip_reason),
-        confidence: fake_args.confidence.map(|c| match c {
-            ConfidenceArg::High => ConfidenceFilter::High,
-        }),
-    };
-
-    // Build the in-memory MigrationPlan — identical to `repair::run_plan`'s call.
-    // `plan_from_findings` is pure: no filesystem side effects.
-    let mut plan = plan_from_findings(
-        ctx.vault_root.clone(),
-        plan_filters,
-        filtered_findings,
-        &config.repair,
-        &index,
-    );
-
-    // Apply `skip_reason` narrowing to the skipped set (same as `repair::run_plan`).
-    let skip_patterns = normalized_filter_values(&fake_args.skip_reason);
-    if !skip_patterns.is_empty() {
-        plan.skipped
-            .retain(|sf| code_matches_any(&sf.reason, &skip_patterns));
-    }
+    // Findings → plan run through the ONE surface-neutral orchestration in
+    // `repair::mod` (NRN-291) — the SAME functions the CLI-local summary path
+    // calls, keyed on this request's `RepairParams`. No hand-rolled `RepairArgs`
+    // reconstruction: the params ARE the vocabulary.
+    let findings = crate::repair::filtered_findings(&p, &index, &config)?;
+    let plan = crate::repair::build_plan(&p, ctx.vault_root.clone(), findings, &config, &index);
 
     // Serialize the MigrationPlan to a serde_json::Value.
     // This is byte-equivalent to `serde_json::to_string_pretty(&plan)` — the
@@ -226,6 +167,75 @@ pub fn handle(ctx: &VaultEnv, scope: &RequestScope, p: RepairParams) -> Result<R
         plan: plan_value,
         has_diagnostic_errors,
     })
+}
+
+impl RepairParams {
+    /// Build the request vocabulary from parsed `norn repair` CLI args (NRN-291).
+    ///
+    /// Adapter direction is ALWAYS args → params, never params → fake args. The
+    /// CLI-only knobs (`--plan`, `--format`, `--out`) have no `RepairParams`
+    /// field, so their exclusion from the wire lives here by construction. The
+    /// `ValidateTriageArgs` destructure is exhaustive so a new triage flag is a
+    /// compile error here, not a silently-dropped field.
+    pub(crate) fn from_args(args: &RepairArgs) -> Self {
+        let crate::cli::ValidateTriageArgs {
+            code,
+            severity,
+            field,
+            rule,
+            path,
+            target,
+            reason,
+        } = &args.triage;
+        Self {
+            code: code.clone(),
+            severity: severity.clone(),
+            field: field.clone(),
+            rule: rule.clone(),
+            path: path.clone(),
+            target: target.clone(),
+            reason: reason.clone(),
+            confidence: args.confidence.map(|c| match c {
+                ConfidenceArg::High => ConfidenceBand::High,
+            }),
+            skip_reason: args.skip_reason.clone(),
+        }
+    }
+
+    /// The triage-filter view over these params, borrowed for `filter_findings`.
+    pub(crate) fn validate_filter_options(&self) -> ValidateFilterOptions<'_> {
+        ValidateFilterOptions {
+            codes: &self.code,
+            severities: &self.severity,
+            fields: &self.field,
+            rules: &self.rule,
+            paths: &self.path,
+            targets: &self.target,
+            reasons: &self.reason,
+        }
+    }
+
+    /// The planner's `RepairPlanFilters` derived from these params.
+    pub(crate) fn plan_filters(&self) -> RepairPlanFilters {
+        RepairPlanFilters {
+            code: normalized_filter_values(&self.code),
+            severity: normalized_filter_values(&self.severity),
+            field: normalized_filter_values(&self.field),
+            rule: normalized_filter_values(&self.rule),
+            path: normalized_filter_values(&self.path),
+            target: normalized_filter_values(&self.target),
+            reason: normalized_filter_values(&self.reason),
+            skip_reason: normalized_filter_values(&self.skip_reason),
+            confidence: self.confidence.map(|c| match c {
+                ConfidenceBand::High => ConfidenceFilter::High,
+            }),
+        }
+    }
+
+    /// Normalized `--skip-reason` patterns (comma-split, trimmed, non-empty).
+    pub(crate) fn skip_patterns(&self) -> Vec<String> {
+        normalized_filter_values(&self.skip_reason)
+    }
 }
 
 fn normalized_filter_values(values: &[String]) -> Vec<String> {

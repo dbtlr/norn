@@ -19,13 +19,14 @@ use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cli::{RepairArgs, RepairPlanFormat};
-use crate::config_loader::load_config;
+use crate::config_loader::{load_config, LoadedConfig};
 use crate::core::GraphIndex;
+use crate::mcp::tools::repair::RepairParams;
 use crate::migration_plan::MigrationPlan;
 use crate::planner::findings::plan_from_findings;
 use crate::repair::skip_reasons::code_matches_any;
-use crate::standards::{validate_with_compiled, ConfidenceFilter, RepairPlanFilters};
-use crate::validate_filter::{filter_findings, ValidateFilterOptions};
+use crate::standards::{validate_with_compiled, Finding};
+use crate::validate_filter::filter_findings;
 
 /// Shared context the dispatcher hands to `run_plan` / `run_summary`.
 pub struct RepairRunContext<'a> {
@@ -35,18 +36,59 @@ pub struct RepairRunContext<'a> {
     pub verbose: bool,
 }
 
-/// Gather validation findings, build the GraphIndex, and apply the triage
-/// filters shared by both `run_plan` and `run_summary`.
-///
-/// Returns `(index, findings)`.
-fn gather_findings(
-    args: &RepairArgs,
-    ctx: &RepairRunContext<'_>,
-) -> Result<(
-    GraphIndex,
-    Vec<crate::standards::Finding>,
-    crate::config_loader::LoadedConfig,
-)> {
+/// Filter the vault's validation findings for `params` against an already-loaded
+/// `index` + `config`. The surface-neutral finding-filter orchestration
+/// (NRN-291): the cold `execute()` path (MCP handler + routed daemon) and the
+/// CLI-local `run_summary` path both call this, keyed on `RepairParams` — the
+/// canonical request vocabulary. Index construction stays surface-specific (the
+/// caller loads it: `VaultEnv::load_graph_index` on the cold path,
+/// `cache::command::load_graph_index` on the CLI path), so this function does no
+/// I/O and never forks on surface.
+pub(crate) fn filtered_findings(
+    params: &RepairParams,
+    index: &GraphIndex,
+    config: &LoadedConfig,
+) -> Result<Vec<Finding>> {
+    let findings = validate_with_compiled(
+        index,
+        &config.validate,
+        &config.compiled,
+        config.index_options.alias_field.as_deref(),
+    );
+    filter_findings(findings, &params.validate_filter_options())
+}
+
+/// Build the in-memory `MigrationPlan` for `params` from already-filtered
+/// findings. The surface-neutral plan-construction twin of [`filtered_findings`]
+/// (NRN-291): `plan_from_findings` is pure (no filesystem side effects), then
+/// `--skip-reason` narrows the skipped set — the SAME sequence both the cold
+/// `execute()` path and the CLI-local summary path run.
+pub(crate) fn build_plan(
+    params: &RepairParams,
+    vault_root: Utf8PathBuf,
+    findings: Vec<Finding>,
+    config: &LoadedConfig,
+    index: &GraphIndex,
+) -> MigrationPlan {
+    let mut plan =
+        plan_from_findings(vault_root, params.plan_filters(), findings, &config.repair, index);
+
+    // --skip-reason narrows the skipped set only (planner does not apply it).
+    // The MigrationPlan SkippedFinding `reason` carries the kebab-case reason code.
+    let skip_patterns = params.skip_patterns();
+    if !skip_patterns.is_empty() {
+        plan.skipped
+            .retain(|sf| code_matches_any(&sf.reason, &skip_patterns));
+    }
+    plan
+}
+
+/// Load config + the CLI-direct graph index for a `norn repair` invocation, with
+/// the standard non-verbose diagnostic trim. The CLI-local index-loading seam
+/// shared by [`run_plan`] and [`run_summary`]; the cold `execute()` path loads
+/// via `VaultEnv::load_graph_index` instead (NRN-291), so this stays the
+/// CLI-only loader.
+fn load_cli_index(ctx: &RepairRunContext<'_>) -> Result<(GraphIndex, LoadedConfig)> {
     let loaded_config = load_config(ctx.cwd, ctx.config_path)?;
     let mut index = crate::cache::command::load_graph_index(
         ctx.cwd,
@@ -54,65 +96,16 @@ fn gather_findings(
         ctx.no_cache_refresh,
     )?;
     crate::trim_diagnostics(&mut index, ctx.verbose);
-    let findings = validate_with_compiled(
-        &index,
-        &loaded_config.validate,
-        &loaded_config.compiled,
-        loaded_config.index_options.alias_field.as_deref(),
-    );
-    let filters = ValidateFilterOptions::from(args);
-    let findings = filter_findings(findings, &filters)?;
-    Ok((index, findings, loaded_config))
-}
-
-/// Translate the CLI triage + skip-reason + confidence flags into the
-/// planner's `RepairPlanFilters`.
-fn plan_filters(args: &RepairArgs) -> RepairPlanFilters {
-    RepairPlanFilters {
-        code: normalized_filter_values(&args.triage.code),
-        severity: normalized_filter_values(&args.triage.severity),
-        field: normalized_filter_values(&args.triage.field),
-        rule: normalized_filter_values(&args.triage.rule),
-        path: normalized_filter_values(&args.triage.path),
-        target: normalized_filter_values(&args.triage.target),
-        reason: normalized_filter_values(&args.triage.reason),
-        skip_reason: normalized_filter_values(&args.skip_reason),
-        confidence: args.confidence.map(|c| match c {
-            crate::cli::ConfidenceArg::High => ConfidenceFilter::High,
-        }),
-    }
-}
-
-fn normalized_filter_values(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect()
+    Ok((index, loaded_config))
 }
 
 /// `norn repair --plan` — generate a MigrationPlan from current findings and
 /// render it as report / json / paths. Read-only.
 pub fn run_plan(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32> {
-    let (index, findings, loaded_config) = gather_findings(args, ctx)?;
-
-    let mut plan = plan_from_findings(
-        ctx.cwd.clone(),
-        plan_filters(args),
-        findings,
-        &loaded_config.repair,
-        &index,
-    );
-
-    // --skip-reason narrows the skipped set only (planner does not apply it).
-    // The MigrationPlan SkippedFinding `reason` carries the kebab-case reason code.
-    let skip_patterns = normalized_filter_values(&args.skip_reason);
-    if !skip_patterns.is_empty() {
-        plan.skipped
-            .retain(|sf| code_matches_any(&sf.reason, &skip_patterns));
-    }
+    let params = RepairParams::from_args(args);
+    let (index, loaded_config) = load_cli_index(ctx)?;
+    let findings = filtered_findings(&params, &index, &loaded_config)?;
+    let plan = build_plan(&params, ctx.cwd.clone(), findings, &loaded_config, &index);
 
     // The exit-code signal: any error-severity diagnostic anywhere in the FULL
     // index, independent of the triage filters just applied to `plan` — the
@@ -186,7 +179,9 @@ pub(crate) fn emit_plan(
 /// `norn repair` (bare) — print a read-only findings summary. Placeholder for a
 /// future interactive repair workflow.
 pub fn run_summary(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32> {
-    let (index, findings, loaded_config) = gather_findings(args, ctx)?;
+    let params = RepairParams::from_args(args);
+    let (index, loaded_config) = load_cli_index(ctx)?;
+    let findings = filtered_findings(&params, &index, &loaded_config)?;
 
     // Count by code (sorted) for a stable summary.
     let mut by_code: BTreeMap<&str, usize> = BTreeMap::new();
@@ -194,12 +189,13 @@ pub fn run_summary(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32>
         *by_code.entry(finding.code.as_str()).or_insert(0) += 1;
     }
 
-    // Of those, how many would the planner turn into operations?
-    let plan = plan_from_findings(
+    // Of those, how many would the planner turn into operations? Shares the ONE
+    // finding→plan orchestration with the `--plan` and cold `execute()` paths.
+    let plan = build_plan(
+        &params,
         ctx.cwd.clone(),
-        plan_filters(args),
         findings.clone(),
-        &loaded_config.repair,
+        &loaded_config,
         &index,
     );
 
