@@ -171,29 +171,25 @@ pub fn run_summary(args: &RepairArgs, ctx: &RepairRunContext<'_>) -> Result<i32>
     let params = RepairParams::from_args(args);
     let (index, loaded_config) = load_cli_index(ctx)?;
     let findings = filtered_findings(&params, &index, &loaded_config)?;
+    let findings_len = findings.len();
 
-    // Count by code (sorted) for a stable summary.
-    let mut by_code: BTreeMap<&str, usize> = BTreeMap::new();
+    // Count by code (sorted) for a stable summary. Owned keys so `findings`
+    // can move into the planner below.
+    let mut by_code: BTreeMap<String, usize> = BTreeMap::new();
     for finding in &findings {
-        *by_code.entry(finding.code.as_str()).or_insert(0) += 1;
+        *by_code.entry(finding.code.clone()).or_insert(0) += 1;
     }
 
     // Of those, how many would the planner turn into operations? Shares the ONE
     // finding→plan orchestration with the `--plan` and cold `execute()` paths.
-    let plan = build_plan(
-        &params,
-        ctx.cwd.clone(),
-        findings.clone(),
-        &loaded_config,
-        &index,
-    );
+    let plan = build_plan(&params, ctx.cwd.clone(), findings, &loaded_config, &index);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     writeln!(
         out,
         "{} findings across {} documents",
-        findings.len(),
+        findings_len,
         index.documents.len()
     )?;
     if !by_code.is_empty() {
