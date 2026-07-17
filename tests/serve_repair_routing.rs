@@ -382,18 +382,25 @@ fn no_daemon_runs_direct() {
 ///
 ///  * DIRECT (no daemon): the CLI dispatch tail triggers the GC locally, so the
 ///    marker is created. (unchanged from NRN-291.)
-///  * ROUTED (served by the daemon): the CLI client still skips its LOCAL tail
-///    trigger (the NRN-291 `served_by_daemon` contract — a routed client performs
-///    no local cache maintenance), BUT under NRN-287 the daemon now triggers the
-///    GC SERVER-SIDE per request (the per-request seam in `run_wrapped`),
-///    closing the gap where a warm daemon never swept. Client and daemon share
-///    this host's cache home, so the marker is present after a routed run —
-///    placed there by the DAEMON, not the client. The marker can no longer
-///    distinguish the client's skip from the daemon's touch; the client-skip
-///    stays enforced in code (`served_by_daemon`) and the daemon's server-side
-///    trigger is what the marker now observes.
+///  * ROUTED (served by the daemon): under NRN-287 the daemon triggers the GC
+///    SERVER-SIDE per request (the per-request seam in `run_wrapped`), closing
+///    the gap where a warm daemon never swept. So the marker is present after a
+///    routed run — placed there by the DAEMON.
+///
+/// What this test does NOT prove is the CLIENT-SKIP half of the contract (a
+/// routed client performs no LOCAL cache maintenance). The client and daemon
+/// MUST share one host cache home to route at all — the daemon socket
+/// (`<XDG_CACHE_HOME>/norn/run/norn.sock`) and the marker
+/// (`<XDG_CACHE_HOME>/norn/.last-prune`) derive from the same cache home, so
+/// divergent homes can't route — and the daemon's own server-side sweep touches
+/// that shared marker. The marker therefore cannot distinguish the client's skip
+/// from the daemon's touch, and deleting the `!served_by_daemon` guard would not
+/// fail this test. The client-skip is covered deterministically by the
+/// `tail_sweep_fires_truth_table` unit test in `src/lib.rs`, which drives the
+/// tail gate with `served_by_daemon = true` directly. This test's job is only the
+/// SERVER-SIDE trigger and the direct-path trigger.
 #[test]
-fn direct_gc_runs_client_side_routed_gc_runs_server_side() {
+fn direct_triggers_marker_and_daemon_triggers_gc_server_side() {
     // Mirrors src/cache/prune.rs `PRUNE_MARKER` (crate-private, so hardcoded here).
     fn prune_marker(cache_home: &Path) -> PathBuf {
         cache_home.join("norn").join(".last-prune")

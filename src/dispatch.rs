@@ -45,7 +45,8 @@
 //! A ROUTED command performs NO local cache-maintenance side effects — the
 //! daemon owns its warm cache, so it (not this process) is responsible for GC
 //! eviction and the throttled prune sweep. The CLI adapter must therefore skip
-//! the tail `lazy_sweep` (`lib.rs`, the shared `run` tail) whenever a request
+//! the tail GC trigger `maybe_spawn_sweep` (`lib.rs`, the shared `run` tail,
+//! gated by `tail_sweep_fires`) whenever a request
 //! routed, exactly reproducing the pre-NRN-291 early-return: on main a routed
 //! read `return`ed at the call site and never reached the sweep, while a DIRECT
 //! (cold local) run fell through to it. [`dispatch`] surfaces which happened via
@@ -98,7 +99,7 @@ pub(crate) trait Request: serde::Serialize {
 ///
 /// `routed` is the dispatch seam's cache-maintenance contract (see the module
 /// doc): `true` means the daemon served the request and owns its cache upkeep,
-/// so the CLI adapter MUST skip the tail `lazy_sweep`; `false` means a cold local
+/// so the CLI adapter MUST skip the tail GC trigger `maybe_spawn_sweep`; `false` means a cold local
 /// run, which still sweeps. It is carried alongside `outcome` (rather than folded
 /// into the `Ok`) precisely so a routed FAILURE — a daemon-side refusal, an
 /// unreadable envelope committed post-send — also suppresses the sweep, matching
@@ -106,7 +107,8 @@ pub(crate) trait Request: serde::Serialize {
 /// not.
 pub(crate) struct Dispatched {
     /// Whether a live warm daemon served the request (routed) vs. a cold local
-    /// execution (direct). Gates the CLI adapter's tail `lazy_sweep`.
+    /// execution (direct). Gates the CLI adapter's tail GC trigger
+    /// `maybe_spawn_sweep` (via `tail_sweep_fires`).
     pub(crate) routed: bool,
     /// The rendered exit code, or the error the top level maps to one.
     pub(crate) outcome: Result<i32>,

@@ -170,6 +170,25 @@ pub(crate) fn routing_forced_direct(explicit_config: bool, no_cache_refresh: boo
     explicit_config || no_cache_refresh
 }
 
+/// Whether the tail GC trigger fires after a command completes (`run`'s tail).
+/// It fires ONLY for a DIRECT run of a non-maintenance command:
+///
+/// - `skip_tail_sweep`: explicit `cache prune` owns its sweep, and the hidden
+///   `cache sweep` IS the detached child — both suppress the tail trigger (a
+///   `cache sweep` that re-triggered would spawn an unbounded grandchild chain).
+/// - `served_by_daemon`: a ROUTED command performs NO local cache maintenance —
+///   the daemon owns its warm cache and triggers GC server-side per request
+///   (NRN-287), reproducing the pre-NRN-291 routed early-return. This is the
+///   dispatch seam's client-skip contract (see `dispatch.rs`).
+///
+/// Factored out (like [`routing_forced_direct`]) so the gate is unit-testable
+/// without a live daemon — the marker-based e2e proof cannot discriminate the
+/// `served_by_daemon` skip, because client and daemon share one host cache home
+/// and the daemon sweeps server-side into that same marker.
+fn tail_sweep_fires(skip_tail_sweep: bool, served_by_daemon: bool) -> bool {
+    !skip_tail_sweep && !served_by_daemon
+}
+
 /// Whether stdin carries a redirected/piped payload — a FIFO pipe (`echo … |`)
 /// or a regular file (`< ops.json`) — as opposed to a terminal or an empty
 /// source such as `/dev/null`. Used to refuse `norn edit` op-flag sugar combined
@@ -1487,8 +1506,8 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             // once, so both the routing seam and the direct tail reuse its `raw`
             // bytes + parsed plan. A schema mismatch already refused (exit 2, prose
             // on stderr) byte-identically to Direct, BEFORE any wire activity; a
-            // parse failure propagates as the `Err` arm (outcome → lazy_sweep runs
-            // exactly as today).
+            // parse failure propagates as the `Err` arm (outcome → the tail GC
+            // trigger `maybe_spawn_sweep` runs exactly as today).
             match apply::preamble(&run_args) {
                 Err(e) => Err(e),
                 Ok(apply::Preamble::Refused(code)) => Ok(code),
@@ -2806,7 +2825,7 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     // performs no local cache-maintenance side effect — reproducing the
     // pre-NRN-291 early-return that bypassed this tail (see the dispatch seam's
     // cache-maintenance contract in `dispatch.rs`).
-    if !skip_tail_sweep && !served_by_daemon {
+    if tail_sweep_fires(skip_tail_sweep, served_by_daemon) {
         crate::cache::prune::maybe_spawn_sweep(&cwd, config_path.as_ref());
     }
     outcome
@@ -3216,8 +3235,8 @@ fn exit_code_for(index: &GraphIndex) -> i32 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        after_send_for, execute_routed_call, routing_forced_direct, CallSpec, FallbackAfterSend,
-        RoutedCall,
+        after_send_for, execute_routed_call, routing_forced_direct, tail_sweep_fires, CallSpec,
+        FallbackAfterSend, RoutedCall,
     };
     use crate::service::{bind_trusted, CallPhase, OnToolError, ServiceClient, CONTROL_PROTOCOL};
     use anyhow::Result;
@@ -3242,6 +3261,39 @@ mod tests {
             "--no-cache-refresh forces Direct"
         );
         assert!(routing_forced_direct(true, true), "both flags force Direct");
+    }
+
+    /// F1 (NRN-287) tail-sweep gate: the `run` tail's GC trigger fires ONLY on a
+    /// DIRECT run of a non-maintenance command. This deterministically kills the
+    /// "delete `!served_by_daemon`" mutation — a ROUTED run must perform NO local
+    /// cache maintenance (the NRN-291 client-skip contract). The marker-based e2e
+    /// proof (`serve_repair_routing.rs`) cannot discriminate this, because the
+    /// routed client and the daemon share one host cache home and the daemon
+    /// sweeps server-side into the same marker; this table is the discriminating
+    /// coverage of the client skip.
+    #[test]
+    fn tail_sweep_fires_truth_table() {
+        // Direct run of a normal command: the tail trigger fires.
+        assert!(
+            tail_sweep_fires(false, false),
+            "direct non-maintenance run sweeps"
+        );
+        // Routed: the client skips its LOCAL tail trigger (served_by_daemon).
+        // Deleting `!served_by_daemon` from the gate flips this to `true` → fails.
+        assert!(
+            !tail_sweep_fires(false, true),
+            "routed run performs no local cache maintenance"
+        );
+        // `cache prune` / hidden `cache sweep`: they own GC; tail is suppressed.
+        assert!(
+            !tail_sweep_fires(true, false),
+            "cache-maintenance command skips the tail trigger"
+        );
+        // Both suppressors: still no tail sweep.
+        assert!(
+            !tail_sweep_fires(true, true),
+            "both suppressors => no tail sweep"
+        );
     }
 
     // ── NRN-228 route_call send-commit seam ──────────────────────────────────
