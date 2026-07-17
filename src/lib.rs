@@ -6,9 +6,9 @@
 //! each arm either does the work in-process (the CLI-direct surface) or
 //! delegates into a command module under `src/<verb>/`. Before the direct work,
 //! a routable command consults its route seam (`try_route_read`,
-//! `try_route_<verb>`, `route_count`/`route_find`/`route_get`/`route_repair`);
-//! a live `serve` daemon answers through the same MCP handlers, otherwise the
-//! seam returns `None` and the direct arm runs. `run` returns the process exit
+//! `try_route_<verb>`, `route_count`/`route_find`/`route_get`) or the generic
+//! `crate::dispatch` (`repair --plan`, NRN-291); a live `serve` daemon answers
+//! through the same MCP handlers, otherwise the seam runs the direct/cold arm. `run` returns the process exit
 //! code that `cli_main` maps to `process::exit` (broken pipe → 0, `Err` → 1,
 //! refusals carry their own code). The module tree declared below is the whole
 //! crate; `docs/development.md` has the architecture map.
@@ -32,6 +32,7 @@ mod core;
 mod count;
 pub mod delete;
 mod describe;
+mod dispatch;
 mod edit;
 mod env;
 mod filter;
@@ -165,7 +166,7 @@ pub fn cli_main() {
 /// Unix-only, like the routing seam that calls it: on non-Unix targets
 /// `try_route_read` is a compile-time Direct stub that consults nothing.
 #[cfg(unix)]
-fn routing_forced_direct(explicit_config: bool, no_cache_refresh: bool) -> bool {
+pub(crate) fn routing_forced_direct(explicit_config: bool, no_cache_refresh: bool) -> bool {
     explicit_config || no_cache_refresh
 }
 
@@ -216,12 +217,14 @@ fn stdin_carries_redirected_payload() -> bool {
 /// `--config` / `--no-cache-refresh` force Direct up front (see
 /// [`routing_forced_direct`]).
 ///
-/// **Routing coverage.** `count` (NRN-94), `find` and `get` (NRN-222), and
-/// `repair --plan` (NRN-231) route today. Each command's MCP tool returns a
-/// `structuredContent` payload that the client rebuilds into the command's
-/// native result type and renders through the SAME renderers the direct path
-/// uses, so routed and direct output are byte-identical (the load-bearing
-/// isomorphism, ADR 0005):
+/// **Routing coverage.** `count` (NRN-94), `find` and `get` (NRN-222) route
+/// through this seam; `repair --plan` (NRN-231/291) routes through the generic
+/// `crate::dispatch` from its own `run` arm instead (its cold fall-back executes
+/// the SAME `Request::execute` body, so route and local live in one home). Each
+/// command's MCP tool returns a `structuredContent` payload that the client
+/// rebuilds into the command's native result type and renders through the SAME
+/// renderers the direct path uses, so routed and direct output are
+/// byte-identical (the load-bearing isomorphism, ADR 0005):
 ///
 /// - `count` — `vault.count`'s `CountEnvelope` losslessly re-encodes `CountOutput`.
 /// - `find` — `vault.find` carries the `total`/`returned`/`truncated`/`starts_at`
@@ -233,12 +236,12 @@ fn stdin_carries_redirected_payload() -> bool {
 ///   applying the CLI's client-side `--col` narrowing. `--format markdown`
 ///   travels in a dedicated exact-source envelope; `--section` stays Direct
 ///   (see `route_get`).
-/// - `repair --plan` — `vault.repair` carries the full `MigrationPlan` (byte-equal
-///   to `serde_json::to_value(&plan)`) plus `has_diagnostic_errors` (the exit-1
-///   signal); the client rebuilds the `MigrationPlan` and renders/writes it via
-///   the SAME `repair::emit_plan` the direct path uses (report / json / paths,
-///   `--out`). Bare `repair` (summary mode) has no wire analogue and stays
-///   Direct (see `route_repair`).
+/// - `repair --plan` (via `crate::dispatch`, not this match) — `vault.repair`
+///   carries the full `MigrationPlan` (byte-equal to `serde_json::to_value(&plan)`)
+///   plus `has_diagnostic_errors` (the exit-1 signal); the client rebuilds the
+///   `MigrationPlan` and renders/writes it via the SAME `repair::emit_plan` the
+///   cold path uses (report / json / paths, `--out`). Bare `repair` (summary
+///   mode) has no wire analogue and stays CLI-local (`repair::run_summary`).
 ///
 /// **byte-identical output outranks routing coverage** — routing a read whose
 /// output would differ is worse than not routing it. Any daemon-side failure
@@ -282,7 +285,10 @@ fn try_route_read(
             Command::Count(args) => route_count(args, cwd, verbose, dynamic_keys),
             Command::Find(args) => route_find(args, cwd, color, verbose, dynamic_keys),
             Command::Get(args) => route_get(args, cwd, verbose),
-            Command::Repair(args) => route_repair(args, cwd, verbose),
+            // `repair --plan` routes through the generic `crate::dispatch`
+            // (NRN-291), driven from its own `run` arm — not this read-seam match.
+            // Its cold fall-back executes the SAME `Request::execute` body, so
+            // dispatch owns both the route and the local run in one home.
             _ => None,
         }
     }
@@ -521,7 +527,7 @@ fn post_send_uncertainty_error(tool: &str, source: anyhow::Error) -> anyhow::Err
 /// pre-send and a post-send failure fall back safely and byte-identically —
 /// hence the [`FallbackAfterSend::Fallback`] policy.
 #[cfg(unix)]
-fn route_read<T>(
+pub(crate) fn route_read<T>(
     cwd: &camino::Utf8Path,
     spec: CallSpec<'_>,
     reconstruct: impl FnOnce(&serde_json::Value) -> Result<T>,
@@ -736,40 +742,6 @@ fn route_get(
         },
         |structured| crate::get::route::reconstruct(structured, args),
         |report| crate::get::emit(&report, args),
-    )
-}
-
-/// Route a `repair --plan` to the warm daemon, or `None` to run Direct.
-///
-/// Only `--plan` shapes route: bare `norn repair` (summary mode) has no wire
-/// analogue (`vault.repair` only ever returns a `MigrationPlan`), so it
-/// returns `None` up front and always runs Direct.
-#[cfg(unix)]
-fn route_repair(
-    args: &crate::cli::RepairArgs,
-    cwd: &camino::Utf8Path,
-    verbose: bool,
-) -> Option<Result<i32>> {
-    if !args.plan {
-        return None;
-    }
-    route_read(
-        cwd,
-        CallSpec {
-            tool: "vault.repair",
-            arguments: crate::repair::route::to_mcp_arguments(args),
-            on_tool_error: crate::service::OnToolError::FallBackDirect,
-            verbose,
-        },
-        crate::repair::route::reconstruct,
-        |routed| {
-            // `--out` writes and stdout rendering run through the SAME
-            // `emit_plan` the direct path calls, so a routed `--out` write is
-            // byte-identical to the direct `fs::write`, and the exit code
-            // (1 if the vault carries any error-severity diagnostic) matches
-            // `crate::exit_code_for(&index)` on the direct path (NRN-231).
-            crate::repair::emit_plan(&routed.plan, args, cwd, routed.has_diagnostic_errors)
-        },
     )
 }
 
@@ -1487,6 +1459,13 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
         return result;
     }
 
+    // Whether a routed daemon served this invocation. A ROUTED command performs
+    // no local cache-maintenance side effects — the daemon owns its warm cache —
+    // so the tail `lazy_sweep` is skipped for it, reproducing the pre-NRN-291
+    // early-return (a routed read `return`ed here and never reached the sweep;
+    // a direct run fell through to it). Only the dispatch-backed arms set this;
+    // it is the dispatch seam's cache-maintenance contract (see `dispatch.rs`).
+    let mut served_by_daemon = false;
     let outcome = match command {
         Command::Apply(args) => {
             let run_args = ApplyRunArgs {
@@ -1579,15 +1558,47 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
             )
         }
         Command::Repair(args) => {
-            let ctx = crate::repair::RepairRunContext {
-                cwd: &cwd,
-                config_path: config_path.as_ref(),
-                no_cache_refresh,
-                verbose,
-            };
             if args.plan {
-                repair::run_plan(&args, &ctx)
+                // Beat 1 — ADAPTER. `--plan` is the CLI-only routing gate (only
+                // this shape has a `vault.repair` wire analogue); build the
+                // request vocabulary from args, then hand it to the generic
+                // dispatch (NRN-291). `--format` / `--out` are CLI-only render
+                // knobs handled entirely in the render closure (`emit_plan`), so
+                // they never reach the wire.
+                let params = crate::mcp::tools::repair::RepairParams::from_args(&args);
+                let dispatched = crate::dispatch::dispatch(
+                    &params,
+                    &cwd,
+                    config_path.as_ref(),
+                    no_cache_refresh,
+                    config_path.is_some(),
+                    verbose,
+                    |report: crate::mcp::tools::repair::RepairOutput| {
+                        // Deserialize the plan `Value` adapter-side into the typed
+                        // `MigrationPlan` the renderer needs (the wire schema stays
+                        // `Value` — NRN-302), then render through the SHARED
+                        // `emit_plan` seam (format resolution, `--out`, exit code).
+                        let plan: crate::migration_plan::MigrationPlan =
+                            serde_json::from_value(report.plan)?;
+                        crate::repair::emit_plan(&plan, &args, &cwd, report.has_diagnostic_errors)
+                    },
+                );
+                // A routed run leaves cache maintenance to the daemon: gate the
+                // tail `lazy_sweep` off so a routed `repair --plan` performs no
+                // local prune/GC side effect (NRN-291 sweep parity). A direct run
+                // (`routed == false`) still sweeps, exactly as main's direct path.
+                served_by_daemon = dispatched.routed;
+                dispatched.outcome
             } else {
+                // Bare `norn repair` (summary) has no wire analogue — it stays a
+                // CLI-local path (never routes), but shares the SAME finding→plan
+                // orchestration via `run_summary`.
+                let ctx = crate::repair::RepairRunContext {
+                    cwd: &cwd,
+                    config_path: config_path.as_ref(),
+                    no_cache_refresh,
+                    verbose,
+                };
                 repair::run_summary(&args, &ctx)
             }
         }
@@ -2777,8 +2788,12 @@ fn run(cli: Cli, dynamic_keys: &[String]) -> Result<i32> {
     // the next invocation. The sweep must remain the last thing before
     // returning `outcome`; do not insert post-dispatch work after it.
     // Explicit `cache prune` is also skipped: it manages the sweep itself,
-    // and a --dry-run must never be followed by a real sweep.
-    if !is_explicit_prune {
+    // and a --dry-run must never be followed by a real sweep. A ROUTED dispatch
+    // is skipped too (`served_by_daemon`): the daemon owns its warm cache's
+    // upkeep, so a routed command performs no local cache-maintenance side
+    // effect — reproducing the pre-NRN-291 early-return that bypassed this tail
+    // (see the dispatch seam's cache-maintenance contract in `dispatch.rs`).
+    if !is_explicit_prune && !served_by_daemon {
         crate::cache::prune::lazy_sweep(&cwd, config_path.as_ref());
     }
     outcome
