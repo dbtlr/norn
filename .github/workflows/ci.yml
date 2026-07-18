@@ -93,6 +93,14 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: fixture-gen smoke (oracle)
+        shell: bash
+        run: |
+          ./target/release/norn-fixtures "$RUNNER_TEMP/fx-clean" --profile clean --seed 1
+          norn -C "$RUNNER_TEMP/fx-clean" validate --summary --format json | tee /dev/stderr | grep -q '"findings": 0'
+          ./target/release/norn-fixtures "$RUNNER_TEMP/fx-zoo" --profile zoo --seed 1
+          norn -C "$RUNNER_TEMP/fx-zoo" validate --summary --format json | tee /dev/stderr | grep -vq '"findings": 0'
+
       - name: fixture validate (oracle)
         run: norn -C fixtures/basic validate --summary --format json
 
