@@ -17,6 +17,7 @@ pub mod exec;
 pub mod fixtures;
 pub mod ledger;
 pub mod normalize;
+pub mod paths;
 pub mod report;
 pub mod run;
 pub mod verdict;

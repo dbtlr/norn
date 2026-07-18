@@ -1,7 +1,10 @@
-//! Deterministic rendering of a [`crate::run::RunReport`] to stdout text.
-//! Row order follows `crate::cases::suites()` declaration order (the run
-//! order) — never a `HashMap`, so nothing here can reorder between runs.
+//! Deterministic rendering of a run's results to stdout text — the one home
+//! for both the comparison report and the consistency report, each paired
+//! with the exit code it maps to. Row order follows `crate::cases::suites()`
+//! declaration order (the run order) — never a `HashMap`, so nothing here
+//! can reorder between runs.
 
+use crate::consistency::Finding;
 use crate::run::{Mode, RunReport};
 use crate::verdict::Verdict;
 
@@ -69,4 +72,21 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
         ));
     }
     out
+}
+
+/// Render the oracle self-consistency result and the exit code it maps to:
+/// exit 0 with a clean line when nothing disagrees; exit 1 with one line per
+/// disagreement (each a candidate divergence-ledger entry, ADR 0018).
+pub fn render_consistency(findings: &[Finding]) -> (String, u8) {
+    if findings.is_empty() {
+        return ("consistency: 0 disagreements\n".to_string(), 0);
+    }
+    let mut out = String::new();
+    for f in findings {
+        out.push_str(&format!(
+            "disagreement [{}] fixture={}: {}\n",
+            f.check, f.fixture, f.message
+        ));
+    }
+    (out, 1)
 }

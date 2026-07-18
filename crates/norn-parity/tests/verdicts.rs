@@ -1,106 +1,109 @@
-//! Fabricated-divergence tests: deterministically force a mismatch (and,
-//! separately, a forced match) through the compare/verdict/stale-detection
-//! path, independent of whether any real case currently diverges.
+//! End-to-end verdict tests: drive the REAL `run::run_suites` orchestration
+//! (the production seam under `run::run`) over a synthetic one-case catalog,
+//! forcing each of Drift / Diverged / stale and asserting the exit code.
 //!
-//! The fabrication technique (per the implementation spec): run the real
-//! oracle with two *different* argv against the same fixture vault (`count`
-//! vs `count --format json`) so their normalized outputs are guaranteed to
-//! differ, and feed that pair through `verdict::outputs_match` /
-//! `Ledger::entry_for_case` exactly as `run::run` would for a real
-//! oracle-vs-rewrite case. A real, already-declared case id
-//! (`read-count-clean`) stands in for "the case" so the ledger's
-//! unknown-case-id validation stays meaningful — only the pair of outputs
-//! being compared is fabricated, not the case identity.
+//! Why a synthetic catalog: the production catalog has zero `ported` cases in
+//! phase 0, so neither a gated run nor a ledger entry could ever cite a real
+//! case (the ledger rejects entries for unported surfaces). `run_suites`
+//! takes an explicit `&'static [Suite]` so a test can inject a single ported
+//! case and exercise the classification/stale glue exactly as production
+//! would — no re-derivation of that logic inline.
 //!
-//! Every ledger used here is a temp file (`common::write_ledger`); the real
-//! `docs/parity-ledger.toml` is never touched.
+//! The candidate binary is `/bin/echo` (present on macOS + Linux,
+//! deterministic, and guaranteed to mismatch the oracle's `--help` output) for
+//! the mismatch cases, and the oracle itself for the match/stale case. Every
+//! ledger here is a temp file; the real `docs/parity-ledger.toml` is never
+//! touched.
 
 mod common;
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
-use norn_parity::exec;
-use norn_parity::ledger::Ledger;
-use norn_parity::normalize;
-use norn_parity::run::{CaseOutcome, RunReport};
-use norn_parity::verdict::{self, Verdict};
+use norn_parity::cases::{Case, Fixture, Suite};
+use norn_parity::run::{self, Mode, RunConfig};
+use norn_parity::Verdict;
 
-const FABRICATED_CASE_ID: &str = "read-count-clean";
+const CLEAN_1: Fixture = Fixture {
+    profile_name: "clean",
+    seed: 1,
+};
 
-fn normalized(oracle: &Path, argv: &[&str], vault: &Path) -> normalize::NormalizedOutput {
-    let raw = exec::run_argv(oracle, argv, None, vault).expect("oracle invocation failed");
-    normalize::normalize_output(&raw, vault, normalize::DEFAULT)
-        .expect("oracle process was not signaled")
-}
+const FAB_CASE_ID: &str = "fab-help-clean";
 
-fn known_ids() -> BTreeSet<&'static str> {
-    norn_parity::cases::all_case_ids().into_iter().collect()
+/// A single ported case running `--help` (exits 0 on the oracle) over the
+/// clean fixture — the injected catalog for every test below.
+///
+/// `--help` is deliberately vault-content-independent: its output does not
+/// read the on-disk cache, so an oracle-vs-oracle run Matches deterministically
+/// even when these three tests execute concurrently. A vault-reading argv
+/// (e.g. `count`) is not safe here — the oracle non-deterministically emits a
+/// `cache is corrupted (missing schema_version meta row); rebuilding` stderr
+/// line on a fresh vault's first touch when several `norn` processes race the
+/// cache build, which would flip the stale test's required Match to a
+/// Diverged. (The production self-check runs its cases sequentially in one
+/// process and is unaffected.) The mismatch tests below still hold: the
+/// oracle's help text never equals `/bin/echo`'s echo of the argv.
+static FAB_SUITES: &[Suite] = &[Suite {
+    name: "fabricated",
+    cases: &[Case {
+        id: FAB_CASE_ID,
+        argv: &["--help"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: &[],
+    }],
+}];
+
+const ECHO: &str = "/bin/echo";
+
+fn diverged_verdicts(report: &run::RunReport) -> Vec<String> {
+    report
+        .outcomes
+        .iter()
+        .filter_map(|o| match &o.verdict {
+            Verdict::Diverged { entry_id } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
-fn mismatch_with_no_ledger_entry_is_drift_and_exits_1() {
-    if !common::oracle_present() {
-        eprintln!("skip: `norn` not found on PATH — verdicts skipped");
+fn candidate_echo_with_no_ledger_entry_is_drift_and_exits_1() {
+    if common::oracle_missing("verdicts") {
         return;
     }
-    let dir = tempfile::TempDir::new().unwrap();
-    let vault = dir.path().join("vault");
-    norn_fixtures::generate(&norn_fixtures::Profile::clean(), 1, &vault).unwrap();
-    let oracle = common::oracle_path();
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    common::write_ledger(&ledger_path, "[meta]\noracle_version = \"0.48.0\"\n");
 
-    let a = normalized(&oracle, &["count"], &vault);
-    let b = normalized(&oracle, &["count", "--format", "json"], &vault);
-    assert!(
-        !verdict::outputs_match(&a, &b),
-        "`count` and `count --format json` must produce different output for this fabrication to be meaningful"
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: Path::new("norn"),
+        rewrite: Path::new(ECHO),
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    let report = run::run_suites(&config, FAB_SUITES).expect("run should succeed");
+
+    assert_eq!(
+        report.outcomes.len(),
+        1,
+        "the one ported case runs in gated mode"
     );
-
-    let empty_ledger =
-        Ledger::parse("[meta]\noracle_version = \"0.48.0\"\n", &known_ids()).unwrap();
-    let verdict = match empty_ledger.entry_for_case(FABRICATED_CASE_ID) {
-        Some(entry) => Verdict::Diverged {
-            entry_id: entry.id.clone(),
-        },
-        None => Verdict::Drift,
-    };
-    assert_eq!(verdict, Verdict::Drift);
-
-    let ran: BTreeSet<&str> = [FABRICATED_CASE_ID].into_iter().collect();
-    let diverged: BTreeSet<&str> = BTreeSet::new(); // Drift is never cited, never counted as diverged
-    let stale_entries: Vec<String> = empty_ledger
-        .stale_entries(&ran, &diverged)
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-    let report = RunReport {
-        outcomes: vec![CaseOutcome {
-            case_id: FABRICATED_CASE_ID,
-            suite_name: "test",
-            verdict,
-        }],
-        stale_entries,
-        oracle_version: "0.48.0".to_string(),
-    };
+    assert_eq!(report.outcomes[0].verdict, Verdict::Drift);
+    assert!(report.stale_entries.is_empty());
     assert_eq!(report.exit_code(), 1);
 }
 
 #[test]
-fn mismatch_covered_by_a_ledger_entry_is_diverged_citing_it_and_exits_0() {
-    if !common::oracle_present() {
-        eprintln!("skip: `norn` not found on PATH — verdicts skipped");
+fn candidate_echo_covered_by_a_ledger_entry_is_diverged_citing_it_and_exits_0() {
+    if common::oracle_missing("verdicts") {
         return;
     }
-    let dir = tempfile::TempDir::new().unwrap();
-    let vault = dir.path().join("vault");
-    norn_fixtures::generate(&norn_fixtures::Profile::clean(), 1, &vault).unwrap();
-    let oracle = common::oracle_path();
-
-    let a = normalized(&oracle, &["count"], &vault);
-    let b = normalized(&oracle, &["count", "--format", "json"], &vault);
-    assert!(!verdict::outputs_match(&a, &b));
-
     let ledger_dir = tempfile::TempDir::new().unwrap();
     let ledger_path = ledger_dir.path().join("ledger.toml");
     common::write_ledger(
@@ -112,87 +115,42 @@ oracle_version = "0.48.0"
 
 [[entry]]
 id = "TEST-DIVERGED"
-surface = "count (fabricated)"
-cases = ["{FABRICATED_CASE_ID}"]
-old = "count (text)"
-new = "count --format json"
+surface = "help (fabricated)"
+cases = ["{FAB_CASE_ID}"]
+old = "help text"
+new = "echo of argv"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#
         ),
     );
-    let ledger = Ledger::load(&ledger_path, &known_ids()).unwrap();
 
-    let verdict = match ledger.entry_for_case(FABRICATED_CASE_ID) {
-        Some(entry) => Verdict::Diverged {
-            entry_id: entry.id.clone(),
-        },
-        None => Verdict::Drift,
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: Path::new("norn"),
+        rewrite: Path::new(ECHO),
+        ledger_path: &ledger_path,
+        suite_filter: &[],
     };
-    assert_eq!(
-        verdict,
-        Verdict::Diverged {
-            entry_id: "TEST-DIVERGED".to_string()
-        }
-    );
+    let report = run::run_suites(&config, FAB_SUITES).expect("run should succeed");
 
-    let ran: BTreeSet<&str> = [FABRICATED_CASE_ID].into_iter().collect();
-    let diverged: BTreeSet<&str> = [FABRICATED_CASE_ID].into_iter().collect();
-    let stale_entries: Vec<String> = ledger
-        .stale_entries(&ran, &diverged)
-        .into_iter()
-        .map(String::from)
-        .collect();
+    assert_eq!(
+        diverged_verdicts(&report),
+        vec!["TEST-DIVERGED".to_string()],
+        "the mismatch is covered by exactly one entry, cited by id"
+    );
     assert!(
-        stale_entries.is_empty(),
+        report.stale_entries.is_empty(),
         "the entry's case diverged, so it is not stale"
     );
-
-    let report = RunReport {
-        outcomes: vec![CaseOutcome {
-            case_id: FABRICATED_CASE_ID,
-            suite_name: "test",
-            verdict,
-        }],
-        stale_entries,
-        oracle_version: "0.48.0".to_string(),
-    };
     assert_eq!(report.exit_code(), 0);
 }
 
 #[test]
 fn an_entry_citing_a_matching_case_is_stale_and_exits_1() {
-    if !common::oracle_present() {
-        eprintln!("skip: `norn` not found on PATH — verdicts skipped");
+    if common::oracle_missing("verdicts") {
         return;
     }
-    let dir = tempfile::TempDir::new().unwrap();
-    let vault = dir.path().join("vault");
-    norn_fixtures::generate(&norn_fixtures::Profile::clean(), 1, &vault).unwrap();
-    let oracle = common::oracle_path();
-
-    // A genuine, unforced match: `b` is `a`, not a second live invocation.
-    //
-    // This deliberately does NOT re-run the oracle a second time and rely
-    // on the two runs agreeing. Empirically discovered against the real
-    // oracle (v0.48.0): a freshly generated vault's on-disk cache
-    // sometimes fails to persist its `schema_version` meta row, and once
-    // that happens every subsequent invocation against that vault prints a
-    // `cache is corrupted (...); rebuilding` line to stderr — but *which*
-    // invocation first sees it (the 1st, the 2nd, later, or never) is not
-    // consistently reproducible across otherwise-identical fixture
-    // regenerations. That is a real oracle finding (reported separately),
-    // but it is orthogonal to what this test checks: verdict/staleness
-    // composition given a Match precondition never even consults the
-    // ledger for the verdict itself (see `run.rs`), so one real
-    // invocation, compared to itself, exercises exactly that path without
-    // being at the mercy of the oracle's cache-rebuild timing. Real
-    // same-process determinism across the whole case set is what
-    // `self_check.rs` proves, not this test.
-    let a = normalized(&oracle, &["count"], &vault);
-    let b = a.clone();
-    assert!(verdict::outputs_match(&a, &b));
-
     let ledger_dir = tempfile::TempDir::new().unwrap();
     let ledger_path = ledger_dir.path().join("ledger.toml");
     common::write_ledger(
@@ -204,42 +162,37 @@ oracle_version = "0.48.0"
 
 [[entry]]
 id = "TEST-STALE"
-surface = "count (fabricated)"
-cases = ["{FABRICATED_CASE_ID}"]
-old = "count (text)"
-new = "count (text)"
+surface = "help (fabricated)"
+cases = ["{FAB_CASE_ID}"]
+old = "help text"
+new = "help text"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#
         ),
     );
-    let ledger = Ledger::load(&ledger_path, &known_ids()).unwrap();
 
-    // Identical argv means Match — the entry is never even consulted for
-    // the verdict, exactly as `run::run` would behave.
-    let verdict = Verdict::Match;
-
-    let ran: BTreeSet<&str> = [FABRICATED_CASE_ID].into_iter().collect();
-    let diverged: BTreeSet<&str> = BTreeSet::new(); // nothing diverged: the cited case matched
-    let stale_entries: Vec<String> = ledger
-        .stale_entries(&ran, &diverged)
-        .into_iter()
-        .map(String::from)
-        .collect();
-    assert_eq!(stale_entries, vec!["TEST-STALE".to_string()]);
-
-    let report = RunReport {
-        outcomes: vec![CaseOutcome {
-            case_id: FABRICATED_CASE_ID,
-            suite_name: "test",
-            verdict,
-        }],
-        stale_entries,
-        oracle_version: "0.48.0".to_string(),
+    // rewrite := the oracle itself. Per-side vaults (finding 5) mean each
+    // binary reads its own freshly generated copy, so the two `--help`
+    // runs Match; the entry then cites a case that did not diverge -> stale.
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: Path::new("norn"),
+        rewrite: Path::new("norn"),
+        ledger_path: &ledger_path,
+        suite_filter: &[],
     };
+    let report = run::run_suites(&config, FAB_SUITES).expect("run should succeed");
+
+    assert_eq!(
+        report.outcomes[0].verdict,
+        Verdict::Match,
+        "oracle vs. oracle over identical vaults must match"
+    );
+    assert_eq!(report.stale_entries, vec!["TEST-STALE".to_string()]);
     assert_eq!(
         report.exit_code(),
         1,
-        "a stale entry must fail the run even though the one case in it Matched"
+        "a stale entry fails the run even though its one case matched"
     );
 }

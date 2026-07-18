@@ -31,13 +31,25 @@ pub struct NormalizedOutput {
     pub exit_code: i32,
 }
 
-pub fn normalize_text(text: &str, vault_root: &Path, steps: &[Normalization]) -> String {
+/// Normalize `text` under `steps`, replacing any of `vault_roots` with
+/// `<VAULT>`. Multiple root spellings are accepted because a temp vault has
+/// more than one valid absolute spelling on some platforms — notably macOS,
+/// where `/var/folders/...` is a symlink alias of the canonical
+/// `/private/var/folders/...` and `norn` may echo either. Longer spellings
+/// are replaced first so a shorter alias (`/var/..`) never partially
+/// rewrites a longer one (`/private/var/..`).
+pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]) -> String {
     let mut out = text.to_string();
     for step in steps {
         match step {
             Normalization::VaultRoot => {
-                let root = vault_root.display().to_string();
-                if !root.is_empty() {
+                let mut roots: Vec<String> = vault_roots
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                roots.sort_by_key(|s| std::cmp::Reverse(s.len()));
+                for root in roots {
                     out = out.replace(&root, "<VAULT>");
                 }
             }
@@ -48,15 +60,15 @@ pub fn normalize_text(text: &str, vault_root: &Path, steps: &[Normalization]) ->
 
 pub fn normalize_output(
     raw: &crate::exec::RawOutput,
-    vault_root: &Path,
+    vault_roots: &[&Path],
     steps: &[Normalization],
 ) -> Option<NormalizedOutput> {
     let exit_code = raw.exit_code?;
     let stdout = String::from_utf8_lossy(&raw.stdout);
     let stderr = String::from_utf8_lossy(&raw.stderr);
     Some(NormalizedOutput {
-        stdout: normalize_text(&stdout, vault_root, steps),
-        stderr: normalize_text(&stderr, vault_root, steps),
+        stdout: normalize_text(&stdout, vault_roots, steps),
+        stderr: normalize_text(&stderr, vault_roots, steps),
         exit_code,
     })
 }

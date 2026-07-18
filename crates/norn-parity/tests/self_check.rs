@@ -10,8 +10,7 @@ use norn_parity::Verdict;
 
 #[test]
 fn every_case_matches_oracle_vs_itself() {
-    if !common::oracle_present() {
-        eprintln!("skip: `norn` not found on PATH — self_check skipped");
+    if common::oracle_missing("self_check") {
         return;
     }
 

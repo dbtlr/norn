@@ -6,19 +6,22 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-/// Skip-if-absent oracle guard — mirrors
-/// `crates/norn-fixtures/tests/oracle_smoke.rs`. `norn` (the parity
-/// oracle, ADR 0018) is installed before `cargo test` in CI, so these run
-/// for real there and locally whenever `norn` is on PATH; they skip
-/// cleanly when it is absent.
-pub fn oracle_present() -> bool {
-    Command::new("norn")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+pub use norn_fixtures::testing::oracle_present;
+
+/// The single skip-if-no-oracle guard for every oracle-touching test in this
+/// crate: when `norn` is absent it prints one `skip:` line naming the suite
+/// and returns `true`, so the caller can `return`. Collapses the seven
+/// verbatim `if !oracle_present() { eprintln!(...); return; }` blocks into
+/// one call site shape. Wraps the shared probe in
+/// `norn_fixtures::testing::oracle_present`.
+pub fn oracle_missing(suite: &str) -> bool {
+    if oracle_present() {
+        false
+    } else {
+        eprintln!("skip: `norn` not found on PATH — {suite} skipped");
+        true
+    }
 }
 
 /// The bare oracle binary name — `Command::new("norn")` resolves it via
@@ -30,23 +33,12 @@ pub fn oracle_path() -> PathBuf {
 
 /// The workspace root, found by walking up from this crate's manifest
 /// directory (`CARGO_MANIFEST_DIR`, always `.../crates/norn-parity`) to the
-/// ancestor whose `Cargo.toml` declares `[workspace]`.
+/// ancestor whose `Cargo.toml` declares `[workspace]`. Delegates to the
+/// crate's one discovery impl (`norn_parity::paths`).
 pub fn workspace_root() -> PathBuf {
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    loop {
-        let candidate = dir.join("Cargo.toml");
-        if candidate.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&candidate) {
-                if text.contains("[workspace]") {
-                    return dir;
-                }
-            }
-        }
-        assert!(
-            dir.pop(),
-            "walked past filesystem root looking for the workspace root"
-        );
-    }
+    let start = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    norn_parity::paths::find_workspace_root(&start)
+        .expect("walked past filesystem root looking for the workspace root")
 }
 
 /// The rewrite binary (`norn`, the phase-0 skeleton) built in the *debug*

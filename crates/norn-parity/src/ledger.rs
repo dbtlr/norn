@@ -82,6 +82,10 @@ pub enum LedgerError {
         entry: String,
         case: String,
     },
+    UnportedCaseId {
+        entry: String,
+        case: String,
+    },
     CaseCitedByMultipleEntries {
         case: String,
         first_entry: String,
@@ -117,6 +121,12 @@ impl std::fmt::Display for LedgerError {
             LedgerError::UnknownCaseId { entry, case } => {
                 write!(f, "entry {entry} cites unknown case id `{case}`")
             }
+            LedgerError::UnportedCaseId { entry, case } => write!(
+                f,
+                "entry {entry} cites case `{case}` whose surface is not yet ported — \
+                 divergence can only be observed on a ported surface, so an entry for an \
+                 unported one is premature"
+            ),
             LedgerError::CaseCitedByMultipleEntries {
                 case,
                 first_entry,
@@ -185,9 +195,17 @@ impl Ledger {
     /// Parse and structurally validate ledger TOML text: missing required
     /// fields, an unknown `reason`, a duplicate entry id, a case id cited by
     /// more than one entry (the load-time corollary of a Diverged verdict
-    /// needing to resolve to exactly one entry), and an entry citing a case
-    /// id absent from `known_case_ids`.
-    pub fn parse(text: &str, known_case_ids: &BTreeSet<&str>) -> Result<Ledger, LedgerError> {
+    /// needing to resolve to exactly one entry), an entry citing a case id
+    /// absent from `known_case_ids`, and — the phase-0 rot guard — an entry
+    /// citing a known case id that is not in `ported_case_ids`. An entry for
+    /// an unported surface is premature: divergence can only be observed once
+    /// that surface is ported (until then a gated run executes zero of its
+    /// cases and the stale check never fires), so it is rejected at load.
+    pub fn parse(
+        text: &str,
+        known_case_ids: &BTreeSet<&str>,
+        ported_case_ids: &BTreeSet<&str>,
+    ) -> Result<Ledger, LedgerError> {
         let root: toml::Table = text
             .parse()
             .map_err(|e: toml::de::Error| LedgerError::Parse {
@@ -251,6 +269,12 @@ impl Ledger {
                         case: case.clone(),
                     });
                 }
+                if !ported_case_ids.contains(case.as_str()) {
+                    return Err(LedgerError::UnportedCaseId {
+                        entry: id.clone(),
+                        case: case.clone(),
+                    });
+                }
                 if let Some(&existing) = case_index.get(case) {
                     return Err(LedgerError::CaseCitedByMultipleEntries {
                         case: case.clone(),
@@ -279,12 +303,16 @@ impl Ledger {
         })
     }
 
-    pub fn load(path: &Path, known_case_ids: &BTreeSet<&str>) -> Result<Ledger, LedgerError> {
+    pub fn load(
+        path: &Path,
+        known_case_ids: &BTreeSet<&str>,
+        ported_case_ids: &BTreeSet<&str>,
+    ) -> Result<Ledger, LedgerError> {
         let text = fs::read_to_string(path).map_err(|e| LedgerError::Io {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
-        Self::parse(&text, known_case_ids).map_err(|e| match e {
+        Self::parse(&text, known_case_ids, ported_case_ids).map_err(|e| match e {
             LedgerError::Parse { message, .. } => LedgerError::Parse {
                 path: path.display().to_string(),
                 message,

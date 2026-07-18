@@ -80,24 +80,41 @@ pub fn run_argv(
             source,
         })?;
 
-    if let Some(stdin_text) = stdin {
+    // Feed stdin from a dedicated writer thread rather than writing inline
+    // before `wait_with_output`. An inline `write_all` deadlocks once the
+    // payload plus the child's own output exceed the OS pipe buffers (~64KB):
+    // the child blocks writing stdout while we block writing stdin, and
+    // neither side drains the other. Draining stdout/stderr concurrently
+    // (via `wait_with_output`) while a separate thread writes stdin avoids
+    // it. Matters for phase-3 MCP frame driving; harmless for today's
+    // `stdin: None` cases.
+    let stdin_writer = if let Some(stdin_text) = stdin {
         // `.expect` on the piped handle is safe: we just requested it above.
         let mut child_stdin = child.stdin.take().expect("stdin was piped");
-        child_stdin
-            .write_all(stdin_text.as_bytes())
-            .map_err(|source| ExecError::Stdin {
-                binary: binary_label.clone(),
-                source,
-            })?;
-        // Drop closes the pipe so the child sees EOF.
+        let bytes = stdin_text.as_bytes().to_vec();
+        Some(std::thread::spawn(move || {
+            // Drop (at end of closure) closes the pipe so the child sees EOF.
+            child_stdin.write_all(&bytes)
+        }))
     } else {
         drop(child.stdin.take());
-    }
+        None
+    };
 
     let output = child.wait_with_output().map_err(|source| ExecError::Wait {
-        binary: binary_label,
+        binary: binary_label.clone(),
         source,
     })?;
+
+    if let Some(handle) = stdin_writer {
+        handle
+            .join()
+            .expect("stdin writer thread panicked")
+            .map_err(|source| ExecError::Stdin {
+                binary: binary_label,
+                source,
+            })?;
+    }
 
     Ok(RawOutput {
         stdout: output.stdout,

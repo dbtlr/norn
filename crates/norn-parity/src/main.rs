@@ -5,12 +5,14 @@
 //! Hand-parsed argv (std::env::args) — no `clap`, matching `norn-fixtures`'
 //! bin (see `crates/norn-fixtures/src/main.rs`).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use norn_parity::ledger::Ledger;
 use norn_parity::run::{self, Mode, RunConfig};
-use norn_parity::{consistency, report};
+use norn_parity::{cases, consistency, exec, paths, report};
 
 fn usage() -> String {
     "usage: norn-parity [--self-check | --all | --consistency] --oracle <path> [--rewrite <path>] [--ledger <path>] [--suite <name>]...\n\n\
@@ -119,29 +121,9 @@ fn resolve_binary(raw: &str) -> Result<PathBuf, String> {
     Err(format!("`{raw}` not found on PATH"))
 }
 
-/// Walk up from `start` to the ancestor directory whose `Cargo.toml`
-/// declares `[workspace]` — the default `--ledger` path is
-/// `<that dir>/docs/parity-ledger.toml`.
-fn find_workspace_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = start.to_path_buf();
-    loop {
-        let candidate = dir.join("Cargo.toml");
-        if candidate.is_file() {
-            if let Ok(text) = fs::read_to_string(&candidate) {
-                if text.contains("[workspace]") {
-                    return Some(dir);
-                }
-            }
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
-
 fn default_ledger_path() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read cwd: {e}"))?;
-    find_workspace_root(&cwd)
+    paths::find_workspace_root(&cwd)
         .map(|root| root.join("docs/parity-ledger.toml"))
         .ok_or_else(|| {
             format!(
@@ -151,31 +133,91 @@ fn default_ledger_path() -> Result<PathBuf, String> {
         })
 }
 
+/// Resolve a binary path or map the failure to an exit-2 code, emitting the
+/// standard `norn-parity: {label} binary: {e}` diagnostic — the one home for
+/// the three verbatim resolve-or-exit blocks the modes shared.
+fn resolve_or_exit(raw: &str, label: &str) -> Result<PathBuf, ExitCode> {
+    resolve_binary(raw).map_err(|e| {
+        eprintln!("norn-parity: {label} binary: {e}");
+        ExitCode::from(2)
+    })
+}
+
+fn resolve_ledger_or_exit(args: &Args) -> Result<PathBuf, ExitCode> {
+    match &args.ledger {
+        Some(p) => Ok(p.clone()),
+        None => default_ledger_path().map_err(|e| {
+            eprintln!("norn-parity: {e}");
+            ExitCode::from(2)
+        }),
+    }
+}
+
+/// Probe the oracle's `--version`, require success, and return its
+/// semver-shaped token — the pin the ledger's `meta.oracle_version` must
+/// match.
+fn oracle_version_or_exit(oracle: &Path) -> Result<String, ExitCode> {
+    let raw = exec::probe_version(oracle).map_err(|e| {
+        eprintln!("norn-parity: oracle --version failed: {e}");
+        ExitCode::from(2)
+    })?;
+    if raw.exit_code != Some(0) {
+        eprintln!(
+            "norn-parity: oracle --version did not succeed (exit {:?})",
+            raw.exit_code
+        );
+        return Err(ExitCode::from(2));
+    }
+    let stdout = String::from_utf8_lossy(&raw.stdout);
+    run::parse_version_token(&stdout).ok_or_else(|| {
+        eprintln!("norn-parity: oracle --version produced no semver-shaped token: {stdout:?}");
+        ExitCode::from(2)
+    })
+}
+
 fn run_consistency(args: &Args) -> ExitCode {
-    let oracle_path = match resolve_binary(&args.oracle) {
+    let oracle_path = match resolve_or_exit(&args.oracle, "oracle") {
         Ok(p) => p,
+        Err(code) => return code,
+    };
+
+    // Consistency is a pin-scoped trust claim (its invariants describe the
+    // pinned oracle) — so it loads the ledger meta and enforces the pin, like
+    // the comparison modes, even though it consults no entries and runs no
+    // cases (ADR 0018 mode/ledger/pin matrix).
+    let oracle_version = match oracle_version_or_exit(&oracle_path) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let ledger_path = match resolve_ledger_or_exit(args) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let known: BTreeSet<&str> = cases::all_case_ids().into_iter().collect();
+    let ported: BTreeSet<&str> = cases::ported_case_ids().into_iter().collect();
+    let ledger = match Ledger::load(&ledger_path, &known, &ported) {
+        Ok(l) => l,
         Err(e) => {
-            eprintln!("norn-parity: oracle binary: {e}");
+            eprintln!("norn-parity: {e}");
             return ExitCode::from(2);
         }
     };
+    if let Err(e) = ledger.check_oracle_version(&oracle_version) {
+        eprintln!("norn-parity: {e}");
+        return ExitCode::from(2);
+    }
+
     match consistency::run(&oracle_path) {
-        Ok(findings) if findings.is_empty() => {
-            println!("consistency: 0 disagreements");
-            ExitCode::SUCCESS
-        }
         Ok(findings) => {
-            for f in &findings {
-                println!(
-                    "disagreement [{}] fixture={}: {}",
-                    f.check, f.fixture, f.message
+            let (stdout, exit) = report::render_consistency(&findings);
+            print!("{stdout}");
+            if exit != 0 {
+                eprintln!(
+                    "norn-parity: {} oracle self-consistency disagreement(s) — candidate divergence-ledger entries (ADR 0018)",
+                    findings.len()
                 );
             }
-            eprintln!(
-                "norn-parity: {} oracle self-consistency disagreement(s) — candidate divergence-ledger entries (ADR 0018)",
-                findings.len()
-            );
-            ExitCode::from(1)
+            ExitCode::from(exit)
         }
         Err(e) => {
             eprintln!("norn-parity: {e}");
@@ -185,29 +227,25 @@ fn run_consistency(args: &Args) -> ExitCode {
 }
 
 fn run_comparison(args: &Args, mode: Mode) -> ExitCode {
-    let oracle_path = match resolve_binary(&args.oracle) {
+    let oracle_path = match resolve_or_exit(&args.oracle, "oracle") {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("norn-parity: oracle binary: {e}");
-            return ExitCode::from(2);
-        }
+        Err(code) => return code,
     };
-    let rewrite_path = match resolve_binary(&args.rewrite) {
+    let rewrite_path = match resolve_or_exit(&args.rewrite, "rewrite") {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("norn-parity: rewrite binary: {e}");
-            return ExitCode::from(2);
-        }
+        Err(code) => return code,
     };
-    let ledger_path = match &args.ledger {
-        Some(p) => p.clone(),
-        None => match default_ledger_path() {
+    // Self-check is ledger-blind: it must run without any ledger (so a case
+    // set can be vetted against a NEW oracle before the ledger is updated),
+    // so its default-path resolution is skipped entirely. Gated/all resolve
+    // and load the ledger.
+    let ledger_path = if matches!(mode, Mode::SelfCheck) {
+        PathBuf::new()
+    } else {
+        match resolve_ledger_or_exit(args) {
             Ok(p) => p,
-            Err(e) => {
-                eprintln!("norn-parity: {e}");
-                return ExitCode::from(2);
-            }
-        },
+            Err(code) => return code,
+        }
     };
 
     let config = RunConfig {

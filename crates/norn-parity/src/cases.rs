@@ -1,11 +1,14 @@
 //! The parity case/suite catalog (ADR 0018).
 //!
-//! Every [`Suite`] is `ported: false` today — the rewrite binary is still
+//! Every [`Case`] is `ported: false` today — the rewrite binary is still
 //! the phase-0 skeleton (prints a notice, exits 2; see `crates/norn/src/main.rs`).
 //! The default gated bin run therefore filters to zero cases and reports
-//! "0 suites gated", exit 0. These suites are proven sound today via
-//! `--self-check` (oracle vs. itself) and flip to `ported: true` suite by
-//! suite as phases 1-3 port their surfaces.
+//! "0 suites gated", exit 0. These cases are proven sound today via
+//! `--self-check` (oracle vs. itself) and flip to `ported: true` one at a
+//! time as phases 1-3 port their surfaces. `ported` lives on the [`Case`],
+//! not the [`Suite`]: phase 1 ports commands individually, so case-level
+//! granularity avoids a reshuffle at the first port. [`Suite`] stays a
+//! reporting/grouping label.
 //!
 //! Every case here was run against the installed oracle (v0.48.0) and
 //! confirmed rerun-stable (identical stdout/stderr/exit code across repeated
@@ -37,6 +40,8 @@
 //! suite was moved off the fixture the `validate`/`read`/`describe` suites
 //! share.
 
+use crate::normalize::Normalization;
+
 /// One fixture vault a [`Case`] runs against: a named `norn-fixtures`
 /// [`Profile`](norn_fixtures::Profile) plus the seed that makes generation
 /// deterministic.
@@ -50,21 +55,45 @@ pub struct Fixture {
 /// vault, with the vault directory as the process cwd (no `-C` flag — see
 /// `crate::exec`).
 pub struct Case {
-    /// Unique across all suites (enforced by a debug assertion in
-    /// [`suites`] and exercised by the ledger's unknown-case-id check).
+    /// Unique across all suites (enforced at runtime in `crate::run` —
+    /// [`duplicate_case_id`] — and exercised by the ledger's unknown-case-id
+    /// check).
     pub id: &'static str,
     pub argv: &'static [&'static str],
     pub fixture: Fixture,
     /// Future MCP frame driving (phase 3, stdin-fed JSON-RPC frames). `None`
     /// everywhere today — no case exercises `norn mcp` yet.
     pub stdin: Option<&'static str>,
+    /// Gates whether the default (gated) bin run includes this case. Phase 0:
+    /// `false` everywhere; flips to `true` per-command as phases 1-3 port
+    /// surfaces. A ledger entry may only cite `ported` cases (see
+    /// `crate::ledger`) — divergence can only be observed on a ported surface.
+    pub ported: bool,
+    /// The exit code the oracle is expected to produce for this argv. Any
+    /// oracle exit differing from this — in self-check AND comparison modes —
+    /// is a runner error (exit 2) naming the case, not a quiet match: it
+    /// catches silent case rot (e.g. a `get` target that stops existing
+    /// yields identical error/error output and would Match forever).
+    pub expect_oracle_exit: i32,
+    /// Vault-relative doc path this argv depends on (e.g. the `get` target),
+    /// checked against the generated fixture [`Manifest`](norn_fixtures::Manifest)
+    /// before the case runs. Unmet -> runner error naming case + requirement.
+    pub requires_doc: Option<&'static str>,
+    /// Validation finding code this argv depends on (e.g. the `--code`
+    /// filter), checked against the manifest's expected finding codes. Unmet
+    /// -> runner error naming case + requirement.
+    pub requires_code: Option<&'static str>,
+    /// Per-case normalization steps, appended to the universal
+    /// [`DEFAULT`](crate::normalize::DEFAULT). Empty everywhere today —
+    /// later-phase ported surfaces that emit e.g. timestamps add steps here
+    /// deliberately.
+    pub normalize: &'static [Normalization],
 }
 
-/// A named group of [`Case`]s. `ported` gates whether the default bin run
-/// includes this suite (phase 0: always `false`, see module docs).
+/// A named group of [`Case`]s — purely a reporting/grouping label. Whether a
+/// case is gated lives on the [`Case`]'s own `ported` flag, not here.
 pub struct Suite {
     pub name: &'static str,
-    pub ported: bool,
     pub cases: &'static [Case],
 }
 
@@ -103,24 +132,44 @@ const HELP_FIXTURE: Fixture = Fixture {
     seed: 2,
 };
 
+/// Every current case exits 0 on the oracle, reads no case-specific doc, and
+/// needs no default-appended normalization — the fields that vary are spelled
+/// out per case below.
+const NO_NORM: &[Normalization] = &[];
+
 const HELP_CASES: &[Case] = &[
     Case {
         id: "help-bare",
         argv: &["--help"],
         fixture: HELP_FIXTURE,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
     Case {
         id: "help-validate",
         argv: &["validate", "--help"],
         fixture: HELP_FIXTURE,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
     Case {
         id: "help-find",
         argv: &["find", "--help"],
         fixture: HELP_FIXTURE,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
 ];
 
@@ -130,12 +179,22 @@ const VALIDATE_CASES: &[Case] = &[
         argv: &["validate", "--summary", "--format", "json"],
         fixture: CLEAN_1,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
     Case {
         id: "validate-summary-zoo",
         argv: &["validate", "--summary", "--format", "json"],
         fixture: ZOO_1,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
     // Narrowed from bare `validate --format json` — see module docs: the
     // oracle's raw finding order is not rerun-stable when a document
@@ -154,6 +213,13 @@ const VALIDATE_CASES: &[Case] = &[
         ],
         fixture: ZOO_1,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        // The `--code` filter is only meaningful if the zoo fixture actually
+        // emits this code; tie the argv to the manifest that generates it.
+        requires_code: Some("frontmatter-required-field-missing"),
+        normalize: NO_NORM,
     },
 ];
 
@@ -163,6 +229,11 @@ const READ_CASES: &[Case] = &[
         argv: &["count"],
         fixture: CLEAN_1,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
     Case {
         id: "read-find-json-zoo",
@@ -171,19 +242,35 @@ const READ_CASES: &[Case] = &[
         argv: &["find", "--format", "json", "--all"],
         fixture: ZOO_1,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
     Case {
         id: "read-find-col-title-clean",
         argv: &["find", "--col", "title", "--format", "json", "--all"],
         fixture: CLEAN_1,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
     },
     Case {
         id: "read-get-alpha-zoo",
-        // Stem form, not `notes/alpha` — see module docs.
+        // Stem form, not `notes/alpha` — see module docs. The resolved target
+        // is the vault-relative doc below; tie the argv to the manifest.
         argv: &["get", "alpha", "--format", "json"],
         fixture: ZOO_1,
         stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
     },
 ];
 
@@ -192,38 +279,37 @@ const DESCRIBE_CASES: &[Case] = &[Case {
     argv: &["describe"],
     fixture: ZOO_1,
     stdin: None,
+    ported: false,
+    expect_oracle_exit: 0,
+    requires_doc: None,
+    requires_code: None,
+    normalize: NO_NORM,
 }];
 
 const SUITES: &[Suite] = &[
     Suite {
         name: "help",
-        ported: false,
         cases: HELP_CASES,
     },
     Suite {
         name: "validate",
-        ported: false,
         cases: VALIDATE_CASES,
     },
     Suite {
         name: "read",
-        ported: false,
         cases: READ_CASES,
     },
     Suite {
         name: "describe",
-        ported: false,
         cases: DESCRIBE_CASES,
     },
 ];
 
 /// All suites, in declaration order — that order is the run order and the
-/// report order (determinism constraint, ADR 0018).
+/// report order (determinism constraint, ADR 0018). Case-id uniqueness is
+/// enforced at runtime by the runner via [`duplicate_case_id`], not just a
+/// debug assertion.
 pub fn suites() -> &'static [Suite] {
-    debug_assert!(
-        all_case_ids_unique(SUITES),
-        "case ids must be unique across all suites"
-    );
     SUITES
 }
 
@@ -235,15 +321,80 @@ pub fn all_case_ids() -> Vec<&'static str> {
         .collect()
 }
 
-fn all_case_ids_unique(suites: &[Suite]) -> bool {
-    let mut seen: Vec<&str> = Vec::new();
+/// Every `ported == true` case id, in declaration order. A ledger entry may
+/// only cite these (see `crate::ledger`); phase 0: empty.
+pub fn ported_case_ids() -> Vec<&'static str> {
+    suites()
+        .iter()
+        .flat_map(|s| s.cases.iter().filter(|c| c.ported).map(|c| c.id))
+        .collect()
+}
+
+/// The first case id that appears in more than one case across `suites`, or
+/// `None` if every id is unique. The runner treats a duplicate as an error
+/// (exit 2): a duplicate id would bind two cases to one ledger entry
+/// silently. Runtime-enforced (not `debug_assert`-only) so release builds
+/// catch it too.
+pub fn duplicate_case_id(suites: &[Suite]) -> Option<&'static str> {
+    let mut seen: Vec<&'static str> = Vec::new();
     for suite in suites {
         for case in suite.cases {
             if seen.contains(&case.id) {
-                return false;
+                return Some(case.id);
             }
             seen.push(case.id);
         }
     }
-    true
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static A: Case = Case {
+        id: "dup",
+        argv: &["count"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    };
+    static B: Case = Case {
+        id: "dup",
+        argv: &["describe"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    };
+
+    #[test]
+    fn duplicate_case_id_flags_a_repeated_id_across_suites() {
+        let suites = &[
+            Suite {
+                name: "one",
+                cases: std::slice::from_ref(&A),
+            },
+            Suite {
+                name: "two",
+                cases: std::slice::from_ref(&B),
+            },
+        ];
+        assert_eq!(duplicate_case_id(suites), Some("dup"));
+    }
+
+    #[test]
+    fn duplicate_case_id_none_when_all_unique() {
+        assert!(
+            duplicate_case_id(suites()).is_none(),
+            "the real catalog must have unique case ids"
+        );
+    }
 }

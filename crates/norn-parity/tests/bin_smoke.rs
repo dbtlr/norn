@@ -18,8 +18,7 @@ fn bin() -> &'static str {
 
 #[test]
 fn self_check_end_to_end_is_all_match_exit_0() {
-    if !common::oracle_present() {
-        eprintln!("skip: `norn` not found on PATH — bin_smoke skipped");
+    if common::oracle_missing("bin_smoke") {
         return;
     }
     let workspace = common::workspace_root();
@@ -55,8 +54,7 @@ fn self_check_end_to_end_is_all_match_exit_0() {
 
 #[test]
 fn default_mode_reports_zero_suites_gated_exit_0() {
-    if !common::oracle_present() {
-        eprintln!("skip: `norn` not found on PATH — bin_smoke skipped");
+    if common::oracle_missing("bin_smoke") {
         return;
     }
     let workspace = common::workspace_root();
@@ -82,8 +80,7 @@ fn default_mode_reports_zero_suites_gated_exit_0() {
 
 #[test]
 fn consistency_mode_exits_0_with_no_disagreements() {
-    if !common::oracle_present() {
-        eprintln!("skip: `norn` not found on PATH — bin_smoke skipped");
+    if common::oracle_missing("bin_smoke") {
         return;
     }
     let workspace = common::workspace_root();

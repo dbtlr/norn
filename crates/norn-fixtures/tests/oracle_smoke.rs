@@ -19,15 +19,8 @@ mod common;
 use std::process::Command;
 
 use common::generate_vault;
+use norn_fixtures::testing::oracle_present;
 use norn_fixtures::Profile;
-
-fn oracle_present() -> bool {
-    Command::new("norn")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 fn validate_json(vault: &std::path::Path) -> String {
     let output = Command::new("norn")

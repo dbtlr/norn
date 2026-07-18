@@ -15,9 +15,9 @@
 
 use std::path::Path;
 
-use crate::cases::{CLEAN_1, ZOO_1};
+use crate::cases::{Fixture, CLEAN_1, ZOO_1};
 use crate::exec::{self, ExecError};
-use crate::fixtures::{FixtureCache, FixtureError};
+use crate::fixtures::{FixtureCache, FixtureError, Side};
 
 #[derive(Debug)]
 pub enum ConsistencyError {
@@ -25,11 +25,52 @@ pub enum ConsistencyError {
     Exec(ExecError),
     Unparseable {
         check: &'static str,
-        fixture: &'static str,
+        fixture: String,
         command: &'static str,
         raw: String,
     },
 }
+
+/// A failure raised by an individual invariant, before the runner attaches
+/// the check name and fixture label.
+enum CheckFailure {
+    Exec(ExecError),
+    Unparseable { command: &'static str, raw: String },
+}
+
+/// A single oracle self-consistency invariant bound to one fixture. The
+/// descriptor slice ([`CHECKS`]) is iterated uniformly so each check-name
+/// literal is stated exactly once.
+struct Check {
+    name: &'static str,
+    fixture: Fixture,
+    invariant: fn(&Path, &Path) -> Result<Option<String>, CheckFailure>,
+}
+
+/// The invariants, in report order (declaration order): both checks against
+/// zoo, then both against clean.
+const CHECKS: &[Check] = &[
+    Check {
+        name: "count-total-equals-find-rows",
+        fixture: ZOO_1,
+        invariant: check_count_matches_find,
+    },
+    Check {
+        name: "summary-findings-equals-codes-sum",
+        fixture: ZOO_1,
+        invariant: check_summary_findings_equals_codes_sum,
+    },
+    Check {
+        name: "count-total-equals-find-rows",
+        fixture: CLEAN_1,
+        invariant: check_count_matches_find,
+    },
+    Check {
+        name: "summary-findings-equals-codes-sum",
+        fixture: CLEAN_1,
+        invariant: check_summary_findings_equals_codes_sum,
+    },
+];
 
 impl std::fmt::Display for ConsistencyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,40 +93,47 @@ impl std::fmt::Display for ConsistencyError {
 impl std::error::Error for ConsistencyError {}
 
 /// One disagreement surfaced by a consistency check — reported and treated
-/// as a failing run (a candidate divergence-ledger entry per ADR 0018).
+/// as a failing run (a candidate divergence-ledger entry per ADR 0018). The
+/// fixture label is derived from the profile name and seed.
 pub struct Finding {
     pub check: &'static str,
-    pub fixture: &'static str,
+    pub fixture: String,
     pub message: String,
 }
 
-/// Run both consistency checks against the zoo and clean starter fixtures,
-/// oracle-only. Declaration order (zoo, then clean; check 1 before check 2)
-/// is the report order.
+fn fixture_label(fixture: &Fixture) -> String {
+    format!("{}-{}", fixture.profile_name, fixture.seed)
+}
+
+/// Run every descriptor in [`CHECKS`] oracle-only, in declaration order (the
+/// report order). Each check materializes its fixture on the oracle side and
+/// runs its invariant; a `Some(message)` is a disagreement.
 pub fn run(oracle: &Path) -> Result<Vec<Finding>, ConsistencyError> {
     let mut cache = FixtureCache::new().map_err(ConsistencyError::Fixture)?;
     let mut findings = Vec::new();
 
-    for (fixture_name, fixture) in [("zoo", ZOO_1), ("clean", CLEAN_1)] {
+    for check in CHECKS {
+        // Oracle-only module: a single side suffices (no oracle-vs-candidate
+        // comparison, so cross-binary symmetry is moot).
         let vault = cache
-            .vault_for(&fixture)
+            .vault_for(&check.fixture, Side::Oracle)
             .map_err(ConsistencyError::Fixture)?;
-
-        if let Some(message) = check_count_matches_find(oracle, fixture_name, &vault)? {
-            findings.push(Finding {
-                check: "count-total-equals-find-rows",
-                fixture: fixture_name,
+        match (check.invariant)(oracle, &vault) {
+            Ok(Some(message)) => findings.push(Finding {
+                check: check.name,
+                fixture: fixture_label(&check.fixture),
                 message,
-            });
-        }
-        if let Some(message) =
-            check_summary_findings_equals_codes_sum(oracle, fixture_name, &vault)?
-        {
-            findings.push(Finding {
-                check: "summary-findings-equals-codes-sum",
-                fixture: fixture_name,
-                message,
-            });
+            }),
+            Ok(None) => {}
+            Err(CheckFailure::Exec(e)) => return Err(ConsistencyError::Exec(e)),
+            Err(CheckFailure::Unparseable { command, raw }) => {
+                return Err(ConsistencyError::Unparseable {
+                    check: check.name,
+                    fixture: fixture_label(&check.fixture),
+                    command,
+                    raw,
+                })
+            }
         }
     }
 
@@ -95,21 +143,14 @@ pub fn run(oracle: &Path) -> Result<Vec<Finding>, ConsistencyError> {
 /// `count` total equals the number of rows `find --format json --all`
 /// returns. `--all` bypasses `find`'s default 10-row page — without it the
 /// two commands are not comparable.
-fn check_count_matches_find(
-    oracle: &Path,
-    fixture_name: &'static str,
-    vault: &Path,
-) -> Result<Option<String>, ConsistencyError> {
+fn check_count_matches_find(oracle: &Path, vault: &Path) -> Result<Option<String>, CheckFailure> {
     let count_out = exec::run_argv(oracle, &["count", "--format", "json"], None, vault)
-        .map_err(ConsistencyError::Exec)?;
+        .map_err(CheckFailure::Exec)?;
     let count_text = String::from_utf8_lossy(&count_out.stdout);
-    let total =
-        parse_int_field(&count_text, "total").ok_or_else(|| ConsistencyError::Unparseable {
-            check: "count-total-equals-find-rows",
-            fixture: fixture_name,
-            command: "count --format json",
-            raw: count_text.to_string(),
-        })?;
+    let total = parse_int_field(&count_text, "total").ok_or_else(|| CheckFailure::Unparseable {
+        command: "count --format json",
+        raw: count_text.to_string(),
+    })?;
 
     // `--all` alone only satisfies find's "opt in to a full-vault dump"
     // requirement — the default 10-row page still applies underneath it.
@@ -124,11 +165,9 @@ fn check_count_matches_find(
         None,
         vault,
     )
-    .map_err(ConsistencyError::Exec)?;
+    .map_err(CheckFailure::Exec)?;
     let find_text = String::from_utf8_lossy(&find_out.stdout);
-    let rows = count_documents(&find_text).ok_or_else(|| ConsistencyError::Unparseable {
-        check: "count-total-equals-find-rows",
-        fixture: fixture_name,
+    let rows = count_documents(&find_text).ok_or_else(|| CheckFailure::Unparseable {
         command: "find --format json --all --no-limit",
         raw: find_text.to_string(),
     })?;
@@ -146,28 +185,23 @@ fn check_count_matches_find(
 /// `codes` map values.
 fn check_summary_findings_equals_codes_sum(
     oracle: &Path,
-    fixture_name: &'static str,
     vault: &Path,
-) -> Result<Option<String>, ConsistencyError> {
+) -> Result<Option<String>, CheckFailure> {
     let out = exec::run_argv(
         oracle,
         &["validate", "--summary", "--format", "json"],
         None,
         vault,
     )
-    .map_err(ConsistencyError::Exec)?;
+    .map_err(CheckFailure::Exec)?;
     let text = String::from_utf8_lossy(&out.stdout);
 
     let findings_total =
-        parse_int_field(&text, "findings").ok_or_else(|| ConsistencyError::Unparseable {
-            check: "summary-findings-equals-codes-sum",
-            fixture: fixture_name,
+        parse_int_field(&text, "findings").ok_or_else(|| CheckFailure::Unparseable {
             command: "validate --summary --format json",
             raw: text.to_string(),
         })?;
-    let codes_sum = sum_codes_map(&text).ok_or_else(|| ConsistencyError::Unparseable {
-        check: "summary-findings-equals-codes-sum",
-        fixture: fixture_name,
+    let codes_sum = sum_codes_map(&text).ok_or_else(|| CheckFailure::Unparseable {
         command: "validate --summary --format json",
         raw: text.to_string(),
     })?;
@@ -180,6 +214,14 @@ fn check_summary_findings_equals_codes_sum(
         )))
     }
 }
+
+// The JSON scanners below (`parse_int_field`, `sum_codes_map`,
+// `count_documents`, `find_array_start`, `find_object_start`) read the
+// specific output shapes of the PINNED oracle version (see the ledger's
+// `meta.oracle_version`). Their validity is scoped to that version; every
+// oracle pin bump must revalidate them against the new output. They are
+// deliberately not a general JSON parser (ADR 0018: no `serde_json`
+// dependency for the harness).
 
 /// Parses the integer value of `"key": N` (or `"key":N`) at any nesting
 /// level — sufficient for the flat `total`/`findings` counters this module
@@ -200,9 +242,11 @@ fn parse_int_field(json: &str, key: &str) -> Option<i64> {
 /// object. Assumes flat integer values (true for `validate --summary`'s
 /// `codes` map) — not a general JSON object summer.
 fn sum_codes_map(json: &str) -> Option<i64> {
-    let needle = "\"codes\": {";
-    let start = json.find(needle)?;
-    let rest = &json[start + needle.len()..];
+    // Whitespace-tolerant: matches `"codes":{`, `"codes": {`, `"codes"  :  {`
+    // — the pinned oracle emits `"codes": {`, but the scanner should not be
+    // brittle to spacing changes within an otherwise-unchanged shape.
+    let open = find_object_start(json, "codes")?;
+    let rest = &json[open + 1..];
     let end = rest.find('}')?;
     let body = &rest[..end];
     let mut sum = 0i64;
@@ -266,16 +310,28 @@ fn count_documents(json: &str) -> Option<usize> {
 
 /// The byte index of the `[` opening the array value of `"key":` in `json`.
 fn find_array_start(json: &str, key: &str) -> Option<usize> {
+    find_value_open(json, key, b'[')
+}
+
+/// The byte index of the `{` opening the object value of `"key":` in `json`.
+fn find_object_start(json: &str, key: &str) -> Option<usize> {
+    find_value_open(json, key, b'{')
+}
+
+/// The byte index of the `open` delimiter beginning the value of `"key":`,
+/// tolerating arbitrary whitespace between the key, the colon, and the
+/// delimiter.
+fn find_value_open(json: &str, key: &str, open: u8) -> Option<usize> {
     let needle = format!("\"{key}\"");
     let key_pos = json.find(&needle)?;
     let after_key = &json[key_pos + needle.len()..];
     let colon_rel = after_key.find(':')?;
     let after_colon = &after_key[colon_rel + 1..];
-    let bracket_rel = after_colon.find(|c: char| !c.is_whitespace())?;
-    if after_colon.as_bytes().get(bracket_rel) != Some(&b'[') {
+    let delim_rel = after_colon.find(|c: char| !c.is_whitespace())?;
+    if after_colon.as_bytes().get(delim_rel) != Some(&open) {
         return None;
     }
-    Some(key_pos + needle.len() + colon_rel + 1 + bracket_rel)
+    Some(key_pos + needle.len() + colon_rel + 1 + delim_rel)
 }
 
 #[cfg(test)]
@@ -302,6 +358,18 @@ mod tests {
     fn sums_populated_codes_map() {
         let json = "{\n  \"codes\": {\n    \"a\": 1,\n    \"b\": 4\n  }\n}";
         assert_eq!(sum_codes_map(json), Some(5));
+    }
+
+    #[test]
+    fn sums_codes_map_with_nonstandard_needle_spacing() {
+        // Whitespace-tolerant needle: a compact `"codes":{` and an
+        // extra-spaced `"codes"  :  {` both locate the object (the pinned
+        // oracle emits `"codes": {`, and the map body stays one entry per
+        // line as the oracle pretty-prints it).
+        let compact_needle = "{\n  \"codes\":{\n    \"a\": 1,\n    \"b\": 4\n  }\n}";
+        assert_eq!(sum_codes_map(compact_needle), Some(5));
+        let spaced_needle = "{\n  \"codes\"  :  {\n    \"a\": 2\n  }\n}";
+        assert_eq!(sum_codes_map(spaced_needle), Some(2));
     }
 
     #[test]

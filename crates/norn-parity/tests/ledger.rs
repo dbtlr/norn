@@ -13,10 +13,17 @@ fn known_ids() -> BTreeSet<&'static str> {
     norn_parity::cases::all_case_ids().into_iter().collect()
 }
 
+/// For the structural tests that need their cited cases to *pass* the
+/// ported-only rule, treat the whole catalog as ported. The dedicated
+/// `rejects_an_entry_citing_an_unported_case` test passes a narrower set.
+fn ported_ids() -> BTreeSet<&'static str> {
+    norn_parity::cases::all_case_ids().into_iter().collect()
+}
+
 #[test]
 fn parses_the_real_ledger_with_a_meta_table_and_zero_entries() {
     let path = common::workspace_root().join("docs/parity-ledger.toml");
-    let ledger = Ledger::load(&path, &known_ids())
+    let ledger = Ledger::load(&path, &known_ids(), &ported_ids())
         .unwrap_or_else(|e| panic!("failed to load {}: {e}", path.display()));
     assert_eq!(ledger.meta.oracle_version, "0.48.0");
     assert!(
@@ -41,7 +48,7 @@ new = "new behavior"
 reason = "vibes"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let err = Ledger::parse(toml, &known_ids()).unwrap_err();
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
         matches!(err, LedgerError::UnknownReason { .. }),
         "expected UnknownReason, got {err:?}"
@@ -72,7 +79,7 @@ new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let err = Ledger::parse(toml, &known_ids()).unwrap_err();
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
         matches!(err, LedgerError::DuplicateEntryId(ref id) if id == "PD-001"),
         "expected DuplicateEntryId(\"PD-001\"), got {err:?}"
@@ -94,7 +101,7 @@ new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let err = Ledger::parse(toml, &known_ids()).unwrap_err();
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
         matches!(err, LedgerError::UnknownCaseId { ref case, .. } if case == "this-case-id-does-not-exist"),
         "expected UnknownCaseId, got {err:?}"
@@ -115,7 +122,7 @@ old = "old"
 new = "new"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let err = Ledger::parse(toml, &known_ids()).unwrap_err();
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
         matches!(
             err,
@@ -130,7 +137,7 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 
 #[test]
 fn rejects_a_missing_meta_table() {
-    let err = Ledger::parse("", &known_ids()).unwrap_err();
+    let err = Ledger::parse("", &known_ids(), &ported_ids()).unwrap_err();
     assert!(
         matches!(err, LedgerError::MissingMetaTable),
         "expected MissingMetaTable, got {err:?}"
@@ -161,10 +168,36 @@ new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let err = Ledger::parse(toml, &known_ids()).unwrap_err();
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
         matches!(err, LedgerError::CaseCitedByMultipleEntries { ref case, .. } if case == "help-bare"),
         "expected CaseCitedByMultipleEntries, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_an_entry_citing_an_unported_case() {
+    // `help-bare` is a known case, but here it is NOT in the ported set — an
+    // entry for an unported surface is premature (divergence can only be
+    // observed once ported), so it must fail to load.
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "help-bare"
+cases = ["help-bare"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+"#;
+    let empty_ported: BTreeSet<&str> = BTreeSet::new();
+    let err = Ledger::parse(toml, &known_ids(), &empty_ported).unwrap_err();
+    assert!(
+        matches!(err, LedgerError::UnportedCaseId { ref case, .. } if case == "help-bare"),
+        "expected UnportedCaseId, got {err:?}"
     );
 }
 
@@ -183,7 +216,8 @@ new = "new behavior"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let ledger = Ledger::parse(toml, &known_ids()).expect("well-formed ledger should parse");
+    let ledger =
+        Ledger::parse(toml, &known_ids(), &ported_ids()).expect("well-formed ledger should parse");
     let entry = ledger
         .entry_for_case("help-bare")
         .expect("help-bare should resolve to PD-001");
@@ -206,7 +240,7 @@ new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let ledger = Ledger::parse(toml, &known_ids()).unwrap();
+    let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
     let ran: BTreeSet<&str> = ["help-bare"].into_iter().collect();
     let diverged: BTreeSet<&str> = BTreeSet::new(); // nothing diverged: PD-001's case matched
@@ -228,7 +262,7 @@ new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let ledger = Ledger::parse(toml, &known_ids()).unwrap();
+    let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
     let ran: BTreeSet<&str> = ["help-bare"].into_iter().collect();
     let diverged: BTreeSet<&str> = ["help-bare"].into_iter().collect();
@@ -250,7 +284,7 @@ new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 "#;
-    let ledger = Ledger::parse(toml, &known_ids()).unwrap();
+    let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
     // Suite filtering excluded help-bare from this run entirely — an entry
     // whose cases never ran cannot be judged stale.
@@ -262,7 +296,7 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 #[test]
 fn load_reports_the_file_path_on_a_missing_ledger() {
     let path = Path::new("/nonexistent/parity-ledger.toml");
-    let err = Ledger::load(path, &known_ids()).unwrap_err();
+    let err = Ledger::load(path, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
         matches!(err, LedgerError::Io { .. }),
         "expected Io, got {err:?}"
