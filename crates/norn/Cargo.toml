@@ -1,0 +1,12 @@
+[package]
+name = "norn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic Markdown vault graph, link, and validation tooling for terminals and agents"
+
+[dependencies]
+norn-cli = { path = "../norn-cli" }
+norn-mcp = { path = "../norn-mcp" }
+norn-owner = { path = "../norn-owner" }
