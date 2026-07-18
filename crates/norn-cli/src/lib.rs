@@ -29,6 +29,8 @@ mod commands;
 /// present Reports through it; the internal parse routing (`cli`, `commands`)
 /// stays private.
 pub mod display;
+mod help;
+mod output;
 
 /// One-line boundary contract, referenced by every dependent so each
 /// declared edge in the crate map is compiler-load-bearing.
@@ -44,11 +46,17 @@ pub const DEP_CONTRACTS: &[&str] = &[
 
 /// Parse the process argv and run to a process exit code.
 ///
-/// clap handles `--help` / `--version` (exit 0) and bad invocation — unknown
-/// command, bad flag, missing required arg — (exit 2) by itself, calling
-/// `process::exit` before returning. A successful parse dispatches to the
-/// command module, whose returned code becomes the process exit code.
+/// The custom help renderer (`crate::help`) intercepts `-h` / `--help` BEFORE
+/// `Cli::parse()` — the root and every subcommand disable clap's own help, so
+/// help must be rendered from the derive tree by walking it. A rendered help
+/// returns exit 0 here; otherwise clap parses (`--version` at exit 0, bad
+/// invocation at exit 2, calling `process::exit` itself) and a successful parse
+/// dispatches to the command module, whose returned code becomes the process
+/// exit code.
 pub fn run() -> i32 {
+    if let Some(code) = help::intercept_from_args() {
+        return code;
+    }
     let cli = Cli::parse();
     let mut presenter = Presenter::stdio();
     dispatch(cli, &mut presenter)
@@ -63,8 +71,35 @@ pub fn run() -> i32 {
 /// `NORN_CONFIG_DIR`) fails loud as an operational diagnostic.
 fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i32 {
     match cli.command {
+        // The two ported read exemplars parse to Params and present the uniform
+        // not-yet-ported outcome; the rest of the v0.48 surface is grammar-only
+        // stubs (NRN-329) routed to the same uniform outcome by name.
         Command::Find(args) => commands::find::run(&args, presenter),
         Command::Get(args) => commands::get::run(&args, presenter),
+        Command::Count(_) => presenter.not_yet_ported("count"),
+        Command::Describe(_) => presenter.not_yet_ported("describe"),
+        Command::Set(_) => presenter.not_yet_ported("set"),
+        Command::Edit(_) => presenter.not_yet_ported("edit"),
+        Command::New(_) => presenter.not_yet_ported("new"),
+        Command::Init(_) => presenter.not_yet_ported("init"),
+        Command::Move(_) => presenter.not_yet_ported("move"),
+        Command::Delete(_) => presenter.not_yet_ported("delete"),
+        Command::Apply(_) => presenter.not_yet_ported("apply"),
+        Command::Repair(_) => presenter.not_yet_ported("repair"),
+        Command::RewriteWikilink(_) => presenter.not_yet_ported("rewrite-wikilink"),
+        Command::Validate(_) => presenter.not_yet_ported("validate"),
+        Command::Completions(_) => presenter.not_yet_ported("completions"),
+        Command::Cache(_) => presenter.not_yet_ported("cache"),
+        Command::Config(_) => presenter.not_yet_ported("config"),
+        Command::SelfUpdate(_) => presenter.not_yet_ported("self-update"),
+        Command::Mcp(_) => presenter.not_yet_ported("mcp"),
+        Command::Serve(_) => presenter.not_yet_ported("serve"),
+        Command::Service(_) => presenter.not_yet_ported("service"),
+        Command::Audit(_) => presenter.not_yet_ported("audit"),
+        Command::Manpage => presenter.not_yet_ported("manpage"),
+        // The intentionally-new registry namespace (ADR 0017): no oracle, and
+        // the first namespace that EXECUTES — resolve the ambient config home
+        // and hand it the effective cwd.
         Command::Vault(cmd) => match ConfigHome::from_env() {
             Ok(home) => match effective_cwd(&cli.global) {
                 Ok(cwd) => commands::vault::run(&cmd, home, &cwd, presenter),

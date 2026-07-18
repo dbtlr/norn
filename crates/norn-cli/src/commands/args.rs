@@ -1,21 +1,27 @@
 //! Clap arg groups shared by the read commands, single-sourced so the surface
-//! cannot drift between `find` and `get`. Each group owns its `to_params`
-//! mapping into the [`norn_wire`] vocabulary — the CLI's whole job on the
-//! request side is turning these flags into Params (ADR 0016).
+//! cannot drift between `find`, `count`, `describe`, and `get`. Each group owns
+//! its `to_params` mapping into the [`norn_wire`] vocabulary — the CLI's whole
+//! job on the request side is turning these flags into Params (ADR 0016).
+//!
+//! Help text is donor-exact (NRN-329): the doc comments below reproduce the
+//! retired `src/cli.rs` `FilterArgs` / `SortPaginateArgs` verbatim so the custom
+//! help renderer emits byte-identical output to the parity oracle. clap derives
+//! the flag help from the doc comment and strips its single trailing period —
+//! the oracle relies on exactly that, so the periods here are load-bearing.
 
 use clap::Args;
 use norn_wire::{FilterParams, SortPaginateParams};
 
 /// The filter predicates shared by the read commands, one flag per
-/// [`FilterParams`] field. Ported from the donor's `FilterArgs`; help text is
-/// carried forward for NRN-329 to reconcile to byte parity.
+/// [`FilterParams`] field.
 #[derive(Args, Debug, Default, Clone, PartialEq, Eq)]
 pub struct FilterArgs {
-    /// Full-text body substring. Case-insensitive.
+    /// Full-text body substring. Case-insensitive. Empty string is a no-op.
     #[arg(long, value_name = "NEEDLE", help_heading = "Filter options")]
     pub text: Option<String>,
 
-    /// Frontmatter equality predicate `field:value`.
+    /// Frontmatter equality predicate `field:value`. JSON-typed. An unknown
+    /// `--field value` filters as `--eq field:value` for fields this vault knows.
     #[arg(
         long = "eq",
         value_name = "FIELD:VALUE",
@@ -47,7 +53,7 @@ pub struct FilterArgs {
     )]
     pub not_in: Vec<String>,
 
-    /// Frontmatter `field` (or any array element) starts with `VALUE`.
+    /// Frontmatter `field` (or any array element) starts with `VALUE`. Case-sensitive.
     #[arg(
         long = "starts-with",
         value_name = "FIELD:VALUE",
@@ -55,7 +61,7 @@ pub struct FilterArgs {
     )]
     pub starts_with: Vec<String>,
 
-    /// Frontmatter `field` (or any array element) ends with `VALUE`.
+    /// Frontmatter `field` (or any array element) ends with `VALUE`. Case-sensitive.
     #[arg(
         long = "ends-with",
         value_name = "FIELD:VALUE",
@@ -63,7 +69,7 @@ pub struct FilterArgs {
     )]
     pub ends_with: Vec<String>,
 
-    /// Frontmatter `field` (or any array element) contains `VALUE`.
+    /// Frontmatter `field` (or any array element) contains `VALUE`. Case-sensitive.
     #[arg(
         long = "contains",
         value_name = "FIELD:VALUE",
@@ -83,7 +89,7 @@ pub struct FilterArgs {
     )]
     pub missing: Vec<String>,
 
-    /// Frontmatter `field` (a date) is before `DATE`.
+    /// Frontmatter `field` (a date) is before `DATE`. ISO 8601 expected.
     #[arg(
         long = "before",
         value_name = "FIELD:DATE",
@@ -99,7 +105,7 @@ pub struct FilterArgs {
     )]
     pub after: Vec<String>,
 
-    /// Frontmatter `field` (a date) is exactly `DATE`.
+    /// Frontmatter `field` (a date) is exactly `DATE`. Accepts `today`.
     #[arg(
         long = "on",
         value_name = "FIELD:DATE",
@@ -111,7 +117,9 @@ pub struct FilterArgs {
     #[arg(long = "path", value_name = "GLOB", help_heading = "Filter options")]
     pub path: Vec<String>,
 
-    /// Documents whose outgoing links resolve to TARGET.
+    /// Documents whose outgoing links resolve to TARGET (path, stem, or
+    /// `[[wikilink]]`). Repeatable; multiple targets are AND'd. Resolved-only —
+    /// TARGET must resolve to an existing document.
     #[arg(
         long = "links-to",
         value_name = "TARGET",
@@ -160,8 +168,8 @@ pub struct SortPaginateArgs {
     #[arg(long, help_heading = "Sort and paging")]
     pub desc: bool,
 
-    /// Maximum number of records to return. Each verb applies its own default
-    /// when omitted.
+    /// Maximum number of records to return. `find` defaults to 10; `get`
+    /// returns every named target.
     #[arg(
         long,
         value_name = "N",

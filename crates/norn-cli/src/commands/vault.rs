@@ -28,14 +28,22 @@ use crate::display::{Format, Presenter, EXIT_OK, EXIT_OPERATIONAL};
 #[derive(Subcommand, Debug)]
 pub enum VaultCmd {
     #[command(
+        disable_help_flag = true,
         about = "Register a vault under a short name — the setup act that unlocks durable artifacts (cache, event stream, logs)"
     )]
     Register(RegisterArgs),
-    #[command(about = "Remove a vault registration (durable artifacts are no longer kept)")]
+    #[command(
+        disable_help_flag = true,
+        about = "Remove a vault registration (durable artifacts are no longer kept)"
+    )]
     Unregister(UnregisterArgs),
-    #[command(about = "List registered vaults — name, root, and any stored location overrides")]
+    #[command(
+        disable_help_flag = true,
+        about = "List registered vaults — name, root, and any stored location overrides"
+    )]
     List(ListArgs),
     #[command(
+        disable_help_flag = true,
         about = "Edit a registration in place — the sanctioned mutation path, so the config file is never hand-edited to fill gaps"
     )]
     Set(SetArgs),
