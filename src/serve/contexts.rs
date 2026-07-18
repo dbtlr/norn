@@ -552,12 +552,15 @@ fn open_server(
 ) -> anyhow::Result<McpServer> {
     // Classify a poisoned-state open failure HERE, on the typed error, before the
     // OnceCell initializer stringifies it (`OpenResult = Result<_, String>`) —
-    // after which the request path can no longer downcast it (NRN-337). A
-    // hello-time open is always first-touch (no generation yet), so
-    // `previously_served` is false: only fd exhaustion (the config/fingerprint
-    // read hitting EMFILE) trips, never a first-touch cannot-open.
-    let ctx = VaultEnv::open_warm_with_progress(canonical, progress)
-        .inspect_err(|error| crate::serve::heal::maybe_trip(error, false))?;
+    // after which the request path can no longer downcast it (NRN-337).
+    // `previously_served` comes from the eviction-surviving progress record,
+    // NOT the (dropped-on-evict) VaultEnv: a post-eviction reopen failure on a
+    // vault that already served must classify as the NRN-325 shape, while a
+    // genuine first touch never takes the shared daemon down.
+    let previously_served = progress.served_once();
+    let ctx = VaultEnv::open_warm_with_progress(canonical, Arc::clone(&progress))
+        .inspect_err(|error| crate::serve::heal::maybe_trip(error, previously_served))?;
+    progress.mark_served();
     eprintln!("norn serve: opened vault {canonical}");
     // `new_daemon`: the daemon path emits the per-call served markers the
     // routing proofs count; a stdio `norn mcp` (plain `new`) never does.
@@ -867,6 +870,36 @@ mod tests {
             "same-daemon sequence regressed {} -> {}",
             before.sequence,
             after.sequence
+        );
+    }
+
+    /// The previously-served latch lives on the eviction-surviving progress
+    /// record, so a post-eviction reopen failure still classifies as the
+    /// previously-served (NRN-325) shape rather than first-touch.
+    #[tokio::test]
+    async fn served_latch_survives_context_eviction() {
+        let (_tmp, root) = seeded_vault();
+        let (_canonical, hash) = crate::cache::vault_identity(&root).unwrap();
+        let contexts = Contexts::new();
+        contexts.resolve(root.as_str()).await.unwrap();
+
+        let progress = {
+            let registry = contexts.progress.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(registry.get(&hash).unwrap())
+        };
+        assert!(
+            progress.served_once(),
+            "successful open must set the served latch"
+        );
+
+        // Evict via the dead-root sweep path, then confirm the latch persists
+        // even though the warm context (and its VaultEnv open_count) is gone.
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(contexts.resolve(root.as_str()).await.is_err());
+        assert_eq!(contexts.len().await, 0, "context must be evicted");
+        assert!(
+            progress.served_once(),
+            "served latch must survive eviction (NRN-325 gating after reopen)"
         );
     }
 

@@ -138,9 +138,27 @@ struct ProgressValue {
 #[derive(Debug, Default)]
 pub(crate) struct WriterProgressState {
     value: Mutex<ProgressValue>,
+    /// Daemon-lifetime "this vault has successfully served" latch. Lives here
+    /// (not on `VaultEnv`) because the per-vault progress record deliberately
+    /// survives context eviction — a post-eviction reopen failure must still
+    /// classify as the previously-served (NRN-325) shape, not first-touch
+    /// (NRN-337 review finding).
+    served_once: std::sync::atomic::AtomicBool,
 }
 
 impl WriterProgressState {
+    /// Latch that this vault completed a successful open. Monotonic; never
+    /// cleared for the daemon's lifetime.
+    pub(crate) fn mark_served(&self) {
+        self.served_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this vault ever completed a successful open in this daemon,
+    /// surviving context eviction.
+    pub(crate) fn served_once(&self) -> bool {
+        self.served_once.load(std::sync::atomic::Ordering::Relaxed)
+    }
     fn begin_work(&self) {
         let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
         value.sequence = value.sequence.saturating_add(1);
