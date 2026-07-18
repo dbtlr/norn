@@ -12,6 +12,9 @@ on:
   schedule:
     - cron: "17 4 * * 1"  # weekly cargo audit / cargo deny refresh
 
+permissions:
+  contents: read
+
 jobs:
   changes:
     if: github.event_name != 'schedule'
@@ -21,6 +24,8 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -48,6 +53,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -116,6 +123,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
