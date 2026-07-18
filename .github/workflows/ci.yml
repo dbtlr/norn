@@ -92,6 +92,9 @@ jobs:
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
 
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: cargo build --workspace --release --locked
         run: cargo build --workspace --release --locked
 

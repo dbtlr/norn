@@ -80,15 +80,40 @@ fn zoo_profile_reports_the_expected_finding_codes() {
         "expected zoo profile to report findings, got:\n{stdout}"
     );
 
-    let expected = manifest.expected_codes();
+    let expected: std::collections::BTreeSet<String> = manifest
+        .expected_codes()
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
     assert!(
         !expected.is_empty(),
         "zoo manifest carried no expected finding codes"
     );
-    for code in expected {
-        assert!(
-            stdout.contains(code),
-            "expected zoo findings to mention {code} (from manifest), got:\n{stdout}"
-        );
-    }
+    let actual = parse_summary_codes(&stdout);
+    assert_eq!(
+        actual, expected,
+        "oracle finding codes must equal the manifest's expected set — \
+         a missing code means lost coverage, an extra code means an \
+         unintended finding leaked into the zoo; got:\n{stdout}"
+    );
+}
+
+/// Extract the code names from the summary JSON's `"codes": {{ ... }}` object
+/// with plain string ops (the crate deliberately has no JSON dependency).
+fn parse_summary_codes(stdout: &str) -> std::collections::BTreeSet<String> {
+    let start = stdout
+        .find("\"codes\": {")
+        .expect("summary JSON should contain a codes object");
+    let rest = &stdout[start + "\"codes\": {".len()..];
+    let end = rest
+        .find('}')
+        .expect("summary codes object should be closed");
+    rest[..end]
+        .lines()
+        .filter_map(|line| {
+            let stripped = line.trim().strip_prefix('"')?;
+            let (code, _) = stripped.split_once('"')?;
+            Some(code.to_string())
+        })
+        .collect()
 }

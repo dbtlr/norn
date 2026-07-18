@@ -6,9 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use norn_fixtures::Profile;
-
-const SENTINEL: &str = ".norn-fixture-vault";
+use norn_fixtures::{Profile, SENTINEL_CONTENT, SENTINEL_FILE};
 
 fn usage() -> String {
     format!(
@@ -85,9 +83,19 @@ fn prepare_target(out_dir: &Path) -> Result<(), String> {
     if entries.next().is_none() {
         return Ok(());
     }
-    if !out_dir.join(SENTINEL).exists() {
+    // The sentinel must be a regular (non-symlink) file with the exact
+    // generator-written bytes — anything less must not authorize the
+    // recursive delete below.
+    let sentinel = out_dir.join(SENTINEL_FILE);
+    let owned = fs::symlink_metadata(&sentinel)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+        && fs::read(&sentinel)
+            .map(|bytes| bytes == SENTINEL_CONTENT.as_bytes())
+            .unwrap_or(false);
+    if !owned {
         return Err(format!(
-            "{} exists, is non-empty, and has no {SENTINEL} sentinel — refusing to touch it",
+            "{} exists, is non-empty, and carries no valid {SENTINEL_FILE} sentinel — refusing to touch it",
             out_dir.display()
         ));
     }

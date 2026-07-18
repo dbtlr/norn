@@ -33,3 +33,12 @@ pub const IGNORED_DIR: &str = "ignored";
 pub const TASKS_GLOB: &str = "tasks/**/*.md";
 /// `allowed_paths` glob for `phase` documents (paired with [`PHASES_DIR`]).
 pub const PHASES_GLOB: &str = "phases/**/*.md";
+
+/// Sentinel file marking a directory as generator-owned. Hidden (dot-prefixed)
+/// so it stays out of norn's graph.
+pub const SENTINEL_FILE: &str = ".norn-fixture-vault";
+/// Exact sentinel contents. The bin verifies these bytes (and that the
+/// sentinel is a regular, non-symlink file) before clearing a directory —
+/// a name-only check would let any stray file named like the sentinel
+/// authorize a recursive delete.
+pub const SENTINEL_CONTENT: &str = "norn-fixtures generated vault — safe to delete\n";

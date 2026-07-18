@@ -12,7 +12,14 @@
 /// YAML-significant characters. Alphanumeric-ish values pass through unchanged.
 pub fn scalar(value: &str) -> String {
     if needs_quoting(value) {
-        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        // Line breaks are escaped, not emitted physically — YAML folds a
+        // physical break inside a quoted scalar, so parsing would not
+        // reproduce the input value.
+        let escaped = value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
         format!("\"{escaped}\"")
     } else {
         value.to_string()
@@ -36,7 +43,7 @@ fn needs_quoting(value: &str) -> bool {
         || value.contains(" #")
         || value.ends_with(':')
         || value.ends_with(char::is_whitespace)
-        || value.contains(['"', '#', '\n'])
+        || value.contains(['"', '#', '\n', '\r'])
 }
 
 #[cfg(test)]
@@ -63,5 +70,7 @@ mod tests {
         assert_eq!(scalar("- leading dash"), "\"- leading dash\"");
         assert_eq!(scalar("has \"quote"), "\"has \\\"quote\"");
         assert_eq!(scalar("trailing "), "\"trailing \"");
+        assert_eq!(scalar("line\nbreak"), "\"line\\nbreak\"");
+        assert_eq!(scalar("carriage\rreturn"), "\"carriage\\rreturn\"");
     }
 }

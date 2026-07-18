@@ -18,6 +18,8 @@ mod words;
 mod yaml;
 mod zoo;
 
+pub use contract::{SENTINEL_CONTENT, SENTINEL_FILE};
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -369,8 +371,8 @@ pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Mani
     // Sentinel: written last, single line, hidden — kept out of norn's graph.
     write_rel(
         out_dir,
-        ".norn-fixture-vault",
-        b"norn-fixtures generated vault \xe2\x80\x94 safe to delete\n",
+        SENTINEL_FILE,
+        SENTINEL_CONTENT.as_bytes(),
         &mut dirs,
         &mut files,
     )?;
