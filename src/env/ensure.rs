@@ -394,6 +394,21 @@ impl VaultEnv {
         }
     }
 
+    /// Has this warm context ever opened a generation successfully — i.e. did the
+    /// vault "previously work"? Gates the daemon's fail-closed self-heal (NRN-337):
+    /// a SQLite cannot-open failure on a vault that HAS served is the poisoned
+    /// reopen shape worth exiting for, while a first-touch open failure for a
+    /// never-served vault is a per-vault error that must not take the shared daemon
+    /// down. `open_count` is bumped only after a successful `open_generation`, so a
+    /// non-zero count means at least one generation opened cleanly. Always `false`
+    /// in cold mode.
+    pub(crate) fn warm_has_opened(&self) -> bool {
+        match &self.mode {
+            Mode::Warm(slot) => slot.shared.open_count.load(Ordering::Relaxed) > 0,
+            Mode::Cold => false,
+        }
+    }
+
     /// Test-only: read connections the CURRENT generation's pool has lazily grown
     /// BEYOND its seed (`0` if none / cold). A value `> 0` proves concurrent warm
     /// reads genuinely overlapped on distinct pooled connections rather than

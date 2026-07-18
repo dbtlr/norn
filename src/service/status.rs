@@ -51,6 +51,11 @@ pub struct ProbedState {
     pub uptime_secs: Option<u64>,
     /// The pid the pong self-reported — used when launchd can't supply one.
     pub pong_pid: Option<u32>,
+    /// Warm per-vault contexts the daemon currently holds open (NRN-337). `None`
+    /// when nothing answered or the pong predates the field.
+    pub open_entries: Option<u64>,
+    /// The daemon's total open fds, when it could obtain them cheaply (NRN-337).
+    pub open_fds: Option<u64>,
     /// Explicit per-vault observation requested by `service status --vault`.
     /// `None` keeps the original host-level status shape.
     pub vault: Option<VaultStatus>,
@@ -95,6 +100,13 @@ pub struct ServiceStatus {
     pub on_disk_build: String,
     pub restart_pending: bool,
     pub uptime_secs: Option<u64>,
+    /// Warm per-vault contexts the daemon holds open (NRN-337). Additive; absent
+    /// from JSON when nothing answered or the daemon predates the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_entries: Option<u64>,
+    /// The daemon's total open fds when cheaply obtainable (NRN-337). Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_fds: Option<u64>,
     pub plist: String,
     pub log: String,
     pub socket: String,
@@ -137,6 +149,8 @@ pub fn assemble_status(
         on_disk_build: on_disk_build.to_string(),
         restart_pending,
         uptime_secs: probed.uptime_secs,
+        open_entries: probed.open_entries,
+        open_fds: probed.open_fds,
         plist: paths.plist,
         log: paths.log,
         socket: paths.socket,
@@ -208,6 +222,13 @@ pub fn render_text(status: &ServiceStatus, out: &mut impl Write) -> std::io::Res
             )?;
             if let Some(uptime) = status.uptime_secs {
                 writeln!(out, "  uptime {}", format_uptime(uptime))?;
+            }
+            // Host-global bounded-retention observability (NRN-337).
+            if let Some(entries) = status.open_entries {
+                match status.open_fds {
+                    Some(fds) => writeln!(out, "  entries {entries} · open fds {fds}")?,
+                    None => writeln!(out, "  entries {entries}")?,
+                }
             }
         }
         None => writeln!(
@@ -292,6 +313,8 @@ mod tests {
                 running_build: Some("build-match".into()),
                 uptime_secs: Some(3725),
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -338,6 +361,8 @@ mod tests {
                 running_build: Some("build-old".into()),
                 uptime_secs: Some(10),
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -367,6 +392,8 @@ mod tests {
                 running_build: None,
                 uptime_secs: Some(10),
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -391,6 +418,8 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -412,6 +441,8 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -436,6 +467,8 @@ mod tests {
                 running_build: Some("build-stale".into()),
                 uptime_secs: Some(42),
                 pong_pid: Some(777),
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -484,6 +517,8 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -507,6 +542,8 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -537,6 +574,8 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",
@@ -576,6 +615,8 @@ mod tests {
                 running_build: None,
                 uptime_secs: None,
                 pong_pid: None,
+                open_entries: None,
+                open_fds: None,
                 vault: None,
             },
             "0.45.1",

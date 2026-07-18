@@ -49,6 +49,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 
 use camino::Utf8Path;
 use tokio::sync::{Mutex, OnceCell};
@@ -63,19 +64,80 @@ struct ContextEntry {
     opening: Arc<AtomicUsize>,
     progress: Arc<WriterProgressState>,
     attempt: StdMutex<Option<tokio::sync::watch::Receiver<Option<OpenResult>>>>,
+    /// Last time this entry was resolved (a `hello`) or observed still in use by
+    /// the idle-eviction sweep. Drives LRU ordering when the open-entry cap is
+    /// enforced (NRN-337).
+    last_touch: StdMutex<Instant>,
+    /// Shared with the owning [`Contexts`]: the count of INITIALIZED entries
+    /// (each pinning ~7 fds). Bumped when this entry's cell is first published and
+    /// decremented in [`Drop`], so the count stays accurate across every removal
+    /// path (cap eviction, dead-root sweep, in-flight-then-dropped) without a map
+    /// walk — the pong reads it locklessly, preserving the O(1) control ping.
+    open_entries: Arc<AtomicUsize>,
 }
 
 type OpenResult = Result<McpServer, String>;
 
 impl ContextEntry {
-    fn new(progress: Arc<WriterProgressState>) -> Self {
+    fn new(progress: Arc<WriterProgressState>, open_entries: Arc<AtomicUsize>) -> Self {
         Self {
             cell: OnceCell::new(),
             opening: Arc::new(AtomicUsize::new(0)),
             progress,
             attempt: StdMutex::new(None),
+            last_touch: StdMutex::new(Instant::now()),
+            open_entries,
         }
     }
+
+    /// Refresh the LRU recency stamp to now.
+    fn touch(&self) {
+        *self.last_touch.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
+
+    /// The LRU recency stamp.
+    fn touched_at(&self) -> Instant {
+        *self.last_touch.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for ContextEntry {
+    fn drop(&mut self) {
+        // Pairs with the increment at cell publication: only an initialized entry
+        // ever counted, so only an initialized entry decrements. `cell` is set at
+        // most once and never unset, so this is exactly-once per counted entry —
+        // and it fires whenever the LAST `Arc` drops (map removal AND any in-flight
+        // request draining), i.e. exactly when the fds are actually released.
+        if self.cell.get().is_some() {
+            self.open_entries.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Hard ceiling on the number of INITIALIZED per-vault warm contexts the daemon
+/// retains, enforced (LRU) at every entry-open (NRN-337). One shared daemon
+/// serves every vault; each held context pins ~7 fds (entry `.lock`, the cache
+/// db + WAL + SHM per pooled connection, the write connection, the sentinel), so
+/// left unbounded a burst of distinct vaults (fixture / parity runs) exhausts the
+/// process fd table (~256 on macOS) and wedges the daemon. Capping the retained
+/// idle set bounds fd usage regardless of how many distinct vaults are served;
+/// an active vault is never evicted (see [`Contexts::enforce_entry_cap`]).
+///
+/// `24 * ~7 ≈ 168` descriptors for a fully-idle retained set, leaving comfortable
+/// headroom under 256 for a few concurrently-active vaults (whose read pools can
+/// grow) plus the daemon's own baseline fds.
+const MAX_OPEN_ENTRIES: usize = 24;
+
+/// Debug/test-only override for [`MAX_OPEN_ENTRIES`] (read via
+/// [`debug_env_usize`](crate::cache::debug_env_usize), so release builds ignore
+/// it entirely). Lets an integration test pin a tiny cap to prove eviction
+/// deterministically.
+const MAX_OPEN_ENTRIES_ENV: &str = "NORN_SERVE_MAX_ENTRIES";
+
+/// The retained-context cap: [`MAX_OPEN_ENTRIES`], or the debug-only env override,
+/// floored at 1.
+fn max_open_entries() -> usize {
+    crate::cache::debug_env_usize(MAX_OPEN_ENTRIES_ENV, MAX_OPEN_ENTRIES).max(1)
 }
 
 #[derive(Clone)]
@@ -109,6 +171,10 @@ pub(crate) struct Contexts {
     /// disposable context entry. Retaining this tiny record prevents sequence
     /// regression when an evicted vault is later recreated.
     progress: StdMutex<HashMap<String, Arc<WriterProgressState>>>,
+    /// Count of INITIALIZED entries (each pinning ~7 fds), maintained by
+    /// [`ContextEntry`]'s publish/drop so it stays accurate across every removal
+    /// path. Read locklessly for the `service status` open-entries field (NRN-337).
+    open_entries: Arc<AtomicUsize>,
 }
 
 impl Contexts {
@@ -116,7 +182,15 @@ impl Contexts {
         Self {
             map: Mutex::new(HashMap::new()),
             progress: StdMutex::new(HashMap::new()),
+            open_entries: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Number of INITIALIZED per-vault contexts currently held open (each pins
+    /// ~7 fds). Lockless — the daemon's pong reports it without taking the map
+    /// lock, so the O(1) control ping stays O(1) (NRN-337).
+    pub(crate) fn open_entries(&self) -> u64 {
+        self.open_entries.load(Ordering::Acquire) as u64
     }
 
     /// Resolve the warm [`McpServer`] for `vault_root`, opening it lazily on
@@ -164,13 +238,82 @@ impl Contexts {
         };
         let entry = {
             let mut map = self.map.lock().await;
-            map.entry(hash)
-                .or_insert_with(|| Arc::new(ContextEntry::new(progress)))
-                .clone()
+            let entry = map
+                .entry(hash)
+                .or_insert_with(|| {
+                    Arc::new(ContextEntry::new(progress, Arc::clone(&self.open_entries)))
+                })
+                .clone();
+            // A hello is activity — refresh LRU recency so a freshly-touched vault
+            // is the LAST evicted.
+            entry.touch();
+            entry
         };
         // Map lock released — the (possibly slow) open below runs unguarded.
 
+        // Bound retained fds: evict idle contexts (LRU) down to the cap before
+        // this open proceeds (NRN-337). The entry we just took is held here (its
+        // `Arc` count is > 1) and is not yet initialized, so it is never a
+        // candidate for its own eviction.
+        self.enforce_entry_cap().await;
+
         initialize_entry(entry, canonical, open_server).await
+    }
+
+    /// Evict idle warm contexts (LRU) until at most [`max_open_entries`] remain,
+    /// bounding the daemon's open-fd footprint regardless of how many distinct
+    /// vaults it serves (NRN-337).
+    ///
+    /// Safety invariants (all checked under the map lock, atomically with removal):
+    /// - **Never evict an in-use context.** An entry is a candidate only when the
+    ///   map is its SOLE holder (`Arc::strong_count(entry) == 1` → no concurrent
+    ///   resolver), its cell is initialized, the stored `McpServer`'s `VaultEnv`
+    ///   `Arc` count is 1 (→ no in-flight request holds a clone), it has no
+    ///   in-flight open (`opening == 0`), and its writer queue is not busy
+    ///   (`!progress.busy` → no undrained writer work). To serve OR resolve a
+    ///   vault one must hold one of those `Arc`s, so this is a precise idle test.
+    /// - **No torn context.** Removal only drops the map's `Arc`; a later request
+    ///   for an evicted vault transparently reopens via [`resolve`] (re-acquiring
+    ///   the entry lock and re-proving freshness — v0.48 re-proves per request, so
+    ///   a reopened entry is safe by the existing path). An entry still held by a
+    ///   draining request outlives its map removal and closes only when that last
+    ///   `Arc` drops.
+    /// - **Off-worker teardown.** Dropping an evicted `VaultEnv` joins its writer
+    ///   thread (blocking), so the evicted `Arc`s are dropped on a blocking thread
+    ///   rather than on an async worker (and off the map lock).
+    async fn enforce_entry_cap(&self) {
+        let cap = max_open_entries();
+        let evicted: Vec<Arc<ContextEntry>> = {
+            let mut map = self.map.lock().await;
+            if map.len() <= cap {
+                return;
+            }
+            // Idle candidates with their LRU stamp, oldest first. Uses `&Arc` from
+            // the map so `strong_count == 1` genuinely means "map only".
+            let mut idle: Vec<(String, Instant)> = map
+                .iter()
+                .filter(|(_, entry)| is_idle(entry))
+                .map(|(hash, entry)| (hash.clone(), entry.touched_at()))
+                .collect();
+            idle.sort_by_key(|(_, touched)| *touched);
+
+            let overflow = map.len() - cap;
+            let mut evicted = Vec::new();
+            for (hash, _) in idle.into_iter().take(overflow) {
+                if let Some(entry) = map.remove(&hash) {
+                    evicted.push(entry);
+                }
+            }
+            evicted
+        };
+        if evicted.is_empty() {
+            return;
+        }
+        let count = evicted.len();
+        // VaultEnv `Drop` joins the per-vault writer thread — do it off the async
+        // workers (and off the map lock).
+        let _ = tokio::task::spawn_blocking(move || drop(evicted)).await;
+        eprintln!("norn serve: evicted {count} idle vault context(s) to bound open descriptors");
     }
 
     /// Observe one canonical vault's serving and writer state without opening
@@ -305,7 +448,13 @@ where
 
                 let result = match opened {
                     Ok(server) => {
-                        let _ = task_entry.cell.set(server);
+                        // Count this context as initialized as it is published —
+                        // paired with the decrement in `ContextEntry::drop`
+                        // (NRN-337). The `OnceCell` publishes at most once, so the
+                        // increment fires exactly once per counted entry.
+                        if task_entry.cell.set(server).is_ok() {
+                            task_entry.open_entries.fetch_add(1, Ordering::AcqRel);
+                        }
                         Ok(task_entry
                             .cell
                             .get()
@@ -353,6 +502,34 @@ fn service_progress(progress: crate::mcp::writer_queue::WriterProgress) -> Write
 /// the negative case (a re-inserted entry surviving a stale snapshot) is unit
 /// testable without going through the async sweep/resolve machinery; no
 /// behavior change.
+/// Is `entry` idle and therefore safe to evict for the open-entry cap (NRN-337)?
+///
+/// True only when the map is the entry's sole holder AND its warm context is
+/// initialized, fully released by every request, and quiescent — see
+/// [`Contexts::enforce_entry_cap`] for why each clause is load-bearing. Must be
+/// called while holding the map lock so the `strong_count` snapshots are coherent
+/// with removal.
+fn is_idle(entry: &Arc<ContextEntry>) -> bool {
+    // The map is the only holder — no concurrent resolver has a clone.
+    if Arc::strong_count(entry) != 1 {
+        return false;
+    }
+    // No in-flight open racing this entry.
+    if entry.opening.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+    // Only an initialized context pins fds and is worth evicting.
+    let Some(server) = entry.cell.get() else {
+        return false;
+    };
+    // No in-flight request holds a clone of the warm context.
+    if Arc::strong_count(&server.ctx) != 1 {
+        return false;
+    }
+    // No undrained writer-queue work.
+    !entry.progress.snapshot().busy
+}
+
 fn remove_if_same_arc(
     map: &mut HashMap<String, Arc<ContextEntry>>,
     dead: Vec<(String, Arc<ContextEntry>)>,
@@ -373,7 +550,17 @@ fn open_server(
     canonical: &Utf8Path,
     progress: Arc<WriterProgressState>,
 ) -> anyhow::Result<McpServer> {
-    let ctx = VaultEnv::open_warm_with_progress(canonical, progress)?;
+    // Classify a poisoned-state open failure HERE, on the typed error, before the
+    // OnceCell initializer stringifies it (`OpenResult = Result<_, String>`) —
+    // after which the request path can no longer downcast it (NRN-337).
+    // `previously_served` comes from the eviction-surviving progress record,
+    // NOT the (dropped-on-evict) VaultEnv: a post-eviction reopen failure on a
+    // vault that already served must classify as the NRN-325 shape, while a
+    // genuine first touch never takes the shared daemon down.
+    let previously_served = progress.served_once();
+    let ctx = VaultEnv::open_warm_with_progress(canonical, Arc::clone(&progress))
+        .inspect_err(|error| crate::serve::heal::maybe_trip(error, previously_served))?;
+    progress.mark_served();
     eprintln!("norn serve: opened vault {canonical}");
     // `new_daemon`: the daemon path emits the per-call served markers the
     // routing proofs count; a stdio `norn mcp` (plain `new`) never does.
@@ -444,7 +631,10 @@ mod tests {
         );
 
         let progress = Arc::new(WriterProgressState::default());
-        let entry = Arc::new(ContextEntry::new(Arc::clone(&progress)));
+        let entry = Arc::new(ContextEntry::new(
+            Arc::clone(&progress),
+            Arc::new(AtomicUsize::new(0)),
+        ));
         contexts.map.lock().await.insert(hash, Arc::clone(&entry));
         let opening = OpeningGuard::new(Arc::clone(&entry.opening));
         assert_eq!(
@@ -521,7 +711,10 @@ mod tests {
         let (_tmp, root) = seeded_vault();
         let (canonical, hash) = crate::cache::vault_identity(&root).unwrap();
         let contexts = Contexts::new();
-        let entry = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
+        let entry = Arc::new(ContextEntry::new(
+            Arc::new(WriterProgressState::default()),
+            Arc::new(AtomicUsize::new(0)),
+        ));
         contexts.map.lock().await.insert(hash, Arc::clone(&entry));
 
         let open_count = Arc::new(AtomicUsize::new(0));
@@ -583,7 +776,10 @@ mod tests {
     async fn canceled_waiter_does_not_retry_failed_open() {
         let (_tmp, root) = seeded_vault();
         let (canonical, _) = crate::cache::vault_identity(&root).unwrap();
-        let entry = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
+        let entry = Arc::new(ContextEntry::new(
+            Arc::new(WriterProgressState::default()),
+            Arc::new(AtomicUsize::new(0)),
+        ));
         let open_count = Arc::new(AtomicUsize::new(0));
         let (running_tx, running_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -677,6 +873,36 @@ mod tests {
         );
     }
 
+    /// The previously-served latch lives on the eviction-surviving progress
+    /// record, so a post-eviction reopen failure still classifies as the
+    /// previously-served (NRN-325) shape rather than first-touch.
+    #[tokio::test]
+    async fn served_latch_survives_context_eviction() {
+        let (_tmp, root) = seeded_vault();
+        let (_canonical, hash) = crate::cache::vault_identity(&root).unwrap();
+        let contexts = Contexts::new();
+        contexts.resolve(root.as_str()).await.unwrap();
+
+        let progress = {
+            let registry = contexts.progress.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(registry.get(&hash).unwrap())
+        };
+        assert!(
+            progress.served_once(),
+            "successful open must set the served latch"
+        );
+
+        // Evict via the dead-root sweep path, then confirm the latch persists
+        // even though the warm context (and its VaultEnv open_count) is gone.
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(contexts.resolve(root.as_str()).await.is_err());
+        assert_eq!(contexts.len().await, 0, "context must be evicted");
+        assert!(
+            progress.served_once(),
+            "served latch must survive eviction (NRN-325 gating after reopen)"
+        );
+    }
+
     /// FIX-4: a later hello whose OWN root has vanished sweeps the map, evicting
     /// the now-dead entry rather than leaking its warm context for the daemon's
     /// lifetime.
@@ -720,7 +946,10 @@ mod tests {
     #[test]
     fn remove_if_same_arc_keeps_reinserted_entry() {
         let mut map: HashMap<String, Arc<ContextEntry>> = HashMap::new();
-        let original = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
+        let original = Arc::new(ContextEntry::new(
+            Arc::new(WriterProgressState::default()),
+            Arc::new(AtomicUsize::new(0)),
+        ));
         map.insert("vault-hash".to_string(), original.clone());
 
         // Snapshot the entry as "dead" (as `sweep_dead_roots` would after a
@@ -730,7 +959,10 @@ mod tests {
         // ...but before removal runs, a concurrent re-insert replaces the map
         // entry with a NEW `Arc` for the same hash (e.g. the root came back
         // and a fresh open raced the sweep).
-        let replacement = Arc::new(ContextEntry::new(Arc::new(WriterProgressState::default())));
+        let replacement = Arc::new(ContextEntry::new(
+            Arc::new(WriterProgressState::default()),
+            Arc::new(AtomicUsize::new(0)),
+        ));
         map.insert("vault-hash".to_string(), replacement.clone());
 
         remove_if_same_arc(&mut map, dead);
