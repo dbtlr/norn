@@ -122,8 +122,14 @@ fn vault_register_list_set_unregister_end_to_end() {
     let out = norn_cfg(&cfg).args(["vault", "list"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     let human = stdout_of(&out);
-    let docs_line = human.lines().position(|l| l.starts_with("docs  "));
-    let notes_line = human.lines().position(|l| l.starts_with("notes  "));
+    let docs_line = human
+        .lines()
+        .position(|l| l.starts_with("docs  "))
+        .unwrap_or_else(|| panic!("docs row missing: {human}"));
+    let notes_line = human
+        .lines()
+        .position(|l| l.starts_with("notes  "))
+        .unwrap_or_else(|| panic!("notes row missing: {human}"));
     assert!(docs_line < notes_line, "not name-sorted: {human}");
     assert!(
         human.contains("    cache = /tmp/notes-cache"),
@@ -261,6 +267,47 @@ fn vault_register_missing_root_exits_one() {
         stderr_of(&out).starts_with("norn: failed to canonicalize vault root"),
         "got: {:?}",
         stderr_of(&out)
+    );
+}
+
+#[test]
+fn vault_paths_honor_global_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let base = tmp.path().join("base");
+    let vault_a = base.join("vault-a");
+    let vault_b = base.join("vault-b");
+    std::fs::create_dir_all(&vault_a).unwrap();
+    std::fs::create_dir_all(&vault_b).unwrap();
+
+    // register with no PATH: -C is the effective cwd, so vault-a is the root.
+    let out = norn_cfg(&cfg)
+        .arg("-C")
+        .arg(&vault_a)
+        .args(["vault", "register", "docs"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let canon_a = vault_a.canonicalize().unwrap();
+    assert!(
+        stdout_of(&out).contains(&canon_a.display().to_string()),
+        "-C not honored as register's default PATH: {}",
+        stdout_of(&out)
+    );
+
+    // set --root with a RELATIVE path: grounded against -C, not process cwd.
+    let out = norn_cfg(&cfg)
+        .arg("-C")
+        .arg(&base)
+        .args(["vault", "set", "docs", "--root", "vault-b"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let canon_b = vault_b.canonicalize().unwrap();
+    assert!(
+        stdout_of(&out).contains(&canon_b.display().to_string()),
+        "relative --root not grounded against -C: {}",
+        stdout_of(&out)
     );
 }
 

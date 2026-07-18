@@ -16,7 +16,7 @@
 //! testable against an injected config directory.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgGroup, Args, Subcommand};
 use norn_config::{ConfigHome, RegisteredVault, Registry, VaultChanges, VaultOverrides};
@@ -154,40 +154,37 @@ fn tri_state(set: Option<PathBuf>, clear: bool) -> Option<Option<PathBuf>> {
     }
 }
 
-/// Run a `vault` subcommand against an injected config home. The ambient
-/// [`ConfigHome::from_env`] read happens once at the dispatch boundary; this
-/// entry stays a pure function of its inputs so tests inject a temp directory.
+/// Run a `vault` subcommand against an injected config home and effective
+/// cwd. The ambient reads (config env, process cwd + `-C`) happen once at the
+/// dispatch boundary; this entry stays a pure function of its inputs so tests
+/// inject a temp directory.
 pub fn run<O: Write, E: Write>(
     cmd: &VaultCmd,
     home: ConfigHome,
+    cwd: &Path,
     presenter: &mut Presenter<O, E>,
 ) -> i32 {
     let registry = Registry::new(home);
     match cmd {
-        VaultCmd::Register(args) => register(&registry, args, presenter),
+        VaultCmd::Register(args) => register(&registry, args, cwd, presenter),
         VaultCmd::Unregister(args) => unregister(&registry, args, presenter),
         VaultCmd::List(args) => list(&registry, args, presenter),
-        VaultCmd::Set(args) => set(&registry, args, presenter),
+        VaultCmd::Set(args) => set(&registry, args, cwd, presenter),
     }
 }
 
 fn register<O: Write, E: Write>(
     registry: &Registry,
     args: &RegisterArgs,
+    cwd: &Path,
     presenter: &mut Presenter<O, E>,
 ) -> i32 {
-    // PATH defaults to the current directory. Reading cwd here (rather than
-    // through the resolver) is deliberate: registration names a concrete root,
-    // it does not resolve one.
+    // PATH defaults to the effective cwd (which honors `-C`); a relative PATH
+    // is grounded against it. Registration names a concrete root, it does not
+    // resolve one — but the root it names must respect the invocation's cwd.
     let root = match args.path.clone() {
-        Some(path) => path,
-        None => match std::env::current_dir() {
-            Ok(cwd) => cwd,
-            Err(source) => {
-                presenter.diagnostic(&format!("cannot read the current directory: {source}"));
-                return EXIT_OPERATIONAL;
-            }
-        },
+        Some(path) => cwd.join(path),
+        None => cwd.to_path_buf(),
     };
     match registry.register(&args.name, &root, args.overrides()) {
         Ok(vault) => {
@@ -219,9 +216,16 @@ fn unregister<O: Write, E: Write>(
 fn set<O: Write, E: Write>(
     registry: &Registry,
     args: &SetArgs,
+    cwd: &Path,
     presenter: &mut Presenter<O, E>,
 ) -> i32 {
-    match registry.set(&args.name, args.to_changes()) {
+    let mut changes = args.to_changes();
+    // A relative --root is grounded against the effective cwd, like register's
+    // PATH. Overrides stay verbatim by design.
+    if let Some(root) = changes.root.take() {
+        changes.root = Some(cwd.join(root));
+    }
+    match registry.set(&args.name, changes) {
         Ok(outcome) if outcome.changed => {
             confirm(presenter, "updated", &outcome.vault);
             EXIT_OK

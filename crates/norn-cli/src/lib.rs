@@ -66,12 +66,34 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         Command::Find(args) => commands::find::run(&args, presenter),
         Command::Get(args) => commands::get::run(&args, presenter),
         Command::Vault(cmd) => match ConfigHome::from_env() {
-            Ok(home) => commands::vault::run(&cmd, home, presenter),
+            Ok(home) => match effective_cwd(&cli.global) {
+                Ok(cwd) => commands::vault::run(&cmd, home, &cwd, presenter),
+                Err(msg) => {
+                    presenter.diagnostic(&msg);
+                    display::EXIT_OPERATIONAL
+                }
+            },
             Err(err) => {
                 presenter.diagnostic(&err.to_string());
                 display::EXIT_OPERATIONAL
             }
         },
+    }
+}
+
+/// The directory vault path arguments resolve against: `-C/--cwd` when given
+/// (grounded against the process cwd if itself relative), else the process
+/// cwd. This is the only place the process cwd is read.
+fn effective_cwd(global: &cli::GlobalArgs) -> Result<std::path::PathBuf, String> {
+    let ground = |dir: Option<&std::path::Path>| {
+        std::env::current_dir()
+            .map(|cwd| dir.map_or_else(|| cwd.clone(), |d| cwd.join(d)))
+            .map_err(|source| format!("cannot read the current directory: {source}"))
+    };
+    match &global.cwd {
+        Some(dir) if dir.is_absolute() => Ok(dir.clone()),
+        Some(dir) => ground(Some(dir)),
+        None => ground(None),
     }
 }
 
