@@ -1,14 +1,15 @@
 //! The parity case/suite catalog (ADR 0018).
 //!
-//! Every [`Case`] is `ported: false` today — the rewrite binary is still
-//! the phase-0 skeleton (prints a notice, exits 2; see `crates/norn/src/main.rs`).
-//! The default gated bin run therefore filters to zero cases and reports
-//! "0 suites gated", exit 0. These cases are proven sound today via
-//! `--self-check` (oracle vs. itself) and flip to `ported: true` one at a
-//! time as phases 1-3 port their surfaces. `ported` lives on the [`Case`],
-//! not the [`Suite`]: phase 1 ports commands individually, so case-level
-//! granularity avoids a reshuffle at the first port. [`Suite`] stays a
-//! reporting/grouping label.
+//! Phase 1 (NRN-329) ported the full CLI grammar + custom help renderer, so
+//! the three `help` cases (`help-bare`, `help-validate`, `help-find`) are now
+//! `ported: true` and gated against the oracle; `help-bare` diverges by the
+//! new `vault` namespace and is covered by ledger entry PD-101. The remaining
+//! cases exercise real command execution (query/validate core, not yet ported)
+//! and stay `ported: false` — proven sound via `--self-check` (oracle vs.
+//! itself) and flipped one at a time as later phases port their surfaces.
+//! `ported` lives on the [`Case`], not the [`Suite`]: phase 1 ports commands
+//! individually, so case-level granularity avoids a reshuffle at each port.
+//! [`Suite`] stays a reporting/grouping label.
 //!
 //! Every case here was run against the installed oracle (v0.48.0) and
 //! confirmed rerun-stable (identical stdout/stderr/exit code across repeated
@@ -143,7 +144,7 @@ const HELP_CASES: &[Case] = &[
         argv: &["--help"],
         fixture: HELP_FIXTURE,
         stdin: None,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
@@ -154,7 +155,7 @@ const HELP_CASES: &[Case] = &[
         argv: &["validate", "--help"],
         fixture: HELP_FIXTURE,
         stdin: None,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
@@ -165,7 +166,7 @@ const HELP_CASES: &[Case] = &[
         argv: &["find", "--help"],
         fixture: HELP_FIXTURE,
         stdin: None,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
