@@ -42,17 +42,26 @@ pub fn workspace_root() -> PathBuf {
 }
 
 /// The rewrite binary (`norn`, the phase-0 skeleton) built in the *debug*
-/// profile — `cargo test --workspace` builds every workspace member's bin
-/// targets as a side effect, so this exists by the time any test runs
-/// without requiring a separate `cargo build --release` first. CI's
-/// `cargo test --workspace --locked` step runs BEFORE its
-/// `cargo build --workspace --release --locked` step, so a test that
-/// required the release artifact would fail there.
+/// profile. `cargo test` does NOT reliably uplift another workspace
+/// member's bin to `target/debug/norn` (it landed there locally only as a
+/// stale artifact of earlier `cargo build` runs; a fresh CI runner has no
+/// such file), so build it explicitly — once per test process — via the
+/// same cargo that is running the tests.
 pub fn rewrite_debug_binary() -> PathBuf {
+    static BUILD: std::sync::Once = std::sync::Once::new();
+    BUILD.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = std::process::Command::new(cargo)
+            .args(["build", "-p", "norn", "--bin", "norn"])
+            .current_dir(workspace_root())
+            .status()
+            .expect("failed to spawn cargo to build the rewrite skeleton binary");
+        assert!(status.success(), "cargo build -p norn --bin norn failed");
+    });
     let path = workspace_root().join("target/debug/norn");
     assert!(
         path.is_file(),
-        "{} not found — expected `cargo test --workspace` to have built it as a side effect",
+        "{} not found even after `cargo build -p norn --bin norn` — non-default CARGO_TARGET_DIR?",
         path.display()
     );
     path
