@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# The crate skeleton lands with NRN-301 (norn-core, norn-wire,
+# norn-frontmatter, norn-config, norn-owner, norn-client, norn-cli,
+# norn-mcp, bin); crates/norn-core is a placeholder member until then.
+# The pre-0018 tree lives in retired/ — documentation, not source;
+# see retired/CLAUDE.md for the porting burn-down.
