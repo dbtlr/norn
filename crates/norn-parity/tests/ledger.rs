@@ -21,16 +21,23 @@ fn ported_ids() -> BTreeSet<&'static str> {
 }
 
 #[test]
-fn parses_the_real_ledger_with_a_meta_table_and_zero_entries() {
+fn parses_the_real_ledger_with_the_pd101_vault_namespace_entry() {
     let path = common::workspace_root().join("docs/parity-ledger.toml");
     let ledger = Ledger::load(&path, &known_ids(), &ported_ids())
         .unwrap_or_else(|e| panic!("failed to load {}: {e}", path.display()));
     assert_eq!(ledger.meta.oracle_version, "0.48.0");
-    assert!(
-        ledger.entries.is_empty(),
-        "expected zero entries in the initial ledger, found {}",
+    // Phase 1 (NRN-329) adds exactly one entry: the new `vault` namespace in
+    // top-level `--help`, cited by `help-bare`, reason `decided-better`.
+    assert_eq!(
+        ledger.entries.len(),
+        1,
+        "expected exactly the PD-101 entry, found {}",
         ledger.entries.len()
     );
+    let entry = &ledger.entries[0];
+    assert_eq!(entry.id, "PD-101");
+    assert_eq!(entry.cases, vec!["help-bare".to_string()]);
+    assert_eq!(entry.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]

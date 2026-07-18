@@ -220,6 +220,7 @@ dependencies = [
 name = "norn-cli"
 version = "0.0.0"
 dependencies = [
+ "anstyle",
  "clap",
  "norn-client",
  "norn-config",
