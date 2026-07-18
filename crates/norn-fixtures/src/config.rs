@@ -2,6 +2,15 @@
 //! and seed — and exercises the full v0.48.0 config vocabulary documented in
 //! `docs/configuration.md` and `docs/rule-shape.md`.
 //!
+//! The directory names, path globs, and status vocabulary are not literals
+//! here: they are `%%TOKEN%%` placeholders substituted from [`crate::contract`]
+//! so the emitted rules and the documents the emitters place under those rules
+//! share one source of truth. The template stays a single readable YAML block
+//! (the literal `{{now}}` / `{ type: … }` forms would be corrupted by a
+//! `format!`), and every substituted value passes through [`crate::yaml::scalar`]
+//! or is a fixed glob, so the emitted bytes are unchanged from a hand-written
+//! block.
+//!
 //! Deviation from the literal per-rule field lists in the NRN-319 spec: the
 //! `typed-note` rule additionally declares `field_references: { parent: {
 //! target_type: [phase] } }`. The spec's `typed-note` field list (search
@@ -26,18 +35,43 @@
 //! explicitly exercises, so it is added here rather than dropping the
 //! alias-resolution fixture.
 
-pub const CONFIG_YAML: &str = r#"links:
+use crate::contract::{
+    DRAFTS_DIR, IGNORED_DIR, LOGS_DIR, NOTES_DIR, PHASES_GLOB, STATUS_VALUES, TASKS_DIR,
+    TASKS_GLOB, TEMPLATES_DIR,
+};
+use crate::yaml;
+
+/// Emit `.norn/config.yaml` with the contract values substituted in.
+pub fn config_yaml() -> String {
+    let status = STATUS_VALUES
+        .iter()
+        .map(|s| yaml::scalar(s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    CONFIG_TEMPLATE
+        .replace("%%IGNORED%%", IGNORED_DIR)
+        .replace("%%TEMPLATES%%", TEMPLATES_DIR)
+        .replace("%%DRAFTS%%", DRAFTS_DIR)
+        .replace("%%STATUS%%", &status)
+        .replace("%%TASKS_GLOB%%", TASKS_GLOB)
+        .replace("%%PHASES_GLOB%%", PHASES_GLOB)
+        .replace("%%NOTES%%", NOTES_DIR)
+        .replace("%%LOGS%%", LOGS_DIR)
+        .replace("%%TASKS_DIR%%", TASKS_DIR)
+}
+
+const CONFIG_TEMPLATE: &str = r#"links:
   alias_field: aliases
 
 files:
   ignore:
-    - "ignored/**"
+    - "%%IGNORED%%/**"
     - "**/*.tmp"
 
 validate:
   ignore:
-    - "templates/**"
-    - "drafts/{a,b}/**"
+    - "%%TEMPLATES%%/**"
+    - "%%DRAFTS%%/{a,b}/**"
   required_frontmatter:
     - title
   rules:
@@ -73,26 +107,26 @@ validate:
       required_frontmatter:
         - status
       allowed_values:
-        status: [backlog, active, done]
+        status: [%%STATUS%%]
       allowed_paths:
-        - "tasks/**/*.md"
-        - "phases/**/*.md"
+        - "%%TASKS_GLOB%%"
+        - "%%PHASES_GLOB%%"
       field_references:
         parent:
           target_type: [phase]
 
     - name: no-legacy
       match:
-        path: "notes/**"
+        path: "%%NOTES%%/**"
       exclude:
-        path: "notes/keep/**"
+        path: "%%NOTES%%/keep/**"
       forbidden_frontmatter:
         - legacy
 
     - name: dated-log
       match:
-        path: "logs/**"
-        path_not: "logs/scratch/**"
+        path: "%%LOGS%%/**"
+        path_not: "%%LOGS%%/scratch/**"
       field_types:
         when: date
 
@@ -135,7 +169,7 @@ repair:
         code: document-misrouted
         rule: task-rule
       move_document:
-        to_directory: "tasks/"
+        to_directory: "%%TASKS_DIR%%/"
 
 index:
   auto: true

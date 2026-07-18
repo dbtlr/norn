@@ -65,17 +65,20 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 /// Mimir's sentinel-guard pattern: absent/empty out-dir generates fresh;
 /// present with the sentinel is safe to clear and regenerate; present
 /// without it is refused outright (no `--force` escape hatch).
+///
+/// This is only the sentinel guard. Whether the target is a directory and
+/// whether it is empty are `lib::generate`'s to enforce — the single
+/// precondition point — so those checks are not duplicated here: a non-dir or
+/// leftover-populated target simply falls through and `generate` rejects it.
 fn prepare_target(out_dir: &Path) -> Result<(), String> {
     let meta = match fs::metadata(out_dir) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("cannot stat {}: {e}", out_dir.display())),
     };
+    // Not a directory, or empty: nothing to guard — defer to generate.
     if !meta.is_dir() {
-        return Err(format!(
-            "{} exists and is not a directory",
-            out_dir.display()
-        ));
+        return Ok(());
     }
     let mut entries =
         fs::read_dir(out_dir).map_err(|e| format!("cannot read {}: {e}", out_dir.display()))?;
@@ -119,7 +122,8 @@ fn run() -> Result<String, (String, u8)> {
     prepare_target(&args.out_dir).map_err(|e| (e, 1))?;
 
     let summary = norn_fixtures::generate(&profile, args.seed, &args.out_dir)
-        .map_err(|e| (format!("generation failed: {e}"), 1))?;
+        .map_err(|e| (format!("generation failed: {e}"), 1))?
+        .summary();
 
     Ok(format!(
         "generated {} vault (seed {}): {} docs, {} files -> {}",

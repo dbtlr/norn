@@ -1,39 +1,16 @@
 //! Inventory checks: `zoo` carries the representative fixed files (valid
 //! and violation zoo alike); `clean` carries the valid zoo plus its
-//! expansion docs, and has no violation-zoo files at all.
+//! expansion docs, and has no violation-zoo files at all. The valid-zoo doc
+//! count is derived from the generated manifest rather than hardcoded.
 
-use std::path::Path;
+mod common;
 
-use norn_fixtures::Profile;
-use tempfile::TempDir;
-
-fn generate(profile: &Profile, seed: u64) -> TempDir {
-    let dir = TempDir::new().unwrap();
-    norn_fixtures::generate(profile, seed, dir.path()).unwrap();
-    dir
-}
-
-fn count_md_files(root: &Path) -> usize {
-    let mut count = 0;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if entry.file_type().unwrap().is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                count += 1;
-            }
-        }
-    }
-    count
-}
+use common::{count_md_files, generate_vault};
+use norn_fixtures::{Profile, Tier};
 
 #[test]
 fn zoo_contains_representative_sample() {
-    let dir = generate(&Profile::zoo(), 1);
-    let root = dir.path();
+    let (_dir, vault, _manifest) = generate_vault(&Profile::zoo(), 1);
 
     for rel in [
         ".norn/config.yaml",
@@ -45,7 +22,7 @@ fn zoo_contains_representative_sample() {
         "broken/parse-fail.md",
     ] {
         assert!(
-            root.join(rel).exists(),
+            vault.join(rel).exists(),
             "expected {rel} to exist in the zoo profile"
         );
     }
@@ -53,10 +30,23 @@ fn zoo_contains_representative_sample() {
 
 #[test]
 fn clean_has_no_violation_zoo_and_has_expansion_docs() {
+    // The valid-zoo doc count is whatever the zoo manifest reports as
+    // non-violation docs — derived, not hardcoded — with a single literal
+    // spot-check so a manifest bug can't self-certify.
+    let (_zdir, _zvault, zoo_manifest) = generate_vault(&Profile::zoo(), 1);
+    let valid_zoo_doc_count = zoo_manifest
+        .docs
+        .iter()
+        .filter(|d| d.tier != Tier::Violation)
+        .count();
+    assert_eq!(
+        valid_zoo_doc_count, 23,
+        "valid-zoo doc count drifted from the expected 23"
+    );
+
     let profile = Profile::clean();
     let expansion_docs = profile.expansion_docs;
-    let dir = generate(&profile, 1);
-    let root = dir.path();
+    let (_dir, vault, _manifest) = generate_vault(&profile, 1);
 
     // Violation-zoo-only files must be absent.
     for rel in [
@@ -75,19 +65,17 @@ fn clean_has_no_violation_zoo_and_has_expansion_docs() {
         "shapes/empty-block.md",
     ] {
         assert!(
-            !root.join(rel).exists(),
+            !vault.join(rel).exists(),
             "expected {rel} to be absent from the clean profile"
         );
     }
 
     // Valid zoo files are still present.
-    assert!(root.join("notes/alpha.md").exists());
-    assert!(root.join(".norn/config.yaml").exists());
+    assert!(vault.join("notes/alpha.md").exists());
+    assert!(vault.join(".norn/config.yaml").exists());
 
-    // Exactly the fixed valid zoo (23 docs, see crate::zoo::valid_docs) plus
-    // `expansion_docs` seeded docs.
-    let total_md = count_md_files(root);
-    let valid_zoo_doc_count = 23;
+    // Exactly the manifest-derived valid zoo plus `expansion_docs` seeded docs.
+    let total_md = count_md_files(&vault);
     assert_eq!(
         total_md,
         valid_zoo_doc_count + expansion_docs,

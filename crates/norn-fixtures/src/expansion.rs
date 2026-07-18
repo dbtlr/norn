@@ -4,14 +4,19 @@
 //! type, dates, body shape, links, and (round-robin) violation injection —
 //! is driven by `Rng`, so `(profile, seed)` fully determines the output.
 
+use crate::contract::{PHASES_DIR, STATUS_VALUES, TASKS_DIR};
 use crate::dates::from_base_plus_minutes;
 use crate::rng::Rng;
 use crate::words::{DOC_WORDS, FOLDER_WORDS, HEADING_WORDS, SENTENCE_WORDS};
+use crate::yaml;
 use crate::Profile;
 
 pub struct ExpansionDoc {
     pub path: String,
     pub content: String,
+    /// Finding codes the injected violation (if any) makes the oracle report;
+    /// empty for a clean expansion doc.
+    pub codes: &'static [&'static str],
 }
 
 /// A previously emitted document, tracked so later docs can link to it.
@@ -22,6 +27,32 @@ pub struct KnownDoc {
     pub link_stem: String,
     pub link_path: String,
 }
+
+impl KnownDoc {
+    /// Build a link target from a stem and a vault-relative path. The single
+    /// owner of the `.md`-trim rule for `link_path` (deduped from lib.rs).
+    pub fn new(link_stem: String, path: &str) -> Self {
+        KnownDoc {
+            link_stem,
+            link_path: path.trim_end_matches(".md").to_string(),
+        }
+    }
+}
+
+/// The base document shape drawn per expansion doc. Mirrors `ViolationKind`:
+/// an explicit enum rather than a bare `usize`, so the match arms are
+/// exhaustive and self-documenting.
+#[derive(Clone, Copy)]
+enum DocKind {
+    Note,
+    Task,
+    Phase,
+    Plain,
+}
+
+/// Index-addressable in the same 0..4 order the rng draw expects, so the draw
+/// keeps consuming exactly one value and the stream shape is unchanged.
+const DOC_KINDS: [DocKind; 4] = [DocKind::Note, DocKind::Task, DocKind::Phase, DocKind::Plain];
 
 /// Round-robin violation classes injected into expansion docs. A small,
 /// deliberately-reduced subset of the full violation-zoo repertoire (see
@@ -43,6 +74,19 @@ const VIOLATION_KINDS: [ViolationKind; 5] = [
     ViolationKind::Misrouted,
     ViolationKind::DeadLink,
 ];
+
+impl ViolationKind {
+    /// The finding code(s) the oracle reports for a doc carrying this class.
+    fn codes(self) -> &'static [&'static str] {
+        match self {
+            ViolationKind::MissingKind => &["frontmatter-required-field-missing"],
+            ViolationKind::BadStatus => &["value-not-allowed"],
+            ViolationKind::FieldTypeInvalid => &["field-type-invalid"],
+            ViolationKind::Misrouted => &["document-misrouted"],
+            ViolationKind::DeadLink => &["link-target-missing"],
+        }
+    }
+}
 
 /// Build the deterministic `garden/`-rooted folder tree: `garden` itself,
 /// plus `folder_width` children per parent for `folder_depth` levels. No
@@ -144,8 +188,7 @@ pub fn generate(profile: &Profile, seed: u64, seed_docs: Vec<KnownDoc>) -> Vec<E
         let stem = format!("{word}-{i:03}");
         let title = format!("{} {}", titlecase(word), i);
 
-        // 0 = note, 1 = task, 2 = phase, 3 = plain.
-        let mut kind_choice = rng.range(4);
+        let mut kind = DOC_KINDS[rng.range(4)];
 
         let inject_violation =
             profile.violation_per_mille > 0 && rng.chance(profile.violation_per_mille, 1000);
@@ -161,18 +204,18 @@ pub fn generate(profile: &Profile, seed: u64, seed_docs: Vec<KnownDoc>) -> Vec<E
         // choice; the rng call above still happened, keeping the stream
         // shape stable regardless of injection.
         if let Some(v) = violation {
-            kind_choice = match v {
-                ViolationKind::MissingKind | ViolationKind::FieldTypeInvalid => 0,
-                ViolationKind::BadStatus | ViolationKind::Misrouted => 1,
-                ViolationKind::DeadLink => kind_choice,
+            kind = match v {
+                ViolationKind::MissingKind | ViolationKind::FieldTypeInvalid => DocKind::Note,
+                ViolationKind::BadStatus | ViolationKind::Misrouted => DocKind::Task,
+                ViolationKind::DeadLink => kind,
             };
         }
 
-        let folder = rng.pick(&folders).clone();
+        let folder = rng.pick(&folders);
+        let title = yaml::scalar(&title);
 
-        let (path, mut frontmatter) = match kind_choice {
-            0 => {
-                // note
+        let (path, mut frontmatter) = match kind {
+            DocKind::Note => {
                 let created_minutes = rng.range(2 * 365 * 24 * 60) as i64;
                 let modified_minutes = created_minutes + rng.range(60 * 24 * 30) as i64;
                 let created = from_base_plus_minutes(created_minutes).datetime_z();
@@ -188,13 +231,11 @@ pub fn generate(profile: &Profile, seed: u64, seed_docs: Vec<KnownDoc>) -> Vec<E
                 fm.push_str(&format!("created: {created}\nmodified: {modified}\n"));
                 (format!("{folder}/{stem}.md"), fm)
             }
-            1 => {
-                // task
-                let statuses = ["backlog", "active", "done"];
+            DocKind::Task => {
                 let status = if matches!(violation, Some(ViolationKind::BadStatus)) {
                     "someday"
                 } else {
-                    rng.pick(&statuses)
+                    rng.pick(STATUS_VALUES)
                 };
                 let fm = format!(
                     "title: {title}\ntype: task\nstatus: {status}\nparent: \"[[phase-one]]\"\n"
@@ -202,19 +243,16 @@ pub fn generate(profile: &Profile, seed: u64, seed_docs: Vec<KnownDoc>) -> Vec<E
                 let path = if matches!(violation, Some(ViolationKind::Misrouted)) {
                     format!("{folder}/{stem}.md")
                 } else {
-                    format!("tasks/{stem}.md")
+                    format!("{TASKS_DIR}/{stem}.md")
                 };
                 (path, fm)
             }
-            2 => {
-                // phase
-                let statuses = ["backlog", "active", "done"];
-                let status = rng.pick(&statuses);
+            DocKind::Phase => {
+                let status = rng.pick(STATUS_VALUES);
                 let fm = format!("title: {title}\ntype: phase\nstatus: {status}\n");
-                (format!("phases/{stem}.md"), fm)
+                (format!("{PHASES_DIR}/{stem}.md"), fm)
             }
-            _ => {
-                // plain
+            DocKind::Plain => {
                 let fm = format!("title: {title}\n");
                 (format!("{folder}/{stem}.md"), fm)
             }
@@ -229,13 +267,13 @@ pub fn generate(profile: &Profile, seed: u64, seed_docs: Vec<KnownDoc>) -> Vec<E
         frontmatter = format!("---\n{frontmatter}---\n\n");
         let content = format!("{frontmatter}{body}{links}");
 
-        let link_path = path.trim_end_matches(".md").to_string();
-        known.push(KnownDoc {
-            link_stem: stem.clone(),
-            link_path,
+        let codes: &'static [&'static str] = violation.map_or(&[], ViolationKind::codes);
+        known.push(KnownDoc::new(stem, &path));
+        out.push(ExpansionDoc {
+            path,
+            content,
+            codes,
         });
-
-        out.push(ExpansionDoc { path, content });
     }
 
     out

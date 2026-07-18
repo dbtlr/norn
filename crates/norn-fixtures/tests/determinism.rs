@@ -1,45 +1,22 @@
 //! Byte-determinism: the same `(profile, seed)` must produce a
 //! byte-identical vault tree, and a different seed must change at least one
 //! byte somewhere (sanity that the seed actually matters).
+//!
+//! The cases cover both rng-consumption branch families deliberately: `zoo`
+//! has `expansion_docs: 0` and pins the static zoo (no rng), while `clean`
+//! (non-violating expansion arm) and `violations` (violating expansion arm)
+//! each exercise the seeded generator.
+
+mod common;
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
 
+use common::{generate_vault, walk};
 use norn_fixtures::Profile;
-use tempfile::TempDir;
 
-/// Walk `root`, returning a sorted map of vault-relative path -> file bytes.
-fn walk(root: &Path) -> BTreeMap<String, Vec<u8>> {
-    let mut out = BTreeMap::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if entry.file_type().unwrap().is_dir() {
-                stack.push(path);
-            } else {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-                let bytes = fs::read(&path).unwrap();
-                out.insert(rel, bytes);
-            }
-        }
-    }
-    out
-}
-
-fn generate_into_temp(profile: &Profile, seed: u64) -> (TempDir, BTreeMap<String, Vec<u8>>) {
-    let dir = TempDir::new().unwrap();
-    // generate() requires an empty (or absent) dir; TempDir::new() already
-    // creates an empty directory, so generate directly into it.
-    norn_fixtures::generate(profile, seed, dir.path()).unwrap();
-    let tree = walk(dir.path());
-    (dir, tree)
+fn tree(profile: &Profile, seed: u64) -> BTreeMap<String, Vec<u8>> {
+    let (_dir, vault, _manifest) = generate_vault(profile, seed);
+    walk(&vault)
 }
 
 fn assert_same_tree(a: &BTreeMap<String, Vec<u8>>, b: &BTreeMap<String, Vec<u8>>, label: &str) {
@@ -54,32 +31,39 @@ fn assert_same_tree(a: &BTreeMap<String, Vec<u8>>, b: &BTreeMap<String, Vec<u8>>
 
 #[test]
 fn zoo_is_byte_deterministic() {
-    let profile_a = Profile::zoo();
-    let profile_b = Profile::zoo();
-    let (_dir_a, tree_a) = generate_into_temp(&profile_a, 42);
-    let (_dir_b, tree_b) = generate_into_temp(&profile_b, 42);
-    assert_same_tree(&tree_a, &tree_b, "zoo seed 42");
+    // Static zoo, no rng consumed — pins the fixed content.
+    assert_same_tree(
+        &tree(&Profile::zoo(), 42),
+        &tree(&Profile::zoo(), 42),
+        "zoo seed 42",
+    );
+}
+
+#[test]
+fn clean_seed_7_is_byte_deterministic() {
+    // Seeded expansion, non-violating arm.
+    assert_same_tree(
+        &tree(&Profile::clean(), 7),
+        &tree(&Profile::clean(), 7),
+        "clean seed 7",
+    );
 }
 
 #[test]
 fn violations_seed_42_is_byte_deterministic() {
-    let profile_a = Profile::violations();
-    let profile_b = Profile::violations();
-    let (_dir_a, tree_a) = generate_into_temp(&profile_a, 42);
-    let (_dir_b, tree_b) = generate_into_temp(&profile_b, 42);
-    assert_same_tree(&tree_a, &tree_b, "violations seed 42");
+    // Seeded expansion, violating arm.
+    assert_same_tree(
+        &tree(&Profile::violations(), 42),
+        &tree(&Profile::violations(), 42),
+        "violations seed 42",
+    );
 }
 
 #[test]
 fn different_seeds_change_at_least_one_file() {
-    let profile_a = Profile::violations();
-    let profile_b = Profile::violations();
-    let (_dir_a, tree_a) = generate_into_temp(&profile_a, 1);
-    let (_dir_b, tree_b) = generate_into_temp(&profile_b, 2);
-
     // Path sets may or may not match (expansion doc placement can shift
     // between seeds); the sanity bar is just "something is different".
-    let differs = tree_a != tree_b;
+    let differs = tree(&Profile::violations(), 1) != tree(&Profile::violations(), 2);
     assert!(
         differs,
         "seed 1 and seed 2 produced byte-identical violations vaults"

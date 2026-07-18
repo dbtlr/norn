@@ -3,38 +3,115 @@
 //! notwithstanding. Two tiers:
 //!
 //! - `valid_docs()` / `binary_docs()` — always emitted; every markdown doc
-//!   here satisfies `config::CONFIG_YAML` cleanly (zero validate findings).
+//!   here satisfies the emitted config cleanly (zero validate findings).
 //! - `violation_docs()` — emitted only when `Profile::violations` is set;
-//!   each doc trips at least one specific, named finding code, and together
-//!   they cover every constraint kind in the config plus every `repair.rules`
-//!   match predicate.
+//!   each doc trips at least one specific, named finding code (carried as
+//!   data on the [`ViolationDoc`], the single source the oracle-smoke test
+//!   reads), and together they cover every constraint kind in the config plus
+//!   every `repair.rules` match predicate.
 
-/// `(vault-relative path, file content)` pairs for the always-valid zoo.
-pub fn valid_docs() -> Vec<(&'static str, &'static str)> {
+use crate::Tier;
+
+/// A fixed markdown document in the always-emitted zoo.
+pub struct ZooDoc {
+    /// Vault-relative path.
+    pub path: &'static str,
+    /// File content.
+    pub content: &'static str,
+    /// Which validation tier this doc exercises.
+    pub tier: Tier,
+    /// Eligible as an expansion link target. False for the deliberately
+    /// ambiguous `duplicate` pair and for the files-ignored doc, either of
+    /// which would inject an unintended finding into a clean profile.
+    pub linkable: bool,
+}
+
+/// A fixed markdown document in the violation zoo, tagged with the finding
+/// codes the oracle is expected to report for it.
+pub struct ViolationDoc {
+    /// Vault-relative path.
+    pub path: &'static str,
+    /// File content.
+    pub content: &'static str,
+    /// Finding codes the oracle reports against this doc.
+    pub codes: &'static [&'static str],
+}
+
+const fn valid(path: &'static str, content: &'static str) -> ZooDoc {
+    ZooDoc {
+        path,
+        content,
+        tier: Tier::Valid,
+        linkable: true,
+    }
+}
+
+/// Valid-tier doc excluded from the expansion link-target pool (ambiguous stem).
+const fn valid_unlinkable(path: &'static str, content: &'static str) -> ZooDoc {
+    ZooDoc {
+        path,
+        content,
+        tier: Tier::Valid,
+        linkable: false,
+    }
+}
+
+const fn validate_ignored(path: &'static str, content: &'static str) -> ZooDoc {
+    ZooDoc {
+        path,
+        content,
+        tier: Tier::ValidateIgnored,
+        linkable: true,
+    }
+}
+
+const fn files_ignored(path: &'static str, content: &'static str) -> ZooDoc {
+    ZooDoc {
+        path,
+        content,
+        tier: Tier::FilesIgnored,
+        linkable: false,
+    }
+}
+
+const fn viol(
+    path: &'static str,
+    content: &'static str,
+    codes: &'static [&'static str],
+) -> ViolationDoc {
+    ViolationDoc {
+        path,
+        content,
+        codes,
+    }
+}
+
+/// The always-valid zoo, in fixed emission order.
+pub fn valid_docs() -> Vec<ZooDoc> {
     vec![
-        ("index.md", INDEX),
-        ("notes/alpha.md", ALPHA),
-        ("notes/beta.md", BETA),
-        ("notes/keep/kept.md", KEPT),
-        ("notes/gamma.md", GAMMA),
-        ("phases/phase-one.md", PHASE_ONE),
-        ("tasks/task-001.md", TASK_001),
-        ("tasks/task-002.md", TASK_002),
-        ("notes/cycle-a.md", CYCLE_A),
-        ("notes/cycle-b.md", CYCLE_B),
-        ("notes/cycle-c.md", CYCLE_C),
-        ("notes/orphan.md", ORPHAN),
-        ("notes/duplicate.md", DUPLICATE_ONE),
-        ("archive2/duplicate.md", DUPLICATE_TWO),
-        ("notes/ambi.md", AMBI),
-        ("Über Notiz.md", UBER_NOTIZ),
-        ("Wide Open Spaces.md", WIDE_OPEN_SPACES),
-        ("logs/2025-01-15.md", LOG_DATED),
-        ("logs/scratch/rough.md", LOG_SCRATCH),
-        ("templates/broken-template.md", BROKEN_TEMPLATE),
-        ("drafts/a/draft-note.md", DRAFT_NOTE),
-        ("ignored/hidden-away.md", HIDDEN_AWAY),
-        ("shapes/no-body.md", NO_BODY),
+        valid("index.md", INDEX),
+        valid("notes/alpha.md", ALPHA),
+        valid("notes/beta.md", BETA),
+        valid("notes/keep/kept.md", KEPT),
+        valid("notes/gamma.md", GAMMA),
+        valid("phases/phase-one.md", PHASE_ONE),
+        valid("tasks/task-001.md", TASK_001),
+        valid("tasks/task-002.md", TASK_002),
+        valid("notes/cycle-a.md", CYCLE_A),
+        valid("notes/cycle-b.md", CYCLE_B),
+        valid("notes/cycle-c.md", CYCLE_C),
+        valid("notes/orphan.md", ORPHAN),
+        valid_unlinkable("notes/duplicate.md", DUPLICATE_ONE),
+        valid_unlinkable("archive2/duplicate.md", DUPLICATE_TWO),
+        valid("notes/ambi.md", AMBI),
+        valid("Über Notiz.md", UBER_NOTIZ),
+        valid("Wide Open Spaces.md", WIDE_OPEN_SPACES),
+        valid("logs/2025-01-15.md", LOG_DATED),
+        valid("logs/scratch/rough.md", LOG_SCRATCH),
+        validate_ignored("templates/broken-template.md", BROKEN_TEMPLATE),
+        validate_ignored("drafts/a/draft-note.md", DRAFT_NOTE),
+        files_ignored("ignored/hidden-away.md", HIDDEN_AWAY),
+        valid("shapes/no-body.md", NO_BODY),
     ]
 }
 
@@ -43,23 +120,66 @@ pub fn binary_docs() -> Vec<(&'static str, &'static [u8])> {
     vec![("Assets/pic.png", MINIMAL_PNG)]
 }
 
-/// `(vault-relative path, file content)` pairs for the violation zoo,
-/// emitted only when `Profile::violations` is true.
-pub fn violation_docs() -> Vec<(&'static str, &'static str)> {
+/// The violation zoo, emitted only when `Profile::violations` is true. Each
+/// doc's `codes` are exactly what the pinned oracle reports against it.
+pub fn violation_docs() -> Vec<ViolationDoc> {
     vec![
-        ("broken/parse-fail.md", PARSE_FAIL),
-        ("broken/no-frontmatter.md", NO_FRONTMATTER),
-        ("notes/missing-kind.md", MISSING_KIND),
-        ("notes/has-legacy.md", HAS_LEGACY),
-        ("tasks/task-bad-status.md", TASK_BAD_STATUS),
-        ("stray-task.md", STRAY_TASK),
-        ("notes/bad-types.md", BAD_TYPES),
-        ("notes/bad-parent.md", BAD_PARENT),
-        ("notes/dangling-parent.md", DANGLING_PARENT),
-        ("notes/ambi-bare.md", AMBI_BARE),
-        ("notes/dead-end.md", DEAD_END),
-        ("notes/into-ignored.md", INTO_IGNORED),
-        ("shapes/empty-block.md", EMPTY_BLOCK),
+        viol(
+            "broken/parse-fail.md",
+            PARSE_FAIL,
+            &[
+                "frontmatter-parse-failed",
+                "frontmatter-required-field-missing",
+            ],
+        ),
+        viol(
+            "broken/no-frontmatter.md",
+            NO_FRONTMATTER,
+            &["frontmatter-required-field-missing"],
+        ),
+        viol(
+            "notes/missing-kind.md",
+            MISSING_KIND,
+            &["frontmatter-required-field-missing"],
+        ),
+        viol(
+            "notes/has-legacy.md",
+            HAS_LEGACY,
+            &["frontmatter-forbidden-field"],
+        ),
+        viol(
+            "tasks/task-bad-status.md",
+            TASK_BAD_STATUS,
+            &["value-not-allowed"],
+        ),
+        viol("stray-task.md", STRAY_TASK, &["document-misrouted"]),
+        viol(
+            "notes/bad-types.md",
+            BAD_TYPES,
+            &["field-type-invalid", "frontmatter-exceeds-max-length"],
+        ),
+        viol(
+            "notes/bad-parent.md",
+            BAD_PARENT,
+            &["frontmatter-reference-type"],
+        ),
+        viol(
+            "notes/dangling-parent.md",
+            DANGLING_PARENT,
+            &["link-target-missing"],
+        ),
+        viol("notes/ambi-bare.md", AMBI_BARE, &["link-ambiguous"]),
+        viol("notes/dead-end.md", DEAD_END, &["link-target-missing"]),
+        viol(
+            "notes/into-ignored.md",
+            INTO_IGNORED,
+            &["link-target-missing"],
+        ),
+        viol(
+            "shapes/empty-block.md",
+            EMPTY_BLOCK,
+            &["frontmatter-required-field-missing"],
+        ),
     ]
 }
 
