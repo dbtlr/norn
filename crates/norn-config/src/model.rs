@@ -26,7 +26,7 @@ pub(crate) struct ConfigFile {
 /// A single `[vaults.<name>]` table. Only what was explicitly registered is
 /// stored — defaults are never synthesized here. `extra` preserves unknown
 /// per-vault keys.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct VaultEntry {
     /// Absolute, canonicalized vault root.
     pub root: PathBuf,

@@ -265,6 +265,29 @@ fn vault_register_missing_root_exits_one() {
 }
 
 #[test]
+fn vault_set_noop_reports_no_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    let out = norn_cfg(&cfg)
+        .args(["vault", "register", "docs"])
+        .arg(&vault)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+
+    // Clearing an override that was never set changes nothing.
+    let out = norn_cfg(&cfg)
+        .args(["vault", "set", "docs", "--clear-cache"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stdout_of(&out), "norn: no changes for \"docs\"\n");
+    assert_eq!(stderr_of(&out), "");
+}
+
+#[test]
 fn vault_set_with_no_change_flags_exits_two() {
     let tmp = tempfile::tempdir().unwrap();
     let out = norn_cfg(&tmp.path().join("cfg"))

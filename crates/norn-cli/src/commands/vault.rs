@@ -222,8 +222,16 @@ fn set<O: Write, E: Write>(
     presenter: &mut Presenter<O, E>,
 ) -> i32 {
     match registry.set(&args.name, args.to_changes()) {
-        Ok(vault) => {
-            confirm(presenter, "updated", &vault);
+        Ok(outcome) if outcome.changed => {
+            confirm(presenter, "updated", &outcome.vault);
+            EXIT_OK
+        }
+        Ok(outcome) => {
+            let _ = writeln!(
+                presenter.out(),
+                "norn: no changes for {name:?}",
+                name = outcome.vault.name
+            );
             EXIT_OK
         }
         Err(err) => fail(presenter, err),
