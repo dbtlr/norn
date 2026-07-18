@@ -7,6 +7,7 @@ files:
     - "fixtures/**"
     - ".claude/**"
     - "CLAUDE.local.md"
+    - "retired/**"
 validate:
   rules:
     - name: docs-page

@@ -10,27 +10,27 @@ fmt-check:
     cargo fmt --check
 
 check:
-    cargo check
+    cargo check --workspace --locked
 
 test:
-    cargo test
+    cargo test --workspace
 
 build:
-    cargo build -p norn-run
+    cargo build --workspace
 
 build-release:
-    cargo build -p norn-run --release
+    cargo build --workspace --release
 
 install:
-    NORN_BUILD_CHANNEL=live cargo install --path .
+    @echo "no bin crate yet (ADR 0018 rewrite): the norn binary returns with the workspace skeleton + ported surfaces; use the pinned oracle release meanwhile" && exit 1
 
 verify: fmt-check test
 
 run *args:
-    cargo run -q -p norn-run -- {{args}}
+    @echo "no bin crate yet (ADR 0018 rewrite): the norn binary returns with the workspace skeleton + ported surfaces; use the pinned oracle release meanwhile" && exit 1
 
 dist-plan:
-    cargo dist plan
+    @echo "no bin crate yet (ADR 0018 rewrite): the norn binary returns with the workspace skeleton + ported surfaces; use the pinned oracle release meanwhile" && exit 1
 
 dist-build-local:
     cargo dist build
@@ -43,11 +43,7 @@ release version:
     git tag -a v{{version}} -m "norn v{{version}}"
 
 completions:
-    mkdir -p target/completions
-    cargo run -q -p norn-run -- completions bash > target/completions/norn.bash
-    cargo run -q -p norn-run -- completions zsh  > target/completions/_norn
-    cargo run -q -p norn-run -- completions fish > target/completions/norn.fish
+    @echo "no bin crate yet (ADR 0018 rewrite): the norn binary returns with the workspace skeleton + ported surfaces; use the pinned oracle release meanwhile" && exit 1
 
 manpage:
-    mkdir -p target/man
-    cargo run -q -p norn-run -- manpage > target/man/norn.1
+    @echo "no bin crate yet (ADR 0018 rewrite): the norn binary returns with the workspace skeleton + ported surfaces; use the pinned oracle release meanwhile" && exit 1

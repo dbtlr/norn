@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # The parity-oracle pin (ADR 0018): the released binary CI validates with.
+  ORACLE_VERSION: v0.48.0
+
 jobs:
   changes:
     if: github.event_name != 'schedule'
@@ -30,14 +34,13 @@ jobs:
         id: filter
         with:
           filters: |
+            # retired/** is deliberately in neither group: documentation, not source.
             build:
-              - "src/**"
-              - "tests/**"
+              - "crates/**"
               - "fixtures/**"
               - "examples/**"
               - "Cargo.toml"
               - "Cargo.lock"
-              - "build.rs"
               - ".github/workflows/ci.yml"
             docs:
               - "**/*.md"
@@ -78,31 +81,22 @@ jobs:
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
 
-      - name: cargo build -p norn-run --release --locked
-        run: cargo build -p norn-run --release --locked
+      - name: cargo build --workspace --release --locked
+        run: cargo build --workspace --release --locked
 
-      - name: cargo install --path . --locked
-        run: cargo install --path . --locked
+      # The pre-rewrite binary smokes (install, --help, completions, manpage)
+      # return as their surfaces reach parity (ADR 0018); until then the
+      # pinned oracle release runs the vault validations.
+      - name: install oracle norn (pinned release)
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dbtlr/norn/releases/download/$ORACLE_VERSION/norn-run-installer.sh | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: norn --help
-        run: norn --help
-
-      - name: completions bash smoke
-        run: norn completions init bash > /tmp/norn.bash && test -s /tmp/norn.bash
-
-      - name: completions zsh smoke
-        run: norn completions init zsh > /tmp/_norn && test -s /tmp/_norn
-
-      - name: completions fish smoke
-        run: norn completions init fish > /tmp/norn.fish && test -s /tmp/norn.fish
-
-      - name: manpage smoke
-        run: norn manpage > /tmp/norn.1 && test -s /tmp/norn.1
-
-      - name: fixture validate
+      - name: fixture validate (oracle)
         run: norn -C fixtures/basic validate --summary --format json
 
-      - name: repo self-validate
+      - name: repo self-validate (oracle)
         run: norn -C . validate --summary --format json
 
       - name: cargo audit
@@ -114,9 +108,9 @@ jobs:
       - name: shellcheck
         run: shellcheck examples/repair-recipe.sh
 
-  # Light path for Markdown-only changes: build once (debug, cached) and run
-  # the repo self-validation, which enforces the docs frontmatter rules in
-  # .norn/config.yaml. Skipped when the full ci job runs (it self-validates).
+  # Light path for Markdown-only changes: the pinned oracle release runs the
+  # repo self-validation, which enforces the docs frontmatter rules in
+  # .norn/config.yaml. No Rust build. Skipped when the full ci job runs.
   docs-validate:
     needs: changes
     if: ${{ !cancelled() && github.event_name != 'schedule' && needs.changes.outputs.docs == 'true' && needs.changes.outputs.build != 'true' }}
@@ -126,18 +120,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: install oracle norn (pinned release)
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dbtlr/norn/releases/download/$ORACLE_VERSION/norn-run-installer.sh | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - uses: Swatinem/rust-cache@v2
+      - name: fixture validate (oracle)
+        run: norn -C fixtures/basic validate --summary --format json
 
-      - name: cargo build -p norn-run --locked
-        run: cargo build -p norn-run --locked
-
-      - name: fixture validate
-        run: ./target/debug/norn -C fixtures/basic validate --summary --format json
-
-      - name: repo self-validate
-        run: ./target/debug/norn -C . validate --summary --format json
+      - name: repo self-validate (oracle)
+        run: norn -C . validate --summary --format json
 
   # Rewrite work (ADR 0018) bases on the long-lived rewrite/0017 branch and
   # never targets main; the single graduation switchover PR lands from a
