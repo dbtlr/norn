@@ -35,6 +35,12 @@ pub struct SortPaginateParams {
     pub no_limit: bool,
 
     /// 1-indexed starting offset for paging. Default 1; omitted when default.
+    ///
+    /// Deliberately NOT a non-zero type: the v0.48 tool surface accepts `0`
+    /// and floors it to 1 verb-side ("default to 1 and floor at 1"), so the
+    /// wire stays permissive to reproduce that behavior frame-for-frame under
+    /// the parity harness. Producers (the CLI) clamp before construction;
+    /// flooring is the consuming verb's job.
     #[serde(skip_serializing_if = "is_default_start")]
     pub starts_at: usize,
 }
