@@ -139,17 +139,30 @@ jobs:
       - name: repo self-validate
         run: ./target/debug/norn -C . validate --summary --format json
 
+  # Rewrite work (ADR 0018) bases on the long-lived rewrite/0017 branch and
+  # never targets main; the single graduation switchover PR lands from a
+  # dedicated switchover branch, so this guard stays absolute.
+  branch-guard:
+    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && startsWith(github.head_ref, 'rewrite/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject rewrite/** PRs targeting main
+        run: |
+          echo "::error::rewrite/** branches must target rewrite/0017, not main (ADR 0018)."
+          echo "::error::The graduation switchover lands from a dedicated switchover branch."
+          exit 1
+
   # The single required status check: succeeds when the jobs that were
   # supposed to run succeeded (skipped-by-design counts as success), fails
   # on any failure or cancellation.
   ci-ok:
-    needs: [changes, ci, docs-validate]
+    needs: [changes, ci, docs-validate, branch-guard]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate results
         run: |
-          results="${{ needs.changes.result }} ${{ needs.ci.result }} ${{ needs['docs-validate'].result }}"
+          results="${{ needs.changes.result }} ${{ needs.ci.result }} ${{ needs['docs-validate'].result }} ${{ needs['branch-guard'].result }}"
           echo "job results: $results"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
