@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "norn-run"
-version = "0.48.0"
+version = "0.48.1"
 dependencies = [
  "anstyle",
  "anyhow",
