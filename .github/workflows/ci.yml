@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # The parity-oracle pin (ADR 0018): the released binary CI validates with.
+  ORACLE_VERSION: v0.48.0
+
 jobs:
   changes:
     if: github.event_name != 'schedule'
@@ -32,14 +36,11 @@ jobs:
           filters: |
             # retired/** is deliberately in neither group: documentation, not source.
             build:
-              - "src/**"
               - "crates/**"
-              - "tests/**"
               - "fixtures/**"
               - "examples/**"
               - "Cargo.toml"
               - "Cargo.lock"
-              - "build.rs"
               - ".github/workflows/ci.yml"
             docs:
               - "**/*.md"
@@ -86,9 +87,9 @@ jobs:
       # The pre-rewrite binary smokes (install, --help, completions, manpage)
       # return as their surfaces reach parity (ADR 0018); until then the
       # pinned oracle release runs the vault validations.
-      - name: install oracle norn (pinned v0.48.0 release)
+      - name: install oracle norn (pinned release)
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dbtlr/norn/releases/download/v0.48.0/norn-run-installer.sh | sh
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dbtlr/norn/releases/download/$ORACLE_VERSION/norn-run-installer.sh | sh
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -119,9 +120,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: install oracle norn (pinned v0.48.0 release)
+      - name: install oracle norn (pinned release)
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dbtlr/norn/releases/download/v0.48.0/norn-run-installer.sh | sh
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dbtlr/norn/releases/download/$ORACLE_VERSION/norn-run-installer.sh | sh
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
