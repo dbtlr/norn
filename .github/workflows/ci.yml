@@ -42,6 +42,10 @@ jobs:
               - "Cargo.toml"
               - "Cargo.lock"
               - ".github/workflows/ci.yml"
+              # Trust-critical gating data (ADR 0018), not documentation —
+              # a change here must re-run the parity self-check/consistency
+              # gate, not just the lighter docs-validate path.
+              - "docs/parity-ledger.toml"
             docs:
               - "**/*.md"
               - ".norn/**"
@@ -105,6 +109,22 @@ jobs:
           norn -C "$RUNNER_TEMP/fx-clean" validate --summary --format json | tee /dev/stderr | grep -q '"findings": 0'
           ./target/release/norn-fixtures "$RUNNER_TEMP/fx-zoo" --profile zoo --seed 1
           norn -C "$RUNNER_TEMP/fx-zoo" validate --summary --format json | tee /dev/stderr | { ! grep -q '"findings": 0'; }
+
+      # ADR 0018 parity harness (NRN-320). Line 1 proves the starter case
+      # set + comparator are sound against the real oracle (oracle vs.
+      # itself, every case, ledger not consulted). Line 2 checks oracle
+      # self-consistency invariants (a disagreement means the oracle
+      # contradicts itself — a candidate divergence-ledger entry). Line 3
+      # is the real gated run: phase 0 has zero `ported: true` suites, so
+      # it proves the "0 suites gated" exit-0 path stays green; it becomes
+      # the real rewrite-vs-oracle gate as suites flip `ported` phase by
+      # phase.
+      - name: parity self-check + consistency (oracle)
+        shell: bash
+        run: |
+          ./target/release/norn-parity --self-check --oracle "$(command -v norn)" --rewrite ./target/release/norn
+          ./target/release/norn-parity --consistency --oracle "$(command -v norn)"
+          ./target/release/norn-parity --oracle "$(command -v norn)" --rewrite ./target/release/norn
 
       - name: fixture validate (oracle)
         run: norn -C fixtures/basic validate --summary --format json

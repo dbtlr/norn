@@ -1,0 +1,19 @@
+[package]
+name = "norn-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "ADR 0018 oracle parity harness: drive the pinned oracle and rewrite binaries with identical argv over generated fixture vaults, compare under normalization, gate on match/diverged-with-ledger-entry/drift"
+
+[package.metadata.dist]
+dist = false
+
+[[bin]]
+name = "norn-parity"
+path = "src/main.rs"
+
+[dependencies]
+norn-fixtures = { path = "../norn-fixtures" }
+tempfile = "3"
+toml = "0.8"

@@ -1,0 +1,34 @@
+# Divergence ledger (ADR 0018): every intended old->new behavior difference,
+# decision-gated. The parity runner passes a differing case ONLY when an
+# entry here covers it; a differing case with no entry is drift (CI fails).
+# An entry whose cases all currently MATCH is stale and fails the run —
+# entries cannot rot.
+#
+# Format:
+#
+# [[entry]]
+# id = "PD-001"                      # stable, never reused
+# surface = "find --format json"     # human-readable surface name
+# cases = ["find-json-basic"]        # explicit case ids the entry covers
+# old = "what the oracle does"
+# new = "what the rewrite does"
+# reason = "decided-better"          # or "discovered-inconsistency"
+# decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+#
+# Runner-side rules (crates/norn-parity/src/ledger.rs), all enforced:
+# - Unknown `reason`, a missing required field, a duplicate entry id, or an
+#   entry citing an unknown case id is a load error (runner exit 2).
+# - An entry may only cite cases whose surface is already ported (the case's
+#   own `ported` flag). Divergence can only be observed on a ported surface,
+#   so an entry for an unported one is premature — a load error (exit 2).
+# - A case cited by more than one entry is also a load error — a Diverged
+#   verdict must resolve to exactly one entry.
+# - meta.oracle_version must match the oracle binary's actual `--version`
+#   output, or the run aborts (exit 2) rather than silently comparing
+#   against an unpinned or floated oracle. Enforced by the comparison modes
+#   AND by --consistency (a pin-scoped trust claim); --self-check is
+#   ledger-blind (no ledger, no pin) so a case set can be vetted against a
+#   new oracle before the ledger is updated.
+
+[meta]
+oracle_version = "0.48.0"   # the pinned oracle; the runner verifies `--version` against this

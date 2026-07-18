@@ -18,6 +18,8 @@ mod words;
 mod yaml;
 mod zoo;
 
+pub mod testing;
+
 pub use contract::{SENTINEL_CONTENT, SENTINEL_FILE};
 
 use std::collections::BTreeSet;
