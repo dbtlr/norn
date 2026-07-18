@@ -78,20 +78,33 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
-      - name: cargo test --workspace --locked
-        run: cargo test --workspace --locked
-
-      - name: cargo build --workspace --release --locked
-        run: cargo build --workspace --release --locked
-
-      # The pre-rewrite binary smokes (install, --help, completions, manpage)
-      # return as their surfaces reach parity (ADR 0018); until then the
-      # pinned oracle release runs the vault validations.
+      # Installed BEFORE cargo test so `norn` (the pinned parity oracle) is on
+      # PATH during the test run: tests/oracle_smoke.rs then runs for real
+      # instead of skipping. The pre-rewrite binary smokes (install, --help,
+      # completions, manpage) return as their surfaces reach parity (ADR 0018);
+      # until then the pinned oracle release runs the vault validations.
       - name: install oracle norn (pinned release)
         run: |
           curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dbtlr/norn/releases/download/$ORACLE_VERSION/norn-run-installer.sh | sh
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo build --workspace --release --locked
+        run: cargo build --workspace --release --locked
+
+      - name: fixture-gen smoke (oracle)
+        shell: bash
+        run: |
+          ./target/release/norn-fixtures "$RUNNER_TEMP/fx-clean" --profile clean --seed 1
+          norn -C "$RUNNER_TEMP/fx-clean" validate --summary --format json | tee /dev/stderr | grep -q '"findings": 0'
+          ./target/release/norn-fixtures "$RUNNER_TEMP/fx-zoo" --profile zoo --seed 1
+          norn -C "$RUNNER_TEMP/fx-zoo" validate --summary --format json | tee /dev/stderr | { ! grep -q '"findings": 0'; }
 
       - name: fixture validate (oracle)
         run: norn -C fixtures/basic validate --summary --format json

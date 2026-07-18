@@ -1,0 +1,17 @@
+[package]
+name = "norn-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Deterministic fixture-vault generator — synthesizes Markdown test vaults from a (Profile, seed) pair"
+
+[package.metadata.dist]
+dist = false
+
+[[bin]]
+name = "norn-fixtures"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"
