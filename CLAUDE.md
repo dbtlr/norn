@@ -23,6 +23,14 @@ Design principles serving the mission:
 
 These principles shape every new command and every output-format choice. Test each candidate against the chain above: does doing it natively reduce drift or turns on the *daily* path?
 
+## Branch policy — registered-vault rewrite (ADR 0018)
+
+Until the rewrite graduates, two long-lived lines exist. This policy dissolves at the switchover.
+
+- **All rewrite work (initiative NRN-306) bases on `rewrite/0017`** — branch from it, PR back into it, same gates as main (review, CI). Never target `main` from a `rewrite/**` branch; the `branch-guard` CI job rejects it. The single graduation switchover PR is the sole exception and lands from a dedicated switchover branch.
+- **`main` is the stable release line**: critical fixes only once the trees diverge structurally; a fix needed by both lines is hand-ported, never bulk-merged. Releases and `self-update` artifacts are cut from `main` only, until graduation.
+- Execution model of record: [docs/decisions/0018-greenfield-rewrite-oracle-parity.md](./docs/decisions/0018-greenfield-rewrite-oracle-parity.md).
+
 ## Per-task verification (Rust workspace)
 
 CI runs `cargo test --workspace --locked`. The per-task verification step must include ALL four of these — gaps here have failed CI multiple times. **Order matters**: run the `--locked` check FIRST so any `Cargo.lock` drift surfaces before the non-locked test command masks it by silently regenerating the lockfile.
