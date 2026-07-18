@@ -238,8 +238,24 @@ impl Registry {
             .map_err(|source| ConfigError::io("failed to write temp config", tmp.path(), source))?;
         tmp.flush()
             .map_err(|source| ConfigError::io("failed to flush temp config", tmp.path(), source))?;
+        // Crash durability, not just atomicity: sync the file content before
+        // the rename, then sync the parent directory so the rename itself
+        // survives power loss (a rename alone can be lost with the old file
+        // already unlinked from the directory's flushed state).
+        tmp.as_file()
+            .sync_all()
+            .map_err(|source| ConfigError::io("failed to sync temp config", tmp.path(), source))?;
         tmp.persist(&config_path)
             .map_err(|err| ConfigError::io("failed to persist config", &config_path, err.error))?;
+        #[cfg(unix)]
+        {
+            let dir_handle = fs::File::open(dir).map_err(|source| {
+                ConfigError::io("failed to open config directory for sync", dir, source)
+            })?;
+            dir_handle.sync_all().map_err(|source| {
+                ConfigError::io("failed to sync config directory", dir, source)
+            })?;
+        }
         Ok(())
     }
 }

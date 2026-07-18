@@ -88,6 +88,15 @@ impl Registry {
     /// Resolve a vault following the full precedence order. See the module
     /// docs for the contract.
     pub fn resolve(&self, input: &ResolveInput) -> Result<Resolved, ConfigError> {
+        // Deterministic only over absolute inputs: a relative cwd would make
+        // grounding, the binding walk, and reverse lookup depend on ambient
+        // process state.
+        if !input.cwd.is_absolute() {
+            return Err(ConfigError::RelativeCwd {
+                path: input.cwd.clone(),
+            });
+        }
+
         // 1. Explicit path — direct, never through the registry.
         if let Some(path) = &input.explicit_path {
             return Ok(Resolved {
@@ -226,6 +235,15 @@ mod tests {
 
     fn registry_in(dir: &Path) -> Registry {
         Registry::new(ConfigHome::new(dir.join("norn")))
+    }
+
+    #[test]
+    fn relative_cwd_is_rejected_at_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let input = ResolveInput::new(PathBuf::from("relative/cwd"));
+        let err = reg.resolve(&input).unwrap_err();
+        assert!(matches!(err, ConfigError::RelativeCwd { .. }));
     }
 
     #[test]

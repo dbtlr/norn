@@ -40,17 +40,31 @@ impl ConfigHome {
     /// precedence is unit-testable without mutating the process environment.
     pub fn from_getenv(getenv: impl Fn(&str) -> Option<OsString>) -> Result<Self, ConfigError> {
         if let Some(dir) = getenv(NORN_CONFIG_DIR_ENV).filter(|value| !value.is_empty()) {
+            let dir = PathBuf::from(dir);
+            // Fail loud: an override that silently depended on process cwd
+            // would make the config location non-deterministic.
+            if !dir.is_absolute() {
+                return Err(ConfigError::RelativeConfigDir { path: dir });
+            }
             return Ok(Self::new(dir));
         }
         if let Some(xdg) = getenv("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-            return Ok(Self::new(PathBuf::from(xdg).join("norn")));
+            // XDG basedir spec: a relative XDG_CONFIG_HOME is invalid and
+            // must be ignored, not grounded.
+            let xdg = PathBuf::from(xdg);
+            if xdg.is_absolute() {
+                return Ok(Self::new(xdg.join("norn")));
+            }
         }
         let home = getenv("HOME")
-            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .filter(|value| value.is_absolute())
             .ok_or_else(|| ConfigError::NoConfigHome {
-                reason: format!("none of {NORN_CONFIG_DIR_ENV}, XDG_CONFIG_HOME, or HOME is set"),
+                reason: format!(
+                    "none of {NORN_CONFIG_DIR_ENV}, XDG_CONFIG_HOME, or HOME is set to an absolute path"
+                ),
             })?;
-        Ok(Self::new(PathBuf::from(home).join(".config").join("norn")))
+        Ok(Self::new(home.join(".config").join("norn")))
     }
 
     /// The directory that holds `config.toml`.
@@ -123,6 +137,32 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(home.dir(), Path::new("/home/user/.config/norn"));
+    }
+
+    #[test]
+    fn relative_norn_config_dir_fails_loud() {
+        let err = ConfigHome::from_getenv(env_from(&[
+            ("NORN_CONFIG_DIR", "relative/dir"),
+            ("HOME", "/home/user"),
+        ]))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::RelativeConfigDir { .. }));
+    }
+
+    #[test]
+    fn relative_xdg_config_home_is_ignored_per_spec() {
+        let home = ConfigHome::from_getenv(env_from(&[
+            ("XDG_CONFIG_HOME", "relative-xdg"),
+            ("HOME", "/home/user"),
+        ]))
+        .unwrap();
+        assert_eq!(home.dir(), Path::new("/home/user/.config/norn"));
+    }
+
+    #[test]
+    fn relative_home_yields_no_config_home() {
+        let err = ConfigHome::from_getenv(env_from(&[("HOME", "relative-home")])).unwrap_err();
+        assert!(matches!(err, ConfigError::NoConfigHome { .. }));
     }
 
     #[test]

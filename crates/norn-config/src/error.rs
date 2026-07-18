@@ -30,6 +30,16 @@ pub enum ConfigError {
     #[error("no vault named {name:?} is registered")]
     UnknownName { name: String },
 
+    /// `NORN_CONFIG_DIR` was set to a relative path. The config home must
+    /// never depend on ambient process cwd.
+    #[error("NORN_CONFIG_DIR must be an absolute path, got {path}")]
+    RelativeConfigDir { path: PathBuf },
+
+    /// [`crate::ResolveInput`]'s cwd was relative. Resolution is deterministic
+    /// only over absolute inputs.
+    #[error("resolver cwd must be an absolute path, got {path}")]
+    RelativeCwd { path: PathBuf },
+
     /// A registry entry resolved to a root that no longer exists or is not a
     /// directory. Fail-loud: never a silent fallthrough to the next step.
     #[error(
