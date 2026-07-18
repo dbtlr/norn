@@ -108,8 +108,13 @@ pub fn load_config(cwd: &Utf8PathBuf, config_path: Option<&Utf8PathBuf>) -> Resu
         });
     };
 
-    let config_text = fs::read_to_string(&config_path)
-        .map_err(|error| anyhow::anyhow!("failed to read config {config_path}: {error}"))?;
+    // Preserve the typed `std::io::Error` as the anyhow source (rather than
+    // stringifying it) so a poisoned-state class such as EMFILE surfacing here —
+    // the daemon's first fd-consuming step on a `hello` — stays downcast-able for
+    // the fail-closed self-heal (NRN-337). Mirrors `env::refresh`'s config read.
+    let config_text = fs::read_to_string(&config_path).map_err(|error| {
+        anyhow::Error::new(error).context(format!("failed to read config {config_path}"))
+    })?;
     let (config, compiled) =
         parse_config_compiled(&config_text, &config_path).map_err(|e| anyhow::anyhow!("{e}"))?;
 

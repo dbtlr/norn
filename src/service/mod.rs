@@ -146,6 +146,11 @@ pub enum ControlFrame {
         /// Per-vault writer progress, present only when the ping named a vault.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         writer_progress: Option<WriterProgress>,
+        /// Host-global daemon stats for `service status` (NRN-337): retained warm
+        /// contexts and, when cheaply obtainable, total open fds. Additive and
+        /// serde-defaulted, so an old daemon's pong (which omits it) still parses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<HostStats>,
     },
     /// Client -> daemon, after the control handshake: names the vault this
     /// connection is for. The daemon derives vault identity from this path
@@ -183,6 +188,21 @@ pub enum ServingState {
 pub struct WriterProgress {
     pub busy: bool,
     pub sequence: u64,
+}
+
+/// Host-global daemon stats carried by a pong for `norn service status` (NRN-337).
+/// Host-scoped (not per-vault), so it rides every pong regardless of whether the
+/// ping named a vault.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostStats {
+    /// Warm per-vault contexts currently held open. Each pins ~7 fds, and the
+    /// daemon bounds this set (LRU eviction at the open-entry cap) so it cannot
+    /// grow without limit as distinct vaults are served.
+    pub open_entries: u64,
+    /// Total open file descriptors for the daemon process, when cheaply
+    /// obtainable (Linux `/proc/self/fd`, macOS `/dev/fd`); `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_fds: Option<u64>,
 }
 
 /// A handshake outcome that distinguishes version skew from every other
@@ -386,6 +406,8 @@ pub struct ServicePong {
     pub uptime_secs: Option<u64>,
     pub serving: Option<ServingState>,
     pub writer_progress: Option<WriterProgress>,
+    /// Host-global daemon stats (NRN-337) — retained warm contexts + open fds.
+    pub host: Option<HostStats>,
 }
 
 /// Control-ping a specific socket for `norn service status`: connect and run
@@ -835,6 +857,7 @@ fn handshake_pong(
             uptime_secs,
             serving,
             writer_progress,
+            host,
         } => Ok((
             protocol,
             ServicePong {
@@ -844,6 +867,7 @@ fn handshake_pong(
                 uptime_secs,
                 serving,
                 writer_progress,
+                host,
             },
         )),
         other => anyhow::bail!("unexpected control frame: {other:?}"),
@@ -1730,6 +1754,7 @@ mod tests {
                             busy: true,
                             sequence,
                         }),
+                        host: None,
                     })
                     .unwrap()
                 )
@@ -1787,6 +1812,7 @@ mod tests {
                             busy: false,
                             sequence: 12,
                         }),
+                        host: None,
                     })
                     .unwrap()
                 )
@@ -1890,6 +1916,7 @@ mod tests {
                                 busy: true,
                                 sequence: 9,
                             }),
+                            host: None,
                         })
                         .unwrap()
                     )
@@ -1987,6 +2014,7 @@ mod tests {
                                 busy: true,
                                 sequence: 9,
                             }),
+                            host: None,
                         })
                         .unwrap()
                     )
@@ -2556,6 +2584,7 @@ mod tests {
                 uptime_secs: Some(42),
                 serving: None,
                 writer_progress: None,
+                host: None,
             };
             let mut w = conn;
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
@@ -2631,6 +2660,7 @@ mod tests {
                 uptime_secs: None,
                 serving: None,
                 writer_progress: None,
+                host: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2667,6 +2697,7 @@ mod tests {
                 uptime_secs: Some(1),
                 serving: None,
                 writer_progress: None,
+                host: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2703,6 +2734,7 @@ mod tests {
                 uptime_secs: None,
                 serving: None,
                 writer_progress: None,
+                host: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2747,6 +2779,7 @@ mod tests {
                 uptime_secs: None,
                 serving: None,
                 writer_progress: None,
+                host: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -2790,6 +2823,7 @@ mod tests {
                     uptime_secs: None,
                     serving: None,
                     writer_progress: None,
+                    host: None,
                 };
                 writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
                 w.flush().unwrap();
@@ -2880,6 +2914,7 @@ mod tests {
                     uptime_secs: None,
                     serving: None,
                     writer_progress: None,
+                    host: None,
                 };
                 writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
                 w.flush().unwrap();
@@ -2982,6 +3017,7 @@ mod tests {
                 uptime_secs: None,
                 serving: None,
                 writer_progress: None,
+                host: None,
             };
             writeln!(w, "{}", serde_json::to_string(&pong).unwrap()).unwrap();
             w.flush().unwrap();
@@ -3035,6 +3071,7 @@ mod tests {
                 busy: true,
                 sequence: 7,
             }),
+            host: None,
         };
         assert_eq!(
             serde_json::to_value(&pong).unwrap(),

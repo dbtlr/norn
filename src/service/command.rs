@@ -541,7 +541,7 @@ fn status_cmd(
         crate::service::handshake_timeout(),
         vault_root,
     );
-    let (running_version, running_build, uptime_secs, pong_pid, serving, writer_progress) =
+    let (running_version, running_build, uptime_secs, pong_pid, serving, writer_progress, host) =
         match pong {
             Some(p) => (
                 Some(p.version),
@@ -550,8 +550,9 @@ fn status_cmd(
                 p.pid,
                 p.serving,
                 p.writer_progress,
+                p.host,
             ),
-            None => (None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None),
         };
     let vault = vault_root.map(|root| status::VaultStatus {
         root: root.to_string(),
@@ -566,6 +567,8 @@ fn status_cmd(
             running_build,
             uptime_secs,
             pong_pid,
+            open_entries: host.map(|h| h.open_entries),
+            open_fds: host.and_then(|h| h.open_fds),
             vault,
         },
         env!("CARGO_PKG_VERSION"),
@@ -1026,6 +1029,8 @@ mod tests {
                     running_build: Some("build-abc".into()),
                     uptime_secs: Some(9),
                     pong_pid: None,
+                    open_entries: None,
+                    open_fds: None,
                     vault: None,
                 },
                 "0.45.1",

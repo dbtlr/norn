@@ -25,7 +25,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufRea
 use rmcp::ServiceExt;
 
 use crate::serve::contexts::Contexts;
-use crate::service::{ControlFrame, CONTROL_PROTOCOL, MAX_CONTROL_FRAME_BYTES};
+use crate::service::{ControlFrame, HostStats, CONTROL_PROTOCOL, MAX_CONTROL_FRAME_BYTES};
 
 /// Hard deadline for the first control line. A live client sends it
 /// immediately; anything slower is a stuck or hostile peer we drop.
@@ -83,6 +83,14 @@ pub(crate) async fn handle_connection(
                 uptime_secs: Some(start.elapsed().as_secs()),
                 serving: vault_state.map(|(serving, _)| serving),
                 writer_progress: vault_state.map(|(_, progress)| progress),
+                // Host-global fd/bounded-retention observability (NRN-337). The
+                // entry count is a lockless atomic read; the fd count is a cheap
+                // best-effort `/proc/self/fd` (Linux) / `/dev/fd` (macOS) readdir.
+                // Neither takes the map lock, so the O(1) control ping stays O(1).
+                host: Some(HostStats {
+                    open_entries: contexts.open_entries(),
+                    open_fds: count_open_fds(),
+                }),
             };
             write_frame(&mut write_half, &pong).await?;
         }
@@ -116,6 +124,10 @@ pub(crate) async fn handle_connection(
                     // Client disconnected; the warm context stays in the map.
                 }
                 Err(e) => {
+                    // NRN-337: a poisoned open failure is already classified on the
+                    // TYPED error inside `open_server` (before the OnceCell
+                    // initializer stringifies it), so the latch is tripped by the
+                    // time we get here — this arm just answers the client.
                     eprintln!("norn serve: hello for {vault_root}: {e}");
                     write_error(&mut write_half, &e.to_string()).await;
                 }
@@ -176,6 +188,20 @@ async fn read_first_line_capped<R: AsyncBufRead + Unpin>(
             ));
         }
     }
+}
+
+/// Best-effort count of the daemon process's open file descriptors, for the
+/// `service status` fd field (NRN-337). Reads `/proc/self/fd` (Linux) or
+/// `/dev/fd` (macOS/BSD) — a single cheap readdir — and returns `None` when
+/// neither is available. The readdir itself opens one transient fd, so the count
+/// is approximate by ±1; it is diagnostic, not a control-flow input.
+fn count_open_fds() -> Option<u64> {
+    for dir in ["/proc/self/fd", "/dev/fd"] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            return Some(entries.filter(Result::is_ok).count() as u64);
+        }
+    }
+    None
 }
 
 /// Serialize `frame` as one newline-delimited JSON line, write it, and flush.

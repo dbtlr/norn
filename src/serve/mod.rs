@@ -28,12 +28,14 @@ pub(crate) mod conn;
 #[cfg(unix)]
 pub(crate) mod contexts;
 #[cfg(unix)]
+pub(crate) mod heal;
+#[cfg(unix)]
 pub(crate) mod lifecycle;
 
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use camino::Utf8Path;
@@ -65,13 +67,18 @@ pub fn run() -> anyhow::Result<()> {
         let sigint = signal(SignalKind::interrupt())?;
         let sigterm = signal(SignalKind::terminate())?;
 
+        // Install the fail-closed self-heal trigger BEFORE serving so a poisoned
+        // state surfaced by the very first request can still route an exit
+        // (NRN-337).
+        let poison = heal::install();
+
         let listener = lifecycle::bind_listener(&socket_path)?;
         eprintln!(
             "norn serve: listening at {socket_path} (v{}, pid {})",
             env!("CARGO_PKG_VERSION"),
             std::process::id()
         );
-        serve_loop(listener, &socket_path, sigint, sigterm).await
+        serve_loop(listener, &socket_path, sigint, sigterm, poison).await
     })
 }
 
@@ -94,9 +101,15 @@ async fn serve_loop(
     socket_path: &Utf8Path,
     mut sigint: tokio::signal::unix::Signal,
     mut sigterm: tokio::signal::unix::Signal,
+    poison: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
     let contexts = Arc::new(contexts::Contexts::new());
     let start = Instant::now();
+
+    // Set when we break because of a poisoned state (NRN-337) rather than a
+    // shutdown signal, so we grant in-flight responses a brief flush window
+    // before the runtime tears them down.
+    let mut poisoned = false;
 
     loop {
         tokio::select! {
@@ -109,17 +122,39 @@ async fn serve_loop(
                         }
                     });
                 }
+                // fd exhaustion at accept is the wedge NRN-337 targets: the fd
+                // table is full, so every subsequent accept/open on every vault
+                // fails. Exit to self-heal rather than hot-spinning EMFILE
+                // forever; the next invocation respawns a fresh daemon.
+                Err(e) if heal::is_fd_exhaustion_io(&e) => {
+                    heal::trip("file-descriptor exhaustion at accept (EMFILE/ENFILE)");
+                    poisoned = true;
+                    break;
+                }
                 Err(e) => {
                     eprintln!("norn serve: accept error: {e}");
-                    // Back off briefly so a persistent accept error (e.g. EMFILE
-                    // fd exhaustion) doesn't hot-spin the loop at 100% CPU. With
-                    // the sleep the worst case is ~10 log lines/sec — acceptable.
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    // Back off briefly so a persistent (non-fd) accept error
+                    // doesn't hot-spin the loop at 100% CPU. With the sleep the
+                    // worst case is ~10 log lines/sec — acceptable.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },
             _ = sigint.recv() => break,
             _ = sigterm.recv() => break,
+            // A request path (or the accept arm above) hit a poisoned state and
+            // tripped the latch: stop accepting and exit to self-heal (NRN-337).
+            _ = poison.notified() => {
+                poisoned = true;
+                break;
+            }
         }
+    }
+
+    if poisoned {
+        // Let the request whose error tripped the latch serialize and write its
+        // response before the runtime drops in-flight connection tasks. Only on
+        // the poison path — a signal shutdown needs no grace.
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     // Graceful shutdown: unlink the socket so the next probe sees no daemon.

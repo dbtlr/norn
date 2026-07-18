@@ -289,7 +289,19 @@ impl McpServer {
             // its `isError: true` + structuredContent envelope carries the
             // request's notes exactly like a success.
             Ok((notes, Ok(value))) => Ok(Noted::new(value, notes)),
-            Ok((_notes, Err(err))) => Err(to_mcp_error(err)),
+            Ok((_notes, Err(err))) => {
+                // Fail-closed self-heal (NRN-337): in the warm HOST daemon only
+                // (`emit_serve_markers`), a host-poisoning error class — fd
+                // exhaustion, or a SQLite cannot-open on a vault that was already
+                // serving — trips the poison latch so the daemon answers THIS
+                // request with the error, then exits to self-heal. A stdio
+                // `norn mcp` never exits; a per-vault error never trips.
+                #[cfg(unix)]
+                if self.emit_serve_markers {
+                    crate::serve::heal::maybe_trip(&err, self.ctx.warm_has_opened());
+                }
+                Err(to_mcp_error(err))
+            }
             Err(join_err) => Err(rmcp::ErrorData::internal_error(
                 format!("tool task failed: {join_err}"),
                 None,
