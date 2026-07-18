@@ -245,9 +245,15 @@ fn write_global_line(
     let label = label(g);
     let (flag_part, placeholder_part) = split_flag_and_placeholder(&label);
     let pad = col.saturating_sub(label.len());
-    // Constrain description per spec §2.2.
+    // Constrain description per spec §2.2. The cut floors to a char boundary
+    // so a multibyte description cannot panic the slice; for ASCII (every
+    // current global) the output is byte-identical to the donor's.
     let desc = if g.short_desc.len() > GLOBAL_DESC_MAX {
-        format!("{}…", &g.short_desc[..GLOBAL_DESC_MAX.saturating_sub(1)])
+        let mut cut = GLOBAL_DESC_MAX.saturating_sub(1);
+        while !g.short_desc.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &g.short_desc[..cut])
     } else {
         g.short_desc.clone()
     };
@@ -1000,23 +1006,52 @@ mod tests {
         );
     }
 
+    /// Serializes the env-mutating glyph tests and restores every touched
+    /// variable on drop, so parallel tests never observe a half-set
+    /// environment and nothing leaks past the test.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new(vars: &[(&'static str, Option<&str>)]) -> Self {
+            static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+            let mut saved = Vec::new();
+            for (key, value) in vars {
+                saved.push((*key, std::env::var_os(key)));
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn long_form_emits_live_marker_utf_by_default() {
-        let saved = std::env::var("NORN_ASCII").ok();
-        std::env::remove_var("NORN_ASCII");
-        std::env::set_var("LC_ALL", "en_US.UTF-8");
+        let _env = EnvGuard::new(&[("NORN_ASCII", None), ("LC_ALL", Some("en_US.UTF-8"))]);
         let out = render_long_to_string(&sample_model_with_live());
-        if let Some(v) = saved {
-            std::env::set_var("NORN_ASCII", v);
-        }
         assert!(out.contains("▸"), "expected ▸ marker; got:\n{out}");
     }
 
     #[test]
     fn long_form_emits_ascii_marker_when_norn_ascii_set() {
-        std::env::set_var("NORN_ASCII", "1");
+        let _env = EnvGuard::new(&[("NORN_ASCII", Some("1"))]);
         let out = render_long_to_string(&sample_model_with_live());
-        std::env::remove_var("NORN_ASCII");
         assert!(
             out.contains("> norn find"),
             "expected '> norn find' under NORN_ASCII; got:\n{out}"

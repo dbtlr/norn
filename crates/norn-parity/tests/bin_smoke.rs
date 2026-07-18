@@ -42,8 +42,8 @@ fn self_check_end_to_end_is_all_match_exit_0() {
         output.status.code()
     );
     assert!(
-        stdout.contains("0 drift"),
-        "expected an all-match summary, got:\n{stdout}"
+        stdout.contains("11 cases: 11 match, 0 diverged, 0 drift, 0 stale entries"),
+        "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
         !stdout
@@ -80,12 +80,8 @@ fn default_mode_gates_help_cases_exit_0() {
     // match the oracle byte-for-byte; help-bare diverges by the new `vault`
     // namespace, cited by ledger entry PD-101 — a passing verdict, not drift.
     assert!(
-        stdout.contains("0 drift"),
-        "expected a no-drift summary, got:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("0 stale entries"),
-        "expected no stale ledger entries, got:\n{stdout}"
+        stdout.contains("3 cases: 2 match, 1 diverged, 0 drift, 0 stale entries"),
+        "expected the exact phase-1 gated summary, got:\n{stdout}"
     );
     for needle in [
         "help-bare",

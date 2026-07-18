@@ -116,7 +116,7 @@ fn resolve_subcmd_from_raw_args<'a>(
             // Skip flags and their inline values (`--foo=val` or `--foo val`).
             if !token.contains('=') {
                 let flag_stem = token.trim_start_matches('-');
-                if matches!(flag_stem, "cwd" | "C" | "config" | "color") {
+                if matches!(flag_stem, "cwd" | "C" | "config" | "color" | "vault") {
                     let _ = iter.next(); // skip the value
                 }
             }
@@ -219,6 +219,25 @@ mod tests {
         );
         // -C consumes `find`; `validate` is then the resolved subcommand.
         assert_eq!(path, "norn validate");
+        assert!(!unknown);
+    }
+
+    #[test]
+    fn vault_value_is_not_mistaken_for_a_subcommand() {
+        let root = Cli::command();
+        // `--vault atlas` — `atlas` is the flag's value, not a subcommand.
+        let (_cmd, path, unknown) = resolve_subcmd_from_raw_args(
+            &root,
+            &argv(&["norn", "--vault", "atlas", "find", "--help"]),
+        );
+        assert_eq!(path, "norn find");
+        assert!(!unknown);
+        // Inline form never consumed a following token to begin with.
+        let (_cmd, path, unknown) = resolve_subcmd_from_raw_args(
+            &root,
+            &argv(&["norn", "--vault=atlas", "find", "--help"]),
+        );
+        assert_eq!(path, "norn find");
         assert!(!unknown);
     }
 

@@ -410,6 +410,7 @@ mod tests {
             "frontmatter-required-field-missing",
             "value-not-allowed",
             "field-type-invalid",
+            "frontmatter-exceeds-max-length",
             "frontmatter-forbidden-field",
             "frontmatter-alias-shadowed-by-stem",
             "frontmatter-alias-duplicate-across-docs",
