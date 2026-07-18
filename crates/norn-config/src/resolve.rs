@@ -74,6 +74,11 @@ pub enum ResolvedVia {
 /// resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
+    /// The vault root. Canonical for registry-resolved vias (`ExplicitName`,
+    /// `RepoBinding`, `ReverseLookup`); for the direct-path vias
+    /// (`ExplicitPath`, `NornRootEnv`) it is grounded against the cwd but NOT
+    /// canonicalized — those paths may not exist yet, so callers must not
+    /// assume symlink-free, `..`-free form here.
     pub root: PathBuf,
     pub name: Option<String>,
     pub via: ResolvedVia,

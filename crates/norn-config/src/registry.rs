@@ -428,6 +428,44 @@ mod tests {
     }
 
     #[test]
+    fn mutation_preserves_unknown_toplevel_and_nested_tables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::create_dir_all(reg.home().dir()).unwrap();
+        // Unknown top-level TABLE plus an unknown nested table inside a vault
+        // entry — the flatten/serialization-order pitfall: a serializer that
+        // emits [auth] after [vaults.*] would reparent it under a vault table.
+        let seeded = format!(
+            "[auth]\ntoken = \"t\"\nscopes = [\"read\"]\n\n[vaults.keep]\nroot = {a:?}\n\n[vaults.keep.remote]\nurl = \"https://example.test\"\n",
+            a = a.canonicalize().unwrap(),
+        );
+        fs::write(reg.home().config_path(), seeded).unwrap();
+
+        reg.register("added", &b, VaultOverrides::default())
+            .unwrap();
+        reg.unregister("added").unwrap();
+
+        let reparsed: toml::Value =
+            toml::from_str(&fs::read_to_string(reg.home().config_path()).unwrap()).unwrap();
+        assert_eq!(
+            reparsed["auth"]["token"].as_str(),
+            Some("t"),
+            "top-level [auth] table lost or reparented: {reparsed:?}"
+        );
+        assert_eq!(reparsed["auth"]["scopes"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            reparsed["vaults"]["keep"]["remote"]["url"].as_str(),
+            Some("https://example.test"),
+            "nested vault table lost: {reparsed:?}"
+        );
+        assert!(reparsed["vaults"].get("added").is_none());
+    }
+
+    #[test]
     fn reverse_lookup_nearest_root_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = registry_in(tmp.path());
