@@ -69,7 +69,7 @@ Format: `- [ ] old path → provisional destination`. Verb modules port as
 
 ### Wire + client → `norn-wire` / `norn-client`
 
-- [ ] `src/route_wire.rs` → Params/Report wire vocabulary → `norn-wire`
+- [x] `src/route_wire.rs` → Params/Report wire vocabulary → `norn-wire`
 - [ ] `src/dispatch.rs` → dispatch/summon decision → `norn-client` (the routed-or-direct question is dead; only summon-or-connect survives)
 
 ### Daemon → `norn-owner` / `norn-mcp`
