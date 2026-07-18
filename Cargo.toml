@@ -2,8 +2,16 @@
 resolver = "2"
 members = ["crates/*"]
 
-# The crate skeleton lands with NRN-301 (norn-core, norn-wire,
-# norn-frontmatter, norn-config, norn-owner, norn-client, norn-cli,
-# norn-mcp, bin); crates/norn-core is a placeholder member until then.
-# The pre-0018 tree lives in retired/ — documentation, not source;
-# see retired/CLAUDE.md for the porting burn-down.
+# The ADR 0018 crate map. Boundary invariants are held by dependency
+# direction — an edge that would let a crate perform another's exclusive
+# effect (cache-open: owner; spawn/dial: client; central-config IO:
+# config) is a rejected PR shape. The pre-0018 tree lives in retired/ —
+# documentation, not source; see retired/CLAUDE.md for the porting
+# burn-down.
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["Drew Butler <hi@dbtlr.com>"]
+repository = "https://github.com/dbtlr/norn"

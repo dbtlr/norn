@@ -1,10 +1,8 @@
 [package]
-name = "norn-core"
+name = "norn-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
-norn-wire = { path = "../norn-wire" }
-norn-frontmatter = { path = "../norn-frontmatter" }

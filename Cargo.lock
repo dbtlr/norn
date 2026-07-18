@@ -3,5 +3,62 @@
 version = 4
 
 [[package]]
+name = "norn-cli"
+version = "0.0.0"
+dependencies = [
+ "norn-client",
+ "norn-wire",
+]
+
+[[package]]
+name = "norn-client"
+version = "0.0.0"
+dependencies = [
+ "norn-config",
+ "norn-wire",
+]
+
+[[package]]
+name = "norn-config"
+version = "0.0.0"
+
+[[package]]
 name = "norn-core"
+version = "0.0.0"
+dependencies = [
+ "norn-frontmatter",
+ "norn-wire",
+]
+
+[[package]]
+name = "norn-frontmatter"
+version = "0.0.0"
+
+[[package]]
+name = "norn-mcp"
+version = "0.0.0"
+dependencies = [
+ "norn-client",
+ "norn-wire",
+]
+
+[[package]]
+name = "norn-owner"
+version = "0.0.0"
+dependencies = [
+ "norn-core",
+ "norn-wire",
+]
+
+[[package]]
+name = "norn-run"
+version = "0.0.0"
+dependencies = [
+ "norn-cli",
+ "norn-mcp",
+ "norn-owner",
+]
+
+[[package]]
+name = "norn-wire"
 version = "0.0.0"
