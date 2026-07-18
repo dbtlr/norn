@@ -15,9 +15,21 @@
 //! - [`ConfigHome`] — where the config file lives. Resolved from the
 //!   environment ([`ConfigHome::from_env`]) or injected directly
 //!   ([`ConfigHome::new`]) so tests never touch a real home directory.
-//! - [`Registry`] — register / unregister / list / lookup / reverse-lookup.
+//! - [`Registry`] — register / unregister / list / lookup / reverse-lookup,
+//!   plus the [`Registry::resolve`] entry point implementing the full
+//!   resolution order.
 //! - [`ConfigError`] — a `thiserror` enum with operator-quality variants; no
 //!   `anyhow` in the public API.
+//!
+//! # Resolution order
+//!
+//! [`Registry::resolve`] applies, highest precedence first: explicit path →
+//! explicit name → repo binding (`.norn.toml`, walked up from the cwd) →
+//! `NORN_ROOT` env → cwd reverse lookup. Any step that resolves *through the
+//! registry* to a root that no longer exists fails loud
+//! ([`ConfigError::StaleEntry`]) rather than silently falling through. A cwd
+//! matching no registered vault yields [`ResolvedVia::UnregisteredCwd`] — not
+//! an error; the caller decides what an unregistered vault means.
 //!
 //! # Deliberately out of scope (future responsibility)
 //!
@@ -36,7 +48,9 @@ mod error;
 mod home;
 mod model;
 mod registry;
+mod resolve;
 
 pub use error::ConfigError;
 pub use home::ConfigHome;
 pub use registry::{validate_name, RegisteredVault, Registry, VaultOverrides};
+pub use resolve::{ResolveInput, Resolved, ResolvedVia, BINDING_FILENAME, NORN_ROOT_ENV};
