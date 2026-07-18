@@ -10,3 +10,7 @@ description = "Deterministic Markdown vault graph, link, and validation tooling 
 norn-cli = { path = "../norn-cli" }
 norn-mcp = { path = "../norn-mcp" }
 norn-owner = { path = "../norn-owner" }
+
+[dev-dependencies]
+serde_json = "1.0"
+tempfile = "3"

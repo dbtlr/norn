@@ -18,6 +18,7 @@
 use std::io::Write;
 
 use clap::Parser;
+use norn_config::ConfigHome;
 
 use crate::cli::{Cli, Command};
 use crate::display::Presenter;
@@ -35,7 +36,11 @@ pub const CONTRACT: &str = "norn-cli: thin CLI adapter — parse and present onl
 
 /// Direct-dependency contracts — the code reference that makes this
 /// crate's declared edges load-bearing rather than manifest-only.
-pub const DEP_CONTRACTS: &[&str] = &[norn_client::CONTRACT, norn_wire::CONTRACT];
+pub const DEP_CONTRACTS: &[&str] = &[
+    norn_client::CONTRACT,
+    norn_config::CONTRACT,
+    norn_wire::CONTRACT,
+];
 
 /// Parse the process argv and run to a process exit code.
 ///
@@ -50,10 +55,23 @@ pub fn run() -> i32 {
 }
 
 /// The one dispatch match: parsed command → its module's `run`.
+///
+/// The `vault` namespace executes now (unlike the read-verb stubs), so its
+/// dispatch arm resolves the ambient [`ConfigHome`] here — the single place the
+/// process environment is read for central config — and injects it into the
+/// command run. A config-home that cannot be determined (e.g. a relative
+/// `NORN_CONFIG_DIR`) fails loud as an operational diagnostic.
 fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i32 {
     match cli.command {
         Command::Find(args) => commands::find::run(&args, presenter),
         Command::Get(args) => commands::get::run(&args, presenter),
+        Command::Vault(cmd) => match ConfigHome::from_env() {
+            Ok(home) => commands::vault::run(&cmd, home, presenter),
+            Err(err) => {
+                presenter.diagnostic(&err.to_string());
+                display::EXIT_OPERATIONAL
+            }
+        },
     }
 }
 

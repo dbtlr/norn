@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::commands::{find::FindArgs, get::GetArgs};
+use crate::commands::{find::FindArgs, get::GetArgs, vault::VaultCmd};
 
 #[derive(Debug, Parser)]
 #[command(name = "norn")]
@@ -72,6 +72,11 @@ pub enum Command {
         about = "Get one or more documents — frontmatter, headings, outgoing/incoming/unresolved links"
     )]
     Get(GetArgs),
+    #[command(
+        subcommand,
+        about = "Manage the vault registry — register a vault to unlock durable artifacts (cache, event stream, logs)"
+    )]
+    Vault(VaultCmd),
 }
 
 #[cfg(test)]
