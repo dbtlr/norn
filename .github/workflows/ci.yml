@@ -1,5 +1,10 @@
 name: CI
 
+# The workflow always triggers so `ci-ok` (the required status check) always
+# reports; an internal change-detection gate decides which jobs actually run.
+# Build/test runs only when build-affecting files change; Markdown-only
+# changes run the lighter docs-validate job instead. The weekly cron still
+# runs the full suite unconditionally as a backstop.
 on:
   push:
     branches: [main]
@@ -7,8 +12,40 @@ on:
   schedule:
     - cron: "17 4 * * 1"  # weekly cargo audit / cargo deny refresh
 
+permissions:
+  contents: read
+
 jobs:
+  changes:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            build:
+              - "src/**"
+              - "tests/**"
+              - "fixtures/**"
+              - "examples/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "build.rs"
+              - ".github/workflows/ci.yml"
+            docs:
+              - "**/*.md"
+              - ".norn/**"
+
   ci:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || needs.changes.outputs.build == 'true') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -16,6 +53,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -74,3 +113,48 @@ jobs:
 
       - name: shellcheck
         run: shellcheck examples/repair-recipe.sh
+
+  # Light path for Markdown-only changes: build once (debug, cached) and run
+  # the repo self-validation, which enforces the docs frontmatter rules in
+  # .norn/config.yaml. Skipped when the full ci job runs (it self-validates).
+  docs-validate:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.changes.outputs.docs == 'true' && needs.changes.outputs.build != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build -p norn-run --locked
+        run: cargo build -p norn-run --locked
+
+      - name: fixture validate
+        run: ./target/debug/norn -C fixtures/basic validate --summary --format json
+
+      - name: repo self-validate
+        run: ./target/debug/norn -C . validate --summary --format json
+
+  # The single required status check: succeeds when the jobs that were
+  # supposed to run succeeded (skipped-by-design counts as success), fails
+  # on any failure or cancellation.
+  ci-ok:
+    needs: [changes, ci, docs-validate]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate results
+        run: |
+          results="${{ needs.changes.result }} ${{ needs.ci.result }} ${{ needs['docs-validate'].result }}"
+          echo "job results: $results"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "a required job failed or was cancelled"
+              exit 1
+            fi
+          done
+          echo "ok"

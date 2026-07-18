@@ -1,0 +1,22 @@
+# norn validating its own repository — the repo dogfoods the tool.
+# Run `norn validate` from the repo root. Migrated from the pre-rename
+# top-level .vault/config.yaml.
+files:
+  ignore:
+    - "target/**"
+    - "fixtures/**"
+    - ".claude/**"
+    - "CLAUDE.local.md"
+validate:
+  rules:
+    - name: docs-page
+      match:
+        path: "docs/**/*.md"
+      required_frontmatter: [title, description]
+    - name: decision-record
+      match:
+        path: "docs/decisions/0*.md"
+      required_frontmatter: [title, description]
+      field_types:
+        title: text
+        description: text
