@@ -26,7 +26,7 @@ pub(crate) struct ConfigFile {
 /// A single `[vaults.<name>]` table. Only what was explicitly registered is
 /// stored — defaults are never synthesized here. `extra` preserves unknown
 /// per-vault keys.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct VaultEntry {
     /// Absolute, canonicalized vault root.
     pub root: PathBuf,
@@ -53,9 +53,18 @@ pub(crate) fn read(path: &Path) -> Result<ConfigFile, ConfigError> {
     }
 }
 
-/// Serialize the config to TOML text.
+/// The generated banner prepended to every write. Data-only round-trip means
+/// hand-authored comments never survive a mutation anyway, so the write path
+/// re-stamps this line to tell an operator the file is norn-managed and where
+/// to reach for the sanctioned edit verbs. It is an ordinary TOML comment, so
+/// it re-parses as a no-op.
+pub(crate) const MANAGED_HEADER: &str = "# Managed by norn — use `norn vault register/set/unregister`. Hand edits work but formatting and comments are not preserved.";
+
+/// Serialize the config to TOML text, prefixed with the managed-file banner.
 pub(crate) fn to_toml(config: &ConfigFile) -> Result<String, ConfigError> {
-    toml::to_string_pretty(config).map_err(|source| ConfigError::ConfigSerialize { source })
+    let body =
+        toml::to_string_pretty(config).map_err(|source| ConfigError::ConfigSerialize { source })?;
+    Ok(format!("{MANAGED_HEADER}\n\n{body}"))
 }
 
 #[cfg(test)]
@@ -97,6 +106,30 @@ endpoint = \"https://example.invalid\"
         );
         assert_eq!(reparsed.extra["schema_version"], toml::Value::Integer(7));
         assert!(reparsed.vaults["docs"].extra.contains_key("remote"));
+    }
+
+    #[test]
+    fn serialize_prepends_managed_header_and_reparses() {
+        let mut config = ConfigFile::default();
+        config.vaults.insert(
+            "docs".into(),
+            VaultEntry {
+                root: PathBuf::from("/vaults/docs"),
+                config: None,
+                cache: None,
+                logs: None,
+                extra: BTreeMap::new(),
+            },
+        );
+        let out = to_toml(&config).unwrap();
+        assert!(
+            out.starts_with(MANAGED_HEADER),
+            "header not prepended: {out}"
+        );
+        // The banner is a TOML comment, so a round-trip is a no-op.
+        let reparsed: ConfigFile = toml::from_str(&out).unwrap();
+        assert_eq!(reparsed.vaults["docs"].root, PathBuf::from("/vaults/docs"));
+        assert!(reparsed.extra.is_empty());
     }
 
     #[test]

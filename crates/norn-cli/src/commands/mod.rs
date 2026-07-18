@@ -2,10 +2,14 @@
 //! into the wire vocabulary, and a `run` entry that presents the outcome. The
 //! dispatch match lives once, in [`crate::dispatch`].
 //!
-//! Two exemplars prove the pattern this phase — `find` and `get`. The rest of
-//! the v0.48 surface (the `src/cli.rs` row of the porting burn-down) fills in
-//! as one module each, NRN-329.
+//! Two read exemplars prove the pattern for ported verbs — `find` and `get`,
+//! which parse to Params then present the uniform not-yet-ported outcome. The
+//! rest of the v0.48 read/mutation surface fills in as one module each,
+//! NRN-329. `vault` is the intentionally-new registry surface (no oracle); it
+//! is the first namespace that EXECUTES — its sub-verbs call `norn-config`
+//! directly rather than deferring.
 
 pub mod args;
 pub mod find;
 pub mod get;
+pub mod vault;

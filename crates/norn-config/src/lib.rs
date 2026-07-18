@@ -52,5 +52,7 @@ mod resolve;
 
 pub use error::ConfigError;
 pub use home::ConfigHome;
-pub use registry::{validate_name, RegisteredVault, Registry, VaultOverrides};
+pub use registry::{
+    validate_name, RegisteredVault, Registry, SetOutcome, VaultChanges, VaultOverrides,
+};
 pub use resolve::{ResolveInput, Resolved, ResolvedVia, BINDING_FILENAME, NORN_ROOT_ENV};

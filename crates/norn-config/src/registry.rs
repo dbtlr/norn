@@ -55,6 +55,27 @@ pub struct VaultOverrides {
     pub logs: Option<PathBuf>,
 }
 
+/// An in-place change set for [`Registry::set`], the sanctioned mutation path
+/// for a registered entry — so agents and humans never hand-edit the config to
+/// fill gaps.
+///
+/// Every field is tri-state, encoding leave-untouched vs. change:
+///
+/// - `root`: `None` leaves the root unchanged; `Some(path)` re-points it (the
+///   new root is canonicalized, must be an existing directory, and is
+///   re-checked against one-name-per-root, excluding this entry itself).
+/// - `config` / `cache` / `logs`: an `Option<Option<PathBuf>>` where the outer
+///   `Option` is touched-vs-untouched and the inner is set-vs-clear —
+///   `None` leaves the override as-is, `Some(None)` clears it, and
+///   `Some(Some(path))` stores `path` verbatim (never canonicalized).
+#[derive(Debug, Default, Clone)]
+pub struct VaultChanges {
+    pub root: Option<PathBuf>,
+    pub config: Option<Option<PathBuf>>,
+    pub cache: Option<Option<PathBuf>>,
+    pub logs: Option<Option<PathBuf>>,
+}
+
 /// Validate a vault name against `[a-z0-9][a-z0-9_-]*`: non-empty, lowercase,
 /// no path separators.
 pub fn validate_name(name: &str) -> Result<(), ConfigError> {
@@ -72,6 +93,17 @@ pub fn validate_name(name: &str) -> Result<(), ConfigError> {
             name: name.to_string(),
         })
     }
+}
+
+/// The result of [`Registry::set`]: the entry as it now stands, plus whether
+/// anything actually changed. A no-op set skipped the disk write — callers
+/// should report it as "no changes", not "updated".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetOutcome {
+    /// The entry after the (possibly no-op) edit.
+    pub vault: RegisteredVault,
+    /// Whether any field actually changed (and the file was rewritten).
+    pub changed: bool,
 }
 
 /// The central config / vault registry, bound to a [`ConfigHome`].
@@ -172,7 +204,73 @@ impl Registry {
             };
             let vault = RegisteredVault::from_entry(name, &entry);
             config.vaults.insert(name.to_string(), entry);
-            Ok(vault)
+            Ok((vault, true))
+        })
+    }
+
+    /// Mutate a registered entry in place under the same read-modify-write lock
+    /// as [`Registry::register`]. `UnknownName` if the name is not registered.
+    /// A changed `root` is canonicalized, must be an existing directory, and is
+    /// re-checked against one-name-per-root (excluding this entry itself);
+    /// overrides are stored verbatim (set) or dropped (clear). Unknown per-vault
+    /// and top-level keys survive untouched.
+    pub fn set(&self, name: &str, changes: VaultChanges) -> Result<SetOutcome, ConfigError> {
+        // Canonicalize a changed root before taking the lock — it touches the
+        // filesystem and must not depend on ambient cwd, exactly as register.
+        let new_root = match &changes.root {
+            Some(root) => {
+                let canon = root.canonicalize().map_err(|source| {
+                    ConfigError::io("failed to canonicalize vault root", root, source)
+                })?;
+                if !canon.is_dir() {
+                    return Err(ConfigError::RootNotDirectory { root: canon });
+                }
+                Some(canon)
+            }
+            None => None,
+        };
+
+        self.with_lock(|config| {
+            if !config.vaults.contains_key(name) {
+                return Err(ConfigError::UnknownName {
+                    name: name.to_string(),
+                });
+            }
+            // One-name-per-root, excluding the entry being edited.
+            if let Some(canon) = &new_root {
+                for (existing_name, entry) in &config.vaults {
+                    if existing_name != name && canonicalize_best_effort(&entry.root) == *canon {
+                        return Err(ConfigError::RootAlreadyRegistered {
+                            root: canon.clone(),
+                            existing: existing_name.clone(),
+                        });
+                    }
+                }
+            }
+            // Mutate only the requested fields; `extra` (unknown keys) is never
+            // touched, so future keys survive.
+            let entry = config.vaults.get_mut(name).expect("presence checked above");
+            let before = entry.clone();
+            if let Some(canon) = new_root {
+                entry.root = canon;
+            }
+            if let Some(config_override) = changes.config {
+                entry.config = config_override;
+            }
+            if let Some(cache_override) = changes.cache {
+                entry.cache = cache_override;
+            }
+            if let Some(logs_override) = changes.logs {
+                entry.logs = logs_override;
+            }
+            // A no-op set (e.g. clearing an override that was never set) skips
+            // the rewrite entirely — no disk write, no fsync.
+            let changed = *entry != before;
+            let outcome = SetOutcome {
+                vault: RegisteredVault::from_entry(name, entry),
+                changed,
+            };
+            Ok((outcome, changed))
         })
     }
 
@@ -184,16 +282,18 @@ impl Registry {
                     name: name.to_string(),
                 });
             }
-            Ok(())
+            Ok(((), true))
         })
     }
 
     /// Take the exclusive advisory lock, read the config, run `mutate`, and —
     /// only if it succeeds — write the result back atomically. The lock is held
     /// for the whole read-modify-write and released when the file handle drops.
+    /// The mutate closure returns `(value, dirty)`; the config is rewritten
+    /// only when `dirty` is true, so a no-op mutation costs no disk write.
     fn with_lock<T>(
         &self,
-        mutate: impl FnOnce(&mut ConfigFile) -> Result<T, ConfigError>,
+        mutate: impl FnOnce(&mut ConfigFile) -> Result<(T, bool), ConfigError>,
     ) -> Result<T, ConfigError> {
         let dir = self.home.dir();
         fs::create_dir_all(dir)
@@ -212,8 +312,10 @@ impl Registry {
 
         let result = (|| {
             let mut config = model::read(&self.home.config_path())?;
-            let value = mutate(&mut config)?;
-            self.write_atomic(&config)?;
+            let (value, dirty) = mutate(&mut config)?;
+            if dirty {
+                self.write_atomic(&config)?;
+            }
             Ok(value)
         })();
 
@@ -479,6 +581,300 @@ mod tests {
             "nested vault table lost: {reparsed:?}"
         );
         assert!(reparsed["vaults"].get("added").is_none());
+    }
+
+    #[test]
+    fn set_stores_and_clears_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        reg.register("docs", &vault, VaultOverrides::default())
+            .unwrap();
+
+        // Set cache + logs verbatim, leave config untouched.
+        let updated = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    cache: Some(Some(PathBuf::from("/somewhere/cache"))),
+                    logs: Some(Some(PathBuf::from("/somewhere/logs"))),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap();
+        assert!(updated.changed);
+        assert_eq!(updated.vault.cache, Some(PathBuf::from("/somewhere/cache")));
+        assert_eq!(updated.vault.logs, Some(PathBuf::from("/somewhere/logs")));
+        assert_eq!(updated.vault.config, None);
+
+        // Clear cache, leave logs untouched.
+        let updated = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    cache: Some(None),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap();
+        assert!(updated.changed);
+        assert_eq!(updated.vault.cache, None);
+        assert_eq!(updated.vault.logs, Some(PathBuf::from("/somewhere/logs")));
+
+        // Persisted identically.
+        let found = reg.lookup("docs").unwrap().unwrap();
+        assert_eq!(found.cache, None);
+        assert_eq!(found.logs, Some(PathBuf::from("/somewhere/logs")));
+    }
+
+    #[test]
+    fn set_default_changes_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        let overrides = VaultOverrides {
+            config: Some(PathBuf::from("/c")),
+            cache: None,
+            logs: Some(PathBuf::from("/l")),
+        };
+        reg.register("docs", &vault, overrides).unwrap();
+
+        let before_text = fs::read_to_string(reg.home().config_path()).unwrap();
+        let updated = reg.set("docs", VaultChanges::default()).unwrap();
+        assert!(!updated.changed, "empty changes must report unchanged");
+        assert_eq!(updated.vault.root, vault.canonicalize().unwrap());
+        assert_eq!(updated.vault.config, Some(PathBuf::from("/c")));
+        assert_eq!(updated.vault.cache, None);
+        assert_eq!(updated.vault.logs, Some(PathBuf::from("/l")));
+        let after_text = fs::read_to_string(reg.home().config_path()).unwrap();
+        assert_eq!(before_text, after_text, "no-op set must not rewrite");
+    }
+
+    #[test]
+    fn set_clear_on_unset_override_is_unchanged_and_skips_rewrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        reg.register("docs", &vault, VaultOverrides::default())
+            .unwrap();
+
+        let before_text = fs::read_to_string(reg.home().config_path()).unwrap();
+        let outcome = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    cache: Some(None),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap();
+        assert!(!outcome.changed, "clearing an unset override is a no-op");
+        assert_eq!(outcome.vault.cache, None);
+        let after_text = fs::read_to_string(reg.home().config_path()).unwrap();
+        assert_eq!(before_text, after_text, "no-op set must not rewrite");
+    }
+
+    #[test]
+    fn managed_header_appears_exactly_once_across_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        reg.register("docs", &vault, VaultOverrides::default())
+            .unwrap();
+        reg.set(
+            "docs",
+            VaultChanges {
+                cache: Some(Some(PathBuf::from("/somewhere/cache"))),
+                ..VaultChanges::default()
+            },
+        )
+        .unwrap();
+        reg.set(
+            "docs",
+            VaultChanges {
+                cache: Some(None),
+                ..VaultChanges::default()
+            },
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(reg.home().config_path()).unwrap();
+        assert_eq!(
+            text.matches("Managed by norn").count(),
+            1,
+            "header must not accumulate across writes: {text}"
+        );
+    }
+
+    #[test]
+    fn set_repoints_root_canonicalized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let old = tmp.path().join("old");
+        let new = tmp.path().join("new");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        reg.register("docs", &old, VaultOverrides::default())
+            .unwrap();
+
+        let updated = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    root: Some(new.clone()),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap();
+        assert!(updated.changed);
+        assert_eq!(updated.vault.root, new.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn set_root_to_non_directory_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        reg.register("docs", &vault, VaultOverrides::default())
+            .unwrap();
+        let file = tmp.path().join("a-file");
+        fs::write(&file, "x").unwrap();
+        let err = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    root: Some(file),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::RootNotDirectory { .. }));
+    }
+
+    #[test]
+    fn set_missing_root_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        reg.register("docs", &vault, VaultOverrides::default())
+            .unwrap();
+        let err = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    root: Some(tmp.path().join("nope")),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::Io { .. }));
+    }
+
+    #[test]
+    fn set_root_to_own_current_root_is_allowed() {
+        // Re-pointing to the same root must not trip one-name-per-root against
+        // the entry itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+        reg.register("docs", &vault, VaultOverrides::default())
+            .unwrap();
+        let updated = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    root: Some(vault.clone()),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            !updated.changed,
+            "re-pointing to the same canonical root is a no-op"
+        );
+        assert_eq!(updated.vault.root, vault.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn set_root_to_another_entrys_root_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        reg.register("docs", &a, VaultOverrides::default()).unwrap();
+        reg.register("notes", &b, VaultOverrides::default())
+            .unwrap();
+        // Point docs at notes' root.
+        let err = reg
+            .set(
+                "docs",
+                VaultChanges {
+                    root: Some(b),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap_err();
+        match err {
+            ConfigError::RootAlreadyRegistered { existing, .. } => assert_eq!(existing, "notes"),
+            other => panic!("expected RootAlreadyRegistered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_unknown_name_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let err = reg
+            .set(
+                "ghost",
+                VaultChanges {
+                    cache: Some(None),
+                    ..VaultChanges::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownName { .. }));
+    }
+
+    #[test]
+    fn set_preserves_unknown_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let a = tmp.path().join("a");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(reg.home().dir()).unwrap();
+        // Unknown top-level key plus an unknown per-vault key on the target.
+        let seeded = format!(
+            "schema_version = 9\n\n[vaults.docs]\nroot = {a:?}\nauth_token = \"t\"\n",
+            a = a.canonicalize().unwrap(),
+        );
+        fs::write(reg.home().config_path(), seeded).unwrap();
+
+        reg.set(
+            "docs",
+            VaultChanges {
+                cache: Some(Some(PathBuf::from("/new/cache"))),
+                ..VaultChanges::default()
+            },
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(reg.home().config_path()).unwrap();
+        assert!(
+            text.contains("schema_version = 9"),
+            "top-level key lost: {text}"
+        );
+        assert!(text.contains("auth_token"), "per-vault key lost: {text}");
+        assert!(text.contains("/new/cache"), "override not written: {text}");
     }
 
     #[test]
