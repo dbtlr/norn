@@ -1,6 +1,6 @@
 ---
 title: "0009 — CLI and MCP are peer surfaces over one capability core (parity by default)"
-description: "Architectural decision that every norn capability is exposed on both the CLI and the MCP surface unless a recorded, justified carve-out says otherwise — neither surface is primary — enforced by a CI parity test rather than convention."
+description: "Architectural decision that every norn capability is exposed on both the CLI and the MCP surface unless a recorded, justified carve-out says otherwise — neither surface is primary — originally enforced by a CI parity test; amended 2026-07-16 (ADR 0016): enforcement becomes structural via the shared execute seam."
 ---
 
 # 0009 — CLI and MCP are peer surfaces over one capability core (parity by default)
@@ -37,7 +37,7 @@ These are the differences that are *correct*, and the only ones the parity test 
 
 ## Consequences
 
-- **Every capability-adding PR must touch both surfaces** or add a justified allowlist entry — enforced at CI by the parity test, not by reviewer memory. A new CLI flag fails the build until its MCP twin (or carve-out) exists.
+- **Every capability-adding PR must touch both surfaces** or add a justified allowlist entry — enforced at CI by the parity test, not by reviewer memory; since the 0016 seam this enforcement is structural (see the amendment note above). A new CLI flag fails the build until its MCP twin (or carve-out) exists.
 - **The allowlist is the contract.** It ships enumerating today's known gaps (`move` force/no_link_rewrite, `set` push/pop, `validate` summary, the exit signal, `get` section/paging, plan-path `parents`) as *temporarily allowed*; each gap-closure task removes an entry, so the allowlist shrinks visibly toward zero real drift. A carve-out that is genuinely permanent (the five above) stays, annotated with its reason.
 - **Carve-outs become visible, not silent.** The `init`/`config` exposure question is now a decision to *make* — expose the tools or record the carve-out — rather than a gap discovered by a consumer.
 - **Naming and exit-signal drift are now catchable** because the map and the signal rule are written down.

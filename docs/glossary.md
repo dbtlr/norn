@@ -14,7 +14,7 @@ A directory tree of Markdown files carrying frontmatter and links — norn's uni
 _Avoid_: notebook, knowledge base, repo, library.
 
 **Link**
-A reference from one document to another. norn recognizes two syntaxes: relative Markdown links (`[label](../notes/foo.md)`) and Obsidian wikilinks (`[[target]]`). Relative Markdown links are the default idiom in norn's docs and examples; wikilinks are fully supported but opt-in — see [0002](./decisions/0002-link-syntax-neutrality.md). Both participate equally in resolution, queries, validation, and move/delete cascades.
+A reference from one document to another. norn recognizes two syntaxes: relative Markdown links (`[label](../notes/foo.md)`) and Obsidian wikilinks (`[[target]]`). Relative Markdown links are the default idiom in norn's docs and examples; wikilinks are fully supported but opt-in — see [0002](./decisions/0002-link-syntax-neutrality.md). Both participate equally in resolution, queries, validation, and move/delete cascades for document-body links; frontmatter fields currently parse wikilinks only (a tracked asymmetry).
 _Avoid_: reference, pointer; "backlink" only for an incoming link specifically.
 
 **Drift**
@@ -44,8 +44,8 @@ _Avoid_: markdown file (too format-specific for the core model), row (only insid
 **The three layers**
 How norn is a database made of flat files: **source files are the tables** (human-readable, diffable, the source of truth) · **the SQLite cache is the query engine and index** (derived, disposable, rebuildable — the _only_ place normalization, expression indexes, and embeddings are allowed to live) · **git is the write-ahead log** (transaction history and the undo button). "Delete the directory, let norn validate/repair, revert if wrong" is this model in one sentence.
 
-**Adapter**
-The parser that maps a text format into the Record/field model. Markdown+frontmatter is the first and richest adapter; its body / link / heading features are adapter-specific, not core. JSON/YAML/TOML, CSV, and JSONL are candidate future adapters — none current scope.
+**Adapter (format)**
+The parser that maps a text format into the Record/field model. Distinct from **Adapter (surface)** below. Markdown+frontmatter is the first and richest adapter; its body / link / heading features are adapter-specific, not core. JSON/YAML/TOML, CSV, and JSONL are candidate future adapters — none current scope.
 _Avoid_: parser, loader (when naming the format-to-record boundary specifically).
 
 **Blob**
@@ -58,15 +58,15 @@ _Avoid_: schema (overloaded), config, ruleset.
 ^standards-pack
 
 **norn-service (the warm daemon)**
-A persistent, single-owner process that opens the vault's SQLite cache once, integrity-verifies it, and holds it *warm* for its lifetime — so verification is paid once, not per invocation. It is the existing `norn mcp` server upgraded from a stdio one-shot into a listener. See [0005](./decisions/0005-trusted-cache-via-warm-service.md), *the norn-service architecture design doc (internal design doc)*.
-_Avoid_: server (ambiguous with the MCP tool surface), watcher (a later, separable component of the service).
+The historical name for the warm daemon that opens a vault's SQLite cache once, verifies it, and holds it warm ([0005](./decisions/0005-trusted-cache-via-warm-service.md)). Post-[0017](./decisions/0017-registered-vaults-summoned-owners.md) vocabulary: the daemon is a **Summoned owner** (below) — no longer an optional accelerator, and the only access path.
+_Avoid_: server (ambiguous with the MCP tool surface); treating the daemon as optional (post-0017 there is no direct path).
 
 **Routing seam**
-The decision point in `norn-cli` that, per invocation, probes for a live `norn-service` and either delegates the whole operation to it (translating args to the MCP contract) or falls back to running directly. The seam is what lets trust be *inherited or re-established*, never skipped.
+The per-invocation decision point in the client. Historically ([0005](./decisions/0005-trusted-cache-via-warm-service.md)): probe for a live service, delegate or fall back to a direct open. Post-[0017](./decisions/0017-registered-vaults-summoned-owners.md) it asks one question — is this vault's owner resident, or must one be summoned? — and the direct arm is deleted.
 _Avoid_: proxy, dispatch (too generic).
 
 **Inherited trust**
-The property that a routed request need not re-verify the cache because it is served by a process that already holds a live, verified cache — as opposed to *re-established* trust, where a direct CLI invocation pays its own integrity check. Liveness is proven per-request (a prompt handshake), not stamped as a lease, so there is no stale-trust window.
+The property that a routed request need not re-verify the cache because it is served by a process that already holds a live, verified cache. Post-[0017](./decisions/0017-registered-vaults-summoned-owners.md) this is the *only* trust model: the owner maintains validity between requests (watcher fast path, **Drift auditor** truth loop), and the historical counterpart — *re-established* trust, a direct invocation paying its own integrity check — is deleted with the direct path. Liveness is proven per-request (a prompt handshake), not stamped as a lease, so there is no stale-trust window.
 _Avoid_: cached trust, trusted mode.
 
 **Ignore** _(`files.ignore`)_
@@ -80,6 +80,7 @@ _Avoid_: frozen (informal, and misleads toward immutable — exempt records stay
 **Indexing vs Validation**
 Two independent operations norn performs on a record. **Indexing** parses a record's frontmatter and links into the cache, making its fields queryable and its links part of the graph. **Validation** checks an already-indexed record against the standards pack. `validate.ignore` turns validation *off* while leaving indexing *on* — which is why a validation-exempt session-log stays queryable (`find type=session-log`) even though it is never policed. Conflating the two is the error that makes "unvalidated" seem to imply "invisible."
 _Avoid_: (a distinction, not a synonym cluster — keep both words.)
+
 **Canonical form**
 The single authoritative spelling of a CLI grammar — the one docs teach, `--help` shows, errors echo, and outputs render. Every grammar has exactly one; forgiven variants normalize to it and never appear in documentation. See [0010](./decisions/0010-cli-grammar-forgiving-inputs.md).
 _Avoid_: default form, preferred syntax.
@@ -100,12 +101,12 @@ _Avoid_: intermediate state, partial snapshot, current generation (a generation 
 **Document Source**
 The exact UTF-8 text of one Record in the source layer. `get --format markdown` is its retrieval surface; it is not a structural facet or part of the Published cache snapshot.
 _Avoid_: raw, raw bytes, source facet.
-**Adapter**
-A surface that parses external input into the canonical Request vocabulary and presents the typed Report back out — clap (CLI), rmcp framing (MCP), future HTTP or napi. Adapters own parsing and presentation ONLY; orchestration is core's. See [0016](./decisions/0016-surface-neutral-command-core.md).
+**Adapter (surface)**
+Distinct from **Adapter (format)** above. A surface that parses external input into the canonical Request vocabulary and presents the typed Report back out — clap (CLI), rmcp framing (MCP), future HTTP or napi. Adapters own parsing and presentation ONLY; orchestration is core's. See [0016](./decisions/0016-surface-neutral-command-core.md).
 _Avoid_: frontend, surface layer (too vague), "the MCP layer" when meaning the handlers (those are core).
 
 **Dispatch**
-The single per-request routing decision: run `execute` against a cold in-process env, or ship the Request over the socket to the warm daemon. Happens exactly once, in the process that received the user's intent; the daemon end never re-dispatches. Lives in norn-core so embedders inherit it.
+The single per-request routing decision: connect to the vault's resident owner, or summon one first — the Request always crosses the wire ([0017](./decisions/0017-registered-vaults-summoned-owners.md) deletes the cold in-process arm). Happens exactly once, in the process that received the user's intent; the daemon end never re-dispatches.
 _Avoid_: router/routing layer (implies a standing component; it's one decision), proxy.
 
 **Engine layer / Command layer**

@@ -1,11 +1,11 @@
 ---
 title: "0013 — Generational vault contexts over a two-class single-writer queue"
-description: "Phase 2 concurrency model: immutable per-generation contexts bound at request boundary; one writer queue with liveness-over-bulk classes and file-coherent ~50ms chunks; WAL snapshot reads; control-plane busy/hung; watcher lands as a bulk writer."
+description: "Phase 2 concurrency model: immutable per-generation contexts bound at request boundary; one writer queue with liveness-over-bulk classes and file-coherent ~50ms chunks; WAL snapshot reads; control-plane busy/hung; watcher lands as a bulk writer. Amended 2026-07-17 (ADR 0017): the Direct fallback is deleted — no owner means summon."
 ---
 
 # 0013 — Generational vault contexts over a two-class single-writer queue
 
-> **Amended by [0014](./0014-atomic-cache-publication.md):** generation and queue choices remain accepted; visible per-file cache commits do not. Bulk chunks stage privately and publish one relational snapshot.
+> **Amended by [0014](./0014-atomic-cache-publication.md):** generation and queue choices remain accepted; visible per-file cache commits do not. Bulk chunks stage privately and publish one relational snapshot. **Amended by [0017](./0017-registered-vaults-summoned-owners.md) (2026-07-17):** the Direct fallback is deleted — no owner means summon; see the dated amendment at the end.
 
 ## Context
 
@@ -25,3 +25,7 @@ Phase 1 of norn-service serialized every daemon tool call through one per-vault 
 - Costs accepted: WAL grows for the duration of a bulk chunk (bounded by the yield knob); a pathological long-lived reader could pin a dead generation (all current calls are short; debug-asserted, not designed for).
 - **Named non-goal:** any future streaming/subscription surface must be generation-aware from birth — its source of truth can be swapped under it mid-stream. Nothing else in this design accommodates streams.
 - Fold-ins: post-apply index discard dissolves into "apply commits its own increments"; mutation-lock scope is forced by the chunk model.
+
+## Amendment — 2026-07-17: the Direct fallback is deleted; no owner means summon
+
+[0017](./0017-registered-vaults-summoned-owners.md) makes the summoned owner the sole access path, superseding this ADR's Direct escape hatches: **no pong now means summon an owner and connect** (ephemeral tier for unregistered vaults), never a direct in-process open; a busy writer stalled beyond the service stall budget is an owner-health event — surfaced, and resolved by restarting the owner — not a reroute. Post-send mutations stay `post-send-uncertain` (unmoved). The generational contexts, two-class writer queue, chunk-boundary preemption, snapshot reads, and control-plane liveness contract all carry forward unchanged inside the owner.

@@ -1,9 +1,11 @@
 ---
 title: "0006 — The vault registry is a client-side phonebook"
-description: "Architectural decision reintroducing a client-side vault name-to-path registry for norn, scoped strictly as a phonebook separate from vault configuration and resolved only at the CLI/MCP entry point."
+description: "Architectural decision reintroducing a client-side vault name-to-path registry for norn, scoped strictly as a phonebook separate from vault configuration and resolved only at the CLI/MCP entry point. Amended 2026-07-17 (ADR 0017): promoted from phonebook to norn's central config and the authoritative source of vault identity."
 ---
 
 # 0006 — The vault registry is a client-side phonebook
+
+> **Amended by [0017](./0017-registered-vaults-summoned-owners.md) (2026-07-17):** the registry is promoted from name→path phonebook to norn's central config — the authoritative source of vault identity and the gate for durable artifacts; "registry-blind" becomes "non-registered tolerant." The phonebook scoping below is historical. See the dated amendment at the end.
 
 **Decision:** norn reintroduces a machine-local **vault registry** — a mapping of short names → vault paths — and constrains it to exactly that: **a phonebook, not a config surface.** Everything that defines a vault (schema, rules, index options) stays in the vault's own `.norn/`; the registry holds name → path and nothing else. Names are resolved **client-side**, at the CLI/MCP entry point: the resolver turns a name into a canonical path before any routing happens, so **the wire speaks canonical paths only** and `norn-service` never consults the registry. A registry that is stale, missing, or absent entirely leaves daemon behavior unaffected; a stale entry fails loudly at the client ("no vault at the path 'docs' points to"), never by quietly serving the wrong data.
 

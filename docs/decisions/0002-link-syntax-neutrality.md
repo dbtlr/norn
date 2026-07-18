@@ -9,7 +9,7 @@ norn supports both relative Markdown links (`[label](../notes/foo.md)`) and Obsi
 
 ## Context
 
-As of 2026-06-01 the tool is already mostly neutral: parsing, resolution, `find --links-to` / `--unresolved-links`, `get` link facets, `validate` link findings, and `move` / `delete` cascade rewrites all cover both syntaxes (relative Markdown links get a recomputed relative path on move). The lean toward wikilinks was cultural in the prose, not a tool limitation. Two real asymmetries remain (tracked as tasks, below).
+As of 2026-06-01 the tool is already mostly neutral: parsing, resolution, `find --links-to` / `--unresolved-links`, `get` link facets, `validate` link findings, and `move` / `delete` cascade rewrites all cover both syntaxes in document bodies (relative Markdown links get a recomputed relative path on move); frontmatter fields are the tracked exception below. The lean toward wikilinks was cultural in the prose, not a tool limitation. Two real asymmetries remain (tracked as tasks, below).
 
 ## Consequences
 

@@ -19,11 +19,14 @@ The 2026-07-17 evidence chain (a +461-entries-per-test-run leak, a day-long race
 - **The invariant is relocated, not abandoned.** Verification moves off the request path into owner machinery; the drift auditor is the "don't skip" half of trust-over-speed. Observed drift ≈ 0 is what licenses presumption; observed drift > 0 is a watcher bug surfacing as a metric, not as wrong results.
 - **Warm-up-on-summon is the accepted cost** (~linear in vault size; ~500ms/1.2k docs today). Mitigations: progress surface on self-update and warming queries; managed tier for those who never want cold starts. A future opt-in non-ephemeral db model is the named escape hatch, deliberately deferred.
 
+- **Uncertainty fails closed.** When the watcher or drift auditor cannot vouch for a vault (event overflow, an unsupported backend, auditor lag), the owner drops the presumption of validity for that vault and re-proves freshness before serving the next request — degraded means slower, never stale.
+
 ## Reversals and amendments (owned explicitly)
 
 - **Reverses ADR 0016's rejection of "always-route-to-daemon (kill the cold path)."** What changed: 0016 evaluated routing as an *accelerator* while trust still lived in per-request proofs, so a cold path had to stay budget-compliant. Once trust moves into the owner, a non-routed path is not a cheaper equivalent — it is an untrusted parallel implementation. 0016's seam (adapter → dispatch → execute) survives intact; its dispatch answers "summoned or resident," never "routed or direct."
 - **Amends ADR 0005:** the daemon ceases to be an optional accelerator and becomes the sole access path; verify-once-hold-warm becomes verify-once-**watch-thereafter**. The lifetime flock and one-host-N-contexts topology carry forward unchanged.
 - **Amends ADR 0006:** the registry gains its authoritative role (identity + durability gate), beyond client-side name resolution.
+- **Amends ADR 0013:** the generational/writer machinery and control-plane liveness contract carry forward inside the owner, but its Direct escape hatches (no pong, stalled writer → Direct) are superseded — no owner means summon; there is no direct path.
 - 0001–0004, 0007–0015 are relitigated separately in the redefinitional grooming pass; supersessions land as explicit status changes, not silence.
 
 ## Consequences
