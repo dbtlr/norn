@@ -22,14 +22,15 @@ fn self_check_end_to_end_is_all_match_exit_0() {
         return;
     }
     let workspace = common::workspace_root();
-    let rewrite = common::rewrite_debug_binary();
 
+    // Deliberately points --rewrite at a nonexistent path: self-check runs
+    // oracle-vs-oracle and must not require the rewrite artifact (its whole
+    // purpose is vetting a case set before any rewrite binary exists).
     let output = Command::new(bin())
         .current_dir(&workspace)
         .arg("--self-check")
         .args(["--oracle", "norn"])
-        .arg("--rewrite")
-        .arg(&rewrite)
+        .args(["--rewrite", "/nonexistent/rewrite-norn"])
         .output()
         .expect("failed to run norn-parity --self-check");
 

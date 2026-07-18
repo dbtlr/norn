@@ -78,6 +78,11 @@ pub enum LedgerError {
         value: String,
     },
     DuplicateEntryId(String),
+    /// An entry with `cases = []` maps to nothing and is skipped forever by
+    /// the stale check — dead weight that can only mislead. Rejected at load.
+    EmptyCases {
+        entry: String,
+    },
     UnknownCaseId {
         entry: String,
         case: String,
@@ -121,6 +126,10 @@ impl std::fmt::Display for LedgerError {
             LedgerError::UnknownCaseId { entry, case } => {
                 write!(f, "entry {entry} cites unknown case id `{case}`")
             }
+            LedgerError::EmptyCases { entry } => write!(
+                f,
+                "entry {entry} cites no cases — every entry must cover at least one case"
+            ),
             LedgerError::UnportedCaseId { entry, case } => write!(
                 f,
                 "entry {entry} cites case `{case}` whose surface is not yet ported — \
@@ -248,6 +257,9 @@ impl Ledger {
             let context = format!("entry `{id}`");
             let surface = get_str(table, &context, "surface")?;
             let cases = get_str_array(table, &context, "cases")?;
+            if cases.is_empty() {
+                return Err(LedgerError::EmptyCases { entry: id });
+            }
             let old = get_str(table, &context, "old")?;
             let new = get_str(table, &context, "new")?;
             let reason_str = get_str(table, &context, "reason")?;

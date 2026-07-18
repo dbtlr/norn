@@ -56,6 +56,28 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 }
 
 #[test]
+fn rejects_an_entry_citing_no_cases() {
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "find --format json"
+cases = []
+old = "old behavior"
+new = "new behavior"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+"#;
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
+    assert!(
+        matches!(err, LedgerError::EmptyCases { .. }),
+        "expected EmptyCases, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_a_duplicate_entry_id() {
     let toml = r#"
 [meta]
@@ -300,5 +322,10 @@ fn load_reports_the_file_path_on_a_missing_ledger() {
     assert!(
         matches!(err, LedgerError::Io { .. }),
         "expected Io, got {err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("/nonexistent/parity-ledger.toml"),
+        "diagnostic should name the ledger path, got: {message}"
     );
 }

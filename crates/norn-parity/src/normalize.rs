@@ -58,17 +58,29 @@ pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]
     out
 }
 
+/// Why an output could not be normalized for comparison.
+pub enum NormalizeError {
+    /// The process was killed by a signal — there is no exit code to compare.
+    Signaled,
+    /// The named stream (`"stdout"`/`"stderr"`) is not valid UTF-8. Lossy
+    /// conversion is forbidden in an exact parity gate: two DIFFERENT invalid
+    /// byte sequences would both become U+FFFD and falsely compare equal.
+    NonUtf8 { stream: &'static str },
+}
+
 pub fn normalize_output(
     raw: &crate::exec::RawOutput,
     vault_roots: &[&Path],
     steps: &[Normalization],
-) -> Option<NormalizedOutput> {
-    let exit_code = raw.exit_code?;
-    let stdout = String::from_utf8_lossy(&raw.stdout);
-    let stderr = String::from_utf8_lossy(&raw.stderr);
-    Some(NormalizedOutput {
-        stdout: normalize_text(&stdout, vault_roots, steps),
-        stderr: normalize_text(&stderr, vault_roots, steps),
+) -> Result<NormalizedOutput, NormalizeError> {
+    let exit_code = raw.exit_code.ok_or(NormalizeError::Signaled)?;
+    let stdout = std::str::from_utf8(&raw.stdout)
+        .map_err(|_| NormalizeError::NonUtf8 { stream: "stdout" })?;
+    let stderr = std::str::from_utf8(&raw.stderr)
+        .map_err(|_| NormalizeError::NonUtf8 { stream: "stderr" })?;
+    Ok(NormalizedOutput {
+        stdout: normalize_text(stdout, vault_roots, steps),
+        stderr: normalize_text(stderr, vault_roots, steps),
         exit_code,
     })
 }

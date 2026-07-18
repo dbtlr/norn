@@ -96,6 +96,14 @@ pub enum RunError {
         binary_label: &'static str,
         case_id: &'static str,
     },
+    /// A binary emitted invalid UTF-8. Parity surfaces are text protocols;
+    /// lossy conversion would let two DIFFERENT invalid byte sequences both
+    /// become U+FFFD and falsely compare equal, so this aborts instead.
+    NonUtf8Output {
+        binary_label: &'static str,
+        case_id: &'static str,
+        stream: &'static str,
+    },
     UnknownSuite(String),
     /// Two cases share an id — a duplicate would bind both to one ledger
     /// entry silently. Enforced at runtime (not `debug_assert`-only).
@@ -141,6 +149,14 @@ impl std::fmt::Display for RunError {
             } => write!(
                 f,
                 "{binary_label} was terminated by a signal running case `{case_id}` — cannot compare"
+            ),
+            RunError::NonUtf8Output {
+                binary_label,
+                case_id,
+                stream,
+            } => write!(
+                f,
+                "{binary_label} emitted invalid UTF-8 on {stream} running case `{case_id}` — cannot compare"
             ),
             RunError::UnknownSuite(name) => write!(f, "unknown suite: {name}"),
             RunError::DuplicateCaseId(id) => {
@@ -282,15 +298,37 @@ pub fn run(config: &RunConfig) -> Result<RunReport, RunError> {
 /// can drive the real orchestration end-to-end over a synthetic catalog
 /// (e.g. a ported case to exercise the Diverged/stale paths, which the
 /// phase-0 production catalog — zero ported cases — cannot).
+fn normalize_run_error(
+    e: normalize::NormalizeError,
+    binary_label: &'static str,
+    case_id: &'static str,
+) -> RunError {
+    match e {
+        normalize::NormalizeError::Signaled => RunError::Signaled {
+            binary_label,
+            case_id,
+        },
+        normalize::NormalizeError::NonUtf8 { stream } => RunError::NonUtf8Output {
+            binary_label,
+            case_id,
+            stream,
+        },
+    }
+}
+
 pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunReport, RunError> {
     if let Some(dup) = cases::duplicate_case_id(suites) {
         return Err(RunError::DuplicateCaseId(dup));
     }
 
-    let oracle_version = require_version(config.oracle, "oracle")?;
-    require_spawnable(config.rewrite, "rewrite")?;
-
     let self_check = matches!(config.mode, Mode::SelfCheck);
+
+    let oracle_version = require_version(config.oracle, "oracle")?;
+    // Self-check never runs the rewrite binary (candidate := oracle), so its
+    // absence must not block vetting a case set — don't require it.
+    if !self_check {
+        require_spawnable(config.rewrite, "rewrite")?;
+    }
 
     // Ledger/pin policy is mode-scoped (see the `Mode` doc comment):
     // self-check is blind (no ledger, no pin); gated/all load the full ledger
@@ -364,12 +402,8 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
         let oracle_roots: Vec<&Path> = oracle_spellings.iter().map(PathBuf::as_path).collect();
         let oracle_raw =
             exec::run_case(config.oracle, case, &oracle_vault).map_err(RunError::Exec)?;
-        let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps).ok_or(
-            RunError::Signaled {
-                binary_label: "oracle",
-                case_id: case.id,
-            },
-        )?;
+        let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps)
+            .map_err(|e| normalize_run_error(e, "oracle", case.id))?;
 
         // Case-rot guard: the oracle side must exit exactly as declared —
         // an error/error pair that would Match quietly is caught here first.
@@ -387,10 +421,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
         let candidate_raw =
             exec::run_case(candidate_binary, case, &candidate_vault).map_err(RunError::Exec)?;
         let candidate_norm = normalize::normalize_output(&candidate_raw, &candidate_roots, &steps)
-            .ok_or(RunError::Signaled {
-                binary_label: candidate_label,
-                case_id: case.id,
-            })?;
+            .map_err(|e| normalize_run_error(e, candidate_label, case.id))?;
 
         let entry_id = ledger
             .as_ref()

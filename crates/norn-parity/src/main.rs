@@ -231,9 +231,16 @@ fn run_comparison(args: &Args, mode: Mode) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let rewrite_path = match resolve_or_exit(&args.rewrite, "rewrite") {
-        Ok(p) => p,
-        Err(code) => return code,
+    // Self-check runs oracle-vs-oracle; the rewrite binary is unused and its
+    // absence must not block the mode's whole purpose (vetting a case set
+    // before any rewrite artifact exists).
+    let rewrite_path = if matches!(mode, Mode::SelfCheck) {
+        oracle_path.clone()
+    } else {
+        match resolve_or_exit(&args.rewrite, "rewrite") {
+            Ok(p) => p,
+            Err(code) => return code,
+        }
     };
     // Self-check is ledger-blind: it must run without any ledger (so a case
     // set can be vetted against a NEW oracle before the ledger is updated),
