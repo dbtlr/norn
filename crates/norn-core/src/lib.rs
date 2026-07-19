@@ -15,13 +15,21 @@
 //! - [`target`] — target resolution and backlink lookup over a built graph.
 //! - [`env`] — the [`env::VaultEnv`] value-carrier: vault root plus injected
 //!   config, value-in / value-out with no ambient reads.
+//! - [`graph`] — the vault walk + parse pipeline
+//!   ([`graph::build_index_with_options`]) producing a resolved
+//!   [`domain::GraphIndex`], plus the ignore-glob and alias-field machinery.
+//! - [`links`] — the link model and resolution: Markdown-link and wikilink
+//!   extraction into [`domain::Link`] records and matching a link to a document
+//!   ([`links::resolve_links`]).
 //!
-//! Deliberately NOT here yet (later port phases): the link *resolution* /
-//! graph-build machinery, the query/filter layer, the validate/repair engine
-//! and apply verbs, and the cache engine — see `retired/CLAUDE.md`.
+//! Deliberately NOT here yet (later port phases): the query/filter layer, the
+//! validate/repair engine and apply verbs, and the cache engine — see
+//! `retired/CLAUDE.md`.
 
 pub mod domain;
 pub mod env;
+pub mod graph;
+pub mod links;
 pub mod standards;
 pub mod target;
 
