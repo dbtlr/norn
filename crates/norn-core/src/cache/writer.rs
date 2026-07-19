@@ -1467,9 +1467,10 @@ fn regular_file_metadata(absolute: &Utf8Path) -> Option<(i64, i64)> {
 /// Re-prove the committed `(mtime,size)` for one affected path against the fresh
 /// parse: a parsed document (non-empty hash) must still hash to its parsed
 /// content; a non-document regular file must be stat-stable; a read-failed
-/// document (empty hash) or a deleted/absent path carries no verified metadata
-/// (`Ok(None)`) — the stat-sweep probe re-fires on those via a later stat change.
-/// A drift on a source that IS expected present is a hard abort.
+/// document (empty hash) commits the impossible `(-1, -1)` force-refire sentinel
+/// so the next probe always re-fires on it; a deleted/absent path carries no
+/// metadata (`Ok(None)`). A drift on a source that IS expected present and parsed
+/// is a hard abort.
 fn verify_affected_metadata(
     vault_root: &Utf8Path,
     path: &Utf8Path,
@@ -1480,9 +1481,15 @@ fn verify_affected_metadata(
     if let Some(&doc_i) = fresh_docs.get(path) {
         let doc = &fresh_index.documents[doc_i];
         if doc.hash.is_empty() {
-            // Read-failed document: no parsed hash to re-prove. Best-effort stat;
-            // a later readability change moves the stat and re-fires the probe.
-            return Ok(stable_regular_file_metadata(vault_root, path));
+            // Read-failed document (no parsed content hash to re-prove): commit
+            // the impossible `(-1, -1)` metadata sentinel so the next
+            // freshness/detect pass ALWAYS refires on this path. A best-effort
+            // real stat would let a metadata-only recovery that leaves mtime+size
+            // unchanged (e.g. a `chmod` that touches only ctime) keep serving the
+            // stale read-failed row as Fresh — the stat-sweep probe compares
+            // mtime+size and never notices. `(-1, -1)` can never equal a live
+            // stat, forcing the retry after permission/readability recovery.
+            return Ok(Some((-1, -1)));
         }
         let observed = verify_parsed_document(vault_root, path, &doc.hash).ok_or_else(|| {
             CacheError::IncrementSourceDrift {
@@ -1793,5 +1800,52 @@ mod tests {
             paths,
             std::collections::BTreeSet::from([Utf8PathBuf::from("a.md")])
         );
+    }
+
+    /// F1 residual — a read-failed document commits the impossible `(-1,-1)`
+    /// force-refire baseline (never a real stat), so a subsequent freshness probe
+    /// reports it Stale even when its live mtime+size are unchanged. Without the
+    /// sentinel, a metadata-only readability recovery that leaves stat untouched
+    /// would keep serving the stale read-failed row as Fresh forever.
+    #[test]
+    fn read_failed_document_commits_force_refire_sentinel() {
+        use crate::cache::freshness::{Freshness, FreshnessProbe, StatSweepProbe};
+
+        let (_tmp, root) = fresh_vault();
+        std::fs::write(root.join("a.md").as_std_path(), "---\ntitle: A\n---\n").unwrap();
+        let mut cache = Cache::open(&root).unwrap();
+        cache.full_build(&root).unwrap();
+
+        // A .md whose bytes are not valid UTF-8: build_index records a read-failed
+        // Document with an empty content hash.
+        std::fs::write(
+            root.join("bad.md").as_std_path(),
+            b"\xff\xfe\xfd\xfc not valid utf-8",
+        )
+        .unwrap();
+        cache.index_incremental(&root, &Default::default()).unwrap();
+
+        // The committed baseline for the read-failed doc is the impossible
+        // sentinel, not a real stat.
+        let (mtime, size): (i64, i64) = cache
+            .conn()
+            .query_row(
+                "SELECT mtime_ns, size_bytes FROM documents WHERE path = 'bad.md'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (mtime, size),
+            (-1, -1),
+            "read-failed doc must commit the (-1,-1) force-refire sentinel"
+        );
+
+        // The probe reports Stale for that path despite its live stats never
+        // matching the sentinel — the retry-after-recovery guarantee.
+        match StatSweepProbe.probe(&root, &cache).unwrap() {
+            Freshness::Stale(_) => {}
+            Freshness::Fresh => panic!("read-failed sentinel must force the next probe to refire"),
+        }
     }
 }
