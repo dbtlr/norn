@@ -20,6 +20,20 @@
 //! Wikilink *resolution* (matching a target to a document, aliases, ambiguity)
 //! and Markdown-link / link-graph modeling are deliberately out of scope; they
 //! port to `norn-core` atop the syntax this crate provides.
+//!
+//! # Code blocks are opaque (ADR 0019)
+//!
+//! Every targeted body parser here treats fenced code blocks and inline code
+//! spans as a *different document*: no semantic token — a wikilink, a heading, a
+//! block-id, or anything a future parser extracts — may match inside them. What a
+//! reader sees as a literal code sample, norn reads as literal text, never as
+//! vault structure. [`wikilink::parse_wikilinks`] and
+//! [`wikilink::parse_block_ids`] exclude code byte-ranges explicitly; the
+//! `pulldown-cmark`-based [`heading`] parser skips code events for free. Any
+//! parser added later MUST honor this rule or justify the exception against the
+//! ADR. The one nuance: a `^block-id` on the line *after* a fence references the
+//! code block itself and stays valid — the exclusion covers what is *inside* the
+//! fences, not the anchor line trailing them.
 
 mod diagnostic;
 mod span;

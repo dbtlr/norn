@@ -48,6 +48,10 @@ pub struct Profile {
     pub broken_link_per_mille: u32,
     /// Per-mille of expansion docs that carry one schema violation.
     pub violation_per_mille: u32,
+    /// Emit the text-layer edge docs (`crate::zoo::text_edge_docs`) — the
+    /// isolated BOM / code-opacity divergence probes (NRN-349 / NRN-350). Kept
+    /// off every shared profile so those cases never perturb zoo/clean parity.
+    pub text_edge: bool,
 }
 
 /// The named profiles, in fixed order — the single source for `by_name`,
@@ -63,6 +67,7 @@ const PROFILES: &[Profile] = &[
         max_links_per_doc: 0,
         broken_link_per_mille: 0,
         violation_per_mille: 0,
+        text_edge: false,
     },
     // Zoo without violations, plus ~60 expansion docs. Invariant: the oracle's
     // `validate` reports zero findings against this profile.
@@ -75,6 +80,7 @@ const PROFILES: &[Profile] = &[
         max_links_per_doc: 3,
         broken_link_per_mille: 0,
         violation_per_mille: 0,
+        text_edge: false,
     },
     // Zoo including violations, plus ~120 expansion docs at elevated
     // violation/broken-link ratios.
@@ -87,6 +93,7 @@ const PROFILES: &[Profile] = &[
         max_links_per_doc: 4,
         broken_link_per_mille: 40,
         violation_per_mille: 50,
+        text_edge: false,
     },
     // Zoo without violations, plus ~200 densely-linked docs across deep, wide
     // folders.
@@ -99,6 +106,7 @@ const PROFILES: &[Profile] = &[
         max_links_per_doc: 8,
         broken_link_per_mille: 0,
         violation_per_mille: 0,
+        text_edge: false,
     },
     // Zoo without violations, plus 1000 expansion docs at moderate settings.
     Profile {
@@ -110,6 +118,21 @@ const PROFILES: &[Profile] = &[
         max_links_per_doc: 3,
         broken_link_per_mille: 0,
         violation_per_mille: 0,
+        text_edge: false,
+    },
+    // The valid zoo plus the text-layer edge probes (NRN-349 / NRN-350) — no
+    // expansion, no violations. Dedicated to the BOM / code-opacity parity cases
+    // so those divergences stay off every shared fixture.
+    Profile {
+        name: "text-edge",
+        violations: false,
+        expansion_docs: 0,
+        folder_depth: 0,
+        folder_width: 0,
+        max_links_per_doc: 0,
+        broken_link_per_mille: 0,
+        violation_per_mille: 0,
+        text_edge: true,
     },
 ];
 
@@ -329,6 +352,23 @@ pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Mani
     }
     for (path, bytes) in zoo::binary_docs() {
         write_rel(out_dir, path, bytes, &mut dirs, &mut files)?;
+    }
+
+    if profile.text_edge {
+        for doc in zoo::text_edge_docs() {
+            write_rel(
+                out_dir,
+                doc.path,
+                doc.content.as_bytes(),
+                &mut dirs,
+                &mut files,
+            )?;
+            docs.push(DocEntry {
+                path: doc.path.to_string(),
+                tier: doc.tier,
+                codes: &[],
+            });
+        }
     }
 
     if profile.violations {
