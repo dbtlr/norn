@@ -501,6 +501,27 @@ mod tests {
     }
 
     #[test]
+    fn repeated_format_is_last_wins_grammar_wide() {
+        // NRN-365: `--format` has no per-arg self-override; the root's
+        // `args_override_self` makes the repeat last-wins (the oracle errors).
+        let args = find_args(&[
+            "norn", "find", "--all", "--format", "json", "--format", "paths",
+        ]);
+        assert_eq!(args.format, Some(FindFormat::Paths));
+    }
+
+    #[test]
+    fn repeatable_append_flags_still_accumulate_under_last_wins() {
+        // `args_override_self` touches only self-conflicting `Set` flags; an
+        // `Append` predicate like `--eq` still accumulates both values.
+        let args = find_args(&["norn", "find", "--eq", "type:note", "--eq", "status:active"]);
+        assert_eq!(
+            args.filter.eq,
+            vec!["type:note".to_string(), "status:active".to_string()]
+        );
+    }
+
+    #[test]
     fn all_cols_and_col_are_last_wins() {
         // NRN-331: --all-cols and --col compete over the projection; the last
         // one on the command line wins (no hard conflict).
