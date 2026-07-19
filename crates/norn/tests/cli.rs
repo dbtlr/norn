@@ -367,3 +367,65 @@ fn vault_relative_config_dir_fails_loud() {
         stderr_of(&out)
     );
 }
+
+/// NRN-360: a present-but-invalid `.norn/config.yaml` surfaces the oracle's
+/// config-error on the user-error path — exit 1 and a `norn: invalid config
+/// <path>: …` diagnostic. The `norn:` prefix is the rewrite's display-layer
+/// convention (NRN-361 owns the prefix question); the message body and exit
+/// code match the oracle byte-for-byte. This is the only `cli` test that drives
+/// the real bin end-to-end through a summon, so it pins the whole CLI surface
+/// the owner/client suites can each only pin in part.
+#[cfg(unix)]
+#[test]
+fn invalid_config_exits_one_with_the_config_diagnostic() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // A vault whose config is present but schema-invalid (unknown top field).
+    let vault = tempfile::tempdir().unwrap();
+    let norn_dir = vault.path().join(".norn");
+    std::fs::create_dir_all(&norn_dir).unwrap();
+    std::fs::write(norn_dir.join("config.yaml"), "bogus: true\n").unwrap();
+    std::fs::write(vault.path().join("a.md"), "---\ntype: note\n---\nbody\n").unwrap();
+
+    // A SHORT, unique, isolated runtime dir: the summoned owner's Unix socket
+    // lives under it and must stay within the ~104-byte `sun_path` limit (a
+    // TempDir under the system temp is too long on some platforms), and the
+    // isolation keeps this off the developer's real runtime dir / owners.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let runtime_dir = std::path::PathBuf::from(format!("/tmp/nrn360-{}", nanos % 100_000_000));
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    // Isolate the central-config home too, so resolution never reads the dev's.
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let out = norn()
+        .arg("-C")
+        .arg(vault.path())
+        .args(["find", "--all"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(&runtime_dir); // best-effort cleanup
+
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a bad config must exit 1; stderr was: {stderr:?}"
+    );
+    // The oracle-shaped message body under the rewrite's `norn:` diagnostic
+    // prefix. Path-tail + serde detail are asserted (not the canonicalized
+    // absolute prefix, which varies with the temp dir's symlink spelling).
+    assert!(
+        stderr.contains("norn: invalid config "),
+        "expected the `norn: invalid config …` diagnostic, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains(".norn/config.yaml: unknown field `bogus`"),
+        "expected the config path + serde detail, got: {stderr:?}"
+    );
+}

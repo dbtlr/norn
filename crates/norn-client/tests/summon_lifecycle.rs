@@ -14,7 +14,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use norn_client::{open, SummonConfig};
+use norn_client::{open, socket_path, ClientError, SummonConfig};
 use norn_wire::ServingState;
 
 fn base_config(vault_root: PathBuf, runtime_dir: PathBuf, ttl: Duration) -> SummonConfig {
@@ -103,6 +103,94 @@ fn second_open_connects_to_the_same_owner() {
 
     drop(first);
     drop(second);
+}
+
+/// NRN-360, the whole user story: summoning against a vault whose
+/// `.norn/config.yaml` is present but invalid surfaces the config error on the
+/// USER-error path ([`ClientError::Rejected`], carrying the oracle-shaped
+/// `invalid config …` message) — never an owner-health/owner-gone failure or a
+/// crash loop. The failed owner then EAGER-REAPS (well under the idle TTL, since
+/// it can never serve a useful frame), so once the operator FIXES the config an
+/// immediate re-summon spawns a fresh owner that re-reads it and serves reads.
+#[test]
+fn invalid_config_surfaces_error_eager_reaps_then_a_fix_is_picked_up() {
+    let vault_tmp = tempfile::TempDir::new().unwrap();
+    let vault_root = vault_tmp.path().join("vault");
+    std::fs::create_dir_all(vault_root.join(".norn")).unwrap();
+    // A well-formed-YAML but schema-invalid config (unknown top-level field).
+    std::fs::write(vault_root.join(".norn/config.yaml"), "bogus: true\n").unwrap();
+    std::fs::write(
+        vault_root.join("a.md"),
+        "---\ntype: note\ntitle: A\n---\nbody\n",
+    )
+    .unwrap();
+
+    let rt_tmp = tempfile::TempDir::new().unwrap();
+    let runtime_dir = rt_tmp.path().to_path_buf();
+    // A deliberately LONG idle TTL: eager-reap must beat it by orders of
+    // magnitude. If the owner instead lingered on its idle clock, the reap wait
+    // below would time out long before 60s.
+    let config = base_config(
+        vault_root.clone(),
+        runtime_dir.clone(),
+        Duration::from_secs(60),
+    );
+    let socket = socket_path(&vault_root, &runtime_dir, &config.fingerprint);
+
+    // The config error surfaces at whichever ping observes the failed warm-up
+    // first — the `open` handshake or a `wait_until_ready` poll. Both must be a
+    // Rejected, never OwnerGone (which would resummon into a crash loop).
+    let err = match open(&config) {
+        Ok(mut session) => session
+            .wait_until_ready(Duration::from_secs(20))
+            .expect_err("a bad-config owner must never reach ready"),
+        Err(e) => e,
+    };
+    match &err {
+        ClientError::Rejected(message) => {
+            assert!(
+                message.contains("invalid config "),
+                "expected the oracle config-error message, got {message:?}"
+            );
+            assert!(
+                message.contains("unknown field `bogus`"),
+                "expected the serde detail, got {message:?}"
+            );
+        }
+        other => panic!("expected a Rejected config error, got {other:?}"),
+    }
+
+    // EAGER REAP: the failed owner tears down PROMPTLY — well under the 60s TTL —
+    // removing its socket and db dir. (A lingering owner would time out here.)
+    let reaped = common::wait_until(Duration::from_secs(20), || {
+        !socket.exists() && common::owner_db_dirs(&runtime_dir) == 0
+    });
+    assert!(
+        reaped,
+        "the failed owner must eager-reap, not linger the idle TTL: socket exists={}, db dirs={}",
+        socket.exists(),
+        common::owner_db_dirs(&runtime_dir),
+    );
+
+    // Fix the config; because the stale-error owner reaped, an immediate
+    // re-summon spawns a FRESH owner that re-reads the now-valid config and
+    // serves reads — the fix is picked up at once, not after the TTL.
+    std::fs::write(
+        vault_root.join(".norn/config.yaml"),
+        "links:\n  alias_field: aliases\n",
+    )
+    .unwrap();
+    let mut session = open(&config).expect("re-summon after the config fix");
+    let pong = session
+        .wait_until_ready(Duration::from_secs(20))
+        .expect("the fixed config must warm up to ready");
+    assert_eq!(pong.serving, ServingState::Ready);
+    assert_eq!(
+        session.probe().expect("probe the fixed vault"),
+        1,
+        "the fixed owner should serve the one seeded note"
+    );
+    drop(session);
 }
 
 /// Finding 3 (reaper TOCTOU / drain): across repeated summon→probe→reap cycles,

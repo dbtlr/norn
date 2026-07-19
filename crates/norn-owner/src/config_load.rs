@@ -11,6 +11,16 @@
 //! `<vault_root>/.norn/config.yaml` is used if it exists; otherwise the vault
 //! runs under [`CacheOpenConfig::default`] (no alias field, no ignores, empty
 //! index set).
+//!
+//! Both errors below feed the NRN-360 user-error surface (a warm-up config
+//! failure becomes an `OwnerFrame::Rejected`, not exit-to-heal), but they carry
+//! two distinct message shapes: a present-but-unparseable file yields the
+//! oracle-matching `invalid config <path>: <detail>` (from
+//! [`norn_core::standards::parse_config`]), while a present-but-unreadable file
+//! (a permissions/IO access error) yields `failed to read config <path>: <io>`.
+//! The oracle renders both the same way (`eprintln!("{error:#}")`, exit 1), so
+//! only the parse-error branch is byte-for-byte prefix-identical to it; the
+//! access-error branch is an accepted, rarer edge with its own wording.
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -140,5 +150,30 @@ mod tests {
         std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
         std::fs::write(root.join(".norn/config.yaml").as_std_path(), "not: [valid").unwrap();
         assert!(load_cache_config(&root, None).is_err());
+    }
+
+    /// The config-load error message is the oracle's config-error surface
+    /// verbatim: `invalid config <path>: <detail>` (NRN-360). The owner carries
+    /// this string out to the client as the rejection message, so its shape is a
+    /// contract, not incidental.
+    #[test]
+    fn invalid_config_error_matches_the_oracle_surface() {
+        let (_tmp, root) = root();
+        std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
+        let config = root.join(".norn/config.yaml");
+        // An unknown top-level field — a schema-invalid (but well-formed YAML)
+        // config, the same class the oracle renders as `invalid config …`.
+        std::fs::write(config.as_std_path(), "bogus: true\n").unwrap();
+        let err = load_cache_config(&root, None).expect_err("a bad config is an error");
+        let message = err.to_string();
+        let expected_prefix = format!("invalid config {config}: ");
+        assert!(
+            message.starts_with(&expected_prefix),
+            "expected `{expected_prefix}…`, got {message:?}"
+        );
+        assert!(
+            message.contains("unknown field `bogus`"),
+            "expected the serde detail, got {message:?}"
+        );
     }
 }

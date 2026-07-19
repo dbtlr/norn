@@ -80,6 +80,19 @@ struct OwnerState {
     /// its structure view (path rules, inbox, schema); the other read verbs need
     /// only the cache knobs already folded into the slot.
     vault_config: Mutex<Option<Arc<VaultConfig>>>,
+    /// A warm-up USER error: a present-but-invalid `.norn/config.yaml` (bad
+    /// YAML, unknown field, malformed rule). When set, every frame is answered
+    /// with [`OwnerFrame::Rejected`] carrying this message — the established
+    /// user-error path (NRN-360). Distinct from [`fatal`](Self::fatal)
+    /// (exit-to-heal): a bad config is a user mistake, not a crashed owner, so
+    /// the owner serves the error and exits CLEANLY (exit 0) instead of
+    /// `go_fatal`. It also EAGER-REAPS: once a client has the rejection in hand,
+    /// `handle_connection` latches shutdown (the socket key is config-blind, so
+    /// a lingering bad-config owner would shadow every retry within the idle
+    /// TTL). A resummon therefore spawns a FRESH owner that re-reads the config
+    /// from disk — a fix is picked up immediately, never a crash loop and never
+    /// a stale error.
+    warmup_error: Mutex<Option<String>>,
     last_activity: Mutex<Instant>,
     in_flight: AtomicUsize,
     fatal: AtomicBool,
@@ -100,6 +113,7 @@ impl OwnerState {
             serving: Mutex::new(ServingState::Cold),
             slot: Mutex::new(None),
             vault_config: Mutex::new(None),
+            warmup_error: Mutex::new(None),
             last_activity: Mutex::new(Instant::now()),
             in_flight: AtomicUsize::new(0),
             fatal: AtomicBool::new(false),
@@ -134,6 +148,22 @@ impl OwnerState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// The warm-up config error, if the vault's `.norn/config.yaml` failed to
+    /// load. When `Some`, every frame is answered with a Rejected (NRN-360).
+    fn warmup_error(&self) -> Option<String> {
+        self.warmup_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Record a warm-up config error. Unlike [`go_fatal`](Self::go_fatal) this
+    /// does NOT latch shutdown or mark fatal: the owner stays alive to serve the
+    /// error and then idle-reaps cleanly (exit 0).
+    fn set_warmup_error(&self, message: String) {
+        *self.warmup_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
     }
 
     fn writer_progress(&self) -> WriterProgress {
@@ -263,24 +293,63 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
             // resolved EAV index set all come from `.norn/config.yaml`. Without
             // this the cache would be built under the empty default config and
             // every alias/ignore/index decision would be wrong (ADR 0017).
-            type WarmUp = (VaultCacheSlot, Option<VaultConfig>);
+            //
+            // The two failure classes are kept distinct (NRN-360): a
+            // present-but-invalid config is a USER error (surfaced to the client
+            // as a Rejected, clean exit), while a cache-build fault is
+            // exit-to-heal (the db is disposable derivation).
+            enum WarmUp {
+                // Boxed as one payload: the built slot + parsed config dwarf the
+                // error string, and this enum is a one-shot warm-up return, so the
+                // indirection is free (and keeps the variants size-balanced).
+                Ready(Box<(VaultCacheSlot, Option<VaultConfig>)>),
+                /// A present `.norn/config.yaml` that could not be read/parsed/
+                /// validated — a user mistake, carried out as its message.
+                ConfigInvalid(String),
+            }
             let build = tokio::task::spawn_blocking(move || -> anyhow::Result<WarmUp> {
-                let cache_config =
-                    crate::config_load::load_cache_config(&vault_root, config_path.as_deref())?;
+                // Config load is the user-error boundary: any failure reading or
+                // parsing the vault's own `.norn/config.yaml` is a user mistake,
+                // NOT a disposable-db fault. Its message (`invalid config
+                // <path>: <detail>`) is the oracle's config-error surface.
+                let cache_config = match crate::config_load::load_cache_config(
+                    &vault_root,
+                    config_path.as_deref(),
+                ) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(WarmUp::ConfigInvalid(e.to_string())),
+                };
                 // The full parsed config is retained for `describe`'s structure
                 // view; the cache load above folds out only the four cache knobs.
-                let vault_config =
-                    crate::config_load::load_vault_config(&vault_root, config_path.as_deref())?;
+                let vault_config = match crate::config_load::load_vault_config(
+                    &vault_root,
+                    config_path.as_deref(),
+                ) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(WarmUp::ConfigInvalid(e.to_string())),
+                };
+                // Only a cache-build failure is exit-to-heal (the `?` below).
                 let slot = VaultCacheSlot::create(&db_path, &vault_root, cache_config)?;
-                Ok((slot, vault_config))
+                Ok(WarmUp::Ready(Box::new((slot, vault_config))))
             })
             .await;
             match build {
-                Ok(Ok((slot, vault_config))) => {
+                Ok(Ok(WarmUp::Ready(payload))) => {
+                    let (slot, vault_config) = *payload;
                     *state.slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(slot));
                     *state.vault_config.lock().unwrap_or_else(|p| p.into_inner()) =
                         vault_config.map(Arc::new);
                     state.set_serving(ServingState::Ready);
+                }
+                // A present-but-invalid config is a USER error (NRN-360): store
+                // it so every frame is answered with Rejected, then exit CLEANLY
+                // (exit 0). NOT go_fatal — a bad config must not crash-loop the
+                // summon; the connecting client surfaces this as the config
+                // error (the oracle's `invalid config …` message), and the owner
+                // eager-reaps so a resummon re-reads a fixed config.
+                Ok(Ok(WarmUp::ConfigInvalid(message))) => {
+                    eprintln!("norn owner: warm-up rejected (invalid config): {message}");
+                    state.set_warmup_error(message);
                 }
                 // A cache error during warm-up is exit-to-heal (ADR 0017): the
                 // db never became valid, so terminate and let a resummon rebuild.
@@ -402,15 +471,28 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
             continue;
         }
 
+        // A warm-up config error rejects every frame and can never serve a
+        // useful one (NRN-360). Such a rejection is NOT activity worth extending
+        // the owner's life, so it neither touches the idle clock nor keeps the
+        // owner warm — instead the owner eager-reaps the moment the client has
+        // the error in hand. `warmup_error` is monotonic (set once at warm-up,
+        // never cleared), so reading it before dispatch is race-free: if set
+        // here, dispatch is guaranteed to return the Rejected below.
+        let warmup_reject = state.warmup_error().is_some();
+
         state.in_flight.fetch_add(1, Ordering::SeqCst);
-        state.touch();
+        if !warmup_reject {
+            state.touch();
+        }
         let response = match serde_json::from_str::<ClientFrame>(trimmed) {
             Ok(frame) => dispatch(&state, frame).await,
             Err(err) => OwnerFrame::Error {
                 message: format!("malformed control frame: {err}"),
             },
         };
-        state.touch();
+        if !warmup_reject {
+            state.touch();
+        }
         state.in_flight.fetch_sub(1, Ordering::SeqCst);
 
         let mut buf = serde_json::to_vec(&response)?;
@@ -418,6 +500,17 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         wr.write_all(&buf).await?;
         wr.flush().await?;
 
+        if warmup_reject {
+            // The client has now received the config error (the write+flush
+            // above completed before this point), so eager-reap: latch a CLEAN
+            // shutdown (never go_fatal) so a resummon spawns a FRESH owner that
+            // re-reads `.norn/config.yaml` — a fix is picked up immediately
+            // instead of after the full idle TTL against this stale-error owner.
+            // The socket key is config-blind, so a lingering bad-config owner
+            // would otherwise shadow every retry within the TTL window.
+            state.request_shutdown();
+            break;
+        }
         if state.fatal.load(Ordering::SeqCst) {
             break;
         }
@@ -426,6 +519,14 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
 }
 
 async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
+    // A warm-up that failed on an invalid config answers EVERY frame with the
+    // config error as a Rejected — the user-error path (NRN-360). The owner is
+    // healthy (not fatal); it simply cannot serve a vault whose `.norn/config.yaml`
+    // it could not parse. The client renders this as the config error;
+    // `handle_connection` then eager-reaps so a resummon re-reads the config.
+    if let Some(message) = state.warmup_error() {
+        return OwnerFrame::Rejected { message };
+    }
     match frame {
         ClientFrame::Ping { protocol } => {
             if protocol != CONTROL_PROTOCOL {
@@ -653,4 +754,66 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    /// NRN-360: once a warm-up config error is recorded, EVERY frame — ping,
+    /// probe, and the read verbs — is answered with a `Rejected` carrying the
+    /// config message (the user-error path), never a `go_fatal` Error frame.
+    #[test]
+    fn warmup_config_error_rejects_every_frame() {
+        let state = Arc::new(OwnerState::new(None));
+        state.set_warmup_error(
+            "invalid config /vault/.norn/config.yaml: unknown field `not`".to_string(),
+        );
+
+        // A ping (normally a Pong) is rejected with the config message.
+        let frame = block_on(dispatch(
+            &state,
+            ClientFrame::Ping {
+                protocol: CONTROL_PROTOCOL,
+            },
+        ));
+        match frame {
+            OwnerFrame::Rejected { message } => {
+                assert!(
+                    message.starts_with("invalid config "),
+                    "expected the oracle-shaped config message, got {message:?}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        // A probe is rejected too — the owner cannot serve reads under a config
+        // it could not parse.
+        assert!(matches!(
+            block_on(dispatch(&state, ClientFrame::Probe)),
+            OwnerFrame::Rejected { .. }
+        ));
+
+        // Recording a config error must NOT trip the fatal (exit-to-heal) latch:
+        // a bad config is a user mistake, so the owner exits cleanly, not fatal.
+        // Nor does recording it itself latch shutdown — the eager-reap latch is
+        // pulled by `handle_connection` only AFTER a client has been served the
+        // rejection, so the first client reliably receives it.
+        assert!(
+            !state.fatal.load(Ordering::SeqCst),
+            "a config error must not mark the owner fatal"
+        );
+        assert!(
+            !state.is_shutdown(),
+            "recording a config error must not itself latch shutdown"
+        );
+    }
 }
