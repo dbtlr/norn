@@ -23,7 +23,7 @@
 //!
 //! # Code blocks are opaque (ADR 0019)
 //!
-//! Every targeted body parser here treats fenced code blocks and inline code
+//! Every targeted body parser here treats fenced code blocks, indented code blocks, and inline code
 //! spans as a *different document*: no semantic token — a wikilink, a heading, a
 //! block-id, or anything a future parser extracts — may match inside them. What a
 //! reader sees as a literal code sample, norn reads as literal text, never as

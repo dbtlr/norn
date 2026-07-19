@@ -1,11 +1,11 @@
 ---
 title: "0019 — code blocks are opaque to all targeted parsing"
-description: "Architectural decision that fenced code blocks and inline code spans are treated as a foreign document — no semantic body parser (wikilinks, Markdown links, headings, block-ids, tags, any future extraction) may match inside them."
+description: "Architectural decision that fenced code blocks, indented code blocks, and inline code spans are treated as a foreign document — no semantic body parser (wikilinks, Markdown links, headings, block-ids, tags, any future extraction) may match inside them."
 ---
 
 # 0019 — code blocks are opaque to all targeted parsing
 
-Content inside a fenced code block (``` ``` ```/`~~~`) or an inline code span (`` `…` ``) is **opaque** to every targeted body parser. **Decision:** a code region is a different document — no semantic extraction (wikilink syntax, Markdown links, headings, block-ids, tags, and any parser added later) may recognize a token inside it. What a human reads as a literal code sample, norn must read as literal text, never as vault structure.
+Content inside a fenced code block (``` ``` ```/`~~~`), an indented code block, or an inline code span (`` `…` ``) is **opaque** to every targeted body parser. **Decision:** a code region is a different document — no semantic extraction (wikilink syntax, Markdown links, headings, block-ids, tags, and any parser added later) may recognize a token inside it. What a human reads as a literal code sample, norn must read as literal text, never as vault structure.
 
 One Obsidian-aligned nuance is preserved: a `^block-id` on the line *after* a closing fence references the code block itself and remains a valid anchor. The exclusion covers what is *inside* the fences, not the anchor line that trails them.
 
