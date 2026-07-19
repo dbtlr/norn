@@ -59,6 +59,15 @@ pub const DEFAULT_EPHEMERAL_TTL: Duration = Duration::from_secs(120);
 
 /// The ephemeral idle TTL, honoring [`EPHEMERAL_TTL_ENV`] when it parses to a
 /// non-negative integer, else [`DEFAULT_EPHEMERAL_TTL`].
+///
+/// Env-var semantics (POSIX-by-default, ADR 0020): an *empty* or *unset*
+/// variable means "unset" → the default. An *invalid* value (non-numeric,
+/// negative, or overflowing `u64`) is a **fail-safe to the default**, never a
+/// hard error: this is a resource/performance tuning knob (it bounds only an
+/// idle owner's lifetime, never touches vault correctness), and aborting a
+/// command because an advanced knob is mistyped would be worse than falling
+/// back to the sound default. The fallback is deliberately silent — the knob is
+/// off the daily path and the default is always safe.
 pub fn ephemeral_idle_ttl() -> Duration {
     match std::env::var(EPHEMERAL_TTL_ENV) {
         Ok(raw) => match raw.trim().parse::<u64>() {
