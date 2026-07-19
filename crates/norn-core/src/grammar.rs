@@ -361,16 +361,18 @@ fn normalize_query(
         }
 
         let Some((name, inline)) = parse_long_flag(tok) else {
-            // Short flag / positional (`-C` value handled below) — pass through.
-            if tok == "-C" {
-                out.push(tok.clone());
-                if let Some(v) = toks.get(i + 1) {
-                    out.push(v.clone());
-                    i += 2;
-                    continue;
-                }
-            }
+            // Short flag / positional — pass through. `-C VALUE` (short cwd)
+            // consumes the next token ONLY when it is value-shaped, mirroring
+            // find_subcommand_index and the reserved/alias branches' is_value_token
+            // discipline: `find -C --type note` must leave `-C` value-less (let the
+            // parser surface its native missing-value error) so `--type` still
+            // desugars, and a trailing `-C` must emit exactly once.
             out.push(tok.clone());
+            if tok == "-C" && toks.get(i + 1).is_some_and(|v| is_value_token(v)) {
+                out.push(toks[i + 1].clone());
+                i += 2;
+                continue;
+            }
             i += 1;
             continue;
         };
@@ -889,6 +891,38 @@ mod tests {
         assert_eq!(
             n.argv,
             vec!["norn", "-C", "/vault", "find", "--eq", "type:note"]
+        );
+        assert_eq!(n.dynamic_keys, vec!["type".to_string()]);
+    }
+
+    // ── `-C` after the subcommand: same is_value_token discipline as the ────
+    // reserved branch (deliberate correction over the donor, whose
+    // normalize_query -C branch lacked the guard its own find_subcommand_index
+    // applies; degenerate-input class).
+    #[test]
+    fn dash_c_does_not_swallow_following_flag() {
+        // `find -C --type note`: `-C` is value-less (its value is flag-shaped),
+        // so it passes through alone and `--type note` still desugars.
+        let n = norm(&["norn", "find", "-C", "--type", "note"]);
+        assert_eq!(n.argv, vec!["norn", "find", "-C", "--eq", "type:note"]);
+        assert_eq!(n.dynamic_keys, vec!["type".to_string()]);
+    }
+
+    #[test]
+    fn trailing_dash_c_emits_exactly_once() {
+        let n = norm(&["norn", "find", "--all", "-C"]);
+        assert_eq!(n.argv, vec!["norn", "find", "--all", "-C"]);
+        assert_eq!(n.argv.iter().filter(|t| *t == "-C").count(), 1);
+        assert!(n.dynamic_keys.is_empty());
+    }
+
+    #[test]
+    fn dash_c_after_subcommand_consumes_value_shaped_next() {
+        // The happy path: a real value-shaped token is still consumed as -C's value.
+        let n = norm(&["norn", "find", "-C", "/vault", "--type", "note"]);
+        assert_eq!(
+            n.argv,
+            vec!["norn", "find", "-C", "/vault", "--eq", "type:note"]
         );
         assert_eq!(n.dynamic_keys, vec!["type".to_string()]);
     }
