@@ -441,31 +441,296 @@ const READ_CASES: &[Case] = &[
         normalize: NO_NORM,
     },
     Case {
+        // Deep-facet load (NRN-347): `--col .headings` loads each match's
+        // headings and emits them verbatim — the previously-gated facet, now
+        // pinned to the oracle forever.
+        id: "read-find-col-headings-json-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:note",
+            "--col",
+            ".headings",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--all-cols` — the full structured dump: frontmatter + headings + the
+        // three link sets + body, all loaded via the deep-fetch (NRN-347).
+        id: "read-find-all-cols-json-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:note",
+            "--all-cols",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Incoming links exercise the back-link query (a distinct cache path
+        // from headings/outgoing) — pin it too.
+        id: "read-find-col-incoming-json-zoo",
+        argv: &[
+            "find",
+            "--col",
+            ".incoming_links",
+            "--format",
+            "json",
+            "--all",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // ── get (NRN-347) ──────────────────────────────────────────────────────
+    // The anchor: get ports for real. Stem addressing, each format, the
+    // ambiguity/not-found note+exit contract, and the markdown exact-source read.
+    Case {
         id: "read-get-alpha-zoo",
         // Stem form, not `notes/alpha` — see module docs. The resolved target
         // is the vault-relative doc below; tie the argv to the manifest.
         argv: &["get", "alpha", "--format", "json"],
         fixture: ZOO_1,
         stdin: None,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
     },
+    Case {
+        // Default records: the full field dump (frontmatter + headings + links),
+        // no count line, no color.
+        id: "read-get-alpha-records-zoo",
+        argv: &["get", "alpha"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--all-cols` — the full structured dump incl. body.
+        id: "read-get-alpha-all-cols-json-zoo",
+        argv: &["get", "alpha", "--all-cols", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--format markdown` — the exact source file the owner read from disk
+        // (ADR 0014). Byte-faithful, no trailing-newline fixup.
+        id: "read-get-alpha-markdown-zoo",
+        argv: &["get", "alpha", "--format", "markdown"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Ambiguous stem: one record per candidate + a `note:` on stderr, exit 0.
+        // `duplicate` resolves to archive2/duplicate.md and notes/duplicate.md.
+        id: "read-get-ambiguous-json-zoo",
+        argv: &["get", "duplicate", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/duplicate.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Not-found: `[]` on stdout, an `error:` note on stderr, exit 1 — the
+        // note-driven failure signal. `zzz-no-such-doc` is not a fixture stem.
+        id: "read-get-not-found-json-zoo",
+        argv: &["get", "zzz-no-such-doc", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--section`: resolve a named heading's exact span. `notes/alpha.md` has
+        // nested headings (`# Alpha`, `## Section One/Two/Three`); the resolved
+        // span is a keyed `sections` object. Pins the section-read primitive.
+        id: "read-get-section-json-zoo",
+        argv: &[
+            "get",
+            "alpha",
+            "--section",
+            "Section One",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // The same section read in records — the verbatim span rendered as a
+        // labeled block (request order preserved), byte-identical to the json span.
+        id: "read-get-section-records-zoo",
+        argv: &["get", "alpha", "--section", "Section One"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Alias addressing: the zoo config sets `links.alias_field: aliases` and
+        // `notes/beta.md` declares `aliases: [bee]`, so `get bee` resolves via the
+        // alias fallback (stem `bee` does not exist). Pins alias resolution.
+        id: "read-get-alias-json-zoo",
+        argv: &["get", "bee", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/beta.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Deep facets in the RECORDS format (json-only elsewhere in the matrix):
+        // `.headings` folds to `# text` display lines via record_block reflow.
+        id: "read-find-col-headings-records-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:note",
+            "--col",
+            ".headings",
+            "--format",
+            "records",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
 ];
 
-const DESCRIBE_CASES: &[Case] = &[Case {
-    id: "describe-zoo",
-    argv: &["describe"],
-    fixture: ZOO_1,
-    stdin: None,
-    ported: false,
-    expect_oracle_exit: 0,
-    requires_doc: None,
-    requires_code: None,
-    normalize: NO_NORM,
-}];
+/// describe ports for real (NRN-347): the structure view (folders + declared
+/// rules + inbox + the full schema under `--format json`) and the contents
+/// summary (`--data`/`--stats`/`--by`). All `ported: true`, must Match the
+/// oracle. `--format json` pins the schema serialization (the full validate
+/// config) byte-for-byte forever.
+const DESCRIBE_CASES: &[Case] = &[
+    Case {
+        id: "describe-zoo",
+        argv: &["describe"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "describe-data-zoo",
+        argv: &["describe", "--data"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--stats` is a pure alias for `--data` — same output.
+        id: "describe-stats-zoo",
+        argv: &["describe", "--stats"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // The structure view in full, incl. the serialized schema (validate
+        // config) — pins the schema shape byte-for-byte.
+        id: "describe-json-zoo",
+        argv: &["describe", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--by` implies data and bypasses the identity-skip; nested fields.
+        id: "describe-by-clean",
+        argv: &["describe", "--by", "type,status"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Data summary on the clean fixture — a different doc mix + date bounds.
+        id: "describe-data-clean",
+        argv: &["describe", "--data"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+];
 
 const SUITES: &[Suite] = &[
     Suite {

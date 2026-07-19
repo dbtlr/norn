@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_wire::{
-    ClientFrame, CountParams, CountReport, FindParams, FindReport, OwnerFrame, ServingState,
-    WriterProgress, CONTROL_PROTOCOL,
+    ClientFrame, CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport,
+    GetParams, GetReport, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -162,6 +162,30 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected count report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `get` request against the owner's warm cache.
+    pub fn get(&mut self, params: GetParams) -> Result<GetReport, ClientError> {
+        match self.request(&ClientFrame::Get { params })? {
+            OwnerFrame::Get { report } => Ok(report),
+            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected get report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `describe` request against the owner's warm cache + retained config.
+    pub fn describe(&mut self, params: DescribeParams) -> Result<DescribeReport, ClientError> {
+        match self.request(&ClientFrame::Describe { params })? {
+            OwnerFrame::Describe { report } => Ok(report),
+            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected describe report, got {other:?}"
             ))),
         }
     }

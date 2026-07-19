@@ -27,7 +27,9 @@ use anyhow::Result;
 use norn_wire::{FindDoc, FindParams, FindReport};
 
 use crate::cache::{Cache, FindQuery, SortClause, SortDirection};
+use crate::domain::DocumentSummary;
 use crate::query::filter_args::build_document_query;
+use crate::read::{connection_values, ConnectionValues};
 
 /// The find-only default limit applied when `--limit` is absent and
 /// `--no-limit` is not set (donor parity).
@@ -86,14 +88,8 @@ pub fn execute(
     let documents = result
         .matches
         .into_iter()
-        .map(|doc| FindDoc {
-            path: doc.path.to_string(),
-            stem: doc.stem,
-            hash: doc.hash,
-            frontmatter: doc.frontmatter,
-            body_text: doc.body_text,
-        })
-        .collect();
+        .map(|doc| project_match(cache, doc, params.with_connections))
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(Ok(FindReport {
         documents,
@@ -102,6 +98,34 @@ pub fn execute(
         starts_at,
         truncated: result.truncated,
     }))
+}
+
+/// Project one matched summary into the flat wire [`FindDoc`], loading the deep
+/// connection facets (headings + link sets) only when `with_connections` is set
+/// — a plain `find` never pays the per-match connection load.
+fn project_match(cache: &Cache, doc: DocumentSummary, with_connections: bool) -> Result<FindDoc> {
+    let conns = if with_connections {
+        // A match resolved to a path missing from the deep read is a torn cache
+        // read; treat empty connections as the honest answer rather than failing
+        // the whole query (the row still exists in the summary scan).
+        match cache.document_with_connections(doc.path.as_path(), false)? {
+            Some(deep) => connection_values(&deep)?,
+            None => ConnectionValues::empty(),
+        }
+    } else {
+        ConnectionValues::empty()
+    };
+    Ok(FindDoc {
+        path: doc.path.to_string(),
+        stem: doc.stem,
+        hash: doc.hash,
+        frontmatter: doc.frontmatter,
+        body_text: doc.body_text,
+        headings: conns.headings,
+        outgoing_links: conns.outgoing_links,
+        unresolved_links: conns.unresolved_links,
+        incoming_links: conns.incoming_links,
+    })
 }
 
 #[cfg(test)]
@@ -195,6 +219,63 @@ mod tests {
         };
         let outcome = execute(&cache, &params, TODAY).unwrap();
         assert!(outcome.is_err(), "malformed --eq must be a user error");
+    }
+
+    #[test]
+    fn connections_absent_by_default_present_when_requested() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntype: note\n---\n# A heading\n[[b]]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntype: note\n---\n# B heading\n[[a]]\n",
+        )
+        .unwrap();
+        let mut cache = Cache::open(&root).unwrap();
+        cache.full_build(&root).unwrap();
+
+        // Default: no connection facets loaded.
+        let plain = execute(&cache, &FindParams::default(), TODAY)
+            .unwrap()
+            .unwrap();
+        assert!(plain
+            .documents
+            .iter()
+            .all(|d| d.headings.is_empty() && d.outgoing_links.is_empty()));
+
+        // with_connections: each match carries its deep facets.
+        let params = FindParams {
+            with_connections: true,
+            ..Default::default()
+        };
+        let deep = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let a = deep
+            .documents
+            .iter()
+            .find(|d| d.path == "a.md")
+            .expect("a.md present");
+        assert!(
+            a.headings.iter().any(|h| h["text"] == "A heading"),
+            "expected the 'A heading' value for a.md, got {:?}",
+            a.headings
+        );
+        assert!(
+            a.outgoing_links.iter().any(|l| l["target"] == "b"),
+            "expected outgoing link to b, got {:?}",
+            a.outgoing_links
+        );
+        assert!(
+            a.incoming_links.iter().any(|l| l["source_path"] == "b.md"),
+            "expected incoming link from b.md, got {:?}",
+            a.incoming_links
+        );
     }
 
     #[test]

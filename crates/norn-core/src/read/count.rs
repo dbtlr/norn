@@ -12,19 +12,16 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use serde_json::Value;
 
 use norn_wire::{CountParams, CountReport, GroupNode};
 
 use crate::cache::Cache;
 use crate::domain::DocumentSummary;
 use crate::query::filter_args::build_document_query;
+use crate::read::{render_key, MISSING};
 
 /// The most `--by` fields a single count may nest (donor parity).
 const MAX_BY_FIELDS: usize = 16;
-
-/// The bucket label for a document missing the grouped field.
-const MISSING: &str = "(missing)";
 
 /// Run a `count` request against the warm cache.
 pub fn execute(
@@ -126,17 +123,6 @@ fn doc_key(doc: &DocumentSummary, field: &str) -> String {
         .and_then(|fm| fm.get(field))
         .map(render_key)
         .unwrap_or_else(|| MISSING.to_string())
-}
-
-/// Render a frontmatter value as a group-key string (donor parity).
-fn render_key(value: &Value) -> String {
-    match value {
-        Value::Null => "(null)".to_string(),
-        Value::String(s) => s.clone(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        other => other.to_string(),
-    }
 }
 
 #[cfg(test)]

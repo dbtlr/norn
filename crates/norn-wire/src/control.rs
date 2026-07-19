@@ -17,7 +17,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CountParams, CountReport, FindParams, FindReport};
+use crate::{
+    CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport, GetParams,
+    GetReport,
+};
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
 /// keyed by build fingerprint, so a client can never reach a mismatched owner;
@@ -67,6 +70,11 @@ pub enum ClientFrame {
     Find { params: FindParams },
     /// A `count` request: run the filter query and group by `--by`.
     Count { params: CountParams },
+    /// A `get` request: resolve the targets and return their full facet sets.
+    Get { params: GetParams },
+    /// A `describe` request: the vault structure, plus a contents-summary with
+    /// `--data`.
+    Describe { params: DescribeParams },
 }
 
 /// Owner -> client. One JSON object per line.
@@ -92,6 +100,11 @@ pub enum OwnerFrame {
     Find { report: FindReport },
     /// The answer to `Count`: the total, distribution, or nested group tree.
     Count { report: CountReport },
+    /// The answer to `Get`: the resolved records, notes, and (for markdown) the
+    /// single doc's exact source.
+    Get { report: GetReport },
+    /// The answer to `Describe`: the vault structure and optional data summary.
+    Describe { report: DescribeReport },
     /// A well-formed request the owner could not carry out for a
     /// non-cache reason — a bad predicate, an unresolvable `--links-to`
     /// target. Distinct from [`Error`](OwnerFrame::Error): the owner stays

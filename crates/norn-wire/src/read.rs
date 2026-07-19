@@ -32,6 +32,20 @@ pub struct FindParams {
     pub filter: FilterParams,
     #[serde(skip_serializing_if = "is_default_paging")]
     pub paging: SortPaginateParams,
+    /// Load each match's deep connection facets (headings + the three link
+    /// sets) alongside the flat projection. Off by default — a plain `find`
+    /// never pays the per-match connection load; the CLI turns this on only
+    /// when a deep `--col` facet (`.headings` / `.outgoing_links` /
+    /// `.unresolved_links` / `.incoming_links`) or `--all-cols` is requested,
+    /// so the empty-vs-loaded distinction is the CLI's: it renders a deep facet
+    /// only when it asked for one (and so it was loaded), never a misleading
+    /// empty array for an unrequested facet.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub with_connections: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn is_default_filter(f: &FilterParams) -> bool {
@@ -53,9 +67,13 @@ pub struct FindReport {
     pub truncated: bool,
 }
 
-/// One matched document, projected flat (no joined headings/links — those are a
-/// later deep-facet port). Frontmatter is carried as-parsed so the CLI can
-/// project any `--col` field or emit the whole block.
+/// One matched document. Frontmatter and body are carried as-parsed so the CLI
+/// can project any `--col` field or emit the whole block. The deep connection
+/// facets (headings + the three link sets) are carried as pre-serialized JSON
+/// values (`serde_json::to_value` of the cache's `Heading` / `Link` /
+/// `IncomingLink`), so the CLI's `--format json` emission is byte-identical to
+/// the cache's own serialization; they are populated only when the request set
+/// [`FindParams::with_connections`], and are empty otherwise.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FindDoc {
     pub path: String,
@@ -65,6 +83,189 @@ pub struct FindDoc {
     pub frontmatter: Option<Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub body_text: String,
+    /// Serialized `Heading` values (`{ level, slug, text, source_span }`),
+    /// document order. Empty unless connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<Value>,
+    /// Serialized resolved `Link` values. Empty unless connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outgoing_links: Vec<Value>,
+    /// Serialized unresolved `Link` values. Empty unless connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_links: Vec<Value>,
+    /// Serialized `IncomingLink` values (`{ source_path, link }`). Empty unless
+    /// connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incoming_links: Vec<Value>,
+}
+
+/// A `get` request: the targets to resolve plus the sort/paging surface. `--col`
+/// / `--all-cols` are NOT sent — the owner always returns each resolved
+/// document's full facet set (frontmatter, headings, the three link sets, body,
+/// hash, stem) and the CLI projects. `sections` is the `--section` list to
+/// resolve owner-side; the CLI sends it empty for formats that ignore sections
+/// (`paths` / `markdown`), so resolving one never pushes an exit-flipping error
+/// note for a format that documents `--section` as ignored. `markdown` selects
+/// the exact-source path (the owner reads the file — ADR 0014: markdown does not
+/// participate in the relational snapshot).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GetParams {
+    pub targets: Vec<String>,
+    #[serde(skip_serializing_if = "is_default_paging")]
+    pub paging: SortPaginateParams,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<String>,
+    /// Whether the whole-body field should be DISPLAYED (`--all-cols` or
+    /// `--col .body`). The owner carries body on `GetRecord.body` only when set,
+    /// so the CLI's records/json body gate is exactly "did the record carry a
+    /// body". Body is still LOADED (but not returned) when `sections` is
+    /// non-empty, so `--section` can resolve its spans without leaking the body.
+    #[serde(skip_serializing_if = "is_false")]
+    pub with_body: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub markdown: bool,
+}
+
+/// A `get` response: the resolved records plus non-fatal notes (ambiguity
+/// warnings, missing-target errors — routed to stderr; an `error:`-prefixed note
+/// drives the exit-1 signal). For `--format markdown`, `records` carries the
+/// resolved paths (for the CLI's count/warnings) and `markdown_content` carries
+/// the single doc's exact source bytes when exactly one resolved.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GetReport {
+    pub records: Vec<GetRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The exact source bytes for a single-doc `--format markdown` request.
+    /// `None` for structured formats, or when markdown resolved zero / more than
+    /// one doc (the CLI derives the error from `records.len()`), or when the
+    /// owner could not read the source file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown_content: Option<String>,
+}
+
+/// One resolved document with its full facet set. The deep facets (headings +
+/// the three link sets) are pre-serialized JSON values, byte-identical to the
+/// cache's own serialization. `frontmatter` keys the absent-vs-null distinction
+/// on key presence: an absent key is a source with no frontmatter block, a
+/// present `null` is an empty `---`/`---` block. `hash` / `stem` / `body` are
+/// always carried; the CLI emits them only when the projection asks (opt-in
+/// `--col .document_hash` / `.stem`, and body via `--all-cols` / `.body`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GetRecord {
+    pub path: String,
+    pub stem: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontmatter: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outgoing_links: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_links: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incoming_links: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Resolved `--section` spans as ordered `(heading, content)` pairs, request
+    /// order. `None` when `--section` was not requested (or the format ignores
+    /// it); `Some(vec![])` when requested but zero headings resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<(String, String)>>,
+}
+
+/// A `describe` request: the structure view always, plus a contents-summary when
+/// `data` is set (`--data`/`--stats`) OR `by` is non-empty (`--by` implies data,
+/// on the *normalized* `by`). `limit` caps value-buckets per field (`None` →
+/// default 20; `Some(0)` → uncapped). `--format` is a CLI-side presentation
+/// choice over the report, never sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DescribeParams {
+    #[serde(skip_serializing_if = "is_false")]
+    pub data: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "is_default_filter")]
+    pub filter: FilterParams,
+}
+
+/// A `describe` response — the donor `DescribeOutput`, field order preserved so
+/// `--format json` (which serializes the struct directly) is byte-identical.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DescribeReport {
+    pub folders: Vec<String>,
+    pub path_rules: Vec<PathRule>,
+    pub creatable_rules: Vec<CreatableRule>,
+    pub inbox: Option<String>,
+    pub schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<DataSummary>,
+}
+
+/// A declared path rule: which glob gets which frontmatter defaults.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PathRule {
+    pub glob: String,
+    pub name: Option<String>,
+    pub frontmatter_defaults: Value,
+}
+
+/// A rule usable with `new { rule: name }` — declares both a name and a target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatableRule {
+    pub name: String,
+    pub target: String,
+    pub required_vars: Vec<String>,
+    pub frontmatter_defaults: Value,
+    pub body: Option<String>,
+}
+
+/// The contents-summary: totals, per-field value distributions, date bounds, and
+/// the identity-skipped fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataSummary {
+    pub total: usize,
+    pub fields: Vec<FieldDistribution>,
+    pub dates: Vec<DateBounds>,
+    pub skipped: Vec<SkippedField>,
+}
+
+/// One field's value distribution: the shown buckets plus how many were capped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldDistribution {
+    pub field: String,
+    pub values: Vec<ValueCount>,
+    pub more: usize,
+}
+
+/// One value bucket: the rendered value and its occurrence count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValueCount {
+    pub value: String,
+    pub count: usize,
+}
+
+/// Lexical min/max bounds for a date-typed field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DateBounds {
+    pub field: String,
+    pub min: String,
+    pub max: String,
+}
+
+/// A field dropped from the auto distributions for being (near-)identity: as many
+/// distinct values as occurrences.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkippedField {
+    pub field: String,
+    pub distinct: usize,
+    pub total: usize,
 }
 
 /// A `count` request: the `--by` grouping fields plus the shared filter surface.
@@ -191,6 +392,10 @@ mod tests {
                 hash: "h".into(),
                 frontmatter: Some(json!({"type": "note"})),
                 body_text: "body".into(),
+                headings: vec![],
+                outgoing_links: vec![],
+                unresolved_links: vec![],
+                incoming_links: vec![],
             }],
             total: 1,
             returned: 1,
