@@ -36,8 +36,44 @@ impl Diagnostic {
         }
     }
 
+    pub fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Error,
+            code: code.into(),
+            message: message.into(),
+            detail: None,
+        }
+    }
+
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_constructor_sets_error_severity() {
+        let diagnostic = Diagnostic::error("read-failed", "failed to read document");
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.code, "read-failed");
+        assert_eq!(diagnostic.message, "failed to read document");
+        assert_eq!(diagnostic.detail, None);
+    }
+
+    #[test]
+    fn error_carries_optional_detail() {
+        let diagnostic =
+            Diagnostic::error("read-failed", "failed to read document").with_detail("boom");
+        assert_eq!(diagnostic.detail.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn warning_constructor_sets_warning_severity() {
+        let diagnostic = Diagnostic::warning("frontmatter-parse-failed", "malformed");
+        assert_eq!(diagnostic.severity, Severity::Warning);
     }
 }
