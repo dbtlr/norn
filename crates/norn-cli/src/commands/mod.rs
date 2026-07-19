@@ -10,6 +10,7 @@
 //! directly rather than deferring.
 
 pub mod args;
+pub mod count;
 pub mod find;
 pub mod get;
 pub mod vault;

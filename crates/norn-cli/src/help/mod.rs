@@ -52,6 +52,23 @@ pub fn intercept_from_args() -> Option<i32> {
     render_help_for_args(&args)
 }
 
+/// Render a subcommand's long-form help into a byte buffer — used by the read
+/// verbs' no-argument help gate (bare `norn find` prints its help and exits 2,
+/// like the oracle). Unknown command names fall back to the root help.
+pub fn render_command_long(command_name: &str, color: crate::cli::ColorWhen) -> Vec<u8> {
+    let root = Cli::command();
+    let subcmd = root
+        .get_subcommands()
+        .find(|c| c.get_name() == command_name)
+        .unwrap_or(&root);
+    let path = format!("{BIN_NAME} {command_name}");
+    let model = build_model(subcmd, &root, &path, HelpForm::Long);
+    let palette = palette::resolve(color);
+    let mut buf: Vec<u8> = Vec::new();
+    let _ = render::render_long(&mut buf, &model, &palette, TERM_WIDTH);
+    buf
+}
+
 /// The testable core of [`intercept_from_args`]: given the raw argv, render
 /// help to real stdout and return `Some(exit)`, or `None` when no help flag is
 /// present / an unknown subcommand should fall through to clap's error.

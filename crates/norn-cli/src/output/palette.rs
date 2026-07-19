@@ -31,6 +31,10 @@ pub struct Palette {
     pub moss: Style,
     /// Muted — ANSI 256 #244 (#808080, medium gray) per brand §2.
     pub dim: Style,
+    /// Field labels in a record block (= `dim`).
+    pub label: Style,
+    /// Record-block headers (= `bone.bold()`).
+    pub header: Style,
     /// Section headers (= `dim().bold()`).
     pub section: Style,
     /// Whether color output is enabled.
@@ -49,6 +53,8 @@ impl Palette {
             thread: Style::new(),
             moss: Style::new(),
             dim: Style::new(),
+            label: Style::new(),
+            header: Style::new(),
             section: Style::new(),
             enabled: false,
         }
@@ -72,6 +78,8 @@ impl Palette {
             thread: ansi256(67),
             moss: ansi256(108),
             dim,
+            label: dim,
+            header: bone.bold(),
             section: dim.bold(),
             enabled: true,
         }

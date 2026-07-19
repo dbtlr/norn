@@ -29,8 +29,10 @@ mod commands;
 /// present Reports through it; the internal parse routing (`cli`, `commands`)
 /// stays private.
 pub mod display;
+mod grammar_flags;
 mod help;
 mod output;
+mod routed;
 
 /// One-line boundary contract, referenced by every dependent so each
 /// declared edge in the crate map is compiler-load-bearing.
@@ -57,7 +59,29 @@ pub fn run() -> i32 {
     if let Some(code) = help::intercept_from_args() {
         return code;
     }
-    let cli = Cli::parse();
+    // Forgiving-input normalization (ADR 0010): desugar dynamic `--field value`
+    // predicates and the alias pack on the query family BEFORE clap parses, using
+    // a real clap-derived KnownFlags. A normalization error (a valueless dynamic
+    // flag, an ambiguous repeat, a cross-family predicate on a mutate verb) is a
+    // usage error (exit 2), reported before parse.
+    let raw: Vec<String> = std::env::args().collect();
+    let flags = grammar_flags::derive_known_flags();
+    let normalized = match norn_core::grammar::normalize_argv(raw, &flags) {
+        Ok(n) => n.argv,
+        Err(e) => {
+            eprintln!("{}: {e}", display::PROGRAM);
+            return display::EXIT_USAGE;
+        }
+    };
+    let cli = match Cli::try_parse_from(&normalized) {
+        Ok(cli) => cli,
+        Err(e) => {
+            // clap prints its own usage/version output and picks the exit code
+            // (0 for --version/help paths handled above, 2 for a bad invocation).
+            e.print().ok();
+            return e.exit_code();
+        }
+    };
     let mut presenter = Presenter::stdio();
     dispatch(cli, &mut presenter)
 }
@@ -74,9 +98,9 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         // The two ported read exemplars parse to Params and present the uniform
         // not-yet-ported outcome; the rest of the v0.48 surface is grammar-only
         // stubs (NRN-329) routed to the same uniform outcome by name.
-        Command::Find(args) => commands::find::run(&args, presenter),
+        Command::Find(args) => commands::find::run(&args, &cli.global, presenter),
         Command::Get(args) => commands::get::run(&args, presenter),
-        Command::Count(_) => presenter.not_yet_ported("count"),
+        Command::Count(args) => commands::count::run(&args, &cli.global, presenter),
         Command::Describe(_) => presenter.not_yet_ported("describe"),
         Command::Set(_) => presenter.not_yet_ported("set"),
         Command::Edit(_) => presenter.not_yet_ported("edit"),
@@ -135,23 +159,6 @@ fn effective_cwd(global: &cli::GlobalArgs) -> Result<std::path::PathBuf, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dispatch_find_presents_not_yet_ported() {
-        let cli = Cli::try_parse_from(["norn", "find", "--all"]).unwrap();
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let code = {
-            let mut p = Presenter::new(&mut out, &mut err);
-            dispatch(cli, &mut p)
-        };
-        assert_eq!(code, display::EXIT_OPERATIONAL);
-        assert!(out.is_empty());
-        assert_eq!(
-            String::from_utf8(err).unwrap(),
-            "norn: `find` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
-        );
-    }
 
     #[test]
     fn dispatch_get_presents_not_yet_ported() {
