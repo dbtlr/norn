@@ -34,13 +34,13 @@ Format: `- [ ] old path → provisional destination`. Verb modules port as
 
 ### Domain model, graph, query → `norn-core`
 
-- [ ] `src/core.rs`, `src/core/` → domain model (partial: the `Heading` struct + `SourceSpan` text-layer projection already ported to `norn-frontmatter` in NRN-339; the rest of the domain model remains)
+- [x] `src/core.rs`, `src/core/` → domain model → `norn-core::domain` (NRN-340): `Document`, `GraphIndex`, `VaultFile`, `DocumentSummary`, the `Link` value types, and the `display` string helpers. `Heading`/`SourceSpan`/`Diagnostic` are consumed from `norn-frontmatter` (ported there in NRN-339), not redefined.
 - [ ] `src/graph.rs`, `src/graph/` → vault graph
-- [ ] `src/links.rs`, `src/links/` → link model + resolution (partial: wikilink SYNTAX — `wikilink` token recognition, `anchor` split/slug/block-id, and heading parsing from `commonmark` — already ported to `norn-frontmatter` in NRN-339; the link model, Markdown-link extraction, and all of `resolve.rs` remain here for norn-core)
+- [ ] `src/links.rs`, `src/links/` → link model + resolution (partial: wikilink SYNTAX — `wikilink` token recognition, `anchor` split/slug/block-id, and heading parsing from `commonmark` — already ported to `norn-frontmatter` in NRN-339; the `Link` VALUE types moved to `norn-core::domain` with the core.rs domain model in NRN-340; Markdown-link extraction and all of `resolve.rs` — matching a `Link` to a document — remain here for norn-core)
 - [ ] `src/query.rs`, `src/filter.rs`, `src/filter_args.rs`, `src/validate_filter.rs` → query/predicate layer
 - [ ] `src/grammar.rs` → canonical-form + forgiving-input grammar (ADR 0010)
-- [ ] `src/standards.rs`, `src/standards/` → standards pack / rules
-- [ ] `src/target.rs` → target resolution
+- [ ] `src/standards.rs`, `src/standards/` → standards pack / rules (partial: the DECLARATION side ported to `norn-core::standards` in NRN-340 — `config.rs` rules model + parse/compile, `path_match.rs` (incl. `effective_match_glob`), `duration.rs`, the field-type/selector `predicates.rs` slice, and the `{{…}}` reference-scan carved from `defaults.rs` as `template_refs`; the minimal-edit splice core of `apply.rs` went to `norn-frontmatter::edit` in NRN-339. Still here for the phase-3 mutation port: the validate `engine.rs`/`checks.rs`/`findings.rs`/`index_policy.rs`, `repair/`, `substitution.rs`, `summary.rs`, the `defaults.rs` resolver (`applicable_rules`/`merge_defaults`/`resolve_to_fixpoint`), the document-matching predicates, and the verb-level apply machinery.)
+- [x] `src/target.rs` → target resolution → `norn-core::target` (NRN-340): `resolve_target_path` + `backlinks`.
 
 ### Cache engine (owner-opened module in `norn-core`)
 
@@ -60,7 +60,7 @@ Format: `- [ ] old path → provisional destination`. Verb modules port as
 
 - [ ] `src/find/`, `src/count/`, `src/get/`, `src/describe/` → read verbs
 - [ ] `src/set/`, `src/new/`, `src/edit/`, `src/move/`, `src/delete/`, `src/rewrite_wikilink/` → mutation verbs (partial: `edit/transform.rs`'s `SectionSpan` + `resolve_section` heading→span primitive already ported to `norn-frontmatter::section` in NRN-339; the edit-op grammar and the verbs themselves remain)
-- [ ] `src/env/` → VaultEnv (value-in value-out; no ambient reads in the new world)
+- [ ] `src/env/` → VaultEnv (value-in value-out; no ambient reads in the new world) (partial: the value-carrier shape from `env/mod.rs` ported to `norn-core::env` in NRN-340 — vault root + injected `VaultConfig`/`CompiledConfig`, no ambient reads. Deliberately left behind for the cache-engine / `norn-owner` ports: warm/cold `Mode`, the held-open `Cache` + generations + read pool + writer queue + per-request refresh pipeline (`env/generation.rs`, `env/refresh.rs`, `env/ensure.rs`, `env/request_scope.rs`, `env/error.rs`), and config *resolution* from disk (`config_loader`).)
 
 ### Config → `norn-config`
 
