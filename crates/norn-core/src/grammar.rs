@@ -681,8 +681,21 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    // Value-taking globals (`global = true` in cli.rs): appear on every
+    // subcommand. `--vault` is a hidden new-world global but still consumes a
+    // value, so it belongs in the value set.
+    const VALUE_GLOBALS: &[&str] = &["cwd", "config", "color", "vault"];
+
+    /// A mutate subcommand's value-flag set: the value-taking globals plus that
+    /// subcommand's own value args.
+    fn mutate_flags(own: &[&str]) -> BTreeSet<String> {
+        let mut s = set_of(own);
+        s.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
+        s
+    }
+
     fn flags() -> KnownFlags {
-        let query_value = set_of(&[
+        let mut query_value = set_of(&[
             "text",
             "eq",
             "not-eq",
@@ -704,10 +717,8 @@ mod tests {
             "by",
             "col",
             "format",
-            "cwd",
-            "config",
-            "color",
         ]);
+        query_value.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
         let query_boolean = set_of(&[
             "unresolved-links",
             "all",
@@ -721,21 +732,33 @@ mod tests {
             "no-cache-refresh",
             "help",
         ]);
-        // Globals are value flags on every subcommand; each mutate sub adds its
-        // own value args (`set --field`, `new --as/--title`).
-        let globals = ["cwd", "config", "color"];
+        // Each mutate sub's own value args (verified against the frozen cli.rs
+        // `SetArgs` / `NewArgs` / `EditArgs`), plus the value-taking globals.
         let mut mutate_value = HashMap::new();
         mutate_value.insert(
             "set".to_string(),
-            set_of(&[globals[0], globals[1], globals[2], "field"]),
+            mutate_flags(&["field", "field-json", "push", "pop", "remove", "format"]),
         );
         mutate_value.insert(
             "new".to_string(),
-            set_of(&[globals[0], globals[1], globals[2], "as", "title"]),
+            mutate_flags(&["as", "title", "var", "field", "field-json", "format"]),
         );
         mutate_value.insert(
             "edit".to_string(),
-            set_of(&[globals[0], globals[1], globals[2]]),
+            mutate_flags(&[
+                "edits-json",
+                "ops-file",
+                "str-replace",
+                "replace-section",
+                "append-to-section",
+                "delete-section",
+                "insert-before-heading",
+                "insert-after-heading",
+                "new",
+                "content",
+                "expected-hash",
+                "format",
+            ]),
         );
         KnownFlags {
             query_value,
