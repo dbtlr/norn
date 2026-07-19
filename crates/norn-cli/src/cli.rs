@@ -133,6 +133,15 @@ pub struct GlobalArgs {
         action = clap::ArgAction::SetTrue
     )]
     pub help_long: bool,
+
+    /// The dynamically-desugared field keys the forgiving-input normalization
+    /// (ADR 0010) expanded from `--field value` predicates, captured BEFORE clap
+    /// parses and injected here after parse (`run`). Not a real flag — `skip`
+    /// keeps it out of the grammar and help; it rides the parsed command into
+    /// the query verbs, which forward it to the owner-side field-universe gate
+    /// (NRN-367). Canonical `--eq`/`--in` keys never appear here.
+    #[arg(skip)]
+    pub dynamic_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

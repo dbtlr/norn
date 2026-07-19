@@ -42,6 +42,16 @@ pub struct FindParams {
     /// empty array for an unrequested facet.
     #[serde(default, skip_serializing_if = "is_false")]
     pub with_connections: bool,
+    /// The dynamically-desugared field keys the CLI expanded from forgiving
+    /// `--field value` predicates (ADR 0010) — the input to the owner-side
+    /// field-universe gate (NRN-367). Canonical `--eq`/`--in` keys are never
+    /// listed here (they bypass the gate by design), so the owner rejects a
+    /// genuinely-unknown dynamic field with a did-you-mean while leaving an
+    /// explicit `--eq` predicate untouched. Empty (and absent on the wire) for
+    /// the common no-dynamic-predicate request, so this stays backward
+    /// compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_keys: Vec<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -276,6 +286,14 @@ pub struct CountParams {
     pub by: Vec<String>,
     #[serde(skip_serializing_if = "is_default_filter")]
     pub filter: FilterParams,
+    /// The dynamically-desugared field keys expanded from forgiving
+    /// `--field value` predicates (ADR 0010), gated owner-side against the field
+    /// universe (NRN-367) — mirrors [`FindParams::dynamic_keys`]. The `--by`
+    /// grouping keys are NOT listed here; only desugared filter predicates are
+    /// gated (an unknown `--sort`/`--by` key is a separate, still-unplumbed
+    /// surface).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_keys: Vec<String>,
 }
 
 /// A `count` response. `#[serde(untagged)]` so the serialized form is exactly
@@ -321,6 +339,27 @@ mod tests {
         assert_eq!(
             serde_json::to_value(FindParams::default()).unwrap(),
             json!({})
+        );
+    }
+
+    #[test]
+    fn dynamic_keys_are_absent_when_empty_and_carried_when_present() {
+        // Backward compatible: the common no-dynamic-predicate request omits the
+        // field entirely (NRN-367), so an older `{ … }`-only frame still parses.
+        let mut params = FindParams::default();
+        assert!(!serde_json::to_string(&params)
+            .unwrap()
+            .contains("dynamic_keys"));
+
+        // Present → carried on the wire and round-trips for the owner-side gate.
+        params.dynamic_keys = vec!["titel".to_string()];
+        let line = serde_json::to_string(&params).unwrap();
+        assert!(line.contains(r#""dynamic_keys":["titel"]"#), "{line}");
+        assert_eq!(
+            serde_json::from_str::<FindParams>(&line)
+                .unwrap()
+                .dynamic_keys,
+            vec!["titel".to_string()]
         );
     }
 

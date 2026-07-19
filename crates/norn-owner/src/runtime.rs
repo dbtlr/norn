@@ -24,12 +24,14 @@
 //!   fatal (the db is disposable) — the owner terminates and the next summon
 //!   rebuilds. No integrity ladder, no retry.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use norn_core::cache::VaultCacheSlot;
+use norn_core::cache::{Cache, VaultCacheSlot};
+use norn_core::grammar::FieldRejection;
 use norn_core::standards::VaultConfig;
 use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -591,8 +593,21 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 return not_ready();
             };
             let today = today_local();
+            let config = state.vault_config();
             let result = tokio::task::spawn_blocking(move || {
-                slot.serve_read(|cache| norn_core::read::find::execute(cache, &params, &today))
+                slot.serve_read(|cache| {
+                    // NRN-367: gate the desugared dynamic fields against the
+                    // vault's field universe BEFORE the query runs, so an unknown
+                    // field rejects with a did-you-mean instead of silently
+                    // matching nothing.
+                    if let Err(rej) =
+                        gate_query_fields(cache, config.as_deref(), &params.dynamic_keys)?
+                    {
+                        return Ok(Err(rej));
+                    }
+                    Ok(norn_core::read::find::execute(cache, &params, &today)?
+                        .map_err(FieldRejection::from))
+                })
             })
             .await;
             classify_read(state, result, |report| OwnerFrame::Find { report }, "find")
@@ -602,8 +617,18 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 return not_ready();
             };
             let today = today_local();
+            let config = state.vault_config();
             let result = tokio::task::spawn_blocking(move || {
-                slot.serve_read(|cache| norn_core::read::count::execute(cache, &params, &today))
+                slot.serve_read(|cache| {
+                    // NRN-367: same field-universe gate as `find`.
+                    if let Err(rej) =
+                        gate_query_fields(cache, config.as_deref(), &params.dynamic_keys)?
+                    {
+                        return Ok(Err(rej));
+                    }
+                    Ok(norn_core::read::count::execute(cache, &params, &today)?
+                        .map_err(FieldRejection::from))
+                })
             })
             .await;
             classify_read(
@@ -633,7 +658,7 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                             }
                             Ok(report)
                         }
-                        Err(msg) => Err(msg),
+                        Err(msg) => Err(FieldRejection::from(msg)),
                     })
                 })
             })
@@ -648,7 +673,13 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
             let today = today_local();
             let result = tokio::task::spawn_blocking(move || {
                 slot.serve_read(|cache| {
-                    norn_core::read::describe::execute(cache, config.as_deref(), &params, &today)
+                    Ok(norn_core::read::describe::execute(
+                        cache,
+                        config.as_deref(),
+                        &params,
+                        &today,
+                    )?
+                    .map_err(FieldRejection::from))
                 })
             })
             .await;
@@ -696,24 +727,61 @@ fn not_ready() -> OwnerFrame {
     }
 }
 
+/// Gate a query's dynamically-desugared field keys against the vault's field
+/// universe (NRN-367). The universe is the schema-declared fields (the vault
+/// config's validate rules + the configured alias field) unioned with the
+/// frontmatter keys actually observed in the cache; a dynamic key outside it is
+/// a mistyped field or flag and is rejected with a did-you-mean via the one
+/// shared [`closest`](norn_core::grammar::closest) heuristic. Canonical
+/// `--eq`/`--in` keys never reach here (the CLI omits them from `dynamic_keys`),
+/// so an explicit predicate on an as-yet-unseen field is never gated — only the
+/// forgiving `--field value` desugar is.
+///
+/// The `Ok(Ok(()))` / `Ok(Err(rejection))` / `Err(_)` split mirrors the read
+/// verbs': a rejection is a user error (owner stays alive), while a cache error
+/// reading the observed keys propagates as exit-to-heal.
+fn gate_query_fields(
+    cache: &Cache,
+    config: Option<&VaultConfig>,
+    dynamic_keys: &[String],
+) -> anyhow::Result<Result<(), FieldRejection>> {
+    if dynamic_keys.is_empty() {
+        return Ok(Ok(()));
+    }
+    let mut universe: BTreeSet<String> = match config {
+        Some(cfg) => norn_core::grammar::schema_field_names(&cfg.validate, cfg),
+        None => BTreeSet::new(),
+    };
+    universe.extend(cache.observed_field_names()?);
+    let known_flags = norn_core::grammar::frozen_known_flags().query_known_flags();
+    Ok(norn_core::grammar::gate_dynamic_fields(
+        dynamic_keys,
+        &universe,
+        &known_flags,
+    ))
+}
+
 /// Classify a routed read's outcome into an owner frame. The read verbs return
-/// `anyhow::Result<Result<Report, String>>`:
+/// `anyhow::Result<Result<Report, FieldRejection>>` (a plain user-error string
+/// maps into a hint-less [`FieldRejection`]; the field-universe gate supplies
+/// the did-you-mean hints):
 ///
 /// - `Ok(Ok(report))` — success → the verb's report frame.
-/// - `Ok(Err(message))` — a user error (bad predicate, unresolvable target) →
-///   [`OwnerFrame::Rejected`]. The owner stays alive.
+/// - `Ok(Err(rejection))` — a user error (bad predicate, unresolvable target,
+///   unknown dynamic field) → [`OwnerFrame::Rejected`] carrying the headline and
+///   any soft-landing hints. The owner stays alive.
 /// - `Err(_)` / join panic — a cache/read fault → exit-to-heal (ADR 0017).
 fn classify_read<R>(
     state: &Arc<OwnerState>,
-    result: Result<anyhow::Result<Result<R, String>>, tokio::task::JoinError>,
+    result: Result<anyhow::Result<Result<R, FieldRejection>>, tokio::task::JoinError>,
     to_frame: impl FnOnce(R) -> OwnerFrame,
     verb: &str,
 ) -> OwnerFrame {
     match result {
         Ok(Ok(Ok(report))) => to_frame(report),
-        Ok(Ok(Err(message))) => OwnerFrame::Rejected {
-            message,
-            hints: Vec::new(),
+        Ok(Ok(Err(rejection))) => OwnerFrame::Rejected {
+            message: rejection.message,
+            hints: rejection.hints,
         },
         Ok(Err(err)) => {
             state.go_fatal();

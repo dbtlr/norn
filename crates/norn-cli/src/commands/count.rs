@@ -30,6 +30,9 @@ pub fn run(args: &CountArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> 
     let params = CountParams {
         by: args.by.clone(),
         filter: args.filters.to_params(),
+        // The desugared dynamic-field keys ride to the owner's field-universe
+        // gate (NRN-367), same as `find`.
+        dynamic_keys: global.dynamic_fields.clone(),
     };
     let report = session
         .count(params)

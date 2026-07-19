@@ -624,16 +624,51 @@ fn dynamic_no_value_error(
     }
 }
 
+/// A dynamic-field gate rejection, carried structurally so the owner maps it
+/// straight onto `OwnerFrame::Rejected { message, hints }` (the NRN-361
+/// soft-landing split): `message` is the stable headline naming the unknown
+/// field, and `hints` carry the did-you-mean (via the one shared [`closest`]
+/// heuristic) plus the canonical-`--eq` next step. The CLI renders the headline
+/// as `norn: <message>` and each hint as a `hint:` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldRejection {
+    pub message: String,
+    pub hints: Vec<String>,
+}
+
+impl FieldRejection {
+    /// A bare-headline rejection with no soft-landing hints — the shape a plain
+    /// read-verb user error (a malformed predicate, an unresolvable
+    /// `--links-to`) takes when it flows through the same Rejected channel.
+    pub fn headline(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hints: Vec::new(),
+        }
+    }
+}
+
+impl From<String> for FieldRejection {
+    fn from(message: String) -> Self {
+        Self::headline(message)
+    }
+}
+
 /// Validate every dynamically-desugared key against the vault's field universe
 /// (T2b). A key that resolves is a legitimate predicate; a key that does not is
-/// a hard error with did-you-mean across both real flags and known fields —
-/// the guardrail that stops a typo'd real flag (`--formt json`) from becoming a
-/// silent empty query.
+/// a hard rejection with a did-you-mean across both real flags and known fields
+/// — the guardrail that stops a typo'd real flag (`--formt json`) or a mistyped
+/// field (`--titel foo`) from becoming a silent empty query.
+///
+/// Returns a structured [`FieldRejection`] (headline + soft-landing hints) so
+/// the owner surfaces it as `OwnerFrame::Rejected { message, hints }` under the
+/// one soft-landing doctrine (NRN-361/367). The did-you-mean uses the single
+/// shared [`closest`] heuristic — no second threshold.
 pub fn gate_dynamic_fields(
     dynamic_keys: &[String],
     universe: &BTreeSet<String>,
     known_flags: &[String],
-) -> Result<()> {
+) -> Result<(), FieldRejection> {
     for key in dynamic_keys {
         if universe.contains(key) {
             continue;
@@ -643,25 +678,38 @@ pub fn gate_dynamic_fields(
         // an unhelpful did-you-mean over an empty field set. Say what is actually
         // wrong and point at canonical `--eq`, which bypasses the gate entirely.
         if universe.is_empty() {
-            return Err(anyhow!(
-                "unknown field `{key}`: this vault has no known fields yet (no schema declared \
-                 and no documents indexed) — filter anyway with the canonical `--eq {key}:value`, \
-                 which does not require a known field universe"
-            ));
+            return Err(FieldRejection {
+                message: format!(
+                    "unknown field `{key}`: this vault has no known fields yet (no schema \
+                     declared and no documents indexed)"
+                ),
+                hints: vec![format!(
+                    "filter anyway with the canonical `--eq {key}:value`, which does not require \
+                     a known field universe"
+                )],
+            });
         }
         let mut candidates: Vec<String> = known_flags.to_vec();
         candidates.extend(universe.iter().cloned());
         let suggestion = closest(key, &candidates);
         return Err(match suggestion {
-            Some(s) => anyhow!(
-                "unknown field `{key}` — did you mean `{s}`? \
-                 (filter a known field with `--eq {key}:value`; \
-                 dynamic `--{key} value` only works for fields this vault knows)"
-            ),
-            None => anyhow!(
-                "unknown field `{key}`: not a known vault field or flag \
-                 (filter a known field with `--eq field:value`)"
-            ),
+            Some(s) => FieldRejection {
+                message: format!("unknown field `{key}`"),
+                hints: vec![
+                    format!("did you mean `{s}`?"),
+                    format!(
+                        "filter a known field with `--eq {key}:value`; a dynamic `--{key} value` \
+                         predicate only works for a field this vault knows"
+                    ),
+                ],
+            },
+            None => FieldRejection {
+                message: format!("unknown field `{key}`"),
+                hints: vec![format!(
+                    "filter a known field with `--eq {key}:value` — `{key}` is not a known vault \
+                     field or flag"
+                )],
+            },
         });
     }
     Ok(())
@@ -980,15 +1028,18 @@ mod tests {
 
     #[test]
     fn gate_rejects_typo_of_real_flag_with_suggestion() {
-        // `--formt json` desugared to key `formt`; not a field → hard error
-        // pointing at the real `--format` flag (the silent-empty trap killer).
+        // `--formt json` desugared to key `formt`; not a field → hard rejection
+        // whose did-you-mean hint points at the real `--format` flag (the
+        // silent-empty trap killer). Headline names the field; hint carries the
+        // suggestion (the NRN-361 soft-landing split).
         let u = universe(&["type", "status"]);
         let known = flags().query_known_flags();
-        let err = gate_dynamic_fields(&["formt".to_string()], &u, &known).unwrap_err();
-        let msg = err.to_string();
+        let rej = gate_dynamic_fields(&["formt".to_string()], &u, &known).unwrap_err();
+        assert_eq!(rej.message, "unknown field `formt`");
         assert!(
-            msg.contains("--format"),
-            "expected --format suggestion, got: {msg}"
+            rej.hints.iter().any(|h| h.contains("--format")),
+            "expected a --format did-you-mean hint, got: {:?}",
+            rej.hints
         );
     }
 
@@ -996,26 +1047,45 @@ mod tests {
     fn gate_rejects_unknown_non_field_key() {
         let u = universe(&["type", "status"]);
         let known = flags().query_known_flags();
-        let err = gate_dynamic_fields(&["zzqqxx".to_string()], &u, &known).unwrap_err();
-        assert!(err.to_string().contains("unknown field"), "{err}");
+        let rej = gate_dynamic_fields(&["zzqqxx".to_string()], &u, &known).unwrap_err();
+        assert_eq!(rej.message, "unknown field `zzqqxx`");
+        assert!(
+            rej.hints.iter().any(|h| h.contains("--eq zzqqxx:value")),
+            "expected a canonical --eq hint, got: {:?}",
+            rej.hints
+        );
     }
 
     #[test]
     fn gate_empty_universe_points_at_canonical_eq() {
         let u: BTreeSet<String> = BTreeSet::new();
         let known = flags().query_known_flags();
-        let err = gate_dynamic_fields(&["type".to_string()], &u, &known).unwrap_err();
-        assert!(err.to_string().contains("no known fields yet"), "{err}");
+        let rej = gate_dynamic_fields(&["type".to_string()], &u, &known).unwrap_err();
+        assert!(
+            rej.message.contains("no known fields yet"),
+            "{}",
+            rej.message
+        );
+        assert!(
+            rej.hints.iter().any(|h| h.contains("--eq type:value")),
+            "expected a canonical --eq hint, got: {:?}",
+            rej.hints
+        );
     }
 
     #[test]
     fn gate_suggests_near_field() {
         // `priorty` is a clear typo of the `priority` field and far from any
-        // real flag, so the suggestion must be the field.
+        // real flag, so the suggestion hint must be the field.
         let u = universe(&["status", "priority"]);
         let known = flags().query_known_flags();
-        let err = gate_dynamic_fields(&["priorty".to_string()], &u, &known).unwrap_err();
-        assert!(err.to_string().contains("priority"), "{err}");
+        let rej = gate_dynamic_fields(&["priorty".to_string()], &u, &known).unwrap_err();
+        assert_eq!(rej.message, "unknown field `priorty`");
+        assert!(
+            rej.hints.iter().any(|h| h.contains("`priority`")),
+            "expected a priority did-you-mean hint, got: {:?}",
+            rej.hints
+        );
     }
 
     // ── R1a: reserved value-flag must not swallow a flag-shaped next token ──
