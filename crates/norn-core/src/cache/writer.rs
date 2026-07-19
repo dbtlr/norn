@@ -153,9 +153,26 @@ impl crate::cache::Cache {
             return self.full_build(vault_root);
         }
         let start = Instant::now();
-        let mut changes = detect(vault_root, self, options)?;
-        if changes.is_empty() {
+        let outcome = detect(vault_root, self, options)?;
+        let mut changes = outcome.changes;
+        let rebaselines = outcome.rebaselines;
+        if changes.is_empty() && rebaselines.is_empty() {
             return Ok(IndexReport::default());
+        }
+        if changes.is_empty() {
+            // Rebaseline-only refresh: no content changed, so no re-parse or link
+            // rewrite is needed — just re-stamp the `(mtime,size)` baseline of the
+            // touched-but-unchanged files inside one transaction so the freshness
+            // probe converges (otherwise it re-fires and re-hashes them forever).
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            apply_rebaselines(&tx, &rebaselines)?;
+            tx.commit()?;
+            return Ok(IndexReport {
+                duration_ms: start.elapsed().as_millis(),
+                ..Default::default()
+            });
         }
 
         let graph_opts = crate::graph::IndexOptions {
@@ -280,6 +297,12 @@ impl crate::cache::Cache {
                 )?;
             }
         }
+
+        // Converge the baseline of touched-but-unchanged files in the same commit,
+        // so a mixed refresh (real changes + metadata drift) leaves the probe with
+        // nothing to re-fire on. These rows are not in the affected set, so this
+        // never conflicts with the drop+reinsert above.
+        apply_rebaselines(&tx, &rebaselines)?;
 
         // Whole-table link re-resolution: link resolution is a global function of
         // the document set (an alias/path/stem change re-resolves links in
@@ -1131,6 +1154,23 @@ fn rerun_link_resolution(tx: &Transaction, fresh_index: &GraphIndex) -> Result<(
     Ok(())
 }
 
+/// Re-stamp the `documents.(mtime_ns, size_bytes)` baseline for touched-but-
+/// unchanged files (`detect`'s hash-matched rebaselines). Each metadata pair is
+/// bound to the observation that re-proved the content hash, so this converges
+/// the freshness probe without touching any content-derived rows.
+fn apply_rebaselines(
+    tx: &Transaction,
+    rebaselines: &[(Utf8PathBuf, (i64, i64))],
+) -> Result<(), CacheError> {
+    for (path, (mtime_ns, size_bytes)) in rebaselines {
+        tx.execute(
+            "UPDATE documents SET mtime_ns = ?, size_bytes = ? WHERE path = ?",
+            params![mtime_ns, size_bytes, path.as_str()],
+        )?;
+    }
+    Ok(())
+}
+
 fn clear_all_rows(tx: &Transaction) -> Result<(), CacheError> {
     for table in [
         "documents",
@@ -1847,5 +1887,62 @@ mod tests {
             Freshness::Stale(_) => {}
             Freshness::Fresh => panic!("read-failed sentinel must force the next probe to refire"),
         }
+    }
+
+    /// A touched-but-unchanged file (same bytes, bumped mtime) must converge after
+    /// ONE incremental refresh: the rebaseline re-stamps its `(mtime,size)` so the
+    /// probe reports Fresh again, instead of re-firing (and re-hashing the file)
+    /// on every subsequent request forever.
+    #[test]
+    fn touched_but_unchanged_file_converges_after_one_refresh() {
+        use crate::cache::freshness::{Freshness, FreshnessProbe, StatSweepProbe};
+
+        let (_tmp, root) = fresh_vault();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntitle: A\n---\nbody\n",
+        )
+        .unwrap();
+        let mut cache = Cache::open(&root).unwrap();
+        cache.full_build(&root).unwrap();
+        assert_eq!(
+            StatSweepProbe.probe(&root, &cache).unwrap(),
+            Freshness::Fresh
+        );
+
+        // Same bytes, new mtime → the probe now reads Stale.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntitle: A\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                StatSweepProbe.probe(&root, &cache).unwrap(),
+                Freshness::Stale(_)
+            ),
+            "a bumped mtime must read Stale before the rebaseline"
+        );
+
+        // One refresh (rebaseline-only) must converge the baseline.
+        let report = cache.index_incremental(&root, &Default::default()).unwrap();
+        assert_eq!(
+            report.doc_count, 0,
+            "no content changed, so nothing re-indexed"
+        );
+
+        assert_eq!(
+            StatSweepProbe.probe(&root, &cache).unwrap(),
+            Freshness::Fresh,
+            "the rebaseline must converge the probe — no permanent refresh loop"
+        );
+        // Idempotent: a second refresh sees nothing to do.
+        let again = cache.index_incremental(&root, &Default::default()).unwrap();
+        assert_eq!(again.doc_count, 0);
+        assert_eq!(
+            StatSweepProbe.probe(&root, &cache).unwrap(),
+            Freshness::Fresh
+        );
     }
 }

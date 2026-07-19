@@ -32,11 +32,25 @@ impl FileChange {
     }
 }
 
+/// The outcome of a change scan: the content changes to re-index, plus the set
+/// of touched-but-unchanged files whose cached `(mtime,size)` baseline must be
+/// re-stamped so the freshness probe converges.
+pub(crate) struct DetectOutcome {
+    pub(crate) changes: Vec<FileChange>,
+    /// `(path, (mtime_ns, size_bytes))` for files whose cheap-check failed but
+    /// whose content hash still matches the cached hash — the metadata drifted
+    /// (e.g. a same-bytes rewrite bumped mtime) without any content change. Each
+    /// metadata pair comes from the SAME stable observation that produced the
+    /// matching hash (never a fresh naked stat), so a rebaseline can never encode
+    /// content that changed during the read.
+    pub(crate) rebaselines: Vec<(Utf8PathBuf, (i64, i64))>,
+}
+
 pub(crate) fn detect(
     vault_root: &Utf8Path,
     cache: &crate::cache::Cache,
     options: &ChangeDetectOptions,
-) -> Result<Vec<FileChange>, CacheError> {
+) -> Result<DetectOutcome, CacheError> {
     let cached = load_cached_metadata(&cache.conn)?;
     // Honor files.ignore in the live scan so a path newly added to files.ignore
     // is seen as absent → detected as Deleted → purged from the cache, keeping
@@ -44,6 +58,7 @@ pub(crate) fn detect(
     let live = scan_filesystem(vault_root, &cache.files_ignore)?;
 
     let mut changes = Vec::new();
+    let mut rebaselines = Vec::new();
 
     for (path, live_meta) in &live {
         match cached.get(path) {
@@ -54,9 +69,27 @@ pub(crate) fn detect(
                 if unchanged_cheap {
                     continue;
                 }
-                let live_hash = hash_file(&vault_root.join(path))?;
-                if live_hash != cached_meta.hash {
-                    changes.push(FileChange::Modified(path.clone()));
+                // Cheap check failed (or force_hash): re-hash under a stable
+                // observation (stat → read → stat) so the verdict — and any
+                // rebaseline metadata — is bound to the bytes we hashed.
+                match stable_hash_observation(&vault_root.join(path))? {
+                    Some((live_hash, observed)) => {
+                        if live_hash != cached_meta.hash {
+                            changes.push(FileChange::Modified(path.clone()));
+                        } else if observed != (cached_meta.mtime_ns, cached_meta.size_bytes) {
+                            // Content identical, only `(mtime,size)` drifted:
+                            // rebaseline so the probe stops re-firing (and the
+                            // refresh stops re-hashing this file) every request.
+                            rebaselines.push((path.clone(), observed));
+                        }
+                        // else: force_hash on a genuinely unchanged file — no-op.
+                    }
+                    None => {
+                        // The file changed under our own read (before != after):
+                        // skip both the change and the rebaseline. The next probe
+                        // re-fires once it settles — the safe direction, never a
+                        // stale-serve.
+                    }
                 }
             }
             None => {
@@ -72,7 +105,11 @@ pub(crate) fn detect(
     }
 
     changes.sort_by(|a, b| a.path().cmp(b.path()));
-    Ok(changes)
+    rebaselines.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(DetectOutcome {
+        changes,
+        rebaselines,
+    })
 }
 
 /// Per-file metadata cached in the `documents` table. Shared (with
@@ -208,14 +245,44 @@ fn walk_visit<B>(
     Ok(ControlFlow::Continue(()))
 }
 
-fn hash_file(path: &Utf8Path) -> Result<String, CacheError> {
-    // Must match the hash format `crate::graph::build_index` stores in
-    // documents.hash (blake3 hex of the raw file bytes).
-    let bytes = std::fs::read(path.as_std_path()).map_err(|e| CacheError::IndexRead {
-        path: path.to_owned(),
+/// Hash `absolute` under a stability guard: stat before, read, stat after. The
+/// hash (blake3 hex of the raw bytes, matching `crate::graph::build_index`'s
+/// `documents.hash`) is returned WITH the `(mtime_ns, size_bytes)` from that same
+/// observation only when the before/after stats agree — otherwise the file
+/// changed under the read and `None` is returned. Binding the metadata to the
+/// hashed bytes is what lets `detect`'s rebaseline (and any consumer) commit a
+/// `(mtime,size)` baseline that cannot encode content that raced the read.
+/// A blake3 hex hash paired with the `(mtime_ns, size_bytes)` observed in the
+/// same stable read.
+type HashObservation = (String, (i64, i64));
+
+fn stable_hash_observation(absolute: &Utf8Path) -> Result<Option<HashObservation>, CacheError> {
+    let before = regular_stat(absolute);
+    let bytes = std::fs::read(absolute.as_std_path()).map_err(|e| CacheError::IndexRead {
+        path: absolute.to_owned(),
         source: e,
     })?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    let after = regular_stat(absolute);
+    match (before, after) {
+        (Some(before), Some(after)) if before == after && bytes.len() as i64 == after.1 => {
+            Ok(Some((blake3::hash(&bytes).to_hex().to_string(), after)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn regular_stat(absolute: &Utf8Path) -> Option<(i64, i64)> {
+    let metadata = std::fs::metadata(absolute.as_std_path()).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let mtime_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as i64;
+    Some((mtime_ns, metadata.len() as i64))
 }
 
 #[cfg(test)]
@@ -240,8 +307,13 @@ mod tests {
     #[test]
     fn unchanged_files_yield_no_changes() {
         let (_tmp, root, cache) = setup();
-        let changes = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
-        assert!(changes.is_empty(), "expected no changes, got {changes:?}");
+        let outcome = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
+        assert!(
+            outcome.changes.is_empty(),
+            "expected no changes, got {:?}",
+            outcome.changes
+        );
+        assert!(outcome.rebaselines.is_empty());
     }
 
     #[test]
@@ -253,18 +325,18 @@ mod tests {
             "---\ntitle: A2\n---\nedited\n",
         )
         .unwrap();
-        let changes = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
-        assert_eq!(changes.len(), 1);
-        assert!(matches!(changes[0], FileChange::Modified(_)));
+        let outcome = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
+        assert_eq!(outcome.changes.len(), 1);
+        assert!(matches!(outcome.changes[0], FileChange::Modified(_)));
     }
 
     #[test]
     fn added_file_detected() {
         let (_tmp, root, cache) = setup();
         std::fs::write(root.join("c.md").as_std_path(), "---\ntitle: C\n---\n").unwrap();
-        let changes = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
-        assert_eq!(changes.len(), 1);
-        match &changes[0] {
+        let outcome = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
+        assert_eq!(outcome.changes.len(), 1);
+        match &outcome.changes[0] {
             FileChange::Added(p) => assert_eq!(p, "c.md"),
             other => panic!("expected Added, got {other:?}"),
         }
@@ -274,9 +346,9 @@ mod tests {
     fn deleted_file_detected() {
         let (_tmp, root, cache) = setup();
         std::fs::remove_file(root.join("a.md").as_std_path()).unwrap();
-        let changes = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
-        assert_eq!(changes.len(), 1);
-        match &changes[0] {
+        let outcome = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
+        assert_eq!(outcome.changes.len(), 1);
+        match &outcome.changes[0] {
             FileChange::Deleted(p) => assert_eq!(p, "a.md"),
             other => panic!("expected Deleted, got {other:?}"),
         }
@@ -286,7 +358,30 @@ mod tests {
     fn force_hash_skips_cheap_check() {
         let (_tmp, root, cache) = setup();
         let opts = ChangeDetectOptions { force_hash: true };
-        let changes = detect(&root, &cache, &opts).unwrap();
-        assert!(changes.is_empty());
+        let outcome = detect(&root, &cache, &opts).unwrap();
+        assert!(outcome.changes.is_empty());
+        // force_hash on genuinely-unchanged files rebaselines nothing (the
+        // observed metadata already equals the cached baseline).
+        assert!(outcome.rebaselines.is_empty());
+    }
+
+    /// A same-bytes rewrite bumps mtime without changing content: the cheap check
+    /// fails, the re-hash matches, and the path is offered as a rebaseline (not a
+    /// content change) so the caller can converge the baseline.
+    #[test]
+    fn touched_but_unchanged_file_is_offered_as_a_rebaseline() {
+        let (_tmp, root, cache) = setup();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Identical bytes to `setup`'s a.md — only mtime advances.
+        std::fs::write(root.join("a.md").as_std_path(), "---\ntitle: A\n---\n").unwrap();
+
+        let outcome = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
+        assert!(
+            outcome.changes.is_empty(),
+            "content unchanged → no FileChange, got {:?}",
+            outcome.changes
+        );
+        assert_eq!(outcome.rebaselines.len(), 1);
+        assert_eq!(outcome.rebaselines[0].0, "a.md");
     }
 }

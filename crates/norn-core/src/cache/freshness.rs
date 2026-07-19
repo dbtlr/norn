@@ -192,12 +192,16 @@ mod tests {
             StatSweepProbe.probe(&root, &cache).unwrap(),
             Freshness::Fresh
         );
-        let changes = crate::cache::change_detection::detect(
+        let outcome = crate::cache::change_detection::detect(
             &root,
             &cache,
             &crate::cache::ChangeDetectOptions::default(),
         )
         .unwrap();
-        assert!(changes.is_empty(), "fresh probe but detect saw {changes:?}");
+        assert!(
+            outcome.changes.is_empty(),
+            "fresh probe but detect saw {:?}",
+            outcome.changes
+        );
     }
 }

@@ -277,3 +277,71 @@ impl Cache {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use tempfile::TempDir;
+
+    use super::Cache;
+
+    /// Planner guard for `observed_field_names`: the `documents` × `json_each`
+    /// query must stay a bounded scan (a single SCAN of `documents` feeding the
+    /// `json_each` table-valued function), never a per-row correlated subquery.
+    #[test]
+    fn observed_field_names_query_plan_has_no_correlated_subquery() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("a.md").as_std_path(),
+            "---\ntype: note\nstatus: active\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntype: task\npriority: 3\n---\n",
+        )
+        .unwrap();
+        let mut cache = Cache::open(&root).unwrap();
+        cache.full_build(&root).unwrap();
+
+        // Correctness first: the field universe is exactly the observed keys.
+        let fields = cache.observed_field_names().unwrap();
+        assert_eq!(
+            fields,
+            ["priority", "status", "type"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        );
+
+        let sql = "EXPLAIN QUERY PLAN \
+             SELECT DISTINCT je.key \
+             FROM documents, json_each(documents.frontmatter_json) je \
+             WHERE documents.frontmatter_json IS NOT NULL \
+               AND json_valid(documents.frontmatter_json) \
+               AND json_type(documents.frontmatter_json) = 'object'";
+        let mut stmt = cache.conn().prepare(sql).unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(
+            !rows.iter().any(|r| r.contains("CORRELATED")),
+            "observed_field_names must not run a per-row correlated subquery: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SUBQUERY")),
+            "observed_field_names must not introduce a per-row subquery: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("documents")),
+            "plan should scan the documents table once: {rows:?}"
+        );
+    }
+}
