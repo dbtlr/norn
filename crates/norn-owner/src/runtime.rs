@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use norn_core::cache::{CacheOpenConfig, VaultCacheSlot};
+use norn_core::cache::VaultCacheSlot;
 use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -59,6 +59,10 @@ pub struct OwnerConfig {
     /// diagnostics / future tiers. The ephemeral client trusts the build-keyed
     /// socket, so this is informational.
     pub build: Option<String>,
+    /// The resolved `[vaults.<name>].config` override path, if the summoning
+    /// client passed one. `None` → the warm-up loads `<vault_root>/.norn/config.yaml`
+    /// (the default) if present, else runs under the empty default config.
+    pub config_path: Option<Utf8PathBuf>,
 }
 
 /// The owner-lifetime lock path sits next to the socket: `<socket>.lock`.
@@ -229,6 +233,7 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
     let warmup_handle = {
         let state = Arc::clone(&state);
         let vault_root = config.vault_root.clone();
+        let config_path = config.config_path.clone();
         tokio::spawn(async move {
             state.set_serving(ServingState::Opening);
             // Internal test/debug seam: an optional pre-build delay to simulate a
@@ -239,8 +244,15 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
             {
                 tokio::time::sleep(Duration::from_millis(ms)).await;
             }
-            let build = tokio::task::spawn_blocking(move || {
-                VaultCacheSlot::create(&db_path, &vault_root, CacheOpenConfig::default())
+            // Load the vault's config OFF the blocking thread's own read, then
+            // build the cache under it — alias field, ignore globs, and the
+            // resolved EAV index set all come from `.norn/config.yaml`. Without
+            // this the cache would be built under the empty default config and
+            // every alias/ignore/index decision would be wrong (ADR 0017).
+            let build = tokio::task::spawn_blocking(move || -> anyhow::Result<VaultCacheSlot> {
+                let cache_config =
+                    crate::config_load::load_cache_config(&vault_root, config_path.as_deref())?;
+                Ok(VaultCacheSlot::create(&db_path, &vault_root, cache_config)?)
             })
             .await;
             match build {
@@ -448,5 +460,111 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 }
             }
         }
+        ClientFrame::Find { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let today = today_utc();
+            let result = tokio::task::spawn_blocking(move || {
+                slot.serve_read(|cache| norn_core::read::find::execute(cache, &params, &today))
+            })
+            .await;
+            classify_read(state, result, |report| OwnerFrame::Find { report }, "find")
+        }
+        ClientFrame::Count { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let today = today_utc();
+            let result = tokio::task::spawn_blocking(move || {
+                slot.serve_read(|cache| norn_core::read::count::execute(cache, &params, &today))
+            })
+            .await;
+            classify_read(
+                state,
+                result,
+                |report| OwnerFrame::Count { report },
+                "count",
+            )
+        }
     }
+}
+
+/// The warm slot when serving is Ready, else `None` (the client pings-until-ready
+/// before a read; an early read is reported, not a fault — see [`not_ready`]).
+fn ready_slot(state: &Arc<OwnerState>) -> Option<Arc<VaultCacheSlot>> {
+    if state.serving() != ServingState::Ready {
+        return None;
+    }
+    state.slot()
+}
+
+/// The "vault not ready" report a read gets before warm-up finishes.
+fn not_ready() -> OwnerFrame {
+    OwnerFrame::Error {
+        message: "vault not ready".to_string(),
+    }
+}
+
+/// Classify a routed read's outcome into an owner frame. The read verbs return
+/// `anyhow::Result<Result<Report, String>>`:
+///
+/// - `Ok(Ok(report))` — success → the verb's report frame.
+/// - `Ok(Err(message))` — a user error (bad predicate, unresolvable target) →
+///   [`OwnerFrame::Rejected`]. The owner stays alive.
+/// - `Err(_)` / join panic — a cache/read fault → exit-to-heal (ADR 0017).
+fn classify_read<R>(
+    state: &Arc<OwnerState>,
+    result: Result<anyhow::Result<Result<R, String>>, tokio::task::JoinError>,
+    to_frame: impl FnOnce(R) -> OwnerFrame,
+    verb: &str,
+) -> OwnerFrame {
+    match result {
+        Ok(Ok(Ok(report))) => to_frame(report),
+        Ok(Ok(Err(message))) => OwnerFrame::Rejected { message },
+        Ok(Err(err)) => {
+            state.go_fatal();
+            OwnerFrame::Error {
+                message: format!("cache error (exit-to-heal): {err}"),
+            }
+        }
+        Err(join_err) => {
+            state.go_fatal();
+            OwnerFrame::Error {
+                message: format!("{verb} task panicked (exit-to-heal): {join_err}"),
+            }
+        }
+    }
+}
+
+/// Today's date as `%Y-%m-%d` in UTC, injected into the read verbs so
+/// `--on today` resolves deterministically (norn-core never reads a clock).
+///
+/// UTC (not the donor's local time) is a deliberate, minor simplification: it
+/// keeps the owner free of a timezone dependency, and no parity case exercises
+/// `--on today`, so it is not a pinned contract. Revisit if local-date semantics
+/// become observable.
+fn today_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Convert days-since-Unix-epoch to a `(year, month, day)` civil date
+/// (Howard Hinnant's `civil_from_days`, public-domain algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }

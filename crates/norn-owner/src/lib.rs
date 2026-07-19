@@ -9,12 +9,14 @@
 //!
 //! The summoner (`norn-client`) spawns the current executable in *owner mode* —
 //! `norn __norn-owner --socket <path> --vault-root <path> --ttl-secs <n>
-//! [--build <fp>]`. That argv shape is an internal contract between the client
+//! [--build <fp>] [--config <path>]`. That argv shape is an internal contract between the client
 //! (which builds it) and this crate (which parses it); it is deliberately NOT a
 //! clap subcommand, so it never touches the CLI grammar or the parity oracle.
 //! The bin calls [`run_if_owner_mode`] before `norn_cli::run`; a non-owner argv
 //! returns `None` and normal CLI dispatch proceeds.
 
+#[cfg(unix)]
+mod config_load;
 #[cfg(unix)]
 mod lifecycle;
 #[cfg(unix)]
@@ -87,6 +89,7 @@ struct ParsedOwnerArgs {
     vault_root: camino::Utf8PathBuf,
     ttl_secs: u64,
     build: Option<String>,
+    config: Option<camino::Utf8PathBuf>,
 }
 
 #[cfg(unix)]
@@ -96,6 +99,7 @@ impl ParsedOwnerArgs {
         let mut vault_root: Option<camino::Utf8PathBuf> = None;
         let mut ttl_secs: Option<u64> = None;
         let mut build: Option<String> = None;
+        let mut config: Option<camino::Utf8PathBuf> = None;
 
         let mut it = args.iter();
         while let Some(flag) = it.next() {
@@ -116,6 +120,9 @@ impl ParsedOwnerArgs {
                 "--build" => {
                     build = Some(next_value(&mut it, flag)?);
                 }
+                "--config" => {
+                    config = Some(next_value(&mut it, flag)?.into());
+                }
                 other => return Err(format!("unknown owner arg: {other}")),
             }
         }
@@ -125,6 +132,7 @@ impl ParsedOwnerArgs {
             vault_root: vault_root.ok_or("missing --vault-root")?,
             ttl_secs: ttl_secs.ok_or("missing --ttl-secs")?,
             build,
+            config,
         })
     }
 
@@ -134,6 +142,7 @@ impl ParsedOwnerArgs {
             vault_root: self.vault_root,
             idle_ttl: Duration::from_secs(self.ttl_secs),
             build: self.build,
+            config_path: self.config,
         }
     }
 }

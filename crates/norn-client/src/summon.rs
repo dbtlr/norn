@@ -26,6 +26,7 @@ pub fn spawn_owner(
     vault_root: &Path,
     idle_ttl: Duration,
     build: &str,
+    config_override: Option<&Path>,
 ) -> Result<(), ClientError> {
     let mut command = Command::new(owner_exe);
     command
@@ -37,7 +38,14 @@ pub fn spawn_owner(
         .arg("--ttl-secs")
         .arg(idle_ttl.as_secs().to_string())
         .arg("--build")
-        .arg(build)
+        .arg(build);
+    // The resolver-derived `[vaults.<name>].config` override (ADR 0017), passed
+    // through only when the registry supplied one; otherwise the owner defaults
+    // to `<vault_root>/.norn/config.yaml`.
+    if let Some(config) = config_override {
+        command.arg("--config").arg(config);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         // Route the owner's stderr to a per-owner log file (truncate-on-start)

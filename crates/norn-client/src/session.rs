@@ -10,7 +10,10 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
+use norn_wire::{
+    ClientFrame, CountParams, CountReport, FindParams, FindReport, OwnerFrame, ServingState,
+    WriterProgress, CONTROL_PROTOCOL,
+};
 
 use crate::error::ClientError;
 use crate::SummonConfig;
@@ -135,6 +138,30 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected probe report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `find` request against the owner's warm cache.
+    pub fn find(&mut self, params: FindParams) -> Result<FindReport, ClientError> {
+        match self.request(&ClientFrame::Find { params })? {
+            OwnerFrame::Find { report } => Ok(report),
+            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected find report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `count` request against the owner's warm cache.
+    pub fn count(&mut self, params: CountParams) -> Result<CountReport, ClientError> {
+        match self.request(&ClientFrame::Count { params })? {
+            OwnerFrame::Count { report } => Ok(report),
+            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected count report, got {other:?}"
             ))),
         }
     }

@@ -45,6 +45,11 @@ pub enum ClientError {
     Protocol(String),
     /// The owner answered a request with an error frame (e.g. exit-to-heal).
     OwnerError(String),
+    /// The owner REJECTED a well-formed request for a non-cache reason — a bad
+    /// predicate, an unresolvable `--links-to` target. The owner is healthy; the
+    /// caller surfaces this as an operational failure (the message is
+    /// user-facing), NOT an owner-health event.
+    Rejected(String),
 }
 
 impl std::fmt::Display for ClientError {
@@ -78,6 +83,7 @@ impl std::fmt::Display for ClientError {
             ClientError::Io(e) => write!(f, "owner socket io error: {e}"),
             ClientError::Protocol(msg) => write!(f, "owner protocol error: {msg}"),
             ClientError::OwnerError(msg) => write!(f, "owner returned an error: {msg}"),
+            ClientError::Rejected(msg) => write!(f, "{msg}"),
         }
     }
 }

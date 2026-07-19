@@ -32,6 +32,7 @@ fn shutdown_during_warmup_awaits_the_build_and_leaves_no_orphans() {
         vault_root,
         idle_ttl: Duration::from_millis(150),
         build: None,
+        config_path: None,
     };
 
     let start = Instant::now();

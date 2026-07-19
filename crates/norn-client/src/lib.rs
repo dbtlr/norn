@@ -88,6 +88,11 @@ pub struct SummonConfig {
     pub owner_exe: PathBuf,
     /// How long to wait for a spawned owner to bind before giving up.
     pub connect_budget: Duration,
+    /// The resolver-derived `[vaults.<name>].config` override path (ADR 0017),
+    /// when the resolved vault is registered with one. `None` → the owner loads
+    /// `<vault_root>/.norn/config.yaml` (the default). Passed to a freshly
+    /// summoned owner; an already-live owner keeps the config it warmed under.
+    pub config_override: Option<PathBuf>,
 }
 
 impl SummonConfig {
@@ -102,7 +107,14 @@ impl SummonConfig {
             idle_ttl: ephemeral_idle_ttl(),
             owner_exe,
             connect_budget: DEFAULT_CONNECT_BUDGET,
+            config_override: None,
         })
+    }
+
+    /// Set the resolver-derived config override the summoned owner warms under.
+    pub fn with_config_override(mut self, config_override: Option<PathBuf>) -> Self {
+        self.config_override = config_override;
+        self
     }
 }
 
@@ -131,6 +143,7 @@ pub(crate) fn connect_or_summon(
         &config.vault_root,
         config.idle_ttl,
         &config.fingerprint,
+        config.config_override.as_deref(),
     )?;
 
     // Connect with bounded retry as it binds. A losing-flock racer's client
