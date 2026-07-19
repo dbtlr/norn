@@ -889,10 +889,111 @@ const TEXT_EDGE_CASES: &[Case] = &[
     },
 ];
 
+/// A dedicated valid-zoo fixture for the error-surface suite (NRN-361 / NRN-365),
+/// seed 3 — kept off the read suite's `ZOO_1` (seed 1) and the `help` suite
+/// (seed 2) so an error probe never shares warm-cache state with a matched read
+/// case (the text-edge isolation discipline).
+const ERR_ZOO: Fixture = Fixture {
+    profile_name: "zoo",
+    seed: 3,
+};
+
+/// The malformed-config fixture: the valid zoo doc tree under a deliberately
+/// invalid `.norn/config.yaml` (the `bad-config` profile). Every read against it
+/// warms into a config rejection — its own profile, shared with no other case.
+const BAD_CONFIG_1: Fixture = Fixture {
+    profile_name: "bad-config",
+    seed: 1,
+};
+
+/// The decided error-surface divergences from the pinned oracle (NRN-361 /
+/// NRN-365). Every case is `ported: true` and DIVERGES — the rewrite's soft-
+/// landing diagnostic surface (prefix + wording + did-you-mean hints) and its
+/// grammar-wide last-wins differ from the oracle, each pinned by a ledger entry
+/// (PD-109 / PD-110). Isolated onto dedicated fixtures so no divergence perturbs
+/// a matched read case.
+const ERROR_CASES: &[Case] = &[
+    Case {
+        // NRN-361: an unresolvable `--links-to` target is rejected. The oracle
+        // prints a bare `no document matched: <t>` line; the rewrite prints the
+        // prefixed, reworded `norn: no document matched path or stem: <t>` — the
+        // soft-landing diagnostic surface. stdout empty and exit 1 on both;
+        // stderr diverges. Pinned by PD-109.
+        id: "err-links-to-unresolvable-zoo",
+        argv: &[
+            "find",
+            "--links-to",
+            "zzz-nonexistent-target",
+            "--format",
+            "json",
+        ],
+        fixture: ERR_ZOO,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // NRN-361: a near-miss `--col` facet typo. Both sides warn and exit 0
+        // with identical stdout; the rewrite leads the warning with a
+        // did-you-mean (`did you mean '.headings'?`) via the shared `closest`
+        // heuristic, so stderr diverges. Pinned by PD-109.
+        id: "err-col-facet-did-you-mean-zoo",
+        argv: &["find", "--all", "--col", ".headngs", "--format", "json"],
+        fixture: ERR_ZOO,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // NRN-361: a malformed `.norn/config.yaml` (one unknown top-level key).
+        // The vault warms into a config rejection on both sides — exit 1, empty
+        // stdout — but the rewrite prefixes the diagnostic (`norn: invalid
+        // config …`) where the oracle prints the bare line. The previously
+        // deferred malformed-config case, now addable. Pinned by PD-109.
+        id: "err-malformed-config",
+        argv: &["find", "--all", "--format", "json"],
+        fixture: BAD_CONFIG_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // NRN-365: a repeated scalar flag. `--limit 5 --limit 1` is a hard
+        // `ArgumentConflict` on the oracle (exit 2, nothing on stdout); the
+        // rewrite's grammar-wide `args_override_self` resolves it last-wins →
+        // limit 1, exit 0, one path on stdout. Exit + stdout + stderr all
+        // diverge. Pinned by PD-110.
+        id: "err-repeated-limit-last-wins-zoo",
+        argv: &[
+            "find", "--all", "--sort", "path", "--limit", "5", "--limit", "1", "--format", "paths",
+        ],
+        fixture: ERR_ZOO,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+];
+
 const SUITES: &[Suite] = &[
     Suite {
         name: "help",
         cases: HELP_CASES,
+    },
+    Suite {
+        name: "errors",
+        cases: ERROR_CASES,
     },
     Suite {
         name: "text-edge",

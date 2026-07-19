@@ -52,6 +52,12 @@ pub struct Profile {
     /// isolated BOM / code-opacity divergence probes (NRN-349 / NRN-350). Kept
     /// off every shared profile so those cases never perturb zoo/clean parity.
     pub text_edge: bool,
+    /// Write a deliberately-invalid `.norn/config.yaml` (one unknown top-level
+    /// key) instead of the valid block, so a config load fails with a stable
+    /// "unknown field" error. Drives the malformed-config error-surface parity
+    /// case (NRN-361); kept off every other profile so a broken config never
+    /// perturbs a real read.
+    pub malformed_config: bool,
 }
 
 /// The named profiles, in fixed order — the single source for `by_name`,
@@ -68,6 +74,7 @@ const PROFILES: &[Profile] = &[
         broken_link_per_mille: 0,
         violation_per_mille: 0,
         text_edge: false,
+        malformed_config: false,
     },
     // Zoo without violations, plus ~60 expansion docs. Invariant: the oracle's
     // `validate` reports zero findings against this profile.
@@ -81,6 +88,7 @@ const PROFILES: &[Profile] = &[
         broken_link_per_mille: 0,
         violation_per_mille: 0,
         text_edge: false,
+        malformed_config: false,
     },
     // Zoo including violations, plus ~120 expansion docs at elevated
     // violation/broken-link ratios.
@@ -94,6 +102,7 @@ const PROFILES: &[Profile] = &[
         broken_link_per_mille: 40,
         violation_per_mille: 50,
         text_edge: false,
+        malformed_config: false,
     },
     // Zoo without violations, plus ~200 densely-linked docs across deep, wide
     // folders.
@@ -107,6 +116,7 @@ const PROFILES: &[Profile] = &[
         broken_link_per_mille: 0,
         violation_per_mille: 0,
         text_edge: false,
+        malformed_config: false,
     },
     // Zoo without violations, plus 1000 expansion docs at moderate settings.
     Profile {
@@ -119,6 +129,7 @@ const PROFILES: &[Profile] = &[
         broken_link_per_mille: 0,
         violation_per_mille: 0,
         text_edge: false,
+        malformed_config: false,
     },
     // The valid zoo plus the text-layer edge probes (NRN-349 / NRN-350) — no
     // expansion, no violations. Dedicated to the BOM / code-opacity parity cases
@@ -133,6 +144,23 @@ const PROFILES: &[Profile] = &[
         broken_link_per_mille: 0,
         violation_per_mille: 0,
         text_edge: true,
+        malformed_config: false,
+    },
+    // The valid zoo doc tree under a deliberately-INVALID `.norn/config.yaml`.
+    // Dedicated to the malformed-config error-surface parity case (NRN-361): the
+    // vault warms into a config rejection, so the read never reaches the graph —
+    // keeping the broken config off every profile that performs a real read.
+    Profile {
+        name: "bad-config",
+        violations: false,
+        expansion_docs: 0,
+        folder_depth: 0,
+        folder_width: 0,
+        max_links_per_doc: 0,
+        broken_link_per_mille: 0,
+        violation_per_mille: 0,
+        text_edge: false,
+        malformed_config: true,
     },
 ];
 
@@ -319,7 +347,11 @@ pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Mani
     let mut files = 0usize;
     let mut docs: Vec<DocEntry> = Vec::new();
 
-    let config_yaml = config::config_yaml();
+    let config_yaml = if profile.malformed_config {
+        config::malformed_config_yaml()
+    } else {
+        config::config_yaml()
+    };
     write_rel(
         out_dir,
         ".norn/config.yaml",
