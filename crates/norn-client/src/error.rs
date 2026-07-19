@@ -48,8 +48,10 @@ pub enum ClientError {
     /// The owner REJECTED a well-formed request for a non-cache reason — a bad
     /// predicate, an unresolvable `--links-to` target. The owner is healthy; the
     /// caller surfaces this as an operational failure (the message is
-    /// user-facing), NOT an owner-health event.
-    Rejected(String),
+    /// user-facing), NOT an owner-health event. `hints` carries the wire's
+    /// soft-landing lines (NRN-361) straight through to the CLI presenter / an
+    /// MCP client; empty in the common case.
+    Rejected { message: String, hints: Vec<String> },
 }
 
 impl std::fmt::Display for ClientError {
@@ -83,7 +85,7 @@ impl std::fmt::Display for ClientError {
             ClientError::Io(e) => write!(f, "owner socket io error: {e}"),
             ClientError::Protocol(msg) => write!(f, "owner protocol error: {msg}"),
             ClientError::OwnerError(msg) => write!(f, "owner returned an error: {msg}"),
-            ClientError::Rejected(msg) => write!(f, "{msg}"),
+            ClientError::Rejected { message, .. } => write!(f, "{message}"),
         }
     }
 }

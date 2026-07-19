@@ -141,8 +141,8 @@ pub fn run<O: Write, E: Write>(
 
     let mut session = match crate::routed::open_session(global) {
         Ok(s) => s,
-        Err(msg) => {
-            presenter.diagnostic(&msg);
+        Err(diag) => {
+            presenter.present_diagnostic(&diag);
             return EXIT_OPERATIONAL;
         }
     };
@@ -156,7 +156,7 @@ pub fn run<O: Write, E: Write>(
     let report = match session.find(params) {
         Ok(r) => r,
         Err(e) => {
-            presenter.diagnostic(&e.to_string());
+            presenter.present_diagnostic(&crate::routed::client_error_diagnostic(&e));
             return EXIT_OPERATIONAL;
         }
     };

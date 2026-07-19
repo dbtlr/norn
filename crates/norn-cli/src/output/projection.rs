@@ -80,13 +80,22 @@ pub fn json_value_inline(v: &Value) -> String {
 }
 
 /// The "unknown `--col` facet" warning message body (no severity prefix).
+///
+/// When the typo is a near-miss of a real facet, lead with a did-you-mean via
+/// the shared `closest` heuristic (NRN-361) before the full valid-facets list —
+/// the same soft-landing the dynamic-field gate gives a mistyped predicate.
 pub fn unknown_facet_message(facet: &str) -> String {
     let valid = KNOWN_FACETS
         .iter()
         .map(|f| format!(".{f}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("unknown --col facet '.{facet}' (valid facets: {valid}; bare names select frontmatter fields)")
+    let candidates: Vec<String> = KNOWN_FACETS.iter().map(|f| f.to_string()).collect();
+    let suggestion = match norn_core::grammar::closest(facet, &candidates) {
+        Some(s) => format!(" — did you mean '.{s}'?"),
+        None => String::new(),
+    };
+    format!("unknown --col facet '.{facet}'{suggestion} (valid facets: {valid}; bare names select frontmatter fields)")
 }
 
 /// Render serialized `Heading` values as `# text` lines, one per heading
@@ -250,5 +259,33 @@ mod tests {
         assert_eq!(json_value_inline(&json!("hi")), "hi");
         assert_eq!(json_value_inline(&json!(42)), "42");
         assert_eq!(json_value_inline(&json!(["a", "b"])), "a, b");
+    }
+
+    #[test]
+    fn unknown_facet_near_miss_gets_a_did_you_mean() {
+        // A one-edit typo of a real facet leads with the suggestion (NRN-361).
+        let msg = unknown_facet_message("healings");
+        assert!(
+            msg.contains("did you mean '.headings'?"),
+            "expected a did-you-mean for a near-miss, got: {msg}"
+        );
+        assert!(msg.contains("valid facets:"), "still lists valid facets");
+    }
+
+    #[test]
+    fn unknown_facet_far_miss_omits_the_did_you_mean() {
+        // A token nowhere near any facet gets the plain message — no dash, no
+        // spurious suggestion.
+        let msg = unknown_facet_message("zzzzzzzz");
+        assert!(
+            !msg.contains("did you mean"),
+            "a far miss must not invent a suggestion, got: {msg}"
+        );
+        assert_eq!(
+            msg,
+            "unknown --col facet '.zzzzzzzz' (valid facets: .path, .stem, .frontmatter, \
+             .headings, .outgoing_links, .unresolved_links, .incoming_links, .body, \
+             .document_hash; bare names select frontmatter fields)"
+        );
     }
 }

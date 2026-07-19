@@ -707,7 +707,11 @@ pub fn schema_field_names(
 /// (fields); the comparison is against the whole candidate string with leading
 /// dashes stripped, so a flag typo (`formt` vs `--format`) still matches on the
 /// shared stem.
-fn closest(key: &str, candidates: &[String]) -> Option<String> {
+///
+/// Public so the CLI reuses this ONE did-you-mean heuristic wherever it computes
+/// candidates (the dynamic-field gate here, plus the `--col` facet path in
+/// `norn-cli`) rather than growing a second, drifting threshold (NRN-361).
+pub fn closest(key: &str, candidates: &[String]) -> Option<String> {
     let mut best: Option<(usize, &String)> = None;
     for cand in candidates {
         let bare = cand.trim_start_matches('-');

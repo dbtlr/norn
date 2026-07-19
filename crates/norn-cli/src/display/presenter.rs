@@ -9,8 +9,13 @@
 
 use std::io::{self, Write};
 
-/// The program-name prefix on every stderr diagnostic line.
+use super::Diagnostic;
+
+/// The program-name prefix on every stderr diagnostic headline.
 pub const PROGRAM: &str = "norn";
+
+/// The prefix on every stderr soft-landing hint line (NRN-361).
+pub const HINT: &str = "hint";
 
 /// The stdout / stderr sinks a command presents through.
 pub struct Presenter<O: Write, E: Write> {
@@ -47,9 +52,26 @@ impl<O: Write, E: Write> Presenter<O, E> {
         (&mut self.out, &mut self.err)
     }
 
-    /// Write one `norn: <msg>` diagnostic line to stderr.
+    /// Present a structured [`Diagnostic`] on stderr, and ONLY stderr — the
+    /// single rendering path for every user-error site (NRN-361). Line 1 is the
+    /// prefixed headline (`norn: <message>`, stable greppable shape); each
+    /// following line is a soft-landing `hint: <hint>`. Hints are
+    /// tty-independent (agents read pipes), and nothing here ever touches
+    /// stdout — the payload stream stays clean in every format.
+    pub fn present_diagnostic(&mut self, diag: &Diagnostic) {
+        let _ = writeln!(self.err, "{PROGRAM}: {}", diag.message());
+        for hint in diag.hints() {
+            let _ = writeln!(self.err, "{HINT}: {hint}");
+        }
+    }
+
+    /// Write one `norn: <msg>` diagnostic headline to stderr — the headline-only
+    /// convenience, routed through the single [`present_diagnostic`] path so it
+    /// can never drift from the structured form.
+    ///
+    /// [`present_diagnostic`]: Self::present_diagnostic
     pub fn diagnostic(&mut self, msg: &str) {
-        let _ = writeln!(self.err, "{PROGRAM}: {msg}");
+        self.present_diagnostic(&Diagnostic::new(msg));
     }
 
     /// The uniform not-yet-ported outcome: one stderr line naming the command,
@@ -66,6 +88,38 @@ impl<O: Write, E: Write> Presenter<O, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn present_diagnostic_renders_headline_then_hints_on_stderr_only() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut p = Presenter::new(&mut out, &mut err);
+            let diag = Diagnostic::new("no vault named \"atlas\" is registered")
+                .with_hint("run `norn vault list` to see registered vault names")
+                .with_hint("register it with `norn vault register`");
+            p.present_diagnostic(&diag);
+        }
+        assert!(out.is_empty(), "a diagnostic must never touch stdout");
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "norn: no vault named \"atlas\" is registered\n\
+             hint: run `norn vault list` to see registered vault names\n\
+             hint: register it with `norn vault register`\n"
+        );
+    }
+
+    #[test]
+    fn diagnostic_headline_only_matches_the_structured_form() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut p = Presenter::new(&mut out, &mut err);
+            p.diagnostic("bad predicate");
+        }
+        assert!(out.is_empty());
+        assert_eq!(String::from_utf8(err).unwrap(), "norn: bad predicate\n");
+    }
 
     #[test]
     fn not_yet_ported_writes_uniform_line_and_returns_operational() {
