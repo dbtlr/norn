@@ -42,7 +42,7 @@ fn self_check_end_to_end_is_all_match_exit_0() {
         output.status.code()
     );
     assert!(
-        stdout.contains("51 cases: 51 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("52 cases: 52 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -86,12 +86,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // PD-103, NRN-349 BOM PD-104), the two CLI-semantics slate cases (zero-indexed
     // `--starts-at` PD-105, last-wins `--limit`/`--no-limit` PD-106), the two
     // URL-semantics slate cases (Markdown-link split-then-decode + block-ref
-    // PD-107, external-vs-local scheme classification PD-108), and the four
-    // presentation/errors slate cases (the soft-landing diagnostic surface — three
-    // shapes under PD-109 — and grammar-wide last-wins PD-110) — covered
-    // divergences, not drift.
+    // PD-107, external-vs-local scheme classification PD-108), and the five
+    // presentation/errors slate cases (the soft-landing diagnostic surface — now
+    // four shapes under PD-109, including the NRN-367 owner-side dynamic-field
+    // gate's unknown-field rejection — and grammar-wide last-wins PD-110) —
+    // covered divergences, not drift.
     assert!(
-        stdout.contains("48 cases: 35 match, 13 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("49 cases: 35 match, 14 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [

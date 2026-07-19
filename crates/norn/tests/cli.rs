@@ -433,3 +433,121 @@ fn invalid_config_exits_one_with_the_config_diagnostic() {
         "expected the config path + serde detail, got: {stderr:?}"
     );
 }
+
+/// A unique, short, isolated runtime dir for a summon-driven test (keeps the
+/// owner's Unix socket inside `sun_path`'s ~104-byte limit and off the dev's
+/// real runtime dir). `tag` disambiguates concurrent tests in this file.
+#[cfg(unix)]
+fn isolated_runtime_dir(tag: &str) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::path::PathBuf::from(format!("/tmp/nrn367-{tag}-{}", nanos % 100_000_000));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// A single-document vault seeded with `title` / `status` frontmatter, returned
+/// as `(guard, vault_root)`. The vault is a NON-hidden `vault/` subdirectory of
+/// the tempdir: `tempfile::tempdir()` names its dir `.tmpXXXX` (dot-prefixed),
+/// and the graph walk skips hidden directories, so warming a dot-prefixed root
+/// directly would index zero documents. The subdir keeps the walked root
+/// non-hidden while the parent tempdir still auto-cleans.
+#[cfg(unix)]
+fn seeded_vault() -> (tempfile::TempDir, std::path::PathBuf) {
+    let guard = tempfile::tempdir().unwrap();
+    let vault = guard.path().join("vault");
+    std::fs::create_dir(&vault).unwrap();
+    std::fs::write(
+        vault.join("a.md"),
+        "---\ntype: note\ntitle: Hello\nstatus: active\n---\nbody\n",
+    )
+    .unwrap();
+    (guard, vault)
+}
+
+/// NRN-367: an unknown dynamic field (`--titel foo`, a typo of the `title`
+/// field) rejects end-to-end with a `norn:` headline naming the field plus a
+/// did-you-mean `hint:` line, exit 1, and a byte-empty stdout — instead of the
+/// pre-gate behavior of silently desugaring to `--eq titel:foo` and returning an
+/// empty result set at exit 0. Drives the real bin through a summon so the whole
+/// owner-side-gate → wire → CLI-diagnostic path is exercised.
+#[cfg(unix)]
+#[test]
+fn unknown_dynamic_field_rejects_with_did_you_mean() {
+    let (_guard, vault) = seeded_vault();
+    let runtime_dir = isolated_runtime_dir("unknown");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let out = norn()
+        .arg("-C")
+        .arg(&vault)
+        .args(["find", "--titel", "foo"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an unknown dynamic field must exit 1; stderr was: {stderr:?}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must stay byte-empty on a rejection, got: {:?}",
+        stdout_of(&out)
+    );
+    assert!(
+        stderr.contains("norn: unknown field `titel`"),
+        "expected the `norn:`-prefixed headline naming the field, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("hint:") && stderr.contains("`title`"),
+        "expected a did-you-mean `hint:` line pointing at `title`, got: {stderr:?}"
+    );
+}
+
+/// NRN-367 correctness guard: a VALID dynamic field that simply matches zero
+/// documents must NOT be gated — it returns an empty set at exit 0, exactly as
+/// before. `--status backlog` is a known (observed) field with a value no doc
+/// carries, so the gate passes and the query runs to an empty result.
+#[cfg(unix)]
+#[test]
+fn valid_dynamic_field_with_zero_matches_stays_empty_exit_zero() {
+    let (_guard, vault) = seeded_vault();
+    let runtime_dir = isolated_runtime_dir("zeromatch");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let out = norn()
+        .arg("-C")
+        .arg(&vault)
+        .args(["find", "--status", "backlog", "--format", "paths"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a valid field matching nothing must exit 0; stderr was: {stderr:?}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "a zero-match query has empty stdout, got: {:?}",
+        stdout_of(&out)
+    );
+    assert!(
+        !stderr.contains("unknown field"),
+        "a known field must not be gated as unknown, got: {stderr:?}"
+    );
+}
