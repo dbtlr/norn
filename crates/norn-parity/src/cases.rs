@@ -582,6 +582,75 @@ const READ_CASES: &[Case] = &[
         requires_code: None,
         normalize: NO_NORM,
     },
+    Case {
+        // `--section`: resolve a named heading's exact span. `notes/alpha.md` has
+        // nested headings (`# Alpha`, `## Section One/Two/Three`); the resolved
+        // span is a keyed `sections` object. Pins the section-read primitive.
+        id: "read-get-section-json-zoo",
+        argv: &[
+            "get",
+            "alpha",
+            "--section",
+            "Section One",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // The same section read in records — the verbatim span rendered as a
+        // labeled block (request order preserved), byte-identical to the json span.
+        id: "read-get-section-records-zoo",
+        argv: &["get", "alpha", "--section", "Section One"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Alias addressing: the zoo config sets `links.alias_field: aliases` and
+        // `notes/beta.md` declares `aliases: [bee]`, so `get bee` resolves via the
+        // alias fallback (stem `bee` does not exist). Pins alias resolution.
+        id: "read-get-alias-json-zoo",
+        argv: &["get", "bee", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/beta.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Deep facets in the RECORDS format (json-only elsewhere in the matrix):
+        // `.headings` folds to `# text` display lines via record_block reflow.
+        id: "read-find-col-headings-records-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:note",
+            "--col",
+            ".headings",
+            "--format",
+            "records",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
 ];
 
 /// describe ports for real (NRN-347): the structure view (folders + declared

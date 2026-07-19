@@ -42,7 +42,7 @@ fn self_check_end_to_end_is_all_match_exit_0() {
         output.status.code()
     );
     assert!(
-        stdout.contains("37 cases: 37 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("41 cases: 41 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -76,14 +76,15 @@ fn default_mode_gates_help_cases_exit_0() {
         "expected exit 0 (find/count match, help cases diverge-with-entry, zero drift), got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
     );
-    // NRN-346 ports find + count; NRN-347 adds three deep-facet find cases, six
-    // get cases, and six describe cases — all 31 find/count/get/describe cases
-    // must Match the oracle (pure byte-parity, no ledger entry). The three help
-    // cases still diverge — help-bare by the `vault` namespace + GLOBAL OPTIONS
+    // NRN-346 ports find + count; NRN-347 adds three deep-facet find cases, ten
+    // get cases (incl. --section + alias addressing), a records-format deep-facet
+    // case, and six describe cases — all 35 find/count/get/describe cases must
+    // Match the oracle (pure byte-parity, no ledger entry). The three help cases
+    // still diverge — help-bare by the `vault` namespace + GLOBAL OPTIONS
     // (PD-101), help-find / help-validate by the GLOBAL OPTIONS change (PD-102),
     // covered divergences, not drift.
     assert!(
-        stdout.contains("34 cases: 31 match, 3 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("38 cases: 35 match, 3 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
