@@ -39,10 +39,18 @@ pub struct Cli {
 // top-level `--help` and diverge from the oracle (whose root has none).
 //
 // Order is load-bearing: the custom help renderer lists globals in declaration
-// order, so `cwd, config, verbose, no-cache-refresh, color` reproduces the
-// oracle's GLOBAL OPTIONS block. The two help bools and the new-world `--vault`
-// global (ADR 0017, `hide`d until resolution is wired) are excluded from that
-// block by the extractor.
+// order, so `cwd, verbose, no-cache-refresh, color, vault` reproduces this
+// build's GLOBAL OPTIONS block. The two help bools are excluded from that block
+// by the extractor.
+//
+// Divergence from the pinned oracle (0.48), decision-gated in the parity ledger
+// (NRN-345): the global `--config` is DELETED — under the registered-vault model
+// (ADR 0017) the per-vault config is resolver-derived
+// (`[vaults.<name>].config -> <root>/.norn/config.yaml`), not a free-floating
+// global path — and the new-world `--vault NAME` global is UNHIDDEN, since
+// name-addressed routing (`norn-client`) now consumes it. Both changes reshape
+// every command's GLOBAL OPTIONS block, covered by ledger entries PD-101 /
+// PD-102.
 #[derive(Debug, Args)]
 pub struct GlobalArgs {
     #[arg(
@@ -53,14 +61,6 @@ pub struct GlobalArgs {
         help = "Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)"
     )]
     pub cwd: Option<PathBuf>,
-
-    #[arg(
-        long,
-        global = true,
-        help_heading = "Global options",
-        help = "YAML config file. Defaults to <cwd>/.norn/config.yaml when present"
-    )]
-    pub config: Option<PathBuf>,
 
     #[arg(
         long,
@@ -88,10 +88,17 @@ pub struct GlobalArgs {
     )]
     pub color: ColorWhen,
 
-    /// Target the registered vault with this name (ADR 0017). Hidden from help
-    /// until resolution is wired — the oracle predates it, so exposing it would
-    /// diverge every command's GLOBAL OPTIONS block from parity.
-    #[arg(long, global = true, hide = true, value_name = "NAME")]
+    /// Target the registered vault with this name (ADR 0017). Now exposed —
+    /// the summoner (`norn-client`) resolves it through the registry to pick the
+    /// vault an invocation routes to. A decided-better divergence from the pinned
+    /// oracle, ledger entries PD-101 / PD-102.
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        help_heading = "Global options",
+        help = "Target the registered vault with this name (see `norn vault register`)"
+    )]
     pub vault: Option<String>,
 
     #[arg(
@@ -1169,12 +1176,16 @@ mod tests {
     }
 
     #[test]
-    fn config_flag_parses_after_subcommand() {
-        let cli = Cli::try_parse_from(["norn", "get", "alpha", "--config", "/c.yaml"]).unwrap();
-        assert_eq!(
-            cli.global.config.as_deref(),
-            Some(std::path::Path::new("/c.yaml"))
-        );
+    fn vault_flag_parses_after_subcommand() {
+        let cli = Cli::try_parse_from(["norn", "get", "alpha", "--vault", "atlas"]).unwrap();
+        assert_eq!(cli.global.vault.as_deref(), Some("atlas"));
+    }
+
+    #[test]
+    fn removed_global_config_is_a_parse_error() {
+        // The global `--config` was deleted (ADR 0017 resolver-derived config);
+        // it must no longer parse as a global flag.
+        assert!(Cli::try_parse_from(["norn", "get", "alpha", "--config", "/c.yaml"]).is_err());
     }
 
     #[test]

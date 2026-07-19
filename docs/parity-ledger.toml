@@ -35,16 +35,33 @@ oracle_version = "0.48.0"   # the pinned oracle; the runner verifies `--version`
 
 # The registered-vault namespace (ADR 0017) is a new-world surface the pinned
 # oracle (0.48) predates. It appears in the top-level `--help` COMMANDS list as
-# one extra `vault` row after every ported oracle command; every other help
-# surface (find/validate) stays byte-identical, so this is the sole help
-# divergence. Live help examples (the "--help builds the cache" behavior) do NOT
-# diverge: under the harness the oracle opens a freshly-created empty cache and
-# emits none, matching the rewrite — no entry needed there.
+# one extra `vault` row after every ported oracle command. The addressing
+# rework (NRN-345) additionally reshapes the GLOBAL OPTIONS block on EVERY
+# command: the global `--config` is deleted (per-vault config is resolver-derived
+# under ADR 0017, `[vaults.<name>].config -> <root>/.norn/config.yaml`, not a
+# free-floating global path) and the `--vault NAME` global is unhidden (the
+# summoner consumes it to pick the routed vault). help-bare carries both the
+# command-list and the global-options change; help-validate / help-find carry
+# only the global-options change. Live help examples (the "--help builds the
+# cache" behavior) do NOT diverge: under the harness the oracle opens a
+# freshly-created empty cache and emits none, matching the rewrite.
 [[entry]]
 id = "PD-101"
-surface = "--help (top-level command list)"
+surface = "--help (top-level command list + GLOBAL OPTIONS)"
 cases = ["help-bare"]
-old = "the 22-command list ends at `audit`; there is no registered-vault namespace"
-new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry"
+old = "the 22-command list ends at `audit` with no registered-vault namespace; GLOBAL OPTIONS lists `--config` and has no `--vault`"
+new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`"
+reason = "decided-better"
+decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
+
+# The per-command GLOBAL OPTIONS change (NRN-345) on the two ported subcommand
+# help surfaces. Both drop `--config` and gain `--vault NAME`; neither has a
+# command list, so the GLOBAL OPTIONS block is their sole divergence.
+[[entry]]
+id = "PD-102"
+surface = "<command> --help (GLOBAL OPTIONS block)"
+cases = ["help-validate", "help-find"]
+old = "GLOBAL OPTIONS lists `--config <YAML config file>` and has no `--vault`"
+new = "GLOBAL OPTIONS drops `--config` (config is resolver-derived under ADR 0017) and adds `--vault NAME` (registered-vault targeting the summoner consumes)"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"

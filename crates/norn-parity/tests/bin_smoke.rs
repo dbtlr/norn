@@ -76,17 +76,20 @@ fn default_mode_gates_help_cases_exit_0() {
         "expected exit 0 (phase-1: help cases match or diverge-with-entry, zero drift), got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
     );
-    // Phase 1 (NRN-329) gates the three help cases. help-find / help-validate
-    // match the oracle byte-for-byte; help-bare diverges by the new `vault`
-    // namespace, cited by ledger entry PD-101 — a passing verdict, not drift.
+    // NRN-345 reshapes the GLOBAL OPTIONS block on every command (drops
+    // `--config`, adds `--vault`), so all three gated help cases now diverge:
+    // help-bare by the `vault` namespace + GLOBAL OPTIONS (PD-101), and
+    // help-find / help-validate by the GLOBAL OPTIONS change (PD-102) — every
+    // one a covered divergence, not drift.
     assert!(
-        stdout.contains("3 cases: 2 match, 1 diverged, 0 drift, 0 stale entries"),
-        "expected the exact phase-1 gated summary, got:\n{stdout}"
+        stdout.contains("3 cases: 0 match, 3 diverged, 0 drift, 0 stale entries"),
+        "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
         "help-bare",
         "diverged",
         "PD-101",
+        "PD-102",
         "help-find",
         "help-validate",
     ] {
