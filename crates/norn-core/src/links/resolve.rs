@@ -502,6 +502,42 @@ mod tests {
     }
 
     #[test]
+    fn markdown_link_block_ref_validates_against_target_block_ids() {
+        // NRN-356: a Markdown `[x](b.md#^blk1)` now carries a block_ref (not an
+        // anchor), so resolution validates it against the target's block-ids and
+        // resolves when the id exists — where the donor slugified `^blk1` as a
+        // heading anchor and reported anchor-missing.
+        let files = vec![make_file("a.md"), make_file("b.md")];
+        let mut documents = vec![make_document("a.md"), make_document("b.md")];
+        documents[1].block_ids.push("blk1".to_string());
+        let mut link = make_wikilink("a.md", "b.md");
+        link.kind = LinkKind::Markdown;
+        link.block_ref = Some("blk1".to_string());
+        documents[0].links.push(link);
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Resolved);
+        assert_eq!(link.resolved_path, Some("b.md".into()));
+    }
+
+    #[test]
+    fn markdown_link_block_ref_missing_reports_block_ref_missing() {
+        let files = vec![make_file("a.md"), make_file("b.md")];
+        let mut documents = vec![make_document("a.md"), make_document("b.md")];
+        let mut link = make_wikilink("a.md", "b.md");
+        link.kind = LinkKind::Markdown;
+        link.block_ref = Some("nope".to_string());
+        documents[0].links.push(link);
+        resolve_links(&files, &mut documents);
+        let link = &documents[0].links[0];
+        assert_eq!(link.status, LinkStatus::Unresolved);
+        assert_eq!(
+            link.unresolved_reason,
+            Some(UnresolvedReason::BlockRefMissing)
+        );
+    }
+
+    #[test]
     fn wikilink_with_missing_anchor_returns_anchor_missing() {
         let files = vec![make_file("a.md"), make_file("b.md")];
         let mut documents = vec![make_document("a.md"), make_document("b.md")];

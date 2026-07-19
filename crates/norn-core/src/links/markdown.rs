@@ -11,16 +11,7 @@ use crate::domain::{Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatu
 use camino::Utf8Path;
 use pulldown_cmark::{Event, Parser, Tag};
 
-use super::target::{decode_percent_escapes, is_local_file_target, is_local_markdown_target};
-
-/// Split a target on its first `#` into `(target, anchor)`; a plain target has no
-/// anchor. Mirrors `norn_frontmatter::wikilink::split_anchor` on owned strings.
-fn split_anchor(raw: &str) -> (String, Option<String>) {
-    match raw.split_once('#') {
-        Some((target, anchor)) => (target.to_string(), Some(anchor.to_string())),
-        None => (raw.to_string(), None),
-    }
-}
+use super::target::{is_local_file_target, is_local_markdown_target, split_and_decode_destination};
 
 /// Extract every local Markdown link and image embed from a document body.
 ///
@@ -42,7 +33,7 @@ pub fn parse_markdown_links(
             Event::Start(Tag::Link { dest_url, .. }) => {
                 let raw = dest_url.to_string();
                 if is_local_markdown_target(&raw) {
-                    let (target, anchor) = split_anchor(&decode_percent_escapes(&raw));
+                    let (target, anchor, block_ref) = split_and_decode_destination(&raw);
                     links.push(Link {
                         source_path: source_path.to_path_buf(),
                         raw,
@@ -50,7 +41,7 @@ pub fn parse_markdown_links(
                         target,
                         label: None,
                         anchor,
-                        block_ref: None,
+                        block_ref,
                         source_span: Some(SourceSpan::at(content, body_start + range.start)),
                         source_context: Some(LinkSourceContext {
                             area: LinkSourceArea::Body,
@@ -66,7 +57,7 @@ pub fn parse_markdown_links(
             Event::Start(Tag::Image { dest_url, .. }) => {
                 let raw = dest_url.to_string();
                 if is_local_file_target(&raw) {
-                    let (target, anchor) = split_anchor(&decode_percent_escapes(&raw));
+                    let (target, anchor, block_ref) = split_and_decode_destination(&raw);
                     links.push(Link {
                         source_path: source_path.to_path_buf(),
                         raw,
@@ -74,7 +65,7 @@ pub fn parse_markdown_links(
                         target,
                         label: None,
                         anchor,
-                        block_ref: None,
+                        block_ref,
                         source_span: Some(SourceSpan::at(content, body_start + range.start)),
                         source_context: Some(LinkSourceContext {
                             area: LinkSourceArea::Body,
@@ -133,6 +124,51 @@ mod tests {
         let links = parse("[with anchor](Markdown%20Target.md#Encoded%20Heading)\n");
         assert_eq!(links[0].target, "Markdown Target.md");
         assert_eq!(links[0].anchor.as_deref(), Some("Encoded Heading"));
+    }
+
+    #[test]
+    fn encoded_hash_in_destination_stays_one_path_segment() {
+        // NRN-356: split-then-decode. `%23` is not a literal `#`, so the whole
+        // reference is one path segment naming a file called `note#draft.md` —
+        // NOT `note` + anchor `draft.md` (which decode-then-split produced).
+        let links = parse("[hashpath](note%23draft.md)\n");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "note#draft.md");
+        assert_eq!(links[0].anchor, None);
+        assert_eq!(links[0].block_ref, None);
+    }
+
+    #[test]
+    fn block_ref_fragment_populates_block_ref_not_anchor() {
+        // NRN-356: a `#^id` fragment on a Markdown destination classifies as a
+        // block reference, exactly like the wikilink path.
+        let links = parse("[blk](target.md#^blk1)\n");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "target.md");
+        assert_eq!(links[0].block_ref.as_deref(), Some("blk1"));
+        assert_eq!(links[0].anchor, None);
+    }
+
+    #[test]
+    fn skips_scheme_bearing_and_protocol_relative_destinations() {
+        // NRN-357: generic scheme classification excludes every external form —
+        // including mixed-case schemes, `tel:`/`file:`, protocol-relative `//`,
+        // and Windows drive letters — that the old lowercase prefix list let
+        // through as (unresolved) local links.
+        let links = parse(
+            "[a](tel:+15551234) [b](file:///etc/hosts) [c](//example.com/x) \
+             [d](C:/Users/x/n.md) [e](hTTp://example.com)\n",
+        );
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn image_embed_carries_block_ref() {
+        // The split-then-decode path applies to image embeds too.
+        let links = parse("![pic](target.md#^blk2)\n");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].kind, LinkKind::Embed);
+        assert_eq!(links[0].block_ref.as_deref(), Some("blk2"));
     }
 
     #[test]

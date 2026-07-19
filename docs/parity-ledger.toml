@@ -123,3 +123,37 @@ old = "`--limit N --no-limit` is a hard conflict: the oracle exits 2 with `the a
 new = "`--limit N --no-limit` is accepted last-wins (NRN-331): `--no-limit` given last wins → unlimited, exit 0. The CLI resolves the order into one wire value; on the wire `no_limit` wins when both arrive"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-356: Markdown-link destinations follow URL-parser rules (RFC 3986 /
+# WHATWG). The fragment is split from the RAW reference BEFORE percent-decoding,
+# then path and fragment decode SEPARATELY, and a `#^id` fragment classifies as a
+# block reference (one resolution semantics with wikilinks). The oracle decoded
+# the whole reference first and split afterward, and never modeled a Markdown
+# block ref. `edge/url-decode-linker.md` isolates both effects on a text-edge
+# probe: `note%23draft.md` (encoded hash) and `url-block-target.md#^blk1` (block
+# ref resolving against the sibling's `^blk1`).
+[[entry]]
+id = "PD-107"
+surface = "get --col .outgoing_links,.unresolved_links (Markdown-link split-then-decode + block-ref)"
+cases = ["url-edge-decode-split-blockref"]
+old = "decode-then-split: `note%23draft.md` decodes first, so the `#` splits it into target `note` + anchor `draft.md` (unresolved target-missing); `url-block-target.md#^blk1` slugifies `^blk1` as a heading anchor, reported anchor-missing"
+new = "split-then-decode (NRN-356): the fragment is split off the raw reference before decoding, so `note%23draft.md` stays one path segment named `note#draft.md`; `#^blk1` classifies as a block ref (like the wikilink path) that resolves against the target's `^blk1` block-id (a resolved outgoing link)"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-357: external-vs-local classification of a Markdown destination follows URL
+# rules — any valid RFC 3986 scheme (case-insensitive), a protocol-relative
+# `//`, or a Windows drive-letter path (normalized to a `file:` URL) is external
+# and leaves the link universe. The oracle used a hand-rolled lowercase prefix
+# list (`http`/`https`/`mailto`/`#`), so `tel:` / `file:` / `//` / drive letters
+# / mixed-case `hTTp:` all leaked through as unresolved local links.
+# `edge/url-scheme-linker.md` isolates all five external forms on a text-edge
+# probe.
+[[entry]]
+id = "PD-108"
+surface = "get --col .outgoing_links,.unresolved_links (external-vs-local scheme classification)"
+cases = ["url-edge-scheme-classification"]
+old = "a hand-rolled lowercase prefix list classifies only `http://`/`https://`/`mailto:`/`#` as external; `tel:`, `file:`, protocol-relative `//`, a `C:/…` drive letter, and mixed-case `hTTp://` all fall through as local links, reported unresolved (target-missing)"
+new = "URL-rules classification (NRN-357): any case-insensitive RFC 3986 scheme, a protocol-relative `//`, or a Windows drive-letter path is external and excluded from the link model, so none of these destinations appear as links at all; a destination whose first segment contains a colon (e.g. `note:draft.md`) also reads as scheme-qualified and classifies external — disambiguate a literal colon-named vault file with a `./` prefix"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
