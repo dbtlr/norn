@@ -30,13 +30,13 @@ Format: `- [ ] old path → provisional destination`. Verb modules port as
 
 ### Text layer → `norn-frontmatter`
 
-- [ ] `src/frontmatter.rs`, `src/frontmatter/` → frontmatter parse/serialize/minimal-edit (the byte-splicing invariant, ADR 0008)
+- [x] `src/frontmatter.rs`, `src/frontmatter/` → frontmatter parse/serialize/minimal-edit (the byte-splicing invariant, ADR 0008) → `norn-frontmatter` (NRN-339). Text layer also absorbed the syntax slices of the links/heading/section modules below — see their parentheticals.
 
 ### Domain model, graph, query → `norn-core`
 
-- [ ] `src/core.rs`, `src/core/` → domain model
+- [ ] `src/core.rs`, `src/core/` → domain model (partial: the `Heading` struct + `SourceSpan` text-layer projection already ported to `norn-frontmatter` in NRN-339; the rest of the domain model remains)
 - [ ] `src/graph.rs`, `src/graph/` → vault graph
-- [ ] `src/links.rs`, `src/links/` → link model + resolution
+- [ ] `src/links.rs`, `src/links/` → link model + resolution (partial: wikilink SYNTAX — `wikilink` token recognition, `anchor` split/slug/block-id, and heading parsing from `commonmark` — already ported to `norn-frontmatter` in NRN-339; the link model, Markdown-link extraction, and all of `resolve.rs` remain here for norn-core)
 - [ ] `src/query.rs`, `src/filter.rs`, `src/filter_args.rs`, `src/validate_filter.rs` → query/predicate layer
 - [ ] `src/grammar.rs` → canonical-form + forgiving-input grammar (ADR 0010)
 - [ ] `src/standards.rs`, `src/standards/` → standards pack / rules
@@ -59,7 +59,7 @@ Format: `- [ ] old path → provisional destination`. Verb modules port as
 ### Verb modules (Params/execute/Report seams) → `norn-core`
 
 - [ ] `src/find/`, `src/count/`, `src/get/`, `src/describe/` → read verbs
-- [ ] `src/set/`, `src/new/`, `src/edit/`, `src/move/`, `src/delete/`, `src/rewrite_wikilink/` → mutation verbs
+- [ ] `src/set/`, `src/new/`, `src/edit/`, `src/move/`, `src/delete/`, `src/rewrite_wikilink/` → mutation verbs (partial: `edit/transform.rs`'s `SectionSpan` + `resolve_section` heading→span primitive already ported to `norn-frontmatter::section` in NRN-339; the edit-op grammar and the verbs themselves remain)
 - [ ] `src/env/` → VaultEnv (value-in value-out; no ambient reads in the new world)
 
 ### Config → `norn-config`
