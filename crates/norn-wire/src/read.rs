@@ -32,6 +32,20 @@ pub struct FindParams {
     pub filter: FilterParams,
     #[serde(skip_serializing_if = "is_default_paging")]
     pub paging: SortPaginateParams,
+    /// Load each match's deep connection facets (headings + the three link
+    /// sets) alongside the flat projection. Off by default — a plain `find`
+    /// never pays the per-match connection load; the CLI turns this on only
+    /// when a deep `--col` facet (`.headings` / `.outgoing_links` /
+    /// `.unresolved_links` / `.incoming_links`) or `--all-cols` is requested,
+    /// so the empty-vs-loaded distinction is the CLI's: it renders a deep facet
+    /// only when it asked for one (and so it was loaded), never a misleading
+    /// empty array for an unrequested facet.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub with_connections: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn is_default_filter(f: &FilterParams) -> bool {
@@ -53,9 +67,13 @@ pub struct FindReport {
     pub truncated: bool,
 }
 
-/// One matched document, projected flat (no joined headings/links — those are a
-/// later deep-facet port). Frontmatter is carried as-parsed so the CLI can
-/// project any `--col` field or emit the whole block.
+/// One matched document. Frontmatter and body are carried as-parsed so the CLI
+/// can project any `--col` field or emit the whole block. The deep connection
+/// facets (headings + the three link sets) are carried as pre-serialized JSON
+/// values (`serde_json::to_value` of the cache's `Heading` / `Link` /
+/// `IncomingLink`), so the CLI's `--format json` emission is byte-identical to
+/// the cache's own serialization; they are populated only when the request set
+/// [`FindParams::with_connections`], and are empty otherwise.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FindDoc {
     pub path: String,
@@ -65,6 +83,20 @@ pub struct FindDoc {
     pub frontmatter: Option<Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub body_text: String,
+    /// Serialized `Heading` values (`{ level, slug, text, source_span }`),
+    /// document order. Empty unless connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<Value>,
+    /// Serialized resolved `Link` values. Empty unless connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outgoing_links: Vec<Value>,
+    /// Serialized unresolved `Link` values. Empty unless connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_links: Vec<Value>,
+    /// Serialized `IncomingLink` values (`{ source_path, link }`). Empty unless
+    /// connections were loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incoming_links: Vec<Value>,
 }
 
 /// A `count` request: the `--by` grouping fields plus the shared filter surface.
@@ -191,6 +223,10 @@ mod tests {
                 hash: "h".into(),
                 frontmatter: Some(json!({"type": "note"})),
                 body_text: "body".into(),
+                headings: vec![],
+                outgoing_links: vec![],
+                unresolved_links: vec![],
+                incoming_links: vec![],
             }],
             total: 1,
             returned: 1,

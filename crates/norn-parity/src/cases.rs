@@ -441,6 +441,68 @@ const READ_CASES: &[Case] = &[
         normalize: NO_NORM,
     },
     Case {
+        // Deep-facet load (NRN-347): `--col .headings` loads each match's
+        // headings and emits them verbatim — the previously-gated facet, now
+        // pinned to the oracle forever.
+        id: "read-find-col-headings-json-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:note",
+            "--col",
+            ".headings",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--all-cols` — the full structured dump: frontmatter + headings + the
+        // three link sets + body, all loaded via the deep-fetch (NRN-347).
+        id: "read-find-all-cols-json-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:note",
+            "--all-cols",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Incoming links exercise the back-link query (a distinct cache path
+        // from headings/outgoing) — pin it too.
+        id: "read-find-col-incoming-json-zoo",
+        argv: &[
+            "find",
+            "--col",
+            ".incoming_links",
+            "--format",
+            "json",
+            "--all",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
         id: "read-get-alpha-zoo",
         // Stem form, not `notes/alpha` — see module docs. The resolved target
         // is the vault-relative doc below; tie the argv to the manifest.

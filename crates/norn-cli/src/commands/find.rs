@@ -6,11 +6,11 @@
 //! (paths / records / json / jsonl) is byte-faithful to the donor (`src/find/`).
 //!
 //! Deep facets (`.headings`, `.outgoing_links`, `.unresolved_links`,
-//! `.incoming_links`) and `--all-cols` require the not-yet-ported deep-fetch;
-//! the flat wire projection carries frontmatter + body only. Rather than render
-//! a misleading empty result (an agent would read `.headings: []` as "no
-//! headings" when there may be some), requesting one FAILS CLOSED with a clear
-//! "not yet available" error until the deep-fetch port lands (NRN-347).
+//! `.incoming_links`) and `--all-cols` load the matches' full connection sets
+//! (NRN-347). The CLI sets [`FindParams::with_connections`] only when one of
+//! those facets is requested, so an unrequested deep facet is never rendered as
+//! a misleading empty array — the empty-vs-loaded distinction lives here, where
+//! the request is known.
 
 use std::io::Write;
 
@@ -23,9 +23,20 @@ use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 use crate::output::palette::{self, Palette};
 use crate::output::primitives::{count_line, record_block, separator, Field};
 use crate::output::projection::{
-    filter_frontmatter, first_deferred_facet, frontmatter_to_display, json_value_inline,
-    split_cols, unknown_facet_message, warn_col_ignored, KNOWN_FACETS,
+    filter_frontmatter, frontmatter_to_display, headings_to_display, incoming_links_to_display,
+    json_value_inline, outgoing_links_to_display, split_cols, unknown_facet_message,
+    unresolved_links_to_display, warn_col_ignored, KNOWN_FACETS,
 };
+
+/// The deep connection facets that require a per-match connection load. When any
+/// is requested (or `--all-cols`), the CLI sets `with_connections` so the owner
+/// loads them; otherwise a plain `find` never pays that cost.
+const DEEP_FACETS: &[&str] = &[
+    "headings",
+    "outgoing_links",
+    "unresolved_links",
+    "incoming_links",
+];
 
 const NAME: &str = "find";
 
@@ -91,6 +102,16 @@ impl FindArgs {
         (self.filter.to_params(), self.paging.to_params())
     }
 
+    /// Whether the request needs each match's deep connection facets loaded —
+    /// true for `--all-cols` or any deep `--col` facet.
+    fn wants_connections(&self) -> bool {
+        if self.all_cols {
+            return true;
+        }
+        let (facets, _fields) = split_cols(&self.col);
+        facets.iter().any(|f| DEEP_FACETS.contains(&f.as_str()))
+    }
+
     /// Whether any filter predicate is present (an empty `--text` is not one).
     /// Compared against the empty default so a new predicate flag can never be
     /// silently missed (donor `has_predicate`).
@@ -117,25 +138,6 @@ pub fn run<O: Write, E: Write>(
         return EXIT_USAGE;
     }
 
-    // NRN-347: deep facets (headings + link sets) and `--all-cols` need the
-    // not-yet-ported deep-fetch. Fail closed — never render an empty structural
-    // column that reads as "none" when there may be some. Delete this gate when
-    // deep-fetch lands (the flat facets `.path`/`.stem`/`.frontmatter`/`.body`/
-    // `.document_hash` and bare fields keep working). Checked before summon so a
-    // rejected request never spins up an owner.
-    if args.all_cols {
-        presenter.diagnostic(
-            "`--all-cols` is not yet available in this build (it includes structural columns pending the deep-fetch port)",
-        );
-        return EXIT_OPERATIONAL;
-    }
-    if let Some(facet) = first_deferred_facet(&args.col) {
-        presenter.diagnostic(&format!(
-            "the `.{facet}` column is not yet available in this build"
-        ));
-        return EXIT_OPERATIONAL;
-    }
-
     let mut session = match crate::routed::open_session(global) {
         Ok(s) => s,
         Err(msg) => {
@@ -145,7 +147,11 @@ pub fn run<O: Write, E: Write>(
     };
 
     let (filter, paging) = args.to_params();
-    let params = FindParams { filter, paging };
+    let params = FindParams {
+        filter,
+        paging,
+        with_connections: args.wants_connections(),
+    };
     let report = match session.find(params) {
         Ok(r) => r,
         Err(e) => {
@@ -345,15 +351,17 @@ fn doc_to_json(doc: &FindDoc, cols: &[String], all_cols: bool) -> serde_json::Va
             filter_frontmatter(doc.frontmatter.as_ref(), &fields),
         );
     }
-    // Deep facets render as empty arrays until deep-fetch lands.
-    for facet in [
-        "headings",
-        "outgoing_links",
-        "unresolved_links",
-        "incoming_links",
+    // Deep facets: emit the pre-serialized values verbatim (byte-identical to
+    // the cache's own `Heading`/`Link`/`IncomingLink` serialization). Populated
+    // only when connections were loaded (`--all-cols` or a deep `--col` facet).
+    for (facet, values) in [
+        ("headings", &doc.headings),
+        ("outgoing_links", &doc.outgoing_links),
+        ("unresolved_links", &doc.unresolved_links),
+        ("incoming_links", &doc.incoming_links),
     ] {
         if all_cols || allow.contains(facet) {
-            map.insert(facet.into(), serde_json::Value::Array(Vec::new()));
+            map.insert(facet.into(), serde_json::Value::Array(values.clone()));
         }
     }
     if all_cols || allow.contains("body") {
@@ -409,6 +417,29 @@ fn build_record_pairs(doc: &FindDoc, cols: &[String], all_cols: bool) -> Vec<(St
                 pairs.push(("frontmatter".into(), value));
             }
         }
+    }
+    // Deep facets, in the donor's field order; each emitted only when requested
+    // (or `--all-cols`) AND non-empty (an empty facet contributes no row).
+    if (all_cols || facet_set.contains("headings")) && !doc.headings.is_empty() {
+        pairs.push(("headings".into(), headings_to_display(&doc.headings)));
+    }
+    if (all_cols || facet_set.contains("outgoing_links")) && !doc.outgoing_links.is_empty() {
+        pairs.push((
+            "outgoing_links".into(),
+            outgoing_links_to_display(&doc.outgoing_links),
+        ));
+    }
+    if (all_cols || facet_set.contains("unresolved_links")) && !doc.unresolved_links.is_empty() {
+        pairs.push((
+            "unresolved_links".into(),
+            unresolved_links_to_display(&doc.unresolved_links),
+        ));
+    }
+    if (all_cols || facet_set.contains("incoming_links")) && !doc.incoming_links.is_empty() {
+        pairs.push((
+            "incoming_links".into(),
+            incoming_links_to_display(&doc.incoming_links),
+        ));
     }
     if all_cols || facet_set.contains("body") {
         let body = doc.body_text.trim();
@@ -505,6 +536,10 @@ mod tests {
             hash: "h".into(),
             frontmatter: if fm.is_null() { None } else { Some(fm) },
             body_text: "body".into(),
+            headings: vec![],
+            outgoing_links: vec![],
+            unresolved_links: vec![],
+            incoming_links: vec![],
         }
     }
 
@@ -536,77 +571,41 @@ mod tests {
         assert_eq!(s, r#"{"frontmatter":null,"path":"a.md"}"#);
     }
 
-    // ── NRN-347 fail-closed gate: deep facets + --all-cols reject; flat OK ──
+    // ── NRN-347 deep facets: --all-cols / a deep --col loads connections ──
 
-    /// Drive `run` with an in-memory presenter. Only meaningful for inputs the
-    /// deep-facet gate rejects BEFORE summon (a passing input would try to spawn
-    /// an owner), which is exactly what these tests exercise.
-    fn run_find(argv: &[&str]) -> (i32, String, String) {
-        let cli = Cli::try_parse_from(argv).unwrap();
-        let global = cli.global;
-        let args = match cli.command {
-            Command::Find(a) => a,
-            other => panic!("expected find, got {other:?}"),
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let code = {
-            let mut p = Presenter::new(&mut out, &mut err);
-            run(&args, &global, &mut p)
-        };
-        (
-            code,
-            String::from_utf8(out).unwrap(),
-            String::from_utf8(err).unwrap(),
-        )
+    #[test]
+    fn wants_connections_only_for_deep_cols_or_all_cols() {
+        assert!(find_args(&["norn", "find", "--all", "--all-cols"]).wants_connections());
+        assert!(find_args(&["norn", "find", "--all", "--col", ".headings"]).wants_connections());
+        assert!(
+            find_args(&["norn", "find", "--all", "--col", ".incoming_links"]).wants_connections()
+        );
+        // Flat facets and bare fields never trigger the connection load.
+        assert!(!find_args(&["norn", "find", "--all", "--col", ".stem"]).wants_connections());
+        assert!(!find_args(&["norn", "find", "--all", "--col", "title"]).wants_connections());
+        assert!(!find_args(&["norn", "find", "--all"]).wants_connections());
     }
 
     #[test]
-    fn all_cols_is_rejected_before_summon() {
-        let (code, out, err) = run_find(&["norn", "find", "--all", "--all-cols"]);
-        assert_eq!(code, EXIT_OPERATIONAL);
-        assert!(out.is_empty(), "stdout must stay empty");
-        assert!(
-            err.contains("`--all-cols` is not yet available"),
-            "got: {err:?}"
+    fn json_deep_facet_emits_serialized_values_verbatim() {
+        let mut d = doc("a.md", serde_json::json!({"type": "note"}));
+        d.headings = vec![serde_json::json!({"level": 2, "text": "Sec", "slug": "sec"})];
+        let v = doc_to_json(&d, &[".headings".to_string()], false);
+        // The heading value is emitted byte-for-byte under the facet key.
+        assert_eq!(
+            v["headings"],
+            serde_json::json!([{"level": 2, "text": "Sec", "slug": "sec"}])
         );
     }
 
     #[test]
-    fn each_deep_facet_col_is_rejected_before_summon() {
-        for facet in [
-            ".headings",
-            ".outgoing_links",
-            ".unresolved_links",
-            ".incoming_links",
-        ] {
-            let (code, out, err) = run_find(&["norn", "find", "--all", "--col", facet]);
-            assert_eq!(code, EXIT_OPERATIONAL, "facet {facet} should reject");
-            assert!(out.is_empty(), "stdout must stay empty for {facet}");
-            assert!(
-                err.contains(&format!("the `{facet}` column is not yet available")),
-                "facet {facet} got: {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn flat_facets_and_fields_pass_the_gate() {
-        // The gate returns None for the currently-available columns, so they
-        // proceed past it (to summon + render, covered by the parity suite).
-        for cols in [
-            vec![".stem".to_string()],
-            vec![".body".to_string()],
-            vec![".path".to_string()],
-            vec![".frontmatter".to_string()],
-            vec![".document_hash".to_string()],
-            vec!["title".to_string()],
-            vec![".stem".to_string(), "title".to_string()],
-        ] {
-            assert!(
-                first_deferred_facet(&cols).is_none(),
-                "flat cols {cols:?} must pass the deep-facet gate"
-            );
-        }
+    fn records_deep_facet_folds_to_display_string() {
+        let mut d = doc("a.md", serde_json::json!({"type": "note"}));
+        d.headings = vec![serde_json::json!({"level": 2, "text": "Sec", "slug": "sec"})];
+        let pairs = build_record_pairs(&d, &[".headings".to_string()], false);
+        assert!(
+            pairs.iter().any(|(k, v)| k == "headings" && v == "## Sec"),
+            "expected a headings row rendered as '## Sec', got {pairs:?}"
+        );
     }
 }

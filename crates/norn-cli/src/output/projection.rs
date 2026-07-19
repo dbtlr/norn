@@ -6,19 +6,16 @@
 //! renders a JSON value as a concise display string.
 //!
 //! Deep facets (`.headings`, `.outgoing_links`, `.unresolved_links`,
-//! `.incoming_links`) are recognized here (so they never warn as unknown) but
-//! their per-doc display data is not yet carried on the flat wire projection —
-//! the deep-fetch port lands them. Until then they render empty.
+//! `.incoming_links`) are carried on the wire as pre-serialized JSON values (the
+//! cache's own `Heading` / `Link` / `IncomingLink` serialization). The JSON
+//! output emits them verbatim; the records renderer folds them to the donor's
+//! one-line display strings via [`headings_to_display`] and the link helpers.
 
 use serde_json::Value;
 use std::io::Write;
 
 /// The structural facets addressable via `--col` (dot-prefixed; dot stripped
 /// here). Bare `--col` names are frontmatter field names instead.
-///
-/// The [`DEFERRED_FACETS`] subset is recognized (so a request for one is a
-/// clear "not yet available" error rather than an "unknown facet" warning) but
-/// its data is gated off until the deep-fetch port (see [`first_deferred_facet`]).
 pub const KNOWN_FACETS: &[&str] = &[
     "path",
     "stem",
@@ -30,34 +27,6 @@ pub const KNOWN_FACETS: &[&str] = &[
     "body",
     "document_hash",
 ];
-
-/// Structural facets that require the not-yet-ported deep-fetch (headings + the
-/// three link sets). The flat wire projection carries frontmatter + body only,
-/// so these would render EMPTY — which an agent reads as "no headings / no
-/// links" when there may be some. That is a trust violation, so requesting one
-/// (or `--all-cols`, which includes them) fails closed instead (see
-/// [`first_deferred_facet`]).
-///
-/// NRN-347: delete this list and the gate when deep-fetch lands.
-pub const DEFERRED_FACETS: &[&str] = &[
-    "headings",
-    "outgoing_links",
-    "unresolved_links",
-    "incoming_links",
-];
-
-/// The first deep (deferred) facet a `--col` request names, dot-stripped, or
-/// `None` when every requested facet is a currently-available flat facet
-/// (`.path` / `.stem` / `.frontmatter` / `.body` / `.document_hash`) or a bare
-/// frontmatter field. The caller fails the invocation closed on `Some`.
-///
-/// NRN-347: delete when deep-fetch lands.
-pub fn first_deferred_facet(cols: &[String]) -> Option<String> {
-    let (facets, _fields) = split_cols(cols);
-    facets
-        .into_iter()
-        .find(|f| DEFERRED_FACETS.contains(&f.as_str()))
-}
 
 /// Partition `--col` tokens into structural facets (dot-prefixed, dot stripped)
 /// and frontmatter field names (bare).
@@ -118,6 +87,73 @@ pub fn unknown_facet_message(facet: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("unknown --col facet '.{facet}' (valid facets: {valid}; bare names select frontmatter fields)")
+}
+
+/// Render serialized `Heading` values as `# text` lines, one per heading
+/// (donor `headings_to_display`). Each value is `{ level, text, ... }`; a
+/// missing/negative level renders no `#` prefix.
+pub fn headings_to_display(headings: &[Value]) -> String {
+    headings
+        .iter()
+        .map(|h| {
+            let level = h.get("level").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let text = h.get("text").and_then(Value::as_str).unwrap_or("");
+            format!("{} {}", "#".repeat(level), text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render serialized resolved `Link` values as `target  →  resolved` (or bare
+/// `target` when unresolved) — donor `outgoing_links_to_display`.
+pub fn outgoing_links_to_display(links: &[Value]) -> String {
+    links
+        .iter()
+        .map(|l| {
+            let target = l.get("target").and_then(Value::as_str).unwrap_or("");
+            match l.get("resolved_path").and_then(Value::as_str) {
+                Some(resolved) => format!("{target}  →  {resolved}"),
+                None => target.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render serialized unresolved `Link` values as `target  (unresolved: reason)`
+/// (donor `unresolved_links_to_display`). The reason is the kebab-case
+/// `unresolved_reason` serialization the cache already emits.
+pub fn unresolved_links_to_display(links: &[Value]) -> String {
+    links
+        .iter()
+        .map(|l| {
+            let target = l.get("target").and_then(Value::as_str).unwrap_or("");
+            let reason = l
+                .get("unresolved_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("{target}  (unresolved: {reason})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render serialized `IncomingLink` values (`{ source_path, link }`) as
+/// `source_path  raw` (donor `incoming_links_to_display`).
+pub fn incoming_links_to_display(links: &[Value]) -> String {
+    links
+        .iter()
+        .map(|il| {
+            let source = il.get("source_path").and_then(Value::as_str).unwrap_or("");
+            let raw = il
+                .get("link")
+                .and_then(|l| l.get("raw"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("{source}  {raw}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Flatten a frontmatter object into `key: value` lines (records `.frontmatter`).
