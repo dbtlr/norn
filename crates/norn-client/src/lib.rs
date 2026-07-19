@@ -33,7 +33,7 @@ pub use summon::OWNER_MODE_ARG;
 
 // Re-export the resolver vocabulary so a caller wires the CLI's `--vault` / `-C`
 // straight through without also naming `norn-config`.
-pub use norn_config::{ConfigHome, Resolved, ResolveInput, ResolvedVia, Registry};
+pub use norn_config::{ConfigHome, Registry, ResolveInput, Resolved, ResolvedVia};
 
 /// One-line boundary contract, referenced by every dependent so each
 /// declared edge in the crate map is compiler-load-bearing.
@@ -138,7 +138,9 @@ pub fn open(config: &SummonConfig) -> Result<OwnerSession, ClientError> {
 /// [`ResolvedVia::UnregisteredCwd`] outcome is not an error — its root still gets
 /// a summoned ephemeral owner.
 pub fn resolve(home: ConfigHome, input: &ResolveInput) -> Result<Resolved, ClientError> {
-    Registry::new(home).resolve(input).map_err(ClientError::from)
+    Registry::new(home)
+        .resolve(input)
+        .map_err(ClientError::from)
 }
 
 fn ensure_runtime_dir_0700(dir: &std::path::Path) -> Result<(), ClientError> {

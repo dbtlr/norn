@@ -139,10 +139,7 @@ impl ParsedOwnerArgs {
 }
 
 #[cfg(unix)]
-fn next_value<'a>(
-    it: &mut impl Iterator<Item = &'a String>,
-    flag: &str,
-) -> Result<String, String> {
+fn next_value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<String, String> {
     it.next()
         .cloned()
         .ok_or_else(|| format!("{flag} requires a value"))

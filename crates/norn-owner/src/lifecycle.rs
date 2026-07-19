@@ -63,7 +63,9 @@ pub fn acquire_owner_lock(lock_path: &Utf8Path, version: &str) -> anyhow::Result
             let _ = file.read_to_string(&mut body);
             match body.split_whitespace().next() {
                 Some(pid) if !pid.is_empty() => {
-                    anyhow::bail!("norn owner: another owner is already serving this vault (pid {pid})")
+                    anyhow::bail!(
+                        "norn owner: another owner is already serving this vault (pid {pid})"
+                    )
                 }
                 _ => anyhow::bail!("norn owner: another owner is already serving this vault"),
             }
@@ -71,7 +73,9 @@ pub fn acquire_owner_lock(lock_path: &Utf8Path, version: &str) -> anyhow::Result
         // Any OTHER error (an flock-unsupported filesystem, EIO, …) is NOT
         // contention; propagate it so the real failure is debuggable.
         Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("failed to lock owner lock {lock_path}")));
+            return Err(
+                anyhow::Error::new(e).context(format!("failed to lock owner lock {lock_path}"))
+            );
         }
     }
 
@@ -130,9 +134,16 @@ mod tests {
             w.flush().unwrap();
         }
 
-        let err = acquire_owner_lock(&lock_path, "0.0.0").expect_err("must refuse a contended lock");
-        assert!(err.to_string().contains("already serving"), "unexpected error: {err}");
-        assert!(err.to_string().contains("424242"), "should surface incumbent pid: {err}");
+        let err =
+            acquire_owner_lock(&lock_path, "0.0.0").expect_err("must refuse a contended lock");
+        assert!(
+            err.to_string().contains("already serving"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("424242"),
+            "should surface incumbent pid: {err}"
+        );
         drop(held);
     }
 
@@ -142,7 +153,10 @@ mod tests {
         let lock_path = Utf8PathBuf::from_path_buf(tmp.path().join("owner.lock")).unwrap();
         let file = acquire_owner_lock(&lock_path, "9.9.9").expect("free lock should acquire");
         let body = std::fs::read_to_string(lock_path.as_std_path()).unwrap();
-        assert!(body.starts_with(&std::process::id().to_string()), "body: {body:?}");
+        assert!(
+            body.starts_with(&std::process::id().to_string()),
+            "body: {body:?}"
+        );
         assert!(body.contains("9.9.9"));
         drop(file);
     }
@@ -153,7 +167,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(tmp.path().join("norn-rt")).unwrap();
         ensure_runtime_dir(&dir).unwrap();
-        let mode = std::fs::metadata(dir.as_std_path()).unwrap().permissions().mode();
+        let mode = std::fs::metadata(dir.as_std_path())
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o700, "runtime dir must be owner-only");
     }
 

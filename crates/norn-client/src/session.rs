@@ -75,7 +75,9 @@ impl OwnerSession {
                 writer_progress,
             }),
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!("expected pong, got {other:?}"))),
+            other => Err(ClientError::Protocol(format!(
+                "expected pong, got {other:?}"
+            ))),
         }
     }
 
@@ -84,7 +86,9 @@ impl OwnerSession {
         match self.request(&ClientFrame::Probe)? {
             OwnerFrame::Probe { document_count } => Ok(document_count),
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!("expected probe report, got {other:?}"))),
+            other => Err(ClientError::Protocol(format!(
+                "expected probe report, got {other:?}"
+            ))),
         }
     }
 
@@ -160,7 +164,10 @@ pub(crate) fn connect(socket: &Path) -> std::io::Result<UnixStream> {
 /// Connect with bounded retry/backoff — the owner needs a moment to bind after
 /// being spawned. Returns [`ClientError::OwnerUnavailable`] if nothing binds
 /// within `budget`.
-pub(crate) fn connect_with_retry(socket: &Path, budget: Duration) -> Result<UnixStream, ClientError> {
+pub(crate) fn connect_with_retry(
+    socket: &Path,
+    budget: Duration,
+) -> Result<UnixStream, ClientError> {
     let start = Instant::now();
     let mut backoff = Duration::from_millis(5);
     loop {

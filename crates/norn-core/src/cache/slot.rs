@@ -576,7 +576,10 @@ mod tests {
     fn spin_until(budget: Duration, mut cond: impl FnMut() -> bool) {
         let start = Instant::now();
         while !cond() {
-            assert!(start.elapsed() < budget, "condition not met within {budget:?}");
+            assert!(
+                start.elapsed() < budget,
+                "condition not met within {budget:?}"
+            );
             std::thread::yield_now();
         }
     }
@@ -617,8 +620,8 @@ mod tests {
             .collect();
 
         barrier.wait(); // release all N readers at once
-        // All must register on the (single, pending) ticket before we let the
-        // writer run — this is what makes the collapse deterministic.
+                        // All must register on the (single, pending) ticket before we let the
+                        // writer run — this is what makes the collapse deterministic.
         spin_until(Duration::from_secs(10), || slot.refresh_arrivals() == N);
 
         resume_tx.send(()).unwrap(); // let the one coalesced refresh run
@@ -661,7 +664,11 @@ mod tests {
             .collect();
 
         for h in handles {
-            assert_eq!(h.join().unwrap(), 3, "every concurrent reader must see c.md");
+            assert_eq!(
+                h.join().unwrap(),
+                3,
+                "every concurrent reader must see c.md"
+            );
         }
     }
 
@@ -733,7 +740,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(bulk.join().unwrap().unwrap(), ApplyIncrementOutcome::Published);
+        assert_eq!(
+            bulk.join().unwrap().unwrap(),
+            ApplyIncrementOutcome::Published
+        );
         for r in readers {
             let n = r.join().unwrap();
             assert!(n == 2 || n == 3, "reader saw an in-range count: {n}");
@@ -742,6 +752,9 @@ mod tests {
         // The published increment is visible afterwards.
         let generation = slot.ensure_current().unwrap();
         let conn = generation.checkout_read();
-        assert_eq!(conn.documents_matching(&Default::default()).unwrap().len(), 3);
+        assert_eq!(
+            conn.documents_matching(&Default::default()).unwrap().len(),
+            3
+        );
     }
 }

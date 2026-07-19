@@ -6,8 +6,9 @@ use std::path::PathBuf;
 /// Why a summon-or-connect failed.
 #[derive(Debug)]
 pub enum ClientError {
-    /// Central-config resolution failed (unknown name, stale entry, …).
-    Resolve(norn_config::ConfigError),
+    /// Central-config resolution failed (unknown name, stale entry, …). Boxed
+    /// so a `ClientError` stays small (`ConfigError` carries paths + strings).
+    Resolve(Box<norn_config::ConfigError>),
     /// The runtime dir for sockets could not be determined (neither
     /// `XDG_RUNTIME_DIR` nor `TMPDIR`/uid usable).
     NoRuntimeDir,
@@ -60,6 +61,6 @@ impl std::error::Error for ClientError {}
 
 impl From<norn_config::ConfigError> for ClientError {
     fn from(e: norn_config::ConfigError) -> Self {
-        ClientError::Resolve(e)
+        ClientError::Resolve(Box::new(e))
     }
 }

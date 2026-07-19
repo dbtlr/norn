@@ -100,15 +100,15 @@ mod tests {
         };
         let line = serde_json::to_string(&frame).unwrap();
         assert!(!line.contains('\n'));
-        assert_eq!(
-            serde_json::from_str::<ClientFrame>(&line).unwrap(),
-            frame
-        );
+        assert_eq!(serde_json::from_str::<ClientFrame>(&line).unwrap(), frame);
     }
 
     #[test]
     fn probe_frame_has_no_fields() {
-        assert_eq!(serde_json::to_string(&ClientFrame::Probe).unwrap(), r#"{"op":"probe"}"#);
+        assert_eq!(
+            serde_json::to_string(&ClientFrame::Probe).unwrap(),
+            r#"{"op":"probe"}"#
+        );
     }
 
     #[test]
@@ -125,7 +125,10 @@ mod tests {
             },
         };
         let line = serde_json::to_string(&frame).unwrap();
-        assert!(!line.contains("build"), "absent build must not serialize: {line}");
+        assert!(
+            !line.contains("build"),
+            "absent build must not serialize: {line}"
+        );
         assert_eq!(serde_json::from_str::<OwnerFrame>(&line).unwrap(), frame);
     }
 

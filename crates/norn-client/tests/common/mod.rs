@@ -19,7 +19,10 @@ pub fn workspace_root() -> PathBuf {
                 }
             }
         }
-        assert!(dir.pop(), "walked past filesystem root looking for workspace root");
+        assert!(
+            dir.pop(),
+            "walked past filesystem root looking for workspace root"
+        );
     }
 }
 
