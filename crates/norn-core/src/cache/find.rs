@@ -261,6 +261,21 @@ mod tests {
     }
 
     #[test]
+    fn paging_beyond_end_returns_empty() {
+        let (_tmp, root) = synth_paged_vault();
+        let cache = built(&root);
+        let q = FindQuery {
+            starts_at: 100,
+            limit: Some(10),
+            ..Default::default()
+        };
+        let result = cache.find_documents(&q).unwrap();
+        assert_eq!(result.total, 25);
+        assert_eq!(result.returned, 0);
+        assert!(result.truncated, "0 returned but 25 total → truncated");
+    }
+
+    #[test]
     fn sort_by_frontmatter_field_asc() {
         let (_tmp, root) = synth_paged_vault();
         let cache = built(&root);

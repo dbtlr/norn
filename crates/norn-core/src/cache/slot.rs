@@ -380,6 +380,13 @@ fn open_or_adopt(
         number
     };
     // A reopen does not re-run the full build: the db content is already present.
+    //
+    // SEAM (phase 4, banked): this path is reached only on an index-relevant
+    // config change, which is a resummon in the registered-vault model today, so
+    // it does not fire in phase 2. Before it is wired live, an index-relevant
+    // change MUST trigger a rebuild-or-reshred here (the deleted reshred-on-open) —
+    // opening N+1 over a db built under the OLD index set would serve stale EAV
+    // rows. Do not wire the watcher/config-change trigger to this without that.
     let generation = Arc::new(open_generation(
         db_path, vault_root, config, number, /* build = */ false,
     )?);

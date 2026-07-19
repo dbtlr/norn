@@ -34,6 +34,15 @@ pub enum CacheError {
     #[error("cache changed after the mutation's baseline was captured but before publication was reserved")]
     IncrementBaselineDrift,
 
+    /// An affected source file changed on disk between the parse that produced
+    /// the cache rows and the commit that would publish them — the re-read hash no
+    /// longer matches the parsed content. Committing anyway would write stale
+    /// content under a fresh `(mtime,size)` baseline that the stat-sweep probe
+    /// would then read as Fresh forever. The refresh/increment aborts; the next
+    /// probe re-fires.
+    #[error("affected source changed while its cache rows were being committed: {path}")]
+    IncrementSourceDrift { path: Utf8PathBuf },
+
     #[error("graph build error: {0}")]
     GraphBuild(#[from] crate::graph::IndexError),
 }

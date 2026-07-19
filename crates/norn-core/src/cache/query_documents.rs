@@ -1009,31 +1009,6 @@ mod tests {
         fields.iter().map(|s| s.to_string()).collect()
     }
 
-    fn synth_vault() -> (TempDir, Utf8PathBuf) {
-        let tmp = TempDir::new().unwrap();
-        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
-            .unwrap()
-            .join("vault");
-        std::fs::create_dir(root.as_std_path()).unwrap();
-        std::fs::write(
-            root.join("note-a.md").as_std_path(),
-            "---\ntype: note\nkind: log\n---\nbody a\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("note-b.md").as_std_path(),
-            "---\ntype: note\nkind: meeting\n---\nbody b\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("workspace.md").as_std_path(),
-            "---\ntype: workspace\n---\nbody w\n",
-        )
-        .unwrap();
-        std::fs::write(root.join("untyped.md").as_std_path(), "no frontmatter\n").unwrap();
-        (tmp, root)
-    }
-
     fn open_authoritative(root: &Utf8PathBuf, fields: &[&str]) -> Cache {
         let mut cache =
             Cache::open_with_index(root, None, &[], index_set(fields), "hash-1").unwrap();
@@ -1042,105 +1017,249 @@ mod tests {
     }
 
     fn paths(docs: &[DocumentSummary]) -> Vec<String> {
-        docs.iter().map(|d| d.path.to_string()).collect()
+        let mut p: Vec<String> = docs.iter().map(|d| d.path.to_string()).collect();
+        p.sort();
+        p
     }
 
-    #[test]
-    fn eav_and_scan_agree_on_eq_not_eq_has_missing_in_not_in() {
-        let (_tmp, root) = synth_vault();
-        let cache = open_authoritative(&root, &["type", "kind"]);
-
-        let cases: Vec<DocumentQuery> = vec![
-            DocumentQuery {
-                frontmatter_eq: vec![("type".into(), serde_json::json!("note"))],
-                ..Default::default()
-            },
-            DocumentQuery {
-                frontmatter_has: vec!["type".into()],
-                frontmatter_not_eq: vec![("type".into(), serde_json::json!("note"))],
-                ..Default::default()
-            },
-            DocumentQuery {
-                frontmatter_has: vec!["kind".into()],
-                ..Default::default()
-            },
-            DocumentQuery {
-                frontmatter_missing: vec!["kind".into()],
-                ..Default::default()
-            },
-            DocumentQuery {
-                frontmatter_in: vec![(
-                    "kind".into(),
-                    vec![serde_json::json!("log"), serde_json::json!("meeting")],
-                )],
-                ..Default::default()
-            },
-            DocumentQuery {
-                frontmatter_not_in: vec![("type".into(), vec![serde_json::json!("workspace")])],
-                ..Default::default()
-            },
-        ];
-
-        for query in &cases {
-            // EAV routed (fields indexed) vs scan (explicit).
-            let routed = cache.documents_matching(query).unwrap();
-            let (scan_sql, scan_binds) = build_documents_matching_sql_parts_scan(query);
-            let scan_full = format!(
-                "SELECT path, stem, hash, frontmatter_json, body_text FROM documents{scan_sql} ORDER BY path"
-            );
-            let mut stmt = cache.conn().prepare(&scan_full).unwrap();
-            let scan_paths: Vec<String> = stmt
-                .query_map(params_from_iter(scan_binds.iter()), |r| {
-                    r.get::<_, String>(0)
-                })
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect();
-            assert_eq!(paths(&routed), scan_paths, "mismatch for {query:?}");
-        }
+    fn explain_plan(cache: &Cache, sql: &str, binds: &[SqlValue]) -> Vec<String> {
+        let explain = format!("EXPLAIN QUERY PLAN {sql}");
+        let mut stmt = cache.conn().prepare(&explain).unwrap();
+        stmt.query_map(params_from_iter(binds.iter()), |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
     }
 
-    #[test]
-    fn two_predicate_positive_query_plan_is_search_no_scan() {
-        let (_tmp, root) = synth_vault();
-        let cache = open_authoritative(&root, &["type", "kind"]);
-        let query = DocumentQuery {
-            frontmatter_eq: vec![
-                ("type".into(), serde_json::json!("note")),
-                ("kind".into(), serde_json::json!("log")),
-            ],
-            ..Default::default()
-        };
-        let (where_sql, binds) = build_documents_matching_sql_parts(&cache, &query);
+    fn plan_for(cache: &Cache, query: &DocumentQuery) -> (String, Vec<String>) {
+        let (where_sql, binds) = build_documents_matching_sql_parts(cache, query);
         let sql = format!("SELECT path FROM documents{where_sql}");
-        let plan = explain_plan(&cache, &sql, &binds);
+        (where_sql.clone(), explain_plan(cache, &sql, &binds))
+    }
+
+    /// The EAV planner-guard invariant: no full SCAN of either `documents` or
+    /// `document_fields`. A per-row degradation of the EAV subquery would show as
+    /// `SCAN document_fields`, which the disarmed `!SCAN documents`-only check
+    /// missed entirely.
+    fn no_scan(rows: &[String]) {
         assert!(
-            !plan.iter().any(|r| r.contains("SCAN documents")),
-            "positive EAV query should not full-scan documents: {plan:?}"
+            !rows.iter().any(|r| r.contains("SCAN documents")),
+            "must not SCAN documents: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("SCAN document_fields")),
+            "must not SCAN document_fields (per-row subquery degradation): {rows:?}"
         );
     }
 
+    fn drives_kv(rows: &[String]) {
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("SEARCH") && r.contains("idx_document_fields_kv")),
+            "must drive via a SEARCH on idx_document_fields_kv: {rows:?}"
+        );
+    }
+
+    fn matched(cache: &Cache, query: &DocumentQuery) -> Vec<String> {
+        paths(&cache.documents_matching(query).unwrap())
+    }
+
+    // ── A realistic multi-shape fixture (ported from the donor mimir vault) ──
+    fn mimir_vault() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        let docs: &[(&str, &str)] = &[
+            (
+                "t-100.md",
+                "---\nproject: NRN\nlifecycle: active\ntype: task\n\
+                 depends_on: [\"[[T-123]]\"]\ntags: [\"release:v0.40\", \"area:cache\"]\n\
+                 anchor: \"[[NRN-80-anchor]]\"\n---\nbody\n",
+            ),
+            (
+                "t-101.md",
+                "---\nproject: NRN\nlifecycle: done\ntype: task\n\
+                 depends_on: []\ntags: [\"release:v0.39\"]\nanchor: \"[[NRN-79-anchor]]\"\n---\nbody\n",
+            ),
+            (
+                "t-102.md",
+                "---\nproject: NRN\nlifecycle: abandoned\ntype: task\ntags: [\"type:note\"]\n---\nbody\n",
+            ),
+            (
+                "t-103.md",
+                "---\nproject: NRN\nlifecycle: backlog\ntype: task\n\
+                 depends_on: [\"[[T-123]]\", \"[[T-999]]\"]\ntags: [\"release:v0.41\"]\n---\nbody\n",
+            ),
+            (
+                "t-104.md",
+                "---\nproject: ATLAS\nlifecycle: active\ntype: task\ntags: [\"area:vault\"]\n---\nbody\n",
+            ),
+            (
+                "t-105.md",
+                "---\nproject: NRN\nlifecycle: active\ntype: task\n---\nbody\n",
+            ),
+        ];
+        for (name, body) in docs {
+            std::fs::write(root.join(name).as_std_path(), body).unwrap();
+        }
+        (tmp, root)
+    }
+
+    fn open_mimir(root: &Utf8PathBuf) -> Cache {
+        open_authoritative(
+            root,
+            &[
+                "project",
+                "lifecycle",
+                "type",
+                "depends_on",
+                "tags",
+                "anchor",
+            ],
+        )
+    }
+
+    // ── R3: --eq project:NRN --not-in lifecycle:done,abandoned ──────────────
     #[test]
-    fn missing_query_plan_is_a_driving_search() {
-        let (_tmp, root) = synth_vault();
-        let cache = open_authoritative(&root, &["kind"]);
+    fn r3_positive_eq_drives_kv_negation_probes_pk() {
+        let (_tmp, root) = mimir_vault();
+        let cache = open_mimir(&root);
         let query = DocumentQuery {
-            frontmatter_missing: vec!["kind".into()],
+            frontmatter_eq: vec![("project".into(), serde_json::json!("NRN"))],
+            frontmatter_not_in: vec![(
+                "lifecycle".into(),
+                vec![serde_json::json!("done"), serde_json::json!("abandoned")],
+            )],
             ..Default::default()
         };
-        let (where_sql, binds) = build_documents_matching_sql_parts(&cache, &query);
-        let sql = format!("SELECT path FROM documents{where_sql}");
-        let plan = explain_plan(&cache, &sql, &binds);
+        let (_where_sql, rows) = plan_for(&cache, &query);
+        drives_kv(&rows);
         assert!(
-            plan.iter().any(|r| r.contains("document_fields")),
-            "--missing should drive on document_fields: {plan:?}"
+            rows.iter().any(|r| r.contains("idx_document_fields_pk")),
+            "negated --not-in must probe via idx_document_fields_pk: {rows:?}"
+        );
+        no_scan(&rows);
+        assert_eq!(
+            matched(&cache, &query),
+            vec!["t-100.md", "t-103.md", "t-105.md"]
+        );
+    }
+
+    // ── R5: --eq depends_on:T-123 (reverse dependency, array wikilink) ──────
+    #[test]
+    fn r5_reverse_dependency_array_wikilink_field_drives_search() {
+        let (_tmp, root) = mimir_vault();
+        let cache = open_mimir(&root);
+        let query = DocumentQuery {
+            frontmatter_eq: vec![("depends_on".into(), serde_json::json!("T-123"))],
+            ..Default::default()
+        };
+        let (_where_sql, rows) = plan_for(&cache, &query);
+        drives_kv(&rows);
+        no_scan(&rows);
+        assert_eq!(matched(&cache, &query), vec!["t-100.md", "t-103.md"]);
+    }
+
+    // ── --missing anchor: sentinel-driven SEARCH ────────────────────────────
+    #[test]
+    fn missing_anchor_drives_search_with_sentinel_bind() {
+        let (_tmp, root) = mimir_vault();
+        let cache = open_mimir(&root);
+        let query = DocumentQuery {
+            frontmatter_missing: vec!["anchor".into()],
+            ..Default::default()
+        };
+        let (where_sql, _binds) = build_documents_matching_sql_parts(&cache, &query);
+        assert!(
+            where_sql.contains("x'00'"),
+            "--missing must reference the x'00' absent-sentinel: {where_sql}"
+        );
+        let (_where_sql, rows) = plan_for(&cache, &query);
+        drives_kv(&rows);
+        no_scan(&rows);
+        assert_eq!(
+            matched(&cache, &query),
+            vec!["t-102.md", "t-103.md", "t-104.md", "t-105.md"]
+        );
+    }
+
+    // ── B1/R6: --starts-with tags:release: is a range SEARCH ────────────────
+    #[test]
+    fn prefix_tags_release_namespace_is_range_search() {
+        let (_tmp, root) = mimir_vault();
+        let cache = open_mimir(&root);
+        let query = DocumentQuery {
+            frontmatter_starts_with: vec![("tags".into(), "release:".into())],
+            ..Default::default()
+        };
+        let (where_sql, rows) = plan_for(&cache, &query);
+        assert!(
+            where_sql.contains("value >= ?") && where_sql.contains("value < ?"),
+            "starts-with's text branch must compile to a value range test: {where_sql}"
+        );
+        assert!(
+            where_sql.contains("UNION"),
+            "starts-with must compile to the two-branch union: {where_sql}"
+        );
+        drives_kv(&rows);
+        no_scan(&rows);
+        assert_eq!(
+            matched(&cache, &query),
+            vec!["t-100.md", "t-101.md", "t-103.md"]
+        );
+    }
+
+    // ── Adversarial: ~50%-selective --eq must still SEARCH, never scan ──────
+    #[test]
+    fn adversarial_non_selective_eq_still_no_scan() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        for i in 0..200 {
+            let ty = if i % 2 == 0 { "note" } else { "log" };
+            std::fs::write(
+                root.join(format!("doc{i:04}.md")).as_std_path(),
+                format!("---\ntype: {ty}\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+        let cache = open_authoritative(&root, &["type"]);
+        let query = DocumentQuery {
+            frontmatter_eq: vec![("type".into(), serde_json::json!("note"))],
+            ..Default::default()
+        };
+        let (_where_sql, rows) = plan_for(&cache, &query);
+        drives_kv(&rows);
+        no_scan(&rows);
+        assert_eq!(cache.documents_matching(&query).unwrap().len(), 100);
+    }
+
+    // ── Unfiltered doc-set load is a single-row plan (no per-row subquery) ──
+    #[test]
+    fn default_query_is_single_scan_no_per_row_subquery() {
+        let (_tmp, root) = mimir_vault();
+        let cache = open_mimir(&root);
+        let (_where_sql, rows) = plan_for(&cache, &DocumentQuery::default());
+        assert_eq!(
+            rows.len(),
+            1,
+            "the doc-set load should be a single plan row (no join/subquery): {rows:?}"
+        );
+        assert!(
+            rows[0].contains("SCAN documents"),
+            "no predicate narrows the set, so a single full scan is the only plan: {rows:?}"
         );
     }
 
     #[test]
     fn unindexed_field_falls_back_to_scan_plan() {
-        let (_tmp, root) = synth_vault();
-        // Only `type` indexed; query filters an unindexed field → scan.
+        let (_tmp, root) = mimir_vault();
+        // `type` indexed but `kind` is not → the referenced unindexed field
+        // forces the whole query onto the json_extract scan path.
         let cache = open_authoritative(&root, &["type"]);
         let query = DocumentQuery {
             frontmatter_eq: vec![("kind".into(), serde_json::json!("log"))],
@@ -1153,12 +1272,191 @@ mod tests {
         );
     }
 
-    fn explain_plan(cache: &Cache, sql: &str, binds: &[SqlValue]) -> Vec<String> {
-        let explain = format!("EXPLAIN QUERY PLAN {sql}");
-        let mut stmt = cache.conn().prepare(&explain).unwrap();
-        stmt.query_map(params_from_iter(binds.iter()), |r| r.get::<_, String>(3))
+    // ── EAV/scan agreement, per value shape (parity is the hard invariant) ──
+    //
+    // Each case is run BOTH routed (via `documents_matching` over an authoritative
+    // cache with the fields indexed) and via the scan builder directly, and the
+    // two result sets must be identical for every shape.
+    fn assert_routed_matches_scan(cache: &Cache, query: &DocumentQuery) {
+        let routed = matched(cache, query);
+        let (scan_sql, scan_binds) = build_documents_matching_sql_parts_scan(query);
+        let sql = format!(
+            "SELECT path, stem, hash, frontmatter_json, body_text FROM documents{scan_sql} ORDER BY path"
+        );
+        let mut stmt = cache.conn().prepare(&sql).unwrap();
+        let mut scan: Vec<String> = stmt
+            .query_map(params_from_iter(scan_binds.iter()), |r| {
+                r.get::<_, String>(0)
+            })
             .unwrap()
             .map(|r| r.unwrap())
-            .collect()
+            .collect();
+        scan.sort();
+        assert_eq!(routed, scan, "EAV route diverged from scan for {query:?}");
+    }
+
+    #[test]
+    fn agree_eq_not_eq_has_missing() {
+        let (_tmp, root) = mimir_vault();
+        let cache = open_mimir(&root);
+        for q in [
+            DocumentQuery {
+                frontmatter_eq: vec![("project".into(), serde_json::json!("NRN"))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_has: vec!["project".into()],
+                frontmatter_not_eq: vec![("lifecycle".into(), serde_json::json!("active"))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_has: vec!["anchor".into()],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_missing: vec!["anchor".into()],
+                ..Default::default()
+            },
+        ] {
+            assert_routed_matches_scan(&cache, &q);
+        }
+    }
+
+    #[test]
+    fn agree_typed_eq_and_in_across_number_bool() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("n1.md").as_std_path(),
+            "---\npriority: 5\nflag: true\nscore: 2.5\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("n2.md").as_std_path(),
+            "---\npriority: 10\nflag: false\nscore: 2.5\n---\n",
+        )
+        .unwrap();
+        let cache = open_authoritative(&root, &["priority", "flag", "score"]);
+        for q in [
+            DocumentQuery {
+                frontmatter_eq: vec![("priority".into(), serde_json::json!(5))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![("flag".into(), serde_json::json!(true))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![("score".into(), serde_json::json!(2.5))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_in: vec![(
+                    "priority".into(),
+                    vec![serde_json::json!(5), serde_json::json!(10)],
+                )],
+                ..Default::default()
+            },
+        ] {
+            assert_routed_matches_scan(&cache, &q);
+        }
+    }
+
+    #[test]
+    fn agree_date_ops_before_after_on() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("old.md").as_std_path(),
+            "---\ncreated: 2025-01-15\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("mid.md").as_std_path(),
+            "---\ncreated: 2026-05-19\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("new.md").as_std_path(),
+            "---\ncreated: 2026-12-01\n---\n",
+        )
+        .unwrap();
+        let cache = open_authoritative(&root, &["created"]);
+        for q in [
+            DocumentQuery {
+                date_before: vec![("created".into(), "2026-01-01".into())],
+                ..Default::default()
+            },
+            DocumentQuery {
+                date_after: vec![("created".into(), "2026-01-01".into())],
+                ..Default::default()
+            },
+            DocumentQuery {
+                date_on: vec![("created".into(), "2026-05-19".into())],
+                ..Default::default()
+            },
+        ] {
+            assert_routed_matches_scan(&cache, &q);
+        }
+    }
+
+    #[test]
+    fn agree_unicode_multibyte_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("cafe.md").as_std_path(),
+            "---\nname: café-mocha\n---\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("cake.md").as_std_path(), "---\nname: cake\n---\n").unwrap();
+        let cache = open_authoritative(&root, &["name"]);
+        let q = DocumentQuery {
+            frontmatter_starts_with: vec![("name".into(), "café".into())],
+            ..Default::default()
+        };
+        assert_routed_matches_scan(&cache, &q);
+        assert_eq!(matched(&cache, &q), vec!["cafe.md"]);
+    }
+
+    #[test]
+    fn agree_embedded_wikilink_object_and_array_element() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("scalar.md").as_std_path(),
+            "---\nworkspace: \"[[norn]]\"\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("arr.md").as_std_path(),
+            "---\nsource_notes:\n  - \"[[seed-note]]\"\n  - \"[[other]]\"\n---\n",
+        )
+        .unwrap();
+        let cache = open_authoritative(&root, &["workspace", "source_notes"]);
+        for q in [
+            DocumentQuery {
+                frontmatter_eq: vec![("workspace".into(), serde_json::json!("norn"))],
+                ..Default::default()
+            },
+            DocumentQuery {
+                frontmatter_eq: vec![("source_notes".into(), serde_json::json!("seed-note"))],
+                ..Default::default()
+            },
+        ] {
+            assert_routed_matches_scan(&cache, &q);
+        }
     }
 }

@@ -17,10 +17,23 @@
 //! for authority, drop+reinsert the affected documents, then re-resolve the
 //! WHOLE links table (ADR — whole-table link re-resolution per increment: link
 //! resolution is a global function of the document set, so this is what keeps an
-//! incremental refresh identical to a full build). Deleted with the 0017 rewrite:
-//! the donor's `PublicationAuthority` filesystem double-re-proof — the trust seam
-//! (the request-boundary [`FreshnessProbe`](crate::cache::freshness::FreshnessProbe))
-//! is the authority now; the increment relies on the parse for content authority.
+//! incremental refresh identical to a full build).
+//!
+//! # Publication-time drift re-proof (the amended trust boundary)
+//!
+//! The request-boundary [`FreshnessProbe`](crate::cache::freshness::FreshnessProbe)
+//! authorizes *serving* a generation; it is NOT the authority for
+//! publication-time drift. A file written between the parse and the commit would
+//! otherwise land stale content under a fresh `(mtime,size)` baseline that the
+//! stat-sweep probe — which compares stats and never re-hashes — reads as Fresh
+//! forever. So every commit site ([`index_incremental`](Cache::index_incremental)
+//! and the chunked increment's [`begin`](Cache::begin_increment_commit) +
+//! terminal publish) re-reads each affected file, requires the re-read hash to
+//! equal the parsed document's expected hash, and takes the committed
+//! `(mtime,size)` from that same stable observation — aborting with
+//! [`CacheError::IncrementSourceDrift`] on mismatch. The donor's broader
+//! `PublicationAuthority` (channel/symlink/excluded-subtree re-proof) is gone;
+//! the load-bearing parsed-hash re-proof stays.
 //!
 //! # Chunked mutation increments (ADR 0013 / 0014, DORMANT here)
 //!
@@ -46,6 +59,32 @@ pub struct IndexReport {
     pub link_count: usize,
     pub file_count: usize,
     pub duration_ms: u128,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Fires once inside [`Cache::index_incremental`] AFTER the whole-vault parse
+    /// and BEFORE the commit transaction's drift re-proof, so a test can race a
+    /// filesystem write into that window and prove the re-proof aborts.
+    static AFTER_INCREMENT_PARSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_after_increment_parse_hook() {
+    AFTER_INCREMENT_PARSE.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_increment_parse_hook(hook: impl FnOnce() + 'static) {
+    AFTER_INCREMENT_PARSE.with(|slot| {
+        let previous = slot.borrow_mut().replace(Box::new(hook));
+        assert!(previous.is_none(), "increment-parse hook already installed");
+    });
 }
 
 impl crate::cache::Cache {
@@ -124,6 +163,8 @@ impl crate::cache::Cache {
             alias_field: self.alias_field.clone(),
         };
         let mut fresh_index = crate::graph::build_index_with_options(vault_root, &graph_opts)?;
+        #[cfg(test)]
+        run_after_increment_parse_hook();
 
         // Detection and the whole-vault parse are separate observations. Expand
         // the affected set to include every path+hash difference the parse
@@ -193,30 +234,49 @@ impl crate::cache::Cache {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut report = IndexReport::default();
 
+        // Publication-time drift re-proof INSIDE the commit transaction: re-read
+        // each affected source and bind the committed `(mtime,size)` to a hash
+        // that still matches the parse. A mismatch aborts the whole refresh (the
+        // next probe re-fires) rather than committing stale content under a fresh
+        // baseline.
+        let mut authoritative_metadata: HashMap<Utf8PathBuf, (i64, i64)> = HashMap::new();
+        for path in &affected_paths {
+            match verify_affected_metadata(
+                vault_root,
+                path,
+                &fresh_index,
+                &fresh_docs,
+                &fresh_files,
+            ) {
+                Ok(Some(observed)) => {
+                    authoritative_metadata.insert(path.clone(), observed);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tx.rollback()?;
+                    return Err(error);
+                }
+            }
+        }
+
         for change in &changes {
             let path = change.path();
+            let observed = authoritative_metadata.get(path).copied();
             tx.execute("DELETE FROM files WHERE path = ?", [path.as_str()])?;
             if let Some(&file_i) = fresh_files.get(path) {
-                let file = &fresh_index.files[file_i];
-                let absolute = vault_root.join(&file.path);
-                insert_file_with_metadata(
-                    &tx,
-                    file,
-                    mtime_ns(&absolute).unwrap_or(0),
-                    size_bytes(&absolute).unwrap_or(0),
-                )?;
+                let (mtime_ns, size_bytes) = observed.unwrap_or((0, 0));
+                insert_file_with_metadata(&tx, &fresh_index.files[file_i], mtime_ns, size_bytes)?;
             }
             crate::cache::invalidation::drop_document(&tx, path)?;
             if let Some(&doc_i) = fresh_docs.get(path) {
-                let doc = &fresh_index.documents[doc_i];
-                let absolute = vault_root.join(&doc.path);
+                let (mtime_ns, size_bytes) = observed.unwrap_or((0, 0));
                 insert_document_with_metadata(
                     &tx,
-                    doc,
+                    &fresh_index.documents[doc_i],
                     &mut report,
                     &index_set,
-                    mtime_ns(&absolute).unwrap_or(0),
-                    size_bytes(&absolute).unwrap_or(0),
+                    mtime_ns,
+                    size_bytes,
                 )?;
             }
         }
@@ -282,6 +342,8 @@ pub(crate) struct IncrementCommit {
     fresh_files: HashMap<Utf8PathBuf, usize>,
     publication_fingerprint: String,
     staged_metadata: HashMap<Utf8PathBuf, (i64, i64)>,
+    /// The affected paths, retained for the terminal-publish drift re-proof.
+    affected_paths: std::collections::BTreeSet<Utf8PathBuf>,
     pending: VecDeque<Utf8PathBuf>,
     pending_links: VecDeque<(usize, usize)>,
     next_link_sequence: i64,
@@ -409,14 +471,15 @@ impl crate::cache::Cache {
             .map(|(i, f)| (f.path.clone(), i))
             .collect();
 
-        // Metadata for the affected paths, stat'd once. The trust seam (the
-        // request-boundary probe) is the freshness authority; the increment does
-        // not re-prove the filesystem here.
+        // Drift re-proof for the affected paths: bind staged `(mtime,size)` to a
+        // re-read hash that still matches the parse (the same guard the terminal
+        // publish re-applies). A mismatch aborts the increment.
         let mut staged_metadata = HashMap::new();
         for path in &affected_paths {
-            let absolute = vault_root.join(path);
-            if let (Some(m), Some(s)) = (mtime_ns(&absolute), size_bytes(&absolute)) {
-                staged_metadata.insert(path.clone(), (m, s));
+            if let Some(observed) =
+                verify_affected_metadata(vault_root, path, &fresh_index, &fresh_docs, &fresh_files)?
+            {
+                staged_metadata.insert(path.clone(), observed);
             }
         }
 
@@ -435,6 +498,7 @@ impl crate::cache::Cache {
             fresh_files,
             publication_fingerprint,
             staged_metadata,
+            affected_paths,
             pending: pending.into_iter().collect(),
             pending_links,
             next_link_sequence: 0,
@@ -610,6 +674,38 @@ impl crate::cache::Cache {
             self.cleanup_staged_increment(job_id)?;
             commit.phase = IncrementPhase::Superseded;
             return Ok(());
+        }
+
+        // Terminal drift re-proof INSIDE the publish transaction: re-read each
+        // affected source, require the hash still match the parse, and overwrite
+        // the staged `(mtime,size)` with the terminal stable observation so the
+        // committed baseline can never encode content that changed after staging.
+        for path in &commit.affected_paths {
+            let observed = match verify_affected_metadata(
+                &self.vault_root,
+                path,
+                &commit.fresh_index,
+                &commit.fresh_docs,
+                &commit.fresh_files,
+            ) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    tx.rollback()?;
+                    return Err(error);
+                }
+            };
+            if let Some((mtime_ns, size_bytes)) = observed {
+                tx.execute(
+                    "UPDATE temp.norn_increment_files SET mtime_ns = ?, size_bytes = ? \
+                     WHERE job_id = ? AND path = ?",
+                    params![mtime_ns, size_bytes, job_id, path.as_str()],
+                )?;
+                tx.execute(
+                    "UPDATE temp.norn_increment_documents SET mtime_ns = ?, size_bytes = ? \
+                     WHERE job_id = ? AND path = ?",
+                    params![mtime_ns, size_bytes, job_id, path.as_str()],
+                )?;
+            }
         }
 
         tx.execute("DELETE FROM main.links", [])?;
@@ -1323,6 +1419,90 @@ fn update_meta_graph_fingerprint(tx: &Transaction, fingerprint: &str) -> Result<
     Ok(())
 }
 
+/// Re-prove that the on-disk source at `path` still holds the exact content the
+/// parse hashed, returning the `(mtime_ns, size_bytes)` from that same stable
+/// observation. Stats before and after the read must agree (no write raced the
+/// read itself), the byte length must match the terminal size, and the re-read
+/// blake3 hash must equal `expected_hash`. `None` on any mismatch — the caller
+/// aborts the commit with [`CacheError::IncrementSourceDrift`], never publishing
+/// stale content under a fresh baseline.
+fn verify_parsed_document(
+    vault_root: &Utf8Path,
+    path: &Utf8Path,
+    expected_hash: &str,
+) -> Option<(i64, i64)> {
+    let absolute = vault_root.join(path);
+    let before = regular_file_metadata(&absolute)?;
+    let bytes = std::fs::read(absolute.as_std_path()).ok()?;
+    let after = regular_file_metadata(&absolute)?;
+    (before == after
+        && bytes.len() as i64 == after.1
+        && blake3::hash(&bytes).to_hex().as_str() == expected_hash)
+        .then_some(after)
+}
+
+/// A regular file's `(mtime_ns, size_bytes)` observed twice with an equality
+/// guard, for non-document sources (attachments) that carry no parsed hash.
+fn stable_regular_file_metadata(vault_root: &Utf8Path, path: &Utf8Path) -> Option<(i64, i64)> {
+    let absolute = vault_root.join(path);
+    let before = regular_file_metadata(&absolute)?;
+    let after = regular_file_metadata(&absolute)?;
+    (before == after).then_some(after)
+}
+
+fn regular_file_metadata(absolute: &Utf8Path) -> Option<(i64, i64)> {
+    let metadata = std::fs::metadata(absolute.as_std_path()).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let mtime_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as i64;
+    Some((mtime_ns, metadata.len() as i64))
+}
+
+/// Re-prove the committed `(mtime,size)` for one affected path against the fresh
+/// parse: a parsed document (non-empty hash) must still hash to its parsed
+/// content; a non-document regular file must be stat-stable; a read-failed
+/// document (empty hash) or a deleted/absent path carries no verified metadata
+/// (`Ok(None)`) — the stat-sweep probe re-fires on those via a later stat change.
+/// A drift on a source that IS expected present is a hard abort.
+fn verify_affected_metadata(
+    vault_root: &Utf8Path,
+    path: &Utf8Path,
+    fresh_index: &GraphIndex,
+    fresh_docs: &HashMap<Utf8PathBuf, usize>,
+    fresh_files: &HashMap<Utf8PathBuf, usize>,
+) -> Result<Option<(i64, i64)>, CacheError> {
+    if let Some(&doc_i) = fresh_docs.get(path) {
+        let doc = &fresh_index.documents[doc_i];
+        if doc.hash.is_empty() {
+            // Read-failed document: no parsed hash to re-prove. Best-effort stat;
+            // a later readability change moves the stat and re-fires the probe.
+            return Ok(stable_regular_file_metadata(vault_root, path));
+        }
+        let observed = verify_parsed_document(vault_root, path, &doc.hash).ok_or_else(|| {
+            CacheError::IncrementSourceDrift {
+                path: path.to_owned(),
+            }
+        })?;
+        return Ok(Some(observed));
+    }
+    if fresh_files.contains_key(path) {
+        let observed = stable_regular_file_metadata(vault_root, path).ok_or_else(|| {
+            CacheError::IncrementSourceDrift {
+                path: path.to_owned(),
+            }
+        })?;
+        return Ok(Some(observed));
+    }
+    // Deletion / graph-excluded path: nothing to publish, nothing to verify.
+    Ok(None)
+}
+
 fn mtime_ns(path: &Utf8Path) -> Option<i64> {
     std::fs::metadata(path.as_std_path()).ok().and_then(|m| {
         m.modified()
@@ -1344,7 +1524,7 @@ mod tests {
     use camino::Utf8PathBuf;
     use tempfile::TempDir;
 
-    use crate::cache::Cache;
+    use crate::cache::{Cache, CacheError};
 
     #[derive(Debug, Clone)]
     enum Op {
@@ -1495,6 +1675,123 @@ mod tests {
         assert!(
             paths.contains(&Utf8PathBuf::from("b.md")),
             "increment should have published b.md; got {paths:?}"
+        );
+    }
+
+    /// F1 — index_incremental: a file rewritten AFTER the parse but before the
+    /// commit's drift re-proof must abort the whole refresh, never committing
+    /// the stale-content-under-fresh-baseline that the stat-sweep probe would
+    /// then read as Fresh forever.
+    #[test]
+    fn incremental_aborts_on_source_drift_between_parse_and_commit() {
+        let (_tmp, root) = fresh_vault();
+        std::fs::write(root.join("a.md").as_std_path(), "---\ntitle: A\n---\n").unwrap();
+        let mut cache = Cache::open(&root).unwrap();
+        cache.full_build(&root).unwrap();
+
+        // A new file lands; its parse will hash content v1.
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\n---\nversion one\n",
+        )
+        .unwrap();
+
+        // Race a DIFFERENT write into the window between the parse and the
+        // in-transaction re-read.
+        let racing_path = root.join("b.md");
+        super::install_after_increment_parse_hook(move || {
+            std::fs::write(
+                racing_path.as_std_path(),
+                "---\ntitle: B\n---\nversion TWO, different bytes\n",
+            )
+            .unwrap();
+        });
+
+        let result = cache.index_incremental(&root, &Default::default());
+        assert!(
+            matches!(result, Err(CacheError::IncrementSourceDrift { .. })),
+            "expected IncrementSourceDrift, got {result:?}"
+        );
+
+        // The refresh aborted: b.md was never committed, so the cache still holds
+        // only a.md. The next probe re-fires on b.md's still-newer stat.
+        let paths: std::collections::BTreeSet<_> = cache
+            .load_graph_index()
+            .unwrap()
+            .documents
+            .iter()
+            .map(|d| d.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            std::collections::BTreeSet::from([Utf8PathBuf::from("a.md")]),
+            "stale content must not be committed on drift"
+        );
+    }
+
+    /// F1 — chunked increment: a file rewritten AFTER `begin_increment_commit`
+    /// staged its v1 rows but before the terminal publish must be caught by the
+    /// publish-transaction re-proof, aborting the commit.
+    #[test]
+    fn chunked_increment_aborts_on_source_drift_before_terminal_publish() {
+        let (_tmp, root) = fresh_vault();
+        std::fs::write(root.join("a.md").as_std_path(), "---\ntitle: A\n---\n").unwrap();
+        let mut cache = Cache::open(&root).unwrap();
+        cache.full_build(&root).unwrap();
+
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\n---\nversion one\n",
+        )
+        .unwrap();
+        let baseline = cache.load_graph_index().unwrap();
+        let fingerprint: String = cache
+            .conn()
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'graph_fingerprint'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let reservation = cache.reserve_increment_commit(&fingerprint).unwrap();
+        let mut commit = Cache::begin_increment_commit(
+            &root,
+            &[Utf8PathBuf::from("b.md")],
+            None,
+            &[],
+            &reservation,
+            baseline,
+        )
+        .unwrap();
+
+        // Concurrent external write after staging captured v1's content.
+        std::fs::write(
+            root.join("b.md").as_std_path(),
+            "---\ntitle: B\n---\nversion TWO\n",
+        )
+        .unwrap();
+
+        let budget = std::time::Duration::from_millis(0);
+        let mut result: Result<bool, CacheError> = Ok(true);
+        while let Ok(true) = result {
+            result = cache.commit_increment_chunk(&mut commit, budget);
+        }
+        assert!(
+            matches!(result, Err(CacheError::IncrementSourceDrift { .. })),
+            "terminal publish must re-prove drift, got {result:?}"
+        );
+
+        // b.md was never published under a stale baseline.
+        let paths: std::collections::BTreeSet<_> = cache
+            .load_graph_index()
+            .unwrap()
+            .documents
+            .iter()
+            .map(|d| d.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            std::collections::BTreeSet::from([Utf8PathBuf::from("a.md")])
         );
     }
 }
