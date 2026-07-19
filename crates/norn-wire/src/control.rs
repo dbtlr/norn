@@ -110,7 +110,17 @@ pub enum OwnerFrame {
     /// target. Distinct from [`Error`](OwnerFrame::Error): the owner stays
     /// alive (no exit-to-heal) and the client surfaces this as an operational
     /// failure, not an owner-health event.
-    Rejected { message: String },
+    ///
+    /// `hints` carries the soft-landing lines structured alongside the headline
+    /// (NRN-361): the CLI renders them as `hint:` lines, an MCP client reads
+    /// them as fields. Absent on the wire when empty (the common case today —
+    /// the owner does not yet compute rejection hints), so this is backward
+    /// compatible with a `{ message }`-only frame.
+    Rejected {
+        message: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hints: Vec<String>,
+    },
     /// A fatal owner-side error (e.g. a `CacheError` — the db is disposable
     /// derivation, so any cache error is exit-to-heal). The owner is
     /// terminating; the client surfaces this as an owner-health error and a

@@ -69,12 +69,17 @@ pub fn run() -> i32 {
     // a real clap-derived KnownFlags. A normalization error (a valueless dynamic
     // flag, an ambiguous repeat, a cross-family predicate on a mutate verb) is a
     // usage error (exit 2), reported before parse.
+    let mut presenter = Presenter::stdio();
     let raw: Vec<String> = std::env::args().collect();
     let flags = grammar_flags::derive_known_flags();
     let normalized = match norn_core::grammar::normalize_argv(raw, &flags) {
         Ok(n) => n.argv,
         Err(e) => {
-            eprintln!("{}: {e}", display::PROGRAM);
+            // A normalization error (valueless dynamic flag, ambiguous repeat,
+            // cross-family predicate) is a usage error. Its message already
+            // carries the did-you-mean the `closest` machinery computed; route it
+            // through the single diagnostic path so the shape stays uniform.
+            presenter.diagnostic(&e.to_string());
             return display::EXIT_USAGE;
         }
     };
@@ -87,7 +92,6 @@ pub fn run() -> i32 {
             return e.exit_code();
         }
     };
-    let mut presenter = Presenter::stdio();
     dispatch(cli, &mut presenter)
 }
 

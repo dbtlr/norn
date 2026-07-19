@@ -129,7 +129,9 @@ impl OwnerSession {
             // Rejected (NRN-360). The owner is healthy (not exit-to-heal), so
             // this rides the user-error path: `wait_until_ready` returns it and
             // the CLI renders the config error, never a resummon/crash loop.
-            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected pong, got {other:?}"
@@ -143,7 +145,9 @@ impl OwnerSession {
             OwnerFrame::Probe { document_count } => Ok(document_count),
             // A bad-config warm-up rejects every frame with the config error
             // (NRN-360) — surface it on the user-error path, like the read verbs.
-            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected probe report, got {other:?}"
@@ -155,7 +159,9 @@ impl OwnerSession {
     pub fn find(&mut self, params: FindParams) -> Result<FindReport, ClientError> {
         match self.request(&ClientFrame::Find { params })? {
             OwnerFrame::Find { report } => Ok(report),
-            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected find report, got {other:?}"
@@ -167,7 +173,9 @@ impl OwnerSession {
     pub fn count(&mut self, params: CountParams) -> Result<CountReport, ClientError> {
         match self.request(&ClientFrame::Count { params })? {
             OwnerFrame::Count { report } => Ok(report),
-            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected count report, got {other:?}"
@@ -179,7 +187,9 @@ impl OwnerSession {
     pub fn get(&mut self, params: GetParams) -> Result<GetReport, ClientError> {
         match self.request(&ClientFrame::Get { params })? {
             OwnerFrame::Get { report } => Ok(report),
-            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected get report, got {other:?}"
@@ -191,7 +201,9 @@ impl OwnerSession {
     pub fn describe(&mut self, params: DescribeParams) -> Result<DescribeReport, ClientError> {
         match self.request(&ClientFrame::Describe { params })? {
             OwnerFrame::Describe { report } => Ok(report),
-            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected describe report, got {other:?}"
@@ -527,6 +539,7 @@ mod tests {
         let socket = dir.path().join("badconfig.sock");
         let handle = fake_owner(socket.clone(), |_| OwnerFrame::Rejected {
             message: "invalid config /vault/.norn/config.yaml: unknown field `bogus`".to_string(),
+            hints: Vec::new(),
         });
 
         // One connection (the fake owner serves a single accept): a direct ping
@@ -536,7 +549,7 @@ mod tests {
             .ping()
             .expect_err("a bad-config owner must reject the ping");
         match &err {
-            ClientError::Rejected(message) => {
+            ClientError::Rejected { message, .. } => {
                 assert!(
                     message.starts_with("invalid config "),
                     "expected the oracle-shaped config message, got {message:?}"
@@ -554,7 +567,7 @@ mod tests {
         let err = session
             .wait_until_ready(Duration::from_secs(5))
             .expect_err("a bad-config owner never reaches ready");
-        assert!(matches!(err, ClientError::Rejected(_)), "got {err:?}");
+        assert!(matches!(err, ClientError::Rejected { .. }), "got {err:?}");
 
         drop(session);
         handle.join().unwrap();

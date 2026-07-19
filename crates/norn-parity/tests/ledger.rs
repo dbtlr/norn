@@ -35,11 +35,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // added PD-105 (zero-indexed `--starts-at`, NRN-332) and PD-106 (last-wins
     // `--limit`/`--no-limit`, NRN-331); the URL-semantics slate added PD-107
     // (Markdown-link split-then-decode + block-ref, NRN-356) and PD-108
-    // (external-vs-local scheme classification, NRN-357).
+    // (external-vs-local scheme classification, NRN-357); the presentation/errors
+    // slate added PD-109 (the soft-landing diagnostic surface, NRN-361/362) and
+    // PD-110 (grammar-wide last-wins, NRN-365).
     assert_eq!(
         ledger.entries.len(),
-        8,
-        "expected exactly PD-101..PD-108, found {}",
+        10,
+        "expected exactly PD-101..PD-110, found {}",
         ledger.entries.len()
     );
 
@@ -104,6 +106,32 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         .expect("the scheme-classification case must resolve to an entry");
     assert_eq!(pd108.id, "PD-108");
     assert_eq!(pd108.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    // The presentation/errors divergences (PD-109 / PD-110). PD-109 (the
+    // soft-landing diagnostic surface) covers three cases; PD-110 (grammar-wide
+    // last-wins) one.
+    for case in [
+        "err-links-to-unresolvable-zoo",
+        "err-col-facet-did-you-mean-zoo",
+        "err-malformed-config",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some("PD-109"),
+            "{case} is gated by PD-109"
+        );
+    }
+    let pd109 = ledger
+        .entry_for_case("err-malformed-config")
+        .expect("the malformed-config case must resolve to an entry");
+    assert_eq!(pd109.reason, norn_parity::ledger::Reason::DecidedBetter);
+    assert_eq!(
+        ledger
+            .entry_for_case("err-repeated-limit-last-wins-zoo")
+            .map(|e| e.id.as_str()),
+        Some("PD-110"),
+        "the grammar-wide last-wins case is gated by PD-110"
+    );
 }
 
 #[test]

@@ -525,7 +525,10 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
     // it could not parse. The client renders this as the config error;
     // `handle_connection` then eager-reaps so a resummon re-reads the config.
     if let Some(message) = state.warmup_error() {
-        return OwnerFrame::Rejected { message };
+        return OwnerFrame::Rejected {
+            message,
+            hints: Vec::new(),
+        };
     }
     match frame {
         ClientFrame::Ping { protocol } => {
@@ -708,7 +711,10 @@ fn classify_read<R>(
 ) -> OwnerFrame {
     match result {
         Ok(Ok(Ok(report))) => to_frame(report),
-        Ok(Ok(Err(message))) => OwnerFrame::Rejected { message },
+        Ok(Ok(Err(message))) => OwnerFrame::Rejected {
+            message,
+            hints: Vec::new(),
+        },
         Ok(Err(err)) => {
             state.go_fatal();
             OwnerFrame::Error {
@@ -801,7 +807,7 @@ mod tests {
             },
         ));
         match frame {
-            OwnerFrame::Rejected { message } => {
+            OwnerFrame::Rejected { message, .. } => {
                 assert!(
                     message.starts_with("invalid config "),
                     "expected the oracle-shaped config message, got {message:?}"

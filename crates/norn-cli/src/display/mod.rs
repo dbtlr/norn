@@ -15,11 +15,13 @@
 //! convention, and the process exit-code constants live here now so a porting
 //! PR fills the renderers in rather than reshaping the seam.
 
+mod diagnostic;
 mod format;
 mod presenter;
 
+pub use diagnostic::Diagnostic;
 pub use format::Format;
-pub use presenter::{Presenter, PROGRAM};
+pub use presenter::{Presenter, HINT, PROGRAM};
 
 /// Clean success: every operation applied (or a dry-run forecast). Produced by
 /// clap for `--help` / `--version`; a ported verb returns it on success.

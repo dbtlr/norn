@@ -147,7 +147,7 @@ fn invalid_config_surfaces_error_eager_reaps_then_a_fix_is_picked_up() {
         Err(e) => e,
     };
     match &err {
-        ClientError::Rejected(message) => {
+        ClientError::Rejected { message, .. } => {
             assert!(
                 message.contains("invalid config "),
                 "expected the oracle config-error message, got {message:?}"

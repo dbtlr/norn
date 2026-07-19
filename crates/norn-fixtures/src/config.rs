@@ -60,6 +60,16 @@ pub fn config_yaml() -> String {
         .replace("%%TASKS_DIR%%", TASKS_DIR)
 }
 
+/// A deliberately-invalid `.norn/config.yaml`: valid YAML that carries one
+/// unknown top-level key, so a strict (`deny_unknown_fields`) config load fails
+/// with a stable "unknown field" error. Drives the malformed-config error-surface
+/// parity case (NRN-361) — the vault warms into a config rejection, and the CLI's
+/// diagnostic surface (the `norn:` prefix) diverges from the oracle's bare line.
+/// Content is fixed (profile/seed-independent) so the error text is deterministic.
+pub fn malformed_config_yaml() -> String {
+    "not_a_real_section: true\n".to_string()
+}
+
 const CONFIG_TEMPLATE: &str = r#"links:
   alias_field: aliases
 

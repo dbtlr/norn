@@ -141,8 +141,8 @@ pub fn run<O: Write, E: Write>(
 
     let mut session = match crate::routed::open_session(global) {
         Ok(s) => s,
-        Err(msg) => {
-            presenter.diagnostic(&msg);
+        Err(diag) => {
+            presenter.present_diagnostic(&diag);
             return EXIT_OPERATIONAL;
         }
     };
@@ -156,7 +156,7 @@ pub fn run<O: Write, E: Write>(
     let report = match session.find(params) {
         Ok(r) => r,
         Err(e) => {
-            presenter.diagnostic(&e.to_string());
+            presenter.present_diagnostic(&crate::routed::client_error_diagnostic(&e));
             return EXIT_OPERATIONAL;
         }
     };
@@ -498,6 +498,27 @@ mod tests {
     fn find_format_parses() {
         let args = find_args(&["norn", "find", "--all", "--format", "json"]);
         assert_eq!(args.format, Some(FindFormat::Json));
+    }
+
+    #[test]
+    fn repeated_format_is_last_wins_grammar_wide() {
+        // NRN-365: `--format` has no per-arg self-override; the root's
+        // `args_override_self` makes the repeat last-wins (the oracle errors).
+        let args = find_args(&[
+            "norn", "find", "--all", "--format", "json", "--format", "paths",
+        ]);
+        assert_eq!(args.format, Some(FindFormat::Paths));
+    }
+
+    #[test]
+    fn repeatable_append_flags_still_accumulate_under_last_wins() {
+        // `args_override_self` touches only self-conflicting `Set` flags; an
+        // `Append` predicate like `--eq` still accumulates both values.
+        let args = find_args(&["norn", "find", "--eq", "type:note", "--eq", "status:active"]);
+        assert_eq!(
+            args.filter.eq,
+            vec!["type:note".to_string(), "status:active".to_string()]
+        );
     }
 
     #[test]

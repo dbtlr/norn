@@ -19,7 +19,7 @@ use serde_json::{Map, Value};
 use crate::cli::GlobalArgs;
 use crate::commands::args::SortPaginateArgs;
 use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL};
-use crate::output::palette::Palette;
+use crate::output::palette::{self, Palette};
 use crate::output::primitives::{record_block, separator, Field};
 use crate::output::projection::{
     filter_frontmatter, frontmatter_to_display, headings_to_display, incoming_links_to_display,
@@ -145,8 +145,8 @@ pub fn run<O: Write, E: Write>(
 ) -> i32 {
     let mut session = match crate::routed::open_session(global) {
         Ok(s) => s,
-        Err(msg) => {
-            presenter.diagnostic(&msg);
+        Err(diag) => {
+            presenter.present_diagnostic(&diag);
             return EXIT_OPERATIONAL;
         }
     };
@@ -166,16 +166,24 @@ pub fn run<O: Write, E: Write>(
     let report = match session.get(params) {
         Ok(r) => r,
         Err(e) => {
-            presenter.diagnostic(&e.to_string());
+            presenter.present_diagnostic(&crate::routed::client_error_diagnostic(&e));
             return EXIT_OPERATIONAL;
         }
     };
 
     let (out, err) = presenter.streams();
     if matches!(args.format, GetFormat::Markdown) {
+        // Byte-faithful source passthrough — never colorized, so no palette is
+        // resolved on this path.
         emit_markdown(args, &report, out, err)
     } else {
-        emit_structured(args, &report, out, err)
+        // NRN-362: get renders records through the SAME resolved palette find
+        // uses, so a TTY read is colorized (the donor hardcoded no-color, a
+        // preserved oversight). Piped — the parity harness and any pipeline —
+        // resolves to off, so the byte output is unchanged there. Resolved only
+        // here, where it is consumed.
+        let palette = palette::resolve(global.color);
+        emit_structured(args, &report, &palette, out, err)
     }
 }
 
@@ -190,6 +198,7 @@ fn has_error(report: &GetReport) -> bool {
 fn emit_structured<O: Write, E: Write>(
     args: &GetArgs,
     report: &GetReport,
+    palette: &Palette,
     out: &mut O,
     err: &mut E,
 ) -> i32 {
@@ -197,7 +206,7 @@ fn emit_structured<O: Write, E: Write>(
         GetFormat::Json => render_json(report, &args.col),
         GetFormat::Jsonl => render_jsonl(report, &args.col),
         GetFormat::Paths => render_paths(report),
-        GetFormat::Records => render_records(report, &args.col),
+        GetFormat::Records => render_records(report, palette, &args.col),
         GetFormat::Markdown => unreachable!("markdown handled by emit_markdown"),
     };
     // Exactly one trailing newline (donor `emit`).
@@ -397,11 +406,11 @@ fn render_paths(report: &GetReport) -> String {
 /// `records` output: one vertical key-value block per document, separated by a
 /// horizontal rule. Field order: frontmatter fields → headings → outgoing →
 /// unresolved → incoming → body → sections. Empty facets are omitted.
-fn render_records(report: &GetReport, cols: &[String]) -> String {
-    // The donor renders get records uncolored regardless of TTY (a likely
-    // oversight preserved for byte-parity); color isn't exercised by the parity
-    // harness, which always runs piped (color off) anyway.
-    let palette = Palette::off();
+fn render_records(report: &GetReport, palette: &Palette, cols: &[String]) -> String {
+    // NRN-362: get renders through the caller's resolved palette — the same one
+    // find uses — instead of the donor's hardcoded no-color. Piped (the parity
+    // harness, any pipeline) it resolves to off, so byte output is unchanged;
+    // only a TTY read gains color.
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
@@ -413,7 +422,7 @@ fn render_records(report: &GetReport, cols: &[String]) -> String {
     let mut buf: Vec<u8> = Vec::new();
     for (i, record) in report.records.iter().enumerate() {
         if i > 0 {
-            let _ = separator(&mut buf, &palette, term_width);
+            let _ = separator(&mut buf, palette, term_width);
         }
         let owned = build_text_fields(record, all_cols, &facet_set, &field_cols);
         let fields: Vec<Field<'_>> = owned
@@ -424,7 +433,7 @@ fn render_records(report: &GetReport, cols: &[String]) -> String {
                 highlight: false,
             })
             .collect();
-        let _ = record_block(&mut buf, &palette, Some(&record.path), &fields, term_width);
+        let _ = record_block(&mut buf, palette, Some(&record.path), &fields, term_width);
         if fields.is_empty() {
             let _ = writeln!(buf, "  (no fields)");
         }
@@ -655,10 +664,33 @@ mod tests {
             notes: vec![],
             markdown_content: None,
         };
-        let text = render_records(&report, &[]);
+        let text = render_records(&report, &Palette::off(), &[]);
         assert!(text.contains("a.md"), "path header: {text}");
         assert!(text.contains("title"), "frontmatter field: {text}");
         assert!(text.contains("headings"), "headings row: {text}");
+    }
+
+    #[test]
+    fn records_colorize_under_an_enabled_palette() {
+        // NRN-362: get now honors the resolved palette. With color on, the block
+        // carries ANSI escapes; with it off, the bytes are unchanged (the piped /
+        // parity path).
+        let rec = record("a.md", json!({"title": "A"}));
+        let report = GetReport {
+            records: vec![rec],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let colored = render_records(&report, &Palette::on(), &[]);
+        let plain = render_records(&report, &Palette::off(), &[]);
+        assert!(
+            colored.contains('\u{1b}'),
+            "expected ANSI escapes: {colored:?}"
+        );
+        assert!(
+            !plain.contains('\u{1b}'),
+            "off palette stays plain: {plain:?}"
+        );
     }
 
     #[test]

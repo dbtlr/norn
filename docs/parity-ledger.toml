@@ -157,3 +157,43 @@ old = "a hand-rolled lowercase prefix list classifies only `http://`/`https://`/
 new = "URL-rules classification (NRN-357): any case-insensitive RFC 3986 scheme, a protocol-relative `//`, or a Windows drive-letter path is external and excluded from the link model, so none of these destinations appear as links at all; a destination whose first segment contains a colon (e.g. `note:draft.md`) also reads as scheme-qualified and classifies external — disambiguate a literal colon-named vault file with a `./` prefix"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-361 (the soft-landing error doctrine): errors educate, never stop-sign.
+# The rewrite's diagnostic surface diverges from the oracle's on stderr — a
+# stable, greppable `norn:` headline prefix on every user error, plus soft-
+# landing did-you-mean / next-step `hint:` lines via the shared `closest`
+# machinery where a near-miss or diagnosis path exists. stdout stays payload-only
+# in every format. The isolated `errors` suite pins three shapes of this one
+# surface: an unresolvable `--links-to` rejection (prefixed + reworded headline,
+# exit 1), a near-miss `--col` facet (a did-you-mean leads the warning, exit 0),
+# and a malformed `.norn/config.yaml` (the config rejection gains the `norn:`
+# prefix, exit 1 — the previously-deferred malformed-config case, now addable).
+# NRN-362 rides along under this entry: `get` now renders records through the
+# same resolved palette `find` uses (colorized on a TTY) instead of the donor's
+# hardcoded no-color; piped — including this harness — it resolves to off, so the
+# byte output is unchanged and no read case diverges on it.
+[[entry]]
+id = "PD-109"
+surface = "read-verb error surface (stderr diagnostics: prefix + wording + hints)"
+cases = ["err-links-to-unresolvable-zoo", "err-col-facet-did-you-mean-zoo", "err-malformed-config"]
+old = "a user error prints an unprefixed, terse line to stderr: `no document matched: <t>`, `unknown --col facet '.x' (valid facets: …)`, `invalid config <path>: unknown field …` — no `norn:` prefix, no did-you-mean, no next-step hint"
+new = "every user error is a soft landing (NRN-361): a stable `norn:`-prefixed headline (`norn: no document matched path or stem: <t>`, `norn: invalid config <path>: …`) plus, where a near-miss exists, a leading did-you-mean (`unknown --col facet '.headngs' — did you mean '.headings'? …`) — via the one `closest` heuristic. stdout stays payload-only in every format"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-365 (grammar-wide last-wins): a repeated scalar flag is merge-queue
+# semantics — the last occurrence wins — not a hard error. The single lever is
+# clap's `args_override_self` global setting on the root, which propagates to
+# every subcommand, so EVERY `ArgAction::Set` flag repeat resolves last-wins
+# rather than erroring `ArgumentConflict`. `--limit 5 --limit 1` is the anchor:
+# the oracle rejects it (exit 2), the rewrite resolves it to limit 1 (exit 0).
+# Repeatable `Append` flags still accumulate; genuine cross-flag conflicts
+# (delete's `--allow-broken-links`/`--rewrite-to`) still error.
+[[entry]]
+id = "PD-110"
+surface = "repeated scalar flag (grammar-wide last-wins)"
+cases = ["err-repeated-limit-last-wins-zoo"]
+old = "a repeated scalar flag is a hard conflict: `find --limit 5 --limit 1` exits 2 with `error: the argument '--limit <N>' cannot be used multiple times`, nothing on stdout"
+new = "a repeated scalar flag is last-wins (NRN-365, `args_override_self` on the root propagated to every subcommand): `find --limit 5 --limit 1` resolves to limit 1, exit 0, the single sorted path on stdout"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

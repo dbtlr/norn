@@ -170,18 +170,18 @@ pub struct SortPaginateArgs {
 
     /// Maximum number of records to return. `find` defaults to 10; `get`
     /// returns every named target.
-    // NRN-331: `--limit` and `--no-limit` compete over one outcome (the
-    // effective cap). `overrides_with_all` (which includes each arg's OWN id)
-    // makes both the cross-flag competition AND same-flag repetition last-wins
-    // rather than a hard conflict: `--limit 5 --no-limit` is unlimited,
-    // `--no-limit --limit 5` is 5, `--limit 5 --limit 10` is 10. clap resets the
-    // loser, so exactly one of the pair reaches the wire (no ambiguity for the
-    // consuming verb). The user-facing help stays oracle-exact — the doctrine
-    // note lives here, not in `--help`.
+    // NRN-331 / NRN-365: `--limit` and `--no-limit` compete over one outcome
+    // (the effective cap). The CROSS-flag competition is `overrides_with` (each
+    // names the OTHER); the same-flag repeat (`--limit 5 --limit 10` → 10) is now
+    // the grammar-wide `args_override_self` lever on the root, so the redundant
+    // self-id is dropped here. clap resets the loser, so exactly one of the pair
+    // reaches the wire (no ambiguity for the consuming verb): `--limit 5
+    // --no-limit` is unlimited, `--no-limit --limit 5` is 5. The user-facing help
+    // stays oracle-exact — the doctrine note lives here, not in `--help`.
     #[arg(
         long,
         value_name = "N",
-        overrides_with_all = ["limit", "no_limit"],
+        overrides_with = "no_limit",
         help_heading = "Sort and paging"
     )]
     pub limit: Option<usize>,
@@ -189,7 +189,7 @@ pub struct SortPaginateArgs {
     /// Return all records; no limit. Competes with `--limit`; the last of the two given wins.
     #[arg(
         long = "no-limit",
-        overrides_with_all = ["no_limit", "limit"],
+        overrides_with = "limit",
         help_heading = "Sort and paging"
     )]
     pub no_limit: bool,
@@ -397,5 +397,28 @@ mod tests {
             Some(10),
             "a repeated scalar flag keeps the last value"
         );
+    }
+
+    // ── NRN-365: grammar-wide last-wins (args_override_self on the root) ─────
+    #[test]
+    fn repeated_scalar_paging_flags_keep_the_last_without_self_override() {
+        // Neither `--sort` nor `--starts-at` carries a per-arg self-override; the
+        // root's `args_override_self` makes every scalar repeat last-wins.
+        let args = find_args(&[
+            "norn",
+            "find",
+            "--all",
+            "--sort",
+            "title",
+            "--sort",
+            "created",
+            "--starts-at",
+            "1",
+            "--starts-at",
+            "4",
+        ]);
+        let (_, paging) = args.to_params();
+        assert_eq!(paging.sort.as_deref(), Some("created"));
+        assert_eq!(paging.starts_at, 4);
     }
 }

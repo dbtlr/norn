@@ -22,6 +22,16 @@ use crate::commands::{find::FindArgs, get::GetArgs, vault::VaultCmd};
 #[command(version)]
 #[command(disable_help_flag = true)]
 #[command(disable_help_subcommand = true)]
+// NRN-365: grammar-wide last-wins. `args_override_self` is a GLOBAL clap setting
+// (`AppSettings::AllArgsOverrideSelf`) — declared once on the root, it propagates
+// to every subcommand, so EVERY scalar flag repeat (`ArgAction::Set`) resolves to
+// the last occurrence instead of erroring `ArgumentConflict`. One lever replaces
+// per-arg `overrides_with_self` across the whole surface. It touches only a
+// flag's conflict-with-ITSELF: repeatable `Append` flags (`--eq`, `--field`,
+// `--col`) still accumulate, and genuine CROSS-flag rules (`--all-cols`/`--col`
+// via `overrides_with`, delete's `--allow-broken-links`/`--rewrite-to` via
+// `conflicts_with`) are unaffected and still enforced.
+#[command(args_override_self = true)]
 pub struct Cli {
     #[command(flatten)]
     pub global: GlobalArgs,
