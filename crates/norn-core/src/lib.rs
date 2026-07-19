@@ -34,6 +34,7 @@
 //! on the validate engine's `Finding` model), the validate/repair engine and
 //! apply verbs, and the cache engine — see `retired/CLAUDE.md`.
 
+pub mod cache;
 pub mod domain;
 pub mod env;
 pub mod grammar;
