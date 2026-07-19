@@ -149,12 +149,13 @@ pub fn render_short(
         writeln!(out)?;
     }
 
-    // GLOBAL OPTIONS — full block, no collapse (spec §2.2).
+    // GLOBAL OPTIONS — full block, no collapse (spec §2.2). Short form: the
+    // concise, clamped `short_desc`.
     if !model.globals.is_empty() {
         write_section_header(out, palette, "GLOBAL OPTIONS")?;
         let col_g = compute_globals_column(&model.globals);
         for g in &model.globals {
-            write_global_line(out, palette, g, col_g)?;
+            write_global_line(out, palette, g, col_g, false)?;
         }
         writeln!(out)?;
     }
@@ -241,14 +242,19 @@ fn write_global_line(
     palette: &Palette,
     g: &GlobalEntry,
     col: usize,
+    long: bool,
 ) -> io::Result<()> {
     let label = label(g);
     let (flag_part, placeholder_part) = split_flag_and_placeholder(&label);
     let pad = col.saturating_sub(label.len());
-    // Constrain description per spec §2.2. The cut floors to a char boundary
-    // so a multibyte description cannot panic the slice; for ASCII (every
-    // current global) the output is byte-identical to the donor's.
-    let desc = if g.short_desc.len() > GLOBAL_DESC_MAX {
+    // `-h` shows the concise `short_desc`, clamped to the spec §2.2 column as a
+    // backstop. `--help` shows the full `long_desc` (falling back to
+    // `short_desc`) UNCLAMPED, so a long global description is not silently
+    // truncated in long help (NRN-335). The clamp floors to a char boundary so
+    // a multibyte description cannot panic the slice.
+    let desc = if long {
+        g.long_desc.as_deref().unwrap_or(&g.short_desc).to_string()
+    } else if g.short_desc.len() > GLOBAL_DESC_MAX {
         let mut cut = GLOBAL_DESC_MAX.saturating_sub(1);
         while !g.short_desc.is_char_boundary(cut) {
             cut -= 1;
@@ -553,12 +559,13 @@ pub fn render_long(
     // the block.
     write_conceptual_sections_block(out, palette, &model.extras.conceptual_sections)?;
 
-    // GLOBAL OPTIONS — aligned column (spec §3.1 — short lines use the column).
+    // GLOBAL OPTIONS — aligned column (spec §3.1). Long form: the full
+    // `long_desc`, UNCLAMPED (NRN-335), so no global is silently truncated.
     if !model.globals.is_empty() {
         write_section_header(out, palette, "GLOBAL OPTIONS")?;
         let col_g = compute_globals_column(&model.globals);
         for g in &model.globals {
-            write_global_line(out, palette, g, col_g)?;
+            write_global_line(out, palette, g, col_g, true)?;
         }
         writeln!(out)?;
     }
@@ -670,6 +677,7 @@ mod tests {
                 long: Some("cwd".to_string()),
                 value_name: None,
                 short_desc: "Run as if norn started in this directory".to_string(),
+                long_desc: None,
             }],
             subcommands: vec![],
             extras: HelpExtras::default(),
@@ -725,12 +733,37 @@ mod tests {
     }
 
     #[test]
-    fn global_description_over_max_is_truncated() {
+    fn global_description_over_max_is_truncated_in_short_form() {
         let mut model = sample_model();
         model.globals[0].short_desc = "x".repeat(80);
         let out = render_to_string(&model);
-        // Truncated to GLOBAL_DESC_MAX-1 chars plus the ellipsis.
+        // `-h` truncates to GLOBAL_DESC_MAX-1 chars plus the ellipsis.
         assert!(out.contains(&format!("{}…", "x".repeat(GLOBAL_DESC_MAX - 1))));
+    }
+
+    #[test]
+    fn global_long_desc_is_unclamped_in_long_form() {
+        // NRN-335: `--help` renders `long_desc` in full, never truncated.
+        let mut model = sample_model();
+        let full = "Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)";
+        assert!(
+            full.len() > GLOBAL_DESC_MAX,
+            "fixture must exceed the column"
+        );
+        model.globals[0].long_desc = Some(full.to_string());
+        let out = render_long_to_string(&model);
+        assert!(
+            out.contains(full),
+            "long form must show the full desc, unclamped"
+        );
+        assert!(!out.contains('…'), "no ellipsis in long form");
+    }
+
+    #[test]
+    fn global_falls_back_to_short_desc_in_long_form_when_no_long_desc() {
+        // A global with no `long_desc` shows its `short_desc` in `--help`.
+        let out = render_long_to_string(&sample_model());
+        assert!(out.contains("Run as if norn started in this directory"));
     }
 
     #[test]

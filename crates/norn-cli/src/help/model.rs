@@ -48,16 +48,24 @@ pub struct FlagGroup {
     pub flags: Vec<FlagEntry>,
 }
 
-/// A global option. Globals always render in one block (no collapse) with
-/// one short line each.
+/// A global option. Globals render in one block (no collapse) with one line
+/// each. `-h` shows [`short_desc`](Self::short_desc) (clamped to the spec's
+/// ≤70-char column); `--help` shows [`long_desc`](Self::long_desc) unclamped
+/// when present, so a global whose full description exceeds the column is not
+/// silently truncated in long help (NRN-335).
 #[derive(Debug, Clone)]
 pub struct GlobalEntry {
     pub short: Option<char>,
     pub long: Option<String>,
     /// `None` if the global takes no value (e.g. `--verbose`).
     pub value_name: Option<String>,
-    /// Constrained to ≤70 chars per the help-output v2 spec §2.2.
+    /// The concise one-line description shown in `-h`. Constrained to ≤70 chars
+    /// per the help-output v2 spec §2.2 (clamped by the renderer as a backstop).
     pub short_desc: String,
+    /// The full description shown UNCLAMPED in `--help` (from clap `long_help`).
+    /// `None` — the common case — falls back to `short_desc`. Populated only in
+    /// the long form (see the extractor), so `-h` always renders `short_desc`.
+    pub long_desc: Option<String>,
 }
 
 /// A single generated, runnable example for the LIVE EXAMPLES block in

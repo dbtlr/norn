@@ -53,12 +53,17 @@ pub struct Cli {
 // PD-102.
 #[derive(Debug, Args)]
 pub struct GlobalArgs {
+    // NRN-335: the concise `help` fits the ≤70-char GLOBAL OPTIONS column shown
+    // in `-h`; the full default-resolution chain moves to `long_help`, which
+    // `--help` renders UNCLAMPED. Splitting the two stops `-h` from showing an
+    // ellipsis-truncated line while keeping the whole story available in `--help`.
     #[arg(
         short = 'C',
         long,
         global = true,
         help_heading = "Global options",
-        help = "Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)"
+        help = "Run as if norn started in this directory",
+        long_help = "Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)"
     )]
     pub cwd: Option<PathBuf>,
 
