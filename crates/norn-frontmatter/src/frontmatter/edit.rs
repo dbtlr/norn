@@ -664,4 +664,41 @@ mod tests {
         let err = set_field(content, "title", &json!("b")).unwrap_err();
         assert!(matches!(err, FrontmatterEditError::ParseFailed { .. }));
     }
+
+    // ---- Donor splice-path edge cases (ported from src/standards/apply.rs).
+
+    #[test]
+    fn add_refuses_explicit_null_scalar_block() {
+        // An explicit `null` scalar block is NOT an empty block: splicing a key
+        // after it would produce invalid YAML, so it must stay a hard refusal
+        // rather than be treated as an empty mapping.
+        let content = "---\nnull\n---\nbody\n";
+        let err = add_field(content, "title", &json!("X")).unwrap_err();
+        assert!(
+            matches!(err, FrontmatterEditError::NotAMapping),
+            "expected NotAMapping, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_initializes_whitespace_only_frontmatter_block() {
+        // A block whose content is only whitespace parses as null but IS empty —
+        // it stays initializable (the pre-existing whitespace line is preserved
+        // verbatim; the appended field still parses correctly).
+        let content = "---\n   \n---\nbody\n";
+        let out = add_field(content, "title", &json!("X")).unwrap();
+        assert_eq!(out, "---\n   \ntitle: X\n---\nbody\n");
+    }
+
+    #[test]
+    fn set_rejects_scalar_into_block_sequence_target() {
+        // Setting a block-sequence field to a scalar must refuse: a sequence field
+        // requires an array value, never a bare scalar.
+        let content = "---\naliases:\n  - one\n  - two\n---\n";
+        let err = set_field(content, "aliases", &json!("one")).unwrap_err();
+        assert!(
+            matches!(err, FrontmatterEditError::SequenceRequiresArray { .. }),
+            "expected SequenceRequiresArray, got {err:?}"
+        );
+    }
 }
