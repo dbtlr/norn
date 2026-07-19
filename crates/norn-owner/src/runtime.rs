@@ -221,12 +221,24 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
 
     let state = Arc::new(OwnerState::new(config.build.clone()));
 
-    // Warm-up on summon: cold -> opening -> ready, on a blocking thread.
-    {
+    // Warm-up on summon: cold -> opening -> ready, on a blocking thread. The
+    // JoinHandle is RETAINED (finding 2) so shutdown can await it before the db
+    // dir is torn down — `spawn_blocking` cannot be aborted mid-`full_build`, so
+    // awaiting is the only correct bound: it guarantees no build is still writing
+    // into `db_dir` when `run` deletes it.
+    let warmup_handle = {
         let state = Arc::clone(&state);
         let vault_root = config.vault_root.clone();
         tokio::spawn(async move {
             state.set_serving(ServingState::Opening);
+            // Internal test/debug seam: an optional pre-build delay to simulate a
+            // slow warm-up (only read when set).
+            if let Some(ms) = std::env::var("NORN_OWNER_WARMUP_DELAY_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+            {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
             let build = tokio::task::spawn_blocking(move || {
                 VaultCacheSlot::create(&db_path, &vault_root, CacheOpenConfig::default())
             })
@@ -247,8 +259,8 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                     state.go_fatal();
                 }
             }
-        });
-    }
+        })
+    };
 
     // Idle-TTL reaper. Loops until shutdown is observed (never one-shot): a
     // reap decision that races a late request is simply re-evaluated next tick,
@@ -317,6 +329,15 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
     while state.in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < drain_deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+
+    // Await warm-up to completion before returning (finding 2): `run` deletes the
+    // db dir the moment `serve` returns, and `full_build` may still be writing
+    // into it. `spawn_blocking` cannot be cancelled mid-block, so awaiting is the
+    // correct bound — it guarantees no orphaned temp files survive the disposable
+    // db. For a shutdown that lands mid-warm-up this means shutdown latency is
+    // bounded by the remaining warm-up time (~linear in vault size), which is
+    // acceptable for the ephemeral tier.
+    let _ = warmup_handle.await;
 
     if state.fatal.load(Ordering::SeqCst) {
         Ok(1)

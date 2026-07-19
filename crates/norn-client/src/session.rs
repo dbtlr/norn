@@ -41,8 +41,12 @@ pub struct Pong {
 }
 
 impl OwnerSession {
-    /// Wrap a connected stream. Sets the per-request read timeout (stall budget).
+    /// Wrap a connected stream. Verifies the peer's credentials (defense in
+    /// depth: the socket path is computable, so a squatter could be listening —
+    /// refuse anything not served by our own uid, never fall through to it), then
+    /// sets the per-request read timeout (stall budget).
     pub(crate) fn new(stream: UnixStream, socket: PathBuf) -> Result<Self, ClientError> {
+        verify_peer_uid(&stream)?;
         stream
             .set_read_timeout(Some(STALL_BUDGET))
             .map_err(ClientError::Io)?;
@@ -219,10 +223,58 @@ pub(crate) fn connect_with_retry(
     }
 }
 
+/// The peer's uid on a connected Unix stream, via `getpeereid` (Linux + macOS).
+fn peer_uid(stream: &UnixStream) -> Result<u32, ClientError> {
+    use std::os::unix::io::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: getpeereid reads the peer credentials of a connected AF_UNIX socket
+    // into two valid local out-params; no aliasing, no ownership transfer.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if rc != 0 {
+        return Err(ClientError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(uid as u32)
+}
+
+/// Reject a peer whose uid differs from ours. Split from the syscall so the deny
+/// branch is unit-testable without a privileged foreign listener.
+fn check_peer_uid(peer_uid: u32, our_uid: u32) -> Result<(), ClientError> {
+    if peer_uid == our_uid {
+        Ok(())
+    } else {
+        Err(ClientError::ForeignOwner {
+            peer_uid,
+            expected_uid: our_uid,
+        })
+    }
+}
+
+/// Verify the socket's peer runs as our uid; a foreign owner is refused.
+fn verify_peer_uid(stream: &UnixStream) -> Result<(), ClientError> {
+    check_peer_uid(peer_uid(stream)?, crate::addr::current_uid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, Write};
+
+    #[test]
+    fn check_peer_uid_allows_same_and_rejects_foreign() {
+        assert!(check_peer_uid(1000, 1000).is_ok());
+        match check_peer_uid(4242, 1000) {
+            Err(ClientError::ForeignOwner {
+                peer_uid,
+                expected_uid,
+            }) => {
+                assert_eq!(peer_uid, 4242);
+                assert_eq!(expected_uid, 1000);
+            }
+            other => panic!("expected ForeignOwner, got {other:?}"),
+        }
+    }
 
     /// A scripted fake owner: binds `socket`, accepts one connection, and answers
     /// every client frame with `answer(started_at)`. Exits when the client

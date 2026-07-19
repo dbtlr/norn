@@ -109,16 +109,22 @@ impl SummonConfig {
 /// Connect to the vault's owner, summoning one if none is live. Never opens a
 /// cache in-process; the returned [`OwnerSession`] is the sole access path.
 pub fn open(config: &SummonConfig) -> Result<OwnerSession, ClientError> {
+    // Validate (and create 0700) the runtime dir BEFORE any connect. The socket
+    // path is computable, so a symlinked or foreign-owned runtime dir must be
+    // rejected before we ever dial a socket inside it — the live-owner connect
+    // path (step 1) would otherwise run before any protection (security).
+    ensure_runtime_dir_0700(&config.runtime_dir)?;
     let socket = socket_path(&config.vault_root, &config.runtime_dir, &config.fingerprint);
 
     // 1. A live owner already serving this vault+build? Connect and done.
+    //    `OwnerSession::new` verifies the peer's uid before speaking wire, so a
+    //    squatter at the socket path yields a security error here — we do NOT
+    //    fall through to spawning over it.
     if let Ok(stream) = session::connect(&socket) {
         return OwnerSession::new(stream, socket);
     }
 
-    // 2. No owner — summon one. Ensure the runtime dir exists 0700 first so the
-    //    owner can bind (the owner re-ensures it, idempotently).
-    ensure_runtime_dir_0700(&config.runtime_dir)?;
+    // 2. No owner — summon one (the runtime dir is already validated above).
     summon::spawn_owner(
         &config.owner_exe,
         &socket,

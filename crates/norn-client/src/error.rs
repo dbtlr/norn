@@ -16,6 +16,10 @@ pub enum ClientError {
     /// owned by another uid (a pre-creation / squatting attempt on the
     /// world-writable `$TMPDIR/norn-<uid>` fallback).
     InsecureRuntimeDir(String),
+    /// The process listening at the socket runs as a different uid than us — a
+    /// squatter at the computable socket path. We refuse to speak wire to it and
+    /// never fall through to spawning over it.
+    ForeignOwner { peer_uid: u32, expected_uid: u32 },
     /// Spawning the owner process failed.
     Spawn {
         exe: PathBuf,
@@ -48,6 +52,13 @@ impl std::fmt::Display for ClientError {
             ClientError::InsecureRuntimeDir(msg) => {
                 write!(f, "refusing an insecure runtime dir: {msg}")
             }
+            ClientError::ForeignOwner {
+                peer_uid,
+                expected_uid,
+            } => write!(
+                f,
+                "refusing owner socket served by uid {peer_uid} (expected {expected_uid})"
+            ),
             ClientError::Spawn { exe, source } => {
                 write!(f, "failed to spawn owner {}: {source}", exe.display())
             }
