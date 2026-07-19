@@ -510,7 +510,6 @@ dependencies = [
  "anyhow",
  "camino",
  "fs2",
- "libc",
  "norn-core",
  "norn-wire",
  "serde_json",

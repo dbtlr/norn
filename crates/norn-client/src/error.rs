@@ -12,6 +12,10 @@ pub enum ClientError {
     /// The runtime dir for sockets could not be determined (neither
     /// `XDG_RUNTIME_DIR` nor `TMPDIR`/uid usable).
     NoRuntimeDir,
+    /// The runtime dir failed its security check — it is a symlink, or it is
+    /// owned by another uid (a pre-creation / squatting attempt on the
+    /// world-writable `$TMPDIR/norn-<uid>` fallback).
+    InsecureRuntimeDir(String),
     /// Spawning the owner process failed.
     Spawn {
         exe: PathBuf,
@@ -41,6 +45,9 @@ impl std::fmt::Display for ClientError {
                 f,
                 "cannot determine a runtime dir for owner sockets (set XDG_RUNTIME_DIR or TMPDIR)"
             ),
+            ClientError::InsecureRuntimeDir(msg) => {
+                write!(f, "refusing an insecure runtime dir: {msg}")
+            }
             ClientError::Spawn { exe, source } => {
                 write!(f, "failed to spawn owner {}: {source}", exe.display())
             }

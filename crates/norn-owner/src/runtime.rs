@@ -40,6 +40,12 @@ use crate::lifecycle;
 /// so reap latency is bounded without hot-spinning.
 const REAP_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long shutdown waits for in-flight requests to drain before exiting, so a
+/// request accepted at the reap boundary completes rather than being dropped
+/// mid-flight (finding 3). Bounded so a client that never stops sending cannot
+/// pin the owner open forever.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+
 /// Everything the summoner hands a freshly-spawned owner.
 #[derive(Debug, Clone)]
 pub struct OwnerConfig {
@@ -68,7 +74,14 @@ struct OwnerState {
     in_flight: AtomicUsize,
     fatal: AtomicBool,
     build: Option<String>,
-    shutdown: tokio::sync::Notify,
+    /// The authoritative shutdown latch: once set it never clears, so a missed
+    /// wakeup is recoverable — the accept loop polls it at the top of every
+    /// iteration. `wake` only nudges the loop out of a blocking `accept`.
+    shutdown_requested: AtomicBool,
+    /// A permit-storing nudge (`notify_one`, NOT `notify_waiters`) so a
+    /// notification landing between `select!` iterations is not lost — the next
+    /// `notified()` returns immediately from the stored permit.
+    wake: tokio::sync::Notify,
 }
 
 impl OwnerState {
@@ -80,8 +93,13 @@ impl OwnerState {
             in_flight: AtomicUsize::new(0),
             fatal: AtomicBool::new(false),
             build,
-            shutdown: tokio::sync::Notify::new(),
+            shutdown_requested: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
         }
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown_requested.load(Ordering::SeqCst)
     }
 
     fn touch(&self) {
@@ -113,16 +131,20 @@ impl OwnerState {
         }
     }
 
-    /// Trip exit-to-heal: mark fatal and signal shutdown. Any cache error routes
+    /// Trip exit-to-heal: mark fatal and latch shutdown. Any cache error routes
     /// here — the db is disposable, so the owner terminates and a resummon
     /// rebuilds (ADR 0017).
     fn go_fatal(&self) {
         self.fatal.store(true, Ordering::SeqCst);
-        self.shutdown.notify_waiters();
+        self.request_shutdown();
     }
 
+    /// Latch shutdown and nudge the accept loop. The latch (not the nudge) is
+    /// authoritative, so this is lossless even if the nudge races a loop
+    /// iteration.
     fn request_shutdown(&self) {
-        self.shutdown.notify_waiters();
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
     }
 }
 
@@ -141,7 +163,24 @@ pub fn run(config: OwnerConfig) -> anyhow::Result<i32> {
     // Held for the whole process — dropping it releases single ownership, so it
     // must outlive the runtime below. Flock BEFORE bind so a losing racer never
     // clobbers the winner's socket.
-    let _lock = lifecycle::acquire_owner_lock(&lock_path, env!("CARGO_PKG_VERSION"))?;
+    let _lock = match lifecycle::acquire_owner_lock(&lock_path, env!("CARGO_PKG_VERSION"))? {
+        lifecycle::AcquireOutcome::Acquired(file) => file,
+        // Losing the summon race is NORMAL (finding 8): the incumbent owner
+        // already serves this vault+build. Step aside cleanly (exit 0) — the
+        // client connects to the incumbent. This info line lands in the per-owner
+        // log, not the user's terminal.
+        lifecycle::AcquireOutcome::Contended { incumbent_pid } => {
+            match incumbent_pid {
+                Some(pid) => eprintln!(
+                    "norn owner: another owner already serves this vault (pid {pid}); stepping aside"
+                ),
+                None => eprintln!(
+                    "norn owner: another owner already serves this vault; stepping aside"
+                ),
+            }
+            return Ok(0);
+        }
+    };
 
     // The db is born-with-owner: a per-owner temp dir under the (0700) runtime
     // dir, deleted when this handle drops at the end of `run` (clean/idle/fatal
@@ -211,14 +250,19 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
         });
     }
 
-    // Idle-TTL reaper.
+    // Idle-TTL reaper. Loops until shutdown is observed (never one-shot): a
+    // reap decision that races a late request is simply re-evaluated next tick,
+    // so a single missed reap is recoverable, not a permanent orphan.
     {
         let state = Arc::clone(&state);
         let ttl = config.idle_ttl;
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(REAP_CHECK_INTERVAL).await;
-                if state.fatal.load(Ordering::SeqCst) {
+                if state.is_shutdown() {
+                    // Re-nudge on the way out in case an earlier request raced
+                    // the accept loop; the latch guarantees the loop still exits.
+                    state.wake.notify_one();
                     return;
                 }
                 if state.in_flight.load(Ordering::SeqCst) == 0 {
@@ -229,15 +273,20 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                         .elapsed();
                     if idle >= ttl {
                         state.request_shutdown();
-                        return;
+                        // keep looping — next tick observes the latch and returns.
                     }
                 }
             }
         });
     }
 
-    // Accept loop.
+    // Accept loop. The shutdown latch is polled at the top of every iteration
+    // (recovering any missed nudge); `wake.notified()` only unblocks a parked
+    // `accept`.
     loop {
+        if state.is_shutdown() {
+            break;
+        }
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _addr)) => {
@@ -253,10 +302,20 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },
-            _ = state.shutdown.notified() => break,
-            _ = sigint.recv() => break,
-            _ = sigterm.recv() => break,
+            _ = state.wake.notified() => break,
+            _ = sigint.recv() => { state.request_shutdown(); break; }
+            _ = sigterm.recv() => { state.request_shutdown(); break; }
         }
+    }
+
+    // Reaper TOCTOU (finding 3): stop accepting FIRST (drop the listener — a
+    // connection racing the reap boundary is now either already accepted, and
+    // drained below, or never accepted), then drain in-flight requests so none
+    // is dropped mid-flight.
+    drop(listener);
+    let drain_deadline = Instant::now() + DRAIN_BUDGET;
+    while state.in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < drain_deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     if state.fatal.load(Ordering::SeqCst) {

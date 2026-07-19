@@ -89,7 +89,7 @@ pub fn runtime_dir_from_env() -> Result<PathBuf, ClientError> {
 }
 
 #[cfg(unix)]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     // SAFETY: `getuid` is always-succeeds, no args, no memory effects.
     #[allow(unsafe_code)]
     unsafe {
@@ -98,7 +98,7 @@ fn current_uid() -> u32 {
 }
 
 #[cfg(not(unix))]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     0
 }
 

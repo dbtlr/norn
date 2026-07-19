@@ -40,9 +40,14 @@ pub fn spawn_owner(
         .arg(build)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        // Keep the owner's stderr visible: warm-up / exit-to-heal diagnostics go
-        // there, and a detached daemon's stderr is the only operator signal.
-        .stderr(Stdio::inherit());
+        // Route the owner's stderr to a per-owner log file (truncate-on-start)
+        // rather than inheriting the CLI's stderr fd — a detached owner holding
+        // the CLI's stderr open for up to a full TTL would keep a piped stderr
+        // from ever closing (finding 4). The log preserves operator visibility
+        // (warm-up / exit-to-heal / lost-summon-race diagnostics land there).
+        // Best-effort: if the log can't be opened, discard rather than inherit,
+        // so the fd stays decoupled regardless.
+        .stderr(owner_log_stderr(socket));
 
     // Detach from the CLI's process group so terminal job-control signals to the
     // foreground CLI (SIGINT on ^C, SIGHUP on terminal close) don't also reap
@@ -65,4 +70,20 @@ pub fn spawn_owner(
             exe: owner_exe.to_path_buf(),
             source,
         })
+}
+
+/// The owner's stderr target: a per-owner log file `<h>.<fp>.log` beside the
+/// socket, truncated on start. Falls back to a null sink (never the client's
+/// inherited stderr) so the fd is always decoupled.
+fn owner_log_stderr(socket: &Path) -> Stdio {
+    let log_path = socket.with_extension("log");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+    {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    }
 }

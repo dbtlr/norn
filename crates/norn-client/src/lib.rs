@@ -143,11 +143,31 @@ pub fn resolve(home: ConfigHome, input: &ResolveInput) -> Result<Resolved, Clien
         .map_err(ClientError::from)
 }
 
+/// Create the runtime dir 0700 and validate it (finding 5). The client is the
+/// first to create/adopt the dir and runs as the same uid the owner will, so it
+/// is the ownership-authoritative check: after create, `lstat` and REJECT a
+/// symlink or a dir owned by another uid — the classic pre-creation vector on
+/// the world-writable `$TMPDIR/norn-<uid>` fallback.
 fn ensure_runtime_dir_0700(dir: &std::path::Path) -> Result<(), ClientError> {
     std::fs::create_dir_all(dir).map_err(ClientError::Io)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::symlink_metadata(dir).map_err(ClientError::Io)?; // lstat, no follow
+        if meta.file_type().is_symlink() {
+            return Err(ClientError::InsecureRuntimeDir(format!(
+                "{} is a symlink",
+                dir.display()
+            )));
+        }
+        let me = addr::current_uid();
+        if meta.uid() != me {
+            return Err(ClientError::InsecureRuntimeDir(format!(
+                "{} is owned by uid {} (expected {me})",
+                dir.display(),
+                meta.uid()
+            )));
+        }
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .map_err(ClientError::Io)?;
     }
@@ -165,5 +185,29 @@ mod tests {
         if std::env::var(EPHEMERAL_TTL_ENV).is_err() {
             assert_eq!(ephemeral_idle_ttl(), Duration::from_secs(120));
         }
+    }
+
+    #[test]
+    fn ensure_runtime_dir_creates_owned_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("norn-rt");
+        ensure_runtime_dir_0700(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[test]
+    fn ensure_runtime_dir_rejects_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = tmp.path().join("norn-rt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = ensure_runtime_dir_0700(&link).expect_err("a symlinked runtime dir is insecure");
+        assert!(
+            matches!(err, ClientError::InsecureRuntimeDir(_)),
+            "got {err:?}"
+        );
     }
 }

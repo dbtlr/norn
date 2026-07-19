@@ -83,8 +83,9 @@ fn second_open_connects_to_the_same_owner() {
     let rt_tmp = tempfile::TempDir::new().unwrap();
     let runtime_dir = rt_tmp.path().to_path_buf();
 
-    // A long TTL so the owner stays up across both opens.
-    let config = base_config(vault_root, runtime_dir, Duration::from_secs(120));
+    // A modest TTL: long enough to stay up across both opens, short enough that
+    // the owner self-reaps promptly after the test rather than lingering.
+    let config = base_config(vault_root, runtime_dir, Duration::from_secs(3));
 
     let mut first = open(&config).expect("first summon");
     let pong1 = first.wait_until_ready(Duration::from_secs(20)).unwrap();
@@ -99,9 +100,41 @@ fn second_open_connects_to_the_same_owner() {
     assert_eq!(pong2.serving, ServingState::Ready);
     assert_eq!(second.probe().unwrap(), 2);
 
-    // Shut the owner down promptly rather than waiting out the 120s TTL: dropping
-    // the sessions leaves it idle; the test process exit reaps it via its own
-    // TTL/flock, but we assert liveness here, not reap.
     drop(first);
     drop(second);
+}
+
+/// Finding 3 (reaper TOCTOU / drain): across repeated summon→probe→reap cycles,
+/// every probe that gets a connection returns the EXACT document count — never a
+/// partial, garbage, or mid-flight-dropped response. Alternating idle gaps drive
+/// both same-owner reconnects (gap < TTL) and reap-then-resummon (gap > TTL).
+#[test]
+fn probes_across_reap_boundaries_are_never_corrupted() {
+    let (_vault_tmp, vault_root) = common::temp_vault(4);
+    let rt_tmp = tempfile::TempDir::new().unwrap();
+    let ttl = Duration::from_millis(400);
+    let config = base_config(vault_root, rt_tmp.path().to_path_buf(), ttl);
+
+    for i in 0..10 {
+        let mut session = open(&config).expect("summon-or-connect");
+        session
+            .wait_until_ready(Duration::from_secs(20))
+            .expect("owner ready");
+        assert_eq!(
+            session
+                .probe()
+                .expect("probe must complete, not drop mid-flight"),
+            4,
+            "every probe must return the exact count"
+        );
+        drop(session);
+        // Even iterations outlast the TTL (force a reap + resummon); odd ones do
+        // not (reconnect to the live owner).
+        let gap = if i % 2 == 0 {
+            ttl + Duration::from_millis(300)
+        } else {
+            Duration::from_millis(50)
+        };
+        std::thread::sleep(gap);
+    }
 }

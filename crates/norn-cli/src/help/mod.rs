@@ -116,7 +116,7 @@ fn resolve_subcmd_from_raw_args<'a>(
             // Skip flags and their inline values (`--foo=val` or `--foo val`).
             if !token.contains('=') {
                 let flag_stem = token.trim_start_matches('-');
-                if matches!(flag_stem, "cwd" | "C" | "config" | "color" | "vault") {
+                if matches!(flag_stem, "cwd" | "C" | "color" | "vault") {
                     let _ = iter.next(); // skip the value
                 }
             }
