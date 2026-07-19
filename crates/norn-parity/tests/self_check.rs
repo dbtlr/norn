@@ -29,7 +29,7 @@ fn every_case_matches_oracle_vs_itself() {
     let report = run::run(&config).unwrap_or_else(|e| panic!("self-check run failed: {e}"));
 
     assert_eq!(
-        report.oracle_version, "0.48.0",
+        report.oracle_version, "0.48.1",
         "expected the pinned oracle version"
     );
     assert!(

@@ -78,7 +78,7 @@ fn candidate_echo_with_no_ledger_entry_is_drift_and_exits_1() {
     }
     let ledger_dir = tempfile::TempDir::new().unwrap();
     let ledger_path = ledger_dir.path().join("ledger.toml");
-    common::write_ledger(&ledger_path, "[meta]\noracle_version = \"0.48.0\"\n");
+    common::write_ledger(&ledger_path, "[meta]\noracle_version = \"0.48.1\"\n");
 
     let config = RunConfig {
         mode: Mode::Gated,
@@ -111,7 +111,7 @@ fn candidate_echo_covered_by_a_ledger_entry_is_diverged_citing_it_and_exits_0() 
         &format!(
             r#"
 [meta]
-oracle_version = "0.48.0"
+oracle_version = "0.48.1"
 
 [[entry]]
 id = "TEST-DIVERGED"
@@ -158,7 +158,7 @@ fn an_entry_citing_a_matching_case_is_stale_and_exits_1() {
         &format!(
             r#"
 [meta]
-oracle_version = "0.48.0"
+oracle_version = "0.48.1"
 
 [[entry]]
 id = "TEST-STALE"

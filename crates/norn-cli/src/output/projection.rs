@@ -15,6 +15,10 @@ use std::io::Write;
 
 /// The structural facets addressable via `--col` (dot-prefixed; dot stripped
 /// here). Bare `--col` names are frontmatter field names instead.
+///
+/// The [`DEFERRED_FACETS`] subset is recognized (so a request for one is a
+/// clear "not yet available" error rather than an "unknown facet" warning) but
+/// its data is gated off until the deep-fetch port (see [`first_deferred_facet`]).
 pub const KNOWN_FACETS: &[&str] = &[
     "path",
     "stem",
@@ -26,6 +30,34 @@ pub const KNOWN_FACETS: &[&str] = &[
     "body",
     "document_hash",
 ];
+
+/// Structural facets that require the not-yet-ported deep-fetch (headings + the
+/// three link sets). The flat wire projection carries frontmatter + body only,
+/// so these would render EMPTY — which an agent reads as "no headings / no
+/// links" when there may be some. That is a trust violation, so requesting one
+/// (or `--all-cols`, which includes them) fails closed instead (see
+/// [`first_deferred_facet`]).
+///
+/// NRN-347: delete this list and the gate when deep-fetch lands.
+pub const DEFERRED_FACETS: &[&str] = &[
+    "headings",
+    "outgoing_links",
+    "unresolved_links",
+    "incoming_links",
+];
+
+/// The first deep (deferred) facet a `--col` request names, dot-stripped, or
+/// `None` when every requested facet is a currently-available flat facet
+/// (`.path` / `.stem` / `.frontmatter` / `.body` / `.document_hash`) or a bare
+/// frontmatter field. The caller fails the invocation closed on `Some`.
+///
+/// NRN-347: delete when deep-fetch lands.
+pub fn first_deferred_facet(cols: &[String]) -> Option<String> {
+    let (facets, _fields) = split_cols(cols);
+    facets
+        .into_iter()
+        .find(|f| DEFERRED_FACETS.contains(&f.as_str()))
+}
 
 /// Partition `--col` tokens into structural facets (dot-prefixed, dot stripped)
 /// and frontmatter field names (bare).

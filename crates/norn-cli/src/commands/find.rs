@@ -6,9 +6,11 @@
 //! (paths / records / json / jsonl) is byte-faithful to the donor (`src/find/`).
 //!
 //! Deep facets (`.headings`, `.outgoing_links`, `.unresolved_links`,
-//! `.incoming_links`, and `--all-cols`' join-backed rows) are recognized but not
-//! yet populated — the flat wire projection carries frontmatter + body only.
-//! They render empty pending the deep-fetch port.
+//! `.incoming_links`) and `--all-cols` require the not-yet-ported deep-fetch;
+//! the flat wire projection carries frontmatter + body only. Rather than render
+//! a misleading empty result (an agent would read `.headings: []` as "no
+//! headings" when there may be some), requesting one FAILS CLOSED with a clear
+//! "not yet available" error until the deep-fetch port lands (NRN-347).
 
 use std::io::Write;
 
@@ -21,8 +23,8 @@ use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 use crate::output::palette::{self, Palette};
 use crate::output::primitives::{count_line, record_block, separator, Field};
 use crate::output::projection::{
-    filter_frontmatter, frontmatter_to_display, json_value_inline, split_cols,
-    unknown_facet_message, warn_col_ignored, KNOWN_FACETS,
+    filter_frontmatter, first_deferred_facet, frontmatter_to_display, json_value_inline,
+    split_cols, unknown_facet_message, warn_col_ignored, KNOWN_FACETS,
 };
 
 const NAME: &str = "find";
@@ -113,6 +115,25 @@ pub fn run<O: Write, E: Write>(
         let help = crate::help::render_command_long(NAME, global.color);
         let _ = presenter.streams().1.write_all(&help);
         return EXIT_USAGE;
+    }
+
+    // NRN-347: deep facets (headings + link sets) and `--all-cols` need the
+    // not-yet-ported deep-fetch. Fail closed — never render an empty structural
+    // column that reads as "none" when there may be some. Delete this gate when
+    // deep-fetch lands (the flat facets `.path`/`.stem`/`.frontmatter`/`.body`/
+    // `.document_hash` and bare fields keep working). Checked before summon so a
+    // rejected request never spins up an owner.
+    if args.all_cols {
+        presenter.diagnostic(
+            "`--all-cols` is not yet available in this build (it includes structural columns pending the deep-fetch port)",
+        );
+        return EXIT_OPERATIONAL;
+    }
+    if let Some(facet) = first_deferred_facet(&args.col) {
+        presenter.diagnostic(&format!(
+            "the `.{facet}` column is not yet available in this build"
+        ));
+        return EXIT_OPERATIONAL;
     }
 
     let mut session = match crate::routed::open_session(global) {
@@ -513,5 +534,79 @@ mod tests {
         let v = doc_to_json(&d, &[], false);
         let s = serde_json::to_string(&v).unwrap();
         assert_eq!(s, r#"{"frontmatter":null,"path":"a.md"}"#);
+    }
+
+    // ── NRN-347 fail-closed gate: deep facets + --all-cols reject; flat OK ──
+
+    /// Drive `run` with an in-memory presenter. Only meaningful for inputs the
+    /// deep-facet gate rejects BEFORE summon (a passing input would try to spawn
+    /// an owner), which is exactly what these tests exercise.
+    fn run_find(argv: &[&str]) -> (i32, String, String) {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let global = cli.global;
+        let args = match cli.command {
+            Command::Find(a) => a,
+            other => panic!("expected find, got {other:?}"),
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = {
+            let mut p = Presenter::new(&mut out, &mut err);
+            run(&args, &global, &mut p)
+        };
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    #[test]
+    fn all_cols_is_rejected_before_summon() {
+        let (code, out, err) = run_find(&["norn", "find", "--all", "--all-cols"]);
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(out.is_empty(), "stdout must stay empty");
+        assert!(
+            err.contains("`--all-cols` is not yet available"),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn each_deep_facet_col_is_rejected_before_summon() {
+        for facet in [
+            ".headings",
+            ".outgoing_links",
+            ".unresolved_links",
+            ".incoming_links",
+        ] {
+            let (code, out, err) = run_find(&["norn", "find", "--all", "--col", facet]);
+            assert_eq!(code, EXIT_OPERATIONAL, "facet {facet} should reject");
+            assert!(out.is_empty(), "stdout must stay empty for {facet}");
+            assert!(
+                err.contains(&format!("the `{facet}` column is not yet available")),
+                "facet {facet} got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_facets_and_fields_pass_the_gate() {
+        // The gate returns None for the currently-available columns, so they
+        // proceed past it (to summon + render, covered by the parity suite).
+        for cols in [
+            vec![".stem".to_string()],
+            vec![".body".to_string()],
+            vec![".path".to_string()],
+            vec![".frontmatter".to_string()],
+            vec![".document_hash".to_string()],
+            vec!["title".to_string()],
+            vec![".stem".to_string(), "title".to_string()],
+        ] {
+            assert!(
+                first_deferred_facet(&cols).is_none(),
+                "flat cols {cols:?} must pass the deep-facet gate"
+            );
+        }
     }
 }

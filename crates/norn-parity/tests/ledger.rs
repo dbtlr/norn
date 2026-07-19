@@ -25,7 +25,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     let path = common::workspace_root().join("docs/parity-ledger.toml");
     let ledger = Ledger::load(&path, &known_ids(), &ported_ids())
         .unwrap_or_else(|e| panic!("failed to load {}: {e}", path.display()));
-    assert_eq!(ledger.meta.oracle_version, "0.48.0");
+    assert_eq!(ledger.meta.oracle_version, "0.48.1");
     // Phase 1 (NRN-329) added PD-101 (the `vault` namespace in top-level
     // `--help`). NRN-345 broadened PD-101 to also carry the GLOBAL OPTIONS
     // change on help-bare and added PD-102 for the same GLOBAL OPTIONS change on

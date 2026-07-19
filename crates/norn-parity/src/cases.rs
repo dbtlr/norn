@@ -12,7 +12,7 @@
 //! individually, so case-level granularity avoids a reshuffle at each port.
 //! [`Suite`] stays a reporting/grouping label.
 //!
-//! Every case here was run against the installed oracle (v0.48.0) and
+//! Every case here was run against the installed oracle (v0.48.1) and
 //! confirmed rerun-stable (identical stdout/stderr/exit code across repeated
 //! invocations) before being added — see the crate's implementation notes.
 //! Two starter cases required adjustment from a naive reading of the ADR

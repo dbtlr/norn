@@ -11,9 +11,11 @@
 //! The whole point of deriving (rather than hand-listing) the flag surface is
 //! that a flag added to `cli.rs` cannot silently degrade into a dynamic field
 //! predicate — the derivation picks it up automatically. The drift-guard test
-//! locks that in: it compares the derived surface against an explicit expected
-//! fixture, so adding a query/mutate flag to `cli.rs` without updating the
-//! fixture fails the test (forcing a conscious decision about the new flag).
+//! locks that in: it compares the clap derivation against
+//! [`norn_core::grammar::frozen_known_flags`] — the SAME frozen fixture the
+//! norn-core normalization tests consume — so adding a query/mutate flag to
+//! `cli.rs` without updating that one fixture fails the test. One source of
+//! truth, cross-crate; no local hand-copy to drift out of sync.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -109,109 +111,25 @@ pub fn derive_known_flags() -> KnownFlags {
 mod tests {
     use super::*;
 
-    fn set_of(items: &[&str]) -> BTreeSet<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// The value-taking globals — the anti-drift anchor for the globals surface.
-    const VALUE_GLOBALS: &[&str] = &["cwd", "color", "vault"];
-
-    fn mutate_flags(own: &[&str]) -> BTreeSet<String> {
-        let mut s = set_of(own);
-        s.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
-        s
-    }
-
-    /// The expected frozen flag surface (NRN-329), mirroring the norn-core
-    /// grammar fixture. The derived surface MUST equal this — a query/mutate
-    /// flag added to `cli.rs` changes the derivation and fails this test until
-    /// the fixture is consciously updated (NRN-178 drift guard).
-    fn expected() -> KnownFlags {
-        let mut query_value = set_of(&[
-            "text",
-            "eq",
-            "not-eq",
-            "in",
-            "not-in",
-            "starts-with",
-            "ends-with",
-            "contains",
-            "has",
-            "missing",
-            "before",
-            "after",
-            "on",
-            "path",
-            "links-to",
-            "sort",
-            "limit",
-            "starts-at",
-            "by",
-            "col",
-            "format",
-        ]);
-        query_value.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
-        let query_boolean = set_of(&[
-            "unresolved-links",
-            "all",
-            "all-cols",
-            "no-pager",
-            "desc",
-            "no-limit",
-            "data",
-            "stats",
-            "verbose",
-            "no-cache-refresh",
-            "help",
-        ]);
-        let mut mutate_value = HashMap::new();
-        mutate_value.insert(
-            "set".to_string(),
-            mutate_flags(&["field", "field-json", "push", "pop", "remove", "format"]),
-        );
-        mutate_value.insert(
-            "new".to_string(),
-            mutate_flags(&["as", "title", "var", "field", "field-json", "format"]),
-        );
-        mutate_value.insert(
-            "edit".to_string(),
-            mutate_flags(&[
-                "edits-json",
-                "ops-file",
-                "str-replace",
-                "replace-section",
-                "append-to-section",
-                "delete-section",
-                "insert-before-heading",
-                "insert-after-heading",
-                "new",
-                "content",
-                "expected-hash",
-                "format",
-            ]),
-        );
-        KnownFlags {
-            query_value,
-            query_boolean,
-            mutate_value,
-        }
-    }
-
+    /// The clap derivation MUST equal the single frozen surface norn-core
+    /// exports — a query/mutate flag added to `cli.rs` changes the derivation
+    /// and fails this test until `frozen_known_flags` is consciously updated
+    /// (NRN-178 drift guard, one cross-crate source of truth).
     #[test]
-    fn derived_known_flags_match_the_frozen_fixture() {
+    fn derived_known_flags_match_the_frozen_norn_core_fixture() {
         let derived = derive_known_flags();
-        let expected = expected();
+        let frozen = norn_core::grammar::frozen_known_flags();
         assert_eq!(
-            derived.query_value, expected.query_value,
-            "query value-flag surface drifted from the frozen fixture"
+            derived.query_value, frozen.query_value,
+            "query value-flag surface drifted from norn-core's frozen fixture"
         );
         assert_eq!(
-            derived.query_boolean, expected.query_boolean,
-            "query boolean-flag surface drifted from the frozen fixture"
+            derived.query_boolean, frozen.query_boolean,
+            "query boolean-flag surface drifted from norn-core's frozen fixture"
         );
         assert_eq!(
-            derived.mutate_value, expected.mutate_value,
-            "mutate value-flag surface drifted from the frozen fixture"
+            derived.mutate_value, frozen.mutate_value,
+            "mutate value-flag surface drifted from norn-core's frozen fixture"
         );
     }
 }
