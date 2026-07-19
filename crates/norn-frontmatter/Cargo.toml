@@ -4,5 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
+description = "The text layer — frontmatter parse/serialize, ADR 0008 minimal-edit byte-splicing, heading/section spans, and wikilink syntax. Standalone-publishable future; no dependency on other norn crates."
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+regex = "1.10"
+pulldown-cmark = "0.13"
+thiserror = "2.0"
