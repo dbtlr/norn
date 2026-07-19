@@ -14,7 +14,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use norn_client::{open, SummonConfig};
+use norn_client::{open, socket_path, ClientError, SummonConfig};
 use norn_wire::ServingState;
 
 fn base_config(vault_root: PathBuf, runtime_dir: PathBuf, ttl: Duration) -> SummonConfig {
@@ -103,6 +103,70 @@ fn second_open_connects_to_the_same_owner() {
 
     drop(first);
     drop(second);
+}
+
+/// NRN-360: summoning against a vault whose `.norn/config.yaml` is present but
+/// invalid must surface the config error on the USER-error path
+/// ([`ClientError::Rejected`], carrying the oracle-shaped `invalid config …`
+/// message), NOT as an owner-health/owner-gone failure or a crash loop. The
+/// failed owner then idle-reaps cleanly — a bad config is cheap and repeatable.
+#[test]
+fn summon_against_invalid_config_surfaces_a_config_error_then_reaps() {
+    let vault_tmp = tempfile::TempDir::new().unwrap();
+    let vault_root = vault_tmp.path().join("vault");
+    std::fs::create_dir_all(vault_root.join(".norn")).unwrap();
+    // A well-formed-YAML but schema-invalid config (unknown top-level field).
+    std::fs::write(vault_root.join(".norn/config.yaml"), "bogus: true\n").unwrap();
+    std::fs::write(
+        vault_root.join("a.md"),
+        "---\ntype: note\ntitle: A\n---\nbody\n",
+    )
+    .unwrap();
+
+    let rt_tmp = tempfile::TempDir::new().unwrap();
+    let runtime_dir = rt_tmp.path().to_path_buf();
+    // Short idle TTL so the failed owner's clean reap is observable in-test.
+    let config = base_config(
+        vault_root.clone(),
+        runtime_dir.clone(),
+        Duration::from_secs(1),
+    );
+    let socket = socket_path(&vault_root, &runtime_dir, &config.fingerprint);
+
+    // The config error surfaces at whichever ping observes the failed warm-up
+    // first — the `open` handshake or a `wait_until_ready` poll. Both must be a
+    // Rejected, never OwnerGone (which would resummon into a crash loop).
+    let err = match open(&config) {
+        Ok(mut session) => session
+            .wait_until_ready(Duration::from_secs(20))
+            .expect_err("a bad-config owner must never reach ready"),
+        Err(e) => e,
+    };
+    match &err {
+        ClientError::Rejected(message) => {
+            assert!(
+                message.contains("invalid config "),
+                "expected the oracle config-error message, got {message:?}"
+            );
+            assert!(
+                message.contains("unknown field `bogus`"),
+                "expected the serde detail, got {message:?}"
+            );
+        }
+        other => panic!("expected a Rejected config error, got {other:?}"),
+    }
+
+    // No crash loop: the failed owner idle-reaps cleanly, removing its socket
+    // and db dir — a resummon would be cheap, not a spin.
+    let reaped = common::wait_until(Duration::from_secs(15), || {
+        !socket.exists() && common::owner_db_dirs(&runtime_dir) == 0
+    });
+    assert!(
+        reaped,
+        "the failed owner should idle-reap cleanly: socket exists={}, db dirs={}",
+        socket.exists(),
+        common::owner_db_dirs(&runtime_dir),
+    );
 }
 
 /// Finding 3 (reaper TOCTOU / drain): across repeated summon→probe→reap cycles,

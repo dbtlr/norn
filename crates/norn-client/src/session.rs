@@ -124,6 +124,12 @@ impl OwnerSession {
                 serving,
                 writer_progress,
             }),
+            // A warm-up that failed on an invalid `.norn/config.yaml` answers
+            // every frame — including a ping — with the config error as a
+            // Rejected (NRN-360). The owner is healthy (not exit-to-heal), so
+            // this rides the user-error path: `wait_until_ready` returns it and
+            // the CLI renders the config error, never a resummon/crash loop.
+            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected pong, got {other:?}"
@@ -135,6 +141,9 @@ impl OwnerSession {
     pub fn probe(&mut self) -> Result<u64, ClientError> {
         match self.request(&ClientFrame::Probe)? {
             OwnerFrame::Probe { document_count } => Ok(document_count),
+            // A bad-config warm-up rejects every frame with the config error
+            // (NRN-360) — surface it on the user-error path, like the read verbs.
+            OwnerFrame::Rejected { message } => Err(ClientError::Rejected(message)),
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected probe report, got {other:?}"
@@ -504,6 +513,50 @@ mod tests {
             .expect_err("a closed-after-accept owner must not yield a pong");
         assert!(err.is_owner_gone(), "expected OwnerGone, got {err:?}");
 
+        handle.join().unwrap();
+    }
+
+    /// NRN-360: an owner whose warm-up failed on an invalid config answers a
+    /// ping with a `Rejected` carrying the config message. `ping` must surface
+    /// that as [`ClientError::Rejected`] (the user-error path), NOT a protocol
+    /// error and NOT owner-gone — so `wait_until_ready` returns it verbatim
+    /// instead of resummoning into a crash loop.
+    #[test]
+    fn ping_maps_a_rejected_config_error_onto_the_user_error_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("badconfig.sock");
+        let handle = fake_owner(socket.clone(), |_| OwnerFrame::Rejected {
+            message: "invalid config /vault/.norn/config.yaml: unknown field `bogus`".to_string(),
+        });
+
+        // One connection (the fake owner serves a single accept): a direct ping
+        // and a `wait_until_ready` poll must BOTH surface the Rejected.
+        let mut session = connected_session(&socket);
+        let err = session
+            .ping()
+            .expect_err("a bad-config owner must reject the ping");
+        match &err {
+            ClientError::Rejected(message) => {
+                assert!(
+                    message.starts_with("invalid config "),
+                    "expected the oracle-shaped config message, got {message:?}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        assert!(
+            !err.is_owner_gone(),
+            "a config error is not a resummon signal"
+        );
+
+        // wait_until_ready pings in a loop; a Rejected must be returned as-is,
+        // never triggering the owner-gone resummon path.
+        let err = session
+            .wait_until_ready(Duration::from_secs(5))
+            .expect_err("a bad-config owner never reaches ready");
+        assert!(matches!(err, ClientError::Rejected(_)), "got {err:?}");
+
+        drop(session);
         handle.join().unwrap();
     }
 
