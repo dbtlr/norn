@@ -255,9 +255,13 @@ fn vault_set_unknown_name_exits_one() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+    // NRN-370: the `vault` verbs now fold their ConfigError through the same
+    // routed diagnostic constructor the read verbs use, so `UnknownName` carries
+    // its recovery hint here too (the one deliberate behavior delta).
     assert_eq!(
         stderr_of(&out),
-        "norn: no vault named \"ghost\" is registered\n"
+        "norn: no vault named \"ghost\" is registered\n\
+         hint: run `norn vault list` to see registered vault names\n"
     );
 }
 

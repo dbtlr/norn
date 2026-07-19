@@ -21,7 +21,7 @@ use clap::Parser;
 use norn_config::ConfigHome;
 
 use crate::cli::{Cli, Command};
-use crate::display::Presenter;
+use crate::display::{emit, Diagnostic, Presenter};
 
 mod cli;
 mod commands;
@@ -104,13 +104,30 @@ pub fn run() -> i32 {
 /// `NORN_CONFIG_DIR`) fails loud as an operational diagnostic.
 fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i32 {
     match cli.command {
-        // The two ported read exemplars parse to Params and present the uniform
-        // not-yet-ported outcome; the rest of the v0.48 surface is grammar-only
-        // stubs (NRN-329) routed to the same uniform outcome by name.
-        Command::Find(args) => commands::find::run(&args, &cli.global, presenter),
-        Command::Get(args) => commands::get::run(&args, &cli.global, presenter),
-        Command::Count(args) => commands::count::run(&args, &cli.global, presenter),
-        Command::Describe(args) => commands::describe::run(&args, &cli.global, presenter),
+        // The ported read verbs resolve their report into an `Output` and the
+        // single `emit` call renders it; the rest of the v0.48 surface is
+        // grammar-only stubs (NRN-329) routed to the uniform not-yet-ported
+        // outcome by name.
+        Command::Find(args) => emit(
+            commands::find::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
+        Command::Get(args) => emit(
+            commands::get::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
+        Command::Count(args) => emit(
+            commands::count::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
+        Command::Describe(args) => emit(
+            commands::describe::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Set(_) => presenter.not_yet_ported("set"),
         Command::Edit(_) => presenter.not_yet_ported("edit"),
         Command::New(_) => presenter.not_yet_ported("new"),
@@ -132,20 +149,20 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         Command::Manpage => presenter.not_yet_ported("manpage"),
         // The intentionally-new registry namespace (ADR 0017): no oracle, and
         // the first namespace that EXECUTES — resolve the ambient config home
-        // and hand it the effective cwd.
-        Command::Vault(cmd) => match ConfigHome::from_env() {
-            Ok(home) => match effective_cwd(&cli.global) {
-                Ok(cwd) => commands::vault::run(&cmd, home, &cwd, presenter),
-                Err(msg) => {
-                    presenter.diagnostic(&msg);
-                    display::EXIT_OPERATIONAL
-                }
-            },
-            Err(err) => {
-                presenter.diagnostic(&err.to_string());
-                display::EXIT_OPERATIONAL
-            }
-        },
+        // and hand it the effective cwd, then render the returned Output through
+        // the same single `emit` seam. The ambient-resolution failures stay
+        // headline-only diagnostics (a bad config home / cwd has no useful
+        // recovery hint), byte-identical to the donor.
+        Command::Vault(cmd) => {
+            let result = match ConfigHome::from_env() {
+                Ok(home) => match effective_cwd(&cli.global) {
+                    Ok(cwd) => commands::vault::run(&cmd, home, &cwd),
+                    Err(msg) => Err(Diagnostic::new(msg)),
+                },
+                Err(err) => Err(Diagnostic::new(err.to_string())),
+            };
+            emit(result, &cli.global, presenter)
+        }
     }
 }
 
