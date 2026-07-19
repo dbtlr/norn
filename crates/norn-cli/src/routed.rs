@@ -103,7 +103,12 @@ pub fn client_error_diagnostic(e: &ClientError) -> Diagnostic {
 /// Map a central-config [`ConfigError`] onto a soft-landing [`Diagnostic`]
 /// (NRN-361). The headline is the error's own message; a hint is added for the
 /// variants with a concrete recovery path.
-fn config_error_diagnostic(e: &ConfigError) -> Diagnostic {
+///
+/// Public because the `vault` registry verbs fold their `ConfigError`s through
+/// this same constructor (NRN-370), so a variant like `UnknownName` carries its
+/// `norn vault list` hint identically whether it surfaced from a read summon or
+/// from `vault set <unknown>`.
+pub fn config_error_diagnostic(e: &ConfigError) -> Diagnostic {
     let base = Diagnostic::new(e.to_string());
     match e {
         ConfigError::UnknownName { .. } => {

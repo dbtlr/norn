@@ -13,16 +13,20 @@
 //! they call into [`norn_config`], the sole performer of central-config IO. The
 //! ambient environment read ([`ConfigHome::from_env`]) happens once, at the
 //! dispatch boundary; `run` takes an already-constructed home so it stays
-//! testable against an injected config directory.
+//! testable against an injected config directory. Each sub-verb returns an
+//! [`Output`] (a stdout confirmation line, or the registered-vault list) for the
+//! display layer to render; a [`norn_config::ConfigError`] is folded into the
+//! same routed diagnostic constructor the read verbs use, so a variant like
+//! `UnknownName` carries its `norn vault list` recovery hint everywhere (NRN-370).
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{ArgGroup, Args, Subcommand};
-use norn_config::{ConfigHome, RegisteredVault, Registry, VaultChanges, VaultOverrides};
-use serde::Serialize;
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
+use norn_config::{
+    ConfigError, ConfigHome, RegisteredVault, Registry, VaultChanges, VaultOverrides,
+};
 
-use crate::display::{Format, Presenter, EXIT_OK, EXIT_OPERATIONAL};
+use crate::display::{Diagnostic, Format, FormatSpec, Output, VaultListView};
 
 /// The `vault` namespace: manage the central vault registry.
 #[derive(Subcommand, Debug)]
@@ -97,7 +101,25 @@ pub struct UnregisterArgs {
 pub struct ListArgs {
     /// Output format.
     #[arg(long, value_name = "FORMAT", default_value = "human")]
-    pub format: Format,
+    pub format: VaultListFormat,
+}
+
+/// The `vault list` output subset — its truthful `--help` declaration, mapped
+/// into the shared display [`Format`]. `human` is the bespoke name/root listing;
+/// `json` is the stable machine array.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultListFormat {
+    Human,
+    Json,
+}
+
+impl From<VaultListFormat> for Format {
+    fn from(f: VaultListFormat) -> Self {
+        match f {
+            VaultListFormat::Human => Format::Records,
+            VaultListFormat::Json => Format::Json,
+        }
+    }
 }
 
 /// `norn vault set <name> ...`. At least one change flag is required (an empty
@@ -165,30 +187,21 @@ fn tri_state(set: Option<PathBuf>, clear: bool) -> Option<Option<PathBuf>> {
 }
 
 /// Run a `vault` subcommand against an injected config home and effective
-/// cwd. The ambient reads (config env, process cwd + `-C`) happen once at the
-/// dispatch boundary; this entry stays a pure function of its inputs so tests
-/// inject a temp directory.
-pub fn run<O: Write, E: Write>(
-    cmd: &VaultCmd,
-    home: ConfigHome,
-    cwd: &Path,
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
+/// cwd, returning an [`Output`] to render or a folded [`Diagnostic`]. The ambient
+/// reads (config env, process cwd + `-C`) happen once at the dispatch boundary;
+/// this entry stays a pure function of its inputs so tests inject a temp
+/// directory.
+pub fn run(cmd: &VaultCmd, home: ConfigHome, cwd: &Path) -> Result<Output, Diagnostic> {
     let registry = Registry::new(home);
     match cmd {
-        VaultCmd::Register(args) => register(&registry, args, cwd, presenter),
-        VaultCmd::Unregister(args) => unregister(&registry, args, presenter),
-        VaultCmd::List(args) => list(&registry, args, presenter),
-        VaultCmd::Set(args) => set(&registry, args, cwd, presenter),
+        VaultCmd::Register(args) => register(&registry, args, cwd),
+        VaultCmd::Unregister(args) => unregister(&registry, args),
+        VaultCmd::List(args) => list(&registry, args),
+        VaultCmd::Set(args) => set(&registry, args, cwd),
     }
 }
 
-fn register<O: Write, E: Write>(
-    registry: &Registry,
-    args: &RegisterArgs,
-    cwd: &Path,
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
+fn register(registry: &Registry, args: &RegisterArgs, cwd: &Path) -> Result<Output, Diagnostic> {
     // PATH defaults to the effective cwd (which honors `-C`); a relative PATH
     // is grounded against it. Registration names a concrete root, it does not
     // resolve one — but the root it names must respect the invocation's cwd.
@@ -196,171 +209,70 @@ fn register<O: Write, E: Write>(
         Some(path) => cwd.join(path),
         None => cwd.to_path_buf(),
     };
-    match registry.register(&args.name, &root, args.overrides()) {
-        Ok(vault) => {
-            confirm(presenter, "registered", &vault);
-            EXIT_OK
-        }
-        Err(err) => fail(presenter, err),
-    }
+    let vault = registry
+        .register(&args.name, &root, args.overrides())
+        .map_err(fail)?;
+    Ok(Output::Line(confirm("registered", &vault)))
 }
 
-fn unregister<O: Write, E: Write>(
-    registry: &Registry,
-    args: &UnregisterArgs,
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
-    match registry.unregister(&args.name) {
-        Ok(()) => {
-            let _ = writeln!(
-                presenter.out(),
-                "norn: unregistered {name:?}",
-                name = args.name
-            );
-            EXIT_OK
-        }
-        Err(err) => fail(presenter, err),
-    }
+fn unregister(registry: &Registry, args: &UnregisterArgs) -> Result<Output, Diagnostic> {
+    registry.unregister(&args.name).map_err(fail)?;
+    Ok(Output::Line(format!(
+        "norn: unregistered {name:?}",
+        name = args.name
+    )))
 }
 
-fn set<O: Write, E: Write>(
-    registry: &Registry,
-    args: &SetArgs,
-    cwd: &Path,
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
+fn set(registry: &Registry, args: &SetArgs, cwd: &Path) -> Result<Output, Diagnostic> {
     let mut changes = args.to_changes();
     // A relative --root is grounded against the effective cwd, like register's
     // PATH. Overrides stay verbatim by design.
     if let Some(root) = changes.root.take() {
         changes.root = Some(cwd.join(root));
     }
-    match registry.set(&args.name, changes) {
-        Ok(outcome) if outcome.changed => {
-            confirm(presenter, "updated", &outcome.vault);
-            EXIT_OK
-        }
-        Ok(outcome) => {
-            let _ = writeln!(
-                presenter.out(),
-                "norn: no changes for {name:?}",
-                name = outcome.vault.name
-            );
-            EXIT_OK
-        }
-        Err(err) => fail(presenter, err),
+    let outcome = registry.set(&args.name, changes).map_err(fail)?;
+    if outcome.changed {
+        Ok(Output::Line(confirm("updated", &outcome.vault)))
+    } else {
+        Ok(Output::Line(format!(
+            "norn: no changes for {name:?}",
+            name = outcome.vault.name
+        )))
     }
 }
 
-fn list<O: Write, E: Write>(
-    registry: &Registry,
-    args: &ListArgs,
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
-    let vaults = match registry.list() {
-        Ok(vaults) => vaults,
-        Err(err) => return fail(presenter, err),
-    };
-    match args.format {
-        Format::Human => list_human(&vaults, presenter),
-        Format::Json => list_json(&vaults, presenter),
-    }
-}
-
-fn list_human<O: Write, E: Write>(
-    vaults: &[RegisteredVault],
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
-    if vaults.is_empty() {
-        presenter.diagnostic("no vaults registered");
-        return EXIT_OK;
-    }
-    let out = presenter.out();
-    for vault in vaults {
-        let _ = writeln!(
-            out,
-            "{name}  {root}",
-            name = vault.name,
-            root = display(&vault.root)
-        );
-        for (label, path) in [
-            ("config", &vault.config),
-            ("cache", &vault.cache),
-            ("logs", &vault.logs),
-        ] {
-            if let Some(path) = path {
-                let _ = writeln!(out, "    {label} = {path}", path = display(path));
-            }
-        }
-    }
-    EXIT_OK
-}
-
-/// The stable machine shape: an array of objects, one per vault, each with
-/// `name`, `root`, and the three override fields — absent overrides are
-/// explicit JSON `null`, so every object carries the same fixed key set. Order
-/// is `Registry::list`'s deterministic name order.
-#[derive(Serialize)]
-struct VaultJson {
-    name: String,
-    root: String,
-    config: Option<String>,
-    cache: Option<String>,
-    logs: Option<String>,
-}
-
-impl From<&RegisteredVault> for VaultJson {
-    fn from(vault: &RegisteredVault) -> Self {
-        Self {
-            name: vault.name.clone(),
-            root: display(&vault.root),
-            config: vault.config.as_deref().map(display),
-            cache: vault.cache.as_deref().map(display),
-            logs: vault.logs.as_deref().map(display),
-        }
-    }
-}
-
-fn list_json<O: Write, E: Write>(
-    vaults: &[RegisteredVault],
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
-    let rows: Vec<VaultJson> = vaults.iter().map(VaultJson::from).collect();
-    match serde_json::to_string_pretty(&rows) {
-        Ok(text) => {
-            let _ = writeln!(presenter.out(), "{text}");
-            EXIT_OK
-        }
-        Err(source) => {
-            presenter.diagnostic(&format!("failed to serialize registry as JSON: {source}"));
-            EXIT_OPERATIONAL
-        }
-    }
+fn list(registry: &Registry, args: &ListArgs) -> Result<Output, Diagnostic> {
+    let vaults = registry.list().map_err(fail)?;
+    Ok(Output::VaultList(VaultListView {
+        vaults,
+        explicit: Some(args.format.into()),
+        spec: FormatSpec {
+            tty: Format::Records,
+            piped: Format::Records,
+        },
+    }))
 }
 
 /// One stdout confirmation line, matching norn's voice: `norn: <verb> "name" -> <root>`.
-fn confirm<O: Write, E: Write>(
-    presenter: &mut Presenter<O, E>,
-    verb: &str,
-    vault: &RegisteredVault,
-) {
-    let _ = writeln!(
-        presenter.out(),
+fn confirm(verb: &str, vault: &RegisteredVault) -> String {
+    format!(
         "norn: {verb} {name:?} -> {root}",
         name = vault.name,
         root = display(&vault.root)
-    );
+    )
 }
 
-/// Render a [`norn_config::ConfigError`] through the stderr diagnostic seam and
-/// return the operational exit code.
-fn fail<O: Write, E: Write>(presenter: &mut Presenter<O, E>, err: norn_config::ConfigError) -> i32 {
-    presenter.diagnostic(&err.to_string());
-    EXIT_OPERATIONAL
+/// Fold a [`norn_config::ConfigError`] into the SAME routed diagnostic
+/// constructor the read verbs use, so the hinted variants (`UnknownName`,
+/// `StaleEntry`, …) carry their recovery hint here too (NRN-370). This replaces
+/// the donor's headline-only `presenter.diagnostic(&err.to_string())` — the one
+/// deliberate behavior delta in the presentation refactor.
+fn fail(err: ConfigError) -> Diagnostic {
+    crate::routed::config_error_diagnostic(&err)
 }
 
-/// Lossy path→string for display and JSON. Registered roots are canonical UTF-8
-/// in practice; the lossy fallback only affects non-UTF-8 override paths.
+/// Lossy path→string for display. Registered roots are canonical UTF-8 in
+/// practice; the lossy fallback only affects non-UTF-8 override paths.
 fn display(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -481,11 +393,11 @@ mod tests {
     #[test]
     fn list_format_defaults_to_human_and_parses_json() {
         match vault_cmd(&["norn", "vault", "list"]) {
-            VaultCmd::List(a) => assert_eq!(a.format, Format::Human),
+            VaultCmd::List(a) => assert_eq!(a.format, VaultListFormat::Human),
             other => panic!("expected list, got {other:?}"),
         }
         match vault_cmd(&["norn", "vault", "list", "--format", "json"]) {
-            VaultCmd::List(a) => assert_eq!(a.format, Format::Json),
+            VaultCmd::List(a) => assert_eq!(a.format, VaultListFormat::Json),
             other => panic!("expected list, got {other:?}"),
         }
     }

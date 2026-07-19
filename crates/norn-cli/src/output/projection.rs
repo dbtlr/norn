@@ -11,7 +11,8 @@
 //! output emits them verbatim; the records renderer folds them to the donor's
 //! one-line display strings via [`headings_to_display`] and the link helpers.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::collections::HashSet;
 use std::io::Write;
 
 /// The structural facets addressable via `--col` (dot-prefixed; dot stripped
@@ -218,6 +219,233 @@ pub fn sections_to_json_object(sections: &[(String, String)]) -> Value {
     Value::Object(obj)
 }
 
+/// A read verb's document view for `--col` projection — the shared shape `find`
+/// and `get` project through, so the split/facet-folding ladder exists once
+/// (NRN-370). Both verbs build a `DocView` over their wire record and hand it to
+/// [`project_json`] / [`project_pairs`]; the per-verb differences (find's
+/// always-present body vs get's optional body, get's `--section` spans) ride on
+/// the view fields, not on forked projection code.
+pub struct DocView<'a> {
+    pub path: &'a str,
+    pub stem: &'a str,
+    pub hash: &'a str,
+    pub frontmatter: Option<&'a Value>,
+    pub headings: &'a [Value],
+    pub outgoing_links: &'a [Value],
+    pub unresolved_links: &'a [Value],
+    pub incoming_links: &'a [Value],
+    /// The body text. `find` always carries it (its wire record's body is a plain
+    /// `String`); `get` carries it only when the owner returned one. `None` renders
+    /// as JSON `null` under `--col .body`; `Some("")` renders as an empty string.
+    pub body: Option<&'a str>,
+    /// Resolved `--section` spans (get only), request order. `None` for `find`.
+    pub sections: Option<&'a [(String, String)]>,
+}
+
+/// The no-`--col` default projection: `find` shows `path` + frontmatter only;
+/// `get` shows the full facet set (frontmatter + headings + the three link sets +
+/// body-if-carried). This is the one place the two verbs' defaults genuinely
+/// differ; the `--col` ladder below is shared verbatim.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DefaultCols {
+    /// `find`: `{ path, frontmatter }` only.
+    FrontmatterOnly,
+    /// `get`: frontmatter + headings + the three link sets + body-if-carried.
+    FullFacets,
+}
+
+/// Project a document view to its `--col` JSON object (the shared
+/// `doc_to_json` / `record_to_json`). `path` is always present; the no-`--col`
+/// default is chosen by `default`; the explicit-`--col` ladder is verb-neutral.
+/// `all_cols` is `find`'s `--all-cols` (get always passes `false` — its
+/// full-dump default is the no-`--col` `FullFacets` branch).
+pub fn project_json(
+    view: &DocView<'_>,
+    cols: &[String],
+    all_cols: bool,
+    default: DefaultCols,
+) -> Value {
+    let mut map = Map::new();
+    map.insert("path".into(), Value::String(view.path.to_string()));
+
+    if cols.is_empty() && !all_cols {
+        match default {
+            DefaultCols::FrontmatterOnly => {
+                map.insert(
+                    "frontmatter".into(),
+                    view.frontmatter.cloned().unwrap_or(Value::Null),
+                );
+            }
+            DefaultCols::FullFacets => {
+                map.insert(
+                    "frontmatter".into(),
+                    view.frontmatter.cloned().unwrap_or(Value::Null),
+                );
+                map.insert("headings".into(), Value::Array(view.headings.to_vec()));
+                map.insert(
+                    "outgoing_links".into(),
+                    Value::Array(view.outgoing_links.to_vec()),
+                );
+                map.insert(
+                    "unresolved_links".into(),
+                    Value::Array(view.unresolved_links.to_vec()),
+                );
+                map.insert(
+                    "incoming_links".into(),
+                    Value::Array(view.incoming_links.to_vec()),
+                );
+                // Body appears only when the owner carried it (`--all-cols` /
+                // `.body`); hash/stem never appear in the no-`--col` dump.
+                if let Some(body) = view.body {
+                    map.insert("body".into(), Value::String(body.to_string()));
+                }
+            }
+        }
+        insert_sections_json(&mut map, view);
+        return Value::Object(map);
+    }
+
+    let (facets, fields) = split_cols(cols);
+    let allow: HashSet<&str> = facets.iter().map(String::as_str).collect();
+
+    if allow.contains("stem") {
+        map.insert("stem".into(), Value::String(view.stem.to_string()));
+    }
+    if allow.contains("document_hash") && !view.hash.is_empty() {
+        map.insert("document_hash".into(), Value::String(view.hash.to_string()));
+    }
+    if all_cols || allow.contains("frontmatter") {
+        map.insert(
+            "frontmatter".into(),
+            view.frontmatter.cloned().unwrap_or(Value::Null),
+        );
+    } else if !fields.is_empty() {
+        map.insert(
+            "frontmatter".into(),
+            filter_frontmatter(view.frontmatter, &fields),
+        );
+    }
+    // Deep facets: emit the pre-serialized values verbatim, populated only when
+    // connections were loaded (`--all-cols` or a deep `--col` facet).
+    for (facet, values) in [
+        ("headings", view.headings),
+        ("outgoing_links", view.outgoing_links),
+        ("unresolved_links", view.unresolved_links),
+        ("incoming_links", view.incoming_links),
+    ] {
+        if all_cols || allow.contains(facet) {
+            map.insert(facet.into(), Value::Array(values.to_vec()));
+        }
+    }
+    if all_cols || allow.contains("body") {
+        map.insert(
+            "body".into(),
+            view.body
+                .map(|b| Value::String(b.to_string()))
+                .unwrap_or(Value::Null),
+        );
+    }
+    insert_sections_json(&mut map, view);
+    Value::Object(map)
+}
+
+/// `--section` is orthogonal to `--col`/`--all-cols`: inserted whenever the view
+/// carries it (get only; `find`'s view has `None`).
+fn insert_sections_json(map: &mut Map<String, Value>, view: &DocView<'_>) {
+    if let Some(sections) = view.sections {
+        map.insert("sections".into(), sections_to_json_object(sections));
+    }
+}
+
+/// Project a document view to its ordered `(label, value)` record rows (the
+/// shared `build_record_pairs` / `build_text_fields`). The no-`--col` &&
+/// `!all_cols` case is `find`'s frontmatter-fields-only default; `get` passes
+/// `all_cols = cols.is_empty()`, so its no-`--col` case runs the ladder's
+/// `all_cols` branch (full facets) and never reaches the frontmatter-only path.
+pub fn project_pairs(view: &DocView<'_>, cols: &[String], all_cols: bool) -> Vec<(String, String)> {
+    let fm_object = view.frontmatter.and_then(Value::as_object);
+
+    if cols.is_empty() && !all_cols {
+        let mut pairs = Vec::new();
+        if let Some(obj) = fm_object {
+            for (key, value) in obj {
+                pairs.push((key.clone(), json_value_inline(value)));
+            }
+        }
+        return pairs;
+    }
+
+    let (facets, fields) = split_cols(cols);
+    let facet_set: HashSet<&str> = facets.iter().map(String::as_str).collect();
+    let mut pairs = Vec::new();
+
+    if facet_set.contains("stem") {
+        pairs.push(("stem".into(), view.stem.to_string()));
+    }
+    if facet_set.contains("document_hash") && !view.hash.is_empty() {
+        pairs.push(("document_hash".into(), view.hash.to_string()));
+    }
+    // `--all-cols` and bare `--col` fields are mutually exclusive at the grammar
+    // (`overrides_with`), so at most one of these two blocks contributes.
+    if all_cols {
+        if let Some(obj) = fm_object {
+            for (key, value) in obj {
+                pairs.push((key.clone(), json_value_inline(value)));
+            }
+        }
+    }
+    for field in &fields {
+        if let Some(value) = fm_object.and_then(|obj| obj.get(field)) {
+            pairs.push((field.clone(), json_value_inline(value)));
+        }
+    }
+    if facet_set.contains("frontmatter") {
+        if let Some(fm) = view.frontmatter {
+            let value = frontmatter_to_display(fm);
+            if !value.is_empty() {
+                pairs.push(("frontmatter".into(), value));
+            }
+        }
+    }
+    if (all_cols || facet_set.contains("headings")) && !view.headings.is_empty() {
+        pairs.push(("headings".into(), headings_to_display(view.headings)));
+    }
+    if (all_cols || facet_set.contains("outgoing_links")) && !view.outgoing_links.is_empty() {
+        pairs.push((
+            "outgoing_links".into(),
+            outgoing_links_to_display(view.outgoing_links),
+        ));
+    }
+    if (all_cols || facet_set.contains("unresolved_links")) && !view.unresolved_links.is_empty() {
+        pairs.push((
+            "unresolved_links".into(),
+            unresolved_links_to_display(view.unresolved_links),
+        ));
+    }
+    if (all_cols || facet_set.contains("incoming_links")) && !view.incoming_links.is_empty() {
+        pairs.push((
+            "incoming_links".into(),
+            incoming_links_to_display(view.incoming_links),
+        ));
+    }
+    if all_cols || facet_set.contains("body") {
+        if let Some(body) = view.body {
+            let trimmed = body.trim();
+            if !trimmed.is_empty() {
+                pairs.push(("body".into(), trimmed.to_string()));
+            }
+        }
+    }
+    // `--section` (get only): one labeled block per requested heading, request
+    // order, the verbatim span (byte-identical to `--format json`).
+    if let Some(sections) = view.sections {
+        for (heading, content) in sections {
+            pairs.push((heading.clone(), content.clone()));
+        }
+    }
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +515,157 @@ mod tests {
              .headings, .outgoing_links, .unresolved_links, .incoming_links, .body, \
              .document_hash; bare names select frontmatter fields)"
         );
+    }
+
+    // ── The unified projection (NRN-370): find via FrontmatterOnly, get via
+    //    FullFacets — the ladder shared, the default per verb. ──────────────
+
+    fn view<'a>(
+        fm: Option<&'a Value>,
+        headings: &'a [Value],
+        outgoing: &'a [Value],
+        body: Option<&'a str>,
+    ) -> DocView<'a> {
+        DocView {
+            path: "a.md",
+            stem: "a",
+            hash: "deadbeef",
+            frontmatter: fm,
+            headings,
+            outgoing_links: outgoing,
+            unresolved_links: &[],
+            incoming_links: &[],
+            body,
+            sections: None,
+        }
+    }
+
+    #[test]
+    fn find_json_no_col_is_path_and_frontmatter_sorted() {
+        let fm = json!({"title": "A", "type": "note"});
+        let v = project_json(
+            &view(Some(&fm), &[], &[], Some("body")),
+            &[],
+            false,
+            DefaultCols::FrontmatterOnly,
+        );
+        // serde_json Value is a sorted map: frontmatter, path (body excluded).
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"frontmatter":{"title":"A","type":"note"},"path":"a.md"}"#
+        );
+    }
+
+    #[test]
+    fn find_json_col_bare_field_narrows_frontmatter() {
+        let fm = json!({"title": "A", "type": "note"});
+        let v = project_json(
+            &view(Some(&fm), &[], &[], Some("body")),
+            &["title".to_string()],
+            false,
+            DefaultCols::FrontmatterOnly,
+        );
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"frontmatter":{"title":"A"},"path":"a.md"}"#
+        );
+    }
+
+    #[test]
+    fn find_json_absent_frontmatter_is_null() {
+        let v = project_json(
+            &view(None, &[], &[], Some("body")),
+            &[],
+            false,
+            DefaultCols::FrontmatterOnly,
+        );
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"frontmatter":null,"path":"a.md"}"#
+        );
+    }
+
+    #[test]
+    fn json_deep_facet_emits_serialized_values_verbatim() {
+        let headings = vec![json!({"level": 2, "text": "Sec", "slug": "sec"})];
+        let fm = json!({"type": "note"});
+        let v = project_json(
+            &view(Some(&fm), &headings, &[], Some("body")),
+            &[".headings".to_string()],
+            false,
+            DefaultCols::FrontmatterOnly,
+        );
+        assert_eq!(
+            v["headings"],
+            json!([{"level": 2, "text": "Sec", "slug": "sec"}])
+        );
+    }
+
+    #[test]
+    fn records_deep_facet_folds_to_display_string() {
+        let headings = vec![json!({"level": 2, "text": "Sec", "slug": "sec"})];
+        let fm = json!({"type": "note"});
+        let pairs = project_pairs(
+            &view(Some(&fm), &headings, &[], Some("body")),
+            &[".headings".to_string()],
+            false,
+        );
+        assert!(
+            pairs.iter().any(|(k, v)| k == "headings" && v == "## Sec"),
+            "expected a headings row rendered as '## Sec', got {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn get_json_full_facets_default_emits_facets_no_body() {
+        let fm = json!({"title": "A"});
+        let headings = vec![json!({"level": 2, "text": "Sec", "slug": "sec"})];
+        let outgoing = vec![json!({"target": "b", "resolved_path": "b.md"})];
+        let v = project_json(
+            &view(Some(&fm), &headings, &outgoing, None),
+            &[],
+            false,
+            DefaultCols::FullFacets,
+        );
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("path"));
+        assert!(obj.contains_key("frontmatter"));
+        assert!(obj.contains_key("headings"));
+        assert!(obj.contains_key("outgoing_links"));
+        assert!(obj.contains_key("incoming_links"));
+        // No body/hash/stem in the default dump (body was None).
+        assert!(!obj.contains_key("body"));
+        assert!(!obj.contains_key("document_hash"));
+        assert!(!obj.contains_key("stem"));
+    }
+
+    #[test]
+    fn get_json_col_narrows_to_requested_facets_only() {
+        let fm = json!({"title": "A"});
+        let headings = vec![json!({"level": 2, "text": "Sec", "slug": "sec"})];
+        let outgoing = vec![json!({"target": "b", "resolved_path": "b.md"})];
+        let v = project_json(
+            &view(Some(&fm), &headings, &outgoing, None),
+            &[".headings".to_string()],
+            false,
+            DefaultCols::FullFacets,
+        );
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("headings"));
+        assert!(obj.contains_key("path"));
+        assert!(!obj.contains_key("frontmatter"));
+        assert!(!obj.contains_key("outgoing_links"));
+    }
+
+    #[test]
+    fn get_json_document_hash_is_opt_in() {
+        let fm = json!({"title": "A"});
+        let v = project_json(
+            &view(Some(&fm), &[], &[], None),
+            &[".document_hash".to_string()],
+            false,
+            DefaultCols::FullFacets,
+        );
+        assert_eq!(v["document_hash"], json!("deadbeef"));
     }
 }
