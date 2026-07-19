@@ -63,6 +63,18 @@ pub struct VaultCacheSlot {
     config: CacheOpenConfig,
     shared: Arc<SharedSlot>,
     queue: WriterQueue,
+    /// Test-only, per-slot count of refresh ops that actually executed on the
+    /// writer thread. Per-slot (not a global) so parallel tests don't interfere.
+    /// The coalescing test asserts N concurrent stale readers collapse to ONE
+    /// refresh run (ADR 0013).
+    #[cfg(test)]
+    refresh_runs: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only count of refresh() calls that have completed ticket
+    /// registration (submitted-or-joined) but not yet returned. Lets the
+    /// coalescing test release its writer blocker only once all N callers have
+    /// registered, so the collapse-to-one is deterministic, not timing-raced.
+    #[cfg(test)]
+    refresh_arrivals: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl VaultCacheSlot {
@@ -91,7 +103,25 @@ impl VaultCacheSlot {
             config,
             shared,
             queue,
+            #[cfg(test)]
+            refresh_runs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            refresh_arrivals: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
+    }
+
+    /// Test-only: how many refresh ops have executed on the writer thread for
+    /// this slot.
+    #[cfg(test)]
+    pub(crate) fn refresh_runs(&self) -> usize {
+        self.refresh_runs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test-only: how many refresh() callers have completed registration.
+    #[cfg(test)]
+    pub(crate) fn refresh_arrivals(&self) -> usize {
+        self.refresh_arrivals
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The current generation, opening one via the writer queue if none exists
@@ -164,14 +194,24 @@ impl VaultCacheSlot {
             }
         };
 
+        // Registration (submit-or-join) is now complete; a test can observe that
+        // this caller has committed to a ticket before it blocks on `wait`.
+        #[cfg(test)]
+        self.refresh_arrivals
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
         if submit {
             let gen = Arc::clone(generation);
             let vault_root = self.vault_root.clone();
             let ticket_op = Arc::clone(&ticket);
+            #[cfg(test)]
+            let counter = Arc::clone(&self.refresh_runs);
             // The requester awaits the ticket, not this op's handle.
-            let _handle = self
-                .queue
-                .submit_liveness(move || run_refresh_op(&gen, &vault_root, &ticket_op));
+            let _handle = self.queue.submit_liveness(move || {
+                #[cfg(test)]
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                run_refresh_op(&gen, &vault_root, &ticket_op)
+            });
         }
 
         ticket.wait()
@@ -521,5 +561,187 @@ mod tests {
         let g1 = slot.ensure_current().unwrap();
         let g2 = slot.ensure_current().unwrap();
         assert!(Arc::ptr_eq(&g1, &g2), "config unchanged → same generation");
+    }
+
+    // --- Deterministic concurrency properties over the writer-queue pipeline ---
+    // (ADR 0013, re-derived from the donor's concurrency suite). These use the
+    // writer-queue blocker pattern (a liveness op that parks the single writer
+    // thread on a channel) plus per-slot observability counters — no
+    // sleeps-as-synchronization; every wait is bounded on a condition.
+
+    use std::sync::{mpsc, Barrier};
+    use std::time::{Duration, Instant};
+
+    /// Bounded spin until `cond` holds; panics if it never does within `budget`.
+    fn spin_until(budget: Duration, mut cond: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !cond() {
+            assert!(start.elapsed() < budget, "condition not met within {budget:?}");
+            std::thread::yield_now();
+        }
+    }
+
+    /// N concurrent stale readers collapse to exactly ONE refresh run. While the
+    /// writer is parked on a blocker, the pending ticket never clears, so every
+    /// refresh() that registers during the block joins that one op. We release
+    /// the blocker only after all N have registered (observed via
+    /// `refresh_arrivals`), so the collapse-to-one is deterministic.
+    #[test]
+    fn n_concurrent_refreshes_coalesce_to_one_run() {
+        const N: usize = 8;
+        let (_tmp, root, db_path) = vault();
+        let slot =
+            Arc::new(VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap());
+        let generation = slot.ensure_current().unwrap();
+
+        // Park the single writer thread so no refresh op can run yet.
+        let (running_tx, running_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let blocker = slot.queue().submit_liveness(move || {
+            running_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        });
+        running_rx.recv().unwrap(); // writer confirmed parked
+
+        let barrier = Arc::new(Barrier::new(N + 1));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let slot = Arc::clone(&slot);
+                let generation = Arc::clone(&generation);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    slot.refresh(&generation).unwrap();
+                })
+            })
+            .collect();
+
+        barrier.wait(); // release all N readers at once
+        // All must register on the (single, pending) ticket before we let the
+        // writer run — this is what makes the collapse deterministic.
+        spin_until(Duration::from_secs(10), || slot.refresh_arrivals() == N);
+
+        resume_tx.send(()).unwrap(); // let the one coalesced refresh run
+        assert_eq!(blocker.wait(), Outcome::Done(()));
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            slot.refresh_runs(),
+            1,
+            "N concurrent stale reads must coalesce to exactly one refresh"
+        );
+    }
+
+    /// N concurrent stale `serve_read`s all observe the refreshed vault — the
+    /// coalesced-refresh path is correct under concurrency (no lost update, no
+    /// deadlock, no panic), independent of the collapse count.
+    #[test]
+    fn concurrent_stale_serve_reads_all_see_the_refresh() {
+        const N: usize = 8;
+        let (_tmp, root, db_path) = vault(); // seeds a.md + b.md == 2 docs
+        let slot =
+            Arc::new(VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap());
+
+        // Make the vault stale for every reader.
+        std::fs::write(root.join("c.md").as_std_path(), "---\ntype: note\n---\n").unwrap();
+
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let slot = Arc::clone(&slot);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    slot.serve_read(|c| Ok(c.documents_matching(&Default::default())?.len()))
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        for h in handles {
+            assert_eq!(h.join().unwrap(), 3, "every concurrent reader must see c.md");
+        }
+    }
+
+    /// Single-flight generation binding: N concurrent `ensure_current` calls all
+    /// resolve to the SAME generation `Arc` — the slot never hands out two live
+    /// generations for one config (the donor's single-flight-open property, as
+    /// it manifests in the pre-seeded phase-2 slot; the index-change reopen path
+    /// is banked/dormant per the module docs).
+    #[test]
+    fn concurrent_ensure_current_is_single_flight() {
+        const N: usize = 12;
+        let (_tmp, root, db_path) = vault();
+        let slot =
+            Arc::new(VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap());
+
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let slot = Arc::clone(&slot);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    slot.ensure_current().unwrap()
+                })
+            })
+            .collect();
+
+        let gens: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let first = &gens[0];
+        for g in &gens[1..] {
+            assert!(
+                Arc::ptr_eq(first, g),
+                "all concurrent ensure_current calls must share one generation"
+            );
+        }
+    }
+
+    /// Liveness preempts bulk at chunk boundaries over the real slot pipeline: a
+    /// bulk mutation-increment commit and concurrent liveness refreshes both
+    /// complete without deadlock, and the published increment is visible. (The
+    /// exact between-chunks interleave is pinned deterministically by the
+    /// writer-queue unit tests; here we assert the slot-level coexistence.)
+    #[test]
+    fn bulk_commit_and_concurrent_liveness_both_complete() {
+        let (_tmp, root, db_path) = vault();
+        let slot =
+            Arc::new(VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap());
+
+        let baseline = slot.serve_read(|c| c.load_graph_index()).unwrap();
+        std::fs::write(
+            root.join("c.md").as_std_path(),
+            "---\ntype: note\n---\nsee [[a]]\n",
+        )
+        .unwrap();
+
+        // Fire a bulk increment commit and several liveness reads concurrently.
+        let bulk_slot = Arc::clone(&slot);
+        let bulk = std::thread::spawn(move || {
+            bulk_slot.commit_apply_increments(&[Utf8PathBuf::from("c.md")], baseline)
+        });
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let slot = Arc::clone(&slot);
+                std::thread::spawn(move || {
+                    slot.serve_read(|c| Ok(c.documents_matching(&Default::default())?.len()))
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        assert_eq!(bulk.join().unwrap().unwrap(), ApplyIncrementOutcome::Published);
+        for r in readers {
+            let n = r.join().unwrap();
+            assert!(n == 2 || n == 3, "reader saw an in-range count: {n}");
+        }
+
+        // The published increment is visible afterwards.
+        let generation = slot.ensure_current().unwrap();
+        let conn = generation.checkout_read();
+        assert_eq!(conn.documents_matching(&Default::default()).unwrap().len(), 3);
     }
 }

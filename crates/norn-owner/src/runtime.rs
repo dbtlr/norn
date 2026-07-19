@@ -143,11 +143,13 @@ pub fn run(config: OwnerConfig) -> anyhow::Result<i32> {
     // clobbers the winner's socket.
     let _lock = lifecycle::acquire_owner_lock(&lock_path, env!("CARGO_PKG_VERSION"))?;
 
-    // The db is born-with-owner: a per-owner temp dir, deleted when this handle
-    // drops at the end of `run` (clean/idle/fatal all return through here).
+    // The db is born-with-owner: a per-owner temp dir under the (0700) runtime
+    // dir, deleted when this handle drops at the end of `run` (clean/idle/fatal
+    // all return through here). Co-locating it with the socket keeps every owner
+    // runtime artifact under one owner-only dir.
     let db_dir = tempfile::Builder::new()
         .prefix("norn-owner-db-")
-        .tempdir()
+        .tempdir_in(runtime_dir.as_std_path())
         .map_err(|e| anyhow::anyhow!("failed to create owner db dir: {e}"))?;
     let db_path = Utf8PathBuf::from_path_buf(db_dir.path().join("cache.db"))
         .map_err(|p| anyhow::anyhow!("non-UTF8 db path: {}", p.display()))?;
