@@ -799,9 +799,11 @@ const TEXT_EDGE_1: Fixture = Fixture {
     seed: 1,
 };
 
-/// The decided text-layer divergences from the pinned oracle, each pinned by a
-/// ledger entry (PD-103 / PD-104). Both are `ported: true` and DIVERGE — the
-/// oracle and rewrite differ, and the entry documents why.
+/// The decided text-layer / URL-semantics divergences from the pinned oracle,
+/// each pinned by a ledger entry (PD-104 / PD-103 for BOM + code-opacity;
+/// PD-107 / PD-108 for the URL split-decode + scheme classification). Every case
+/// is `ported: true` and DIVERGES — the oracle and rewrite differ, and the entry
+/// documents why.
 const TEXT_EDGE_CASES: &[Case] = &[
     Case {
         // NRN-349: the oracle reads a BOM-prefixed doc as frontmatter-less; the
@@ -837,6 +839,51 @@ const TEXT_EDGE_CASES: &[Case] = &[
         ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("edge/code-linker.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // NRN-356: split-then-decode + block-ref reclassification of Markdown
+        // link destinations. `note%23draft.md` stays one path segment (oracle:
+        // `note` + anchor `draft.md`); `url-block-target.md#^blk1` is a block ref
+        // resolving against the sibling's `^blk1` (oracle: heading anchor
+        // `^blk1`, anchor-missing). Pinned by PD-107.
+        id: "url-edge-decode-split-blockref",
+        argv: &[
+            "get",
+            "url-decode-linker",
+            "--col",
+            ".outgoing_links,.unresolved_links",
+            "--format",
+            "json",
+        ],
+        fixture: TEXT_EDGE_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("edge/url-decode-linker.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // NRN-357: generic external-vs-local classification by URL rules. Every
+        // destination here is external (URI scheme incl. mixed-case, `//`, or a
+        // drive letter), so the rewrite drops them all; the oracle's lowercase
+        // prefix list models each as an unresolved local link. Pinned by PD-108.
+        id: "url-edge-scheme-classification",
+        argv: &[
+            "get",
+            "url-scheme-linker",
+            "--col",
+            ".outgoing_links,.unresolved_links",
+            "--format",
+            "json",
+        ],
+        fixture: TEXT_EDGE_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("edge/url-scheme-linker.md"),
         requires_code: None,
         normalize: NO_NORM,
     },

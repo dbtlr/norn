@@ -169,6 +169,19 @@ mod tests {
     }
 
     #[test]
+    fn wikilink_target_is_not_percent_decoded() {
+        // Wikilinks are NOT URLs — the URL split-then-decode of NRN-356 applies
+        // only to Markdown `[text](dest)` destinations. A `[[note%23draft]]`
+        // target stays byte-literal: no `%23`->`#` decode, no fragment split.
+        let body = "[[note%23draft]]\n";
+        let links = parse_wikilinks(Utf8Path::new("a.md"), body, body, 0);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "note%23draft");
+        assert_eq!(links[0].anchor, None);
+        assert_eq!(links[0].block_ref, None);
+    }
+
+    #[test]
     fn non_object_frontmatter_yields_no_links() {
         let links = parse_frontmatter_wikilinks(
             Utf8Path::new("a.md"),

@@ -33,11 +33,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // text-layer slate (NRN-349 / NRN-350) added PD-103 (code-opacity block-id
     // resolution) and PD-104 (BOM-prefixed frontmatter); the CLI-semantics slate
     // added PD-105 (zero-indexed `--starts-at`, NRN-332) and PD-106 (last-wins
-    // `--limit`/`--no-limit`, NRN-331).
+    // `--limit`/`--no-limit`, NRN-331); the URL-semantics slate added PD-107
+    // (Markdown-link split-then-decode + block-ref, NRN-356) and PD-108
+    // (external-vs-local scheme classification, NRN-357).
     assert_eq!(
         ledger.entries.len(),
-        6,
-        "expected exactly PD-101..PD-106, found {}",
+        8,
+        "expected exactly PD-101..PD-108, found {}",
         ledger.entries.len()
     );
 
@@ -89,6 +91,19 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         Some("PD-106"),
         "the last-wins --limit/--no-limit case is gated by PD-106"
     );
+
+    // The URL-semantics divergences (PD-107 / PD-108).
+    let pd107 = ledger
+        .entry_for_case("url-edge-decode-split-blockref")
+        .expect("the split-then-decode + block-ref case must resolve to an entry");
+    assert_eq!(pd107.id, "PD-107");
+    assert_eq!(pd107.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    let pd108 = ledger
+        .entry_for_case("url-edge-scheme-classification")
+        .expect("the scheme-classification case must resolve to an entry");
+    assert_eq!(pd108.id, "PD-108");
+    assert_eq!(pd108.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]

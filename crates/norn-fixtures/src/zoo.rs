@@ -132,11 +132,25 @@ pub fn binary_docs() -> Vec<(&'static str, &'static [u8])> {
 ///   `[[code-anchor#^blkincode]]`. The oracle registers the code-fenced id and
 ///   resolves the link; the rewrite treats code as opaque (ADR 0019), so the
 ///   link is unresolved.
+/// - `edge/url-decode-linker.md` — Markdown-link destinations exercising the
+///   split-then-decode + block-ref reclassification (NRN-356). The oracle
+///   decodes before splitting (so `note%23draft.md` becomes `note` + anchor
+///   `draft.md`) and slugifies `#^blk1` as a heading anchor; the rewrite splits
+///   the raw reference first (one `note#draft.md` segment) and classifies
+///   `#^blk1` as a block ref that resolves against `edge/url-block-target.md`.
+/// - `edge/url-scheme-linker.md` — Markdown-link destinations exercising generic
+///   external-vs-local classification (NRN-357). The oracle's hand-rolled
+///   lowercase prefix list treats `tel:` / `file:` / `//` / drive-letter /
+///   mixed-case `hTTp:` as local (unresolved) links; the rewrite classifies each
+///   external by URL rules and drops them from the link universe.
 pub fn text_edge_docs() -> Vec<ZooDoc> {
     vec![
         valid_unlinkable("edge/bom-doc.md", BOM_DOC),
         valid_unlinkable("edge/code-anchor.md", CODE_ANCHOR),
         valid_unlinkable("edge/code-linker.md", CODE_LINKER),
+        valid_unlinkable("edge/url-decode-linker.md", URL_DECODE_LINKER),
+        valid_unlinkable("edge/url-block-target.md", URL_BLOCK_TARGET),
+        valid_unlinkable("edge/url-scheme-linker.md", URL_SCHEME_LINKER),
     ]
 }
 
@@ -451,6 +465,43 @@ title: Code Linker
 ---
 
 Points at a code-fenced block id: [[code-anchor#^blkincode]].
+"#;
+
+/// Markdown-link destinations for the URL split-then-decode + block-ref probe
+/// (NRN-356). `note%23draft.md`: the oracle decodes-then-splits into `note` +
+/// anchor `draft.md`; the rewrite keeps one `note#draft.md` segment.
+/// `url-block-target.md#^blk1`: the oracle slugifies `^blk1` as a heading anchor
+/// (anchor-missing); the rewrite classifies it as a block ref and resolves it
+/// against the sibling's `^blk1`.
+const URL_DECODE_LINKER: &str = r#"---
+title: URL Decode Linker
+---
+
+Percent-encoded hash in the path: [hashpath](note%23draft.md).
+
+Block reference on a Markdown link: [blk](url-block-target.md#^blk1).
+"#;
+
+/// The block-ref resolution target for `url-decode-linker.md`: defines the
+/// `^blk1` block-id in ordinary prose (outside any code fence).
+const URL_BLOCK_TARGET: &str = r#"---
+title: URL Block Target
+---
+
+A paragraph that carries a block id. ^blk1
+"#;
+
+/// Markdown-link destinations for the external-vs-local classification probe
+/// (NRN-357). Every link here is external by URL rules — a URI scheme
+/// (`tel:` / `file:` / mixed-case `hTTp:`), a protocol-relative `//`, or a
+/// Windows drive-letter path — so the rewrite drops them all; the oracle's
+/// lowercase prefix list mistakes each for an (unresolved) local link.
+const URL_SCHEME_LINKER: &str = r#"---
+title: URL Scheme Linker
+---
+
+Scheme links: [tel](tel:+15551234), [file](file:///etc/hosts),
+[proto](//example.com/x), [drive](C:/Users/x/n.md), [mixed](hTTp://example.com).
 "#;
 
 // ---- violation zoo content ------------------------------------------------
