@@ -105,13 +105,15 @@ fn second_open_connects_to_the_same_owner() {
     drop(second);
 }
 
-/// NRN-360: summoning against a vault whose `.norn/config.yaml` is present but
-/// invalid must surface the config error on the USER-error path
-/// ([`ClientError::Rejected`], carrying the oracle-shaped `invalid config …`
-/// message), NOT as an owner-health/owner-gone failure or a crash loop. The
-/// failed owner then idle-reaps cleanly — a bad config is cheap and repeatable.
+/// NRN-360, the whole user story: summoning against a vault whose
+/// `.norn/config.yaml` is present but invalid surfaces the config error on the
+/// USER-error path ([`ClientError::Rejected`], carrying the oracle-shaped
+/// `invalid config …` message) — never an owner-health/owner-gone failure or a
+/// crash loop. The failed owner then EAGER-REAPS (well under the idle TTL, since
+/// it can never serve a useful frame), so once the operator FIXES the config an
+/// immediate re-summon spawns a fresh owner that re-reads it and serves reads.
 #[test]
-fn summon_against_invalid_config_surfaces_a_config_error_then_reaps() {
+fn invalid_config_surfaces_error_eager_reaps_then_a_fix_is_picked_up() {
     let vault_tmp = tempfile::TempDir::new().unwrap();
     let vault_root = vault_tmp.path().join("vault");
     std::fs::create_dir_all(vault_root.join(".norn")).unwrap();
@@ -125,11 +127,13 @@ fn summon_against_invalid_config_surfaces_a_config_error_then_reaps() {
 
     let rt_tmp = tempfile::TempDir::new().unwrap();
     let runtime_dir = rt_tmp.path().to_path_buf();
-    // Short idle TTL so the failed owner's clean reap is observable in-test.
+    // A deliberately LONG idle TTL: eager-reap must beat it by orders of
+    // magnitude. If the owner instead lingered on its idle clock, the reap wait
+    // below would time out long before 60s.
     let config = base_config(
         vault_root.clone(),
         runtime_dir.clone(),
-        Duration::from_secs(1),
+        Duration::from_secs(60),
     );
     let socket = socket_path(&vault_root, &runtime_dir, &config.fingerprint);
 
@@ -156,17 +160,37 @@ fn summon_against_invalid_config_surfaces_a_config_error_then_reaps() {
         other => panic!("expected a Rejected config error, got {other:?}"),
     }
 
-    // No crash loop: the failed owner idle-reaps cleanly, removing its socket
-    // and db dir — a resummon would be cheap, not a spin.
-    let reaped = common::wait_until(Duration::from_secs(15), || {
+    // EAGER REAP: the failed owner tears down PROMPTLY — well under the 60s TTL —
+    // removing its socket and db dir. (A lingering owner would time out here.)
+    let reaped = common::wait_until(Duration::from_secs(20), || {
         !socket.exists() && common::owner_db_dirs(&runtime_dir) == 0
     });
     assert!(
         reaped,
-        "the failed owner should idle-reap cleanly: socket exists={}, db dirs={}",
+        "the failed owner must eager-reap, not linger the idle TTL: socket exists={}, db dirs={}",
         socket.exists(),
         common::owner_db_dirs(&runtime_dir),
     );
+
+    // Fix the config; because the stale-error owner reaped, an immediate
+    // re-summon spawns a FRESH owner that re-reads the now-valid config and
+    // serves reads — the fix is picked up at once, not after the TTL.
+    std::fs::write(
+        vault_root.join(".norn/config.yaml"),
+        "links:\n  alias_field: aliases\n",
+    )
+    .unwrap();
+    let mut session = open(&config).expect("re-summon after the config fix");
+    let pong = session
+        .wait_until_ready(Duration::from_secs(20))
+        .expect("the fixed config must warm up to ready");
+    assert_eq!(pong.serving, ServingState::Ready);
+    assert_eq!(
+        session.probe().expect("probe the fixed vault"),
+        1,
+        "the fixed owner should serve the one seeded note"
+    );
+    drop(session);
 }
 
 /// Finding 3 (reaper TOCTOU / drain): across repeated summon→probe→reap cycles,

@@ -85,10 +85,13 @@ struct OwnerState {
     /// with [`OwnerFrame::Rejected`] carrying this message — the established
     /// user-error path (NRN-360). Distinct from [`fatal`](Self::fatal)
     /// (exit-to-heal): a bad config is a user mistake, not a crashed owner, so
-    /// the owner serves the error and idle-reaps CLEANLY (exit 0) instead of
-    /// `go_fatal`. A resummon reconnects to the same owner and re-reads the same
-    /// error — cheap and repeatable, never a crash loop — until the config is
-    /// fixed and the owner reaps (a config change is a resummon under ADR 0017).
+    /// the owner serves the error and exits CLEANLY (exit 0) instead of
+    /// `go_fatal`. It also EAGER-REAPS: once a client has the rejection in hand,
+    /// `handle_connection` latches shutdown (the socket key is config-blind, so
+    /// a lingering bad-config owner would shadow every retry within the idle
+    /// TTL). A resummon therefore spawns a FRESH owner that re-reads the config
+    /// from disk — a fix is picked up immediately, never a crash loop and never
+    /// a stale error.
     warmup_error: Mutex<Option<String>>,
     last_activity: Mutex<Instant>,
     in_flight: AtomicUsize,
@@ -339,12 +342,11 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                     state.set_serving(ServingState::Ready);
                 }
                 // A present-but-invalid config is a USER error (NRN-360): store
-                // it so every frame is answered with Rejected, and let the owner
-                // idle-reap CLEANLY (exit 0). NOT go_fatal — a bad config must
-                // not crash-loop the summon; the connecting client surfaces this
-                // as the config error (the oracle's `invalid config …` message),
-                // and a resummon reconnects to re-read it until the config is
-                // fixed and the owner reaps.
+                // it so every frame is answered with Rejected, then exit CLEANLY
+                // (exit 0). NOT go_fatal — a bad config must not crash-loop the
+                // summon; the connecting client surfaces this as the config
+                // error (the oracle's `invalid config …` message), and the owner
+                // eager-reaps so a resummon re-reads a fixed config.
                 Ok(Ok(WarmUp::ConfigInvalid(message))) => {
                     eprintln!("norn owner: warm-up rejected (invalid config): {message}");
                     state.set_warmup_error(message);
@@ -469,15 +471,28 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
             continue;
         }
 
+        // A warm-up config error rejects every frame and can never serve a
+        // useful one (NRN-360). Such a rejection is NOT activity worth extending
+        // the owner's life, so it neither touches the idle clock nor keeps the
+        // owner warm — instead the owner eager-reaps the moment the client has
+        // the error in hand. `warmup_error` is monotonic (set once at warm-up,
+        // never cleared), so reading it before dispatch is race-free: if set
+        // here, dispatch is guaranteed to return the Rejected below.
+        let warmup_reject = state.warmup_error().is_some();
+
         state.in_flight.fetch_add(1, Ordering::SeqCst);
-        state.touch();
+        if !warmup_reject {
+            state.touch();
+        }
         let response = match serde_json::from_str::<ClientFrame>(trimmed) {
             Ok(frame) => dispatch(&state, frame).await,
             Err(err) => OwnerFrame::Error {
                 message: format!("malformed control frame: {err}"),
             },
         };
-        state.touch();
+        if !warmup_reject {
+            state.touch();
+        }
         state.in_flight.fetch_sub(1, Ordering::SeqCst);
 
         let mut buf = serde_json::to_vec(&response)?;
@@ -485,6 +500,17 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         wr.write_all(&buf).await?;
         wr.flush().await?;
 
+        if warmup_reject {
+            // The client has now received the config error (the write+flush
+            // above completed before this point), so eager-reap: latch a CLEAN
+            // shutdown (never go_fatal) so a resummon spawns a FRESH owner that
+            // re-reads `.norn/config.yaml` — a fix is picked up immediately
+            // instead of after the full idle TTL against this stale-error owner.
+            // The socket key is config-blind, so a lingering bad-config owner
+            // would otherwise shadow every retry within the TTL window.
+            state.request_shutdown();
+            break;
+        }
         if state.fatal.load(Ordering::SeqCst) {
             break;
         }
@@ -496,8 +522,8 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
     // A warm-up that failed on an invalid config answers EVERY frame with the
     // config error as a Rejected — the user-error path (NRN-360). The owner is
     // healthy (not fatal); it simply cannot serve a vault whose `.norn/config.yaml`
-    // it could not parse. The client renders this as the config error and a
-    // resummon reconnects to the same message until the config is fixed.
+    // it could not parse. The client renders this as the config error;
+    // `handle_connection` then eager-reaps so a resummon re-reads the config.
     if let Some(message) = state.warmup_error() {
         return OwnerFrame::Rejected { message };
     }
@@ -778,13 +804,16 @@ mod tests {
 
         // Recording a config error must NOT trip the fatal (exit-to-heal) latch:
         // a bad config is a user mistake, so the owner exits cleanly, not fatal.
+        // Nor does recording it itself latch shutdown — the eager-reap latch is
+        // pulled by `handle_connection` only AFTER a client has been served the
+        // rejection, so the first client reliably receives it.
         assert!(
             !state.fatal.load(Ordering::SeqCst),
             "a config error must not mark the owner fatal"
         );
         assert!(
             !state.is_shutdown(),
-            "a config error must not latch shutdown — the owner idle-reaps"
+            "recording a config error must not itself latch shutdown"
         );
     }
 }

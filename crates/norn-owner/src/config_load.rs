@@ -11,6 +11,16 @@
 //! `<vault_root>/.norn/config.yaml` is used if it exists; otherwise the vault
 //! runs under [`CacheOpenConfig::default`] (no alias field, no ignores, empty
 //! index set).
+//!
+//! Both errors below feed the NRN-360 user-error surface (a warm-up config
+//! failure becomes an `OwnerFrame::Rejected`, not exit-to-heal), but they carry
+//! two distinct message shapes: a present-but-unparseable file yields the
+//! oracle-matching `invalid config <path>: <detail>` (from
+//! [`norn_core::standards::parse_config`]), while a present-but-unreadable file
+//! (a permissions/IO access error) yields `failed to read config <path>: <io>`.
+//! The oracle renders both the same way (`eprintln!("{error:#}")`, exit 1), so
+//! only the parse-error branch is byte-for-byte prefix-identical to it; the
+//! access-error branch is an accepted, rarer edge with its own wording.
 
 use camino::{Utf8Path, Utf8PathBuf};
 

@@ -1,21 +1,25 @@
 //! NRN-360: a present-but-invalid `.norn/config.yaml` is a USER error, not a
 //! crashed owner. The warm-up must NOT go_fatal (exit-to-heal); instead the
-//! owner stays alive, answers every frame with the config error as a
-//! `Rejected`, and idle-reaps CLEANLY (exit 0) — no stale socket, no orphan db.
+//! owner answers every frame with the config error as a `Rejected` and then
+//! EAGER-REAPS — once a client has the rejection in hand it latches a clean
+//! shutdown (exit 0), so a resummon re-reads a fixed config immediately rather
+//! than reconnecting to a stale-error owner for the whole idle TTL.
 //!
 //! The oracle (v0.48.1) surfaces the same class as, on stderr, exit 1:
 //!
 //!   invalid config <abs>/.norn/config.yaml: unknown field `bogus`, expected …
 //!
-//! This test pins OUR owner-side lifecycle (clean exit + the rejection message
-//! shape); the client-visible surface (`norn: invalid config …`, exit 1) is
-//! pinned end-to-end in `norn-client`'s summon-lifecycle suite against the real
-//! bin. Hermetic: TempDir vault + TempDir runtime dir, a short idle TTL, a raw
-//! Unix-socket wire exchange (no dev-dep on norn-wire/serde_json).
+//! This test pins OUR owner-side lifecycle (the rejection message shape + a
+//! clean, PROMPT reap under a deliberately long idle TTL). The client-visible
+//! surface (`ClientError::Rejected` + fix-pickup) is pinned in `norn-client`'s
+//! summon-lifecycle suite, and the end-to-end CLI surface (`norn: invalid
+//! config …`, exit 1) is pinned against the built bin in `norn`'s `cli` suite.
+//! Hermetic: TempDir vault + TempDir runtime dir, a raw Unix-socket wire
+//! exchange (no dev-dep on norn-wire/serde_json).
 
 #[cfg(unix)]
 #[test]
-fn bad_config_warm_up_rejects_the_client_then_exits_clean() {
+fn bad_config_warm_up_rejects_the_client_then_eager_reaps() {
     use camino::Utf8PathBuf;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -42,16 +46,19 @@ fn bad_config_warm_up_rejects_the_client_then_exits_clean() {
 
     let socket_path = runtime_dir.join("h.fp.sock");
     let socket_std = socket_path.as_std_path().to_path_buf();
+    // A deliberately LONG idle TTL: if the owner merely idle-reaped it would
+    // live 30s. Eager-reap must beat that by orders of magnitude, so the timed
+    // `join` below is the discriminator between the two.
+    const TTL: Duration = Duration::from_secs(30);
     let config = norn_owner::OwnerConfig {
         socket_path,
         vault_root,
-        // Short TTL: once the client stops pinging, the failed owner idle-reaps
-        // promptly within the test budget.
-        idle_ttl: Duration::from_millis(300),
+        idle_ttl: TTL,
         build: None,
         config_path: None,
     };
 
+    let run_started = Instant::now();
     let handle = std::thread::spawn(move || norn_owner::run(config).expect("owner run"));
 
     // Wait for the socket to bind (the owner binds before warm-up runs).
@@ -63,8 +70,7 @@ fn bad_config_warm_up_rejects_the_client_then_exits_clean() {
 
     // Ping until the bad-config warm-up lands: it may briefly answer a
     // Pong(cold/opening) before the failure is recorded, then rejects every
-    // frame. A fresh connection per attempt; each ping resets the idle TTL, so
-    // the owner cannot reap out from under us mid-loop.
+    // frame. A fresh connection per attempt.
     let mut rejected_message: Option<String> = None;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && rejected_message.is_none() {
@@ -98,12 +104,18 @@ fn bad_config_warm_up_rejects_the_client_then_exits_clean() {
         "expected the serde detail, got {line:?}"
     );
 
-    // The owner idle-reaps CLEANLY: exit 0 (never the fatal exit-to-heal code 1),
-    // no stale socket, no orphan db dir.
+    // EAGER REAP: `run` returns as soon as the client is served, exit 0 (never
+    // the fatal exit-to-heal code 1), WELL under the 30s idle TTL — proof the
+    // owner did not linger on its idle clock.
     let code = handle.join().unwrap();
+    let reap_latency = run_started.elapsed();
     assert_eq!(
         code, 0,
-        "a bad-config warm-up must idle-reap cleanly, not go fatal (exit 1)"
+        "a bad-config warm-up must reap cleanly, not go fatal (exit 1)"
+    );
+    assert!(
+        reap_latency < Duration::from_secs(15),
+        "the bad-config owner must eager-reap, not wait out the {TTL:?} idle TTL (took {reap_latency:?})"
     );
     assert!(
         !socket_std.exists(),
