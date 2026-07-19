@@ -5,12 +5,12 @@
 //! (TTY detection, `NO_COLOR`, `CLICOLOR_FORCE`). Ported from the donor
 //! `src/output/palette.rs` (retired tree) for the custom help renderer.
 
-use std::env;
 use std::io::IsTerminal;
 
 use anstyle::{Ansi256Color, Color, Style};
 
 use crate::cli::ColorWhen;
+use crate::output::env_flag;
 
 /// Brand-token color palette.
 ///
@@ -90,11 +90,26 @@ impl Palette {
 ///
 /// Reads `NO_COLOR` and `CLICOLOR_FORCE` from the environment and detects
 /// whether stdout is a TTY, then delegates to [`resolve_inner`].
+///
+/// Env-var semantics follow the POSIX-by-default rule (ADR 0020): an *empty*
+/// value is treated as unset for both toggles (a bare `NO_COLOR=` does not
+/// disable color), per the no-color.org convention. `CLICOLOR_FORCE` follows
+/// the CLICOLOR spec's `!= "0"` rule on top of that — `CLICOLOR_FORCE=0` does
+/// not force color.
 pub fn resolve(when: ColorWhen) -> Palette {
-    let no_color = env::var_os("NO_COLOR").is_some();
-    let force = env::var_os("CLICOLOR_FORCE").is_some();
+    let no_color = env_flag("NO_COLOR");
+    let force = clicolor_force();
     let is_tty = std::io::stdout().is_terminal();
     resolve_inner(when, no_color, force, is_tty)
+}
+
+/// Whether `CLICOLOR_FORCE` requests forced color: present, non-empty, and not
+/// literally `0` (the CLICOLOR convention, https://bixense.com/clicolors/).
+fn clicolor_force() -> bool {
+    match std::env::var_os("CLICOLOR_FORCE") {
+        Some(value) => !value.is_empty() && value != "0",
+        None => false,
+    }
 }
 
 /// Inner resolution logic — separated for testability.
@@ -171,5 +186,33 @@ mod tests {
     #[test]
     fn resolve_inner_auto_without_tty_returns_off() {
         assert!(!resolve_inner(ColorWhen::Auto, false, false, false).enabled);
+    }
+
+    use crate::test_support::EnvGuard;
+
+    #[test]
+    fn clicolor_force_present_nonempty_nonzero_forces() {
+        let _env = EnvGuard::new(&[("CLICOLOR_FORCE", Some("1"))]);
+        assert!(clicolor_force());
+    }
+
+    #[test]
+    fn clicolor_force_zero_does_not_force() {
+        // CLICOLOR spec: `CLICOLOR_FORCE=0` is explicitly "do not force".
+        let _env = EnvGuard::new(&[("CLICOLOR_FORCE", Some("0"))]);
+        assert!(!clicolor_force());
+    }
+
+    #[test]
+    fn clicolor_force_empty_does_not_force() {
+        // POSIX-by-default (ADR 0020): an empty value is unset.
+        let _env = EnvGuard::new(&[("CLICOLOR_FORCE", Some(""))]);
+        assert!(!clicolor_force());
+    }
+
+    #[test]
+    fn clicolor_force_absent_does_not_force() {
+        let _env = EnvGuard::new(&[("CLICOLOR_FORCE", None)]);
+        assert!(!clicolor_force());
     }
 }

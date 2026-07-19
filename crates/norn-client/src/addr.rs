@@ -69,7 +69,13 @@ fn current_exe_identity() -> Option<Vec<u8>> {
 
 /// The runtime dir base for owner sockets, from the environment: `$XDG_RUNTIME_DIR/norn`
 /// when set and non-empty, else `$TMPDIR/norn-<uid>` (falling back to the system
-/// temp dir when `TMPDIR` is unset). This dir is created 0700 at first summon.
+/// temp dir when `TMPDIR` is unset or empty). This dir is created 0700 at first
+/// summon.
+///
+/// Env-var semantics follow the POSIX-by-default rule (ADR 0020): an *empty*
+/// value is treated as unset for both `XDG_RUNTIME_DIR` and `TMPDIR`. An empty
+/// `TMPDIR=` therefore falls through to the system temp dir rather than being
+/// grounded to a bare relative path (which would fail).
 ///
 /// Env-scoped for hermetic tests: pass a value into [`socket_path`] directly
 /// rather than mutating the process environment.
@@ -80,6 +86,7 @@ pub fn runtime_dir_from_env() -> Result<PathBuf, ClientError> {
         }
     }
     let base = std::env::var_os("TMPDIR")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     if base.as_os_str().is_empty() {

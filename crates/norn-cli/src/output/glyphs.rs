@@ -24,7 +24,10 @@ pub fn render(g: Glyph, ascii: bool) -> &'static str {
 }
 
 pub fn use_ascii() -> bool {
-    if std::env::var_os("NORN_ASCII").is_some() {
+    // POSIX-by-default (ADR 0020): a presence toggle honors a *non-empty* value.
+    // An empty `NORN_ASCII=` is unset — the locale still decides, matching how
+    // `NO_COLOR` is read.
+    if crate::output::env_flag("NORN_ASCII") {
         return true;
     }
     !effective_locale().to_lowercase().contains("utf")
@@ -146,6 +149,21 @@ mod tests {
                 ("LANG", None),
             ]);
             assert!(use_ascii(), "NORN_ASCII overrides the locale");
+        }
+
+        // Empty NORN_ASCII is treated as unset (POSIX-by-default, ADR 0020) —
+        // the UTF locale still selects UTF glyphs.
+        {
+            let _env = EnvGuard::new(&[
+                ("NORN_ASCII", Some("")),
+                ("LC_ALL", Some("en_US.UTF-8")),
+                ("LC_CTYPE", None),
+                ("LANG", None),
+            ]);
+            assert!(
+                !use_ascii(),
+                "empty NORN_ASCII is unset — a UTF locale keeps UTF glyphs"
+            );
         }
     }
 }
