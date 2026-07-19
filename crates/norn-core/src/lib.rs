@@ -21,15 +21,25 @@
 //! - [`links`] — the link model and resolution: Markdown-link and wikilink
 //!   extraction into [`domain::Link`] records and matching a link to a document
 //!   ([`links::resolve_links`]).
+//! - [`query`] — the SQL-agnostic predicate model ([`query::DocumentQuery`]) and
+//!   its input parsing ([`query::filter_args::build_document_query`],
+//!   [`query::rule_scope_query`]). Shapes queries; the cache engine runs them.
+//! - [`grammar`] — the ADR 0010 canonical-form + forgiving-input grammar:
+//!   separator forgiveness, the query-family dynamic-predicate desugar
+//!   ([`grammar::normalize_argv`]), and the field-universe gate. clap-free; the
+//!   CLI injects its known-flag surface as a value.
 //!
-//! Deliberately NOT here yet (later port phases): the query/filter layer, the
-//! validate/repair engine and apply verbs, and the cache engine — see
-//! `retired/CLAUDE.md`.
+//! Deliberately NOT here yet (later port phases): the query/filter SQL emission
+//! (the cache-engine run side) and the post-validation finding filters (blocked
+//! on the validate engine's `Finding` model), the validate/repair engine and
+//! apply verbs, and the cache engine — see `retired/CLAUDE.md`.
 
 pub mod domain;
 pub mod env;
+pub mod grammar;
 pub mod graph;
 pub mod links;
+pub mod query;
 pub mod standards;
 pub mod target;
 
