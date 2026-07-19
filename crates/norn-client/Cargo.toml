@@ -8,3 +8,11 @@ publish = false
 [dependencies]
 norn-wire = { path = "../norn-wire" }
 norn-config = { path = "../norn-config" }
+blake3 = "1.5"
+serde_json = "1.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

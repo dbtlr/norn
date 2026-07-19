@@ -16,5 +16,11 @@ fn main() {
     // Reference the crate-map so it is used in every build profile (an unused
     // const would both warn and let the edges decay to manifest-only).
     let _ = CRATE_MAP;
+    // Owner mode (ADR 0017): when the summoner spawns this executable as a
+    // vault owner, argv[1] is the owner-mode sentinel — run the owner runtime
+    // instead of the CLI. A normal argv returns `None` and CLI dispatch runs.
+    if let Some(code) = norn_owner::run_if_owner_mode() {
+        std::process::exit(code);
+    }
     std::process::exit(norn_cli::run());
 }

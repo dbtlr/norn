@@ -273,6 +273,12 @@ impl VaultCacheSlot {
         &self.queue
     }
 
+    /// A coherent snapshot of this slot's writer progress (ADR 0013 control
+    /// plane) — the `{ busy, sequence }` the owner reports in a scoped pong.
+    pub fn writer_progress(&self) -> crate::cache::WriterProgress {
+        self.queue.progress_snapshot()
+    }
+
     /// The vault root this slot serves.
     pub fn vault_root(&self) -> &Utf8Path {
         &self.vault_root
