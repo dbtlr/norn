@@ -25,8 +25,8 @@ pub const MAX_WAIT: Duration = Duration::from_secs(120);
 /// and return a ready session. On failure returns an operator-facing message the
 /// caller prints as a `norn:` diagnostic.
 pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, String> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("cannot read the current directory: {e}"))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
     let home = ConfigHome::from_env().map_err(|e| e.to_string())?;
 
     let input = ResolveInput {
@@ -48,13 +48,15 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, String> {
         None => None,
     };
 
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("cannot locate the norn executable: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("cannot locate the norn executable: {e}"))?;
     let config = SummonConfig::for_vault(resolved.root, exe)
         .map_err(|e| e.to_string())?
         .with_config_override(config_override);
 
     let mut session = open(&config).map_err(|e| e.to_string())?;
-    session.wait_until_ready(MAX_WAIT).map_err(|e| e.to_string())?;
+    session
+        .wait_until_ready(MAX_WAIT)
+        .map_err(|e| e.to_string())?;
     Ok(session)
 }

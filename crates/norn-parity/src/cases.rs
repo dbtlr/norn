@@ -1,12 +1,13 @@
 //! The parity case/suite catalog (ADR 0018).
 //!
 //! Phase 1 (NRN-329) ported the full CLI grammar + custom help renderer, so
-//! the three `help` cases (`help-bare`, `help-validate`, `help-find`) are now
-//! `ported: true` and gated against the oracle; `help-bare` diverges by the
-//! new `vault` namespace and is covered by ledger entry PD-101. The remaining
-//! cases exercise real command execution (query/validate core, not yet ported)
-//! and stay `ported: false` — proven sound via `--self-check` (oracle vs.
-//! itself) and flipped one at a time as later phases port their surfaces.
+//! the three `help` cases (`help-bare`, `help-validate`, `help-find`) are
+//! `ported: true` and gated against the oracle; they diverge on the GLOBAL
+//! OPTIONS reshape (PD-101 / PD-102). NRN-346 ports `find` + `count` for real:
+//! every find/count case is now `ported: true` and must MATCH the oracle (pure
+//! byte-parity — no ledger entry). The still-unported surfaces (`get`,
+//! `describe`, `validate`) stay `ported: false` — proven sound via
+//! `--self-check` (oracle vs. itself) and flipped as later phases port them.
 //! `ported` lives on the [`Case`], not the [`Suite`]: phase 1 ports commands
 //! individually, so case-level granularity avoids a reshuffle at each port.
 //! [`Suite`] stays a reporting/grouping label.
@@ -224,18 +225,74 @@ const VALIDATE_CASES: &[Case] = &[
     },
 ];
 
+/// find + count now port for real (NRN-346): the read-surface parity anchor.
+/// Every find/count case is `ported: true` and must Match the oracle (pure
+/// byte-parity — no ledger entry). The argv matrix covers the filter surface
+/// (eq / in / has / missing / dates / text), sort + limit + paging, `--col`
+/// projection with the flat facets, and every output format the non-tty harness
+/// can drive (paths / records / json / jsonl for find; text / json for count).
+/// The dynamic-predicate desugar (`--type note` → `--eq type:note`) and the
+/// alias pack (`--group-by` → `--by`) are exercised too, since they lower to the
+/// same canonical predicates before parse. `get` stays unported (next task).
 const READ_CASES: &[Case] = &[
+    // ── count ────────────────────────────────────────────────────────────
     Case {
         id: "read-count-clean",
         argv: &["count"],
         fixture: CLEAN_1,
         stdin: None,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
     },
+    Case {
+        id: "read-count-by-status-clean",
+        argv: &["count", "--by", "status"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-count-by-multi-json-clean",
+        argv: &["count", "--by", "type,status", "--format", "json"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-count-eq-zoo",
+        argv: &["count", "--eq", "type:note"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // The alias pack: `--group-by` lowers to `--by` before parse.
+        id: "read-count-group-by-alias-clean",
+        argv: &["count", "--group-by", "status"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // ── find ─────────────────────────────────────────────────────────────
     Case {
         id: "read-find-json-zoo",
         // `--all`: bare `find` with no predicate prints help and exits 2 by
@@ -243,7 +300,7 @@ const READ_CASES: &[Case] = &[
         argv: &["find", "--format", "json", "--all"],
         fixture: ZOO_1,
         stdin: None,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
@@ -254,7 +311,130 @@ const READ_CASES: &[Case] = &[
         argv: &["find", "--col", "title", "--format", "json", "--all"],
         fixture: CLEAN_1,
         stdin: None,
-        ported: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-find-eq-json-zoo",
+        argv: &["find", "--eq", "type:note", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-find-in-json-zoo",
+        argv: &["find", "--in", "status:active,backlog", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-find-has-missing-json-zoo",
+        argv: &[
+            "find",
+            "--has",
+            "title",
+            "--missing",
+            "status",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-find-date-before-json-clean",
+        argv: &["find", "--before", "created:2026-01-01", "--format", "json"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-find-sort-limit-json-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:note",
+            "--sort",
+            "title",
+            "--limit",
+            "5",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Default (piped) format is paths; the 10-limit truncation note lands on
+        // stderr — this pins the paths format AND the truncation signal.
+        id: "read-find-paths-zoo",
+        argv: &["find", "--format", "paths", "--all"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Records format under the non-tty harness: term_width 80, separators
+        // capped at 60, the `·` count line — the whole records primitive path.
+        id: "read-find-records-zoo",
+        argv: &["find", "--eq", "type:note", "--format", "records"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "read-find-jsonl-zoo",
+        argv: &["find", "--format", "jsonl", "--all"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // The dynamic-predicate desugar: `--type note` lowers to `--eq
+        // type:note` before parse (ADR 0010), so the routed query is identical.
+        id: "read-find-dynamic-desugar-json-zoo",
+        argv: &["find", "--type", "note", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,

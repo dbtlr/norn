@@ -105,11 +105,7 @@ mod tests {
     fn unparseable_config_is_a_hard_error() {
         let (_tmp, root) = root();
         std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
-        std::fs::write(
-            root.join(".norn/config.yaml").as_std_path(),
-            "not: [valid",
-        )
-        .unwrap();
+        std::fs::write(root.join(".norn/config.yaml").as_std_path(), "not: [valid").unwrap();
         assert!(load_cache_config(&root, None).is_err());
     }
 }

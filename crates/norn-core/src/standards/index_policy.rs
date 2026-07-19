@@ -249,10 +249,12 @@ validate:
 
     #[test]
     fn hash_changes_when_field_set_changes() {
-        let cfg_a =
-            parse("validate:\n  rules:\n    - name: r\n      field_types:\n        created: date\n");
-        let cfg_b =
-            parse("validate:\n  rules:\n    - name: r\n      field_types:\n        updated: date\n");
+        let cfg_a = parse(
+            "validate:\n  rules:\n    - name: r\n      field_types:\n        created: date\n",
+        );
+        let cfg_b = parse(
+            "validate:\n  rules:\n    - name: r\n      field_types:\n        updated: date\n",
+        );
         let (_, hash_a) = resolved_index_set(&cfg_a);
         let (_, hash_b) = resolved_index_set(&cfg_b);
         assert_ne!(hash_a, hash_b);
@@ -260,8 +262,9 @@ validate:
 
     #[test]
     fn hash_is_lowercase_hex() {
-        let cfg =
-            parse("validate:\n  rules:\n    - name: r\n      field_types:\n        created: date\n");
+        let cfg = parse(
+            "validate:\n  rules:\n    - name: r\n      field_types:\n        created: date\n",
+        );
         let (_, hash) = resolved_index_set(&cfg);
         assert_eq!(hash.len(), 64);
         assert!(hash

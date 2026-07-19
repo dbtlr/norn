@@ -35,7 +35,11 @@ const DEFAULT_LIMIT: usize = 10;
 
 /// Run a `find` request against the warm cache. See the module docs for the
 /// `Ok(Ok)` / `Ok(Err)` / `Err` contract.
-pub fn execute(cache: &Cache, params: &FindParams, today: &str) -> Result<Result<FindReport, String>> {
+pub fn execute(
+    cache: &Cache,
+    params: &FindParams,
+    today: &str,
+) -> Result<Result<FindReport, String>> {
     // Predicate build — a malformed predicate token is a user error.
     let mut predicates = match build_document_query(&params.filter, today) {
         Ok(q) => q,

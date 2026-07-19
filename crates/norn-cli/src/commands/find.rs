@@ -21,8 +21,8 @@ use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 use crate::output::palette::{self, Palette};
 use crate::output::primitives::{count_line, record_block, separator, Field};
 use crate::output::projection::{
-    filter_frontmatter, frontmatter_to_display, json_value_inline, split_cols, unknown_facet_message,
-    warn_col_ignored, KNOWN_FACETS,
+    filter_frontmatter, frontmatter_to_display, json_value_inline, split_cols,
+    unknown_facet_message, warn_col_ignored, KNOWN_FACETS,
 };
 
 const NAME: &str = "find";
@@ -180,7 +180,11 @@ fn render(
     Ok(())
 }
 
-fn render_paths(report: &FindReport, out: &mut dyn Write, err: &mut dyn Write) -> std::io::Result<()> {
+fn render_paths(
+    report: &FindReport,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> std::io::Result<()> {
     for doc in &report.documents {
         writeln!(out, "{}", doc.path)?;
     }
@@ -321,7 +325,12 @@ fn doc_to_json(doc: &FindDoc, cols: &[String], all_cols: bool) -> serde_json::Va
         );
     }
     // Deep facets render as empty arrays until deep-fetch lands.
-    for facet in ["headings", "outgoing_links", "unresolved_links", "incoming_links"] {
+    for facet in [
+        "headings",
+        "outgoing_links",
+        "unresolved_links",
+        "incoming_links",
+    ] {
         if all_cols || allow.contains(facet) {
             map.insert(facet.into(), serde_json::Value::Array(Vec::new()));
         }
@@ -484,7 +493,10 @@ mod tests {
         let v = doc_to_json(&d, &[], false);
         // serde_json Value is a sorted map: keys frontmatter, path.
         let s = serde_json::to_string(&v).unwrap();
-        assert_eq!(s, r#"{"frontmatter":{"title":"A","type":"note"},"path":"a.md"}"#);
+        assert_eq!(
+            s,
+            r#"{"frontmatter":{"title":"A","type":"note"},"path":"a.md"}"#
+        );
     }
 
     #[test]
