@@ -76,7 +76,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "expected exit 0 (find/count match, help cases diverge-with-entry, zero drift), got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
     );
-    // NRN-346 ports find + count; NRN-347 adds three deep-facet find cases, ten
+    // NRN-346 ports find + count; NRN-347 adds three deep-facet find cases, nine
     // get cases (incl. --section + alias addressing), a records-format deep-facet
     // case, and six describe cases — all 35 find/count/get/describe cases must
     // Match the oracle (pure byte-parity, no ledger entry). The three help cases
