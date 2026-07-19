@@ -72,7 +72,7 @@ pub(crate) fn detect(
                 // Cheap check failed (or force_hash): re-hash under a stable
                 // observation (stat → read → stat) so the verdict — and any
                 // rebaseline metadata — is bound to the bytes we hashed.
-                match stable_hash_observation(&vault_root.join(path))? {
+                match stable_hash_observation(&vault_root.join(path)) {
                     Some((live_hash, observed)) => {
                         if live_hash != cached_meta.hash {
                             changes.push(FileChange::Modified(path.clone()));
@@ -245,30 +245,29 @@ fn walk_visit<B>(
     Ok(ControlFlow::Continue(()))
 }
 
-/// Hash `absolute` under a stability guard: stat before, read, stat after. The
-/// hash (blake3 hex of the raw bytes, matching `crate::graph::build_index`'s
-/// `documents.hash`) is returned WITH the `(mtime_ns, size_bytes)` from that same
-/// observation only when the before/after stats agree — otherwise the file
-/// changed under the read and `None` is returned. Binding the metadata to the
-/// hashed bytes is what lets `detect`'s rebaseline (and any consumer) commit a
-/// `(mtime,size)` baseline that cannot encode content that raced the read.
 /// A blake3 hex hash paired with the `(mtime_ns, size_bytes)` observed in the
 /// same stable read.
 type HashObservation = (String, (i64, i64));
 
-fn stable_hash_observation(absolute: &Utf8Path) -> Result<Option<HashObservation>, CacheError> {
-    let before = regular_stat(absolute);
-    let bytes = std::fs::read(absolute.as_std_path()).map_err(|e| CacheError::IndexRead {
-        path: absolute.to_owned(),
-        source: e,
-    })?;
-    let after = regular_stat(absolute);
-    match (before, after) {
-        (Some(before), Some(after)) if before == after && bytes.len() as i64 == after.1 => {
-            Ok(Some((blake3::hash(&bytes).to_hex().to_string(), after)))
-        }
-        _ => Ok(None),
-    }
+/// Hash `absolute` under a stability guard: stat before, read, stat after. The
+/// hash (blake3 hex of the raw bytes, matching `crate::graph::build_index`'s
+/// `documents.hash`) is returned WITH the `(mtime_ns, size_bytes)` from that same
+/// observation only when the before/after stats agree.
+///
+/// This is a SPECULATIVE observation whose only consumer is the rebaseline
+/// convergence, so it NEVER propagates an error: a missing before-stat, a failed
+/// read (the file was deleted between the walk and here, or vanished mid-read), a
+/// before/after mismatch, or a size that disagrees with the read all return
+/// `None`. Aborting the whole `detect` scan because one file was concurrently
+/// deleted would be wrong — that deletion surfaces as `Deleted` on the next
+/// cycle. `None` is always the safe direction: skip, and let the next
+/// probe/detect classify the path.
+fn stable_hash_observation(absolute: &Utf8Path) -> Option<HashObservation> {
+    let before = regular_stat(absolute)?;
+    let bytes = std::fs::read(absolute.as_std_path()).ok()?;
+    let after = regular_stat(absolute)?;
+    (before == after && bytes.len() as i64 == after.1)
+        .then(|| (blake3::hash(&bytes).to_hex().to_string(), after))
 }
 
 fn regular_stat(absolute: &Utf8Path) -> Option<(i64, i64)> {
@@ -383,5 +382,35 @@ mod tests {
         );
         assert_eq!(outcome.rebaselines.len(), 1);
         assert_eq!(outcome.rebaselines[0].0, "a.md");
+    }
+
+    /// A file that vanishes during the speculative rebaseline observation must NOT
+    /// abort the whole scan: the observation returns `None` (skip), and the
+    /// deletion is classified `Deleted` on the following detect cycle rather than
+    /// propagating a `NotFound` error out of `detect`.
+    #[test]
+    fn vanished_file_during_observation_is_none_and_next_detect_reports_deleted() {
+        let (_tmp, root, cache) = setup();
+
+        // The speculative observation of an absent path yields None, not an error.
+        assert!(
+            super::stable_hash_observation(&root.join("gone.md")).is_none(),
+            "a missing file must skip (None), never propagate an IO error"
+        );
+
+        // A genuinely-removed tracked file: detect completes without error and
+        // classifies it Deleted (the safe classification the skip defers to). The
+        // read never fires for it — it drops out of the live walk — but this pins
+        // the whole-scan-completes-without-error contract the skip protects.
+        std::fs::remove_file(root.join("a.md").as_std_path()).unwrap();
+        let outcome = detect(&root, &cache, &ChangeDetectOptions::default()).unwrap();
+        assert!(
+            outcome
+                .changes
+                .iter()
+                .any(|c| matches!(c, FileChange::Deleted(p) if p == "a.md")),
+            "the removed file must be classified Deleted: {:?}",
+            outcome.changes
+        );
     }
 }
