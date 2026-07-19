@@ -652,14 +652,14 @@ const READ_CASES: &[Case] = &[
         normalize: NO_NORM,
     },
     // ── NRN-331 / NRN-332: decided CLI-semantics divergences ─────────────────
-    // Each DIFFERS from the oracle and is gated by a ledger entry (PD-103 /
-    // PD-104). Both are ported: true so the gated run compares them.
+    // Each DIFFERS from the oracle and is gated by a ledger entry (PD-105 /
+    // PD-106). Both are ported: true so the gated run compares them.
     Case {
         // NRN-332: `--starts-at` is now a ZERO-indexed offset (default 0). With
         // `--sort path --limit 1 --starts-at 1` the rewrite returns the SECOND
         // document; the oracle's 1-indexed reading (offset floored to 0) returns
         // the FIRST. The stderr "showing 1 of N" note is identical on both sides,
-        // so the divergence is the single stdout path line (PD-103).
+        // so the divergence is the single stdout path line (PD-105).
         id: "read-find-starts-at-zero-indexed-zoo",
         argv: &[
             "find",
@@ -685,7 +685,7 @@ const READ_CASES: &[Case] = &[
         // NRN-331: `--limit N --no-limit` competes over the effective cap. The
         // oracle REJECTS the combo (`conflicts_with`, exit 2); the rewrite
         // accepts it last-wins, so `--no-limit` (last) wins → unlimited, exit 0.
-        // The exit + stdout + stderr all diverge; gated by PD-104.
+        // The exit + stdout + stderr all diverge; gated by PD-106.
         id: "read-find-limit-nolimit-last-wins-zoo",
         argv: &[
             "find",
