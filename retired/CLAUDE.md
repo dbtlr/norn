@@ -44,7 +44,7 @@ Format: `- [ ] old path → provisional destination`. Verb modules port as
 
 ### Cache engine (owner-opened module in `norn-core`)
 
-- [ ] `src/cache.rs`, `src/cache/` → schema, EAV, writer, generational contexts (ADRs 0003/0004/0013/0014)
+- [x] `src/cache.rs`, `src/cache/` → schema, EAV, writer, generational contexts (ADRs 0003/0004/0013/0014) → `norn-core::cache` (NRN-344): schema DDL + EAV `document_fields` writer, canonical, change-detection + `FreshnessProbe` trust seam, `full_build`/incremental refresh + dormant chunked increment pipeline, the read surface (`load_graph_index`, `documents_matching`/`find_documents` EAV-scan router with EXPLAIN guards, `document_with_connections`, status), the two-class `WriterQueue`, generational `ReadPool`, and the owner-facing `VaultCacheSlot` (`create`/`ensure_current`/`serve_read`/coalesced refresh/`commit_apply_increments`). Deleted per ADR 0017: identity path matrix, channels, self-heal ladder, reshred-on-open, GC/prune, `(dev,ino)` re-verification + sentinel + invalidation floor, and `PublicationAuthority`'s filesystem double-re-proof. `src/seq_alloc.rs` (phase 3) and `src/init_scan.rs` (unrelated `norn init` tally) remain.
 - [ ] `src/seq_alloc.rs` → sequence allocation
 - [ ] `src/init_scan.rs` → initial scan / staging
 
