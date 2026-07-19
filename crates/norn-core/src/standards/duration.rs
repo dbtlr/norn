@@ -17,7 +17,10 @@ pub fn parse_duration(s: &str) -> Option<std::time::Duration> {
         _ => return None,
     };
     let n: u64 = num.trim().parse().ok()?;
-    Some(std::time::Duration::from_secs(n * unit_secs))
+    // Best-effort contract: an absurd-but-numeric value (e.g. "18446744073709551w")
+    // overflows the unit multiply — return None rather than panicking (debug) or
+    // wrapping (release), consistent with None-on-unrecognized.
+    Some(std::time::Duration::from_secs(n.checked_mul(unit_secs)?))
 }
 
 #[cfg(test)]
@@ -41,5 +44,12 @@ mod tests {
         assert_eq!(parse_duration("nonsense"), None);
         assert_eq!(parse_duration("10"), None); // no suffix
         assert_eq!(parse_duration(""), None);
+    }
+
+    #[test]
+    fn duration_parser_returns_none_on_unit_multiply_overflow() {
+        // Numeric but absurd: n * seconds-per-week overflows u64. Best-effort
+        // contract returns None instead of panicking (debug) or wrapping (release).
+        assert_eq!(parse_duration("18446744073709551w"), None);
     }
 }

@@ -646,7 +646,13 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             .clone()
             .unwrap_or_else(|| "unnamed validate rule".into());
 
-        for (field, spec) in &rule.field_types {
+        // Fields sorted for deterministic error output (HashMap iteration order
+        // is otherwise arbitrary, so a multi-invalid-field config would name a
+        // run-to-run-varying offender).
+        let mut field_type_entries: Vec<(&String, &FieldTypeSpec)> =
+            rule.field_types.iter().collect();
+        field_type_entries.sort_by_key(|(field, _)| field.as_str());
+        for (field, spec) in field_type_entries {
             let Some(ty) = spec.type_name() else {
                 // Extended form without `type` is valid only as the type-less
                 // indexed-only shape (`{ indexed: bool }`, no other keys).
@@ -690,7 +696,11 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         }
 
         // allowed_values: non-empty, scalar values only.
-        for (field, values) in &rule.allowed_values {
+        // Fields sorted for deterministic error output.
+        let mut allowed_value_entries: Vec<(&String, &Vec<serde_json::Value>)> =
+            rule.allowed_values.iter().collect();
+        allowed_value_entries.sort_by_key(|(field, _)| field.as_str());
+        for (field, values) in allowed_value_entries {
             if values.is_empty() {
                 return Err(ConfigError::Invalid {
                     source_path: source_path.to_owned(),
@@ -710,8 +720,11 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         }
 
         // Frontmatter predicate values: a scalar (exact match) or a non-empty
-        // list of scalars (any-of).
-        for (field, value) in &rule.r#match.frontmatter {
+        // list of scalars (any-of). Fields sorted for deterministic error output.
+        let mut frontmatter_predicate_entries: Vec<(&String, &serde_json::Value)> =
+            rule.r#match.frontmatter.iter().collect();
+        frontmatter_predicate_entries.sort_by_key(|(field, _)| field.as_str());
+        for (field, value) in frontmatter_predicate_entries {
             match value {
                 serde_json::Value::Array(options) => {
                     if options.is_empty() {
@@ -789,7 +802,11 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                     .map(|pp| pp.declared_variables().into_iter().collect())
             })
             .unwrap_or_default();
-        for (field, value) in &rule.frontmatter_defaults {
+        // Fields sorted for deterministic error output.
+        let mut default_entries: Vec<(&String, &serde_json::Value)> =
+            rule.frontmatter_defaults.iter().collect();
+        default_entries.sort_by_key(|(field, _)| field.as_str());
+        for (field, value) in &default_entries {
             let Some(s) = value.as_str() else {
                 continue;
             };
@@ -806,7 +823,8 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
         }
 
         // frontmatter_defaults: transforms must be known.
-        for (field, value) in &rule.frontmatter_defaults {
+        // Reuses the sorted `default_entries` above for deterministic output.
+        for (field, value) in &default_entries {
             let Some(s) = value.as_str() else {
                 continue;
             };
@@ -1072,6 +1090,26 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("unknown field_type 'bogus'"), "got: {msg}");
         assert!(msg.contains("datetime"), "got: {msg}");
+    }
+
+    #[test]
+    fn multi_invalid_field_types_report_lexicographically_first_offender_deterministically() {
+        // Two invalid field_types in one rule: `apple` and `zebra`. HashMap
+        // iteration order is arbitrary, so without a sort the reported offender
+        // would vary run-to-run. Keys are sorted, so the error must always name
+        // `apple` (lexicographically first) and never bail on `zebra` first.
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        zebra: bogus_z\n        apple: bogus_a\n";
+        for _ in 0..64 {
+            let msg = parse(yaml).unwrap_err().to_string();
+            assert!(
+                msg.contains("for field 'apple'") && msg.contains("bogus_a"),
+                "expected the lexicographically-first offender (apple), got: {msg}"
+            );
+            assert!(
+                !msg.contains("zebra"),
+                "must bail on apple before reaching zebra, got: {msg}"
+            );
+        }
     }
 
     // ── NRN-77: string/text field types, max_length, indexed ─────────────────
