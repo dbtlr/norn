@@ -29,11 +29,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // Phase 1 (NRN-329) added PD-101 (the `vault` namespace in top-level
     // `--help`). NRN-345 broadened PD-101 to also carry the GLOBAL OPTIONS
     // change on help-bare and added PD-102 for the same GLOBAL OPTIONS change on
-    // the two ported subcommand help surfaces (help-validate / help-find).
+    // the two ported subcommand help surfaces (help-validate / help-find). The
+    // text-layer slate (NRN-349 / NRN-350) added PD-103 (code-opacity block-id
+    // resolution) and PD-104 (BOM-prefixed frontmatter).
     assert_eq!(
         ledger.entries.len(),
-        2,
-        "expected exactly PD-101 and PD-102, found {}",
+        4,
+        "expected exactly PD-101..PD-104, found {}",
         ledger.entries.len()
     );
 
@@ -53,6 +55,21 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         "help-find shares PD-102 with help-validate"
     );
     assert_eq!(pd102.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    let pd103 = ledger
+        .entry_for_case("text-edge-code-fenced-block-id-link")
+        .expect("the code-opacity case must resolve to an entry");
+    assert_eq!(pd103.id, "PD-103");
+    assert_eq!(pd103.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    let pd104 = ledger
+        .entry_for_case("text-edge-bom-doc-all-cols")
+        .expect("the BOM case must resolve to an entry");
+    assert_eq!(pd104.id, "PD-104");
+    assert_eq!(
+        pd104.reason,
+        norn_parity::ledger::Reason::DiscoveredInconsistency
+    );
 }
 
 #[test]

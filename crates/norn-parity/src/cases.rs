@@ -732,10 +732,66 @@ const DESCRIBE_CASES: &[Case] = &[
     },
 ];
 
+/// The text-layer edge fixture (NRN-349 / NRN-350): the valid zoo plus three
+/// isolated divergence probes (`edge/bom-doc.md`, `edge/code-anchor.md`,
+/// `edge/code-linker.md`). Dedicated to the two cases below so the BOM /
+/// code-opacity divergences never touch a shared zoo/clean case.
+const TEXT_EDGE_1: Fixture = Fixture {
+    profile_name: "text-edge",
+    seed: 1,
+};
+
+/// The decided text-layer divergences from the pinned oracle, each pinned by a
+/// ledger entry (PD-103 / PD-104). Both are `ported: true` and DIVERGE — the
+/// oracle and rewrite differ, and the entry documents why.
+const TEXT_EDGE_CASES: &[Case] = &[
+    Case {
+        // NRN-349: the oracle reads a BOM-prefixed doc as frontmatter-less; the
+        // rewrite skips the BOM and indexes the block. `--all-cols` surfaces the
+        // frontmatter facet (present vs. empty) and the body (post-fence vs. the
+        // whole file). Pinned by PD-104.
+        id: "text-edge-bom-doc-all-cols",
+        argv: &["get", "bom-doc", "--all-cols", "--format", "json"],
+        fixture: TEXT_EDGE_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("edge/bom-doc.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // NRN-350 / ADR 0019: `code-linker` references a block-id defined only
+        // inside a fenced code block. The oracle registers the code-fenced id and
+        // resolves the link (outgoing); the rewrite treats code as opaque, so the
+        // link is unresolved. Pinned by PD-103.
+        id: "text-edge-code-fenced-block-id-link",
+        argv: &[
+            "get",
+            "code-linker",
+            "--col",
+            ".outgoing_links,.unresolved_links",
+            "--format",
+            "json",
+        ],
+        fixture: TEXT_EDGE_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("edge/code-linker.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+];
+
 const SUITES: &[Suite] = &[
     Suite {
         name: "help",
         cases: HELP_CASES,
+    },
+    Suite {
+        name: "text-edge",
+        cases: TEXT_EDGE_CASES,
     },
     Suite {
         name: "validate",

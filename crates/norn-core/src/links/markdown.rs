@@ -136,6 +136,17 @@ mod tests {
     }
 
     #[test]
+    fn markdown_links_skip_a_fence() {
+        // Code opacity (ADR 0019): the pulldown-cmark event stream never emits a
+        // `Tag::Link` for a `[text](url)` inside a fence, so a Markdown link in a
+        // code sample is never extracted — the link half of the sweep.
+        let body = "real [Delta](delta.md)\n\n```\n[fake md](fake.md)\n```\n";
+        let links = parse(body);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "delta.md");
+    }
+
+    #[test]
     fn source_span_is_absolute_in_content() {
         // Body begins partway through the file; the recorded offset must be
         // content-absolute (body_start + in-body offset).

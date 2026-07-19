@@ -124,15 +124,27 @@ static BLOCK_ID_RE: LazyLock<Regex> =
 
 /// Read trailing block-id definitions (`… ^block-id`) from each line of `body`.
 /// These are the anchor targets a `[[Note#^block-id]]` reference points at.
+///
+/// Fenced code blocks and inline code spans are opaque (ADR 0019): a `^id`
+/// inside them is literal sample text, never an anchor, so any match whose bytes
+/// fall in a code range is dropped — the same exclusion [`parse_wikilinks`]
+/// applies. A `^id` on the line *after* a closing fence lies outside the fence's
+/// range and stays a valid anchor (the Obsidian-aligned nuance: it references
+/// the code block itself).
 pub fn parse_block_ids(body: &str) -> Vec<String> {
-    body.lines()
-        .filter_map(|line| {
-            BLOCK_ID_RE
-                .captures(line)
-                .and_then(|captures| captures.get(1))
-                .map(|block_id| block_id.as_str().to_string())
-        })
-        .collect()
+    let ignored = ignored_code_ranges(body);
+    let mut block_ids = Vec::new();
+    let mut line_start = 0;
+    for line in body.split_inclusive('\n') {
+        if let Some(block_id) = BLOCK_ID_RE.captures(line).and_then(|c| c.get(1)) {
+            let id_range = (line_start + block_id.start())..(line_start + block_id.end());
+            if !ignored.iter().any(|r| ranges_overlap(r, &id_range)) {
+                block_ids.push(block_id.as_str().to_string());
+            }
+        }
+        line_start += line.len();
+    }
+    block_ids
 }
 
 /// Byte ranges of inline code spans and fenced code blocks in `body`, where a
@@ -321,5 +333,67 @@ mod tests {
     #[test]
     fn parse_block_ids_allows_trailing_whitespace() {
         assert_eq!(parse_block_ids("hello ^ok  \n"), vec!["ok"]);
+    }
+
+    // ---- Code opacity (ADR 0019): a `^id` inside code is not an anchor.
+
+    #[test]
+    fn block_id_inside_fenced_code_is_not_an_anchor() {
+        let body = "real ^outside\n\n```\n^incode\n```\n";
+        assert_eq!(parse_block_ids(body), vec!["outside"]);
+    }
+
+    #[test]
+    fn block_id_inside_inline_code_is_not_an_anchor() {
+        // A bare `^id` line that is entirely an inline code span is literal text.
+        // pulldown-cmark reports the span (backticks included) as a Code range;
+        // the id's bytes fall inside it, so the exclusion drops it.
+        let body = "prose\n`^incode`\n";
+        assert!(parse_block_ids(body).is_empty());
+    }
+
+    #[test]
+    fn block_id_on_line_after_a_fence_is_still_an_anchor() {
+        // The Obsidian-aligned nuance: a `^id` on the line AFTER a closing fence
+        // references the code block itself and remains valid — it lies outside
+        // the fence's byte range.
+        let body = "```\ncode line\n```\n^after-fence\n";
+        assert_eq!(parse_block_ids(body), vec!["after-fence"]);
+    }
+
+    // ---- Sweep (ADR 0019): every body parser is opaque to a single fence.
+    // A fixture with a fake heading, a wikilink, a Markdown link, and a block-id
+    // all inside one fence — none of the text-layer parsers may extract from it.
+
+    const FENCED_ZOO: &str = "\
+outside [[real-link]]
+
+```
+# Fake Heading
+[[fake-wikilink]]
+[fake md](fake.md)
+^fake-block-id
+```
+";
+
+    #[test]
+    fn sweep_wikilinks_skip_a_fence() {
+        let targets: Vec<String> = parse_wikilinks(FENCED_ZOO)
+            .into_iter()
+            .map(|w| w.target)
+            .collect();
+        assert_eq!(targets, vec!["real-link"]);
+    }
+
+    #[test]
+    fn sweep_block_ids_skip_a_fence() {
+        assert!(parse_block_ids(FENCED_ZOO).is_empty());
+    }
+
+    #[test]
+    fn sweep_headings_skip_a_fence() {
+        // The heading parser is pulldown-cmark-based; a `#` inside a fence never
+        // emits a heading event.
+        assert!(crate::heading::parse_headings(FENCED_ZOO).is_empty());
     }
 }

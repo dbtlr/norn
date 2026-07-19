@@ -120,6 +120,26 @@ pub fn binary_docs() -> Vec<(&'static str, &'static [u8])> {
     vec![("Assets/pic.png", MINIMAL_PNG)]
 }
 
+/// The text-layer edge zoo — emitted only when `Profile::text_edge` is set.
+/// Each doc isolates one decided divergence from the pinned oracle (NRN-349 /
+/// NRN-350) so a dedicated parity case can pin it without perturbing any
+/// shared zoo/clean case:
+///
+/// - `edge/bom-doc.md` — a leading UTF-8 BOM before the fence. The oracle reads
+///   it as frontmatter-less; the rewrite recognizes the block (NRN-349).
+/// - `edge/code-anchor.md` — defines a `^blkincode` block-id *inside* a fenced
+///   code block, and `edge/code-linker.md` references it via
+///   `[[code-anchor#^blkincode]]`. The oracle registers the code-fenced id and
+///   resolves the link; the rewrite treats code as opaque (ADR 0019), so the
+///   link is unresolved.
+pub fn text_edge_docs() -> Vec<ZooDoc> {
+    vec![
+        valid_unlinkable("edge/bom-doc.md", BOM_DOC),
+        valid_unlinkable("edge/code-anchor.md", CODE_ANCHOR),
+        valid_unlinkable("edge/code-linker.md", CODE_LINKER),
+    ]
+}
+
 /// The violation zoo, emitted only when `Profile::violations` is true. Each
 /// doc's `codes` are exactly what the pinned oracle reports against it.
 pub fn violation_docs() -> Vec<ViolationDoc> {
@@ -399,6 +419,38 @@ Excluded from the graph entirely via files.ignore: ignored/**.
 const NO_BODY: &str = r#"---
 title: No Body
 ---
+"#;
+
+// ---- text-layer edge content ----------------------------------------------
+
+/// A BOM-prefixed document (NRN-349). The `\u{feff}` sits before the fence, so
+/// the oracle never recognizes the block and sees `type` as absent; the rewrite
+/// skips the BOM and indexes the frontmatter.
+const BOM_DOC: &str =
+    "\u{feff}---\ntitle: BOM Doc\ntype: bomkind\n---\n\nThe oracle reads this as frontmatter-less.\n";
+
+/// Defines a `^blkincode` block-id *inside* a fenced code block (NRN-350 / ADR
+/// 0019). The oracle registers it as a real anchor; the rewrite does not.
+const CODE_ANCHOR: &str = r#"---
+title: Code Anchor
+---
+
+A block id that lives only inside a fenced code block:
+
+```
+^blkincode
+```
+
+Nothing outside the fence defines that id.
+"#;
+
+/// References the code-fenced block id (NRN-350). Under the oracle the link
+/// resolves; under the rewrite it is unresolved (the anchor no longer exists).
+const CODE_LINKER: &str = r#"---
+title: Code Linker
+---
+
+Points at a code-fenced block id: [[code-anchor#^blkincode]].
 "#;
 
 // ---- violation zoo content ------------------------------------------------

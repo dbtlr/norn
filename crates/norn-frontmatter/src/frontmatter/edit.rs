@@ -690,6 +690,45 @@ mod tests {
         assert_eq!(out, "---\n   \ntitle: X\n---\nbody\n");
     }
 
+    // ---- BOM'd documents (NRN-349): the BOM byte is preserved; edits splice
+    // after it, and the frontmatter is found rather than duplicated.
+
+    #[test]
+    fn set_on_bom_doc_preserves_the_bom_and_every_other_byte() {
+        // Minimal-edit invariant under a leading BOM: only the value bytes change;
+        // the BOM, fences, and body are byte-identical.
+        let content = "\u{feff}---\ntitle: hello\nstatus: draft\n---\n# body\n";
+        let out = set_field(content, "status", &json!("done")).unwrap();
+        assert_eq!(
+            out,
+            "\u{feff}---\ntitle: hello\nstatus: done\n---\n# body\n"
+        );
+        assert!(out.starts_with('\u{feff}'));
+    }
+
+    #[test]
+    fn set_field_finds_a_field_in_a_bom_doc() {
+        let content = "\u{feff}---\ntitle: hello\n---\n";
+        let out = set_field(content, "title", &json!("changed")).unwrap();
+        assert_eq!(out, "\u{feff}---\ntitle: changed\n---\n");
+    }
+
+    #[test]
+    fn add_on_bom_doc_appends_into_the_existing_block_not_a_duplicate() {
+        // The NRN-339-review adversarial doc: before BOM recognition, a BOM'd doc
+        // read as frontmatter-less made `add_field` prepend a SECOND `---` block.
+        // Now the existing block is found and the field is appended into it — a
+        // single block, BOM intact.
+        let content = "\u{feff}---\ntitle: hello\n---\n# body\n";
+        let out = add_field(content, "status", &json!("draft")).unwrap();
+        assert_eq!(
+            out,
+            "\u{feff}---\ntitle: hello\nstatus: draft\n---\n# body\n"
+        );
+        // Exactly one frontmatter block (two fence lines), not two.
+        assert_eq!(out.matches("---\n").count(), 2);
+    }
+
     #[test]
     fn set_rejects_scalar_into_block_sequence_target() {
         // Setting a block-sequence field to a scalar must refuse: a sequence field

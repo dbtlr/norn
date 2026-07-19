@@ -51,9 +51,19 @@ pub fn extract_frontmatter<'a>(
     &'a str,
     usize,
 ) {
-    let Some(after_open) = content
+    // NRN-349: recognize and skip a leading UTF-8 BOM (`\u{feff}`) before the
+    // opening fence. Only frontmatter *recognition* steps past it — the BOM byte
+    // stays in the document (offsets below are computed relative to `content`, so
+    // a minimal edit splices after it and leaves it untouched).
+    //
+    // PHASE 3 (planned, not built here): validate/repair will flag a BOM'd doc as
+    // a diagnostic and strip the BOM on repair. This seam only makes a BOM'd doc's
+    // frontmatter queryable/editable; it never normalizes the byte away.
+    let after_bom = content.strip_prefix('\u{feff}').unwrap_or(content);
+
+    let Some(after_open) = after_bom
         .strip_prefix("---\n")
-        .or_else(|| content.strip_prefix("---\r\n"))
+        .or_else(|| after_bom.strip_prefix("---\r\n"))
     else {
         return (None, None, content, 0);
     };
@@ -187,6 +197,35 @@ mod tests {
         assert!(range.is_some());
         // A YAML sequence at the root produces a JSON array, not a mapping.
         assert!(value.as_ref().unwrap().is_array());
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn bom_prefixed_frontmatter_is_recognized() {
+        // NRN-349: a leading UTF-8 BOM before the fence must not hide the block.
+        let mut diagnostics = Vec::new();
+        let content = "\u{feff}---\ntitle: hello\n---\n# body\n";
+        let (value, range, body, body_start) = extract_frontmatter(content, &mut diagnostics);
+        assert!(value.is_some());
+        assert_eq!(value.unwrap()["title"], serde_json::json!("hello"));
+        // The BOM is 3 bytes; the YAML content sits after BOM + `---\n`.
+        assert_eq!(range, Some(7..20));
+        assert_eq!(body, "# body\n");
+        assert!(diagnostics.is_empty());
+        // Offsets are content-absolute (BOM included): body starts after the
+        // closing fence, not at 0.
+        assert_eq!(&content[body_start..], "# body\n");
+    }
+
+    #[test]
+    fn bom_without_frontmatter_stays_frontmatter_less() {
+        let mut diagnostics = Vec::new();
+        let content = "\u{feff}# just a heading\n";
+        let (value, range, body, body_start) = extract_frontmatter(content, &mut diagnostics);
+        assert!(value.is_none());
+        assert!(range.is_none());
+        assert_eq!(body, content);
+        assert_eq!(body_start, 0);
         assert!(diagnostics.is_empty());
     }
 
