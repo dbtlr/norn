@@ -154,6 +154,6 @@ id = "PD-108"
 surface = "get --col .outgoing_links,.unresolved_links (external-vs-local scheme classification)"
 cases = ["url-edge-scheme-classification"]
 old = "a hand-rolled lowercase prefix list classifies only `http://`/`https://`/`mailto:`/`#` as external; `tel:`, `file:`, protocol-relative `//`, a `C:/…` drive letter, and mixed-case `hTTp://` all fall through as local links, reported unresolved (target-missing)"
-new = "URL-rules classification (NRN-357): any case-insensitive RFC 3986 scheme, a protocol-relative `//`, or a Windows drive-letter path is external and excluded from the link model, so none of these destinations appear as links at all"
+new = "URL-rules classification (NRN-357): any case-insensitive RFC 3986 scheme, a protocol-relative `//`, or a Windows drive-letter path is external and excluded from the link model, so none of these destinations appear as links at all; a destination whose first segment contains a colon (e.g. `note:draft.md`) also reads as scheme-qualified and classifies external — disambiguate a literal colon-named vault file with a `./` prefix"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
