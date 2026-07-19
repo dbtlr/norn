@@ -5,9 +5,10 @@
 //! `serve_read`; the CLI renders the returned `Report`. No IO beyond the cache
 //! read, no clock read (the current date is injected as `today`).
 //!
-//! Shipped this phase: [`find`], [`count`], and [`get`]. `describe` follows.
+//! Shipped: [`find`], [`count`], [`get`], and [`describe`].
 
 pub mod count;
+pub mod describe;
 pub mod find;
 pub mod get;
 
@@ -15,6 +16,24 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::cache::DocumentDeep;
+
+/// The bucket label a document lands in when it is missing the grouped field —
+/// shared by `count` and `describe` so the two surfaces cannot drift.
+pub(crate) const MISSING: &str = "(missing)";
+
+/// Render a frontmatter value as a group-key / bucket-label string — shared by
+/// `count` (`--by`) and `describe` (contents-summary) so the two cannot drift on
+/// how a value stringifies. Scalars render bare; `null` is `(null)`; arrays /
+/// objects use their JSON stringification (so an empty array is `[]`).
+pub(crate) fn render_key(value: &Value) -> String {
+    match value {
+        Value::Null => "(null)".to_string(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
 
 /// The four deep-connection facets of a document, each pre-serialized to a JSON
 /// value so the wire carries — and the CLI re-emits under `--format json` —

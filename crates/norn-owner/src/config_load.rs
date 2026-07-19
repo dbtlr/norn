@@ -15,6 +15,39 @@
 use camino::{Utf8Path, Utf8PathBuf};
 
 use norn_core::cache::CacheOpenConfig;
+use norn_core::standards::VaultConfig;
+
+/// Resolve the config file path an owner should load: an explicit
+/// `[vaults.<name>].config` override wins; else `<vault_root>/.norn/config.yaml`
+/// if it exists; else `None` (the vault runs under defaults).
+fn config_path(vault_root: &Utf8Path, config_override: Option<&Utf8Path>) -> Option<Utf8PathBuf> {
+    match config_override {
+        Some(p) => Some(p.to_path_buf()),
+        None => {
+            let default = vault_root.join(".norn/config.yaml");
+            default.exists().then_some(default)
+        }
+    }
+}
+
+/// Load the vault's full parsed [`VaultConfig`], or `None` when the vault runs
+/// under no config file. Used by the owner to serve `describe`'s structure view
+/// (path rules, inbox, schema) — the cache knobs come from [`load_cache_config`].
+/// A present-but-unparseable file is a hard error, consistent with the cache
+/// load.
+pub fn load_vault_config(
+    vault_root: &Utf8Path,
+    config_override: Option<&Utf8Path>,
+) -> anyhow::Result<Option<VaultConfig>> {
+    let Some(path) = config_path(vault_root, config_override) else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path.as_std_path())
+        .map_err(|e| anyhow::anyhow!("failed to read config {path}: {e}"))?;
+    let config =
+        norn_core::standards::parse_config(&text, &path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(Some(config))
+}
 
 /// Load the vault's config into a [`CacheOpenConfig`].
 ///

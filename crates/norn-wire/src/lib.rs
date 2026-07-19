@@ -39,8 +39,9 @@ pub use filter::FilterParams;
 pub use paging::SortPaginateParams;
 pub use presence::Presence;
 pub use read::{
-    CountParams, CountReport, FindDoc, FindParams, FindReport, GetParams, GetRecord, GetReport,
-    GroupNode,
+    CountParams, CountReport, CreatableRule, DataSummary, DateBounds, DescribeParams,
+    DescribeReport, FieldDistribution, FindDoc, FindParams, FindReport, GetParams, GetRecord,
+    GetReport, GroupNode, PathRule, SkippedField, ValueCount,
 };
 
 /// One-line boundary contract, referenced by every dependent so each

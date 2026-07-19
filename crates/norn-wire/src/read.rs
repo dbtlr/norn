@@ -177,6 +177,97 @@ pub struct GetRecord {
     pub sections: Option<Vec<(String, String)>>,
 }
 
+/// A `describe` request: the structure view always, plus a contents-summary when
+/// `data` is set (`--data`/`--stats`) OR `by` is non-empty (`--by` implies data,
+/// on the *normalized* `by`). `limit` caps value-buckets per field (`None` →
+/// default 20; `Some(0)` → uncapped). `--format` is a CLI-side presentation
+/// choice over the report, never sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DescribeParams {
+    #[serde(skip_serializing_if = "is_false")]
+    pub data: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "is_default_filter")]
+    pub filter: FilterParams,
+}
+
+/// A `describe` response — the donor `DescribeOutput`, field order preserved so
+/// `--format json` (which serializes the struct directly) is byte-identical.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DescribeReport {
+    pub folders: Vec<String>,
+    pub path_rules: Vec<PathRule>,
+    pub creatable_rules: Vec<CreatableRule>,
+    pub inbox: Option<String>,
+    pub schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<DataSummary>,
+}
+
+/// A declared path rule: which glob gets which frontmatter defaults.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PathRule {
+    pub glob: String,
+    pub name: Option<String>,
+    pub frontmatter_defaults: Value,
+}
+
+/// A rule usable with `new { rule: name }` — declares both a name and a target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatableRule {
+    pub name: String,
+    pub target: String,
+    pub required_vars: Vec<String>,
+    pub frontmatter_defaults: Value,
+    pub body: Option<String>,
+}
+
+/// The contents-summary: totals, per-field value distributions, date bounds, and
+/// the identity-skipped fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataSummary {
+    pub total: usize,
+    pub fields: Vec<FieldDistribution>,
+    pub dates: Vec<DateBounds>,
+    pub skipped: Vec<SkippedField>,
+}
+
+/// One field's value distribution: the shown buckets plus how many were capped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldDistribution {
+    pub field: String,
+    pub values: Vec<ValueCount>,
+    pub more: usize,
+}
+
+/// One value bucket: the rendered value and its occurrence count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValueCount {
+    pub value: String,
+    pub count: usize,
+}
+
+/// Lexical min/max bounds for a date-typed field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DateBounds {
+    pub field: String,
+    pub min: String,
+    pub max: String,
+}
+
+/// A field dropped from the auto distributions for being (near-)identity: as many
+/// distinct values as occurrences.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkippedField {
+    pub field: String,
+    pub distinct: usize,
+    pub total: usize,
+}
+
 /// A `count` request: the `--by` grouping fields plus the shared filter surface.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

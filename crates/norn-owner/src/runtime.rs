@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use norn_core::cache::VaultCacheSlot;
+use norn_core::standards::VaultConfig;
 use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -74,6 +75,11 @@ fn lock_path_for(socket_path: &Utf8Path) -> Utf8PathBuf {
 struct OwnerState {
     serving: Mutex<ServingState>,
     slot: Mutex<Option<Arc<VaultCacheSlot>>>,
+    /// The vault's parsed config, loaded once at warm-up alongside the slot.
+    /// `None` when the vault runs under no config file. `describe` reads it for
+    /// its structure view (path rules, inbox, schema); the other read verbs need
+    /// only the cache knobs already folded into the slot.
+    vault_config: Mutex<Option<Arc<VaultConfig>>>,
     last_activity: Mutex<Instant>,
     in_flight: AtomicUsize,
     fatal: AtomicBool,
@@ -93,6 +99,7 @@ impl OwnerState {
         Self {
             serving: Mutex::new(ServingState::Cold),
             slot: Mutex::new(None),
+            vault_config: Mutex::new(None),
             last_activity: Mutex::new(Instant::now()),
             in_flight: AtomicUsize::new(0),
             fatal: AtomicBool::new(false),
@@ -120,6 +127,13 @@ impl OwnerState {
 
     fn slot(&self) -> Option<Arc<VaultCacheSlot>> {
         self.slot.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn vault_config(&self) -> Option<Arc<VaultConfig>> {
+        self.vault_config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn writer_progress(&self) -> WriterProgress {
@@ -249,15 +263,23 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
             // resolved EAV index set all come from `.norn/config.yaml`. Without
             // this the cache would be built under the empty default config and
             // every alias/ignore/index decision would be wrong (ADR 0017).
-            let build = tokio::task::spawn_blocking(move || -> anyhow::Result<VaultCacheSlot> {
+            type WarmUp = (VaultCacheSlot, Option<VaultConfig>);
+            let build = tokio::task::spawn_blocking(move || -> anyhow::Result<WarmUp> {
                 let cache_config =
                     crate::config_load::load_cache_config(&vault_root, config_path.as_deref())?;
-                Ok(VaultCacheSlot::create(&db_path, &vault_root, cache_config)?)
+                // The full parsed config is retained for `describe`'s structure
+                // view; the cache load above folds out only the four cache knobs.
+                let vault_config =
+                    crate::config_load::load_vault_config(&vault_root, config_path.as_deref())?;
+                let slot = VaultCacheSlot::create(&db_path, &vault_root, cache_config)?;
+                Ok((slot, vault_config))
             })
             .await;
             match build {
-                Ok(Ok(slot)) => {
+                Ok(Ok((slot, vault_config))) => {
                     *state.slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(slot));
+                    *state.vault_config.lock().unwrap_or_else(|p| p.into_inner()) =
+                        vault_config.map(Arc::new);
                     state.set_serving(ServingState::Ready);
                 }
                 // A cache error during warm-up is exit-to-heal (ADR 0017): the
@@ -513,6 +535,25 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
             })
             .await;
             classify_read(state, result, |report| OwnerFrame::Get { report }, "get")
+        }
+        ClientFrame::Describe { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_utc();
+            let result = tokio::task::spawn_blocking(move || {
+                slot.serve_read(|cache| {
+                    norn_core::read::describe::execute(cache, config.as_deref(), &params, &today)
+                })
+            })
+            .await;
+            classify_read(
+                state,
+                result,
+                |report| OwnerFrame::Describe { report },
+                "describe",
+            )
         }
     }
 }

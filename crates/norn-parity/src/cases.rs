@@ -584,17 +584,84 @@ const READ_CASES: &[Case] = &[
     },
 ];
 
-const DESCRIBE_CASES: &[Case] = &[Case {
-    id: "describe-zoo",
-    argv: &["describe"],
-    fixture: ZOO_1,
-    stdin: None,
-    ported: false,
-    expect_oracle_exit: 0,
-    requires_doc: None,
-    requires_code: None,
-    normalize: NO_NORM,
-}];
+/// describe ports for real (NRN-347): the structure view (folders + declared
+/// rules + inbox + the full schema under `--format json`) and the contents
+/// summary (`--data`/`--stats`/`--by`). All `ported: true`, must Match the
+/// oracle. `--format json` pins the schema serialization (the full validate
+/// config) byte-for-byte forever.
+const DESCRIBE_CASES: &[Case] = &[
+    Case {
+        id: "describe-zoo",
+        argv: &["describe"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        id: "describe-data-zoo",
+        argv: &["describe", "--data"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--stats` is a pure alias for `--data` — same output.
+        id: "describe-stats-zoo",
+        argv: &["describe", "--stats"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // The structure view in full, incl. the serialized schema (validate
+        // config) — pins the schema shape byte-for-byte.
+        id: "describe-json-zoo",
+        argv: &["describe", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--by` implies data and bypasses the identity-skip; nested fields.
+        id: "describe-by-clean",
+        argv: &["describe", "--by", "type,status"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Data summary on the clean fixture — a different doc mix + date bounds.
+        id: "describe-data-clean",
+        argv: &["describe", "--data"],
+        fixture: CLEAN_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+];
 
 const SUITES: &[Suite] = &[
     Suite {
