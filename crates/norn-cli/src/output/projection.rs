@@ -182,6 +182,33 @@ pub fn warn_col_ignored(
     Ok(())
 }
 
+/// Warn (once) that `--section` has no effect with a format that ignores it
+/// (`paths` / `markdown`) — donor `warn_section_ignored`.
+pub fn warn_section_ignored(
+    sections: &[String],
+    inert_format: Option<&str>,
+    stderr: &mut dyn Write,
+) -> std::io::Result<()> {
+    if let Some(fmt) = inert_format {
+        if !sections.is_empty() {
+            writeln!(stderr, "warning: --section is ignored with --format {fmt}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Build the `sections` JSON value: a plain object keyed by heading text
+/// (`{heading: content, ...}`) — donor `sections_to_json_object`. Keys land in a
+/// `serde_json::Map` (sorted), so the object is alphabetically keyed regardless
+/// of the request order the records renderer preserves.
+pub fn sections_to_json_object(sections: &[(String, String)]) -> Value {
+    let mut obj = serde_json::Map::with_capacity(sections.len());
+    for (heading, content) in sections {
+        obj.insert(heading.clone(), Value::String(content.clone()));
+    }
+    Value::Object(obj)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

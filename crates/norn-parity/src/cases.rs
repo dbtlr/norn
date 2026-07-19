@@ -502,6 +502,9 @@ const READ_CASES: &[Case] = &[
         requires_code: None,
         normalize: NO_NORM,
     },
+    // ── get (NRN-347) ──────────────────────────────────────────────────────
+    // The anchor: get ports for real. Stem addressing, each format, the
+    // ambiguity/not-found note+exit contract, and the markdown exact-source read.
     Case {
         id: "read-get-alpha-zoo",
         // Stem form, not `notes/alpha` — see module docs. The resolved target
@@ -509,9 +512,73 @@ const READ_CASES: &[Case] = &[
         argv: &["get", "alpha", "--format", "json"],
         fixture: ZOO_1,
         stdin: None,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Default records: the full field dump (frontmatter + headings + links),
+        // no count line, no color.
+        id: "read-get-alpha-records-zoo",
+        argv: &["get", "alpha"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--all-cols` — the full structured dump incl. body.
+        id: "read-get-alpha-all-cols-json-zoo",
+        argv: &["get", "alpha", "--all-cols", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--format markdown` — the exact source file the owner read from disk
+        // (ADR 0014). Byte-faithful, no trailing-newline fixup.
+        id: "read-get-alpha-markdown-zoo",
+        argv: &["get", "alpha", "--format", "markdown"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Ambiguous stem: one record per candidate + a `note:` on stderr, exit 0.
+        // `duplicate` resolves to archive2/duplicate.md and notes/duplicate.md.
+        id: "read-get-ambiguous-json-zoo",
+        argv: &["get", "duplicate", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/duplicate.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Not-found: `[]` on stdout, an `error:` note on stderr, exit 1 — the
+        // note-driven failure signal. `zzz-no-such-doc` is not a fixture stem.
+        id: "read-get-not-found-json-zoo",
+        argv: &["get", "zzz-no-such-doc", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
     },

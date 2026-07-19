@@ -38,7 +38,10 @@ pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL
 pub use filter::FilterParams;
 pub use paging::SortPaginateParams;
 pub use presence::Presence;
-pub use read::{CountParams, CountReport, FindDoc, FindParams, FindReport, GroupNode};
+pub use read::{
+    CountParams, CountReport, FindDoc, FindParams, FindReport, GetParams, GetRecord, GetReport,
+    GroupNode,
+};
 
 /// One-line boundary contract, referenced by every dependent so each
 /// declared edge in the crate map is compiler-load-bearing.

@@ -77,12 +77,12 @@ fn bare_find_prints_help_and_exits_two() {
 }
 
 #[test]
-fn get_unported_exits_one_with_uniform_line() {
-    let out = norn().args(["get", "alpha"]).output().unwrap();
+fn describe_unported_exits_one_with_uniform_line() {
+    let out = norn().args(["describe"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(out.stderr).unwrap(),
-        "norn: `get` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
+        "norn: `describe` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
     );
 }
 

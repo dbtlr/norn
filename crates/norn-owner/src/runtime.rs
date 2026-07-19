@@ -487,6 +487,51 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 "count",
             )
         }
+        ClientFrame::Get { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let today = today_utc();
+            let result = tokio::task::spawn_blocking(move || {
+                slot.serve_read(|cache| {
+                    let outcome = norn_core::read::get::execute(cache, &params, &today)?;
+                    Ok(match outcome {
+                        Ok(mut report) => {
+                            // `--format markdown` is the exact source file straight
+                            // from disk (ADR 0014) — the OWNER reads it (it holds the
+                            // vault root and is co-located with the vault; a future
+                            // off-filesystem client could not). Only the single-doc
+                            // case reads; 0 / >1 selected is the CLI's error to render.
+                            if params.markdown {
+                                read_markdown_source(cache, &mut report);
+                            }
+                            Ok(report)
+                        }
+                        Err(msg) => Err(msg),
+                    })
+                })
+            })
+            .await;
+            classify_read(state, result, |report| OwnerFrame::Get { report }, "get")
+        }
+    }
+}
+
+/// Fill `markdown_content` with the exact source bytes for a single-doc
+/// `--format markdown` request. A read failure becomes an `error:` note (the CLI
+/// exits 1 on it) rather than a cache fault — the db is intact; the file just
+/// could not be read.
+fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire::GetReport) {
+    if report.records.len() != 1 {
+        return;
+    }
+    let path = report.records[0].path.clone();
+    let full = cache.vault_root().join(&path);
+    match std::fs::read_to_string(full.as_std_path()) {
+        Ok(raw) => report.markdown_content = Some(raw),
+        Err(_) => report
+            .notes
+            .push(format!("error: could not read source file for '{path}'")),
     }
 }
 

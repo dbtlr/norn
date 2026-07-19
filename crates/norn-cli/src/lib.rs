@@ -99,7 +99,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         // not-yet-ported outcome; the rest of the v0.48 surface is grammar-only
         // stubs (NRN-329) routed to the same uniform outcome by name.
         Command::Find(args) => commands::find::run(&args, &cli.global, presenter),
-        Command::Get(args) => commands::get::run(&args, presenter),
+        Command::Get(args) => commands::get::run(&args, &cli.global, presenter),
         Command::Count(args) => commands::count::run(&args, &cli.global, presenter),
         Command::Describe(_) => presenter.not_yet_ported("describe"),
         Command::Set(_) => presenter.not_yet_ported("set"),
@@ -161,8 +161,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_get_presents_not_yet_ported() {
-        let cli = Cli::try_parse_from(["norn", "get", "alpha"]).unwrap();
+    fn dispatch_describe_presents_not_yet_ported() {
+        let cli = Cli::try_parse_from(["norn", "describe"]).unwrap();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = {
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(code, display::EXIT_OPERATIONAL);
         assert_eq!(
             String::from_utf8(err).unwrap(),
-            "norn: `get` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
+            "norn: `describe` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
         );
     }
 }
