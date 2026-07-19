@@ -1039,40 +1039,7 @@ mod tests {
         );
     }
 
-    /// Serializes the env-mutating glyph tests and restores every touched
-    /// variable on drop, so parallel tests never observe a half-set
-    /// environment and nothing leaks past the test.
-    struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    }
-
-    impl EnvGuard {
-        fn new(vars: &[(&'static str, Option<&str>)]) -> Self {
-            static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let lock = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-            let mut saved = Vec::new();
-            for (key, value) in vars {
-                saved.push((*key, std::env::var_os(key)));
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-            Self { _lock: lock, saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.saved.drain(..) {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
+    use crate::test_support::EnvGuard;
 
     #[test]
     fn long_form_emits_live_marker_utf_by_default() {

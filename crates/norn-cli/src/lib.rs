@@ -34,6 +34,11 @@ mod help;
 mod output;
 mod routed;
 
+/// Crate-internal, test-only shared helpers (e.g. the panic-safe `EnvGuard`
+/// every env-mutating test goes through). Compiled only under `cfg(test)`.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 /// One-line boundary contract, referenced by every dependent so each
 /// declared edge in the crate map is compiler-load-bearing.
 pub const CONTRACT: &str = "norn-cli: thin CLI adapter — parse and present only";
