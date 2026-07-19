@@ -16,15 +16,16 @@ pub struct FindQuery {
     pub sort: Option<SortClause>,
     /// None = no limit (every match returned).
     pub limit: Option<usize>,
-    /// 1-indexed. `1` = start from the first match; `0` is normalized to the
-    /// first match by [`offset`](FindQuery::offset).
+    /// Zero-indexed starting offset (NRN-332). `0` = start from the first
+    /// match; `N` skips the first `N` matches. No 1-indexed clamp — the offset
+    /// is used verbatim as the SQL OFFSET.
     pub starts_at: usize,
 }
 
 impl FindQuery {
     /// Effective starting offset (0-indexed) for SQL OFFSET.
     pub(crate) fn offset(&self) -> usize {
-        self.starts_at.saturating_sub(1)
+        self.starts_at
     }
 }
 
@@ -216,7 +217,7 @@ mod tests {
         let (_tmp, root) = synth_paged_vault();
         let cache = built(&root);
         let q = FindQuery {
-            starts_at: 1,
+            starts_at: 0,
             ..Default::default()
         };
         let result = cache.find_documents(&q).unwrap();
@@ -232,7 +233,7 @@ mod tests {
         let (_tmp, root) = synth_paged_vault();
         let cache = built(&root);
         let q = FindQuery {
-            starts_at: 1,
+            starts_at: 0,
             limit: Some(10),
             ..Default::default()
         };
@@ -249,7 +250,7 @@ mod tests {
         let (_tmp, root) = synth_paged_vault();
         let cache = built(&root);
         let q = FindQuery {
-            starts_at: 11,
+            starts_at: 10,
             limit: Some(10),
             ..Default::default()
         };
@@ -280,7 +281,7 @@ mod tests {
         let (_tmp, root) = synth_paged_vault();
         let cache = built(&root);
         let q = FindQuery {
-            starts_at: 1,
+            starts_at: 0,
             limit: Some(3),
             sort: Some(SortClause {
                 field: "priority".to_string(),
@@ -308,7 +309,7 @@ mod tests {
         let (_tmp, root) = synth_paged_vault();
         let cache = built(&root);
         let q = FindQuery {
-            starts_at: 1,
+            starts_at: 0,
             limit: Some(3),
             sort: Some(SortClause {
                 field: "path".to_string(),
@@ -329,7 +330,7 @@ mod tests {
                 frontmatter_eq: vec![("type".to_string(), serde_json::json!("note"))],
                 ..Default::default()
             },
-            starts_at: 1,
+            starts_at: 0,
             limit: Some(5),
             sort: Some(SortClause {
                 field: "path".to_string(),
@@ -353,7 +354,7 @@ mod tests {
                 path_globs: vec!["doc-*0.md".to_string()],
                 ..Default::default()
             },
-            starts_at: 1,
+            starts_at: 0,
             limit: Some(100),
             ..Default::default()
         };

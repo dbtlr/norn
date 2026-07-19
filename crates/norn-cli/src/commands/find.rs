@@ -63,8 +63,8 @@ pub struct FindArgs {
 
     /// Emit the full structured dump for each match: whole frontmatter plus
     /// every cache-served facet (`.headings`, the three link sets, `.body`).
-    /// Mutually exclusive with `--col`.
-    #[arg(long = "all-cols", conflicts_with = "col", help_heading = "Output")]
+    /// Competes with `--col` over the projection; the last of the two given wins.
+    #[arg(long = "all-cols", overrides_with = "col", help_heading = "Output")]
     pub all_cols: bool,
 
     /// Comma-separated columns to include. Bare names select frontmatter
@@ -79,6 +79,7 @@ pub struct FindArgs {
         long,
         value_name = "COL1,COL2,...",
         value_delimiter = ',',
+        overrides_with = "all_cols",
         help_heading = "Output"
     )]
     pub col: Vec<String>,
@@ -500,9 +501,19 @@ mod tests {
     }
 
     #[test]
-    fn all_cols_conflicts_with_col() {
-        let res = Cli::try_parse_from(["norn", "find", "--all", "--all-cols", "--col", "title"]);
-        assert!(res.is_err(), "--all-cols and --col are mutually exclusive");
+    fn all_cols_and_col_are_last_wins() {
+        // NRN-331: --all-cols and --col compete over the projection; the last
+        // one on the command line wins (no hard conflict).
+        let col_last = find_args(&["norn", "find", "--all", "--all-cols", "--col", "title"]);
+        assert!(!col_last.all_cols, "--col is last, so --all-cols is reset");
+        assert_eq!(col_last.col, vec!["title".to_string()]);
+
+        let all_cols_last = find_args(&["norn", "find", "--all", "--col", "title", "--all-cols"]);
+        assert!(all_cols_last.all_cols, "--all-cols is last, so it wins");
+        assert!(
+            all_cols_last.col.is_empty(),
+            "the overridden --col is reset"
+        );
     }
 
     #[test]

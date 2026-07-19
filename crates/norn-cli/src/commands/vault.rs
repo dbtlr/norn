@@ -101,7 +101,8 @@ pub struct ListArgs {
 }
 
 /// `norn vault set <name> ...`. At least one change flag is required (an empty
-/// change set is a usage error); each `--clear-*` conflicts with its `--*`.
+/// change set is a usage error); each `--clear-*` competes with its `--*` over a
+/// single override, resolved last-wins (NRN-331) rather than as a hard conflict.
 #[derive(Args, Debug)]
 #[command(group(
     ArgGroup::new("changes")
@@ -119,24 +120,24 @@ pub struct SetArgs {
     pub root: Option<PathBuf>,
 
     /// Set the config-location override (stored verbatim).
-    #[arg(long, value_name = "PATH", conflicts_with = "clear_config")]
+    #[arg(long, value_name = "PATH", overrides_with = "clear_config")]
     pub config: Option<PathBuf>,
     /// Remove the config-location override.
-    #[arg(long = "clear-config")]
+    #[arg(long = "clear-config", overrides_with = "config")]
     pub clear_config: bool,
 
     /// Set the cache-location override (stored verbatim).
-    #[arg(long, value_name = "PATH", conflicts_with = "clear_cache")]
+    #[arg(long, value_name = "PATH", overrides_with = "clear_cache")]
     pub cache: Option<PathBuf>,
     /// Remove the cache-location override.
-    #[arg(long = "clear-cache")]
+    #[arg(long = "clear-cache", overrides_with = "cache")]
     pub clear_cache: bool,
 
     /// Set the logs-location override (stored verbatim).
-    #[arg(long, value_name = "PATH", conflicts_with = "clear_logs")]
+    #[arg(long, value_name = "PATH", overrides_with = "clear_logs")]
     pub logs: Option<PathBuf>,
     /// Remove the logs-location override.
-    #[arg(long = "clear-logs")]
+    #[arg(long = "clear-logs", overrides_with = "logs")]
     pub clear_logs: bool,
 }
 
@@ -153,7 +154,8 @@ impl SetArgs {
 
 /// Fold a `--set PATH` / `--clear` flag pair into the override tri-state:
 /// `None` = untouched, `Some(None)` = clear, `Some(Some(path))` = set. clap's
-/// `conflicts_with` guarantees the set-and-clear case never reaches here.
+/// `overrides_with` resolves a set-and-clear on one field last-wins BEFORE this
+/// runs, so at most one of the pair is ever present here (NRN-331).
 fn tri_state(set: Option<PathBuf>, clear: bool) -> Option<Option<PathBuf>> {
     match (set, clear) {
         (Some(path), _) => Some(Some(path)),
@@ -435,8 +437,10 @@ mod tests {
     }
 
     #[test]
-    fn set_clear_conflicts_with_set() {
-        let err = Cli::try_parse_from([
+    fn set_and_clear_on_one_field_is_last_wins() {
+        // NRN-331: `--cache PATH --clear-cache` no longer errors; the last of
+        // the two wins. Clear is last → the override is cleared.
+        let clear_last = match vault_cmd(&[
             "norn",
             "vault",
             "set",
@@ -444,9 +448,34 @@ mod tests {
             "--cache",
             "/c",
             "--clear-cache",
-        ])
-        .unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        ]) {
+            VaultCmd::Set(a) => a.to_changes(),
+            other => panic!("expected set, got {other:?}"),
+        };
+        assert_eq!(
+            clear_last.cache,
+            Some(None),
+            "clear is last → clear the override"
+        );
+
+        // Set is last → the override is set to the path.
+        let set_last = match vault_cmd(&[
+            "norn",
+            "vault",
+            "set",
+            "docs",
+            "--clear-cache",
+            "--cache",
+            "/c",
+        ]) {
+            VaultCmd::Set(a) => a.to_changes(),
+            other => panic!("expected set, got {other:?}"),
+        };
+        assert_eq!(
+            set_last.cache,
+            Some(Some(PathBuf::from("/c"))),
+            "set is last → set the override verbatim"
+        );
     }
 
     #[test]

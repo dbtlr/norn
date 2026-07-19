@@ -49,8 +49,8 @@ oracle_version = "0.48.1"   # the pinned oracle; the runner verifies `--version`
 id = "PD-101"
 surface = "--help (top-level command list + GLOBAL OPTIONS)"
 cases = ["help-bare"]
-old = "the 22-command list ends at `audit` with no registered-vault namespace; GLOBAL OPTIONS lists `--config` and has no `--vault`"
-new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`"
+old = "the 22-command list ends at `audit` with no registered-vault namespace; GLOBAL OPTIONS lists `--config` and has no `--vault`; the `-C/--cwd` description is truncated at 70 chars with an ellipsis in `--help`"
+new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`; the `-C/--cwd` description is shown in FULL (unclamped) in `--help`, only the concise line in `-h` (NRN-335)"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
 
@@ -61,8 +61,8 @@ decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
 id = "PD-102"
 surface = "<command> --help (GLOBAL OPTIONS block)"
 cases = ["help-validate", "help-find"]
-old = "GLOBAL OPTIONS lists `--config <YAML config file>` and has no `--vault`"
-new = "GLOBAL OPTIONS drops `--config` (config is resolver-derived under ADR 0017) and adds `--vault NAME` (registered-vault targeting the summoner consumes)"
+old = "GLOBAL OPTIONS lists `--config <YAML config file>` and has no `--vault`; `-C/--cwd` is truncated at 70 chars in `--help`; on `find --help`, `--no-limit` reads 'Overrides --limit', `--starts-at` reads '1-indexed ... Default 1', and `--all-cols` reads 'Mutually exclusive with --col'"
+new = "GLOBAL OPTIONS drops `--config` (config is resolver-derived under ADR 0017) and adds `--vault NAME` (registered-vault targeting the summoner consumes); `-C/--cwd` shows its full description unclamped in `--help` (NRN-335); on `find --help` the Sort-and-paging / Output help text also changes — `--no-limit` and `--all-cols` state last-wins and `--starts-at` states zero-indexing / Default 0 (NRN-331 / NRN-332)"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
 
@@ -93,4 +93,33 @@ cases = ["text-edge-bom-doc-all-cols"]
 old = "a leading UTF-8 BOM hides the frontmatter: the block is unrecognized, so its fields are absent and the whole file (fences included) is body"
 new = "the BOM is skipped before the fence (NRN-349): the frontmatter is recognized and its fields are queryable, and body starts after the closing fence"
 reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-332: `--starts-at` is re-indexed from 1-indexed (with a 0→1 floor) to a
+# plain ZERO-indexed offset (default 0). Agents assume zero-indexing; the
+# floored 1-indexed convention was the surprising one. `--starts-at 1` now skips
+# the first record (returns the SECOND) where the oracle returned the FIRST.
+# (Renumbered PD-103 → PD-105 on rebase: the text-layer slate landed PD-103/104.)
+[[entry]]
+id = "PD-105"
+surface = "find --starts-at (paging offset)"
+cases = ["read-find-starts-at-zero-indexed-zoo"]
+old = "`--starts-at` is 1-indexed with a silent floor (`0` and `1` both mean the first record); `--starts-at 1 --limit 1` returns the first document"
+new = "`--starts-at` is a zero-indexed offset, default 0, no floor; `--starts-at 1 --limit 1` skips the first document and returns the SECOND (NRN-332)"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-331: competing flags follow merge-queue semantics — the LAST operation on
+# the command line wins — instead of hard-erroring. `--limit` and `--no-limit`
+# compete over the effective cap; the oracle rejects the pair, the rewrite
+# resolves it last-wins (and desugars to exactly one wire value; `no_limit`
+# wins when a raw MCP caller sends both, since JSON has no order).
+# (Renumbered PD-104 → PD-106 on rebase: the text-layer slate landed PD-103/104.)
+[[entry]]
+id = "PD-106"
+surface = "find --limit / --no-limit (competing flags)"
+cases = ["read-find-limit-nolimit-last-wins-zoo"]
+old = "`--limit N --no-limit` is a hard conflict: the oracle exits 2 with `the argument '--limit <N>' cannot be used with '--no-limit'`"
+new = "`--limit N --no-limit` is accepted last-wins (NRN-331): `--no-limit` given last wins → unlimited, exit 0. The CLI resolves the order into one wire value; on the wire `no_limit` wins when both arrive"
+reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
