@@ -223,7 +223,11 @@ pub(crate) fn connect_with_retry(
     }
 }
 
-/// The peer's uid on a connected Unix stream, via `getpeereid` (Linux + macOS).
+/// The peer's uid on a connected Unix stream. `getpeereid` is a BSD/macOS API;
+/// Linux has no such libc symbol and exposes peer credentials through
+/// `getsockopt(SOL_SOCKET, SO_PEERCRED)` instead — the two cfg arms below are
+/// the same check on each platform's native surface.
+#[cfg(not(target_os = "linux"))]
 fn peer_uid(stream: &UnixStream) -> Result<u32, ClientError> {
     use std::os::unix::io::AsRawFd;
     let mut uid: libc::uid_t = 0;
@@ -236,6 +240,34 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, ClientError> {
         return Err(ClientError::Io(std::io::Error::last_os_error()));
     }
     Ok(uid as u32)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> Result<u32, ClientError> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: SO_PEERCRED on a connected AF_UNIX socket fills a ucred struct;
+    // the out-params are valid locals sized by `len`; no aliasing, no ownership
+    // transfer.
+    #[allow(unsafe_code)]
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::addr_of_mut!(cred).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(ClientError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(cred.uid)
 }
 
 /// Reject a peer whose uid differs from ours. Split from the syscall so the deny
