@@ -17,6 +17,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{CountParams, CountReport, FindParams, FindReport};
+
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
 /// keyed by build fingerprint, so a client can never reach a mismatched owner;
 /// this constant is the demoted sanity assert both sides still check.
@@ -59,12 +61,16 @@ pub enum ClientFrame {
     Ping { protocol: u32 },
     /// The trivial routed read exercised end-to-end before the read verbs land
     /// (NRN-345): count the vault's documents through the owner's warm
-    /// `serve_read`. Superseded by `find`/`count`/`get`/`describe` next task.
+    /// `serve_read`. Retained alongside the real read verbs as a liveness probe.
     Probe,
+    /// A `find` request: run the filter/sort/paging query through the warm cache.
+    Find { params: FindParams },
+    /// A `count` request: run the filter query and group by `--by`.
+    Count { params: CountParams },
 }
 
 /// Owner -> client. One JSON object per line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum OwnerFrame {
     /// Proof of life plus the vault's serving/progress state (answer to `Ping`).
@@ -82,6 +88,16 @@ pub enum OwnerFrame {
     },
     /// The answer to `Probe`: the vault's live document count.
     Probe { document_count: u64 },
+    /// The answer to `Find`: the matched, projected, paged document set.
+    Find { report: FindReport },
+    /// The answer to `Count`: the total, distribution, or nested group tree.
+    Count { report: CountReport },
+    /// A well-formed request the owner could not carry out for a
+    /// non-cache reason — a bad predicate, an unresolvable `--links-to`
+    /// target. Distinct from [`Error`](OwnerFrame::Error): the owner stays
+    /// alive (no exit-to-heal) and the client surfaces this as an operational
+    /// failure, not an owner-health event.
+    Rejected { message: String },
     /// A fatal owner-side error (e.g. a `CacheError` — the db is disposable
     /// derivation, so any cache error is exit-to-heal). The owner is
     /// terminating; the client surfaces this as an owner-health error and a
