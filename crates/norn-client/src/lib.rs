@@ -24,7 +24,7 @@ mod session;
 mod summon;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use addr::{build_fingerprint, runtime_dir_from_env, socket_path};
 pub use error::ClientError;
@@ -106,25 +106,25 @@ impl SummonConfig {
     }
 }
 
-/// Connect to the vault's owner, summoning one if none is live. Never opens a
-/// cache in-process; the returned [`OwnerSession`] is the sole access path.
-pub fn open(config: &SummonConfig) -> Result<OwnerSession, ClientError> {
+/// Summon-or-connect (no handshake): validate the runtime dir, derive the
+/// socket, connect to a live owner, or spawn one and connect with bounded retry
+/// as it binds. Returns the raw stream + socket; the caller wraps it (peer-uid,
+/// handshake). Shared by [`open`] and the session's self-healing reconnect.
+pub(crate) fn connect_or_summon(
+    config: &SummonConfig,
+) -> Result<(std::os::unix::net::UnixStream, PathBuf), ClientError> {
     // Validate (and create 0700) the runtime dir BEFORE any connect. The socket
     // path is computable, so a symlinked or foreign-owned runtime dir must be
-    // rejected before we ever dial a socket inside it — the live-owner connect
-    // path (step 1) would otherwise run before any protection (security).
+    // rejected before we ever dial a socket inside it (security).
     ensure_runtime_dir_0700(&config.runtime_dir)?;
     let socket = socket_path(&config.vault_root, &config.runtime_dir, &config.fingerprint);
 
-    // 1. A live owner already serving this vault+build? Connect and done.
-    //    `OwnerSession::new` verifies the peer's uid before speaking wire, so a
-    //    squatter at the socket path yields a security error here — we do NOT
-    //    fall through to spawning over it.
+    // A live owner already serving this vault+build? Connect and done.
     if let Ok(stream) = session::connect(&socket) {
-        return OwnerSession::new(stream, socket);
+        return Ok((stream, socket));
     }
 
-    // 2. No owner — summon one (the runtime dir is already validated above).
+    // No owner — summon one (the runtime dir is already validated above).
     summon::spawn_owner(
         &config.owner_exe,
         &socket,
@@ -133,10 +133,49 @@ pub fn open(config: &SummonConfig) -> Result<OwnerSession, ClientError> {
         &config.fingerprint,
     )?;
 
-    // 3. Connect with bounded retry as it binds. A losing-flock racer's client
-    //    still connects here — to whichever owner won and bound the socket.
+    // Connect with bounded retry as it binds. A losing-flock racer's client
+    // still connects here — to whichever owner won and bound the socket.
     let stream = session::connect_with_retry(&socket, config.connect_budget)?;
-    OwnerSession::new(stream, socket)
+    Ok((stream, socket))
+}
+
+/// Connect to the vault's owner, summoning one if none is live. Never opens a
+/// cache in-process; the returned [`OwnerSession`] is the sole access path.
+///
+/// # The linux drain-window backlog race
+///
+/// A summoned owner idle-reaps by dropping its listener and exiting. On Linux a
+/// client `connect()` that lands after the reaper's listener-drop decision but
+/// before the process fully exits still succeeds — into the dying owner's accept
+/// backlog — so a bare connect can hand back a socket whose first exchange then
+/// fails with BrokenPipe / EOF as the owner exits. (macOS refuses such a connect
+/// immediately, which is why this only bit Linux CI.)
+///
+/// To self-heal invisibly, `open` performs one `ping` round-trip as a
+/// connection-verification handshake before returning the session: if that
+/// handshake reports the owner went away ([`ClientError::is_owner_gone`]), it
+/// loops back into summon-or-connect — bounded by `connect_budget`, with backoff,
+/// never spinning. Every reconnect re-runs the peer-uid check.
+pub fn open(config: &SummonConfig) -> Result<OwnerSession, ClientError> {
+    let deadline = Instant::now() + config.connect_budget;
+    let mut backoff = Duration::from_millis(5);
+    loop {
+        let (stream, socket) = connect_or_summon(config)?;
+        // `OwnerSession::new` verifies the peer uid (a squatter yields a security
+        // error, never a fall-through to spawn).
+        let mut session = OwnerSession::new(stream, socket, Some(config.clone()))?;
+        // Handshake: prove the connection is a live owner, not a stale backlog
+        // connection into a dying one (see the linux-backlog race above).
+        match session.ping() {
+            Ok(_) => return Ok(session),
+            Err(e) if e.is_owner_gone() && Instant::now() < deadline => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Resolve a vault through the central registry (name / binding / env / cwd).

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 
 use crate::error::ClientError;
+use crate::SummonConfig;
 
 /// The service stall budget (ADR 0013): the read deadline for a control-plane
 /// exchange. Not a call timeout — a healthy busy writer answers pings instantly
@@ -28,6 +29,11 @@ pub struct OwnerSession {
     /// (not the [`STALL_BUDGET`] const) so tests can shrink it to drive the
     /// busy-stall path fast; production keeps the default.
     stall_budget: Duration,
+    /// The config this session was summoned with, retained so the session can
+    /// self-heal (re-summon-or-connect) when the owner goes away before Ready is
+    /// first observed — the linux-backlog race (see [`crate::open`]). `None` for
+    /// test sessions wrapped around a fake owner: they never reconnect.
+    config: Option<SummonConfig>,
 }
 
 /// The parsed proof-of-life a `ping` returns.
@@ -45,7 +51,11 @@ impl OwnerSession {
     /// depth: the socket path is computable, so a squatter could be listening —
     /// refuse anything not served by our own uid, never fall through to it), then
     /// sets the per-request read timeout (stall budget).
-    pub(crate) fn new(stream: UnixStream, socket: PathBuf) -> Result<Self, ClientError> {
+    pub(crate) fn new(
+        stream: UnixStream,
+        socket: PathBuf,
+        config: Option<SummonConfig>,
+    ) -> Result<Self, ClientError> {
         verify_peer_uid(&stream)?;
         stream
             .set_read_timeout(Some(STALL_BUDGET))
@@ -56,7 +66,28 @@ impl OwnerSession {
             writer,
             socket,
             stall_budget: STALL_BUDGET,
+            config,
         })
+    }
+
+    /// Re-establish the connection: re-run summon-or-connect (which re-validates
+    /// the runtime dir and re-checks the peer uid) and swap in the fresh
+    /// reader/writer/socket. Used to self-heal an owner that went away before
+    /// Ready. Requires a retained config (production sessions always have one).
+    fn reconnect(&mut self) -> Result<(), ClientError> {
+        let config = self
+            .config
+            .clone()
+            .ok_or_else(|| ClientError::OwnerUnavailable {
+                socket: self.socket.clone(),
+            })?;
+        let (stream, socket) = crate::connect_or_summon(&config)?;
+        // `new` re-runs the peer-uid check, so every reconnect is re-verified.
+        let fresh = OwnerSession::new(stream, socket, Some(config))?;
+        self.reader = fresh.reader;
+        self.writer = fresh.writer;
+        self.socket = fresh.socket;
+        Ok(())
     }
 
     /// Test-only: shrink the busy-writer sequence-stall budget so the busy-stall
@@ -124,12 +155,34 @@ impl OwnerSession {
     ///   owner is waited on indefinitely (bounded only by `max_wait`).
     /// - **Only a busy writer whose sequence stalls is hung** (0013). The
     ///   sequence-stall budget applies solely while `busy == true`.
+    ///
+    /// Before Ready is first observed, an owner that goes away at the connection
+    /// level ([`ClientError::OwnerGone`]) — the linux drain-window backlog race
+    /// (see [`crate::open`]) — is self-healed by re-summoning (bounded by
+    /// `max_wait`), never surfaced as raw IO. After Ready would be observed the
+    /// method has returned, so a mid-request drop on the returned session stays a
+    /// hard error (post-send uncertainty is a separate contract).
     pub fn wait_until_ready(&mut self, max_wait: Duration) -> Result<Pong, ClientError> {
         let start = Instant::now();
         let mut last_seq: Option<u64> = None;
         let mut busy_since: Option<Instant> = None;
         loop {
-            let pong = self.ping()?; // a read timeout inside becomes OwnerHealth
+            let pong = match self.ping() {
+                Ok(pong) => pong,
+                // Owner went away before Ready — resummon and retry, bounded by
+                // `max_wait`. A hung owner (OwnerHealth) or other error is NOT
+                // healable this way, so it surfaces.
+                Err(e) if e.is_owner_gone() => {
+                    if start.elapsed() > max_wait {
+                        return Err(e);
+                    }
+                    self.reconnect()?;
+                    last_seq = None;
+                    busy_since = None;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             if pong.serving == ServingState::Ready {
                 return Ok(pong);
             }
@@ -167,12 +220,16 @@ impl OwnerSession {
         let mut line = serde_json::to_vec(frame)
             .map_err(|e| ClientError::Protocol(format!("failed to encode frame: {e}")))?;
         line.push(b'\n');
-        self.writer.write_all(&line).map_err(ClientError::Io)?;
-        self.writer.flush().map_err(ClientError::Io)?;
+        // A write to a peer that already went away fails at the connection level
+        // (BrokenPipe/ConnectionReset) — classify as OwnerGone, not raw IO.
+        self.writer.write_all(&line).map_err(classify_io)?;
+        self.writer.flush().map_err(classify_io)?;
 
         let mut resp = String::new();
         match self.reader.read_line(&mut resp) {
-            Ok(0) => Err(ClientError::OwnerHealth(
+            // EOF before a reply == the owner exited mid-exchange (the drain-window
+            // shape) — a resummon signal, not a hang.
+            Ok(0) => Err(ClientError::OwnerGone(
                 "owner closed the connection before replying".to_string(),
             )),
             Ok(_) => serde_json::from_str(resp.trim())
@@ -180,7 +237,7 @@ impl OwnerSession {
             Err(e) if is_timeout(&e) => Err(ClientError::OwnerHealth(
                 "no reply from owner within the stall budget".to_string(),
             )),
-            Err(e) => Err(ClientError::Io(e)),
+            Err(e) => Err(classify_io(e)),
         }
     }
 }
@@ -190,6 +247,21 @@ fn is_timeout(e: &std::io::Error) -> bool {
         e.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
     )
+}
+
+/// Map a socket IO error to [`ClientError::OwnerGone`] when it is a
+/// connection-level drop (the owner went away — the resummon signal), else to a
+/// raw [`ClientError::Io`].
+fn classify_io(e: std::io::Error) -> ClientError {
+    use std::io::ErrorKind::*;
+    if matches!(
+        e.kind(),
+        BrokenPipe | ConnectionReset | ConnectionAborted | UnexpectedEof | NotConnected
+    ) {
+        ClientError::OwnerGone(e.to_string())
+    } else {
+        ClientError::Io(e)
+    }
 }
 
 /// Try a single connect to `socket`. `None` (via `Err`) simply means no owner is
@@ -351,7 +423,37 @@ mod tests {
 
     fn connected_session(socket: &std::path::Path) -> OwnerSession {
         let stream = UnixStream::connect(socket).unwrap();
-        OwnerSession::new(stream, socket.to_path_buf()).unwrap()
+        // No config: these fake-owner sessions never reconnect.
+        OwnerSession::new(stream, socket.to_path_buf(), None).unwrap()
+    }
+
+    /// The linux drain-window shape, made deterministic on every platform: an
+    /// owner that accepts one connection, reads the client's frame, then closes
+    /// WITHOUT replying (as the reaper's listener-drop + process exit does to a
+    /// connection sitting in the accept backlog). The first exchange must
+    /// classify as `OwnerGone` (the resummon signal) — never a raw IO error or a
+    /// spurious pong.
+    #[test]
+    fn owner_closing_after_accept_classifies_as_owner_gone() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("closer.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Consume the client's ping frame, then drop the connection.
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf);
+            drop(stream);
+        });
+
+        let mut session = connected_session(&socket);
+        let err = session
+            .ping()
+            .expect_err("a closed-after-accept owner must not yield a pong");
+        assert!(err.is_owner_gone(), "expected OwnerGone, got {err:?}");
+
+        handle.join().unwrap();
     }
 
     /// Finding 1: a warm-up (non-busy `opening`) that runs LONGER than the stall

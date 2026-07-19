@@ -33,6 +33,12 @@ pub enum ClientError {
     /// a busy writer whose progress sequence stalled past it (ADR 0013's
     /// 2026-07-17 amendment — surfaced as an owner-health event, never a reroute).
     OwnerHealth(String),
+    /// The owner went away at the connection level — the socket exchange failed
+    /// with a connection-level error (EOF / BrokenPipe / ConnectionReset /
+    /// UnexpectedEof). This is the resummon signal: a self-healable "owner gone",
+    /// distinct from [`OwnerHealth`](ClientError::OwnerHealth) (reachable but
+    /// hung) — see the linux-backlog race documented on `open`.
+    OwnerGone(String),
     /// An IO error talking to the owner over the socket.
     Io(std::io::Error),
     /// A malformed or unexpected frame from the owner.
@@ -68,10 +74,21 @@ impl std::fmt::Display for ClientError {
                 socket.display()
             ),
             ClientError::OwnerHealth(msg) => write!(f, "owner health: {msg}"),
+            ClientError::OwnerGone(msg) => write!(f, "owner went away: {msg}"),
             ClientError::Io(e) => write!(f, "owner socket io error: {e}"),
             ClientError::Protocol(msg) => write!(f, "owner protocol error: {msg}"),
             ClientError::OwnerError(msg) => write!(f, "owner returned an error: {msg}"),
         }
+    }
+}
+
+impl ClientError {
+    /// Whether this is a self-healable "owner went away" at the connection level
+    /// (the resummon signal). `true` only for [`OwnerGone`](ClientError::OwnerGone)
+    /// — an [`OwnerHealth`](ClientError::OwnerHealth) hang is NOT healable by a
+    /// reconnect (the owner is reachable, just stuck).
+    pub fn is_owner_gone(&self) -> bool {
+        matches!(self, ClientError::OwnerGone(_))
     }
 }
 
