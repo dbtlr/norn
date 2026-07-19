@@ -684,9 +684,10 @@ mod tests {
     }
 
     // Value-taking globals (`global = true` in cli.rs): appear on every
-    // subcommand. `--vault` is a hidden new-world global but still consumes a
-    // value, so it belongs in the value set.
-    const VALUE_GLOBALS: &[&str] = &["cwd", "config", "color", "vault"];
+    // subcommand. `--vault` is the new-world registered-vault global (exposed
+    // as of NRN-345) and consumes a value, so it belongs in the value set. The
+    // global `--config` was deleted (ADR 0017 resolver-derived config).
+    const VALUE_GLOBALS: &[&str] = &["cwd", "color", "vault"];
 
     /// A mutate subcommand's value-flag set: the value-taking globals plus that
     /// subcommand's own value args.

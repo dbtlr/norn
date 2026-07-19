@@ -21,23 +21,38 @@ fn ported_ids() -> BTreeSet<&'static str> {
 }
 
 #[test]
-fn parses_the_real_ledger_with_the_pd101_vault_namespace_entry() {
+fn parses_the_real_ledger_with_the_help_divergence_entries() {
     let path = common::workspace_root().join("docs/parity-ledger.toml");
     let ledger = Ledger::load(&path, &known_ids(), &ported_ids())
         .unwrap_or_else(|e| panic!("failed to load {}: {e}", path.display()));
     assert_eq!(ledger.meta.oracle_version, "0.48.0");
-    // Phase 1 (NRN-329) adds exactly one entry: the new `vault` namespace in
-    // top-level `--help`, cited by `help-bare`, reason `decided-better`.
+    // Phase 1 (NRN-329) added PD-101 (the `vault` namespace in top-level
+    // `--help`). NRN-345 broadened PD-101 to also carry the GLOBAL OPTIONS
+    // change on help-bare and added PD-102 for the same GLOBAL OPTIONS change on
+    // the two ported subcommand help surfaces (help-validate / help-find).
     assert_eq!(
         ledger.entries.len(),
-        1,
-        "expected exactly the PD-101 entry, found {}",
+        2,
+        "expected exactly PD-101 and PD-102, found {}",
         ledger.entries.len()
     );
-    let entry = &ledger.entries[0];
-    assert_eq!(entry.id, "PD-101");
-    assert_eq!(entry.cases, vec!["help-bare".to_string()]);
-    assert_eq!(entry.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    let pd101 = ledger
+        .entry_for_case("help-bare")
+        .expect("help-bare must resolve to an entry");
+    assert_eq!(pd101.id, "PD-101");
+    assert_eq!(pd101.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    let pd102 = ledger
+        .entry_for_case("help-validate")
+        .expect("help-validate must resolve to an entry");
+    assert_eq!(pd102.id, "PD-102");
+    assert_eq!(
+        ledger.entry_for_case("help-find").map(|e| e.id.as_str()),
+        Some("PD-102"),
+        "help-find shares PD-102 with help-validate"
+    );
+    assert_eq!(pd102.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]

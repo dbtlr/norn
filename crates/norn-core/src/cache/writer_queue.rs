@@ -271,6 +271,14 @@ impl WriterQueue {
         self.inner.progress()
     }
 
+    /// A coherent snapshot of this queue's writer progress (ADR 0013 control
+    /// plane). Owner-facing: the summoned owner reports `{ busy, sequence }` in
+    /// a scoped pong so a client can tell a healthy busy writer (sequence
+    /// advancing) from a hung one (sequence stalled past the stall budget).
+    pub fn progress_snapshot(&self) -> WriterProgress {
+        self.inner.progress.snapshot()
+    }
+
     /// Submit a liveness op — latency-critical work a reader is blocked on.
     pub fn submit_liveness<R, F>(&self, op: F) -> Handle<R>
     where
