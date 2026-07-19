@@ -11,6 +11,7 @@ norn-wire = { path = "../norn-wire" }
 anyhow = "1.0"
 camino = "1.1"
 fs2 = "0.4"
+jiff = "0.2"
 serde_json = "1.0"
 tempfile = "3"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "io-util"] }

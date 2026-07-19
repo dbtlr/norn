@@ -69,18 +69,22 @@ pub fn execute(
             SortDirection::Asc
         },
     });
+    // `no_limit` wins over `limit` when both arrive — the CLI already resolves
+    // the last-wins competition (NRN-331), and this is the wire precedence a raw
+    // MCP caller relies on (see `SortPaginateParams` docs).
     let limit = if paging.no_limit {
         None
     } else {
         Some(paging.limit.unwrap_or(DEFAULT_LIMIT))
     };
-    let starts_at = paging.starts_at.max(1);
+    // `starts_at` is a zero-indexed offset (NRN-332): used verbatim, no floor.
+    let offset = paging.starts_at;
 
     let query = FindQuery {
         predicates,
         sort,
         limit,
-        starts_at,
+        starts_at: offset,
     };
 
     let result = cache.find_documents(&query)?;
@@ -95,7 +99,10 @@ pub fn execute(
         documents,
         total: result.total,
         returned: result.returned,
-        starts_at,
+        // The report echoes the 1-based position of the first returned record
+        // (offset + 1) — the "showing N–M" human line and the JSON envelope stay
+        // 1-based, so a default (offset 0) query is unchanged from the oracle.
+        starts_at: offset.saturating_add(1),
         truncated: result.truncated,
     }))
 }
@@ -204,6 +211,55 @@ mod tests {
         assert_eq!(report.total, 3);
         assert_eq!(report.returned, 1);
         assert!(report.truncated);
+    }
+
+    #[test]
+    fn default_offset_starts_at_first_record_and_reports_one() {
+        let (_tmp, root) = vault();
+        let cache = built(&root);
+        let report = execute(&cache, &FindParams::default(), TODAY)
+            .unwrap()
+            .unwrap();
+        // Zero-indexed default offset 0 → first record, echoed 1-based.
+        assert_eq!(report.starts_at, 1);
+        assert_eq!(report.documents[0].path, "a.md");
+    }
+
+    #[test]
+    fn starts_at_one_skips_the_first_record() {
+        let (_tmp, root) = vault();
+        let cache = built(&root);
+        // `--sort path` for a stable order; offset 1 skips a.md (NRN-332).
+        let params = FindParams {
+            paging: SortPaginateParams {
+                sort: Some("path".into()),
+                starts_at: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        assert_eq!(report.documents[0].path, "b.md", "offset 1 = second record");
+        assert_eq!(report.starts_at, 2, "1-based echo of offset 1");
+        assert_eq!(report.total, 3);
+    }
+
+    #[test]
+    fn no_limit_wins_over_limit_when_both_present() {
+        let (_tmp, root) = vault();
+        let cache = built(&root);
+        // A raw caller sends both; `no_limit` must win (wire precedence, NRN-331).
+        let params = FindParams {
+            paging: SortPaginateParams {
+                limit: Some(1),
+                no_limit: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        assert_eq!(report.returned, 3, "no_limit overrides the limit of 1");
+        assert!(!report.truncated);
     }
 
     #[test]

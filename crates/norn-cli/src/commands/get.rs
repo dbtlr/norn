@@ -43,8 +43,8 @@ pub struct GetArgs {
     // ── Output ───────────────────────────────────────────────────────────
     /// Emit the full structured dump: every frontmatter field plus every
     /// cache-served facet (`.headings`, the three link sets, `.body`).
-    /// Mutually exclusive with `--col`.
-    #[arg(long = "all-cols", conflicts_with = "col", help_heading = "Output")]
+    /// Competes with `--col` over the projection; the last of the two given wins.
+    #[arg(long = "all-cols", overrides_with = "col", help_heading = "Output")]
     pub all_cols: bool,
 
     /// Comma-separated columns to include. Bare names select frontmatter
@@ -59,6 +59,7 @@ pub struct GetArgs {
         long,
         value_name = "COL1,COL2,...",
         value_delimiter = ',',
+        overrides_with = "all_cols",
         help_heading = "Output"
     )]
     pub col: Vec<String>,
@@ -572,9 +573,15 @@ mod tests {
     }
 
     #[test]
-    fn all_cols_conflicts_with_col() {
-        let res = Cli::try_parse_from(["norn", "get", "a.md", "--all-cols", "--col", "type"]);
-        assert!(res.is_err(), "--all-cols and --col are mutually exclusive");
+    fn all_cols_and_col_are_last_wins() {
+        // NRN-331: last of --all-cols / --col over the projection wins.
+        let col_last = get_args(&["norn", "get", "a.md", "--all-cols", "--col", "type"]);
+        assert!(!col_last.all_cols);
+        assert_eq!(col_last.col, vec!["type".to_string()]);
+
+        let all_cols_last = get_args(&["norn", "get", "a.md", "--col", "type", "--all-cols"]);
+        assert!(all_cols_last.all_cols);
+        assert!(all_cols_last.col.is_empty());
     }
 
     #[test]

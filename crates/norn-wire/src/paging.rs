@@ -7,13 +7,21 @@ use serde::{Deserialize, Serialize};
 ///
 /// The typed successor to the donor's `insert_paging`. Defaults are OMITTED from
 /// the wire: `sort: None`, `desc: false`, `limit: None`, `no_limit: false`, and
-/// `starts_at == 1` (the 1-indexed default) all send nothing, so a fully-default
-/// value serializes to `{}`. An absent key deserializes to the default, so the
-/// value round-trips.
+/// `starts_at == 0` (the zero-indexed default) all send nothing, so a
+/// fully-default value serializes to `{}`. An absent key deserializes to the
+/// default, so the value round-trips.
 ///
 /// A verb-specific default for an absent `limit` (e.g. `find`'s implicit 10) is
 /// applied by the consuming verb, never encoded here — an omitted `limit` stays
 /// absent on the wire.
+///
+/// **Field precedence (`limit` vs `no_limit`).** The CLI resolves the last-wins
+/// competition between `--limit` and `--no-limit` (NRN-331) BEFORE constructing
+/// this value, so a CLI-produced params always carries at most one of them. A
+/// non-CLI producer (a raw MCP/JSON caller) has no argv order to resolve, so if
+/// BOTH `limit` and `no_limit` arrive, `no_limit` WINS — the consuming verb
+/// treats `no_limit: true` as unlimited regardless of any `limit`. Producers
+/// that mean "limit to N" must send `no_limit: false` (or omit it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SortPaginateParams {
@@ -26,27 +34,26 @@ pub struct SortPaginateParams {
     pub desc: bool,
 
     /// Maximum number of records to return. Absent means the verb applies its
-    /// own default.
+    /// own default. Ignored when `no_limit` is also set (see the type docs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 
-    /// Return all records; no limit. Overrides `limit`.
+    /// Return all records; no limit. When both this and `limit` arrive, this
+    /// wins (see the type-level precedence note).
     #[serde(skip_serializing_if = "is_false")]
     pub no_limit: bool,
 
-    /// 1-indexed starting offset for paging. Default 1; omitted when default.
+    /// Zero-indexed starting offset for paging. Default 0 (the first record);
+    /// omitted when default. `N` skips the first `N` matches (NRN-332).
     ///
-    /// Deliberately NOT a non-zero type: the v0.48 tool surface accepts `0`
-    /// and floors it to 1 verb-side ("default to 1 and floor at 1"), so the
-    /// wire stays permissive to reproduce that behavior frame-for-frame under
-    /// the parity harness. Producers (the CLI) clamp before construction;
-    /// flooring is the consuming verb's job.
+    /// The old 1-indexed "default to 1 and floor at 1" behavior is gone: agents
+    /// assume zero-indexing, so `0` is the first record and there is no clamp.
     #[serde(skip_serializing_if = "is_default_start")]
     pub starts_at: usize,
 }
 
-/// The default paging start (1-indexed).
-const DEFAULT_STARTS_AT: usize = 1;
+/// The default paging start (zero-indexed: the first record).
+const DEFAULT_STARTS_AT: usize = 0;
 
 impl Default for SortPaginateParams {
     fn default() -> Self {
@@ -101,13 +108,25 @@ mod tests {
     }
 
     #[test]
-    fn starts_at_one_is_omitted() {
+    fn starts_at_zero_is_omitted() {
+        let params = SortPaginateParams {
+            starts_at: 0,
+            ..SortPaginateParams::default()
+        };
+        let wire = serde_json::to_value(&params).unwrap();
+        assert!(wire.get("starts_at").is_none());
+    }
+
+    #[test]
+    fn starts_at_one_is_serialized() {
+        // 1 is no longer the default (0 is), so an explicit offset of 1 — the
+        // SECOND record — must appear on the wire (NRN-332).
         let params = SortPaginateParams {
             starts_at: 1,
             ..SortPaginateParams::default()
         };
         let wire = serde_json::to_value(&params).unwrap();
-        assert!(wire.get("starts_at").is_none());
+        assert_eq!(wire["starts_at"], 1);
     }
 
     #[test]
@@ -120,9 +139,9 @@ mod tests {
     }
 
     #[test]
-    fn absent_starts_at_deserializes_to_one() {
+    fn absent_starts_at_deserializes_to_zero() {
         let back: SortPaginateParams = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(back.starts_at, 1);
+        assert_eq!(back.starts_at, 0);
         assert_eq!(back, SortPaginateParams::default());
     }
 

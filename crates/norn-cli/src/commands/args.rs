@@ -170,33 +170,45 @@ pub struct SortPaginateArgs {
 
     /// Maximum number of records to return. `find` defaults to 10; `get`
     /// returns every named target.
+    // NRN-331: `--limit` and `--no-limit` compete over one outcome (the
+    // effective cap). `overrides_with_all` (which includes each arg's OWN id)
+    // makes both the cross-flag competition AND same-flag repetition last-wins
+    // rather than a hard conflict: `--limit 5 --no-limit` is unlimited,
+    // `--no-limit --limit 5` is 5, `--limit 5 --limit 10` is 10. clap resets the
+    // loser, so exactly one of the pair reaches the wire (no ambiguity for the
+    // consuming verb). The user-facing help stays oracle-exact — the doctrine
+    // note lives here, not in `--help`.
     #[arg(
         long,
         value_name = "N",
-        conflicts_with = "no_limit",
+        overrides_with_all = ["limit", "no_limit"],
         help_heading = "Sort and paging"
     )]
     pub limit: Option<usize>,
 
-    /// Return all records; no limit. Overrides --limit.
-    #[arg(long = "no-limit", help_heading = "Sort and paging")]
+    /// Return all records; no limit. Competes with `--limit`; the last of the two given wins.
+    #[arg(
+        long = "no-limit",
+        overrides_with_all = ["no_limit", "limit"],
+        help_heading = "Sort and paging"
+    )]
     pub no_limit: bool,
 
-    /// 1-indexed starting offset for paging. Default 1.
+    /// Zero-indexed starting offset for paging. Default 0.
     #[arg(
         long = "starts-at",
         value_name = "N",
-        default_value_t = 1,
+        default_value_t = 0,
         help_heading = "Sort and paging"
     )]
     pub starts_at: usize,
 }
 
 impl SortPaginateArgs {
-    /// Map the parsed flags one-to-one onto the shared wire vocabulary. The
-    /// permissive `starts_at` (0 → 1) flooring is the consuming verb's job, not
-    /// the adapter's — the wire stays permissive on purpose (see
-    /// [`SortPaginateParams`]).
+    /// Map the parsed flags one-to-one onto the shared wire vocabulary.
+    /// `starts_at` is a zero-indexed offset (NRN-332): `0` is the first record,
+    /// `N` skips the first `N`. There is no flooring — the old 1-indexed
+    /// `0 → 1` clamp is gone on both the CLI and the wire.
     pub fn to_params(&self) -> SortPaginateParams {
         SortPaginateParams {
             sort: self.sort.clone(),
@@ -236,7 +248,7 @@ mod tests {
             paging,
             SortPaginateParams {
                 limit: Some(5),
-                starts_at: 1,
+                starts_at: 0,
                 ..SortPaginateParams::default()
             }
         );
@@ -335,5 +347,55 @@ mod tests {
         let (filter, paging) = args.to_params();
         assert_eq!(filter, FilterParams::default());
         assert_eq!(paging, SortPaginateParams::default());
+    }
+
+    #[test]
+    fn default_starts_at_is_zero() {
+        let args = find_args(&["norn", "find", "--all"]);
+        let (_, paging) = args.to_params();
+        assert_eq!(
+            paging.starts_at, 0,
+            "default is the first record (offset 0)"
+        );
+    }
+
+    #[test]
+    fn starts_at_is_a_zero_indexed_offset() {
+        // `--starts-at 1` now maps straight to offset 1 (the SECOND record),
+        // with no 1-indexed clamp (NRN-332).
+        let args = find_args(&["norn", "find", "--all", "--starts-at", "1"]);
+        let (_, paging) = args.to_params();
+        assert_eq!(paging.starts_at, 1);
+    }
+
+    // ── NRN-331: last-operation-wins for --limit / --no-limit ───────────────
+    #[test]
+    fn limit_then_no_limit_yields_no_limit() {
+        let args = find_args(&["norn", "find", "--all", "--limit", "5", "--no-limit"]);
+        let (_, paging) = args.to_params();
+        assert!(paging.no_limit, "--no-limit is last, so it wins");
+        assert_eq!(paging.limit, None, "the overridden --limit is reset");
+    }
+
+    #[test]
+    fn no_limit_then_limit_yields_limit() {
+        let args = find_args(&["norn", "find", "--all", "--no-limit", "--limit", "10"]);
+        let (_, paging) = args.to_params();
+        assert!(
+            !paging.no_limit,
+            "--no-limit is overridden by the later --limit"
+        );
+        assert_eq!(paging.limit, Some(10));
+    }
+
+    #[test]
+    fn repeated_limit_keeps_the_last() {
+        let args = find_args(&["norn", "find", "--all", "--limit", "5", "--limit", "10"]);
+        let (_, paging) = args.to_params();
+        assert_eq!(
+            paging.limit,
+            Some(10),
+            "a repeated scalar flag keeps the last value"
+        );
     }
 }

@@ -299,9 +299,11 @@ fn sort_key_string(v: &serde_json::Value) -> String {
     }
 }
 
-/// Apply the 1-indexed `starts_at` offset, then an optional `limit`.
+/// Apply the zero-indexed `starts_at` offset (NRN-332), then an optional
+/// `limit`. `starts_at` is the count of leading records to skip — `0` keeps the
+/// first record, with no 1-indexed clamp.
 fn apply_paging(records: &mut Vec<GetRecord>, starts_at: usize, limit: Option<usize>) {
-    let offset = starts_at.saturating_sub(1);
+    let offset = starts_at;
     if offset > 0 {
         records.drain(..offset.min(records.len()));
     }

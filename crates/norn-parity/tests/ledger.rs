@@ -31,11 +31,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // change on help-bare and added PD-102 for the same GLOBAL OPTIONS change on
     // the two ported subcommand help surfaces (help-validate / help-find). The
     // text-layer slate (NRN-349 / NRN-350) added PD-103 (code-opacity block-id
-    // resolution) and PD-104 (BOM-prefixed frontmatter).
+    // resolution) and PD-104 (BOM-prefixed frontmatter); the CLI-semantics slate
+    // added PD-105 (zero-indexed `--starts-at`, NRN-332) and PD-106 (last-wins
+    // `--limit`/`--no-limit`, NRN-331).
     assert_eq!(
         ledger.entries.len(),
-        4,
-        "expected exactly PD-101..PD-104, found {}",
+        6,
+        "expected exactly PD-101..PD-106, found {}",
         ledger.entries.len()
     );
 
@@ -56,6 +58,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     );
     assert_eq!(pd102.reason, norn_parity::ledger::Reason::DecidedBetter);
 
+    // The text-layer edge divergences (PD-103 / PD-104).
     let pd103 = ledger
         .entry_for_case("text-edge-code-fenced-block-id-link")
         .expect("the code-opacity case must resolve to an entry");
@@ -69,6 +72,22 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     assert_eq!(
         pd104.reason,
         norn_parity::ledger::Reason::DiscoveredInconsistency
+    );
+
+    // The CLI-semantics divergences (PD-105 / PD-106).
+    assert_eq!(
+        ledger
+            .entry_for_case("read-find-starts-at-zero-indexed-zoo")
+            .map(|e| e.id.as_str()),
+        Some("PD-105"),
+        "the zero-indexed --starts-at case is gated by PD-105"
+    );
+    assert_eq!(
+        ledger
+            .entry_for_case("read-find-limit-nolimit-last-wins-zoo")
+            .map(|e| e.id.as_str()),
+        Some("PD-106"),
+        "the last-wins --limit/--no-limit case is gated by PD-106"
     );
 }
 

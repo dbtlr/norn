@@ -55,6 +55,11 @@ pub fn build_model(cmd: &Command, root: &Command, cmd_path: &str, form: HelpForm
                 long: entry.long,
                 value_name: entry.value_name,
                 short_desc: entry.short_desc,
+                // `long_desc` is populated only in the long form (the extractor
+                // gates `flag_entry_from_arg`'s `long_desc` on `form`), so `-h`
+                // renders the concise `short_desc` and `--help` the unclamped
+                // full description when a global defines `long_help` (NRN-335).
+                long_desc: entry.long_desc,
             }
         })
         .collect();

@@ -42,7 +42,7 @@ fn self_check_end_to_end_is_all_match_exit_0() {
         output.status.code()
     );
     assert!(
-        stdout.contains("43 cases: 43 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("45 cases: 45 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -79,13 +79,15 @@ fn default_mode_gates_help_cases_exit_0() {
     // NRN-346 ports find + count; NRN-347 adds three deep-facet find cases, nine
     // get cases (incl. --section + alias addressing), a records-format deep-facet
     // case, and six describe cases — all 35 find/count/get/describe cases must
-    // Match the oracle (pure byte-parity, no ledger entry). Five cases diverge
+    // Match the oracle (pure byte-parity, no ledger entry). Seven cases diverge
     // with ledger entries: the three help cases (help-bare by the `vault`
     // namespace + GLOBAL OPTIONS PD-101, help-find / help-validate by the GLOBAL
-    // OPTIONS change PD-102) plus the two text-layer edge cases (NRN-350
-    // code-opacity PD-103, NRN-349 BOM PD-104) — covered divergences, not drift.
+    // OPTIONS change PD-102), the two text-layer edge cases (NRN-350 code-opacity
+    // PD-103, NRN-349 BOM PD-104), and the two CLI-semantics slate cases
+    // (zero-indexed `--starts-at` PD-105, last-wins `--limit`/`--no-limit`
+    // PD-106) — covered divergences, not drift.
     assert!(
-        stdout.contains("40 cases: 35 match, 5 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("42 cases: 35 match, 7 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -95,8 +97,12 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-102",
         "PD-103",
         "PD-104",
+        "PD-105",
+        "PD-106",
         "text-edge-bom-doc-all-cols",
         "text-edge-code-fenced-block-id-link",
+        "read-find-starts-at-zero-indexed-zoo",
+        "read-find-limit-nolimit-last-wins-zoo",
         "help-find",
         "help-validate",
         "read-find-json-zoo",
