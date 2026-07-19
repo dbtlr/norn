@@ -48,6 +48,30 @@ fn term_width() -> usize {
         .unwrap_or(80)
 }
 
+/// The one render IO-error policy (NRN-372), applied by every render path.
+///
+/// A render closure does its writes with `?` and, on success, returns the exit
+/// code its content implies (e.g. `get`'s `has_error` outcome). This resolves
+/// that result the same way for every verb:
+/// - `BrokenPipe` (the reader end closed early — `norn find | head`) is
+///   tolerated silently and treated as success. This is standard CLI
+///   behavior; a downstream reader closing the pipe is not the vault's fault.
+/// - Every other IO error (full disk, closed fd, …) is a real failure: one
+///   `norn: <e>` diagnostic on stderr, and the operational exit.
+///
+/// No render path swallows an IO error with `let _ =` — every write funnels
+/// through this one outcome.
+fn render_outcome(result: io::Result<i32>, err: &mut dyn Write) -> i32 {
+    match result {
+        Ok(code) => code,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => EXIT_OK,
+        Err(e) => {
+            let _ = writeln!(err, "norn: {e}");
+            EXIT_OPERATIONAL
+        }
+    }
+}
+
 /// Render a command's returned [`Output`] (or its [`Diagnostic`]) and return the
 /// process exit code. The single render seam: every read/registry verb reaches
 /// stdout through here and nowhere else.
@@ -70,13 +94,20 @@ pub fn emit<O: Write, E: Write>(
         Output::Describe(view) => render_describe(view, presenter),
         Output::VaultList(view) => render_vault_list(view, presenter),
         Output::Line(line) => {
-            let _ = writeln!(presenter.out(), "{line}");
-            EXIT_OK
+            let (out, err) = presenter.streams();
+            let result: io::Result<i32> = (|| {
+                writeln!(out, "{line}")?;
+                Ok(EXIT_OK)
+            })();
+            render_outcome(result, err)
         }
         Output::Usage(bytes) => {
             let (_out, err) = presenter.streams();
-            let _ = err.write_all(&bytes);
-            EXIT_USAGE
+            let result: io::Result<i32> = (|| {
+                err.write_all(&bytes)?;
+                Ok(EXIT_USAGE)
+            })();
+            render_outcome(result, err)
         }
     }
 }
@@ -94,7 +125,7 @@ fn render_find<O: Write, E: Write>(
     let (out, err) = presenter.streams();
     let mut conv = Conversation::new(err);
 
-    let result: io::Result<()> = (|| {
+    let result: io::Result<i32> = (|| {
         match format {
             Format::Paths => {
                 for doc in &view.report.documents {
@@ -131,14 +162,10 @@ fn render_find<O: Write, E: Write>(
             conv.writer(),
         )?;
         warn_unknown_cols_find(&view.report, &view.cols, conv.writer())?;
-        Ok(())
+        Ok(EXIT_OK)
     })();
 
-    if let Err(e) = result {
-        let _ = writeln!(conv.writer(), "norn: {e}");
-        return EXIT_OPERATIONAL;
-    }
-    EXIT_OK
+    render_outcome(result, conv.writer())
 }
 
 /// The truncation note both `paths` and `jsonl` emit on stderr (donor parity).
@@ -285,58 +312,66 @@ fn render_get<O: Write, E: Write>(
         }
         Format::Markdown => unreachable!("markdown handled above"),
     };
-    // Exactly one trailing newline (donor `emit`).
-    if text.ends_with('\n') {
-        let _ = write!(out, "{text}");
-    } else {
-        let _ = writeln!(out, "{text}");
-    }
+    let result: io::Result<i32> = (|| {
+        // Exactly one trailing newline (donor `emit`).
+        if text.ends_with('\n') {
+            write!(out, "{text}")?;
+        } else {
+            writeln!(out, "{text}")?;
+        }
 
-    let paths_inert = (format == Format::Paths).then_some("paths");
-    let _ = warn_col_ignored(&view.cols, paths_inert, conv.writer());
-    let _ = warn_section_ignored(&view.sections, paths_inert, conv.writer());
-    let _ = warn_unknown_cols_get(&view.cols, &view.report, conv.writer());
-    for note in &view.report.notes {
-        let _ = conv.line(note);
-    }
+        let paths_inert = (format == Format::Paths).then_some("paths");
+        warn_col_ignored(&view.cols, paths_inert, conv.writer())?;
+        warn_section_ignored(&view.sections, paths_inert, conv.writer())?;
+        warn_unknown_cols_get(&view.cols, &view.report, conv.writer())?;
+        for note in &view.report.notes {
+            conv.line(note)?;
+        }
 
-    if has_error(&view.report) {
-        EXIT_OPERATIONAL
-    } else {
-        EXIT_OK
-    }
+        Ok(if has_error(&view.report) {
+            EXIT_OPERATIONAL
+        } else {
+            EXIT_OK
+        })
+    })();
+
+    render_outcome(result, conv.writer())
 }
 
 /// `--format markdown`: the exact source bytes (donor `emit_markdown`). Errors
 /// unless exactly one document resolved; `--col`/`--section` are ignored (warned).
 fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversation<'_>) -> i32 {
-    let _ = warn_col_ignored(&view.cols, Some("markdown"), conv.writer());
-    let _ = warn_section_ignored(&view.sections, Some("markdown"), conv.writer());
-    for note in &view.report.notes {
-        let _ = conv.line(note);
-    }
-
-    if let Some(content) = &view.report.markdown_content {
-        let _ = write!(out, "{content}");
-        return if has_error(&view.report) {
-            EXIT_OPERATIONAL
-        } else {
-            EXIT_OK
-        };
-    }
-
-    match view.report.records.len() {
-        // Zero resolved, or one resolved but no content (source-read failure):
-        // the per-target `error:` notes are already printed.
-        0 | 1 => EXIT_OPERATIONAL,
-        n => {
-            let _ = conv.line(&format!(
-                "error: --format markdown returns a single document; {n} selected \
-                 — request one target at a time"
-            ));
-            EXIT_OPERATIONAL
+    let result: io::Result<i32> = (|| {
+        warn_col_ignored(&view.cols, Some("markdown"), conv.writer())?;
+        warn_section_ignored(&view.sections, Some("markdown"), conv.writer())?;
+        for note in &view.report.notes {
+            conv.line(note)?;
         }
-    }
+
+        if let Some(content) = &view.report.markdown_content {
+            write!(out, "{content}")?;
+            return Ok(if has_error(&view.report) {
+                EXIT_OPERATIONAL
+            } else {
+                EXIT_OK
+            });
+        }
+
+        Ok(match view.report.records.len() {
+            // Zero resolved, or one resolved but no content (source-read
+            // failure): the per-target `error:` notes are already printed.
+            0 | 1 => EXIT_OPERATIONAL,
+            n => {
+                conv.line(&format!(
+                    "error: --format markdown returns a single document; {n} selected \
+                     — request one target at a time"
+                ))?;
+                EXIT_OPERATIONAL
+            }
+        })
+    })();
+
+    render_outcome(result, conv.writer())
 }
 
 /// The single get "failure" signal: an `error:`-prefixed note drives exit 1.
@@ -457,13 +492,16 @@ fn render_count<O: Write, E: Write>(view: CountView, presenter: &mut Presenter<O
         Format::Json => count_json(&view.report),
         _ => count_text(&view.report),
     };
-    let out = presenter.out();
-    if text.ends_with('\n') {
-        let _ = write!(out, "{text}");
-    } else {
-        let _ = writeln!(out, "{text}");
-    }
-    EXIT_OK
+    let (out, err) = presenter.streams();
+    let result: io::Result<i32> = (|| {
+        if text.ends_with('\n') {
+            write!(out, "{text}")?;
+        } else {
+            writeln!(out, "{text}")?;
+        }
+        Ok(EXIT_OK)
+    })();
+    render_outcome(result, err)
 }
 
 fn count_json(report: &CountReport) -> String {
@@ -530,13 +568,16 @@ fn render_describe<O: Write, E: Write>(view: DescribeView, presenter: &mut Prese
         Format::Json => describe_json(&view.report),
         _ => describe_text(&view.report),
     };
-    let out = presenter.out();
-    if text.ends_with('\n') {
-        let _ = write!(out, "{text}");
-    } else {
-        let _ = writeln!(out, "{text}");
-    }
-    EXIT_OK
+    let (out, err) = presenter.streams();
+    let result: io::Result<i32> = (|| {
+        if text.ends_with('\n') {
+            write!(out, "{text}")?;
+        } else {
+            writeln!(out, "{text}")?;
+        }
+        Ok(EXIT_OK)
+    })();
+    render_outcome(result, err)
 }
 
 fn describe_json(report: &DescribeReport) -> String {
@@ -621,25 +662,28 @@ fn list_human<O: Write, E: Write>(
         presenter.diagnostic("no vaults registered");
         return EXIT_OK;
     }
-    let out = presenter.out();
-    for vault in vaults {
-        let _ = writeln!(
-            out,
-            "{name}  {root}",
-            name = vault.name,
-            root = path_display(&vault.root)
-        );
-        for (label, path) in [
-            ("config", &vault.config),
-            ("cache", &vault.cache),
-            ("logs", &vault.logs),
-        ] {
-            if let Some(path) = path {
-                let _ = writeln!(out, "    {label} = {path}", path = path_display(path));
+    let (out, err) = presenter.streams();
+    let result: io::Result<i32> = (|| {
+        for vault in vaults {
+            writeln!(
+                out,
+                "{name}  {root}",
+                name = vault.name,
+                root = path_display(&vault.root)
+            )?;
+            for (label, path) in [
+                ("config", &vault.config),
+                ("cache", &vault.cache),
+                ("logs", &vault.logs),
+            ] {
+                if let Some(path) = path {
+                    writeln!(out, "    {label} = {path}", path = path_display(path))?;
+                }
             }
         }
-    }
-    EXIT_OK
+        Ok(EXIT_OK)
+    })();
+    render_outcome(result, err)
 }
 
 /// The stable machine shape: an array of objects, one per vault, absent overrides
@@ -672,8 +716,12 @@ fn list_json<O: Write, E: Write>(
     let rows: Vec<VaultJson> = vaults.iter().map(VaultJson::from).collect();
     match serde_json::to_string_pretty(&rows) {
         Ok(text) => {
-            let _ = writeln!(presenter.out(), "{text}");
-            EXIT_OK
+            let (out, err) = presenter.streams();
+            let result: io::Result<i32> = (|| {
+                writeln!(out, "{text}")?;
+                Ok(EXIT_OK)
+            })();
+            render_outcome(result, err)
         }
         Err(source) => {
             presenter.diagnostic(&format!("failed to serialize registry as JSON: {source}"));
@@ -875,5 +923,404 @@ mod tests {
             markdown_content: None,
         };
         assert!(!has_error(&ok));
+    }
+
+    // ── render IO-error policy (NRN-372) ───────────────────────────────────
+    //
+    // One policy, every render path: BrokenPipe is a silent success (the
+    // standard `norn find | head` shape); every other IO error is a `norn:
+    // <e>` diagnostic plus the operational exit. `FailingWriter` stands in for
+    // a stdout/stderr that can't accept another byte (closed pipe, full disk,
+    // …), so these prove the policy end-to-end through each render path, not
+    // just at the shared helper.
+
+    use crate::cli::{ColorWhen, GlobalArgs};
+    use norn_config::RegisteredVault;
+
+    use super::super::format::FormatSpec;
+
+    /// A `Write` that fails every write with a fixed [`io::ErrorKind`].
+    struct FailingWriter(io::ErrorKind);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn global_args() -> GlobalArgs {
+        GlobalArgs {
+            cwd: None,
+            verbose: false,
+            no_cache_refresh: false,
+            color: ColorWhen::Never,
+            vault: None,
+            help_short: false,
+            help_long: false,
+        }
+    }
+
+    #[test]
+    fn render_outcome_tolerates_broken_pipe_as_success() {
+        let mut err = Vec::new();
+        let result: io::Result<i32> = Err(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert_eq!(render_outcome(result, &mut err), EXIT_OK);
+        assert!(err.is_empty(), "broken pipe must not print a diagnostic");
+    }
+
+    #[test]
+    fn render_outcome_reports_other_io_errors_operationally() {
+        let mut err = Vec::new();
+        let result: io::Result<i32> = Err(io::Error::other("disk full"));
+        assert_eq!(render_outcome(result, &mut err), EXIT_OPERATIONAL);
+        assert_eq!(String::from_utf8(err).unwrap(), "norn: disk full\n");
+    }
+
+    #[test]
+    fn render_outcome_passes_through_the_success_code() {
+        let mut err = Vec::new();
+        assert_eq!(render_outcome(Ok(EXIT_USAGE), &mut err), EXIT_USAGE);
+        assert!(err.is_empty());
+    }
+
+    fn one_find_doc() -> FindDoc {
+        FindDoc {
+            path: "a.md".into(),
+            stem: "a".into(),
+            hash: "deadbeef".into(),
+            frontmatter: None,
+            body_text: String::new(),
+            headings: vec![],
+            outgoing_links: vec![],
+            unresolved_links: vec![],
+            incoming_links: vec![],
+        }
+    }
+
+    fn find_view() -> FindView {
+        FindView {
+            report: FindReport {
+                documents: vec![one_find_doc()],
+                total: 1,
+                returned: 1,
+                starts_at: 0,
+                truncated: false,
+            },
+            cols: vec![],
+            all_cols: false,
+            sort_field: None,
+            explicit: Some(Format::Paths),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Paths,
+            },
+        }
+    }
+
+    #[test]
+    fn render_find_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_find(find_view(), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty(), "broken pipe must stay silent: {err:?}");
+    }
+
+    #[test]
+    fn render_find_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_find(find_view(), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(
+            String::from_utf8(err).unwrap().starts_with("norn: "),
+            "expected the norn: diagnostic"
+        );
+    }
+
+    fn get_view(explicit: Format, report: GetReport) -> GetView {
+        GetView {
+            report,
+            cols: vec![],
+            sections: vec![],
+            explicit: Some(explicit),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        }
+    }
+
+    #[test]
+    fn render_get_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_get(get_view(Format::Paths, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_get_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_get(get_view(Format::Paths, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    #[test]
+    fn render_get_markdown_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({}))],
+            notes: vec![],
+            markdown_content: Some("# hello\n".into()),
+        };
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_get(get_view(Format::Markdown, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_get_markdown_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({}))],
+            notes: vec![],
+            markdown_content: Some("# hello\n".into()),
+        };
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_get(get_view(Format::Markdown, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    fn count_view(explicit: Format) -> CountView {
+        CountView {
+            report: CountReport::Total { total: 3 },
+            explicit: Some(explicit),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        }
+    }
+
+    #[test]
+    fn render_count_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_count(count_view(Format::Json), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_count_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_count(count_view(Format::Json), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    fn describe_view() -> DescribeView {
+        DescribeView {
+            report: describe_sample(),
+            explicit: Some(Format::Json),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        }
+    }
+
+    #[test]
+    fn render_describe_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_describe(describe_view(), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_describe_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_describe(describe_view(), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    fn sample_vault() -> RegisteredVault {
+        RegisteredVault {
+            name: "docs".into(),
+            root: std::path::PathBuf::from("/vaults/docs"),
+            config: None,
+            cache: None,
+            logs: None,
+        }
+    }
+
+    fn vault_list_view(explicit: Format) -> VaultListView {
+        VaultListView {
+            vaults: vec![sample_vault()],
+            explicit: Some(explicit),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        }
+    }
+
+    #[test]
+    fn render_vault_list_human_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_vault_list(vault_list_view(Format::Records), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_vault_list_human_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_vault_list(vault_list_view(Format::Records), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    #[test]
+    fn render_vault_list_json_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_vault_list(vault_list_view(Format::Json), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_vault_list_json_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_vault_list(vault_list_view(Format::Json), &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    #[test]
+    fn emit_line_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            emit(Ok(Output::Line("ok".into())), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn emit_line_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            emit(Ok(Output::Line("ok".into())), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    #[test]
+    fn emit_usage_tolerates_broken_pipe_on_stderr() {
+        let global = global_args();
+        let code = {
+            let mut presenter =
+                Presenter::new(Vec::new(), FailingWriter(io::ErrorKind::BrokenPipe));
+            emit(
+                Ok(Output::Usage(b"usage text".to_vec())),
+                &global,
+                &mut presenter,
+            )
+        };
+        assert_eq!(code, EXIT_OK);
+    }
+
+    #[test]
+    fn emit_usage_reports_other_io_errors_on_stderr() {
+        // Usage text writes to stderr; a genuine IO failure there still needs
+        // the norn: diagnostic and the operational exit — sharing stderr with
+        // the diagnostic path doesn't exempt Usage from the policy.
+        let global = global_args();
+        let code = {
+            let mut presenter =
+                Presenter::new(Vec::new(), FailingWriter(io::ErrorKind::PermissionDenied));
+            emit(
+                Ok(Output::Usage(b"usage text".to_vec())),
+                &global,
+                &mut presenter,
+            )
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
     }
 }
