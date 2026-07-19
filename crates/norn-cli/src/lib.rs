@@ -72,8 +72,8 @@ pub fn run() -> i32 {
     let mut presenter = Presenter::stdio();
     let raw: Vec<String> = std::env::args().collect();
     let flags = grammar_flags::derive_known_flags();
-    let normalized = match norn_core::grammar::normalize_argv(raw, &flags) {
-        Ok(n) => n.argv,
+    let (normalized, dynamic_fields) = match norn_core::grammar::normalize_argv(raw, &flags) {
+        Ok(n) => (n.argv, n.dynamic_keys),
         Err(e) => {
             // A normalization error (valueless dynamic flag, ambiguous repeat,
             // cross-family predicate) is a usage error. Its message already
@@ -83,7 +83,7 @@ pub fn run() -> i32 {
             return display::EXIT_USAGE;
         }
     };
-    let cli = match Cli::try_parse_from(&normalized) {
+    let mut cli = match Cli::try_parse_from(&normalized) {
         Ok(cli) => cli,
         Err(e) => {
             // clap prints its own usage/version output and picks the exit code
@@ -92,6 +92,10 @@ pub fn run() -> i32 {
             return e.exit_code();
         }
     };
+    // The desugared dynamic-field keys are not a grammar flag — carry them from
+    // normalization into the parsed command so the query verbs can forward them
+    // to the owner-side field-universe gate (NRN-367).
+    cli.global.dynamic_fields = dynamic_fields;
     dispatch(cli, &mut presenter)
 }
 

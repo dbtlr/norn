@@ -960,6 +960,7 @@ mod tests {
             vault: None,
             help_short: false,
             help_long: false,
+            dynamic_fields: Vec::new(),
         }
     }
 

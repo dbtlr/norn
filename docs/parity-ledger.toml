@@ -175,9 +175,9 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 [[entry]]
 id = "PD-109"
 surface = "read-verb error surface (stderr diagnostics: prefix + wording + hints)"
-cases = ["err-links-to-unresolvable-zoo", "err-col-facet-did-you-mean-zoo", "err-malformed-config"]
-old = "a user error prints an unprefixed, terse line to stderr: `no document matched: <t>`, `unknown --col facet '.x' (valid facets: …)`, `invalid config <path>: unknown field …` — no `norn:` prefix, no did-you-mean, no next-step hint"
-new = "every user error is a soft landing (NRN-361): a stable `norn:`-prefixed headline (`norn: no document matched path or stem: <t>`, `norn: invalid config <path>: …`) plus, where a near-miss exists, a leading did-you-mean (`unknown --col facet '.headngs' — did you mean '.headings'? …`) — via the one `closest` heuristic. stdout stays payload-only in every format"
+cases = ["err-links-to-unresolvable-zoo", "err-col-facet-did-you-mean-zoo", "err-malformed-config", "err-unknown-dynamic-field-did-you-mean-zoo"]
+old = "a user error prints an unprefixed, terse line to stderr: `no document matched: <t>`, `unknown --col facet '.x' (valid facets: …)`, `invalid config <path>: unknown field …`, `unknown field `titel` — did you mean `title`? (…)` — no `norn:` prefix, no did-you-mean/hint split, no next-step hint"
+new = "every user error is a soft landing (NRN-361): a stable `norn:`-prefixed headline (`norn: no document matched path or stem: <t>`, `norn: invalid config <path>: …`, `norn: unknown field `titel``) plus, where a near-miss exists, a leading/standalone did-you-mean `hint:` line (`unknown --col facet '.headngs' — did you mean '.headings'? …`; `hint: did you mean `title`?`) — via the one `closest` heuristic. The unknown-dynamic-field rejection (NRN-367) is this same surface now that the owner-side gate is wired live. stdout stays payload-only in every format"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 

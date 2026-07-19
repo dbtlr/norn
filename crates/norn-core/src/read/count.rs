@@ -243,6 +243,7 @@ mod tests {
                 eq: vec!["type:task".into()],
                 ..Default::default()
             },
+            ..Default::default()
         };
         let report = execute(&cache, &params, TODAY).unwrap().unwrap();
         match report {

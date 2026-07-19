@@ -149,6 +149,10 @@ pub fn run(args: &FindArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         filter,
         paging,
         with_connections: args.wants_connections(),
+        // The desugared dynamic-field keys ride to the owner's field-universe
+        // gate (NRN-367); the owner rejects a genuinely-unknown field with a
+        // did-you-mean instead of returning a silent empty set.
+        dynamic_keys: global.dynamic_fields.clone(),
     };
     let report = session
         .find(params)

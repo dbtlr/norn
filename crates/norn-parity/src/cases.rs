@@ -967,6 +967,25 @@ const ERROR_CASES: &[Case] = &[
         normalize: NO_NORM,
     },
     Case {
+        // NRN-367: an unknown dynamic field. `--titel foo` desugars to a dynamic
+        // `titel` predicate; the owner-side field-universe gate rejects it with a
+        // did-you-mean. Both sides exit 1 with empty stdout; the oracle prints
+        // one bare inline line (`unknown field `titel` — did you mean `title`?
+        // (…)`), the rewrite prints the soft-landing split — a `norn:`-prefixed
+        // headline naming the field plus a `hint:` did-you-mean — so stderr
+        // diverges. Same soft-landing surface as the other error cases, pinned by
+        // PD-109. `title` is a common field in the zoo, so the near-miss resolves.
+        id: "err-unknown-dynamic-field-did-you-mean-zoo",
+        argv: &["find", "--titel", "foo", "--format", "json"],
+        fixture: ERR_ZOO,
+        stdin: None,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
         // NRN-365: a repeated scalar flag. `--limit 5 --limit 1` is a hard
         // `ArgumentConflict` on the oracle (exit 2, nothing on stdout); the
         // rewrite's grammar-wide `args_override_self` resolves it last-wins →
