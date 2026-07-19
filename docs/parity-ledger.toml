@@ -31,7 +31,7 @@
 #   new oracle before the ledger is updated.
 
 [meta]
-oracle_version = "0.48.0"   # the pinned oracle; the runner verifies `--version` against this
+oracle_version = "0.48.1"   # the pinned oracle; the runner verifies `--version` against this
 
 # The registered-vault namespace (ADR 0017) is a new-world surface the pinned
 # oracle (0.48) predates. It appears in the top-level `--help` COMMANDS list as

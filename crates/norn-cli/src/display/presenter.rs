@@ -41,6 +41,12 @@ impl<O: Write, E: Write> Presenter<O, E> {
         &mut self.out
     }
 
+    /// Both sinks at once — for renderers that write records/JSON to stdout and
+    /// truncation notes / `--col` warnings to stderr in one pass.
+    pub fn streams(&mut self) -> (&mut O, &mut E) {
+        (&mut self.out, &mut self.err)
+    }
+
     /// Write one `norn: <msg>` diagnostic line to stderr.
     pub fn diagnostic(&mut self, msg: &str) {
         let _ = writeln!(self.err, "{PROGRAM}: {msg}");

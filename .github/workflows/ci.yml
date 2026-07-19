@@ -17,7 +17,7 @@ permissions:
 
 env:
   # The parity-oracle pin (ADR 0018): the released binary CI validates with.
-  ORACLE_VERSION: v0.48.0
+  ORACLE_VERSION: v0.48.1
 
 jobs:
   changes:

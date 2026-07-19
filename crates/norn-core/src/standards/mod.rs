@@ -19,9 +19,12 @@
 
 pub mod config;
 pub mod duration;
+mod index_policy;
 pub mod path_match;
 pub mod predicates;
 mod template_refs;
+
+pub use index_policy::resolved_index_set;
 
 pub use config::{
     parse_config, parse_config_compiled, CacheConfig, CompiledConfig, CompiledRule, ConfigError,

@@ -42,7 +42,7 @@ fn self_check_end_to_end_is_all_match_exit_0() {
         output.status.code()
     );
     assert!(
-        stdout.contains("11 cases: 11 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("24 cases: 24 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -73,16 +73,16 @@ fn default_mode_gates_help_cases_exit_0() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "expected exit 0 (phase-1: help cases match or diverge-with-entry, zero drift), got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "expected exit 0 (find/count match, help cases diverge-with-entry, zero drift), got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
     );
-    // NRN-345 reshapes the GLOBAL OPTIONS block on every command (drops
-    // `--config`, adds `--vault`), so all three gated help cases now diverge:
-    // help-bare by the `vault` namespace + GLOBAL OPTIONS (PD-101), and
-    // help-find / help-validate by the GLOBAL OPTIONS change (PD-102) — every
-    // one a covered divergence, not drift.
+    // NRN-346 ports find + count for real: all 16 find/count cases must Match the
+    // oracle (pure byte-parity, no ledger entry). The three help cases still
+    // diverge — help-bare by the `vault` namespace + GLOBAL OPTIONS (PD-101),
+    // help-find / help-validate by the GLOBAL OPTIONS change (PD-102), covered
+    // divergences, not drift.
     assert!(
-        stdout.contains("3 cases: 0 match, 3 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("19 cases: 16 match, 3 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -92,6 +92,9 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-102",
         "help-find",
         "help-validate",
+        "read-find-json-zoo",
+        "read-count-clean",
+        "match",
     ] {
         assert!(
             stdout.contains(needle),

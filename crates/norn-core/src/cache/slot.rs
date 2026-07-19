@@ -40,6 +40,22 @@ pub struct CacheOpenConfig {
 }
 
 impl CacheOpenConfig {
+    /// Derive the cache-open config from a parsed [`VaultConfig`](crate::standards::VaultConfig):
+    /// the alias field, the file-ignore globs, and the resolved index set (plus
+    /// its stable identity hash). Pure — no IO; the caller injects the parsed
+    /// config (the owner reads `.norn/config.yaml` off disk, keeping norn-core
+    /// IO-free). This is the single mapping from a vault's declared standards to
+    /// the four knobs the cache engine accepts.
+    pub fn from_vault_config(config: &crate::standards::VaultConfig) -> Self {
+        let (index_set, index_set_hash) = crate::standards::resolved_index_set(config);
+        Self {
+            alias_field: config.links.alias_field.clone(),
+            files_ignore: config.files.ignore.clone(),
+            index_set,
+            index_set_hash,
+        }
+    }
+
     fn index_identity(&self) -> IndexIdentity {
         IndexIdentity {
             index_set_hash: self.index_set_hash.clone(),

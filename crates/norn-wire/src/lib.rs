@@ -32,11 +32,13 @@ mod control;
 mod filter;
 mod paging;
 mod presence;
+mod read;
 
 pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 pub use filter::FilterParams;
 pub use paging::SortPaginateParams;
 pub use presence::Presence;
+pub use read::{CountParams, CountReport, FindDoc, FindParams, FindReport, GroupNode};
 
 /// One-line boundary contract, referenced by every dependent so each
 /// declared edge in the crate map is compiler-load-bearing.

@@ -133,11 +133,106 @@ pub struct Normalized {
 /// - `mutate_value` — per-mutate-subcommand (`set`/`new`/`edit`) value-flag
 ///   longs (that subcommand's args plus the globals), for the cross-family
 ///   teaching-error scanner's value-consumption model.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KnownFlags {
     pub query_value: BTreeSet<String>,
     pub query_boolean: BTreeSet<String>,
     pub mutate_value: HashMap<String, BTreeSet<String>>,
+}
+
+/// The frozen NRN-329 known-flag surface — the single source of truth both the
+/// normalization tests here AND the CLI's clap-derivation drift guard
+/// (`norn-cli`) compare against. Pure data; no clap. When the CLI derives a
+/// different surface from `Cli::command()`, the drift guard fails — forcing a
+/// conscious decision about a newly-added query/mutate flag (NRN-178).
+///
+/// `--vault` is the new-world registered-vault global (exposed as of NRN-345)
+/// and consumes a value; the global `--config` was deleted (ADR 0017
+/// resolver-derived config).
+pub fn frozen_known_flags() -> KnownFlags {
+    /// The value-taking globals (`global = true`): present on every subcommand.
+    const VALUE_GLOBALS: &[&str] = &["cwd", "color", "vault"];
+
+    fn set_of(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+    fn mutate_flags(own: &[&str]) -> BTreeSet<String> {
+        let mut s = set_of(own);
+        s.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
+        s
+    }
+
+    let mut query_value = set_of(&[
+        "text",
+        "eq",
+        "not-eq",
+        "in",
+        "not-in",
+        "starts-with",
+        "ends-with",
+        "contains",
+        "has",
+        "missing",
+        "before",
+        "after",
+        "on",
+        "path",
+        "links-to",
+        "sort",
+        "limit",
+        "starts-at",
+        "by",
+        "col",
+        "format",
+    ]);
+    query_value.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
+
+    let query_boolean = set_of(&[
+        "unresolved-links",
+        "all",
+        "all-cols",
+        "no-pager",
+        "desc",
+        "no-limit",
+        "data",
+        "stats",
+        "verbose",
+        "no-cache-refresh",
+        "help",
+    ]);
+
+    let mut mutate_value = HashMap::new();
+    mutate_value.insert(
+        "set".to_string(),
+        mutate_flags(&["field", "field-json", "push", "pop", "remove", "format"]),
+    );
+    mutate_value.insert(
+        "new".to_string(),
+        mutate_flags(&["as", "title", "var", "field", "field-json", "format"]),
+    );
+    mutate_value.insert(
+        "edit".to_string(),
+        mutate_flags(&[
+            "edits-json",
+            "ops-file",
+            "str-replace",
+            "replace-section",
+            "append-to-section",
+            "delete-section",
+            "insert-before-heading",
+            "insert-after-heading",
+            "new",
+            "content",
+            "expected-hash",
+            "format",
+        ]),
+    );
+
+    KnownFlags {
+        query_value,
+        query_boolean,
+        mutate_value,
+    }
 }
 
 impl KnownFlags {
@@ -673,101 +768,11 @@ mod tests {
         assert_eq!(split_field_value("nocolon"), None);
     }
 
-    // ── Injected known-flag fixture (the clap-derivation seam's product) ────
-    //
-    // Reproduces the frozen query-family flag surface (NRN-329) plus the mutate
-    // subcommands' value flags, so the pure algorithm is exercised exactly as
-    // the CLI-derived `KnownFlags` would drive it. The clap-derivation itself is
-    // guarded on the CLI seam, not here.
-    fn set_of(items: &[&str]) -> BTreeSet<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    // Value-taking globals (`global = true` in cli.rs): appear on every
-    // subcommand. `--vault` is the new-world registered-vault global (exposed
-    // as of NRN-345) and consumes a value, so it belongs in the value set. The
-    // global `--config` was deleted (ADR 0017 resolver-derived config).
-    const VALUE_GLOBALS: &[&str] = &["cwd", "color", "vault"];
-
-    /// A mutate subcommand's value-flag set: the value-taking globals plus that
-    /// subcommand's own value args.
-    fn mutate_flags(own: &[&str]) -> BTreeSet<String> {
-        let mut s = set_of(own);
-        s.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
-        s
-    }
-
+    // The known-flag fixture is the single frozen surface `frozen_known_flags`
+    // exports — the same data the CLI's clap-derivation drift guard compares
+    // against, so the normalization tests and the guard can never disagree.
     fn flags() -> KnownFlags {
-        let mut query_value = set_of(&[
-            "text",
-            "eq",
-            "not-eq",
-            "in",
-            "not-in",
-            "starts-with",
-            "ends-with",
-            "contains",
-            "has",
-            "missing",
-            "before",
-            "after",
-            "on",
-            "path",
-            "links-to",
-            "sort",
-            "limit",
-            "starts-at",
-            "by",
-            "col",
-            "format",
-        ]);
-        query_value.extend(VALUE_GLOBALS.iter().map(|g| g.to_string()));
-        let query_boolean = set_of(&[
-            "unresolved-links",
-            "all",
-            "all-cols",
-            "no-pager",
-            "desc",
-            "no-limit",
-            "data",
-            "stats",
-            "verbose",
-            "no-cache-refresh",
-            "help",
-        ]);
-        // Each mutate sub's own value args (verified against the frozen cli.rs
-        // `SetArgs` / `NewArgs` / `EditArgs`), plus the value-taking globals.
-        let mut mutate_value = HashMap::new();
-        mutate_value.insert(
-            "set".to_string(),
-            mutate_flags(&["field", "field-json", "push", "pop", "remove", "format"]),
-        );
-        mutate_value.insert(
-            "new".to_string(),
-            mutate_flags(&["as", "title", "var", "field", "field-json", "format"]),
-        );
-        mutate_value.insert(
-            "edit".to_string(),
-            mutate_flags(&[
-                "edits-json",
-                "ops-file",
-                "str-replace",
-                "replace-section",
-                "append-to-section",
-                "delete-section",
-                "insert-before-heading",
-                "insert-after-heading",
-                "new",
-                "content",
-                "expected-hash",
-                "format",
-            ]),
-        );
-        KnownFlags {
-            query_value,
-            query_boolean,
-            mutate_value,
-        }
+        frozen_known_flags()
     }
 
     // ── T2/T3: argv normalization ──────────────────────────────────────────

@@ -6,3 +6,5 @@
 
 pub mod glyphs;
 pub mod palette;
+pub mod primitives;
+pub mod projection;

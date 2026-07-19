@@ -62,13 +62,17 @@ fn get_missing_required_target_exits_two() {
 }
 
 #[test]
-fn find_unported_exits_one_with_uniform_line() {
+fn bare_find_prints_help_and_exits_two() {
+    // `find` is ported (NRN-346); a bare invocation with no predicate and no
+    // `--all` is the help gate — it prints the find help to stderr and exits 2
+    // (a full-vault dump is almost always a mistake), never summoning an owner.
     let out = norn().arg("find").output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty(), "stdout must stay empty");
-    assert_eq!(
-        String::from_utf8(out.stderr).unwrap(),
-        "norn: `find` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("find") && !stderr.is_empty(),
+        "expected the find help on stderr, got: {stderr:?}"
     );
 }
 
