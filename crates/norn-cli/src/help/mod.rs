@@ -33,6 +33,7 @@ use std::io::{self, Write};
 use clap::CommandFactory;
 
 use crate::cli::Cli;
+use crate::display::Presenter;
 use crate::output::palette;
 
 /// Fixed wrap width. Wrapping affects only the short-form description line and
@@ -100,13 +101,17 @@ fn render_help_for_args(args: &[String]) -> Option<i32> {
         HelpForm::Long => render::render_long(&mut buf, &model, &palette, TERM_WIDTH),
     };
     if let Err(err) = render_result {
-        eprintln!("{BIN_NAME}: help render failed: {err}");
+        // Route the failure through the single stderr diagnostic path (the
+        // `norn:` headline convention), rather than a raw stderr write — the
+        // pre-parse help interceptor runs before dispatch, so it builds its own
+        // stdio presenter. Byte-identical to the prior `{BIN_NAME}: …` line.
+        Presenter::stdio().diagnostic(&format!("help render failed: {err}"));
         return Some(1);
     }
 
     if let Err(err) = io::stdout().write_all(&buf) {
         if err.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("{BIN_NAME}: writing help failed: {err}");
+            Presenter::stdio().diagnostic(&format!("writing help failed: {err}"));
             return Some(1);
         }
     }
