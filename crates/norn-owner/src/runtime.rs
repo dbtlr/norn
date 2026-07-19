@@ -587,7 +587,7 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
             let Some(slot) = ready_slot(state) else {
                 return not_ready();
             };
-            let today = today_utc();
+            let today = today_local();
             let result = tokio::task::spawn_blocking(move || {
                 slot.serve_read(|cache| norn_core::read::find::execute(cache, &params, &today))
             })
@@ -598,7 +598,7 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
             let Some(slot) = ready_slot(state) else {
                 return not_ready();
             };
-            let today = today_utc();
+            let today = today_local();
             let result = tokio::task::spawn_blocking(move || {
                 slot.serve_read(|cache| norn_core::read::count::execute(cache, &params, &today))
             })
@@ -614,7 +614,7 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
             let Some(slot) = ready_slot(state) else {
                 return not_ready();
             };
-            let today = today_utc();
+            let today = today_local();
             let result = tokio::task::spawn_blocking(move || {
                 slot.serve_read(|cache| {
                     let outcome = norn_core::read::get::execute(cache, &params, &today)?;
@@ -642,7 +642,7 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 return not_ready();
             };
             let config = state.vault_config();
-            let today = today_utc();
+            let today = today_local();
             let result = tokio::task::spawn_blocking(move || {
                 slot.serve_read(|cache| {
                     norn_core::read::describe::execute(cache, config.as_deref(), &params, &today)
@@ -724,36 +724,29 @@ fn classify_read<R>(
     }
 }
 
-/// Today's date as `%Y-%m-%d` in UTC, injected into the read verbs so
-/// `--on today` resolves deterministically (norn-core never reads a clock).
+/// Today's date as `%Y-%m-%d` in the caller's LOCAL timezone, injected into the
+/// read verbs so `--on today` resolves against the user's wall clock (NRN-359).
 ///
-/// UTC (not the donor's local time) is a deliberate, minor simplification: it
-/// keeps the owner free of a timezone dependency, and no parity case exercises
-/// `--on today`, so it is not a pinned contract. Revisit if local-date semantics
-/// become observable.
-fn today_utc() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = (secs / 86_400) as i64;
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}")
+/// This matches the oracle, which resolves `today` locally — the previous port
+/// used UTC as a "no timezone dependency" simplification, which silently shifted
+/// the boundary by up to a day near midnight. No ledger entry: this returns to
+/// the oracle's behavior rather than diverging from it.
+///
+/// jiff over chrono: jiff is a single, focused datetime crate with first-class
+/// local-zone support — `TimeZone::system()` reads the system zone (honoring
+/// `TZ`) — and no feature-flag juggling or the historical `localtime_r`
+/// soundness caveats chrono's `clock` feature carries. The whole need here is
+/// "the local civil date, as a string," which jiff expresses directly.
+fn today_local() -> String {
+    today_in(jiff::Timestamp::now(), &jiff::tz::TimeZone::system())
 }
 
-/// Convert days-since-Unix-epoch to a `(year, month, day)` civil date
-/// (Howard Hinnant's `civil_from_days`, public-domain algorithm).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    (if m <= 2 { y + 1 } else { y }, m, d)
+/// The civil date (`%Y-%m-%d`) of `now` as seen in `tz`. Factored out of
+/// [`today_local`] so the timezone-awareness is deterministically testable with
+/// an explicit zone and a fixed instant (jiff caches the process system zone, so
+/// mutating the `TZ` env mid-process is not a reliable test lever).
+fn today_in(now: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> String {
+    now.to_zoned(tz.clone()).strftime("%Y-%m-%d").to_string()
 }
 
 #[cfg(test)]
@@ -766,6 +759,28 @@ mod tests {
             .build()
             .unwrap()
             .block_on(fut)
+    }
+
+    /// NRN-359: `today` resolves against the LOCAL wall clock, not UTC. At an
+    /// instant just after UTC midnight, a far-east zone has already rolled to
+    /// the new day while a far-west zone is still on the previous one — a
+    /// UTC-only resolver would return the same date for both. Uses an explicit
+    /// zone + fixed instant (the deterministic form of the `TZ=UTC+X boundary`
+    /// case) since jiff caches the process system zone.
+    #[test]
+    fn today_resolves_in_the_local_zone_not_utc() {
+        let just_after_utc_midnight: jiff::Timestamp = "2026-07-20T00:30:00Z".parse().unwrap();
+        let east = today_in(
+            just_after_utc_midnight,
+            &jiff::tz::TimeZone::get("Etc/GMT-14").unwrap(), // UTC+14
+        );
+        let west = today_in(
+            just_after_utc_midnight,
+            &jiff::tz::TimeZone::get("Etc/GMT+12").unwrap(), // UTC-12
+        );
+        assert_eq!(east, "2026-07-20", "UTC+14 has already rolled to the 20th");
+        assert_eq!(west, "2026-07-19", "UTC-12 is still on the 19th");
+        assert_ne!(east, west, "the zone must change the resolved date");
     }
 
     /// NRN-360: once a warm-up config error is recorded, EVERY frame — ping,
