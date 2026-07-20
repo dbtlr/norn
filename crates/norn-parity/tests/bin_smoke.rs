@@ -57,8 +57,8 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // refusal, and a rewrite-wikilink apply), taking the total to 84; all Match.
     // NRN-382 adds three `repair` cases (bare summary on clean + zoo, and a
     // `--plan --format paths`), taking the total to 87; all Match (a `--plan
-    // --format json` case is intentionally omitted — the oracle's plan op order
-    // is not rerun-stable, so it DRIFTS oracle-vs-oracle).
+    // --format json` case is intentionally omitted — the plan's wall-clock
+    // `generated_at` makes its bytes non-rerun-stable, so it DRIFTS oracle-vs-oracle).
     assert!(
         stdout.contains("87 cases: 87 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"

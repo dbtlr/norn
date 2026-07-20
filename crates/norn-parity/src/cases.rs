@@ -336,14 +336,14 @@ const VALIDATE_CASES: &[Case] = &[
 /// `repair` ports as a READ verb (NRN-382): findings → `MigrationPlan`, never
 /// applied (the donor's `norn repair` is read-only; `apply` executes the plan).
 /// Bare `norn repair` prints the findings summary (order-free: sorted by-code
-/// counts + operation/skip tallies); `--plan` emits the plan. As with
-/// `validate`, a raw `--plan --format json` over the whole zoo is NOT a case —
-/// the plan's operation order follows the oracle's raw finding order, which is
-/// not rerun-stable across multi-finding documents. Every `--plan` case here is
-/// therefore order-free: `--format paths` (sorted + deduped) or a
-/// single-per-document `--code` narrow (`frontmatter-required-field-missing`
-/// matches at most once per zoo document). The zoo carries no error-severity
-/// diagnostic, so `has_diagnostic_errors` is false → exit 0 on both sides.
+/// counts + operation/skip tallies); `--plan` emits the plan. A `--plan --format
+/// json` case is NOT included: the serialized `MigrationPlan` carries a
+/// wall-clock `generated_at` (and, on multi-finding documents, a raw-finding-order
+/// `operations` array), so its bytes are not rerun-stable — oracle self-check
+/// DRIFTS on it, the same class of limitation that keeps bare `validate --format
+/// json` out of the suite. The `--plan` case here is therefore order-/clock-free:
+/// `--format paths` (sorted + deduped, no timestamp). The zoo carries no
+/// error-severity diagnostic, so `has_diagnostic_errors` is false → exit 0.
 const REPAIR_CASES: &[Case] = &[
     Case {
         // Bare `norn repair` on a clean vault — the no-findings summary: "0
@@ -390,14 +390,14 @@ const REPAIR_CASES: &[Case] = &[
         requires_code: None,
         normalize: NO_NORM,
     },
-    // A `--plan --format json` case is deliberately omitted: the `MigrationPlan`
-    // serializes its `operations` / `skipped` arrays in the oracle's raw finding
-    // order, which is not rerun-stable across multi-finding documents (the same
-    // limitation that keeps bare `validate --format json` out of the suite —
-    // oracle self-check DRIFTS on it). The plan's JSON shape is pinned by
-    // `norn-core`'s `read::repair` + `plan_from_findings` unit tests instead; the
-    // `--format paths` case above already exercises the findings → plan
-    // generation end to end through the parity oracle.
+    // A `--plan --format json` case is deliberately omitted: the serialized
+    // `MigrationPlan` carries a wall-clock `generated_at` (and orders its
+    // `operations` array by raw finding order across multi-finding documents), so
+    // its bytes are not rerun-stable — oracle self-check DRIFTS on it, the same
+    // class of limitation that keeps bare `validate --format json` out of the
+    // suite. The plan's JSON shape is pinned by `norn-core`'s `read::repair` +
+    // `plan_from_findings` unit tests instead; the `--format paths` case above
+    // exercises the findings → plan generation end to end through the oracle.
 ];
 
 /// find + count now port for real (NRN-346): the read-surface parity anchor.
