@@ -129,6 +129,10 @@ pub enum RunError {
     /// Two cases share an id — a duplicate would bind both to one ledger
     /// entry silently. Enforced at runtime (not `debug_assert`-only).
     DuplicateCaseId(&'static str),
+    /// A case's `plan` and `argv` disagree about the authored-plan capability
+    /// (NRN-394) — see `cases::plan_argv_mismatch`. Enforced at runtime (not
+    /// `debug_assert`-only), mirroring [`RunError::DuplicateCaseId`].
+    PlanArgvMismatch(&'static str),
     /// The oracle exited with a code other than the case's
     /// `expect_oracle_exit` — catches silent case rot before it can Match
     /// quietly.
@@ -198,6 +202,11 @@ impl std::fmt::Display for RunError {
             RunError::DuplicateCaseId(id) => {
                 write!(f, "duplicate case id across suites: `{id}`")
             }
+            RunError::PlanArgvMismatch(id) => write!(
+                f,
+                "case `{id}`: `plan` and the argv `{{PLAN}}` placeholder must both be present \
+                 or both absent"
+            ),
             RunError::OracleExitMismatch {
                 case_id,
                 expected,
@@ -361,9 +370,31 @@ fn normalize_run_error(
     }
 }
 
+/// Replace the one `cases::PLAN_ARGV_PLACEHOLDER` token in `argv` with
+/// `plan_path`'s display string, cloning every other token verbatim — the
+/// per-side argv an authored-plan case (`cases::Case::plan`) actually
+/// executes. `plan_argv_mismatch` already guarantees the placeholder appears
+/// whenever this is called (a case with `plan.is_some()`), so a template
+/// carrying zero occurrences is unreachable in production, but a bare `map`
+/// leaves that combination a harmless no-op rather than a panic.
+fn substitute_plan_argv(argv: &[&str], plan_path: &Path) -> Vec<String> {
+    argv.iter()
+        .map(|&tok| {
+            if tok == cases::PLAN_ARGV_PLACEHOLDER {
+                plan_path.display().to_string()
+            } else {
+                tok.to_string()
+            }
+        })
+        .collect()
+}
+
 pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunReport, RunError> {
     if let Some(dup) = cases::duplicate_case_id(suites) {
         return Err(RunError::DuplicateCaseId(dup));
+    }
+    if let Some(id) = cases::plan_argv_mismatch(suites) {
+        return Err(RunError::PlanArgvMismatch(id));
     }
 
     let self_check = matches!(config.mode, Mode::SelfCheck);
@@ -523,8 +554,30 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 .copied()
                 .collect();
 
-            let oracle_raw =
-                exec::run_case(config.oracle, case, &oracle_vault.path).map_err(RunError::Exec)?;
+            // Authored-plan cases (`case.plan.is_some()`) materialize a plan file
+            // PER SIDE — substituting `PLAN_VAULT_ROOT_TOKEN` for THAT side's own
+            // vault path, since the pinned oracle rejects a plan whose
+            // `vault_root` does not canonicalize to the invoked cwd — before
+            // substituting the materialized path into argv's `{PLAN}` token (see
+            // `cases::Case::plan`'s doc). Every other case runs its declared argv
+            // unchanged via `exec::run_case`, exactly as before.
+            let oracle_raw = if let Some(template) = case.plan {
+                let plan_path = fixture_cache
+                    .materialize_plan(
+                        &case.fixture,
+                        Side::Oracle,
+                        case.id,
+                        &oracle_vault.path,
+                        template,
+                    )
+                    .map_err(RunError::Fixture)?;
+                let argv = substitute_plan_argv(case.argv, &plan_path);
+                let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                exec::run_argv(config.oracle, &argv_refs, None, &oracle_vault.path)
+                    .map_err(RunError::Exec)?
+            } else {
+                exec::run_case(config.oracle, case, &oracle_vault.path).map_err(RunError::Exec)?
+            };
             let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps)
                 .map_err(|e| normalize_run_error(e, "oracle", case.id))?;
 
@@ -538,8 +591,24 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 });
             }
 
-            let candidate_raw = exec::run_case(candidate_binary, case, &candidate_vault.path)
-                .map_err(RunError::Exec)?;
+            let candidate_raw = if let Some(template) = case.plan {
+                let plan_path = fixture_cache
+                    .materialize_plan(
+                        &case.fixture,
+                        Side::Candidate,
+                        case.id,
+                        &candidate_vault.path,
+                        template,
+                    )
+                    .map_err(RunError::Fixture)?;
+                let argv = substitute_plan_argv(case.argv, &plan_path);
+                let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                exec::run_argv(candidate_binary, &argv_refs, None, &candidate_vault.path)
+                    .map_err(RunError::Exec)?
+            } else {
+                exec::run_case(candidate_binary, case, &candidate_vault.path)
+                    .map_err(RunError::Exec)?
+            };
             let candidate_norm =
                 normalize::normalize_output(&candidate_raw, &candidate_roots, &steps)
                     .map_err(|e| normalize_run_error(e, candidate_label, case.id))?;

@@ -60,8 +60,13 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // Match (a `--plan --format json` case is intentionally omitted — the plan's
     // wall-clock `generated_at`, the SHA-256 → BLAKE3 `change_id` swap, and its
     // raw-finding-order arrays make the raw JSON unpinnable; see `REPAIR_CASES`).
+    // NRN-394 adds five `apply` cases exercising a HAND-AUTHORED `MigrationPlan`
+    // (never one a mutation verb generated) — a move, an add_frontmatter dry-run
+    // json forecast, an ADR 0015 owner-set precondition-mismatch refusal, a
+    // schema_version refusal, and two `{{seq}}` creates sharing one template in
+    // one plan — taking the total to 93; all Match.
     assert!(
-        stdout.contains("88 cases: 88 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("93 cases: 93 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -133,8 +138,14 @@ fn default_mode_gates_help_cases_exit_0() {
     // `--plan --format paths`, and `--plan --format report`), all byte-exact
     // matches (no ledger entry): the gated total grows to 86 and the match count
     // to 69 (diverged stays 17).
+    // NRN-394 adds five ported `apply` cases exercising a hand-authored
+    // `MigrationPlan` (a move, an add_frontmatter dry-run json forecast, an ADR
+    // 0015 owner-set precondition-mismatch refusal, a schema_version refusal, and
+    // two `{{seq}}` creates sharing one template), all byte-exact matches (no
+    // ledger entry): the gated total grows to 91 and the match count to 74
+    // (diverged stays 17).
     assert!(
-        stdout.contains("86 cases: 69 match, 17 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("91 cases: 74 match, 17 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -171,6 +182,8 @@ fn default_mode_gates_help_cases_exit_0() {
         "validate-summary-zoo",
         "repair-summary-zoo",
         "repair-plan-report-zoo",
+        "apply-authored-move-plan-zoo",
+        "apply-authored-precondition-mismatch-refusal-zoo",
         "match",
     ] {
         assert!(

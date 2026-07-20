@@ -110,7 +110,38 @@ pub struct Case {
     /// later-phase ported surfaces that emit e.g. timestamps add steps here
     /// deliberately.
     pub normalize: &'static [Normalization],
+    /// Authored-plan capability (NRN-394): for an `apply`-verb case, the raw
+    /// `MigrationPlan` source text (JSON or YAML) with every
+    /// [`PLAN_VAULT_ROOT_TOKEN`] token standing in for the vault root — the
+    /// static fixture Case model has no way to know a per-side temp vault's
+    /// absolute path at declaration time, and the pinned oracle REJECTS a plan
+    /// whose `vault_root` does not canonicalize to the invoked cwd (see
+    /// `norn-core::apply::executor::apply_migration_plan`'s `vault-root-mismatch`
+    /// barrier), so an authored plan cannot simply hardcode one.
+    /// `crate::run::run_suites` materializes this template into a real file once
+    /// PER SIDE (never inside the vault directory itself, so it is invisible to
+    /// `crate::poststate`'s tree snapshot) — substituting the token for that
+    /// side's own materialized vault path — before running the case, and expects
+    /// `argv` to carry exactly one [`PLAN_ARGV_PLACEHOLDER`] token naming where
+    /// the materialized file's path is substituted into the argv actually
+    /// executed. `None` for every non-apply case; the (`plan.is_some()` ==
+    /// argv contains the placeholder) pairing is enforced at runtime (not just a
+    /// debug assertion) by [`plan_argv_mismatch`], the same discipline
+    /// [`duplicate_case_id`] applies to case ids.
+    pub plan: Option<&'static str>,
 }
+
+/// The token an authored [`Case::plan`] template uses in place of the
+/// materializing side's own absolute vault root. Never collides with real
+/// plan content: no vault-relative path or field value plausibly contains
+/// literal double-brace `VAULT_ROOT`.
+pub const PLAN_VAULT_ROOT_TOKEN: &str = "{{VAULT_ROOT}}";
+
+/// The token an authored-plan [`Case::argv`] uses in place of the materialized
+/// plan file's path, substituted by `crate::run::run_suites` before executing.
+/// Never collides with a real argv token — no flag or value in the CLI
+/// grammar is spelled `{PLAN}`.
+pub const PLAN_ARGV_PLACEHOLDER: &str = "{PLAN}";
 
 /// A named group of [`Case`]s — purely a reporting/grouping label. Whether a
 /// case is gated lives on the [`Case`]'s own `ported` flag, not here.
@@ -171,6 +202,7 @@ const HELP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "help-validate",
@@ -183,6 +215,7 @@ const HELP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "help-find",
@@ -195,6 +228,7 @@ const HELP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
@@ -220,6 +254,7 @@ const VALIDATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "validate-summary-zoo",
@@ -232,6 +267,7 @@ const VALIDATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // The human `--summary` records view: status headline + severity tally +
@@ -247,6 +283,7 @@ const VALIDATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--format paths`: every affected document path, sorted + deduplicated —
@@ -261,6 +298,7 @@ const VALIDATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // Narrowed from bare `validate --format json` — see module docs: the
     // oracle's raw finding order is not rerun-stable when a document
@@ -287,6 +325,7 @@ const VALIDATE_CASES: &[Case] = &[
         // emits this code; tie the argv to the manifest that generates it.
         requires_code: Some("frontmatter-required-field-missing"),
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--format jsonl` over the same single-per-document code: one finding
@@ -309,6 +348,7 @@ const VALIDATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: Some("frontmatter-required-field-missing"),
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // The `--severity` triage filter, over the grouped summary so the output
@@ -330,6 +370,7 @@ const VALIDATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
@@ -370,6 +411,7 @@ const REPAIR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Bare `norn repair` on the zoo — the findings summary: total findings,
@@ -385,6 +427,7 @@ const REPAIR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--plan --format paths`: every affected document path, sorted +
@@ -400,6 +443,7 @@ const REPAIR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--plan --format report`: the human decision-support view — the richest
@@ -420,6 +464,7 @@ const REPAIR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // (A `--plan --format json` case is deliberately omitted — three independent
     // reasons, spelled out in the suite doc comment above: (a) wall-clock
@@ -452,6 +497,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-count-by-status-clean",
@@ -464,6 +510,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-count-by-multi-json-clean",
@@ -476,6 +523,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-count-eq-zoo",
@@ -488,6 +536,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // The alias pack: `--group-by` lowers to `--by` before parse.
@@ -501,6 +550,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // ── find ─────────────────────────────────────────────────────────────
     Case {
@@ -516,6 +566,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-find-col-title-clean",
@@ -528,6 +579,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-find-eq-json-zoo",
@@ -540,6 +592,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-find-in-json-zoo",
@@ -552,6 +605,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-find-has-missing-json-zoo",
@@ -572,6 +626,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-find-date-before-json-clean",
@@ -584,6 +639,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-find-sort-limit-json-zoo",
@@ -606,6 +662,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Default (piped) format is paths; the 10-limit truncation note lands on
@@ -620,6 +677,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Records format under the non-tty harness: term_width 80, separators
@@ -634,6 +692,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "read-find-jsonl-zoo",
@@ -646,6 +705,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // The dynamic-predicate desugar: `--type note` lowers to `--eq
@@ -660,6 +720,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Deep-facet load (NRN-347): `--col .headings` loads each match's
@@ -683,6 +744,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--all-cols` — the full structured dump: frontmatter + headings + the
@@ -704,6 +766,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Incoming links exercise the back-link query (a distinct cache path
@@ -725,6 +788,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // ── get (NRN-347) ──────────────────────────────────────────────────────
     // The anchor: get ports for real. Stem addressing, each format, the
@@ -742,6 +806,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Default records: the full field dump (frontmatter + headings + links),
@@ -756,6 +821,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--all-cols` — the full structured dump incl. body.
@@ -769,6 +835,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--format markdown` — the exact source file the owner read from disk
@@ -783,6 +850,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Ambiguous stem: one record per candidate + a `note:` on stderr, exit 0.
@@ -797,6 +865,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/duplicate.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Not-found: `[]` on stdout, an `error:` note on stderr, exit 1 — the
@@ -811,6 +880,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--section`: resolve a named heading's exact span. `notes/alpha.md` has
@@ -833,6 +903,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // The same section read in records — the verbatim span rendered as a
@@ -847,6 +918,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Alias addressing: the zoo config sets `links.alias_field: aliases` and
@@ -862,6 +934,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: Some("notes/beta.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Deep facets in the RECORDS format (json-only elsewhere in the matrix):
@@ -884,6 +957,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // ── NRN-331 / NRN-332: decided CLI-semantics divergences ─────────────────
     // Each DIFFERS from the oracle and is gated by a ledger entry (PD-105 /
@@ -915,6 +989,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-331: `--limit N --no-limit` competes over the effective cap. The
@@ -944,6 +1019,7 @@ const READ_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
@@ -964,6 +1040,7 @@ const DESCRIBE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         id: "describe-data-zoo",
@@ -976,6 +1053,7 @@ const DESCRIBE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--stats` is a pure alias for `--data` — same output.
@@ -989,6 +1067,7 @@ const DESCRIBE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // The structure view in full, incl. the serialized schema (validate
@@ -1003,6 +1082,7 @@ const DESCRIBE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // `--by` implies data and bypasses the identity-skip; nested fields.
@@ -1016,6 +1096,7 @@ const DESCRIBE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // Data summary on the clean fixture — a different doc mix + date bounds.
@@ -1029,6 +1110,7 @@ const DESCRIBE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
@@ -1062,6 +1144,7 @@ const TEXT_EDGE_CASES: &[Case] = &[
         requires_doc: Some("edge/bom-doc.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-350 / ADR 0019: `code-linker` references a block-id defined only
@@ -1085,6 +1168,7 @@ const TEXT_EDGE_CASES: &[Case] = &[
         requires_doc: Some("edge/code-linker.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-356: split-then-decode + block-ref reclassification of Markdown
@@ -1109,6 +1193,7 @@ const TEXT_EDGE_CASES: &[Case] = &[
         requires_doc: Some("edge/url-decode-linker.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-357: generic external-vs-local classification by URL rules. Every
@@ -1132,6 +1217,7 @@ const TEXT_EDGE_CASES: &[Case] = &[
         requires_doc: Some("edge/url-scheme-linker.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
@@ -1181,6 +1267,7 @@ const ERROR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-361: a near-miss `--col` facet typo. Both sides warn and exit 0
@@ -1197,6 +1284,7 @@ const ERROR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-361: a malformed `.norn/config.yaml` (one unknown top-level key).
@@ -1214,6 +1302,7 @@ const ERROR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-367: an unknown dynamic field. `--titel foo` desugars to a dynamic
@@ -1234,6 +1323,7 @@ const ERROR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // NRN-365: a repeated scalar flag. `--limit 5 --limit 1` is a hard
@@ -1253,6 +1343,7 @@ const ERROR_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
@@ -1305,6 +1396,7 @@ const MCP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // A `tools/call` of a read tool (`vault.get`, the MCP counterpart of
@@ -1326,6 +1418,7 @@ const MCP_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
@@ -1383,6 +1476,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // set: plain (piped, no --yes) is an implicit dry-run — the plan preview.
     Case {
@@ -1396,6 +1490,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // set: explicit --dry-run plan output.
     Case {
@@ -1409,6 +1504,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // new: explicit-path forecast (Mode A) — `--title` is inert here (warns).
     Case {
@@ -1422,6 +1518,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // new: --as a non-creatable rule (the zoo declares no `target:`) refuses.
     Case {
@@ -1435,6 +1532,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // new: an existing destination without --force is a refusal (exit 2).
     Case {
@@ -1448,6 +1546,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // new: --force over an existing destination, forecast (writes nothing).
     Case {
@@ -1461,6 +1560,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // ── NRN-388: confirmed applies + report bodies ───────────────────────────
     // set: a plain confirmed apply (records). The field-change line is compared
@@ -1478,6 +1578,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: TRACE_NORM,
+        plan: None,
     },
     // new: a multi-field confirmed apply (records). Pins the padded key/value
     // block and byte-compares the created file. `title` is supplied so the
@@ -1504,6 +1605,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: TRACE_NORM,
+        plan: None,
     },
     // set --push --format json, confirmed apply: pins the collapsed donor op
     // shape — a `--push` reports as `{"op":"set",...,"new":[…]}` (the whole list
@@ -1527,6 +1629,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: TRACE_NORM,
+        plan: None,
     },
     // new with an unknown field under --force, --format json (forecast): the one
     // DECIDED warning-shape divergence (PD-111). The donor emits an inconsistent
@@ -1552,6 +1655,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // set: a value-not-allowed refusal, comparing the MESSAGE BODY (not just the
     // exit code). The offending value appears in the stderr line on both sides,
@@ -1567,6 +1671,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("tasks/task-001.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // set: a field-conflict refusal (same key across --field + --push). The
     // multi-line explainer body is compared, exit 2, write-free — a MATCH.
@@ -1583,6 +1688,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // NRN-371: a `set` against a bare-`null` frontmatter block. The oracle refuses
     // (`frontmatter is not a top-level mapping`, exit 2, write-free); the rewrite
@@ -1601,6 +1707,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("shapes/null-block.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // NRN-371 (same class as the null block): a `set` against a comment-only
     // frontmatter block. The oracle refuses identically; the rewrite preserves
@@ -1616,6 +1723,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("shapes/comment-block.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // ── NRN-380: the cascade verbs (move / delete / rewrite-wikilink) ─────────
     // The zoo `cycle-a/b/c` docs form a deterministic 3-cycle: `notes/cycle-a.md`
@@ -1639,6 +1747,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: TRACE_NORM,
+        plan: None,
     },
     // move: the `--dry-run` forecast (records) — the plan preview with the
     // backlink-rewrite count, write-free on both binaries. No trace footer on a
@@ -1654,6 +1763,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // move: the `--dry-run --format json` forecast — the pretty `ApplyReport`
     // serialization. Locks the full report SHAPE (operations, cascade counts,
@@ -1682,6 +1792,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: PLAN_HASH_NORM,
+        plan: None,
     },
     // delete: a confirmed apply with `--rewrite-to`, redirecting the one incoming
     // backlink to `cycle-c` before deleting (records). Post-state proves the
@@ -1697,6 +1808,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: TRACE_NORM,
+        plan: None,
     },
     // delete: the backlink-policy refusal — `cycle-b` has an incoming link and
     // neither `--allow-broken-links` nor `--rewrite-to` is given, so both binaries
@@ -1712,6 +1824,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // rewrite-wikilink: a confirmed vault-wide `[[cycle-b]]` → `[[cycle-c]]`
     // rewrite (records). The `rewrote [[…]] → [[…]] in N ops` breakdown is
@@ -1728,6 +1841,7 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: TRACE_NORM,
+        plan: None,
     },
 ];
 
@@ -1766,6 +1880,7 @@ const EDIT_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: TRACE_NORM,
+        plan: None,
     },
     // A dry-run forecast (records): the plan preview (`dry-run: edit …` + the
     // str_replace change line with its `1×` occurrence count + the `body: X → Y
@@ -1793,6 +1908,7 @@ const EDIT_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // A bad target is a clean pre-write refusal: `error: doc not found: <t>` on
     // stderr, exit 2, write-free (the format-independent edit refusal surface).
@@ -1813,6 +1929,7 @@ const EDIT_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // A malformed op (an unknown op discriminant in the JSON array): the CLI-side
     // parse refuses with `error: invalid edits JSON: <serde detail>`, exit 2,
@@ -1829,6 +1946,7 @@ const EDIT_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     // The canonical JSON-ops-array source (`--edits-json`) rendered as a `--format
     // json` forecast: pins the whole EditReport JSON shape (struct field order,
@@ -1853,6 +1971,241 @@ const EDIT_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
+    },
+];
+
+/// Authored-plan parity for `apply` (NRN-394): the gap the verb's own port
+/// (#206, NRN-393) left untested — every prior `apply`-exercising case ran a
+/// plan a MUTATION VERB (`set`/`new`/`move`/…) generated at runtime, never one
+/// an operator or automation client hand-authors and feeds `apply` directly.
+/// Every case here supplies its own `MigrationPlan` JSON via `Case::plan` (a
+/// [`PLAN_VAULT_ROOT_TOKEN`] template the runner materializes per side — see
+/// that field's doc) and drives `apply` with the materialized file path
+/// substituted for the [`PLAN_ARGV_PLACEHOLDER`] token in `argv`. All
+/// `ported: true`; every case here MATCHES the oracle (pure byte-parity — no
+/// ledger entry): the plan model (schema v2 + ADR 0015 owner-set
+/// preconditions) and the `apply` verb's execution semantics are ported
+/// donor-faithfully, so a hand-authored plan exercises no different a code
+/// path than one a mutation verb would have generated.
+///
+/// `strip_bom` (a plan touching the BOM-recognition divergence, PD-104) is a
+/// deliberate follow-on, not a gap here: it needs PR #207's BOM diagnostics
+/// surface, which had not landed on this branch's base at authoring time (see
+/// the git history) — adding it now would either fabricate an unmerged
+/// dependency or misdescribe an untested surface as covered.
+const APPLY_CASES: &[Case] = &[
+    // A confirmed apply of a hand-authored single-op move plan (records). Same
+    // shape `move_doc.rs` itself would generate — the zoo's `cycle-a/b/c` 3-cycle
+    // (see the `mutate` suite's cascade cases) gives `cycle-c` exactly one
+    // incoming link (from `cycle-b`, `Points to [[cycle-c]]`), so the low-level
+    // `move_document` op's automatic backlink cascade fires even with no
+    // separate `rewrite_link` op authored. Post-state byte-compares the moved
+    // file AND the rewritten backlink, proving the raw plan bytes — not just a
+    // CLI-synthesized one — apply identically on both binaries. TRACE_NORM
+    // collapses the oracle's random applied `trace:` id to the rewrite's empty
+    // one.
+    Case {
+        id: "apply-authored-move-plan-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-c.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    {
+      "kind": "move_document",
+      "fields": { "src": "notes/cycle-c.md", "dst": "notes/moved-c.md", "parents": false }
+    }
+  ]
+}
+"##,
+        ),
+    },
+    // A hand-authored single-op `add_frontmatter` plan, forecast (`--dry-run
+    // --format json`): pins the full `--format json` `ApplyReport` SHAPE for an
+    // authored (not verb-synthesized) plan. `add_frontmatter` (not
+    // `set_frontmatter`) targeting `priority` — a field genuinely absent from
+    // `notes/alpha.md`'s frontmatter — deliberately: a low-level
+    // `set_frontmatter`/`add_frontmatter` op with no `expected_old_value` CAS
+    // check defaults to asserting the field is currently ABSENT (empirically
+    // confirmed against the pinned oracle: the same op naming alpha's existing
+    // `summary` field refuses `expected-old-value-mismatch`, "expected missing,
+    // found …" — a real CAS barrier, not a fixture bug), so an authored plan
+    // omitting the check must target a field the doc does not already carry.
+    // `plan_hash` is `MigrationPlan::canonical_hash()` — genuinely
+    // per-side-root-dependent (the plan embeds the absolute `vault_root`), same
+    // as the cascade-verb `--dry-run --format json` cases, so `PLAN_HASH_NORM`
+    // is needed alongside the universal `VaultRoot` default. Write-free on both
+    // binaries.
+    Case {
+        id: "apply-authored-add-frontmatter-plan-dry-run-json-zoo",
+        argv: &[
+            "apply",
+            PLAN_ARGV_PLACEHOLDER,
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: PLAN_HASH_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    {
+      "kind": "add_frontmatter",
+      "fields": { "path": "notes/alpha.md", "field": "priority", "new_value": "high" }
+    }
+  ]
+}
+"##,
+        ),
+    },
+    // ADR 0015: an owner-set precondition whose `expected_paths` names the WRONG
+    // path for the real owner of stem `alpha` (`notes/alpha.md`) — a plan
+    // authored against a stale planning-time snapshot. The barrier evaluates
+    // before any operation writes (even under `--yes`), so the whole plan
+    // refuses (`owner-set-mismatch`, exit 2) with every operation `not_run`,
+    // write-free on both binaries — proving the precondition barrier itself,
+    // not just operation execution, is donor-faithful for an authored plan.
+    Case {
+        id: "apply-authored-precondition-mismatch-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "preconditions": [
+    {
+      "id": "alpha-owner",
+      "kind": "owner_set",
+      "selector": { "stem": "alpha" },
+      "expected_paths": ["notes/not-actually-alpha.md"]
+    }
+  ],
+  "operations": [
+    {
+      "kind": "set_frontmatter",
+      "fields": { "path": "notes/alpha.md", "field": "summary", "new_value": "should-not-apply" }
+    }
+  ]
+}
+"##,
+        ),
+    },
+    // A plan whose `schema_version` (99) does not match
+    // `MIGRATION_PLAN_SCHEMA_VERSION` (2) — the CLIENT-SIDE preamble refuses
+    // BEFORE any wire activity (`unsupported-schema-version`, exit 2), so this
+    // never even reaches a session; write-free on both binaries by construction.
+    // `generated_at` OMITTED (the field is `Option`, `skip_serializing_if`/
+    // `default` on both sides — confirmed accepted with no field at all, not
+    // just a null).
+    Case {
+        id: "apply-authored-schema-version-refusal",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 99,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": []
+}
+"##,
+        ),
+    },
+    // Two `create_document` ops sharing the SAME `{{seq}}` template
+    // (`seq/task-{{seq}}.md`) in one plan, confirmed apply (records). `seq/` does
+    // not exist in the zoo fixture, so `--parents` (`-p`) is required (a bare
+    // create into a missing parent directory refuses, exit 2 — a `{{seq}}`
+    // create is no exception). The apply-time resolver
+    // (`seq_alloc::resolve_seq_create`) starts the counter at 1 for the first op
+    // and — folding in that not-yet-on-disk allocation (NRN-101) — advances to 2
+    // for the second, entirely within the single mutation-lock critical section
+    // one plan apply runs under: post-state PROVES both `seq/task-1.md` (`Task
+    // One`) and `seq/task-2.md` (`Task Two`) actually land on disk with the
+    // right content, byte-identically on both binaries. Empirically confirmed
+    // against the pinned oracle: the REPORT's own counters/summary lines are
+    // donor-faithful but visually confusing here — `applied: 1  skipped: 1` and
+    // BOTH ops' one-line summaries read `create seq/task-1.md` (the second op's
+    // display line never picks up its own apply-time-resolved id) — yet the
+    // actual vault tree carries both files with the correct distinct
+    // frontmatter/body, and the rewrite reproduces the identical counters and
+    // mislabeled summary text byte-for-byte, so this is real donor behavior to
+    // preserve, not a rewrite bug to route around. TRACE_NORM for the
+    // confirmed-apply trace id.
+    Case {
+        id: "apply-authored-sequenced-seq-creates-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes", "--parents"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    {
+      "kind": "create_document",
+      "fields": {
+        "path": "seq/task-{{seq}}.md",
+        "new_value": {
+          "frontmatter": { "title": "Task One", "type": "task" },
+          "body": "# Task One\n"
+        },
+        "force": false
+      }
+    },
+    {
+      "kind": "create_document",
+      "fields": {
+        "path": "seq/task-{{seq}}.md",
+        "new_value": {
+          "frontmatter": { "title": "Task Two", "type": "task" },
+          "body": "# Task Two\n"
+        },
+        "force": false
+      }
+    }
+  ]
+}
+"##,
+        ),
     },
 ];
 
@@ -1896,6 +2249,10 @@ const SUITES: &[Suite] = &[
     Suite {
         name: "edit",
         cases: EDIT_CASES,
+    },
+    Suite {
+        name: "apply",
+        cases: APPLY_CASES,
     },
 ];
 
@@ -1942,6 +2299,35 @@ pub fn duplicate_case_id(suites: &[Suite]) -> Option<&'static str> {
     None
 }
 
+/// The first case id whose [`Case::plan`] and `argv` disagree about carrying
+/// the authored-plan capability — either an authored plan (`plan.is_some()`)
+/// whose argv names no [`PLAN_ARGV_PLACEHOLDER`] (the materialized file could
+/// never reach the process), or an argv naming the placeholder with no plan
+/// template to materialize it from (a dangling token the runner cannot fill in).
+/// `None` when every case pairs the two consistently. Runtime-enforced (not
+/// `debug_assert`-only), mirroring [`duplicate_case_id`]'s discipline.
+pub fn plan_argv_mismatch(suites: &[Suite]) -> Option<&'static str> {
+    for suite in suites {
+        for case in suite.cases {
+            // Exactly-one, per the `Case::plan` contract: zero tokens with a
+            // plan is a dangling template; two or more would silently receive
+            // the same path (and a literal "{PLAN}" argv value is unsupported
+            // by design — the token is reserved).
+            let placeholders = case
+                .argv
+                .iter()
+                .filter(|a| **a == PLAN_ARGV_PLACEHOLDER)
+                .count();
+            if (case.plan.is_some() && placeholders != 1)
+                || (case.plan.is_none() && placeholders != 0)
+            {
+                return Some(case.id);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1957,6 +2343,7 @@ mod tests {
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     };
     static B: Case = Case {
         id: "dup",
@@ -1969,6 +2356,7 @@ mod tests {
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     };
 
     #[test]
@@ -1991,6 +2379,81 @@ mod tests {
         assert!(
             duplicate_case_id(suites()).is_none(),
             "the real catalog must have unique case ids"
+        );
+    }
+
+    static PLAN_NO_PLACEHOLDER: Case = Case {
+        id: "plan-no-placeholder",
+        argv: &["apply", "plan.json", "--yes"],
+        fixture: CLEAN_1,
+        stdin: None,
+        mutating: true,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some("{}"),
+    };
+    static PLACEHOLDER_NO_PLAN: Case = Case {
+        id: "placeholder-no-plan",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: CLEAN_1,
+        stdin: None,
+        mutating: true,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    };
+    static PLAN_PAIRED: Case = Case {
+        id: "plan-paired",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: CLEAN_1,
+        stdin: None,
+        mutating: true,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some("{}"),
+    };
+
+    #[test]
+    fn plan_argv_mismatch_flags_a_plan_with_no_placeholder() {
+        let suites = &[Suite {
+            name: "one",
+            cases: std::slice::from_ref(&PLAN_NO_PLACEHOLDER),
+        }];
+        assert_eq!(plan_argv_mismatch(suites), Some("plan-no-placeholder"));
+    }
+
+    #[test]
+    fn plan_argv_mismatch_flags_a_placeholder_with_no_plan() {
+        let suites = &[Suite {
+            name: "one",
+            cases: std::slice::from_ref(&PLACEHOLDER_NO_PLAN),
+        }];
+        assert_eq!(plan_argv_mismatch(suites), Some("placeholder-no-plan"));
+    }
+
+    #[test]
+    fn plan_argv_mismatch_none_when_paired() {
+        let suites = &[Suite {
+            name: "one",
+            cases: std::slice::from_ref(&PLAN_PAIRED),
+        }];
+        assert!(plan_argv_mismatch(suites).is_none());
+    }
+
+    #[test]
+    fn plan_argv_mismatch_none_across_the_real_catalog() {
+        assert!(
+            plan_argv_mismatch(suites()).is_none(),
+            "every real case must pair `plan` and the argv placeholder consistently"
         );
     }
 }
