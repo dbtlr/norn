@@ -920,6 +920,32 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                 "rewrite-wikilink",
             )
         }
+        ClientFrame::Apply { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            let _writer = state.mutation_lock.lock().await;
+            let result = tokio::task::spawn_blocking(move || {
+                run_mutation(&slot, params.confirm, |cache, sink| {
+                    norn_core::mutate::apply::execute(
+                        cache,
+                        config.as_deref(),
+                        &params,
+                        &today,
+                        sink,
+                    )
+                })
+            })
+            .await;
+            classify_mutation(
+                state,
+                result,
+                apply_report_frame(|report| OwnerFrame::Apply { report }),
+                "apply",
+            )
+        }
     }
 }
 
