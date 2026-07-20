@@ -35,11 +35,13 @@ use super::conversation::Conversation;
 use super::fix_hints::fix_hint_for;
 use super::format::Format;
 use super::output::{
-    CountView, DescribeView, EditMutationView, FindView, GetView, NewMutationView, Output,
-    SetMutationView, ValidateView, VaultListView,
+    CountView, DeleteMutationView, DescribeView, EditMutationView, FindView, GetView,
+    MoveMutationView, NewMutationView, Output, RewriteWikilinkView, SetMutationView, ValidateView,
+    VaultListView,
 };
 use super::sink::Sink;
 use super::{Diagnostic, Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
+use norn_core::apply::report::{ApplyOutcome, ApplyReport};
 
 /// Whether the process stdout is a terminal — the one isatty read, consumed by
 /// [`FormatSpec::resolve`](super::format::FormatSpec::resolve).
@@ -103,6 +105,9 @@ pub fn emit<O: Write, E: Write>(
         Output::Set(view) => render_set(view, global, presenter),
         Output::New(view) => render_new(view, global, presenter),
         Output::Edit(view) => render_edit(view, global, presenter),
+        Output::Move(view) => render_move(view, presenter),
+        Output::Delete(view) => render_delete(view, presenter),
+        Output::RewriteWikilink(view) => render_rewrite_wikilink(view, presenter),
         Output::Line(line) => {
             let (out, err) = presenter.streams();
             let result: io::Result<i32> = (|| {
@@ -1423,6 +1428,465 @@ fn render_edit<O: Write, E: Write>(
         Ok(EXIT_OK)
     })();
     render_outcome(result, conv.writer())
+}
+
+// ── move / delete / rewrite-wikilink (the cascade verbs) ─────────────────────────
+//
+// These render the shared `ApplyReport` the donor emits (byte-faithful to
+// `retired/src/{move,delete,rewrite_wikilink}/route.rs`). `--format json` is the
+// report's PRETTY serialization (with a trailing newline); records is the donor's
+// human summary. A refused report renders the coded `{code,message,path?}`
+// envelope (json, pretty) or `error: <msg>` (records) and exits 2. Cascade
+// failures (real FS errors) surface on stderr before the summary.
+
+/// The exit code an `ApplyReport` implies, via its own outcome→exit mapping
+/// (applied/dry-run → 0, partial-failure → 1, refused → 2).
+fn apply_report_exit(report: &ApplyReport) -> i32 {
+    report.exit_code()
+}
+
+/// Render a refused cascade `ApplyReport` (the donor `emit_refusal`): the pretty
+/// coded error envelope on stdout for `--format json`, else `error: <message>` on
+/// stderr. Exit 2.
+fn render_apply_refusal(
+    report: &ApplyReport,
+    json: bool,
+    out: &mut dyn Write,
+    conv: &mut Conversation,
+) -> i32 {
+    let error = report
+        .operations
+        .iter()
+        .find_map(|o| o.error.as_ref())
+        .or_else(|| report.preconditions.iter().find_map(|p| p.error.as_ref()));
+    if json {
+        let result: io::Result<i32> = (|| {
+            match error {
+                Some(e) => writeln!(out, "{}", serde_json::to_string_pretty(e)?)?,
+                None => writeln!(out, "{{}}")?,
+            }
+            Ok(EXIT_USAGE)
+        })();
+        render_outcome(result, conv.writer())
+    } else {
+        let msg = error
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "refused".to_string());
+        let result: io::Result<i32> = (|| {
+            conv.line(&format!("error: {msg}"))?;
+            Ok(EXIT_USAGE)
+        })();
+        render_outcome(result, conv.writer())
+    }
+}
+
+/// Emit the cascade-failure warnings (real FS errors that left backlinks
+/// dangling) on stderr — the donor `emit_cascade_failure_warnings`. A no-op on
+/// the common (failure-free) path.
+fn emit_cascade_failure_warnings(report: &ApplyReport, w: &mut dyn Write) {
+    for op in &report.operations {
+        let Some(cascade) = op.cascade.as_ref() else {
+            continue;
+        };
+        if cascade.failed == 0 {
+            continue;
+        }
+        let _ = writeln!(
+            w,
+            "warning: {} backlink{} could not be rewritten after retries and now dangle{}:",
+            cascade.failed,
+            if cascade.failed == 1 { "" } else { "s" },
+            if cascade.failed == 1 { "s" } else { "" },
+        );
+        for f in &cascade.failures {
+            let _ = match &f.detail {
+                Some(d) => writeln!(
+                    w,
+                    "  {}: {} → {} ({}: {})",
+                    f.file, f.from, f.to, f.reason, d
+                ),
+                None => writeln!(w, "  {}: {} → {} ({})", f.file, f.from, f.to, f.reason),
+            };
+        }
+        let _ = writeln!(
+            w,
+            "  fix manually, or run `norn validate` to list dangling links."
+        );
+    }
+}
+
+fn render_move<O: Write, E: Write>(view: MoveMutationView, presenter: &mut Presenter<O, E>) -> i32 {
+    let report = &view.report;
+    let (out, err) = presenter.streams();
+    let mut conv = Conversation::new(err);
+
+    if report.outcome == ApplyOutcome::Refused {
+        return render_apply_refusal(report, view.json, out, &mut conv);
+    }
+
+    emit_cascade_failure_warnings(report, conv.writer());
+    let exit = apply_report_exit(report);
+
+    if view.json {
+        let result: io::Result<i32> = (|| {
+            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            Ok(exit)
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    let ascii = glyphs::use_ascii();
+    let dry_run = report.dry_run;
+    // A folder move's expanded ops carry `from` provenance (the parent
+    // `move_folder` op index); a single-file move's `move_document` op does not.
+    let is_folder = report.operations.iter().any(|o| o.from.is_some());
+    let result: io::Result<i32> = (|| {
+        if is_folder {
+            render_folder_apply_tty(out, report, dry_run)?;
+        } else {
+            let (link_total, link_files) = report
+                .operations
+                .iter()
+                .find(|o| o.kind == "move_document")
+                .and_then(|o| o.cascade.as_ref())
+                .map_or((0, 0), |c| (c.applied, c.files));
+            let applied = !dry_run && exit == 0;
+            render_move_apply_tty(
+                out, &view.src, &view.dst, link_total, link_files, applied, ascii,
+            )?;
+        }
+        if !dry_run {
+            writeln!(out, "trace: {}", report.trace_id)?;
+        }
+        Ok(exit)
+    })();
+    render_outcome(result, conv.writer())
+}
+
+/// Single-file move summary (donor `r#move::render_move_apply_tty`).
+fn render_move_apply_tty(
+    out: &mut dyn Write,
+    src: &str,
+    dst: &str,
+    link_total: usize,
+    link_files: usize,
+    applied: bool,
+    ascii: bool,
+) -> io::Result<()> {
+    let arrow = glyphs::render(Glyph::Arrow, ascii);
+    if applied {
+        writeln!(
+            out,
+            "{} moved {src} {arrow} {dst}",
+            glyphs::render(Glyph::Pass, ascii)
+        )?;
+        if link_total > 0 {
+            writeln!(
+                out,
+                "{} rewrote {} backlink{} across {} file{}",
+                glyphs::render(Glyph::Pass, ascii),
+                link_total,
+                plural(link_total),
+                link_files,
+                plural(link_files),
+            )?;
+        }
+    } else {
+        writeln!(out, "norn move {src} {arrow} {dst}")?;
+        if link_total > 0 {
+            writeln!(
+                out,
+                "  {} backlink{} to rewrite across {} file{}",
+                link_total,
+                plural(link_total),
+                link_files,
+                plural(link_files),
+            )?;
+        } else {
+            writeln!(out, "  no backlinks to rewrite")?;
+        }
+    }
+    Ok(())
+}
+
+/// Folder move summary (donor `r#move::render_folder_apply_tty`).
+fn render_folder_apply_tty(
+    out: &mut dyn Write,
+    report: &ApplyReport,
+    dry_run: bool,
+) -> io::Result<()> {
+    let status_label = if dry_run { "dry-run" } else { "applied" };
+    writeln!(out, "move-folder {status_label}")?;
+    writeln!(
+        out,
+        "  applied: {}  skipped: {}  failed: {}",
+        report.applied, report.skipped, report.failed
+    )?;
+    for op in &report.operations {
+        let status = format!("{:?}", op.status).to_lowercase();
+        writeln!(out, "  [{status}] {}", op.summary)?;
+    }
+    Ok(())
+}
+
+fn render_delete<O: Write, E: Write>(
+    view: DeleteMutationView,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let report = &view.report;
+    let (out, err) = presenter.streams();
+    let mut conv = Conversation::new(err);
+
+    if report.outcome == ApplyOutcome::Refused {
+        return render_apply_refusal(report, view.json, out, &mut conv);
+    }
+
+    emit_cascade_failure_warnings(report, conv.writer());
+    let exit = apply_report_exit(report);
+
+    if view.json {
+        let result: io::Result<i32> = (|| {
+            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            Ok(exit)
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    let ascii = glyphs::use_ascii();
+    let dry_run = report.dry_run;
+    let result: io::Result<i32> = (|| {
+        render_delete_records(out, report, &view.doc, dry_run, exit, ascii)?;
+        Ok(exit)
+    })();
+    render_outcome(result, conv.writer())
+}
+
+/// Records-format delete output (donor `delete::render_delete_records`).
+fn render_delete_records(
+    out: &mut dyn Write,
+    report: &ApplyReport,
+    doc: &str,
+    dry_run: bool,
+    exit: i32,
+    ascii: bool,
+) -> io::Result<()> {
+    let delete_op = report
+        .operations
+        .iter()
+        .find(|o| o.kind == "delete_document");
+    let (incoming_total, incoming_files, redirect_to): (usize, &[String], Option<&str>) = delete_op
+        .and_then(|o| o.link_impact.as_ref())
+        .map_or((0, &[][..], None), |li| {
+            (
+                li.incoming_total,
+                li.incoming_files.as_slice(),
+                li.redirect_to.as_deref(),
+            )
+        });
+    let rewrite_total = delete_op
+        .and_then(|o| o.cascade.as_ref())
+        .map_or(0, |c| c.applied);
+    let applied = !dry_run && exit == 0;
+    render_delete_apply_tty(
+        out,
+        doc,
+        incoming_total,
+        incoming_files,
+        redirect_to,
+        rewrite_total,
+        applied,
+        ascii,
+    )?;
+    if !dry_run {
+        writeln!(out, "trace: {}", report.trace_id)?;
+    }
+    Ok(())
+}
+
+/// The delete summary (donor `delete::render_delete_apply_tty`).
+#[allow(clippy::too_many_arguments)]
+fn render_delete_apply_tty(
+    out: &mut dyn Write,
+    doc: &str,
+    incoming_total: usize,
+    incoming_files: &[String],
+    rewrite_to: Option<&str>,
+    rewrite_total: usize,
+    applied: bool,
+    ascii: bool,
+) -> io::Result<()> {
+    let pass = glyphs::render(Glyph::Pass, ascii);
+    let warn = glyphs::render(Glyph::Warn, ascii);
+    if applied {
+        match rewrite_to {
+            Some(alt) => {
+                writeln!(
+                    out,
+                    "{pass} deleted {doc} (incoming links redirected to {alt})"
+                )?;
+                writeln!(
+                    out,
+                    "{pass} rewrote {} {} across {} {}",
+                    rewrite_total,
+                    noun(rewrite_total, "backlink", "backlinks"),
+                    incoming_files.len(),
+                    noun(incoming_files.len(), "file", "files"),
+                )?;
+            }
+            None => {
+                writeln!(out, "{pass} deleted {doc}")?;
+                if incoming_total > 0 {
+                    writeln!(
+                        out,
+                        "{warn} {} {} now broken (surface via norn validate)",
+                        incoming_total,
+                        noun(incoming_total, "link", "links"),
+                    )?;
+                }
+            }
+        }
+    } else {
+        match rewrite_to {
+            Some(alt) => {
+                writeln!(
+                    out,
+                    "norn delete {doc} {} redirects {} incoming {} to {alt}",
+                    glyphs::render(Glyph::Arrow, ascii),
+                    incoming_total,
+                    noun(incoming_total, "link", "links"),
+                )?;
+                writeln!(
+                    out,
+                    "  {} {} to rewrite across {} {}",
+                    rewrite_total,
+                    noun(rewrite_total, "backlink", "backlinks"),
+                    incoming_files.len(),
+                    noun(incoming_files.len(), "file", "files"),
+                )?;
+            }
+            None => {
+                writeln!(out, "norn delete {doc}")?;
+                if incoming_total > 0 {
+                    writeln!(
+                        out,
+                        "  {warn} {} incoming {} will break across {} {}:",
+                        incoming_total,
+                        noun(incoming_total, "link", "links"),
+                        incoming_files.len(),
+                        noun(incoming_files.len(), "file", "files"),
+                    )?;
+                    for file in incoming_files {
+                        writeln!(out, "      {file}")?;
+                    }
+                    writeln!(
+                        out,
+                        "  (broken links will surface as link-target-missing findings in `norn validate`)"
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_rewrite_wikilink<O: Write, E: Write>(
+    view: RewriteWikilinkView,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let report = &view.report;
+    let (out, err) = presenter.streams();
+    let mut conv = Conversation::new(err);
+
+    if report.outcome == ApplyOutcome::Refused {
+        // `--out` is a write-to-file projection of the report; a refusal never
+        // reaches it (the donor refuses before rendering), so the envelope path
+        // is unconditional here.
+        return render_apply_refusal(report, view.json, out, &mut conv);
+    }
+
+    emit_cascade_failure_warnings(report, conv.writer());
+    let exit = apply_report_exit(report);
+
+    // `--out`: write the (always-JSON, pretty) report to the file, silence stdout.
+    if let Some(out_path) = &view.out {
+        let result: io::Result<i32> = (|| {
+            let json = serde_json::to_string_pretty(report)?;
+            std::fs::write(out_path, format!("{json}\n"))?;
+            Ok(exit)
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    if view.json {
+        let result: io::Result<i32> = (|| {
+            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            Ok(exit)
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    let result: io::Result<i32> = (|| {
+        render_rewrite_records(out, report, &view.old, &view.new)?;
+        if !report.dry_run {
+            writeln!(out, "trace: {}", report.trace_id)?;
+        }
+        Ok(exit)
+    })();
+    render_outcome(result, conv.writer())
+}
+
+/// Records-format rewrite-wikilink output (donor `rewrite_wikilink::render_records`).
+fn render_rewrite_records(
+    out: &mut dyn Write,
+    report: &ApplyReport,
+    old: &str,
+    new: &str,
+) -> io::Result<()> {
+    let body_count = report
+        .operations
+        .iter()
+        .filter(|o| o.kind == "rewrite_link")
+        .count();
+    let fm_count = report
+        .operations
+        .iter()
+        .filter(|o| o.kind == "set_frontmatter")
+        .count();
+    let total = report.operations.len();
+    let status = if report.dry_run {
+        "would rewrite"
+    } else {
+        "rewrote"
+    };
+    writeln!(
+        out,
+        "{status} [[{old}]] → [[{new}]] in {total} ops ({body_count} body + {fm_count} frontmatter)"
+    )?;
+    if !report.warnings.is_empty() {
+        writeln!(out, "warnings:")?;
+        for w in &report.warnings {
+            writeln!(out, "  {}: {}", w.code, w.message)?;
+        }
+    }
+    Ok(())
+}
+
+/// `""` for a count of 1, `"s"` otherwise — the donor pluralization.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// Singular/plural noun selector for the delete summary.
+fn noun(n: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if n == 1 {
+        singular
+    } else {
+        plural
+    }
 }
 
 // ── vault list ─────────────────────────────────────────────────────────────────

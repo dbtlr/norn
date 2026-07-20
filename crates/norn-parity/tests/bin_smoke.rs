@@ -52,8 +52,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // the confirmed-apply cases via the per-case trace-id normalization).
     // NRN-379 adds five `edit` cases (a confirmed apply, a dry-run forecast, and
     // three refusal/json-ops shapes), taking the total to 78; all Match.
+    // NRN-380 adds six `mutate` cascade cases (move apply + dry-run forecast +
+    // dry-run --format json, delete apply with --rewrite-to, a backlink-present
+    // refusal, and a rewrite-wikilink apply), taking the total to 84; all Match.
     assert!(
-        stdout.contains("78 cases: 78 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("84 cases: 84 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -116,8 +119,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // NRN-379 adds five ported `edit` cases, every one a byte-exact match (no
     // ledger entry): the gated total grows to 76 and the match count to 59; the
     // diverged count stays 17.
+    // NRN-380 adds six ported `mutate` cascade cases (move apply + dry-run
+    // forecast + dry-run --format json, delete apply with --rewrite-to, a
+    // backlink-present refusal, and a rewrite-wikilink apply), all byte-exact
+    // matches — the gated total grows to 82 and the match count to 65 (diverged
+    // stays 17).
     assert!(
-        stdout.contains("76 cases: 59 match, 17 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("82 cases: 65 match, 17 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [

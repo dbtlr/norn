@@ -1,8 +1,16 @@
-//! Mutation-verb execute seams (set/new/edit). Each builds — and, when confirmed,
-//! applies — a MigrationPlan against the warm cache, returning a wire Report.
+//! Mutation-verb execute seams (set/new/edit/move/delete/rewrite-wikilink). Each
+//! builds — and, when confirmed, applies — a MigrationPlan against the warm
+//! cache, returning a report. The frontmatter/body verbs (`set`/`new`/`edit`)
+//! answer with a compact wire twin; the cascade verbs
+//! (`move`/`delete`/`rewrite_wikilink`) answer with the shared
+//! [`crate::apply::report::ApplyReport`] the donor emits, which the owner
+//! serializes onto the wire as an opaque JSON value.
 mod coerce;
+pub mod delete;
 pub mod edit;
+pub mod move_doc;
 pub mod new;
+pub mod rewrite_wikilink;
 pub mod set;
 
 use camino::Utf8PathBuf;

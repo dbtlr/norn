@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_wire::{
-    ClientFrame, CountParams, CountReport, DescribeParams, DescribeReport, EditParams, EditReport,
-    FindParams, FindReport, GetParams, GetReport, NewParams, NewReport, OwnerFrame, ServingState,
-    SetParams, SetReport, ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
+    ClientFrame, CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport,
+    EditParams, EditReport, FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams,
+    NewReport, OwnerFrame, RewriteWikilinkParams, ServingState, SetParams, SetReport,
+    ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -270,6 +271,56 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected edit report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `move` mutation against the owner's warm cache. Same send-once,
+    /// never-retry contract as [`set`](Self::set). The report is the shared
+    /// `ApplyReport` as an opaque JSON value (the wire cannot name the core type —
+    /// see `norn_wire`); the CLI, which links norn-core, deserializes it.
+    pub fn move_document(&mut self, params: MoveParams) -> Result<serde_json::Value, ClientError> {
+        match self.request(&ClientFrame::Move { params })? {
+            OwnerFrame::Move { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected move report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `delete` mutation against the owner's warm cache. Same contract as
+    /// [`move_document`](Self::move_document).
+    pub fn delete(&mut self, params: DeleteParams) -> Result<serde_json::Value, ClientError> {
+        match self.request(&ClientFrame::Delete { params })? {
+            OwnerFrame::Delete { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected delete report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `rewrite-wikilink` mutation against the owner's warm cache. Same
+    /// contract as [`move_document`](Self::move_document).
+    pub fn rewrite_wikilink(
+        &mut self,
+        params: RewriteWikilinkParams,
+    ) -> Result<serde_json::Value, ClientError> {
+        match self.request(&ClientFrame::RewriteWikilink { params })? {
+            OwnerFrame::RewriteWikilink { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected rewrite-wikilink report, got {other:?}"
             ))),
         }
     }

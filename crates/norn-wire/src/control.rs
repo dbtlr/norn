@@ -18,9 +18,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CountParams, CountReport, DescribeParams, DescribeReport, EditParams, EditReport, FindParams,
-    FindReport, GetParams, GetReport, NewParams, NewReport, SetParams, SetReport, ValidateParams,
-    ValidateReport,
+    CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport,
+    FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams, NewReport,
+    RewriteWikilinkParams, SetParams, SetReport, ValidateParams, ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
@@ -89,6 +89,15 @@ pub enum ClientFrame {
     /// An `edit` request: apply atomic content-anchored body edits to one
     /// document. Applies when `confirm` is set, else forecasts.
     Edit { params: EditParams },
+    /// A `move` request: relocate a document (or folder) and cascade-rewrite
+    /// backlinks. Applies when `confirm` is set, else forecasts.
+    Move { params: MoveParams },
+    /// A `delete` request: remove a document, optionally redirecting its incoming
+    /// links. Applies when `confirm` is set, else forecasts.
+    Delete { params: DeleteParams },
+    /// A `rewrite-wikilink` request: rewrite `[[old]]` → `[[new]]` vault-wide.
+    /// Applies when `confirm` is set, else forecasts.
+    RewriteWikilink { params: RewriteWikilinkParams },
 }
 
 /// Owner -> client. One JSON object per line.
@@ -130,6 +139,25 @@ pub enum OwnerFrame {
     /// The answer to `Edit`: the body-edit report (applied or forecast, or a
     /// coded `outcome = refused` on a clean pre-write decline).
     Edit { report: EditReport },
+    /// The answer to `Move` / `Delete` / `RewriteWikilink`: the shared
+    /// `norn-core` `ApplyReport`, serialized as an opaque JSON value (this crate
+    /// cannot name the core type — see `crate::mutate`). A refusal rides in the
+    /// value's `outcome = refused` + `operations[].error`, so it stays exit 2
+    /// without a distinct frame. Applied/forecast reports carry the cascade.
+    Move {
+        #[serde(rename = "report")]
+        report: serde_json::Value,
+    },
+    /// The answer to `Delete` — the shared `ApplyReport` as a JSON value.
+    Delete {
+        #[serde(rename = "report")]
+        report: serde_json::Value,
+    },
+    /// The answer to `RewriteWikilink` — the shared `ApplyReport` as a JSON value.
+    RewriteWikilink {
+        #[serde(rename = "report")]
+        report: serde_json::Value,
+    },
     /// A well-formed request the owner could not carry out for a
     /// non-cache reason — a bad predicate, an unresolvable `--links-to`
     /// target. Distinct from [`Error`](OwnerFrame::Error): the owner stays
