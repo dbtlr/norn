@@ -17,6 +17,8 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
+use crate::mutation_result::{output_schema_for, MutationResult};
+
 /// Map a summoner/owner [`ClientError`] onto an rmcp error. A tool that cannot
 /// even reach the owner (or whose owner rejected/failed the request) surfaces as a
 /// JSON-RPC error, not a tool result. A structured owner `Rejected` carries its
@@ -102,6 +104,36 @@ impl McpServer {
         let wire = crate::tools::count::to_wire(p);
         let report = self.call(move |s| s.count(wire)).await?;
         Ok(Json(crate::tools::count::envelope(report)))
+    }
+
+    /// `vault.get` — fetch one or more documents with full connection context.
+    #[tool(
+        name = "vault.get",
+        description = "Fetch structured documents, or one exact on-disk source document with format=markdown.",
+        output_schema = output_schema_for::<crate::tools::get::GetOutput>()
+    )]
+    async fn get(
+        &self,
+        Parameters(p): Parameters<crate::tools::get::GetParams>,
+    ) -> Result<MutationResult<crate::tools::get::GetOutput>, rmcp::ErrorData> {
+        let wire = crate::tools::get::to_wire(&p);
+        let report = self.call(move |s| s.get(wire)).await?;
+        Ok(crate::tools::get::envelope(&p, report))
+    }
+
+    /// `vault.validate` — validate vault graph facts and configured rules.
+    #[tool(
+        name = "vault.validate",
+        description = "Validate vault graph facts and configured frontmatter/link rules; returns structured findings."
+    )]
+    async fn validate(
+        &self,
+        Parameters(p): Parameters<crate::tools::validate::ValidateParams>,
+    ) -> Result<Json<crate::tools::validate::ValidateOutput>, rmcp::ErrorData> {
+        let summary_requested = p.summary;
+        let wire = crate::tools::validate::to_wire(p);
+        let report = self.call(move |s| s.validate(wire)).await?;
+        Ok(Json(crate::tools::validate::envelope(report, summary_requested)))
     }
 }
 
