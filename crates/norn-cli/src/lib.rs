@@ -158,7 +158,11 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             &cli.global,
             presenter,
         ),
-        Command::Apply(_) => presenter.not_yet_ported("apply"),
+        Command::Apply(args) => emit(
+            commands::apply::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Repair(args) => emit(
             commands::repair::run(&args, &cli.global),
             &cli.global,

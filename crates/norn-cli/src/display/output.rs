@@ -47,6 +47,8 @@ pub enum Output {
     Delete(DeleteMutationView),
     /// `rewrite-wikilink`: the cascade `ApplyReport` (forecast / applied / refused).
     RewriteWikilink(RewriteWikilinkView),
+    /// `apply`: the executed plan's `ApplyReport` (forecast / applied / refused).
+    Apply(ApplyMutationView),
     /// A single stdout confirmation line, written verbatim plus a newline, exit 0
     /// — `vault` register / set / unregister / no-changes.
     Line(String),
@@ -191,6 +193,20 @@ pub struct RewriteWikilinkView {
     pub report: ApplyReport,
     pub old: String,
     pub new: String,
+    pub json: bool,
+    /// `--out`: write the (always-JSON) report to this file, silencing stdout.
+    pub out: Option<String>,
+}
+
+/// `apply`'s renderable report. Unlike the other cascade verbs, `apply` renders
+/// the donor's generic apply-report summary (`apply <status>` + counts +
+/// preconditions + per-op + warnings): `--format json` is the report's pretty
+/// serialization; records is that summary. A refused report renders the coded
+/// error envelope (envelope-only refusals) or, for an owner-set precondition
+/// mismatch, the full summary with the preconditions block — both at exit 2.
+pub struct ApplyMutationView {
+    pub report: ApplyReport,
+    /// `true` for `--format json`.
     pub json: bool,
     /// `--out`: write the (always-JSON) report to this file, silencing stdout.
     pub out: Option<String>,

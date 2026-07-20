@@ -9,6 +9,7 @@
 //! is the first namespace that EXECUTES — its sub-verbs call `norn-config`
 //! directly rather than deferring.
 
+pub mod apply;
 pub mod args;
 pub mod count;
 pub mod delete;
