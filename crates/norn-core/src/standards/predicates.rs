@@ -4,11 +4,16 @@
 //! This is the declaration side of the standards model: the pure value/type
 //! predicates the config layer needs to compile and conflict-check rules
 //! (`frontmatter_predicate_matches`, `frontmatter_type_matches`, the date/time
-//! recognizers). The document-MATCHING helpers (running these predicates over a
-//! `Document` to decide which rules fire) belong to the validate engine and are
-//! deferred to that port — nothing here depends on the domain model.
+//! recognizers), plus the document-MATCHING helpers that run a
+//! `match.frontmatter` selector over a [`Document`] to decide which rules fire
+//! (`document_frontmatter_field`, `frontmatter_predicates_match`). The
+//! document-matching helpers are the standards-side matching left behind by
+//! NRN-340; the validate engine that drives them lands with the phase-3
+//! mutation port.
 
+use crate::domain::Document;
 use serde_json::Value;
+use std::collections::HashMap;
 
 pub(crate) fn frontmatter_value_matches(actual: &Value, expected: &Value) -> bool {
     match (actual, expected) {
@@ -246,6 +251,51 @@ pub fn is_wikilink_string(value: &str) -> bool {
     value.starts_with("[[") && value.ends_with("]]") && value.len() > 4
 }
 
+// ── Document-matching helpers ───────────────────────────────────────────────
+//
+// These run the value/selector predicates above over a `Document`'s
+// frontmatter — the standards-side matching that decides which rules fire on a
+// given document. Consumed by the validate engine (phase-3 port); exposed as
+// crate-public surface so that port can wire them in without redefining.
+
+/// Does `document`'s frontmatter carry a non-null value for `field`?
+pub fn document_has_frontmatter_field(document: &Document, field: &str) -> bool {
+    document_frontmatter_field(document, field).is_some()
+}
+
+/// The non-null frontmatter value for `field`, if present. A `null` value is
+/// treated as absent (the field carries no meaningful value).
+pub fn document_frontmatter_field<'a>(document: &'a Document, field: &str) -> Option<&'a Value> {
+    document
+        .frontmatter
+        .as_ref()
+        .and_then(|frontmatter| frontmatter.get(field))
+        .filter(|value| !value.is_null())
+}
+
+/// Do all of `predicates` accept `document`'s frontmatter? An empty predicate
+/// set matches everything; a document with no frontmatter fails any non-empty
+/// predicate set. Each predicate uses selector semantics
+/// ([`frontmatter_predicate_matches`]): scalar = exact equality, list = any-of.
+pub fn frontmatter_predicates_match(
+    document: &Document,
+    predicates: &HashMap<String, Value>,
+) -> bool {
+    if predicates.is_empty() {
+        return true;
+    }
+
+    let Some(frontmatter) = document.frontmatter.as_ref() else {
+        return false;
+    };
+
+    predicates.iter().all(|(field, expected)| {
+        frontmatter
+            .get(field)
+            .is_some_and(|actual| frontmatter_predicate_matches(actual, expected))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -419,5 +469,97 @@ mod tests {
         ] {
             assert!(!is_date_string(value), "{value} should be invalid");
         }
+    }
+}
+
+#[cfg(test)]
+mod document_matching_tests {
+    use super::{
+        document_frontmatter_field, document_has_frontmatter_field, frontmatter_predicates_match,
+    };
+    use crate::domain::Document;
+    use camino::Utf8PathBuf;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    fn doc_with(frontmatter: Option<Value>) -> Document {
+        Document {
+            path: Utf8PathBuf::from("notes/a.md"),
+            stem: "a".to_string(),
+            hash: "abc".to_string(),
+            frontmatter,
+            body_text: String::new(),
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
+        }
+    }
+
+    #[test]
+    fn frontmatter_field_reads_present_value() {
+        let doc = doc_with(Some(json!({"type": "note"})));
+        assert_eq!(
+            document_frontmatter_field(&doc, "type"),
+            Some(&json!("note"))
+        );
+        assert!(document_has_frontmatter_field(&doc, "type"));
+    }
+
+    #[test]
+    fn null_field_is_treated_as_absent() {
+        let doc = doc_with(Some(json!({"type": Value::Null})));
+        assert_eq!(document_frontmatter_field(&doc, "type"), None);
+        assert!(!document_has_frontmatter_field(&doc, "type"));
+    }
+
+    #[test]
+    fn missing_frontmatter_yields_no_field() {
+        let doc = doc_with(None);
+        assert_eq!(document_frontmatter_field(&doc, "type"), None);
+        assert!(!document_has_frontmatter_field(&doc, "type"));
+    }
+
+    #[test]
+    fn empty_predicate_set_matches_everything() {
+        let doc = doc_with(None);
+        assert!(frontmatter_predicates_match(&doc, &HashMap::new()));
+    }
+
+    #[test]
+    fn non_empty_predicates_fail_on_document_without_frontmatter() {
+        let doc = doc_with(None);
+        let predicates = HashMap::from([("type".to_string(), json!("note"))]);
+        assert!(!frontmatter_predicates_match(&doc, &predicates));
+    }
+
+    #[test]
+    fn predicates_use_selector_semantics() {
+        let doc = doc_with(Some(json!({"type": "task"})));
+        // Scalar = exact equality.
+        let exact = HashMap::from([("type".to_string(), json!("task"))]);
+        assert!(frontmatter_predicates_match(&doc, &exact));
+        let miss = HashMap::from([("type".to_string(), json!("note"))]);
+        assert!(!frontmatter_predicates_match(&doc, &miss));
+        // List = any-of.
+        let any_of = HashMap::from([("type".to_string(), json!(["task", "phase"]))]);
+        assert!(frontmatter_predicates_match(&doc, &any_of));
+    }
+
+    #[test]
+    fn all_predicates_must_match() {
+        let doc = doc_with(Some(json!({"type": "task", "status": "backlog"})));
+        let both = HashMap::from([
+            ("type".to_string(), json!("task")),
+            ("status".to_string(), json!("backlog")),
+        ]);
+        assert!(frontmatter_predicates_match(&doc, &both));
+        let one_wrong = HashMap::from([
+            ("type".to_string(), json!("task")),
+            ("status".to_string(), json!("done")),
+        ]);
+        assert!(!frontmatter_predicates_match(&doc, &one_wrong));
     }
 }
