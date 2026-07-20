@@ -148,11 +148,23 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             presenter,
         ),
         Command::Init(_) => presenter.not_yet_ported("init"),
-        Command::Move(_) => presenter.not_yet_ported("move"),
-        Command::Delete(_) => presenter.not_yet_ported("delete"),
+        Command::Move(args) => emit(
+            commands::move_doc::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
+        Command::Delete(args) => emit(
+            commands::delete::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Apply(_) => presenter.not_yet_ported("apply"),
         Command::Repair(_) => presenter.not_yet_ported("repair"),
-        Command::RewriteWikilink(_) => presenter.not_yet_ported("rewrite-wikilink"),
+        Command::RewriteWikilink(args) => emit(
+            commands::rewrite_wikilink::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Validate(args) => emit(
             commands::validate::run(&args, &cli.global),
             &cli.global,

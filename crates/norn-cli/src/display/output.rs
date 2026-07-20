@@ -9,6 +9,7 @@
 //! the one presenter path.
 
 use norn_config::RegisteredVault;
+use norn_core::apply::report::ApplyReport;
 use norn_wire::{
     CountReport, DescribeReport, EditReport, FindReport, GetReport, NewReport, SetReport,
     ValidateReport,
@@ -38,6 +39,12 @@ pub enum Output {
     New(NewMutationView),
     /// `edit`: the body-edit report (forecast / applied / refused).
     Edit(EditMutationView),
+    /// `move`: the cascade `ApplyReport` (forecast / applied / refused).
+    Move(MoveMutationView),
+    /// `delete`: the cascade `ApplyReport` (forecast / applied / refused).
+    Delete(DeleteMutationView),
+    /// `rewrite-wikilink`: the cascade `ApplyReport` (forecast / applied / refused).
+    RewriteWikilink(RewriteWikilinkView),
     /// A single stdout confirmation line, written verbatim plus a newline, exit 0
     /// — `vault` register / set / unregister / no-changes.
     Line(String),
@@ -133,4 +140,36 @@ pub struct EditMutationView {
     pub report: EditReport,
     pub explicit: Option<Format>,
     pub spec: FormatSpec,
+}
+
+/// `move`'s renderable report. The cascade verbs render the shared
+/// [`ApplyReport`] the donor emits: `--format json` is its pretty serialization;
+/// records is the donor's single/folder move summary. A refused report renders
+/// the coded error envelope (json) or `error: <msg>` (records) and exits 2.
+pub struct MoveMutationView {
+    pub report: ApplyReport,
+    /// The raw source argument, echoed in the records summary.
+    pub src: String,
+    /// The raw destination argument, echoed in the records summary.
+    pub dst: String,
+    /// `true` for `--format json`.
+    pub json: bool,
+}
+
+/// `delete`'s renderable report.
+pub struct DeleteMutationView {
+    pub report: ApplyReport,
+    /// The raw target argument, echoed in the records summary.
+    pub doc: String,
+    pub json: bool,
+}
+
+/// `rewrite-wikilink`'s renderable report.
+pub struct RewriteWikilinkView {
+    pub report: ApplyReport,
+    pub old: String,
+    pub new: String,
+    pub json: bool,
+    /// `--out`: write the (always-JSON) report to this file, silencing stdout.
+    pub out: Option<String>,
 }

@@ -38,9 +38,9 @@ mod read;
 pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 pub use filter::FilterParams;
 pub use mutate::{
-    CodedError, EditChange, EditParams, EditReport, FrontmatterChange, FrontmatterCreated,
-    MutationOutcome, MutationWarning, NewParams, NewReport, SetParams, SetReport,
-    EDIT_REPORT_SCHEMA_VERSION,
+    CodedError, DeleteParams, EditChange, EditParams, EditReport, FrontmatterChange,
+    FrontmatterCreated, MoveParams, MutationOutcome, MutationWarning, NewParams, NewReport,
+    RewriteWikilinkParams, SetParams, SetReport, EDIT_REPORT_SCHEMA_VERSION,
 };
 pub use paging::SortPaginateParams;
 pub use presence::Presence;

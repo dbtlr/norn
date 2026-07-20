@@ -288,6 +288,78 @@ pub struct EditChange {
 /// The `edit` report schema version (donor `edit::report::SCHEMA_VERSION`).
 pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 
+// ── move / delete / rewrite-wikilink ──────────────────────────────────────────
+//
+// Unlike `set`/`new` — whose donor reports are compact verb-specific structs —
+// the donor `move`/`delete`/`rewrite-wikilink` verbs answer with the shared
+// `ApplyReport` (its `--format json` IS `serde_json::to_string_pretty(&report)`).
+// That report lives in `norn-core::apply::report`, and this crate depends on no
+// other norn crate by contract (lib.rs), so it cannot name the type. The report
+// therefore rides these frames as an opaque `serde_json::Value` — the core
+// `ApplyReport` serialized as-is.
+//
+// Carrying the value (rather than a hand-kept wire twin) makes the report SHELL
+// byte-faithful for free: there is no second serde definition that can drift from
+// the engine's, so every SHAPE field re-materializes identically. It does NOT by
+// itself guarantee the plan-DERIVED fields match — chiefly `plan_hash`
+// (`MigrationPlan::canonical_hash()`): that depends on the execute seam
+// constructing the plan's op FIELD SET donor-identically. See
+// `norn-core::mutate::{move_doc::single_move_fields, delete::delete_fields}`,
+// which are pinned to the donor's `mcp/tools/*` field sets (unit-tested) so the
+// hash matches. The CLI (which DOES link norn-core) deserializes the value back
+// into `ApplyReport` to render records and derive the exit code. See
+// `norn-owner`'s mutation dispatch and the CLI
+// `commands::{move_doc,delete,rewrite_wikilink}`.
+
+/// A `move` request: relocate a document (or, with `recursive`, a folder) and
+/// cascade-rewrite the backlinks. `from`/`to` are the RAW arguments (a stem, an
+/// exact vault-relative `.md` path, or — for a folder move — a directory);
+/// resolution runs owner-side against the warm index so a routed move plans the
+/// resolved source, never the raw token. `confirm` applies (else forecast).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MoveParams {
+    pub from: String,
+    pub to: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub recursive: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub parents: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub force: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub no_link_rewrite: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub confirm: bool,
+}
+
+/// A `delete` request: remove a document and either leave its incoming links
+/// broken (`allow_broken_links`) or redirect them (`rewrite_to`). `target` is
+/// the RAW argument (stem or path); `rewrite_to` is the RAW alternate. `confirm`
+/// applies (else forecast).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeleteParams {
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rewrite_to: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub allow_broken_links: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub confirm: bool,
+}
+
+/// A `rewrite-wikilink` request: rewrite every `[[old]]` reference (body +
+/// frontmatter) to `[[new]]` across the vault. `confirm` applies (else forecast).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RewriteWikilinkParams {
+    pub old: String,
+    pub new: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub confirm: bool,
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }

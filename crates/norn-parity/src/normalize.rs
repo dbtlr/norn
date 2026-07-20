@@ -29,6 +29,18 @@ pub enum Normalization {
     /// per-case, only on the confirmed-apply cases that need it — never a read
     /// case, and never a refusal/forecast (which carry no id on either side).
     TraceId,
+    /// Strip the `plan_hash` hex from a cascade-verb `--format json` report (the
+    /// pretty `"plan_hash": "<hex>"` field). `plan_hash` is
+    /// `MigrationPlan::canonical_hash()`, which serializes the plan INCLUDING its
+    /// absolute `vault_root` — so it is genuinely root-dependent and differs
+    /// between the harness's two per-side vault copies (different roots), exactly
+    /// as the sibling `vault_root` field does (already normalized). Same root →
+    /// identical hash on both binaries (verified out-of-band + unit-pinned by the
+    /// verbs' op-field-set tests), so normalizing the environment-dependent hash
+    /// lets a `--format json` cascade case compare the rest of the report shape
+    /// (operations, cascade, outcome) byte-exactly. Only for `--format json`
+    /// cascade cases; records omits `plan_hash`.
+    PlanHash,
 }
 
 /// The normalization steps applied to every case today.
@@ -70,6 +82,11 @@ pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]
             Normalization::TraceId => {
                 out = strip_hex_run_after(&out, "trace: ");
                 out = strip_hex_run_after(&out, "\"trace_id\":\"");
+            }
+            Normalization::PlanHash => {
+                // The cascade verbs' `--format json` is PRETTY, so the field is
+                // `"plan_hash": "<hex>"` (a space after the colon).
+                out = strip_hex_run_after(&out, "\"plan_hash\": \"");
             }
         }
     }

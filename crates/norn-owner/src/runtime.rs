@@ -787,7 +787,95 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
             .await;
             classify_mutation(state, result, |report| OwnerFrame::Edit { report }, "edit")
         }
+        ClientFrame::Move { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            let _writer = state.mutation_lock.lock().await;
+            let result = tokio::task::spawn_blocking(move || {
+                run_mutation(&slot, params.confirm, |cache, sink| {
+                    norn_core::mutate::move_doc::execute(
+                        cache,
+                        config.as_deref(),
+                        &params,
+                        &today,
+                        sink,
+                    )
+                })
+            })
+            .await;
+            classify_mutation(
+                state,
+                result,
+                apply_report_frame(|report| OwnerFrame::Move { report }),
+                "move",
+            )
+        }
+        ClientFrame::Delete { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            let _writer = state.mutation_lock.lock().await;
+            let result = tokio::task::spawn_blocking(move || {
+                run_mutation(&slot, params.confirm, |cache, sink| {
+                    norn_core::mutate::delete::execute(
+                        cache,
+                        config.as_deref(),
+                        &params,
+                        &today,
+                        sink,
+                    )
+                })
+            })
+            .await;
+            classify_mutation(
+                state,
+                result,
+                apply_report_frame(|report| OwnerFrame::Delete { report }),
+                "delete",
+            )
+        }
+        ClientFrame::RewriteWikilink { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            let _writer = state.mutation_lock.lock().await;
+            let result = tokio::task::spawn_blocking(move || {
+                run_mutation(&slot, params.confirm, |cache, sink| {
+                    norn_core::mutate::rewrite_wikilink::execute(
+                        cache,
+                        config.as_deref(),
+                        &params,
+                        &today,
+                        sink,
+                    )
+                })
+            })
+            .await;
+            classify_mutation(
+                state,
+                result,
+                apply_report_frame(|report| OwnerFrame::RewriteWikilink { report }),
+                "rewrite-wikilink",
+            )
+        }
     }
+}
+
+/// Serialize a cascade verb's core [`ApplyReport`] onto its owner frame as an
+/// opaque JSON value (the wire cannot name the core type — see
+/// `norn_wire::mutate`). Serialization of a well-formed report cannot fail; a
+/// null fallback degrades to a client protocol error rather than a panic.
+fn apply_report_frame(
+    make: impl FnOnce(serde_json::Value) -> OwnerFrame,
+) -> impl FnOnce(norn_core::apply::report::ApplyReport) -> OwnerFrame {
+    move |report| make(serde_json::to_value(&report).unwrap_or(serde_json::Value::Null))
 }
 
 /// Drive a mutation verb's execute seam against the warm slot and, when a

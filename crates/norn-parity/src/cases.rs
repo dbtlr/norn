@@ -1248,6 +1248,10 @@ const MUTATE_EDGE_1: Fixture = Fixture {
 /// MATCH — a diverged/refused/forecast case carries no id to normalize.
 const TRACE_NORM: &[Normalization] = &[Normalization::TraceId];
 
+/// A cascade-verb `--format json` forecast normalizes only the root-dependent
+/// `plan_hash` (see [`Normalization::PlanHash`]) — no trace id on a forecast.
+const PLAN_HASH_NORM: &[Normalization] = &[Normalization::PlanHash];
+
 /// Mutation-verb parity for `set` / `new` (NRN-378 forecasts/refusals, extended
 /// by NRN-388 with the CONFIRMED-apply path and report BODIES). Each case is
 /// `mutating: true`, so the harness runs it against a FRESH per-case vault per
@@ -1515,6 +1519,118 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("shapes/comment-block.md"),
         requires_code: None,
         normalize: NO_NORM,
+    },
+    // ── NRN-380: the cascade verbs (move / delete / rewrite-wikilink) ─────────
+    // The zoo `cycle-a/b/c` docs form a deterministic 3-cycle: `notes/cycle-a.md`
+    // links `[[cycle-b]]`, `cycle-b`→`[[cycle-c]]`, `cycle-c`→`[[cycle-a]]`. So
+    // `cycle-b` has exactly ONE incoming backlink (from `cycle-a`) — a clean,
+    // single-file cascade whose post-state proves both binaries rewrote the same
+    // bytes.
+    //
+    // move: a confirmed single-file move with a backlink rewrite (records). The
+    // `✓ moved … / ✓ rewrote 1 backlink across 1 file` summary is compared AND the
+    // moved file + rewritten backlink are byte-compared via post-state. TRACE_NORM
+    // collapses the oracle's random applied `trace:` id to the rewrite's empty one.
+    Case {
+        id: "mutate-move-apply-cascade-zoo",
+        argv: &["move", "cycle-b", "notes/moved-b.md", "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+    },
+    // move: the `--dry-run` forecast (records) — the plan preview with the
+    // backlink-rewrite count, write-free on both binaries. No trace footer on a
+    // forecast, so NO_NORM.
+    Case {
+        id: "mutate-move-dry-run-forecast-zoo",
+        argv: &["move", "cycle-b", "notes/moved-b.md", "--dry-run"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // move: the `--dry-run --format json` forecast — the pretty `ApplyReport`
+    // serialization. Locks the full report SHAPE (operations, cascade counts,
+    // outcome, field presence) byte-exactly. `plan_hash` embeds the absolute
+    // vault_root (it is `MigrationPlan::canonical_hash()`), so it is genuinely
+    // per-side-root-dependent and normalized here (PLAN_HASH_NORM) like the
+    // sibling vault_root field — its EQUALITY given a shared root is proven
+    // out-of-band + unit-pinned by `mutate::{move_doc::single_move_fields,
+    // delete::delete_fields}` (the op FIELD SET that feeds the hash). A forecast
+    // carries no trace id.
+    Case {
+        id: "mutate-move-dry-run-json-zoo",
+        argv: &[
+            "move",
+            "cycle-b",
+            "notes/moved-b.md",
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: PLAN_HASH_NORM,
+    },
+    // delete: a confirmed apply with `--rewrite-to`, redirecting the one incoming
+    // backlink to `cycle-c` before deleting (records). Post-state proves the
+    // redirect wrote identically and the file is gone on both sides. TRACE_NORM.
+    Case {
+        id: "mutate-delete-rewrite-to-apply-zoo",
+        argv: &["delete", "cycle-b", "--rewrite-to", "cycle-c", "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+    },
+    // delete: the backlink-policy refusal — `cycle-b` has an incoming link and
+    // neither `--allow-broken-links` nor `--rewrite-to` is given, so both binaries
+    // refuse `error: document has 1 incoming link(s) …` (exit 2), write-free.
+    Case {
+        id: "mutate-delete-backlinks-refusal-zoo",
+        argv: &["delete", "cycle-b"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // rewrite-wikilink: a confirmed vault-wide `[[cycle-b]]` → `[[cycle-c]]`
+    // rewrite (records). The `rewrote [[…]] → [[…]] in N ops` breakdown is
+    // compared and the rewritten backlink is byte-compared via post-state.
+    // TRACE_NORM.
+    Case {
+        id: "mutate-rewrite-wikilink-apply-zoo",
+        argv: &["rewrite-wikilink", "cycle-b", "cycle-c", "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
     },
 ];
 
