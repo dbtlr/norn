@@ -43,6 +43,7 @@
 //! pass-based apply executor (fused with the mutation verbs it serves), and the
 //! mutation verbs themselves — see `retired/CLAUDE.md`.
 
+pub mod apply;
 pub mod cache;
 pub mod domain;
 pub mod env;
