@@ -618,4 +618,45 @@ mod tests {
         assert_eq!(report.operations[1].summary, "would create_document c.md");
         assert_eq!(report.plan_hash, plan.canonical_hash());
     }
+
+    #[test]
+    fn numbers_match_aligns_with_find_eq() {
+        let num = |v: serde_json::Value| match v {
+            serde_json::Value::Number(n) => n,
+            _ => unreachable!("test passes only numbers"),
+        };
+        // `2` matches a stored `2.0` — SQLite INTEGER/REAL numeric equality, the
+        // behavior `find --eq` binds through.
+        assert!(numbers_match(
+            &num(serde_json::json!(2)),
+            &num(serde_json::json!(2.0))
+        ));
+        assert!(numbers_match(
+            &num(serde_json::json!(2.0)),
+            &num(serde_json::json!(2))
+        ));
+        assert!(numbers_match(
+            &num(serde_json::json!(2)),
+            &num(serde_json::json!(2))
+        ));
+        // Different values never match.
+        assert!(!numbers_match(
+            &num(serde_json::json!(2)),
+            &num(serde_json::json!(3.0))
+        ));
+        // An integer beyond f64 precision never rounds into a float.
+        assert!(!numbers_match(
+            &num(serde_json::json!(9007199254740993i64)),
+            &num(serde_json::json!(9007199254740992.0))
+        ));
+        // Two floats compare by value.
+        assert!(numbers_match(
+            &num(serde_json::json!(1.5)),
+            &num(serde_json::json!(1.5))
+        ));
+        assert!(!numbers_match(
+            &num(serde_json::json!(1.5)),
+            &num(serde_json::json!(1.6))
+        ));
+    }
 }

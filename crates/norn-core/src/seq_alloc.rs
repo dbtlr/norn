@@ -8,9 +8,11 @@
 //! section that serializes every writer to one vault, so two concurrent creates
 //! observe each other's files and get distinct sequential ids. In the pre-owner
 //! world that boundary was a cross-process advisory `flock` (the mutation lock);
-//! under the summoned-owner model (ADR 0013/0017) it is the owner's in-process
-//! single-writer queue — the owner is the sole writer, so the allocation moves
-//! behind its serialization untouched. Either way the invariant is the same and
+//! under the summoned-owner model (ADR 0013/0017) it is a triad: the owner-
+//! lifetime `flock` (`acquire_owner_lock`, flock-then-bind) guarantees one
+//! owner process per vault, the client's connect-or-summon path leaves no
+//! direct-write route, and the owner's in-process single-writer queue then
+//! serializes writes within that process. Either way the invariant is the same and
 //! it is NOT enforced by this module: the caller MUST hold the writer boundary
 //! across [`resolve_seq_create`] and the subsequent create. Resolving `{{seq}}`
 //! outside that boundary races and can mint duplicate ids.
