@@ -18,9 +18,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport,
-    FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams, NewReport, RepairParams,
-    RepairReport, RewriteWikilinkParams, SetParams, SetReport, ValidateParams, ValidateReport,
+    ApplyParams, CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport,
+    EditParams, EditReport, FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams,
+    NewReport, RepairParams, RepairReport, RewriteWikilinkParams, SetParams, SetReport,
+    ValidateParams, ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
@@ -57,7 +58,11 @@ pub struct WriterProgress {
 }
 
 /// Client -> owner. One JSON object per line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: the `Apply` variant carries an [`ApplyParams`] whose
+/// opaque `plan` is a `serde_json::Value` (not `Eq`), exactly as [`OwnerFrame`]'s
+/// cascade-report variants already are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ClientFrame {
     /// Liveness + serving-state probe. O(1) on the owner — it touches no vault
@@ -102,6 +107,10 @@ pub enum ClientFrame {
     /// A `rewrite-wikilink` request: rewrite `[[old]]` → `[[new]]` vault-wide.
     /// Applies when `confirm` is set, else forecasts.
     RewriteWikilink { params: RewriteWikilinkParams },
+    /// An `apply` request: execute an already-parsed, schema-checked
+    /// `MigrationPlan` (carried opaque in `params.plan`). Applies when `confirm`
+    /// is set, else forecasts.
+    Apply { params: ApplyParams },
 }
 
 /// Owner -> client. One JSON object per line.
@@ -162,6 +171,16 @@ pub enum OwnerFrame {
     },
     /// The answer to `RewriteWikilink` — the shared `ApplyReport` as a JSON value.
     RewriteWikilink {
+        #[serde(rename = "report")]
+        report: serde_json::Value,
+    },
+    /// The answer to `Apply` — the shared `norn-core` `ApplyReport` for the
+    /// executed plan, serialized as an opaque JSON value (this crate cannot name
+    /// the core type — see `crate::mutate`). A refusal (malformed at the owner,
+    /// an owner-set precondition mismatch, a containment violation) rides in the
+    /// value's `outcome = refused` + `operations[]`/`preconditions[]`, so it stays
+    /// exit 2 without a distinct frame.
+    Apply {
         #[serde(rename = "report")]
         report: serde_json::Value,
     },

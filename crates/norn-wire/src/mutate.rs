@@ -360,6 +360,31 @@ pub struct RewriteWikilinkParams {
     pub confirm: bool,
 }
 
+/// An `apply` request: execute an already-reviewed `MigrationPlan`.
+///
+/// Unlike the other cascade verbs, `apply` does not synthesize its plan owner-side
+/// from a handful of arguments — the CLI reads the plan source (file or stdin),
+/// detects its format, parses it into a `MigrationPlan`, and validates its
+/// `schema_version` BEFORE the wire (a malformed plan or a schema mismatch refuses
+/// client-side, byte-identical to the donor preamble). The parsed plan then crosses
+/// as `plan` — `serde_json::to_value(&plan)`, the exact value the direct
+/// `--format json` serializes and exactly what `repair` emits, so a repair→apply
+/// composition round-trips (ADR 0011: the plan bytes reviewed are the plan bytes
+/// applied). This crate cannot name `norn_core::plan::MigrationPlan` (it depends on
+/// no other norn crate — see `crate::mutate`'s cascade-verb note), so the plan
+/// rides as an opaque `serde_json::Value`; the owner (which links norn-core)
+/// deserializes it back. `confirm` applies (else forecast); `parents` auto-creates
+/// missing parent directories for `create_document` ops that proceed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApplyParams {
+    pub plan: Value,
+    #[serde(skip_serializing_if = "is_false")]
+    pub confirm: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub parents: bool,
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -472,5 +497,34 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         let back: NewReport = serde_json::from_value(v).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn apply_params_omit_false_flags_and_round_trip() {
+        let p = ApplyParams {
+            plan: json!({ "schema_version": 2, "vault_root": "/v", "operations": [] }),
+            confirm: false,
+            parents: false,
+        };
+        // `confirm`/`parents` omitted when false; `plan` carries the opaque value.
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            json!({ "plan": { "schema_version": 2, "vault_root": "/v", "operations": [] } })
+        );
+        let back: ApplyParams = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn apply_params_include_set_flags() {
+        let p = ApplyParams {
+            plan: json!({ "schema_version": 2 }),
+            confirm: true,
+            parents: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            json!({ "plan": { "schema_version": 2 }, "confirm": true, "parents": true })
+        );
     }
 }
