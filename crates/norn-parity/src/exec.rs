@@ -63,6 +63,59 @@ impl std::fmt::Display for ExecError {
 
 impl std::error::Error for ExecError {}
 
+/// A spawned child plus its (optional) stdin-writer thread — the setup
+/// [`run_argv`] and [`run_argv_bounded`] share; only how they WAIT for the
+/// child differs (unbounded `wait_with_output` vs. a polled, killable
+/// deadline), so that is the one thing left to each caller.
+struct Spawned {
+    child: std::process::Child,
+    stdin_writer: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+}
+
+/// Spawn `binary` with `argv`/cwd = `vault` (stdin/stdout/stderr all piped),
+/// and — if `stdin` is `Some` — start writing it on a dedicated thread
+/// rather than inline before the caller drains output. An inline
+/// `write_all` deadlocks once the payload plus the child's own output
+/// exceed the OS pipe buffers (~64KB): the child blocks writing stdout
+/// while we block writing stdin, and neither side drains the other.
+fn spawn_with_stdin(
+    binary: &Path,
+    argv: &[&str],
+    stdin: Option<&str>,
+    vault: &Path,
+    binary_label: &str,
+) -> Result<Spawned, ExecError> {
+    let mut child = Command::new(binary)
+        .args(argv)
+        .current_dir(vault)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| ExecError::Spawn {
+            binary: binary_label.to_string(),
+            source,
+        })?;
+
+    let stdin_writer = if let Some(stdin_text) = stdin {
+        // `.expect` on the piped handle is safe: we just requested it above.
+        let mut child_stdin = child.stdin.take().expect("stdin was piped");
+        let bytes = stdin_text.as_bytes().to_vec();
+        Some(std::thread::spawn(move || {
+            // Drop (at end of closure) closes the pipe so the child sees EOF.
+            child_stdin.write_all(&bytes)
+        }))
+    } else {
+        drop(child.stdin.take());
+        None
+    };
+
+    Ok(Spawned {
+        child,
+        stdin_writer,
+    })
+}
+
 /// Run `binary` with `case`'s argv, cwd = `vault` — no `-C` flag, so the
 /// identical argv drives both the oracle and the rewrite binary and
 /// normalization never has to strip the vault path out of argv itself.
@@ -91,39 +144,14 @@ pub fn run_argv(
     vault: &Path,
 ) -> Result<RawOutput, ExecError> {
     let binary_label = binary.display().to_string();
-    let mut child = Command::new(binary)
-        .args(argv)
-        .current_dir(vault)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| ExecError::Spawn {
-            binary: binary_label.clone(),
-            source,
-        })?;
+    let Spawned {
+        child,
+        stdin_writer,
+    } = spawn_with_stdin(binary, argv, stdin, vault, &binary_label)?;
 
-    // Feed stdin from a dedicated writer thread rather than writing inline
-    // before `wait_with_output`. An inline `write_all` deadlocks once the
-    // payload plus the child's own output exceed the OS pipe buffers (~64KB):
-    // the child blocks writing stdout while we block writing stdin, and
-    // neither side drains the other. Draining stdout/stderr concurrently
-    // (via `wait_with_output`) while a separate thread writes stdin avoids
-    // it. Matters for phase-3 MCP frame driving; harmless for today's
-    // `stdin: None` cases.
-    let stdin_writer = if let Some(stdin_text) = stdin {
-        // `.expect` on the piped handle is safe: we just requested it above.
-        let mut child_stdin = child.stdin.take().expect("stdin was piped");
-        let bytes = stdin_text.as_bytes().to_vec();
-        Some(std::thread::spawn(move || {
-            // Drop (at end of closure) closes the pipe so the child sees EOF.
-            child_stdin.write_all(&bytes)
-        }))
-    } else {
-        drop(child.stdin.take());
-        None
-    };
-
+    // `wait_with_output` drains stdout/stderr concurrently with the stdin
+    // writer thread (spawned above) — waiting AND draining together is
+    // exactly what avoids the deadlock `spawn_with_stdin`'s doc describes.
     let output = child.wait_with_output().map_err(|source| ExecError::Wait {
         binary: binary_label.clone(),
         source,
@@ -158,7 +186,7 @@ pub fn run_argv(
 /// Cannot reuse `wait_with_output` (which blocks until exit, precisely what
 /// a timeout must not do): stdout/stderr are drained on their own reader
 /// threads instead, mirroring the stdin-writer-thread deadlock-avoidance
-/// reasoning in [`run_argv`] — the main thread only ever polls
+/// reasoning in [`spawn_with_stdin`] — the main thread only ever polls
 /// `try_wait`, never blocks on the child.
 pub fn run_argv_bounded(
     binary: &Path,
@@ -170,26 +198,10 @@ pub fn run_argv_bounded(
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
     let binary_label = binary.display().to_string();
-    let mut child = Command::new(binary)
-        .args(argv)
-        .current_dir(vault)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| ExecError::Spawn {
-            binary: binary_label.clone(),
-            source,
-        })?;
-
-    let stdin_writer = if let Some(stdin_text) = stdin {
-        let mut child_stdin = child.stdin.take().expect("stdin was piped");
-        let bytes = stdin_text.as_bytes().to_vec();
-        Some(std::thread::spawn(move || child_stdin.write_all(&bytes)))
-    } else {
-        drop(child.stdin.take());
-        None
-    };
+    let Spawned {
+        mut child,
+        stdin_writer,
+    } = spawn_with_stdin(binary, argv, stdin, vault, &binary_label)?;
 
     let mut child_stdout = child.stdout.take().expect("stdout was piped");
     let stdout_reader = std::thread::spawn(move || -> Vec<u8> {
@@ -224,10 +236,14 @@ pub fn run_argv_bounded(
         Some(status) => status,
         None => {
             // Deadline hit before the child exited: kill and reap so it
-            // never becomes a zombie. Killing it closes its end of every
-            // pipe, which unblocks a stdin writer mid-`write_all` (EPIPE)
-            // and lets the reader threads observe EOF — so every thread
-            // below is guaranteed to finish, never hang this join.
+            // never becomes a zombie. Killing OUR OWN CHILD closes its end
+            // of every pipe, which unblocks a stdin writer mid-`write_all`
+            // (EPIPE) and lets the reader threads observe EOF — so on THIS
+            // (timeout) path, every thread below is guaranteed to finish,
+            // never hang this join. (That guarantee is specific to this
+            // path: it holds because we hold the exact pid we spawned and
+            // kill it directly. It is NOT a general guarantee for the
+            // normal-exit path below — see the comment there.)
             let _ = child.kill();
             let _ = child.wait();
             if let Some(handle) = stdin_writer {
@@ -251,6 +267,15 @@ pub fn run_argv_bounded(
                 source,
             })?;
     }
+    // The child itself has already exited (`status` above), so its own copy
+    // of each pipe's write end is closed — but that alone only guarantees
+    // these joins finish if NO OTHER process holds a duplicate of that fd.
+    // A grandchild the child spawned and left running, inheriting the pipe,
+    // could still keep a reader blocked here indefinitely; unreachable for
+    // the real `norn mcp` (a single process, no children) and for every
+    // stub this crate's tests use (each closes/replaces its own image
+    // rather than forking a lingering descendant — see `tests/mcp.rs`'s
+    // `exec sleep` stub for the general shape of that hazard elsewhere).
     let stdout = stdout_reader.join().expect("stdout reader thread panicked");
     let stderr = stderr_reader.join().expect("stderr reader thread panicked");
 
