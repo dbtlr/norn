@@ -47,7 +47,8 @@ pub use presence::Presence;
 pub use read::{
     CountParams, CountReport, CreatableRule, DataSummary, DateBounds, DescribeParams,
     DescribeReport, FieldDistribution, FindDoc, FindParams, FindReport, GetParams, GetRecord,
-    GetReport, GroupNode, PathRule, SkippedField, ValidateParams, ValidateReport, ValueCount,
+    GetReport, GroupNode, PathRule, RepairParams, RepairReport, SkippedField, ValidateParams,
+    ValidateReport, ValueCount,
 };
 
 /// One-line boundary contract, referenced by every dependent so each

@@ -24,10 +24,8 @@ use std::collections::HashMap;
 /// and no ambiguity. If multiple footnotes share a `change_id` in a future
 /// schema, only the last one wins — that is noted in the design archive.
 ///
-/// Unused until the `repair` VERB lands (its findings→plan entry point); the
-/// intent expanders are already live via the executor. Kept live rather than
-/// deferring this adapter's port along with the verb.
-#[allow(dead_code)]
+/// The `repair` VERB's findings→plan entry point (`crate::read::repair`); the
+/// intent expanders are the other intent source, live via the executor.
 pub(crate) fn plan_from_findings(
     vault_root: Utf8PathBuf,
     filters: RepairPlanFilters,

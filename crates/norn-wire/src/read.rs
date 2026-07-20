@@ -401,6 +401,67 @@ pub struct ValidateReport {
     pub has_errors: bool,
 }
 
+/// A `repair` request: run the standards engine over the warm graph, triage-filter
+/// the findings, and turn them into a deterministic `MigrationPlan` — WITHOUT
+/// applying it. Read-only, like `validate` (`repair` emits a plan; `apply`
+/// executes it). The triage filters mirror [`ValidateParams`]; `confidence_high`
+/// is the `--confidence high` band gate (drop Medium closest-match proposals) and
+/// `skip_reasons` narrows the plan's skipped-findings list by reason-code glob.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub severities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    /// `--skip-reason` reason-code globs — narrows the plan's skipped list only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_reasons: Vec<String>,
+    /// `--confidence high`: keep only High-confidence closest-match proposals.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confidence_high: bool,
+    /// Keep graph-diagnostic `detail` in findings (the donor `--verbose` gate);
+    /// mirrors [`ValidateParams::verbose`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub verbose: bool,
+}
+
+/// A `repair` response: the deterministic `MigrationPlan` the findings produced,
+/// carried as its pretty-JSON string (byte-identical to what `norn repair --plan
+/// --format json` prints — the CLI re-emits it verbatim, and parses it back to
+/// render the `report` / `paths` formats and the bare-summary counts). The
+/// bare-`norn repair` summary also needs the by-code finding tally and the run
+/// header counts, which the plan does not carry, so those ride alongside.
+/// `has_diagnostic_errors` is the single exit-code driver (an error-severity
+/// graph diagnostic anywhere in the FULL index, computed BEFORE triage filtering
+/// so a `--code` narrow never changes the exit code — the donor's
+/// `exit_code_for`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairReport {
+    /// The `MigrationPlan` as its `serde_json::to_string_pretty` bytes — the
+    /// verbatim `--format json` passthrough. `norn-wire` cannot name the core
+    /// `MigrationPlan` type (the dependency rule), so it rides as a string; the
+    /// CLI decodes it (it links `norn-core`) for the other projections.
+    pub plan_json: String,
+    /// Sorted `(code, count)` over the triage-filtered findings — the bare
+    /// summary's per-code tally (a `BTreeMap` collected in code order).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings_by_code: Vec<(String, usize)>,
+    pub findings_total: usize,
+    pub total_docs: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_diagnostic_errors: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

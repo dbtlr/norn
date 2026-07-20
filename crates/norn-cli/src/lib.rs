@@ -159,7 +159,11 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             presenter,
         ),
         Command::Apply(_) => presenter.not_yet_ported("apply"),
-        Command::Repair(_) => presenter.not_yet_ported("repair"),
+        Command::Repair(args) => emit(
+            commands::repair::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::RewriteWikilink(args) => emit(
             commands::rewrite_wikilink::run(&args, &cli.global),
             &cli.global,

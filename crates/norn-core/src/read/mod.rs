@@ -5,12 +5,14 @@
 //! `serve_read`; the CLI renders the returned `Report`. No IO beyond the cache
 //! read, no clock read (the current date is injected as `today`).
 //!
-//! Shipped: [`find`], [`count`], [`get`], [`describe`], and [`validate`].
+//! Shipped: [`find`], [`count`], [`get`], [`describe`], [`validate`], and
+//! [`repair`] (findings → plan; read-only, `apply` executes the plan).
 
 pub mod count;
 pub mod describe;
 pub mod find;
 pub mod get;
+pub mod repair;
 pub mod validate;
 
 use anyhow::Result;
