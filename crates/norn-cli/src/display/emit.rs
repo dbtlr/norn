@@ -2231,9 +2231,15 @@ fn render_apply<O: Write, E: Write>(
 
     let result: io::Result<i32> = (|| {
         render_apply_records(out, report)?;
-        // TTY `trace:` footer on a real apply (records only; json carries it as a
-        // field). A forecast and a refusal carry no minted id.
-        if !report.dry_run && report.outcome != ApplyOutcome::Refused {
+        // TTY `trace:` footer on any CONFIRMED (non-dry-run) apply call — records
+        // only; json carries it as a field regardless. Empirically confirmed
+        // against the pinned oracle: unlike the envelope-only refusal above (which
+        // never prints a trace line at all), the FULL report render — reached here
+        // for Applied/Failed/Rebased AND for a precondition-populated Refused
+        // (`--yes` against a plan an owner-set precondition rejects) — carries the
+        // footer on every one of those outcomes, including Refused; only an actual
+        // forecast (`dry_run == true`) omits it.
+        if !report.dry_run {
             writeln!(out, "trace: {}", report.trace_id)?;
         }
         Ok(exit)
