@@ -56,6 +56,7 @@ pub mod read;
 pub mod seq_alloc;
 pub mod standards;
 pub mod target;
+pub mod telemetry;
 
 /// One-line boundary contract, referenced by every dependent so each
 /// declared edge in the crate map is compiler-load-bearing.
