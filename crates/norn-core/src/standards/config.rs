@@ -820,7 +820,7 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                     return Err(ConfigError::Invalid {
                         source_path: source_path.to_owned(),
                         message: format!(
-                            "rule {rule_label}: field `{field}` references {{{{path.{referenced}}}}} which is not declared in this rule's match.path"
+                            "rule {rule_label}: field `{field}` references {{{{path.{referenced}}}}} which is not declared by this rule's match.path or target"
                         ),
                     });
                 }
