@@ -1447,6 +1447,7 @@ const MCP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // A read `tools/call` with args: `vault.count` grouped by a frontmatter
@@ -1466,6 +1467,7 @@ const MCP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // A `vault.validate` tools/call, narrowed by `code` to a single finding
@@ -1490,6 +1492,7 @@ const MCP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // A mutation `tools/call` FORECAST: `vault.set` with `confirm` absent is a
@@ -1514,6 +1517,7 @@ const MCP_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
     Case {
         // A mutation `tools/call` REFUSAL: `vault.set --confirm` against a target
@@ -1536,6 +1540,7 @@ const MCP_CASES: &[Case] = &[
         requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
     },
 ];
 
