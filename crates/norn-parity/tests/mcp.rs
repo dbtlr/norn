@@ -116,6 +116,7 @@ fn one_case_suite() -> Vec<Suite> {
             requires_doc: None,
             requires_code: None,
             normalize: &[],
+            plan: None,
         }])),
     }]
 }
@@ -142,6 +143,7 @@ fn two_case_suite() -> Vec<Suite> {
                 requires_doc: None,
                 requires_code: None,
                 normalize: &[],
+                plan: None,
             },
             Case {
                 id: PING_CASE_ID,
@@ -154,6 +156,7 @@ fn two_case_suite() -> Vec<Suite> {
                 requires_doc: None,
                 requires_code: None,
                 normalize: &[],
+                plan: None,
             },
         ])),
     }]

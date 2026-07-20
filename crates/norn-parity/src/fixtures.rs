@@ -190,6 +190,47 @@ impl FixtureCache {
         Ok(Vault { path, spellings })
     }
 
+    /// Materialize an authored-plan [`Case`](crate::cases::Case)'s plan file for
+    /// one side: substitute every [`crate::cases::PLAN_VAULT_ROOT_TOKEN`] in
+    /// `template` with `vault`'s own absolute path (the pinned oracle rejects a
+    /// plan whose `vault_root` does not canonicalize to the invoked cwd), and
+    /// write the result to a file dedicated to this `(fixture, side, case_id)` —
+    /// deliberately a SIBLING of the vault directory, never inside it, so the
+    /// plan file is invisible to `crate::poststate`'s tree snapshot and to
+    /// `norn`'s own vault scan. Returns the plan file's absolute path, for
+    /// substitution into the case's argv (the [`crate::cases::PLAN_ARGV_PLACEHOLDER`]
+    /// token).
+    pub fn materialize_plan(
+        &self,
+        fixture: &Fixture,
+        side: Side,
+        case_id: &str,
+        vault: &Path,
+        template: &str,
+    ) -> Result<PathBuf, FixtureError> {
+        let dir = self.canonical_root.join(format!(
+            "{}-{}-{}-{}-plan",
+            fixture.profile_name,
+            fixture.seed,
+            side.tag(),
+            case_id
+        ));
+        std::fs::create_dir_all(&dir).map_err(|source| FixtureError::PlanWrite {
+            path: dir.clone(),
+            source,
+        })?;
+        let content = template.replace(
+            crate::cases::PLAN_VAULT_ROOT_TOKEN,
+            &vault.display().to_string(),
+        );
+        let path = dir.join("plan.json");
+        std::fs::write(&path, content).map_err(|source| FixtureError::PlanWrite {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
+    }
+
     /// Every valid absolute spelling of the vault at `rel` — the canonical
     /// path plus the pre-canonical alias — so normalization strips whichever a
     /// binary happens to echo (see [`Self::new`]).
@@ -261,6 +302,13 @@ pub enum FixtureError {
         seed: u64,
         source: io::Error,
     },
+    /// An authored-plan case's plan file (`FixtureCache::materialize_plan`)
+    /// could not be written — an environment/IO failure, not a verdict, so the
+    /// run aborts rather than guessing at a comparison.
+    PlanWrite {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl std::fmt::Display for FixtureError {
@@ -283,6 +331,9 @@ impl std::fmt::Display for FixtureError {
                 f,
                 "fixture generation failed for profile {profile} seed {seed}: {source}"
             ),
+            FixtureError::PlanWrite { path, source } => {
+                write!(f, "failed to write authored plan file {path:?}: {source}")
+            }
         }
     }
 }

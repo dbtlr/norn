@@ -56,6 +56,7 @@ static FAB_SUITES: &[Suite] = &[Suite {
         requires_doc: None,
         requires_code: None,
         normalize: &[],
+        plan: None,
     }],
 }];
 

@@ -89,6 +89,7 @@ fn one_case_suite(mutating: bool) -> Vec<Suite> {
             requires_doc: None,
             requires_code: None,
             normalize: &[],
+            plan: None,
         }])),
     }]
 }
