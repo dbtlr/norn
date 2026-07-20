@@ -64,6 +64,31 @@ fn eof_early_stub_body() -> String {
     )
 }
 
+/// Like [`mcp_stub_body`], but exits `exit_code` instead of 0 — F1: the
+/// process exit code is part of the comparison even when every frame's
+/// content is byte-identical.
+fn mcp_stub_body_with_exit(version: &str, tools_result: &str, exit_code: i32) -> String {
+    format!(
+        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit {exit_code}\n"
+    )
+}
+
+/// Like [`mcp_stub_body`], but writes one EXTRA response line (`extra_line`,
+/// a full JSON-RPC frame) for an id never requested — F2.
+fn mcp_stub_body_with_extra(version: &str, tools_result: &str, extra_line: &str) -> String {
+    format!(
+        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\necho '{extra_line}'\nexit 0\n"
+    )
+}
+
+/// Like [`mcp_stub_body`], but answers id 2 TWICE (identical content both
+/// times) — F3.
+fn mcp_stub_body_with_duplicate_id2(version: &str, tools_result: &str) -> String {
+    format!(
+        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit 0\n"
+    )
+}
+
 /// A stub that drains stdin then sleeps far longer than the harness's MCP
 /// timeout before ever answering — the runner must kill it and time out
 /// rather than hang. `exec sleep 30` (not a plain `sleep 30`, which forks a
@@ -92,6 +117,45 @@ fn one_case_suite() -> Vec<Suite> {
             requires_code: None,
             normalize: &[],
         }])),
+    }]
+}
+
+const PING_CASE_ID: &str = "fab-ping-clean";
+
+/// A two-case catalog: the MCP case above, plus a plain non-MCP case whose
+/// argv (`["ping"]`) the stub's preamble answers quietly (exit 0, no
+/// output) on both sides regardless — so it always Matches. Used to prove
+/// an MCP driving failure in `Mode::All` does not swallow the rest of the
+/// burn-down (F4): this second case must still produce a normal row.
+fn two_case_suite() -> Vec<Suite> {
+    vec![Suite {
+        name: "fabricated",
+        cases: Box::leak(Box::new([
+            Case {
+                id: MCP_CASE_ID,
+                argv: &["mcp"],
+                fixture: CLEAN_1,
+                stdin: Some(REQUEST_FRAMES),
+                mutating: false,
+                ported: true,
+                expect_oracle_exit: 0,
+                requires_doc: None,
+                requires_code: None,
+                normalize: &[],
+            },
+            Case {
+                id: PING_CASE_ID,
+                argv: &["ping"],
+                fixture: CLEAN_1,
+                stdin: None,
+                mutating: false,
+                ported: true,
+                expect_oracle_exit: 0,
+                requires_doc: None,
+                requires_code: None,
+                normalize: &[],
+            },
+        ])),
     }]
 }
 
@@ -129,8 +193,8 @@ fn identical_frames_modulo_normalized_fields_match() {
         "differing serverInfo.version alone must normalize away to a Match"
     );
     assert!(
-        report.outcomes[0].mcp_diffs.is_empty(),
-        "a Match must carry no reported frame diffs"
+        report.outcomes[0].mcp_divergence.is_none(),
+        "a Match must carry no reported divergence"
     );
 }
 
@@ -162,13 +226,24 @@ fn a_differing_frame_with_no_ledger_entry_is_drift_with_the_right_pointer() {
 
     assert_eq!(report.outcomes.len(), 1);
     assert_eq!(report.outcomes[0].verdict, Verdict::Drift);
-    let diffs = &report.outcomes[0].mcp_diffs;
-    assert_eq!(diffs.len(), 1, "exactly one response frame differs");
-    assert_eq!(diffs[0].id, "2");
-    assert_eq!(diffs[0].method, "tools/list");
+    let divergence = report.outcomes[0]
+        .mcp_divergence
+        .as_ref()
+        .expect("a Drift outcome must carry the divergence detail");
     assert_eq!(
-        diffs[0].pointer, "/result/tools/0",
+        divergence.diffs.len(),
+        1,
+        "exactly one response frame differs"
+    );
+    assert_eq!(divergence.diffs[0].id, "2");
+    assert_eq!(divergence.diffs[0].method, "tools/list");
+    assert_eq!(
+        divergence.diffs[0].pointer, "/result/tools/0",
         "the pointer must lead to the first differing element, not a full dump"
+    );
+    assert!(
+        divergence.exit_mismatch.is_none(),
+        "both stubs exit 0 — only the frame content differs"
     );
 }
 
@@ -295,4 +370,203 @@ fn a_premature_eof_is_a_runner_error_never_a_verdict() {
             report.exit_code()
         ),
     }
+}
+
+// ---- F1: candidate exit code is part of the comparison ---------------------
+
+#[test]
+fn a_candidate_exit_code_mismatch_with_identical_frames_is_drift_not_a_silent_match() {
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let oracle = write_stub(bin_dir.path(), "oracle", &mcp_stub_body("9.9.9", "[]"));
+    // Every frame is byte-identical to the oracle's, but the process itself
+    // exits non-zero — before F1 this would have been blessed as a silent
+    // Match (the candidate exit was discarded).
+    let candidate = write_stub(
+        bin_dir.path(),
+        "candidate",
+        &mcp_stub_body_with_exit("9.9.9", "[]", 3),
+    );
+
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    write_ledger_meta_only(&ledger_path);
+
+    let suites = one_case_suite();
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: &oracle,
+        rewrite: &candidate,
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    let report = run::run_suites(&config, Box::leak(suites.into_boxed_slice())).unwrap();
+
+    assert_eq!(report.outcomes.len(), 1);
+    assert_eq!(
+        report.outcomes[0].verdict,
+        Verdict::Drift,
+        "identical frame content but a differing exit code must not be a silent Match"
+    );
+    let divergence = report.outcomes[0]
+        .mcp_divergence
+        .as_ref()
+        .expect("a Drift outcome must carry the divergence detail");
+    assert_eq!(divergence.exit_mismatch, Some((0, 3)));
+    assert!(
+        divergence.diffs.is_empty(),
+        "frame content genuinely matched — only the exit code differs"
+    );
+}
+
+// ---- F2: an unsolicited response id is a divergence ------------------------
+
+#[test]
+fn an_unsolicited_response_id_is_a_divergence_naming_the_side() {
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let oracle = write_stub(bin_dir.path(), "oracle", &mcp_stub_body("9.9.9", "[]"));
+    // The candidate additionally answers an id (99) that was never
+    // requested, alongside correctly answering ids 1 and 2.
+    let candidate = write_stub(
+        bin_dir.path(),
+        "candidate",
+        &mcp_stub_body_with_extra(
+            "9.9.9",
+            "[]",
+            r#"{"jsonrpc":"2.0","id":99,"result":{"unsolicited":true}}"#,
+        ),
+    );
+
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    write_ledger_meta_only(&ledger_path);
+
+    let suites = one_case_suite();
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: &oracle,
+        rewrite: &candidate,
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    let report = run::run_suites(&config, Box::leak(suites.into_boxed_slice())).unwrap();
+
+    assert_eq!(report.outcomes[0].verdict, Verdict::Drift);
+    let divergence = report.outcomes[0].mcp_divergence.as_ref().unwrap();
+    assert_eq!(divergence.extra_response_ids.len(), 1);
+    assert_eq!(divergence.extra_response_ids[0].id, "99");
+    assert_eq!(
+        divergence.extra_response_ids[0].label, "rewrite",
+        "the side that produced the unsolicited response must be named"
+    );
+    assert!(
+        divergence.diffs.is_empty(),
+        "the requested ids' content genuinely matched"
+    );
+}
+
+// ---- F3: a repeated response id is a divergence ----------------------------
+
+#[test]
+fn a_repeated_response_id_is_a_divergence_naming_the_side_and_count() {
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let oracle = write_stub(bin_dir.path(), "oracle", &mcp_stub_body("9.9.9", "[]"));
+    // The candidate answers id 2 twice (identical content both times) — a
+    // repeat, not a content difference.
+    let candidate = write_stub(
+        bin_dir.path(),
+        "candidate",
+        &mcp_stub_body_with_duplicate_id2("9.9.9", "[]"),
+    );
+
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    write_ledger_meta_only(&ledger_path);
+
+    let suites = one_case_suite();
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: &oracle,
+        rewrite: &candidate,
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    let report = run::run_suites(&config, Box::leak(suites.into_boxed_slice())).unwrap();
+
+    assert_eq!(report.outcomes[0].verdict, Verdict::Drift);
+    let divergence = report.outcomes[0].mcp_divergence.as_ref().unwrap();
+    assert_eq!(divergence.duplicate_response_ids.len(), 1);
+    assert_eq!(divergence.duplicate_response_ids[0].id, "2");
+    assert_eq!(divergence.duplicate_response_ids[0].label, "rewrite");
+    assert_eq!(divergence.duplicate_response_ids[0].count, 2);
+    assert!(
+        divergence.diffs.is_empty(),
+        "the repeated frames' content genuinely matched — only the repeat count is the anomaly"
+    );
+}
+
+// ---- F4: --all renders an MCP driving error as a row, never aborts --------
+
+#[test]
+fn all_mode_renders_an_mcp_driving_error_as_a_runner_error_row_without_aborting() {
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let oracle = write_stub(bin_dir.path(), "oracle", &mcp_stub_body("9.9.9", "[]"));
+    // The candidate never answers id 2 — a premature EOF, exactly the shape
+    // the rewrite's not-yet-ported `mcp` subcommand produces today (it never
+    // reads stdin at all).
+    let candidate = write_stub(bin_dir.path(), "candidate", &eof_early_stub_body());
+
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    write_ledger_meta_only(&ledger_path);
+
+    let suites = two_case_suite();
+    let config = RunConfig {
+        mode: Mode::All,
+        oracle: &oracle,
+        rewrite: &candidate,
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+
+    let report = run::run_suites(&config, Box::leak(suites.into_boxed_slice()))
+        .expect("--all must render a runner-error row instead of aborting the whole run");
+
+    assert_eq!(
+        report.outcomes.len(),
+        2,
+        "both cases must produce a row — the MCP failure must not swallow the rest"
+    );
+
+    let mcp_outcome = report
+        .outcomes
+        .iter()
+        .find(|o| o.case_id == MCP_CASE_ID)
+        .unwrap();
+    assert_eq!(
+        mcp_outcome.verdict,
+        Verdict::Drift,
+        "a runner-error row is still one of the three sanctioned verdicts internally"
+    );
+    let message = mcp_outcome
+        .runner_error
+        .as_ref()
+        .expect("the MCP driving error must be captured as runner_error, not propagated");
+    assert!(
+        message.contains("premature EOF")
+            || message.contains("EofEarly")
+            || message.contains("EOF"),
+        "the runner_error message should name the premature-EOF condition, got: {message}"
+    );
+
+    let ping_outcome = report
+        .outcomes
+        .iter()
+        .find(|o| o.case_id == PING_CASE_ID)
+        .unwrap();
+    assert_eq!(
+        ping_outcome.verdict,
+        Verdict::Match,
+        "the rest of the burn-down must still run and report normally"
+    );
+    assert!(ping_outcome.runner_error.is_none());
 }
