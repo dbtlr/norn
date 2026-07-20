@@ -203,6 +203,13 @@ pub struct DescribeParams {
     pub limit: Option<usize>,
     #[serde(skip_serializing_if = "is_default_filter")]
     pub filter: FilterParams,
+    /// The dynamically-desugared field keys expanded from forgiving
+    /// `--field value` predicates (ADR 0010), gated owner-side against the field
+    /// universe (NRN-367/NRN-374) — mirrors [`FindParams::dynamic_keys`] /
+    /// [`CountParams::dynamic_keys`]. The `--by` grouping keys are NOT listed
+    /// here; only desugared filter predicates are gated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamic_keys: Vec<String>,
 }
 
 /// A `describe` response — the donor `DescribeOutput`, field order preserved so
@@ -420,6 +427,26 @@ mod tests {
         assert!(line.contains(r#""dynamic_keys":["titel"]"#), "{line}");
         assert_eq!(
             serde_json::from_str::<FindParams>(&line)
+                .unwrap()
+                .dynamic_keys,
+            vec!["titel".to_string()]
+        );
+    }
+
+    #[test]
+    fn describe_dynamic_keys_are_absent_when_empty_and_carried_when_present() {
+        // Same backward-compat shape as `FindParams`/`CountParams` (NRN-374): the
+        // common no-dynamic-predicate request omits the field entirely.
+        let mut params = DescribeParams::default();
+        assert!(!serde_json::to_string(&params)
+            .unwrap()
+            .contains("dynamic_keys"));
+
+        params.dynamic_keys = vec!["titel".to_string()];
+        let line = serde_json::to_string(&params).unwrap();
+        assert!(line.contains(r#""dynamic_keys":["titel"]"#), "{line}");
+        assert_eq!(
+            serde_json::from_str::<DescribeParams>(&line)
                 .unwrap()
                 .dynamic_keys,
             vec!["titel".to_string()]

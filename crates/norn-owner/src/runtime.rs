@@ -673,6 +673,15 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
             let today = today_local();
             let result = tokio::task::spawn_blocking(move || {
                 slot.serve_read(|cache| {
+                    // NRN-374: same field-universe gate as `find`/`count` — an
+                    // unknown desugared dynamic field rejects with a did-you-mean
+                    // instead of silently filtering the data-mode summary to
+                    // nothing.
+                    if let Err(rej) =
+                        gate_query_fields(cache, config.as_deref(), &params.dynamic_keys)?
+                    {
+                        return Ok(Err(rej));
+                    }
                     Ok(norn_core::read::describe::execute(
                         cache,
                         config.as_deref(),
