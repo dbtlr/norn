@@ -162,6 +162,7 @@ pub fn run(args: &GetArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         report,
         cols: args.col.clone(),
         sections: args.section.clone(),
+        sort_field: args.paging.sort.clone(),
         explicit: Some(args.format.into()),
         spec: FormatSpec {
             tty: Format::Records,

@@ -44,6 +44,7 @@ pub fn run(args: &DescribeArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
 
     Ok(Output::Describe(DescribeView {
         report,
+        by: args.by.clone(),
         explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Text))),
         spec: FormatSpec {
             tty: Format::Records,

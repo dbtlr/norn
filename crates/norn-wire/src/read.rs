@@ -297,8 +297,10 @@ pub struct CountParams {
     /// `--field value` predicates (ADR 0010), gated owner-side against the field
     /// universe (NRN-367) — mirrors [`FindParams::dynamic_keys`]. The `--by`
     /// grouping keys are NOT listed here; only desugared filter predicates are
-    /// gated (an unknown `--sort`/`--by` key is a separate, still-unplumbed
-    /// surface).
+    /// GATED (a hard rejection). An unknown `--by` key is a separate, softer
+    /// surface (NRN-374): the CLI display layer warns (never rejects) when a
+    /// `--by` field groups every matched document into `(missing)` — see
+    /// `norn_cli::display::emit::warn_unknown_by_count`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dynamic_keys: Vec<String>,
 }
