@@ -132,8 +132,9 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             &cli.global,
             presenter,
         ),
-        // The eight mutation verbs share one interactive-confirm shape
-        // (NRN-389): `emit_mutation` renders the first (ladder-derived)
+        // The seven mutation verbs that write (repair stays read-only; init
+        // is not yet ported) share one interactive-confirm shape (NRN-389):
+        // `emit_mutation` renders the first (ladder-derived)
         // report exactly like `emit` would, and — ONLY when `can_prompt` is
         // true and stdin turns out to be a real terminal and that first
         // render was a clean, unrefused forecast — prompts on stderr and, on

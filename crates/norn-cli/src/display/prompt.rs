@@ -12,9 +12,11 @@
 //! donor's `new` gate reads as an oversight, not a deliberate choice).
 //!
 //! This port standardizes on ONE prompt string and ONE gate (`stdin`) across
-//! all eight mutation verbs (NRN-389 uniformity) — a deliberate redesign call
-//! the parity harness cannot observe either way, since this text is TTY-only
-//! and never appears in piped output.
+//! all seven mutation verbs that write (`set`/`new`/`edit`/`move`/`delete`/
+//! `rewrite-wikilink`/`apply` — `repair` stays read-only, and `init` is not
+//! yet ported) (NRN-389 uniformity) — a deliberate redesign call the parity
+//! harness cannot observe either way, since this text is TTY-only and never
+//! appears in piped output.
 
 use std::io::{self, BufRead, Write};
 
