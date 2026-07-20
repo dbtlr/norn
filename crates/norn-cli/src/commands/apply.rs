@@ -25,12 +25,24 @@ use norn_wire::ApplyParams;
 /// schema mismatch and every owner-side pre-write decline arrive IN the report
 /// (`outcome = refused`) the display renders at exit 2.
 pub fn run(args: &ApplyArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
-    let json = matches!(args.format, ApplyFormat::Json);
-
     // --dry-run wins over --yes; no --yes is a forecast (the shared mode ladder).
-    // Resolved BEFORE the schema branch so a pre-wire refusal reports a truthful
-    // `dry_run` (a forecast unless `--yes` was actually given).
-    let confirm = args.yes && !args.dry_run;
+    run_confirm(args, global, args.yes && !args.dry_run)
+}
+
+/// Same as [`run`], but with `confirm` supplied rather than derived from
+/// `args` — the dispatch loop's interactive retry (NRN-389) calls this
+/// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
+/// routed request, not a replay of the cached forecast: the plan is re-read
+/// and re-executed fresh under the owner's lock, exactly as a direct `--yes`
+/// invocation would (the donor's own `apply` prompt worked the same way — it
+/// prompted, then executed the SAME in-process `ApplyContext`, which the
+/// routed owner boundary here re-runs instead of replaying).
+pub(crate) fn run_confirm(
+    args: &ApplyArgs,
+    global: &GlobalArgs,
+    confirm: bool,
+) -> Result<Output, Diagnostic> {
+    let json = matches!(args.format, ApplyFormat::Json);
 
     // ── Preamble: read + format-detect + parse + schema-check (client-side) ──
     let raw = read_plan_source(&args.plan_path)?;

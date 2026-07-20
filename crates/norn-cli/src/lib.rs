@@ -21,7 +21,7 @@ use clap::Parser;
 use norn_config::ConfigHome;
 
 use crate::cli::{Cli, Command};
-use crate::display::{emit, Diagnostic, Presenter};
+use crate::display::{emit, emit_mutation, Diagnostic, Presenter};
 
 mod cli;
 mod commands;
@@ -132,47 +132,104 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             &cli.global,
             presenter,
         ),
-        Command::Set(args) => emit(
-            commands::set::run(&args, &cli.global),
-            &cli.global,
-            presenter,
-        ),
-        Command::Edit(args) => emit(
-            commands::edit::run(&args, &cli.global),
-            &cli.global,
-            presenter,
-        ),
-        Command::New(args) => emit(
-            commands::new::run(&args, &cli.global),
-            &cli.global,
-            presenter,
-        ),
+        // The seven mutation verbs that write (repair stays read-only; init
+        // is not yet ported) share one interactive-confirm shape (NRN-389):
+        // `emit_mutation` renders the first (ladder-derived)
+        // report exactly like `emit` would, and — ONLY when `can_prompt` is
+        // true and stdin turns out to be a real terminal and that first
+        // render was a clean, unrefused forecast — prompts on stderr and, on
+        // 'y', re-runs the SAME verb with `confirm: true` (a second routed
+        // request, re-planned fresh under the owner's lock) and renders that
+        // as the final outcome. `can_prompt` mirrors the shared
+        // `--dry-run`/`--yes`/`--format json` mode ladder each verb's `run`
+        // already resolves `confirm` from: an explicit `--dry-run` or
+        // `--yes` already answered the apply question, and `--format json`
+        // is output-shape-only and never implies interactive consent — none
+        // of those three should ever reach a prompt.
+        Command::Set(args) => {
+            let can_prompt =
+                !args.dry_run && !args.yes && !matches!(args.format, cli::SetFormat::Json);
+            emit_mutation(
+                commands::set::run(&args, &cli.global),
+                can_prompt,
+                || commands::set::run_confirm(&args, &cli.global, true),
+                &cli.global,
+                presenter,
+            )
+        }
+        Command::Edit(args) => {
+            let can_prompt =
+                !args.dry_run && !args.yes && !matches!(args.format, cli::EditFormat::Json);
+            emit_mutation(
+                commands::edit::run(&args, &cli.global),
+                can_prompt,
+                || commands::edit::run_confirm(&args, &cli.global, true),
+                &cli.global,
+                presenter,
+            )
+        }
+        Command::New(args) => {
+            let can_prompt =
+                !args.dry_run && !args.yes && !matches!(args.format, cli::NewFormat::Json);
+            emit_mutation(
+                commands::new::run(&args, &cli.global),
+                can_prompt,
+                || commands::new::run_confirm(&args, &cli.global, true),
+                &cli.global,
+                presenter,
+            )
+        }
         Command::Init(_) => presenter.not_yet_ported("init"),
-        Command::Move(args) => emit(
-            commands::move_doc::run(&args, &cli.global),
-            &cli.global,
-            presenter,
-        ),
-        Command::Delete(args) => emit(
-            commands::delete::run(&args, &cli.global),
-            &cli.global,
-            presenter,
-        ),
-        Command::Apply(args) => emit(
-            commands::apply::run(&args, &cli.global),
-            &cli.global,
-            presenter,
-        ),
+        Command::Move(args) => {
+            let can_prompt =
+                !args.dry_run && !args.yes && !matches!(args.format, cli::MoveFormat::Json);
+            emit_mutation(
+                commands::move_doc::run(&args, &cli.global),
+                can_prompt,
+                || commands::move_doc::run_confirm(&args, &cli.global, true),
+                &cli.global,
+                presenter,
+            )
+        }
+        Command::Delete(args) => {
+            let can_prompt =
+                !args.dry_run && !args.yes && !matches!(args.format, cli::DeleteFormat::Json);
+            emit_mutation(
+                commands::delete::run(&args, &cli.global),
+                can_prompt,
+                || commands::delete::run_confirm(&args, &cli.global, true),
+                &cli.global,
+                presenter,
+            )
+        }
+        Command::Apply(args) => {
+            let can_prompt =
+                !args.dry_run && !args.yes && !matches!(args.format, cli::ApplyFormat::Json);
+            emit_mutation(
+                commands::apply::run(&args, &cli.global),
+                can_prompt,
+                || commands::apply::run_confirm(&args, &cli.global, true),
+                &cli.global,
+                presenter,
+            )
+        }
         Command::Repair(args) => emit(
             commands::repair::run(&args, &cli.global),
             &cli.global,
             presenter,
         ),
-        Command::RewriteWikilink(args) => emit(
-            commands::rewrite_wikilink::run(&args, &cli.global),
-            &cli.global,
-            presenter,
-        ),
+        Command::RewriteWikilink(args) => {
+            let can_prompt = !args.dry_run
+                && !args.yes
+                && !matches!(args.format, cli::RewriteWikilinkFormat::Json);
+            emit_mutation(
+                commands::rewrite_wikilink::run(&args, &cli.global),
+                can_prompt,
+                || commands::rewrite_wikilink::run_confirm(&args, &cli.global, true),
+                &cli.global,
+                presenter,
+            )
+        }
         Command::Validate(args) => emit(
             commands::validate::run(&args, &cli.global),
             &cli.global,

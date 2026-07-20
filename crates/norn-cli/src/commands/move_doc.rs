@@ -17,6 +17,20 @@ use norn_wire::MoveParams;
 /// decline arrives IN the report (`outcome = refused`) the display renders at
 /// exit 2.
 pub fn run(args: &MoveArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
+    run_confirm(args, global, args.yes && !args.dry_run)
+}
+
+/// Same as [`run`], but with `confirm` supplied rather than derived from
+/// `args` — the dispatch loop's interactive retry (NRN-389) calls this
+/// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
+/// routed request, not a replay of the cached forecast: the owner re-resolves
+/// the source and re-plans the move + cascade fresh under its lock, exactly
+/// as a direct `--yes` invocation would.
+pub(crate) fn run_confirm(
+    args: &MoveArgs,
+    global: &GlobalArgs,
+    confirm: bool,
+) -> Result<Output, Diagnostic> {
     let params = MoveParams {
         from: args.src.clone(),
         to: args.dst.clone(),
@@ -24,8 +38,7 @@ pub fn run(args: &MoveArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         parents: args.parents,
         force: args.force,
         no_link_rewrite: args.no_link_rewrite,
-        // --dry-run wins over --yes; no --yes is a forecast.
-        confirm: args.yes && !args.dry_run,
+        confirm,
     };
 
     let mut session = crate::routed::open_session(global)?;

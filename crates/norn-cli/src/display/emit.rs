@@ -39,6 +39,7 @@ use super::output::{
     GetView, MoveMutationView, NewMutationView, Output, RepairView, RewriteWikilinkView,
     SetMutationView, ValidateView, VaultListView,
 };
+use super::prompt;
 use super::sink::Sink;
 use super::{Diagnostic, Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 use crate::cli::RepairPlanFormat;
@@ -49,6 +50,14 @@ use norn_core::plan::MigrationPlan;
 /// [`FormatSpec::resolve`](super::format::FormatSpec::resolve).
 fn is_stdout_tty() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
+
+/// Whether the process stdin is a terminal — the interactive-confirm gate
+/// (NRN-389). Deliberately separate from [`is_stdout_tty`]: the confirm
+/// prompt READS from stdin, so stdin is the terminal whose ttyness actually
+/// matters, independent of whatever stdout is connected to.
+fn is_stdin_tty() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
 /// The effective terminal width for record wrapping (donor default 80).
@@ -128,6 +137,88 @@ pub fn emit<O: Write, E: Write>(
             })();
             render_outcome(result, err)
         }
+    }
+}
+
+/// Render a mutation verb's first report and, when the invocation is
+/// interactive-eligible, carry the donor's preview → prompt → apply
+/// conversation (NRN-389).
+///
+/// The first render is BYTE-IDENTICAL to today's non-interactive path in
+/// every case — forecast (with its `Apply with --yes` hint), applied, or
+/// refused — because this wraps [`emit`] rather than changing it. Only when
+/// ALL of the following hold does anything additional happen:
+///
+/// - `prompt_eligible` is true (the caller's `--dry-run`/`--yes`/
+///   `--format json` ladder decided this run was a plain, unconfirmed
+///   forecast attempt — the same ladder that decides `confirm` itself);
+/// - the first render's exit code is [`EXIT_OK`] (a clean forecast, not a
+///   refusal or an operational error — nothing to confirm on those); and
+/// - stdin is a real terminal ([`is_stdin_tty`]).
+///
+/// Then: prompt on stderr (blank line + `Proceed? [y/N] `, donor text). On a
+/// "y"/"yes" answer, call `rerun` — a SECOND routed request with `confirm`
+/// forced true, re-planned and applied fresh under the owner's lock, exactly
+/// as a direct `--yes` invocation would — and render its report as the FINAL
+/// outcome. On anything else (a declined answer, EOF, or an I/O error
+/// reading the prompt), decline: no second request, exit
+/// [`EXIT_OPERATIONAL`] (1) — the donor's `process::exit(1)` on a declined
+/// confirm, carried here as a return rather than a hard process exit.
+///
+/// Piped / non-TTY invocations never reach the prompt at all (`is_stdin_tty`
+/// is false), so today's forecast-plus-hint contract for scripts and the
+/// parity harness is unchanged byte-for-byte.
+///
+/// `--body-from-stdin` (`set`/`new`) at a TTY auto-declines rather than
+/// prompting: the body read already consumed stdin to EOF before the ladder
+/// runs, so a subsequent `confirm()` read sees EOF and returns `Ok(false)`.
+/// This is safe (no write happens on a decline) but means the human never
+/// actually gets asked — an accepted, documented gap rather than a bug: the
+/// same stdin cannot serve both a piped body and an interactive prompt.
+pub fn emit_mutation<O: Write, E: Write>(
+    first: Result<Output, Diagnostic>,
+    prompt_eligible: bool,
+    rerun: impl FnOnce() -> Result<Output, Diagnostic>,
+    global: &GlobalArgs,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    confirm_and_finish(
+        first,
+        prompt_eligible,
+        is_stdin_tty(),
+        prompt::confirm_interactive,
+        rerun,
+        global,
+        presenter,
+    )
+}
+
+/// The injectable core of [`emit_mutation`] (NRN-389 F2). Identical decision
+/// logic, but with the stdin-tty read and the confirm reader taken as
+/// parameters instead of wired to the real process — the donor's own
+/// `prompt::confirm<R, W>` factoring is the precedent for pulling the I/O
+/// dependency out from behind the policy. Without this seam the prompt
+/// branch is unreachable under `cargo test`: the test process's stdin is
+/// never a real terminal, so `is_stdin_tty()` always reads false there.
+/// [`emit_mutation`] is the one production caller and always supplies the
+/// real [`is_stdin_tty`] result and [`prompt::confirm_interactive`]; tests
+/// call this directly with a fixed `stdin_is_tty` and a stub `confirm`.
+fn confirm_and_finish<O: Write, E: Write>(
+    first: Result<Output, Diagnostic>,
+    prompt_eligible: bool,
+    stdin_is_tty: bool,
+    confirm: impl FnOnce() -> io::Result<bool>,
+    rerun: impl FnOnce() -> Result<Output, Diagnostic>,
+    global: &GlobalArgs,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let exit = emit(first, global, presenter);
+    if !prompt_eligible || exit != EXIT_OK || !stdin_is_tty {
+        return exit;
+    }
+    match confirm() {
+        Ok(true) => emit(rerun(), global, presenter),
+        Ok(false) | Err(_) => EXIT_OPERATIONAL,
     }
 }
 
@@ -2403,10 +2494,253 @@ mod tests {
     use std::collections::BTreeMap;
 
     use norn_wire::{
-        DataSummary, DateBounds, DescribeReport, FieldDistribution, GetRecord, GetReport,
-        SkippedField, ValueCount,
+        CodedError, DataSummary, DateBounds, DescribeReport, FieldDistribution, GetRecord,
+        GetReport, SetReport, SkippedField, ValueCount,
     };
     use serde_json::json;
+
+    // ── emit_mutation / confirm_and_finish (NRN-389 F2) ─────────────────────
+    //
+    // `emit_mutation` itself just wires `confirm_and_finish` to the real
+    // `is_stdin_tty()` and `prompt::confirm_interactive`; these tests pin
+    // `confirm_and_finish`'s decision logic directly with an injected
+    // `stdin_is_tty` and `confirm` closure, since real stdin is never a
+    // terminal under `cargo test`.
+
+    /// A `set` report: `outcome: Refused` renders at exit 2; anything else
+    /// (the donor's `MutationOutcome::Applied`, which really means "a valid
+    /// plan" — `applied` is the separate bool distinguishing a forecast from
+    /// a real write) renders at exit 0 regardless of `applied`.
+    fn set_report(applied: bool, outcome: MutationOutcome) -> SetReport {
+        SetReport {
+            schema_version: 2,
+            trace_id: String::new(),
+            operation: "set".into(),
+            target: "a.md".into(),
+            frontmatter_changes: vec![],
+            body_changed: false,
+            body_bytes_new: None,
+            body_bytes_old: None,
+            applied,
+            outcome,
+            error: match outcome {
+                MutationOutcome::Refused => Some(CodedError {
+                    code: "set-refused".into(),
+                    message: "refused".into(),
+                    path: None,
+                }),
+                MutationOutcome::Applied => None,
+            },
+            warnings: vec![],
+        }
+    }
+
+    fn set_output(applied: bool, outcome: MutationOutcome) -> Result<Output, Diagnostic> {
+        Ok(Output::Set(SetMutationView {
+            report: set_report(applied, outcome),
+            explicit: Some(Format::Records),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        }))
+    }
+
+    /// A clean, unrefused forecast: `applied: false`, `outcome: Applied` — the
+    /// shape every mutation verb's first render produces when the ladder
+    /// decided `confirm: false` and nothing was refused. Renders at exit 0.
+    fn forecast_output() -> Result<Output, Diagnostic> {
+        set_output(false, MutationOutcome::Applied)
+    }
+
+    /// A refused report — renders at exit 2 (`EXIT_USAGE`), so a test that
+    /// sees this exit code proves the render came from THIS report and not
+    /// the forecast, without needing to inspect any state beyond the return
+    /// value.
+    fn refused_output() -> Result<Output, Diagnostic> {
+        set_output(false, MutationOutcome::Refused)
+    }
+
+    #[test]
+    fn eligible_confirm_yes_invokes_rerun_exactly_once_and_returns_its_exit() {
+        let global = global_args();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let rerun_calls = std::cell::Cell::new(0u32);
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            confirm_and_finish(
+                forecast_output(),
+                /* prompt_eligible */ true,
+                /* stdin_is_tty */ true,
+                /* confirm */ || Ok(true),
+                /* rerun */
+                || {
+                    rerun_calls.set(rerun_calls.get() + 1);
+                    // A REFUSED second report (exit 2) so the returned exit
+                    // is unambiguously the rerun's, not the forecast's (which
+                    // renders at exit 0).
+                    refused_output()
+                },
+                &global,
+                &mut presenter,
+            )
+        };
+        assert_eq!(rerun_calls.get(), 1, "rerun must be invoked exactly once");
+        assert_eq!(code, EXIT_USAGE, "the SECOND report's exit is returned");
+    }
+
+    #[test]
+    fn eligible_confirm_no_declines_without_ever_calling_rerun() {
+        let global = global_args();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let rerun_called = std::cell::Cell::new(false);
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            confirm_and_finish(
+                forecast_output(),
+                true,
+                true,
+                || Ok(false),
+                || {
+                    rerun_called.set(true);
+                    forecast_output()
+                },
+                &global,
+                &mut presenter,
+            )
+        };
+        assert!(!rerun_called.get(), "a decline must never re-run");
+        assert_eq!(code, EXIT_OPERATIONAL);
+    }
+
+    /// A read error while prompting (e.g. a closed/broken stdin) — treated
+    /// the same as a decline: no re-run, `EXIT_OPERATIONAL`. Genuine EOF
+    /// (an empty read) is already covered by `prompt::confirm` itself, which
+    /// resolves EOF to `Ok(false)` — the "confirm-no" case above — before it
+    /// ever reaches this seam; `Err` here models a hard I/O failure instead.
+    #[test]
+    fn eligible_confirm_io_error_declines_without_ever_calling_rerun() {
+        let global = global_args();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let rerun_called = std::cell::Cell::new(false);
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            confirm_and_finish(
+                forecast_output(),
+                true,
+                true,
+                || Err(io::Error::other("stdin closed")),
+                || {
+                    rerun_called.set(true);
+                    forecast_output()
+                },
+                &global,
+                &mut presenter,
+            )
+        };
+        assert!(!rerun_called.get(), "an I/O error must never re-run");
+        assert_eq!(code, EXIT_OPERATIONAL);
+    }
+
+    #[test]
+    fn not_prompt_eligible_never_prompts_and_returns_the_first_exit() {
+        // Represents `--yes` / `--dry-run` / `--format json`: the caller's
+        // ladder already decided `prompt_eligible: false`, regardless of
+        // stdin.
+        let global = global_args();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let confirm_called = std::cell::Cell::new(false);
+        let rerun_called = std::cell::Cell::new(false);
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            confirm_and_finish(
+                forecast_output(),
+                /* prompt_eligible */ false,
+                /* stdin_is_tty */ true,
+                || {
+                    confirm_called.set(true);
+                    Ok(true)
+                },
+                || {
+                    rerun_called.set(true);
+                    forecast_output()
+                },
+                &global,
+                &mut presenter,
+            )
+        };
+        assert!(!confirm_called.get(), "not eligible must never prompt");
+        assert!(!rerun_called.get(), "not eligible must never re-run");
+        assert_eq!(code, EXIT_OK, "the first (forecast) exit is returned");
+    }
+
+    #[test]
+    fn a_refused_first_render_never_prompts_even_when_otherwise_eligible() {
+        // A non-EXIT_OK first render (here: refused, exit 2) has nothing to
+        // confirm — there is no valid plan to apply.
+        let global = global_args();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let confirm_called = std::cell::Cell::new(false);
+        let rerun_called = std::cell::Cell::new(false);
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            confirm_and_finish(
+                refused_output(),
+                true,
+                true,
+                || {
+                    confirm_called.set(true);
+                    Ok(true)
+                },
+                || {
+                    rerun_called.set(true);
+                    forecast_output()
+                },
+                &global,
+                &mut presenter,
+            )
+        };
+        assert!(!confirm_called.get(), "a refusal must never prompt");
+        assert!(!rerun_called.get(), "a refusal must never re-run");
+        assert_eq!(code, EXIT_USAGE, "the refusal's own exit is returned");
+    }
+
+    #[test]
+    fn non_tty_stdin_never_prompts_even_when_otherwise_eligible() {
+        // The piped/non-interactive contract: today's forecast-plus-hint
+        // behavior, untouched.
+        let global = global_args();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let confirm_called = std::cell::Cell::new(false);
+        let rerun_called = std::cell::Cell::new(false);
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            confirm_and_finish(
+                forecast_output(),
+                true,
+                /* stdin_is_tty */ false,
+                || {
+                    confirm_called.set(true);
+                    Ok(true)
+                },
+                || {
+                    rerun_called.set(true);
+                    forecast_output()
+                },
+                &global,
+                &mut presenter,
+            )
+        };
+        assert!(!confirm_called.get(), "non-tty stdin must never prompt");
+        assert!(!rerun_called.get(), "non-tty stdin must never re-run");
+        assert_eq!(code, EXIT_OK);
+    }
 
     // ── count ────────────────────────────────────────────────────────────
 

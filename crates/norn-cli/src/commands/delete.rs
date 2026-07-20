@@ -16,11 +16,25 @@ use norn_wire::DeleteParams;
 /// decline (target not found, backlinks present, …) arrives IN the report
 /// (`outcome = refused`) the display renders at exit 2.
 pub fn run(args: &DeleteArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
+    run_confirm(args, global, args.yes && !args.dry_run)
+}
+
+/// Same as [`run`], but with `confirm` supplied rather than derived from
+/// `args` — the dispatch loop's interactive retry (NRN-389) calls this
+/// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
+/// routed request, not a replay of the cached forecast: the owner re-runs the
+/// backlink-policy preflight and cascade fresh under its lock, exactly as a
+/// direct `--yes` invocation would.
+pub(crate) fn run_confirm(
+    args: &DeleteArgs,
+    global: &GlobalArgs,
+    confirm: bool,
+) -> Result<Output, Diagnostic> {
     let params = DeleteParams {
         target: args.doc.clone(),
         rewrite_to: args.rewrite_to.clone(),
         allow_broken_links: args.allow_broken_links,
-        confirm: args.yes && !args.dry_run,
+        confirm,
     };
 
     let mut session = crate::routed::open_session(global)?;
