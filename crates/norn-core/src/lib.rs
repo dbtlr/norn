@@ -51,6 +51,7 @@ pub mod env;
 pub mod grammar;
 pub mod graph;
 pub mod links;
+pub mod mutate;
 pub mod plan;
 pub mod planner;
 pub mod query;
