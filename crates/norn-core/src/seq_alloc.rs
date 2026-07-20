@@ -36,10 +36,18 @@ pub fn has_seq(path: &Utf8Path) -> bool {
 /// highest-id file.
 pub fn dir_file_names(dir: &Utf8Path) -> std::io::Result<Vec<String>> {
     match std::fs::read_dir(dir.as_std_path()) {
-        Ok(entries) => Ok(entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect()),
+        Ok(entries) => {
+            // Per-entry errors propagate too: dropping an entry could hide the
+            // real highest id and mint a duplicate. Non-UTF-8 names are skipped
+            // — they cannot match a UTF-8 `{{seq}}` template.
+            let mut names = Vec::new();
+            for entry in entries {
+                if let Ok(name) = entry?.file_name().into_string() {
+                    names.push(name);
+                }
+            }
+            Ok(names)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e),
     }

@@ -174,15 +174,21 @@ pub fn evaluate_owner_preconditions(
             .is_some_and(|changes| changes.len() > 1)
         {
             let result = &mut results[position];
-            result.status = PreconditionStatus::Failed;
-            result.error = Some(ApplyError {
-                code: "owner-claim-conflict".to_string(),
-                message: format!(
-                    "owner-set precondition '{}' conflicts with another planned create for stem '{normalized_stem}'",
-                    result.id
-                ),
-                path: None,
-            });
+            // Only upgrade a still-passing result: a precondition that already
+            // failed carries the more specific diagnostic (owner-set-mismatch
+            // with its actual_paths) — don't clobber it with the generic
+            // conflict message.
+            if result.status == PreconditionStatus::Passed {
+                result.status = PreconditionStatus::Failed;
+                result.error = Some(ApplyError {
+                    code: "owner-claim-conflict".to_string(),
+                    message: format!(
+                        "owner-set precondition '{}' conflicts with another planned create for stem '{normalized_stem}'",
+                        result.id
+                    ),
+                    path: None,
+                });
+            }
         }
     }
 

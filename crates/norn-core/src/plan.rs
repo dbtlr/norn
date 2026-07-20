@@ -173,6 +173,22 @@ operations:
     }
 
     #[test]
+    fn canonical_hash_is_stable_across_field_key_order() {
+        // Semantically identical plans with `fields` keys authored in different
+        // orders hash identically — pins the map-canonicalization the hash
+        // depends on (a future preserve_order opt-in must not change digests).
+        let a: MigrationPlan = serde_yaml::from_str(
+            "schema_version: 2\nvault_root: /abs/vault\noperations:\n  - kind: move_document\n    fields:\n      src: a.md\n      dst: b.md\n",
+        )
+        .unwrap();
+        let b: MigrationPlan = serde_yaml::from_str(
+            "schema_version: 2\nvault_root: /abs/vault\noperations:\n  - kind: move_document\n    fields:\n      dst: b.md\n      src: a.md\n",
+        )
+        .unwrap();
+        assert_eq!(a.canonical_hash(), b.canonical_hash());
+    }
+
+    #[test]
     fn owner_set_precondition_round_trips_with_narrow_selector() {
         let json = serde_json::json!({
             "schema_version": 2,
