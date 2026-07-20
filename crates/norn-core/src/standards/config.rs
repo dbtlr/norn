@@ -791,17 +791,22 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             }
         }
 
-        // frontmatter_defaults: path.X references must be declared in this rule's match.path.
-        let declared: std::collections::BTreeSet<String> = rule
-            .r#match
-            .path
-            .as_deref()
-            .and_then(|p| {
-                crate::standards::path_match::PathPattern::parse(p)
-                    .ok()
-                    .map(|pp| pp.declared_variables().into_iter().collect())
-            })
-            .unwrap_or_default();
+        // frontmatter_defaults: path.X references must be declared by the rule's
+        // effective matcher. NRN-352: `target` is lowered into a PathPattern WITH
+        // captures (via effective_match_glob → glob_from_target), so a target-based
+        // creatable rule can legitimately declare `{{path.X}}` in its defaults. Read
+        // the allowed-vars set from `match.path` OR `target`, consistent with the
+        // effective_match_glob derivation the conflict-check uses — not from
+        // `match.path` alone (which is None for target rules and spuriously rejected
+        // every target-based path capture).
+        let declared: std::collections::BTreeSet<String> =
+            effective_match_glob(rule.r#match.path.as_deref(), rule.target.as_deref())
+                .and_then(|glob| {
+                    crate::standards::path_match::PathPattern::parse(&glob)
+                        .ok()
+                        .map(|pp| pp.declared_variables().into_iter().collect())
+                })
+                .unwrap_or_default();
         // Fields sorted for deterministic error output.
         let mut default_entries: Vec<(&String, &serde_json::Value)> =
             rule.frontmatter_defaults.iter().collect();
@@ -2071,6 +2076,48 @@ validate:
         );
         // In YAML double-quoted strings, \n is a newline escape.
         assert_eq!(r.body.as_deref(), Some("## Context\n"));
+    }
+
+    // NRN-352: a target-based rule lowers `target` into a PathPattern WITH
+    // captures, so a `{{path.X}}` reference in its frontmatter_defaults is valid
+    // when `X` is a full-segment `var.`/`path.` capture in the target. The
+    // declared-vars set is read from the effective matcher (match.path OR target),
+    // so this must be accepted rather than spuriously rejected.
+    #[test]
+    fn target_rule_may_declare_path_capture_in_defaults() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: task
+      target: "Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"
+      frontmatter_defaults:
+        workspace: "[[{{path.workspace}}]]"
+"#;
+        parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml")).expect(
+            "a target-based path capture declared in frontmatter_defaults must be accepted (NRN-352)",
+        );
+    }
+
+    // NRN-352 guard: an undeclared capture on a target-based rule is still
+    // rejected — the fix widens the allowed set to the target's captures, it does
+    // not disable the check.
+    #[test]
+    fn target_rule_rejects_undeclared_path_capture_in_defaults() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: task
+      target: "Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"
+      frontmatter_defaults:
+        oops: "{{path.nonexistent}}"
+"#;
+        let err = parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("path.nonexistent") && err.contains("not declared"),
+            "got: {err}"
+        );
     }
 
     #[test]
