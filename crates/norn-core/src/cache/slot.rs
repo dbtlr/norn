@@ -247,7 +247,35 @@ impl VaultCacheSlot {
         touched_paths: &[Utf8PathBuf],
         baseline: GraphIndex,
     ) -> Result<ApplyIncrementOutcome, CacheError> {
-        let generation = self.ensure_current()?;
+        self.commit_apply_increments_tracked(touched_paths, baseline)
+            .1
+    }
+
+    /// The body of [`commit_apply_increments`](Self::commit_apply_increments),
+    /// also returning the generation number the increment was BOUND to — the one
+    /// this call's own [`ensure_current`](Self::ensure_current) resolved, `None`
+    /// when that resolution itself failed (no generation ran).
+    ///
+    /// The bound number is captured HERE, inside the commit's own scope, so a
+    /// corruption-eviction targets exactly the generation the increment ran on.
+    /// Capturing it in the caller (before this method's `ensure_current`) would be
+    /// wrong: a concurrent reopen can advance the slot's current generation
+    /// between the two points, and evicting the pre-captured (older) number would
+    /// leave the generation the increment actually corrupted in place — the
+    /// NRN-253 lag-hole the donor closed by binding the eviction key at the commit
+    /// site (donor `env/refresh.rs`).
+    fn commit_apply_increments_tracked(
+        &self,
+        touched_paths: &[Utf8PathBuf],
+        baseline: GraphIndex,
+    ) -> (Option<u64>, Result<ApplyIncrementOutcome, CacheError>) {
+        let generation = match self.ensure_current() {
+            Ok(generation) => generation,
+            Err(error) => return (None, Err(error)),
+        };
+        // The generation the increment is bound to — the eviction key, captured
+        // from THIS call's `ensure_current`, not from the caller.
+        let bound = generation.number;
         let expected_fingerprint = graph_fingerprint(&baseline);
 
         // Reserve the publication baseline on the write connection.
@@ -256,7 +284,10 @@ impl VaultCacheSlot {
                 .write_cache
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            write.reserve_increment_commit(&expected_fingerprint)?
+            match write.reserve_increment_commit(&expected_fingerprint) {
+                Ok(reservation) => reservation,
+                Err(error) => return (Some(bound), Err(error)),
+            }
         };
 
         // Build the driver off the writer thread (the parse is read-only over the
@@ -276,7 +307,7 @@ impl VaultCacheSlot {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner());
                 let _ = write.discard_increment_reservation(&reservation);
-                return Err(error);
+                return (Some(bound), Err(error));
             }
         };
 
@@ -288,7 +319,7 @@ impl VaultCacheSlot {
         // Drop-on-death guard: abandon the increment if its target generation is
         // no longer the slot's current one (reads `Generation::number`).
         let shared = Arc::clone(&self.shared);
-        let number = generation.number;
+        let number = bound;
         let handle = self.queue.submit_bulk(
             move || {
                 let mut commit = commit_step.lock().unwrap_or_else(|p| p.into_inner());
@@ -312,7 +343,7 @@ impl VaultCacheSlot {
             })),
         );
 
-        match handle.wait() {
+        let outcome = match handle.wait() {
             Outcome::Done(Ok(())) => Ok(ApplyIncrementOutcome::Published),
             Outcome::Done(Err(message)) => Err(CacheError::Io {
                 path: Utf8PathBuf::from("<increment-commit>"),
@@ -321,7 +352,8 @@ impl VaultCacheSlot {
             // The guard turned false or the queue shut down: the target generation
             // is gone, so the next generation's open re-derives everything.
             Outcome::Dropped | Outcome::Panicked => Ok(ApplyIncrementOutcome::Degraded),
-        }
+        };
+        (Some(bound), outcome)
     }
 
     /// Commit a mutation's cache increment as **fire-and-degrade**: the mutation
@@ -337,20 +369,34 @@ impl VaultCacheSlot {
     /// (NRN-253): a generation whose staged increment failed would keep serving.
     /// So on ANY increment failure we EVICT the generation the increment ran on
     /// (dropping it forces the next [`ensure_current`](Self::ensure_current) to
-    /// re-derive from files — the fail-safe, strictly stronger than the
-    /// corruption-only guard), surface an operator note the owner renders later,
+    /// re-derive from files), surface an operator note the owner renders later,
     /// and SUCCEED. `Degraded` (the target generation died mid-commit) is already
     /// benign — no eviction, just the note.
+    ///
+    /// The eviction key is the generation
+    /// [`commit_apply_increments_tracked`](Self::commit_apply_increments_tracked)
+    /// BOUND (its own `ensure_current`), never a value captured here before the
+    /// commit ran — closing the concurrency window where a reopen advances the
+    /// slot between capture and bind and eviction would miss the corrupt generation.
+    ///
+    /// DELIBERATE DIVERGENCE from the donor (`env/refresh.rs`): the donor evicts
+    /// ONLY on the corruption class (a failed chunk commit) and KEEPS the
+    /// generation on a stale-baseline / reservation failure (it just notes the
+    /// degrade). This evicts on ANY increment failure. Rationale: it is
+    /// trust-conservative (files are the source of truth, so a re-derive is always
+    /// safe) and strictly closes the corrupt-generation-keeps-serving hole
+    /// (NRN-253) rather than reasoning per-error about which failures can leave a
+    /// generation serving stale rows; the cost is a spurious full re-derive on the
+    /// benign baseline-drift path (rare — an increment failure at all is rare).
+    /// Not ledgerable yet: `docs/parity-ledger.toml` is strictly case-keyed and no
+    /// apply-verb parity cases exist; anchor this to a case when they do.
     pub fn commit_apply_increments_fire_and_degrade(
         &self,
         touched_paths: &[Utf8PathBuf],
         baseline: GraphIndex,
     ) -> ApplyIncrementCommit {
-        // The generation the increment will run on (captured before the commit's
-        // own `ensure_current`), so eviction targets exactly it and never a newer
-        // generation a concurrent open already installed.
-        let ran_on = self.current_generation_number();
-        match self.commit_apply_increments(touched_paths, baseline) {
+        let (bound, result) = self.commit_apply_increments_tracked(touched_paths, baseline);
+        match result {
             Ok(ApplyIncrementOutcome::Published) => ApplyIncrementCommit::Published,
             Ok(ApplyIncrementOutcome::Degraded) => ApplyIncrementCommit::Degraded {
                 operator_note:
@@ -359,7 +405,9 @@ impl VaultCacheSlot {
                         .to_string(),
             },
             Err(error) => {
-                self.evict_generation_on_corruption(ran_on);
+                // Evict the generation the increment BOUND (returned by the commit),
+                // not a value captured before it ran.
+                self.evict_generation_on_corruption(bound);
                 ApplyIncrementCommit::Degraded {
                     operator_note: format!(
                         "cache increment failed ({error}); the generation was evicted and the \
@@ -368,16 +416,6 @@ impl VaultCacheSlot {
                 }
             }
         }
-    }
-
-    /// The current generation's number, or `None` when the slot is cold.
-    fn current_generation_number(&self) -> Option<u64> {
-        self.shared
-            .current
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map(|generation| generation.number)
     }
 
     /// Evict the generation an increment ran on so the next open re-derives from
@@ -694,17 +732,46 @@ mod tests {
             }
         }
 
-        // The corrupt generation was evicted: the next open re-derives a fresh one.
+        // The corrupt generation was evicted: the next open re-derives a fresh
+        // one, so the number advances by EXACTLY one. A skipped eviction (the
+        // lag-hole: eviction keyed on a stale/wrong number would find
+        // `current != ran_on` and no-op) would leave `healed == ran_on` — the
+        // strict `+ 1` catches that, where a loose `>` would not.
         let healed = slot.ensure_current().unwrap().number;
-        assert!(
-            healed > ran_on,
-            "eviction forces a fresh generation ({healed} > {ran_on})"
+        assert_eq!(
+            healed,
+            ran_on + 1,
+            "eviction fired on the bound generation and reopened exactly once"
         );
         // And the vault is still fully readable — files are the source of truth.
         let count = slot
             .serve_read(|cache| Ok(cache.documents_matching(&Default::default())?.len()))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn fire_and_degrade_eviction_key_is_the_commit_bound_generation() {
+        // F2 (NRN-386): the eviction key must be the generation the commit's OWN
+        // `ensure_current` bound, not a value captured before the commit ran — the
+        // guard against a concurrent reopen advancing the slot between capture and
+        // bind. Pin it at the source: the tracked commit returns the number it
+        // bound, and it equals the generation current at the commit site.
+        let (_tmp, root, db_path) = vault();
+        let slot = VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap();
+
+        let current = slot.ensure_current().unwrap().number;
+        let mut drifted = slot.serve_read(|cache| cache.load_graph_index()).unwrap();
+        drifted.documents.clear();
+
+        let (bound, result) =
+            slot.commit_apply_increments_tracked(&[Utf8PathBuf::from("a.md")], drifted);
+        assert!(result.is_err(), "a drifted baseline must fail the commit");
+        assert_eq!(
+            bound,
+            Some(current),
+            "the eviction key is the generation the commit's own ensure_current bound"
+        );
     }
 
     #[test]
