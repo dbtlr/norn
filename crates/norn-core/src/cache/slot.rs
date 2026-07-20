@@ -324,6 +324,83 @@ impl VaultCacheSlot {
         }
     }
 
+    /// Commit a mutation's cache increment as **fire-and-degrade**: the mutation
+    /// already succeeded on disk (files are the source of truth), so a failed
+    /// increment MUST NOT surface as an error — it degrades to an operator note
+    /// and the next read heals the cache off the filesystem.
+    ///
+    /// This is the caller-side adapter the HARD CONTRACT (NRN-386) requires:
+    /// [`commit_apply_increments`](Self::commit_apply_increments) propagates a
+    /// failed chunk commit as `Err(CacheError::Io { path: "<increment-commit>" })`
+    /// and a stale baseline as `Err(CacheError::IncrementBaselineDrift)`. Mapping
+    /// EITHER to a hard mutation failure would re-open the corrupt-generation hole
+    /// (NRN-253): a generation whose staged increment failed would keep serving.
+    /// So on ANY increment failure we EVICT the generation the increment ran on
+    /// (dropping it forces the next [`ensure_current`](Self::ensure_current) to
+    /// re-derive from files — the fail-safe, strictly stronger than the
+    /// corruption-only guard), surface an operator note the owner renders later,
+    /// and SUCCEED. `Degraded` (the target generation died mid-commit) is already
+    /// benign — no eviction, just the note.
+    pub fn commit_apply_increments_fire_and_degrade(
+        &self,
+        touched_paths: &[Utf8PathBuf],
+        baseline: GraphIndex,
+    ) -> ApplyIncrementCommit {
+        // The generation the increment will run on (captured before the commit's
+        // own `ensure_current`), so eviction targets exactly it and never a newer
+        // generation a concurrent open already installed.
+        let ran_on = self.current_generation_number();
+        match self.commit_apply_increments(touched_paths, baseline) {
+            Ok(ApplyIncrementOutcome::Published) => ApplyIncrementCommit::Published,
+            Ok(ApplyIncrementOutcome::Degraded) => ApplyIncrementCommit::Degraded {
+                operator_note:
+                    "cache increment did not publish (generation superseded); the next read \
+                     rebuilds it from the vault"
+                        .to_string(),
+            },
+            Err(error) => {
+                self.evict_generation_on_corruption(ran_on);
+                ApplyIncrementCommit::Degraded {
+                    operator_note: format!(
+                        "cache increment failed ({error}); the generation was evicted and the \
+                         next read rebuilds it from the vault"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The current generation's number, or `None` when the slot is cold.
+    fn current_generation_number(&self) -> Option<u64> {
+        self.shared
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|generation| generation.number)
+    }
+
+    /// Evict the generation an increment ran on so the next open re-derives from
+    /// files (NRN-253 corrupt-generation guard). Only drops the CURRENT generation
+    /// when it is still the one the increment ran on (`ran_on`); a newer generation
+    /// a concurrent open already installed is left intact. `ran_on == None` (the
+    /// increment opened the slot from cold) evicts whatever it just installed.
+    fn evict_generation_on_corruption(&self, ran_on: Option<u64>) {
+        let mut current = self
+            .shared
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let still_the_ran_on_generation = match (current.as_ref(), ran_on) {
+            (Some(generation), Some(number)) => generation.number == number,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if still_the_ran_on_generation {
+            *current = None;
+        }
+    }
+
     /// The writer queue, for submitting bulk mutation-increment commits (phase 3).
     pub fn queue(&self) -> &WriterQueue {
         &self.queue
@@ -339,6 +416,21 @@ impl VaultCacheSlot {
     pub fn vault_root(&self) -> &Utf8Path {
         &self.vault_root
     }
+}
+
+/// The result of the fire-and-degrade increment commit
+/// ([`commit_apply_increments_fire_and_degrade`](VaultCacheSlot::commit_apply_increments_fire_and_degrade)).
+///
+/// The mutation always succeeds; this only reports whether the cache stayed warm.
+/// `Degraded` carries an operator note the owner layer renders alongside the
+/// `ApplyReport` (the cache did not update; the next read heals it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyIncrementCommit {
+    /// The increment staged and published; the cache is warm.
+    Published,
+    /// The increment did not publish; the note explains why and the next read
+    /// rebuilds the cache from the vault.
+    Degraded { operator_note: String },
 }
 
 /// The result of a [`commit_apply_increments`](VaultCacheSlot::commit_apply_increments) call.
@@ -568,6 +660,66 @@ mod tests {
         let conn = generation.checkout_read();
         let count = conn.documents_matching(&Default::default()).unwrap().len();
         assert_eq!(count, 3, "increment should have published c.md");
+    }
+
+    #[test]
+    fn fire_and_degrade_evicts_and_succeeds_when_the_increment_fails() {
+        // HARD CONTRACT (NRN-386): a failed cache increment must NOT fail the
+        // mutation. A drifted baseline (fingerprint mismatch vs the db) makes
+        // `commit_apply_increments` return Err; the fire-and-degrade adapter maps
+        // it to eviction + an operator note + success.
+        let (_tmp, root, db_path) = vault();
+        let slot = VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap();
+
+        // Warm the slot and record the generation the increment will run on.
+        let ran_on = slot.ensure_current().unwrap().number;
+
+        // A baseline whose content (and thus fingerprint) does not match the db,
+        // forcing `reserve_increment_commit` to reject it as baseline drift.
+        let mut drifted = slot.serve_read(|cache| cache.load_graph_index()).unwrap();
+        drifted.documents.clear();
+
+        let commit =
+            slot.commit_apply_increments_fire_and_degrade(&[Utf8PathBuf::from("a.md")], drifted);
+
+        match commit {
+            ApplyIncrementCommit::Degraded { operator_note } => {
+                assert!(
+                    operator_note.contains("evicted") || operator_note.contains("rebuilds"),
+                    "the operator note explains the degrade: {operator_note}"
+                );
+            }
+            ApplyIncrementCommit::Published => {
+                panic!("a drifted baseline must degrade, not publish")
+            }
+        }
+
+        // The corrupt generation was evicted: the next open re-derives a fresh one.
+        let healed = slot.ensure_current().unwrap().number;
+        assert!(
+            healed > ran_on,
+            "eviction forces a fresh generation ({healed} > {ran_on})"
+        );
+        // And the vault is still fully readable — files are the source of truth.
+        let count = slot
+            .serve_read(|cache| Ok(cache.documents_matching(&Default::default())?.len()))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn fire_and_degrade_publishes_on_a_clean_increment() {
+        let (_tmp, root, db_path) = vault();
+        let slot = VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap();
+        let baseline = slot.serve_read(|cache| cache.load_graph_index()).unwrap();
+        std::fs::write(
+            root.join("c.md").as_std_path(),
+            "---\ntype: note\n---\nsee [[a]]\n",
+        )
+        .unwrap();
+        let commit =
+            slot.commit_apply_increments_fire_and_degrade(&[Utf8PathBuf::from("c.md")], baseline);
+        assert_eq!(commit, ApplyIncrementCommit::Published);
     }
 
     #[test]
