@@ -339,6 +339,7 @@ fn finding_field(body: &FindingBody) -> Option<String> {
         | FindingBody::DocumentMisrouted { .. }
         | FindingBody::AliasShadowedByStem { .. }
         | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::NonportableFilename { .. }
         | FindingBody::RequiredFrontmatterMissing { .. } => None,
     }
 }

@@ -179,7 +179,8 @@ fn finding_field(finding: &Finding) -> Option<&str> {
         | FindingBody::LinkIssue { .. }
         | FindingBody::DocumentMisrouted { .. }
         | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
+        | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::NonportableFilename { .. } => None,
     }
 }
 
@@ -196,7 +197,8 @@ fn finding_rule(finding: &Finding) -> Option<&str> {
         | FindingBody::LinkIssue { .. }
         | FindingBody::AliasMalformed { .. }
         | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
+        | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::NonportableFilename { .. } => None,
     }
 }
 

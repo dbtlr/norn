@@ -676,7 +676,8 @@ fn skip_reason_for_body(body: &FindingBody) -> SkipReason {
         | FindingBody::DocumentMisrouted { .. }
         | FindingBody::ReferenceType { .. }
         | FindingBody::AliasMalformed { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. } => SkipReason::NoRuleMatched,
+        | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::NonportableFilename { .. } => SkipReason::NoRuleMatched,
         FindingBody::AliasShadowedByStem { .. } => SkipReason::AliasShadowed,
         FindingBody::GraphDiagnostic { .. } => SkipReason::GraphDiagnostic,
     }
@@ -778,6 +779,13 @@ fn skipped_finding(
                 "rerun validate after fixing the conflict".to_string(),
             ],
         ),
+        FindingBody::NonportableFilename { issues } => (
+            "filename portability is diagnosed, not auto-repaired (a rename cascades every backlink; that is a move, out of repair's scope)".to_string(),
+            vec![
+                format!("resolve manually: {}", issues.join("; ")),
+                "rename the file, then rerun validate".to_string(),
+            ],
+        ),
     };
 
     // MissingHash overrides the default reason since the cause is upstream of the rule.
@@ -822,7 +830,8 @@ fn finding_rule(finding: &Finding) -> Option<String> {
         | FindingBody::LinkIssue { .. }
         | FindingBody::AliasMalformed { .. }
         | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
+        | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::NonportableFilename { .. } => None,
     }
 }
 
@@ -839,7 +848,8 @@ fn finding_field(finding: &Finding) -> Option<String> {
         | FindingBody::LinkIssue { .. }
         | FindingBody::DocumentMisrouted { .. }
         | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
+        | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::NonportableFilename { .. } => None,
     }
 }
 
@@ -856,7 +866,8 @@ fn finding_actual_value(finding: &Finding) -> Option<&Value> {
         | FindingBody::ReferenceType { .. }
         | FindingBody::AliasMalformed { .. }
         | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. } => None,
+        | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::NonportableFilename { .. } => None,
     }
 }
 
@@ -1899,5 +1910,38 @@ mod tests {
         let default = RepairPlanFilters::default();
         let default_json = serde_json::to_value(&default).unwrap();
         assert_eq!(default_json["skip_reason"], serde_json::json!([]));
+    }
+
+    fn finding_nonportable_filename(path: &str, issues: Vec<&str>) -> Finding {
+        Finding::nonportable_filename(path.into(), issues.into_iter().map(String::from).collect())
+    }
+
+    #[test]
+    fn nonportable_filename_finding_is_never_auto_repaired() {
+        let finding = finding_nonportable_filename(
+            "weird:name.md",
+            vec!["segment 'weird:name.md' contains illegal character ':'"],
+        );
+        let index = index_for(&["weird:name.md"]);
+        let plan = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &RepairConfig::default(),
+            &index,
+        );
+        assert_eq!(plan.changes.len(), 0);
+        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(
+            plan.skipped_findings[0].skip_reason,
+            SkipReason::NoRuleMatched
+        );
+        assert_eq!(
+            plan.summary.skipped.by_reason.get("no-rule-matched"),
+            Some(&1)
+        );
+        assert!(plan.skipped_findings[0]
+            .reason
+            .contains("diagnosed, not auto-repaired"));
     }
 }

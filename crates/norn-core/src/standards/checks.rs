@@ -354,6 +354,55 @@ pub(crate) fn check_field_references(
     findings
 }
 
+/// (NRN-368) Cross-platform-illegal characters in a path segment:
+/// NTFS-forbidden, Obsidian refuses them outright, and macOS half-breaks a
+/// colon (renders it as `/` in Finder while the byte on disk stays `:`).
+const NONPORTABLE_FILENAME_CHARS: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
+
+/// (NRN-368) Every portability issue across every `/`-separated segment of
+/// `path`: an illegal character (see [`NONPORTABLE_FILENAME_CHARS`]), or a
+/// leading/trailing space, or a trailing dot (all three Windows-illegal
+/// segment shapes). `.`/`..`/empty segments are not real filenames and are
+/// skipped. Order is segment-then-check, matching the path's own left-to-right
+/// reading order — deterministic given a deterministic path.
+fn portable_filename_issues(path: &str) -> Vec<String> {
+    let mut issues = Vec::new();
+    for segment in path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            continue;
+        }
+        for &ch in &NONPORTABLE_FILENAME_CHARS {
+            if segment.contains(ch) {
+                issues.push(format!(
+                    "segment '{segment}' contains illegal character '{ch}'"
+                ));
+            }
+        }
+        if segment.starts_with(' ') {
+            issues.push(format!("segment '{segment}' has a leading space"));
+        }
+        if segment.ends_with(' ') {
+            issues.push(format!("segment '{segment}' has a trailing space"));
+        }
+        if segment.ends_with('.') {
+            issues.push(format!("segment '{segment}' has a trailing dot"));
+        }
+    }
+    issues
+}
+
+/// (NRN-368) One finding per document naming every portability issue across
+/// every path segment — never more than one finding even when several
+/// segments or violation classes fire. Warning severity, no auto-repair: a
+/// rename cascades every backlink, which is a move, not a diagnose-only fix.
+pub(crate) fn check_portable_filename(document: &Document) -> Option<Finding> {
+    let issues = portable_filename_issues(document.path.as_str());
+    if issues.is_empty() {
+        return None;
+    }
+    Some(Finding::nonportable_filename(document.path.clone(), issues))
+}
+
 pub(crate) fn check_links(document: &Document) -> Vec<Finding> {
     document
         .links
@@ -456,5 +505,118 @@ mod tests {
         let doc = doc_with_frontmatter(json!({"status": 12345}));
         let findings = check_field_types(&doc, &types, None);
         assert!(findings.is_empty());
+    }
+
+    fn doc_with_path(path: &str) -> Document {
+        Document {
+            path: Utf8PathBuf::from(path),
+            stem: camino::Utf8Path::new(path)
+                .file_stem()
+                .unwrap_or("")
+                .to_string(),
+            hash: "h".into(),
+            frontmatter: None,
+            body_text: String::new(),
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
+        }
+    }
+
+    #[test]
+    fn portable_filename_clean_path_is_silent() {
+        let doc = doc_with_path("notes/Wide Open Spaces.md");
+        assert!(check_portable_filename(&doc).is_none());
+    }
+
+    #[test]
+    fn portable_filename_flags_each_illegal_character_class() {
+        for ch in [':', '*', '?', '"', '<', '>', '|'] {
+            let path = format!("notes/bad{ch}name.md");
+            let doc = doc_with_path(&path);
+            let finding = check_portable_filename(&doc)
+                .unwrap_or_else(|| panic!("expected a finding for illegal char {ch:?}"));
+            assert_eq!(finding.code, "nonportable-filename");
+            match &finding.body {
+                FindingBody::NonportableFilename { issues } => {
+                    assert_eq!(issues.len(), 1);
+                    let expected_segment = format!("bad{ch}name.md");
+                    assert!(
+                        issues[0].contains(&expected_segment),
+                        "issue should name the offending segment '{expected_segment}': {}",
+                        issues[0]
+                    );
+                    assert!(issues[0].contains(&ch.to_string()));
+                }
+                other => panic!("expected NonportableFilename, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn portable_filename_flags_leading_space_segment() {
+        let doc = doc_with_path(" leading-space/note.md");
+        let finding = check_portable_filename(&doc).expect("expected a finding");
+        match &finding.body {
+            FindingBody::NonportableFilename { issues } => {
+                assert_eq!(issues.len(), 1);
+                assert!(issues[0].contains("leading space"));
+                assert!(issues[0].contains(" leading-space"));
+            }
+            other => panic!("expected NonportableFilename, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portable_filename_flags_trailing_space_segment() {
+        let doc = doc_with_path("notes/trailing-space.md ");
+        let finding = check_portable_filename(&doc).expect("expected a finding");
+        match &finding.body {
+            FindingBody::NonportableFilename { issues } => {
+                assert_eq!(issues.len(), 1);
+                assert!(issues[0].contains("trailing space"));
+            }
+            other => panic!("expected NonportableFilename, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portable_filename_flags_trailing_dot_segment() {
+        let doc = doc_with_path("notes/trailing-dot./note.md");
+        let finding = check_portable_filename(&doc).expect("expected a finding");
+        match &finding.body {
+            FindingBody::NonportableFilename { issues } => {
+                assert_eq!(issues.len(), 1);
+                assert!(issues[0].contains("trailing dot"));
+                assert!(issues[0].contains("trailing-dot."));
+            }
+            other => panic!("expected NonportableFilename, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portable_filename_multiple_violations_collapse_into_one_finding() {
+        // A single segment with two illegal chars, plus a second segment with a
+        // trailing dot: three total issues, ONE finding.
+        let doc = doc_with_path("weird:name?.dir/trailing-dot./note.md");
+        let finding = check_portable_filename(&doc).expect("expected a finding");
+        assert_eq!(finding.code, "nonportable-filename");
+        match &finding.body {
+            FindingBody::NonportableFilename { issues } => {
+                assert_eq!(issues.len(), 3, "expected 3 issues, got: {issues:?}");
+            }
+            other => panic!("expected NonportableFilename, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portable_filename_does_not_flag_dot_segments() {
+        // `.`/`..` segments are not real filenames; the (synthetic) path below
+        // exercises the skip without asserting on real path normalization.
+        let doc = doc_with_path("notes/./note.md");
+        assert!(check_portable_filename(&doc).is_none());
     }
 }

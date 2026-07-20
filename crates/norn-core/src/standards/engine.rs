@@ -109,6 +109,9 @@ pub fn validate_with_compiled(
         }
 
         findings.extend(crate::standards::checks::check_links(document));
+        if let Some(finding) = crate::standards::checks::check_portable_filename(document) {
+            findings.push(finding);
+        }
         findings.extend(crate::standards::checks::check_alias_malformed(
             document,
             alias_field,
