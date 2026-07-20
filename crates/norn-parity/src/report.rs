@@ -5,6 +5,7 @@
 //! can reorder between runs.
 
 use crate::consistency::Finding;
+use crate::poststate::PostStateDiff;
 use crate::run::{Mode, RunReport};
 use crate::verdict::Verdict;
 
@@ -71,7 +72,46 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
             report.stale_entries.join(", ")
         ));
     }
+    render_post_state(&mut out, report);
     out
+}
+
+/// Append a legible post-state section for every mutating case whose two
+/// vault trees differed: which relative paths differ, and — for a shared path
+/// — a concise byte-length summary, never a full body dump. Nothing is emitted
+/// when no mutating case diverged on its tree (the common case, and every case
+/// today, since none mutate yet).
+fn render_post_state(out: &mut String, report: &RunReport) {
+    let diverged: Vec<(&str, &PostStateDiff)> = report
+        .outcomes
+        .iter()
+        .filter_map(|o| o.post_state.as_ref().map(|d| (o.case_id, d)))
+        .collect();
+    if diverged.is_empty() {
+        return;
+    }
+    out.push_str("post-state divergences (vault tree differs after mutation):\n");
+    for (case_id, diff) in diverged {
+        out.push_str(&format!("  {case_id}:\n"));
+        if !diff.only_in_oracle.is_empty() {
+            out.push_str(&format!(
+                "    only in oracle: {}\n",
+                diff.only_in_oracle.join(", ")
+            ));
+        }
+        if !diff.only_in_candidate.is_empty() {
+            out.push_str(&format!(
+                "    only in candidate: {}\n",
+                diff.only_in_candidate.join(", ")
+            ));
+        }
+        for delta in &diff.content_differs {
+            out.push_str(&format!(
+                "    content differs: {} (oracle {} bytes, candidate {} bytes)\n",
+                delta.path, delta.oracle_len, delta.candidate_len
+            ));
+        }
+    }
 }
 
 /// Render the oracle self-consistency result and the exit code it maps to:
