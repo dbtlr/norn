@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport,
     FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams, NewReport,
-    RewriteWikilinkParams, SetParams, SetReport, ValidateParams, ValidateReport,
+    RepairParams, RepairReport, RewriteWikilinkParams, SetParams, SetReport, ValidateParams,
+    ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
@@ -79,6 +80,10 @@ pub enum ClientFrame {
     /// A `validate` request: run the standards engine over the warm graph and
     /// return the (triage-filtered) findings. Read-only.
     Validate { params: ValidateParams },
+    /// A `repair` request: run the engine, filter findings, and build a
+    /// deterministic `MigrationPlan` — WITHOUT applying it. Read-only (`apply`
+    /// executes the plan).
+    Repair { params: RepairParams },
     /// A `set` request: mutate a document's frontmatter fields. Applies when
     /// `confirm` is set, else forecasts. The owner serializes writes under its
     /// single-writer lock.
@@ -130,6 +135,9 @@ pub enum OwnerFrame {
     Describe { report: DescribeReport },
     /// The answer to `Validate`: the findings, summary body, and run counts.
     Validate { report: ValidateReport },
+    /// The answer to `Repair`: the deterministic `MigrationPlan` (as its
+    /// pretty-JSON string) plus the bare-summary finding tally and exit signal.
+    Repair { report: RepairReport },
     /// The answer to `Set`: the frontmatter change report (applied or forecast,
     /// or a coded `outcome = refused` on a clean pre-write decline).
     Set { report: SetReport },

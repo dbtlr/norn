@@ -31,8 +31,8 @@ pub use emit::emit;
 pub use format::{Format, FormatSpec};
 pub use output::{
     CountView, DeleteMutationView, DescribeView, EditMutationView, FindView, GetView,
-    MoveMutationView, NewMutationView, Output, RewriteWikilinkView, SetMutationView, ValidateView,
-    VaultListView,
+    MoveMutationView, NewMutationView, Output, RepairView, RewriteWikilinkView, SetMutationView,
+    ValidateView, VaultListView,
 };
 pub use presenter::{Presenter, HINT, PROGRAM};
 pub use sink::Sink;

@@ -11,8 +11,7 @@
 //!
 //! `intent::expand` is consumed by the pass-based executor (`crate::apply::executor`,
 //! ported in this same NRN-386 task). `findings::plan_from_findings` is the
-//! `repair` VERB's findings→plan adapter, which lands with that command — it and
-//! its private helpers carry a scoped `allow(dead_code)` until then.
+//! `repair` VERB's findings→plan adapter, consumed by `crate::read::repair`.
 
 pub mod findings;
 pub mod intent;

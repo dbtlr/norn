@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use norn_wire::{
     ClientFrame, CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport,
     EditParams, EditReport, FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams,
-    NewReport, OwnerFrame, RewriteWikilinkParams, ServingState, SetParams, SetReport,
-    ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
+    NewReport, OwnerFrame, RepairParams, RepairReport, RewriteWikilinkParams, ServingState,
+    SetParams, SetReport, ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -223,6 +223,22 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected validate report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `repair` request against the owner's warm graph + retained config.
+    /// Read-only: the owner builds the findings-derived `MigrationPlan` and never
+    /// writes (the returned plan is the output; `apply` executes it).
+    pub fn repair(&mut self, params: RepairParams) -> Result<RepairReport, ClientError> {
+        match self.request(&ClientFrame::Repair { params })? {
+            OwnerFrame::Repair { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected repair report, got {other:?}"
             ))),
         }
     }

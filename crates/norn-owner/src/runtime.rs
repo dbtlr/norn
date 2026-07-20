@@ -733,6 +733,33 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 "validate",
             )
         }
+        ClientFrame::Repair { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            // Read-only (findings → plan, no write) — served through `serve_read`
+            // like `validate`, NOT the single-writer mutation path.
+            let result = tokio::task::spawn_blocking(move || {
+                slot.serve_read(|cache| {
+                    Ok(norn_core::read::repair::execute(
+                        cache,
+                        config.as_deref(),
+                        &params,
+                        &today,
+                    )?
+                    .map_err(FieldRejection::from))
+                })
+            })
+            .await;
+            classify_read(
+                state,
+                result,
+                |report| OwnerFrame::Repair { report },
+                "repair",
+            )
+        }
         ClientFrame::Set { params } => {
             let Some(slot) = ready_slot(state) else {
                 return not_ready();
