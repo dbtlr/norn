@@ -942,10 +942,27 @@ mod tests {
     }
 
     /// Liveness preempts bulk at chunk boundaries over the real slot pipeline: a
-    /// bulk mutation-increment commit and concurrent liveness refreshes both
-    /// complete without deadlock, and the published increment is visible. (The
-    /// exact between-chunks interleave is pinned deterministically by the
-    /// writer-queue unit tests; here we assert the slot-level coexistence.)
+    /// bulk mutation-increment commit and concurrent liveness refreshes coexist —
+    /// both complete without deadlock or panic, no reader observes a torn count,
+    /// and the vault ends consistent with `c.md` present. (The exact between-chunks
+    /// interleave is pinned deterministically by the writer-queue unit tests; here
+    /// we assert the slot-level coexistence.)
+    ///
+    /// The bulk arm is deliberately NON-strict about *its own* success: the setup
+    /// makes the vault stale for the concurrent readers (c.md is added before the
+    /// threads fan out), so every reader routes through a coalesced refresh whose
+    /// `index_incremental` advances the stored graph fingerprint on the shared
+    /// write connection. When a refresh wins the `write_cache` lock before the
+    /// bulk's `reserve_increment_commit`, the reserve legitimately observes
+    /// `IncrementBaselineDrift` — the exact race the production caller absorbs via
+    /// [`commit_apply_increments_fire_and_degrade`](VaultCacheSlot::commit_apply_increments_fire_and_degrade)
+    /// (files are the source of truth; the winning refresh already carried c.md
+    /// into the db). Asserting the raw commit MUST publish encodes an invalid
+    /// assumption — that the increment always wins that race — and is what made
+    /// this test flaky on higher-contention (CI) schedulers. So both
+    /// `Published` and `IncrementBaselineDrift` are accepted; what stays strict is
+    /// what the test actually proves: liveness, no deadlock/panic, and final
+    /// consistency (c.md present either way, no lost update).
     #[test]
     fn bulk_commit_and_concurrent_liveness_both_complete() {
         let (_tmp, root, db_path) = vault();
@@ -975,21 +992,30 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(
-            bulk.join().unwrap().unwrap(),
-            ApplyIncrementOutcome::Published
-        );
+        // Both operations complete without deadlock or panic. The bulk arm either
+        // publishes its own increment or observes a concurrent refresh having
+        // advanced the baseline (IncrementBaselineDrift) — the production
+        // fire-and-degrade contract. Any OTHER error would be a real defect.
+        match bulk.join().expect("bulk thread must not panic") {
+            Ok(ApplyIncrementOutcome::Published) | Err(CacheError::IncrementBaselineDrift) => {}
+            other => {
+                panic!("bulk arm must publish or drift on a concurrent refresh, got: {other:?}")
+            }
+        }
         for r in readers {
             let n = r.join().unwrap();
             assert!(n == 2 || n == 3, "reader saw an in-range count: {n}");
         }
 
-        // The published increment is visible afterwards.
+        // Final consistency (no lost update): whichever arm won the race, c.md is
+        // present — the bulk increment published it, or the refresh that drifted
+        // the reserve already carried it into the db.
         let generation = slot.ensure_current().unwrap();
         let conn = generation.checkout_read();
         assert_eq!(
             conn.documents_matching(&Default::default()).unwrap().len(),
-            3
+            3,
+            "the vault ends consistent with c.md present, regardless of which arm won"
         );
     }
 }
