@@ -65,8 +65,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // json forecast, an ADR 0015 owner-set precondition-mismatch refusal, a
     // schema_version refusal, and two `{{seq}}` creates sharing one template in
     // one plan — taking the total to 93; all Match.
+    // NRN-384 adds five more `mcp` tools/call cases (get-missing, count, validate,
+    // set-forecast, set-confirm-refusal) atop the two existing handshake/get cases,
+    // taking the total to 98; self-check ignores `ported`, so all seven `mcp` cases
+    // Match (oracle vs. itself).
     assert!(
-        stdout.contains("93 cases: 93 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("98 cases: 98 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -144,8 +148,16 @@ fn default_mode_gates_help_cases_exit_0() {
     // two `{{seq}}` creates sharing one template), all byte-exact matches (no
     // ledger entry): the gated total grows to 91 and the match count to 74
     // (diverged stays 17).
+    // NRN-384 ports the MCP catalog over the owner session and gates six `mcp`
+    // tools/call cases (get-alpha flipped ported + get-missing→isError,
+    // count-by-type, validate-code, set-forecast, set-confirm-refusal), all
+    // byte-exact matches against the oracle (no ledger entry): the gated total
+    // grows to 97 and the match count to 80 (diverged stays 17). The lone
+    // tools/list case stays `ported: false` (audit-tool absence + intentional
+    // schema divergences make the full catalog un-byte-matchable — see
+    // `MCP_CASES`), so the gated `ported` filter skips it.
     assert!(
-        stdout.contains("91 cases: 74 match, 17 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("97 cases: 80 match, 17 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [

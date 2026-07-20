@@ -38,7 +38,22 @@ pub enum ClientError {
     /// UnexpectedEof). This is the resummon signal: a self-healable "owner gone",
     /// distinct from [`OwnerHealth`](ClientError::OwnerHealth) (reachable but
     /// hung) — see the linux-backlog race documented on `open`.
+    ///
+    /// This variant is the POST-SEND shape: the request WAS written to the socket
+    /// and the owner then went away before (or while) replying. A caller must NOT
+    /// blind-retry it — a mutation that was written but unanswered may have
+    /// applied (ADR 0011 post-send uncertainty). Use
+    /// [`OwnerGonePreSend`](ClientError::OwnerGonePreSend) for the safe-to-retry
+    /// shape.
     OwnerGone(String),
+    /// The owner went away BEFORE the request was written — the write/flush to the
+    /// socket failed at the connection level (the held owner idle-reaped and
+    /// closed its socket, so the very first write got EPIPE / ConnectionReset).
+    /// The request was provably never delivered, so it is SAFE to resummon a fresh
+    /// owner and retry exactly once, even for a mutation (nothing was applied).
+    /// This is the shape a long-lived held session (the MCP stdio server) recovers
+    /// from at its call seam; see `norn_mcp`'s `call`.
+    OwnerGonePreSend(String),
     /// An IO error talking to the owner over the socket.
     Io(std::io::Error),
     /// A malformed or unexpected frame from the owner.
@@ -82,6 +97,7 @@ impl std::fmt::Display for ClientError {
             ),
             ClientError::OwnerHealth(msg) => write!(f, "owner health: {msg}"),
             ClientError::OwnerGone(msg) => write!(f, "owner went away: {msg}"),
+            ClientError::OwnerGonePreSend(msg) => write!(f, "owner went away: {msg}"),
             ClientError::Io(e) => write!(f, "owner socket io error: {e}"),
             ClientError::Protocol(msg) => write!(f, "owner protocol error: {msg}"),
             ClientError::OwnerError(msg) => write!(f, "owner returned an error: {msg}"),
@@ -92,11 +108,26 @@ impl std::fmt::Display for ClientError {
 
 impl ClientError {
     /// Whether this is a self-healable "owner went away" at the connection level
-    /// (the resummon signal). `true` only for [`OwnerGone`](ClientError::OwnerGone)
-    /// — an [`OwnerHealth`](ClientError::OwnerHealth) hang is NOT healable by a
-    /// reconnect (the owner is reachable, just stuck).
+    /// (the resummon signal). `true` for both the POST-SEND
+    /// [`OwnerGone`](ClientError::OwnerGone) and the PRE-SEND
+    /// [`OwnerGonePreSend`](ClientError::OwnerGonePreSend) shapes — the handshake
+    /// resummon (`open` / `wait_until_ready`) heals both, since a ping is
+    /// idempotent. An [`OwnerHealth`](ClientError::OwnerHealth) hang is NOT
+    /// healable by a reconnect (the owner is reachable, just stuck).
     pub fn is_owner_gone(&self) -> bool {
-        matches!(self, ClientError::OwnerGone(_))
+        matches!(
+            self,
+            ClientError::OwnerGone(_) | ClientError::OwnerGonePreSend(_)
+        )
+    }
+
+    /// Whether the owner went away PROVABLY before the request was written (the
+    /// write/flush failed). Only this shape is safe to blind-retry after a
+    /// resummon — a mutation was never applied. The POST-SEND
+    /// [`OwnerGone`](ClientError::OwnerGone) returns `false`: it may have applied
+    /// (ADR 0011), so a caller must propagate it rather than retry.
+    pub fn is_owner_gone_pre_send(&self) -> bool {
+        matches!(self, ClientError::OwnerGonePreSend(_))
     }
 }
 
@@ -105,5 +136,37 @@ impl std::error::Error for ClientError {}
 impl From<norn_config::ConfigError> for ClientError {
     fn from(e: norn_config::ConfigError) -> Self {
         ClientError::Resolve(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_send_is_owner_gone_and_pre_send() {
+        let e = ClientError::OwnerGonePreSend("epipe".into());
+        assert!(e.is_owner_gone(), "pre-send is still a resummon signal");
+        assert!(
+            e.is_owner_gone_pre_send(),
+            "pre-send is the safe-to-retry shape"
+        );
+    }
+
+    #[test]
+    fn post_send_is_owner_gone_but_not_pre_send() {
+        let e = ClientError::OwnerGone("eof mid-reply".into());
+        assert!(e.is_owner_gone(), "post-send is a resummon signal too");
+        assert!(
+            !e.is_owner_gone_pre_send(),
+            "post-send is NOT safe to blind-retry (ADR 0011)"
+        );
+    }
+
+    #[test]
+    fn owner_health_is_neither() {
+        let e = ClientError::OwnerHealth("stalled".into());
+        assert!(!e.is_owner_gone());
+        assert!(!e.is_owner_gone_pre_send());
     }
 }

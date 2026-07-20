@@ -87,9 +87,12 @@ pub fn client_error_diagnostic(e: &ClientError) -> Diagnostic {
             Diagnostic::new(message).with_hints(hints.iter().cloned())
         }
         // A self-healable transient that surfaced anyway (the owner exited at the
-        // connection level after Ready): re-running summons a fresh owner.
-        ClientError::OwnerGone(_) => Diagnostic::new(e.to_string())
-            .with_hint("the vault owner exited before replying — re-run the command"),
+        // connection level, before or after the request was written): re-running
+        // summons a fresh owner.
+        ClientError::OwnerGone(_) | ClientError::OwnerGonePreSend(_) => {
+            Diagnostic::new(e.to_string())
+                .with_hint("the vault owner exited before replying — re-run the command")
+        }
         // Reachable but hung: a real diagnosis path exists via the service verbs.
         ClientError::OwnerHealth(_) => Diagnostic::new(e.to_string())
             .with_hint("the vault owner is not responding — check `norn service status`, or retry"),

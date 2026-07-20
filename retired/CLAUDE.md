@@ -77,7 +77,7 @@ Format: `- [ ] old path → provisional destination`. Verb modules port as
 ### Daemon → `norn-owner` / `norn-mcp`
 
 - [ ] `src/serve/` → host loop, generations, writer queue, read pool → `norn-owner`
-- [ ] `src/mcp/` → MCP tool surface → `norn-mcp` (handlers were already the canonical verb copies)
+- [ ] `src/mcp/` → MCP tool surface → `norn-mcp` (handlers were already the canonical verb copies) (partial, NRN-384: the rmcp stdio server + tool-router scaffold ported over a held `OwnerSession` (not the donor's in-crate `VaultEnv`) — each handler is a thin wrapper parsing MCP args → the verb's wire `Params` → the same routed owner request → the donor's MCP output envelope; `MutationResult`/`output_schema_for` seam ported. Four tools landed at oracle byte-parity (`vault.count`/`get`/`validate`/`set`), gated by four `mcp` parity cases. Still to port: the remaining read tools (`find`/`describe`/`repair`), the cascade + single-op mutators (`new`/`edit`/`move`/`delete`/`rewrite_wikilink`/`apply`), and `vault.audit` (blocked on the audit verb). `tools/list` byte-parity is structurally blocked (audit-tool absence + intentional schema divergences e.g. zero-indexed paging NRN-332) — flagged for adjudication, not silently ledgered. The donor's warm/cold concurrency machinery (`writer_queue`, `call_lock`, `parity_gate`, per-request `Noted` operator-notes) is intentionally NOT ported: the owner holds the warm cache now, so the MCP process is a thin single-client stdio server.)
 
 ### CLI surface → `norn-cli`
 

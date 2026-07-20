@@ -1362,26 +1362,34 @@ const MCP_FIXTURE: Fixture = Fixture {
     seed: 4,
 };
 
-/// MCP frame driving (NRN-383, ADR 0018 phase 3): drive `norn mcp`'s stdio
-/// JSON-RPC surface with the ordered frames in `stdin` and compare responses
-/// frame-by-frame (see `crate::mcp`), instead of the ordinary argv/stdout/
-/// stderr comparison every other case uses. `ported: false` on both — the
-/// rewrite's `mcp` subcommand is still `not_yet_ported` (prints a diagnostic
-/// and exits, no stdio server) — so the gated default run skips these
-/// cleanly via the existing `ported` filter; `--self-check` (oracle vs.
-/// itself) still runs and must Match both.
+/// MCP frame driving (NRN-383/NRN-384, ADR 0018 phase 3): drive `norn mcp`'s
+/// stdio JSON-RPC surface with the ordered frames in `stdin` and compare
+/// responses frame-by-frame (see `crate::mcp`), instead of the ordinary
+/// argv/stdout/stderr comparison every other case uses.
+///
+/// NRN-384 ported the MCP catalog over the owner session (see `norn-mcp`), so the
+/// `tools/call` cases are now `ported: true` and gated against the oracle. The
+/// lone `tools/list` case (`mcp-initialize-tools-list-zoo`) stays `ported: false`
+/// DELIBERATELY: the full catalog cannot byte-match the pinned oracle, for two
+/// structural reasons, so gating it would force ledger entries this task does not
+/// own. First, `vault.audit` — the oracle serves 14 tools, but the rewrite's audit
+/// VERB is not yet ported (no `session.audit`, no durable telemetry store), so the
+/// catalog omits it (13 tools); advertising a dead tool would violate the
+/// thin-adapter contract. Second, the published `inputSchema` reflects the
+/// rewrite's DELIBERATE param redesigns — most visibly zero-indexed paging
+/// (NRN-332), which changes `get`'s `starts_at` default. Both are flagged for
+/// adjudication (audit-verb port; a tools/list ledger entry or a normalization
+/// rule) rather than silently ledgered here. `--self-check` (oracle vs. itself)
+/// still runs and Matches this case, keeping the frame-driving harness exercised
+/// over the full catalog.
 const MCP_CASES: &[Case] = &[
     Case {
         // The MCP session lifecycle anchor: `initialize` (id 1) then
         // `tools/list` (id 2), with the standard `notifications/initialized`
         // in between (a notification — no `id`, no response expected, so
-        // `crate::mcp::run_case` excludes it from pairing). Verified
-        // empirically against the pinned oracle (v0.48.1): newline-delimited
-        // JSON-RPC over stdio (one object per line, no LSP-style
-        // `Content-Length` framing), and the process exits cleanly (exit 0)
-        // once stdin reaches EOF — confirmed by writing exactly these frames,
-        // closing stdin, and observing the process exit on its own rather
-        // than needing to be killed.
+        // `crate::mcp::run_case` excludes it from pairing). Stays `ported:
+        // false` — see the module note above (audit-tool absence + intentional
+        // schema divergences make the full catalog un-byte-matchable).
         id: "mcp-initialize-tools-list-zoo",
         argv: &["mcp"],
         fixture: MCP_FIXTURE,
@@ -1399,11 +1407,11 @@ const MCP_CASES: &[Case] = &[
         plan: None,
     },
     Case {
-        // A `tools/call` of a read tool (`vault.get`, the MCP counterpart of
-        // `norn get`) against an existing fixture doc — proves the mechanics
-        // end to end past the handshake: a real tool invocation, structured
-        // JSON in the response's `structuredContent`, compared frame-by-frame
-        // like the initialize/tools/list case above.
+        // A `tools/call` of a read tool (`vault.get`) against an existing fixture
+        // doc — the mechanics end to end past the handshake: a real tool
+        // invocation, structured JSON in `structuredContent`, compared
+        // frame-by-frame. Now `ported: true` (NRN-384) and gated against the
+        // oracle: the full-facet record projection is byte-identical.
         id: "mcp-tools-call-get-alpha-zoo",
         argv: &["mcp"],
         fixture: MCP_FIXTURE,
@@ -1413,9 +1421,123 @@ const MCP_CASES: &[Case] = &[
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.get","arguments":{"targets":["alpha"]}}}"#,
         ]),
         mutating: false,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A `vault.get` for a target that does not resolve: the report's
+        // `error:`-prefixed missing-target note maps to `isError: true` while the
+        // envelope still carries the (empty) records + notes — the NRN-214 signal,
+        // proven byte-identical on the MCP surface.
+        id: "mcp-tools-call-get-missing-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.get","arguments":{"targets":["nonexistent-doc-xyz"]}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A read `tools/call` with args: `vault.count` grouped by a frontmatter
+        // field. The untagged wire `CountReport` projects into the flat
+        // `{ total, by, groups }` envelope byte-identically to the oracle.
+        id: "mcp-tools-call-count-by-type-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.count","arguments":{"by":"type"}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A `vault.validate` tools/call, narrowed by `code` to a single finding
+        // class. The narrow is deliberate: a bare full-vault validate on the zoo
+        // trips a finding-ORDER divergence between the oracle and the rewrite
+        // (visible at the CLI level too — the reason bare `validate --format json`
+        // is not a gated CLI case either), which is out of this task's scope. The
+        // single-code filter yields a path-ordered, byte-identical finding set,
+        // proving the wire's pre-serialized finding strings re-parse into typed
+        // `structuredContent` correctly (verbose detail kept, PD-111-adjacent).
+        id: "mcp-tools-call-validate-code-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.validate","arguments":{"code":["frontmatter-required-field-missing"]}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A mutation `tools/call` FORECAST: `vault.set` with `confirm` absent is a
+        // dry-run — the report carries the planned `frontmatter_changes` with
+        // `applied: false` and `isError: false` (a forecast never throws in an SDK
+        // that raises on isError, NRN-220). Write-free, so `mutating: false`. The
+        // field (`project`) is a DECLARED typed-note field so the forecast is
+        // warning-free — a warning would trip the unified-envelope divergence
+        // (PD-111 covers `set --format json`; its cases list would need an MCP
+        // extension before an MCP warning frame could gate, flagged not extended).
+        id: "mcp-tools-call-set-forecast-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.set","arguments":{"target":"alpha","field":["project:myproj"]}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A mutation `tools/call` REFUSAL: `vault.set --confirm` against a target
+        // that does not resolve. The precondition refuses BEFORE any write, so the
+        // report is `outcome: refused` + `isError: true` while the vault is
+        // byte-identical — the NRN-220 coded-refusal-as-structured-result shape on
+        // the MCP surface. A refusal writes nothing, so `mutating: false` is
+        // correct even though `confirm: true`.
+        id: "mcp-tools-call-set-confirm-refusal-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.set","arguments":{"target":"nonexistent-doc-xyz","field":["title:X"],"confirm":true}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
         requires_code: None,
         normalize: NO_NORM,
         plan: None,

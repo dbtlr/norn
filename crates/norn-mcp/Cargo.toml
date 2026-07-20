@@ -7,4 +7,14 @@ publish = false
 
 [dependencies]
 norn-client = { path = "../norn-client" }
+norn-core = { path = "../norn-core" }
 norn-wire = { path = "../norn-wire" }
+anyhow = "1.0"
+rmcp = { version = "2.1.0", features = ["server", "transport-io", "macros"] }
+schemars = "1.2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "io-std", "macros", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
