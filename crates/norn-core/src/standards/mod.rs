@@ -21,6 +21,7 @@
 //! the mutation-verb port: the verb-level apply machinery (the minimal-edit
 //! splice core already went to `norn-frontmatter::edit`).
 
+pub mod apply;
 pub mod checks;
 pub mod config;
 pub mod defaults;
