@@ -763,10 +763,12 @@ fn render_validate_summary(
     total_docs: usize,
     width: usize,
 ) -> io::Result<()> {
+    let ascii = glyphs::use_ascii();
     primitives::status_headline(
         out,
         palette,
         &format!("running {rules_count} rules across {total_docs} documents"),
+        ascii,
     )?;
     writeln!(out)?;
 
@@ -785,7 +787,7 @@ fn render_validate_summary(
             }
         }
         let rows: Vec<(&str, usize)> = by_code.into_iter().collect();
-        primitives::tally_group(out, palette, "by code", &rows, width)?;
+        primitives::tally_group(out, palette, "by code", &rows, width, ascii)?;
     }
     Ok(())
 }
@@ -800,10 +802,12 @@ fn render_validate_full(
     rules_count: usize,
     total_docs: usize,
 ) -> io::Result<()> {
+    let ascii = glyphs::use_ascii();
     primitives::status_headline(
         out,
         palette,
         &format!("running {rules_count} rules across {total_docs} documents"),
+        ascii,
     )?;
 
     if findings.is_empty() {
@@ -812,7 +816,6 @@ fn render_validate_full(
         return Ok(());
     }
 
-    let ascii = glyphs::use_ascii();
     for (code, group) in group_by_code(findings) {
         writeln!(out)?;
         let is_error = group

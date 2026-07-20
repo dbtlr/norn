@@ -13,11 +13,22 @@ use std::io::{self, Write};
 use super::glyphs::{self, Glyph};
 use super::palette::Palette;
 
-/// A status headline: the text followed by a `…` ellipsis, the whole line in
-/// `dim`, one newline. The validate records header ("running N rules across M
-/// documents…").
-pub fn status_headline(out: &mut dyn Write, p: &Palette, text: &str) -> io::Result<()> {
-    write!(out, "{}{text}…{}", p.dim.render(), p.dim.render_reset())?;
+/// A status headline: the text followed by an ellipsis (`…`, or `...` in
+/// ASCII mode), the whole line in `dim`, one newline. The validate records
+/// header ("running N rules across M documents…").
+pub fn status_headline(
+    out: &mut dyn Write,
+    p: &Palette,
+    text: &str,
+    ascii: bool,
+) -> io::Result<()> {
+    let ellipsis = if ascii { "..." } else { "…" };
+    write!(
+        out,
+        "{}{text}{ellipsis}{}",
+        p.dim.render(),
+        p.dim.render_reset()
+    )?;
     writeln!(out)
 }
 
@@ -79,6 +90,7 @@ pub fn tally_group(
     header: &str,
     rows: &[(&str, usize)],
     term_width: usize,
+    ascii: bool,
 ) -> io::Result<()> {
     if rows.is_empty() {
         return Ok(());
@@ -108,7 +120,7 @@ pub fn tally_group(
     // terminals stay legible.
     let prefix_w = 4 + label_w + count_w + 2;
     let leader_w = term_width.saturating_sub(prefix_w).max(3);
-    let leader: String = "·".repeat(leader_w);
+    let leader: String = glyphs::render(Glyph::Sep, ascii).repeat(leader_w);
 
     for (label, count) in rows {
         writeln!(
@@ -319,7 +331,13 @@ mod tests {
     #[test]
     fn status_headline_writes_text_then_ellipsis_and_newline() {
         let mut out = Vec::new();
-        status_headline(&mut out, &Palette::off(), "validating .norn/config.yaml").unwrap();
+        status_headline(
+            &mut out,
+            &Palette::off(),
+            "validating .norn/config.yaml",
+            false,
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "validating .norn/config.yaml…\n"
@@ -329,7 +347,7 @@ mod tests {
     #[test]
     fn status_headline_on_palette_wraps_with_dim_ansi() {
         let mut out = Vec::new();
-        status_headline(&mut out, &Palette::on(), "x").unwrap();
+        status_headline(&mut out, &Palette::on(), "x", false).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("\x1b["), "expected ANSI: {s:?}");
         assert!(s.contains("x…"));
@@ -396,7 +414,7 @@ mod tests {
     fn tally_group_emits_header_and_rows() {
         let mut out = Vec::new();
         let rows = [("missing-required-field", 8), ("document-misrouted", 3)];
-        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80, false).unwrap();
         let s = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines[0], "  by code");
@@ -415,7 +433,7 @@ mod tests {
     fn tally_group_right_aligns_counts_to_widest() {
         let mut out = Vec::new();
         let rows = [("a", 5), ("b", 100), ("c", 12)];
-        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80, false).unwrap();
         let s = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = s.lines().collect();
         // count_w = 3 (max of "5"=1, "100"=3, "12"=2); all right-aligned to 3.
@@ -427,15 +445,37 @@ mod tests {
     #[test]
     fn tally_group_empty_rows_is_a_noop() {
         let mut out = Vec::new();
-        tally_group(&mut out, &Palette::off(), "by code", &[], 80).unwrap();
+        tally_group(&mut out, &Palette::off(), "by code", &[], 80, false).unwrap();
         assert!(out.is_empty(), "empty rows must write nothing");
+    }
+
+    #[test]
+    fn status_headline_and_leaders_honor_ascii_mode() {
+        let mut out = Vec::new();
+        status_headline(&mut out, &Palette::off(), "running 2 rules", true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("running 2 rules..."), "got: {s}");
+        assert!(
+            !s.contains('\u{2026}'),
+            "no unicode ellipsis in ascii mode: {s}"
+        );
+
+        let mut out = Vec::new();
+        let rows = vec![("frontmatter-missing", 3usize)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80, true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains(".."), "ascii dot leaders expected: {s}");
+        assert!(
+            !s.contains('\u{00b7}'),
+            "no middle-dot leaders in ascii mode: {s}"
+        );
     }
 
     #[test]
     fn tally_group_uses_ansi_for_labels_and_leader_on_palette() {
         let mut out = Vec::new();
         let rows = [("x", 1)];
-        tally_group(&mut out, &Palette::on(), "by code", &rows, 80).unwrap();
+        tally_group(&mut out, &Palette::on(), "by code", &rows, 80, false).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("\x1b["), "expected ANSI: {s:?}");
     }

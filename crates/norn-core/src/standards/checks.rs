@@ -46,8 +46,12 @@ pub(crate) fn check_field_types(
     types: &HashMap<String, crate::standards::config::FieldTypeSpec>,
     rule: Option<&str>,
 ) -> Vec<Finding> {
+    // Sorted for deterministic finding order (HashMap iteration is unordered;
+    // matches the check_field_references precedent).
+    let mut types: Vec<_> = types.iter().collect();
+    types.sort_by(|a, b| a.0.cmp(b.0));
     types
-        .iter()
+        .into_iter()
         .filter_map(|(field, spec)| {
             // A type-less extended entry (`{ indexed: bool }`) contributes only
             // to the index vote (see index_policy) — it declares no type here.
@@ -112,8 +116,11 @@ pub(crate) fn check_allowed_values(
     values: &HashMap<String, Vec<Value>>,
     rule: Option<&str>,
 ) -> Vec<Finding> {
+    // Sorted for deterministic finding order.
+    let mut values: Vec<_> = values.iter().collect();
+    values.sort_by(|a, b| a.0.cmp(b.0));
     values
-        .iter()
+        .into_iter()
         .filter_map(|(field, allowed_values)| {
             let actual = crate::standards::predicates::document_frontmatter_field(document, field)?;
             if allowed_values
@@ -255,7 +262,10 @@ pub(crate) fn check_alias_duplicate_across_docs(
         }
     }
     let mut findings = Vec::new();
-    for (alias_value, docs) in by_alias {
+    // Sorted for deterministic finding order.
+    let mut groups: Vec<_> = by_alias.into_iter().collect();
+    groups.sort_by(|a, b| a.0.cmp(b.0));
+    for (alias_value, docs) in groups {
         if docs.len() < 2 {
             continue;
         }
