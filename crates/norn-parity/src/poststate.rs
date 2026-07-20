@@ -231,6 +231,12 @@ pub fn compare(
 /// nodes are equivalent. Two empty dirs match; two files match iff their
 /// normalized bytes are equal; a file-vs-empty-dir kind mismatch is always a
 /// difference (the dir side counted as zero bytes).
+///
+/// The kind-mismatch arms are defensive: `walk` keys empty directories with a
+/// trailing slash and files without, so a real file-vs-dir divergence reaches
+/// `compare` as two distinct keys and surfaces as paired `only_in_*` entries —
+/// the more informative report shape. The arms only fire on a hand-built
+/// snapshot whose keys ignore that scheme.
 fn entry_delta(
     path: &str,
     oracle_entry: &Entry,
@@ -356,8 +362,23 @@ mod tests {
         assert_eq!(compare(&oracle, &[], &candidate, &[]), None);
     }
 
+    // Through the real walk key scheme (`x` file vs `x/` empty dir), a kind
+    // mismatch at one logical path surfaces as paired only_in_* entries — a
+    // divergence, never a silent match.
     #[test]
-    fn file_versus_empty_dir_at_one_path_is_a_content_divergence() {
+    fn file_versus_empty_dir_at_one_path_is_a_divergence() {
+        let oracle = snap(&[("x", file(b"body"))]);
+        let candidate = snap(&[("x/", Entry::EmptyDir)]);
+        let diff = compare(&oracle, &[], &candidate, &[]).expect("kind mismatch differs");
+        assert_eq!(diff.only_in_oracle, vec!["x".to_string()]);
+        assert_eq!(diff.only_in_candidate, vec!["x/".to_string()]);
+        assert!(diff.content_differs.is_empty());
+    }
+
+    // Defensive arms: a hand-built snapshot that ignores the walk key scheme
+    // still reports a kind mismatch as a content divergence, not a match.
+    #[test]
+    fn identical_key_kind_mismatch_is_still_a_content_divergence() {
         let oracle = snap(&[("x", file(b"body"))]);
         let candidate = snap(&[("x", Entry::EmptyDir)]);
         let diff = compare(&oracle, &[], &candidate, &[]).expect("kind mismatch differs");
