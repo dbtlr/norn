@@ -355,9 +355,11 @@ pub(crate) fn check_field_references(
 }
 
 /// (NRN-368) Cross-platform-illegal characters in a path segment:
-/// NTFS-forbidden, Obsidian refuses them outright, and macOS half-breaks a
-/// colon (renders it as `/` in Finder while the byte on disk stays `:`).
-const NONPORTABLE_FILENAME_CHARS: [char; 7] = [':', '*', '?', '"', '<', '>', '|'];
+/// NTFS-forbidden, Obsidian refuses them outright, macOS half-breaks a colon
+/// (renders it as `/` in Finder while the byte on disk stays `:`), and a
+/// backslash — legal in a Unix filename, but a path separator on Windows and
+/// therefore forbidden in a Windows filename.
+const NONPORTABLE_FILENAME_CHARS: [char; 8] = [':', '*', '?', '"', '<', '>', '|', '\\'];
 
 /// (NRN-368) Every portability issue across every `/`-separated segment of
 /// `path`: an illegal character (see [`NONPORTABLE_FILENAME_CHARS`]), or a
@@ -534,7 +536,7 @@ mod tests {
 
     #[test]
     fn portable_filename_flags_each_illegal_character_class() {
-        for ch in [':', '*', '?', '"', '<', '>', '|'] {
+        for ch in [':', '*', '?', '"', '<', '>', '|', '\\'] {
             let path = format!("notes/bad{ch}name.md");
             let doc = doc_with_path(&path);
             let finding = check_portable_filename(&doc)
