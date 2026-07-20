@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_wire::{
-    ClientFrame, CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport,
-    GetParams, GetReport, NewParams, NewReport, OwnerFrame, ServingState, SetParams, SetReport,
-    ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
+    ClientFrame, CountParams, CountReport, DescribeParams, DescribeReport, EditParams, EditReport,
+    FindParams, FindReport, GetParams, GetReport, NewParams, NewReport, OwnerFrame, ServingState,
+    SetParams, SetReport, ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -255,6 +255,21 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected new report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run an `edit` mutation against the owner's warm cache. Same send-once,
+    /// never-retry contract as [`set`](Self::set).
+    pub fn edit(&mut self, params: EditParams) -> Result<EditReport, ClientError> {
+        match self.request(&ClientFrame::Edit { params })? {
+            OwnerFrame::Edit { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected edit report, got {other:?}"
             ))),
         }
     }

@@ -77,14 +77,20 @@ fn bare_find_prints_help_and_exits_two() {
 }
 
 #[test]
-fn edit_unported_exits_one_with_uniform_line() {
-    // `set` / `new` now dispatch for real (NRN-378); `edit` remains a grammar-only
-    // stub, so it carries the uniform not-yet-ported line this test pins.
-    let out = norn().args(["edit", "a.md"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
+fn edit_cli_side_refusal_exits_two_with_error_line() {
+    // `edit` now dispatches for real (NRN-379). A CLI-side op-resolution failure
+    // (an empty ops array) is refused BEFORE any owner summon, rendering the
+    // format-independent edit refusal surface: `error: <message>` on stderr,
+    // exit 2, nothing on stdout — exercised here without touching the network.
+    let out = norn()
+        .args(["edit", "a.md", "--edits-json", "[]"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty(), "a refusal writes nothing to stdout");
     assert_eq!(
         String::from_utf8(out.stderr).unwrap(),
-        "norn: `edit` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
+        "error: edits array is empty\n"
     );
 }
 

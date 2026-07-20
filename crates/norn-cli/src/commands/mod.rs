@@ -12,6 +12,7 @@
 pub mod args;
 pub mod count;
 pub mod describe;
+pub mod edit;
 pub mod find;
 pub mod get;
 pub mod new;

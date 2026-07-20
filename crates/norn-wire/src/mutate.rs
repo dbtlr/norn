@@ -223,6 +223,71 @@ pub struct FrontmatterCreated {
     pub rule: Option<String>,
 }
 
+// ── edit ─────────────────────────────────────────────────────────────────────
+
+/// An `edit` request: the target plus the CLI-resolved ops. `edits` is the
+/// serialized JSON array of section-edit ops (`[{"op":"str_replace",…}, …]`),
+/// resolved CLI-side (sugar-desugared, or read from `--edits-json`/`--ops-file`/
+/// stdin) and re-serialized onto the wire so the owner's transform runs on the
+/// SAME resolved array. Carried as the JSON text (not a typed `Vec`) so the
+/// param stays a pure-serde `Eq` type — the typed op vocabulary
+/// (`norn_core::edit::ops::EditOp`) is a `norn-core` engine type `norn-wire` may
+/// not name. `expected_hash` is the opt-in compare-and-swap precondition (the
+/// document's full-content blake3 hex); `confirm` applies (else forecast).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditParams {
+    pub target: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub edits: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub confirm: bool,
+}
+
+/// An `edit` response — the donor `EditReport` (schema v1) shape. Same outer
+/// envelope as [`SetReport`] with an `edits` array (one entry per applied op)
+/// replacing `frontmatter_changes`. `--format json` serializes this directly, so
+/// the field order below IS the JSON contract (donor struct order).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditReport {
+    pub schema_version: u32,
+    /// Empty on EVERY outcome until durable telemetry lands (see
+    /// [`SetReport::trace_id`]).
+    #[serde(default)]
+    pub trace_id: String,
+    pub operation: String,
+    pub target: String,
+    pub edits: Vec<EditChange>,
+    pub body_changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes_old: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes_new: Option<usize>,
+    pub applied: bool,
+    pub outcome: MutationOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<CodedError>,
+}
+
+/// One applied edit op in an `edit` report. `op` is the op discriminant
+/// (`str_replace` / `append_to_section` / …), `anchor` its human-readable anchor
+/// summary, `occurrences` the match count for a `str_replace` (absent for a
+/// structural op), and `applied` whether the batch was written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditChange {
+    pub op: String,
+    pub anchor: String,
+    pub matched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrences: Option<usize>,
+    pub applied: bool,
+}
+
+/// The `edit` report schema version (donor `edit::report::SCHEMA_VERSION`).
+pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
