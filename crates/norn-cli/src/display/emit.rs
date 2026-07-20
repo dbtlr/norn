@@ -274,16 +274,26 @@ fn warn_unknown_cols_find(
     Ok(())
 }
 
-/// Warn when `--sort FIELD` names a frontmatter key absent from every matched
-/// document — the query still runs (every row's `json_extract` misses, so the
-/// SQL ORDER BY falls through to its `path ASC` tiebreak — effectively
-/// unsorted), matching the `--col` "not present in any matching document"
-/// precedent structurally (NRN-374, the still-unplumbed surface flagged in
-/// `FindParams`/`CountParams::dynamic_keys`). `path`/`stem` are the two
-/// virtual/structural sort keys (never frontmatter) and are exempt. Skipped on
-/// a zero-match result: every field would trivially "not be present" in an
-/// empty set, which is redundant with the `total: 0` signal rather than
-/// informative about the field itself.
+/// Warn when `--sort FIELD` names a frontmatter key absent from every
+/// RETURNED document — the query still runs (every row's `json_extract`
+/// misses, so the SQL ORDER BY falls through to its `path ASC` tiebreak —
+/// effectively unsorted), matching the `--col` "not present in any matching
+/// document" precedent structurally (NRN-374, the still-unplumbed surface
+/// flagged in `FindParams`/`CountParams::dynamic_keys`). `path`/`stem` are the
+/// two virtual/structural sort keys (never frontmatter) and are exempt.
+///
+/// Guarded to the FULL result set (never a truncated page): checking only
+/// `report.documents` (the returned page, after `--limit`) would false-positive
+/// on a field that is real but happens to live only beyond the page boundary —
+/// with NULLs-first ordering, an unsorted-by-this-field sparse field is exactly
+/// as likely to be absent from page 1 as present. So this returns early
+/// whenever `report.truncated` (`returned < total`), and likewise on a
+/// zero-match result: every field would trivially "not be present" in an empty
+/// set, which is redundant with the `total: 0` signal rather than informative
+/// about the field itself. (The pre-existing `--col` warning has the identical
+/// truncation false positive — same oracle-parity-locked behavior on both
+/// sides, so it is intentionally left as-is here; a fix there is a banked
+/// ledger candidate, not part of this new-surface warning.)
 fn warn_unknown_sort_find(
     report: &FindReport,
     sort_field: Option<&str>,
@@ -292,7 +302,7 @@ fn warn_unknown_sort_find(
     let Some(field) = sort_field else {
         return Ok(());
     };
-    if matches!(field, "path" | "stem") || report.documents.is_empty() {
+    if matches!(field, "path" | "stem") || report.documents.is_empty() || report.truncated {
         return Ok(());
     }
     let present_in_any = report.documents.iter().any(|d| {
@@ -1672,6 +1682,53 @@ mod tests {
         assert!(
             err.is_empty(),
             "a zero-match result must not warn on every field: {err:?}"
+        );
+    }
+
+    // The truncated-page edge (a real find bug an adversarial review caught):
+    // a sparse field present only beyond the returned page must never warn —
+    // and, pinned alongside it, an UNTRUNCATED result with the same absent
+    // field must still warn (the pre-fix tests all happened to use
+    // total == returned, which left this pair unpinned).
+
+    #[test]
+    fn warn_unknown_sort_find_skips_a_truncated_page() {
+        // 12 total matches, --limit narrows the page to 1 returned document
+        // that happens to lack `priorty` — the field could easily live on one
+        // of the other 11 matches beyond the page boundary, so this must NOT
+        // warn.
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 12,
+            returned: 1,
+            starts_at: 1,
+            truncated: true,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        assert!(
+            err.is_empty(),
+            "a truncated page must not warn on a field absent only from the page: {err:?}"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_sort_find_warns_when_untruncated_and_absent() {
+        // Same shape as the truncated case above but the FULL result set (no
+        // --limit narrowing) — every match was inspected, so the field truly
+        // is absent and the warning must still fire.
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 1,
+            returned: 1,
+            starts_at: 1,
+            truncated: false,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --sort field `priorty` not present in any matching document\n"
         );
     }
 
