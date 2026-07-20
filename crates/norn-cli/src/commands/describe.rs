@@ -33,6 +33,9 @@ pub fn run(args: &DescribeArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
         by: args.by.clone(),
         limit: args.limit,
         filter: args.filters.to_params(),
+        // The desugared dynamic-field keys ride to the owner's field-universe
+        // gate (NRN-367/NRN-374), same as `find`/`count`.
+        dynamic_keys: global.dynamic_fields.clone(),
     };
 
     let report = session
@@ -41,6 +44,7 @@ pub fn run(args: &DescribeArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
 
     Ok(Output::Describe(DescribeView {
         report,
+        by: args.by.clone(),
         explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Text))),
         spec: FormatSpec {
             tty: Format::Records,

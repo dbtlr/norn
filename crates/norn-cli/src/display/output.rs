@@ -54,6 +54,9 @@ pub struct GetView {
     pub report: GetReport,
     pub cols: Vec<String>,
     pub sections: Vec<String>,
+    /// The `--sort` field, if any (NRN-374: drives the unknown-sort-field
+    /// warning, the `get` counterpart to `FindView::sort_field`).
+    pub sort_field: Option<String>,
     pub explicit: Option<Format>,
     pub spec: FormatSpec,
 }
@@ -68,6 +71,10 @@ pub struct CountView {
 /// `describe`'s renderable report.
 pub struct DescribeView {
     pub report: DescribeReport,
+    /// The `--by` fields requested, raw (un-normalized) (NRN-374: drives the
+    /// unknown-`--by`-field warning — `report.data.fields` already carries the
+    /// normalized, occurrence-filtered set to compare against).
+    pub by: Vec<String>,
     pub explicit: Option<Format>,
     pub spec: FormatSpec,
 }

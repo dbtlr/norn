@@ -167,6 +167,7 @@ fn render_find<O: Write, E: Write>(
             conv.writer(),
         )?;
         warn_unknown_cols_find(&view.report, &view.cols, conv.writer())?;
+        warn_unknown_sort_find(&view.report, view.sort_field.as_deref(), conv.writer())?;
         Ok(EXIT_OK)
     })();
 
@@ -273,6 +274,52 @@ fn warn_unknown_cols_find(
     Ok(())
 }
 
+/// Warn when `--sort FIELD` names a frontmatter key absent from every
+/// RETURNED document — the query still runs (every row's `json_extract`
+/// misses, so the SQL ORDER BY falls through to its `path ASC` tiebreak —
+/// effectively unsorted), matching the `--col` "not present in any matching
+/// document" precedent structurally (NRN-374, the still-unplumbed surface
+/// flagged in `FindParams`/`CountParams::dynamic_keys`). `path`/`stem` are the
+/// two virtual/structural sort keys (never frontmatter) and are exempt.
+///
+/// Guarded to the FULL result set (never a truncated page): checking only
+/// `report.documents` (the returned page, after `--limit`) would false-positive
+/// on a field that is real but happens to live only beyond the page boundary —
+/// with NULLs-first ordering, an unsorted-by-this-field sparse field is exactly
+/// as likely to be absent from page 1 as present. So this returns early
+/// whenever `report.truncated` (`returned < total`), and likewise on a
+/// zero-match result: every field would trivially "not be present" in an empty
+/// set, which is redundant with the `total: 0` signal rather than informative
+/// about the field itself. (The pre-existing `--col` warning has the identical
+/// truncation false positive — same oracle-parity-locked behavior on both
+/// sides, so it is intentionally left as-is here; a fix there is a banked
+/// ledger candidate, not part of this new-surface warning.)
+fn warn_unknown_sort_find(
+    report: &FindReport,
+    sort_field: Option<&str>,
+    err: &mut dyn Write,
+) -> io::Result<()> {
+    let Some(field) = sort_field else {
+        return Ok(());
+    };
+    if matches!(field, "path" | "stem") || report.documents.is_empty() || report.truncated {
+        return Ok(());
+    }
+    let present_in_any = report.documents.iter().any(|d| {
+        d.frontmatter
+            .as_ref()
+            .and_then(|fm| fm.as_object())
+            .is_some_and(|obj| obj.contains_key(field))
+    });
+    if !present_in_any {
+        writeln!(
+            err,
+            "warning: --sort field `{field}` not present in any matching document"
+        )?;
+    }
+    Ok(())
+}
+
 fn find_doc_view(doc: &FindDoc) -> DocView<'_> {
     DocView {
         path: &doc.path,
@@ -329,6 +376,7 @@ fn render_get<O: Write, E: Write>(
         warn_col_ignored(&view.cols, paths_inert, conv.writer())?;
         warn_section_ignored(&view.sections, paths_inert, conv.writer())?;
         warn_unknown_cols_get(&view.cols, &view.report, conv.writer())?;
+        warn_unknown_sort_get(&view.report, view.sort_field.as_deref(), conv.writer())?;
         for note in &view.report.notes {
             conv.line(note)?;
         }
@@ -474,6 +522,32 @@ fn warn_unknown_cols_get(
     Ok(())
 }
 
+/// `get`'s counterpart to `warn_unknown_sort_find` (NRN-374): same field-absent
+/// check over the resolved records, same `path`/`stem` exemption and zero-match
+/// skip, but the `warn:` prefix matching `get`'s own `--col` convention above.
+fn warn_unknown_sort_get(
+    report: &GetReport,
+    sort_field: Option<&str>,
+    err: &mut dyn Write,
+) -> io::Result<()> {
+    let Some(field) = sort_field else {
+        return Ok(());
+    };
+    if matches!(field, "path" | "stem") || report.records.is_empty() {
+        return Ok(());
+    }
+    let present_in_any = report.records.iter().any(|r| {
+        r.frontmatter
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|obj| obj.contains_key(field))
+    });
+    if !present_in_any {
+        writeln!(err, "warn: --sort field '{field}' not present in document")?;
+    }
+    Ok(())
+}
+
 fn get_record_view(rec: &GetRecord) -> DocView<'_> {
     DocView {
         path: &rec.path,
@@ -504,9 +578,51 @@ fn render_count<O: Write, E: Write>(view: CountView, presenter: &mut Presenter<O
         } else {
             writeln!(out, "{text}")?;
         }
+        warn_unknown_by_count(&view.report, err)?;
         Ok(EXIT_OK)
     })();
     render_outcome(result, err)
+}
+
+/// The wire's "field entirely absent" bucket value (`"(missing)"`, mirrored
+/// here rather than imported since `norn_core::read::MISSING` is crate-private
+/// — it is already part of the stable `count`/`describe --data` JSON contract).
+const MISSING_BUCKET: &str = "(missing)";
+
+/// Warn when a `--by` field groups EVERY matched document into the
+/// `(missing)` bucket — the count still runs, matching the `--col` "not
+/// present in any matching document" precedent structurally (NRN-374, the
+/// still-unplumbed surface flagged in `CountParams::dynamic_keys`). Only the
+/// OUTERMOST `--by` field is checked for a multi-field group tree — a nested
+/// field's presence would need a per-branch walk, out of scope here (a
+/// documented simplification, not a correctness bug: the outermost field is
+/// the common case and the one the donor's `--count-by` precedent covered).
+/// A zero-match count naturally produces an EMPTY `groups` map (not an
+/// all-`(missing)` one), so this never fires spuriously on `total: 0`.
+fn warn_unknown_by_count(report: &CountReport, err: &mut dyn Write) -> io::Result<()> {
+    let (field, all_missing) = match report {
+        CountReport::Total { .. } => return Ok(()),
+        CountReport::Grouped { by, groups, .. } => (
+            by.as_str(),
+            groups.len() == 1 && groups.contains_key(MISSING_BUCKET),
+        ),
+        CountReport::GroupedMulti { by, groups, .. } => {
+            let Some(first) = by.first() else {
+                return Ok(());
+            };
+            (
+                first.as_str(),
+                groups.len() == 1 && groups.contains_key(MISSING_BUCKET),
+            )
+        }
+    };
+    if all_missing {
+        writeln!(
+            err,
+            "warning: --by field `{field}` not present in any matching document"
+        )?;
+    }
+    Ok(())
 }
 
 fn count_json(report: &CountReport) -> String {
@@ -580,9 +696,44 @@ fn render_describe<O: Write, E: Write>(view: DescribeView, presenter: &mut Prese
         } else {
             writeln!(out, "{text}")?;
         }
+        warn_unknown_by_describe(&view.report, &view.by, err)?;
         Ok(EXIT_OK)
     })();
     render_outcome(result, err)
+}
+
+/// `describe`'s counterpart to `warn_unknown_by_count` (NRN-374). Unlike
+/// `count`, describe's `field_distributions` (`norn-core`) drops a `--by`
+/// field ENTIRELY from `data.fields` when it has zero occurrences across the
+/// matched set (no `(missing)` bucket is even synthesized for an explicit
+/// `--by`, unlike `count`'s always-present bucket) — so "absent" here means
+/// "requested but not in `data.fields`" rather than an all-`(missing)` bucket.
+/// `by` is trimmed the same way `describe::execute`'s internal `normalize_by`
+/// does (never de-duped, matching it), so a comma/whitespace-only entry never
+/// warns. Skipped entirely on `data: None` (no `--data`/`--by` requested) and
+/// on a zero-match `data.total` (every field would trivially be absent,
+/// redundant with the `0 documents` line).
+fn warn_unknown_by_describe(
+    report: &DescribeReport,
+    by: &[String],
+    err: &mut dyn Write,
+) -> io::Result<()> {
+    let Some(data) = &report.data else {
+        return Ok(());
+    };
+    if data.total == 0 {
+        return Ok(());
+    }
+    for field in by.iter().map(|f| f.trim()).filter(|f| !f.is_empty()) {
+        let present = data.fields.iter().any(|fd| fd.field == field);
+        if !present {
+            writeln!(
+                err,
+                "warning: --by field `{field}` not present in any matching document"
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn describe_json(report: &DescribeReport) -> String {
@@ -1310,6 +1461,7 @@ mod tests {
             report,
             cols: vec![],
             sections: vec![],
+            sort_field: None,
             explicit: Some(explicit),
             spec: FormatSpec {
                 tty: Format::Records,
@@ -1425,6 +1577,7 @@ mod tests {
     fn describe_view() -> DescribeView {
         DescribeView {
             report: describe_sample(),
+            by: vec![],
             explicit: Some(Format::Json),
             spec: FormatSpec {
                 tty: Format::Records,
@@ -1454,6 +1607,351 @@ mod tests {
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    // ── NRN-374: unknown `--sort`/`--by` warnings (--col precedent) ──────
+
+    fn find_doc_with(fm: Value) -> FindDoc {
+        FindDoc {
+            frontmatter: Some(fm),
+            ..one_find_doc()
+        }
+    }
+
+    #[test]
+    fn warn_unknown_sort_find_warns_once_when_absent_from_every_match() {
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 1,
+            returned: 1,
+            starts_at: 1,
+            truncated: false,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --sort field `priorty` not present in any matching document\n"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_sort_find_silent_for_a_present_field() {
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 1,
+            returned: 1,
+            starts_at: 1,
+            truncated: false,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, Some("title"), &mut err).unwrap();
+        assert!(err.is_empty(), "known field must not warn: {err:?}");
+    }
+
+    #[test]
+    fn warn_unknown_sort_find_exempts_structural_path_and_stem() {
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({}))],
+            total: 1,
+            returned: 1,
+            starts_at: 1,
+            truncated: false,
+        };
+        for structural in ["path", "stem"] {
+            let mut err = Vec::new();
+            warn_unknown_sort_find(&report, Some(structural), &mut err).unwrap();
+            assert!(
+                err.is_empty(),
+                "{structural} is a virtual sort key, never a frontmatter field: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn warn_unknown_sort_find_skips_a_zero_match_result() {
+        let report = FindReport {
+            documents: vec![],
+            total: 0,
+            returned: 0,
+            starts_at: 1,
+            truncated: false,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, Some("anything"), &mut err).unwrap();
+        assert!(
+            err.is_empty(),
+            "a zero-match result must not warn on every field: {err:?}"
+        );
+    }
+
+    // The truncated-page edge (a real find bug an adversarial review caught):
+    // a sparse field present only beyond the returned page must never warn —
+    // and, pinned alongside it, an UNTRUNCATED result with the same absent
+    // field must still warn (the pre-fix tests all happened to use
+    // total == returned, which left this pair unpinned).
+
+    #[test]
+    fn warn_unknown_sort_find_skips_a_truncated_page() {
+        // 12 total matches, --limit narrows the page to 1 returned document
+        // that happens to lack `priorty` — the field could easily live on one
+        // of the other 11 matches beyond the page boundary, so this must NOT
+        // warn.
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 12,
+            returned: 1,
+            starts_at: 1,
+            truncated: true,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        assert!(
+            err.is_empty(),
+            "a truncated page must not warn on a field absent only from the page: {err:?}"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_sort_find_warns_when_untruncated_and_absent() {
+        // Same shape as the truncated case above but the FULL result set (no
+        // --limit narrowing) — every match was inspected, so the field truly
+        // is absent and the warning must still fire.
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 1,
+            returned: 1,
+            starts_at: 1,
+            truncated: false,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --sort field `priorty` not present in any matching document\n"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_sort_find_is_a_no_op_without_sort() {
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({}))],
+            total: 1,
+            returned: 1,
+            starts_at: 1,
+            truncated: false,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_find(&report, None, &mut err).unwrap();
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_find_with_unknown_sort_field_still_exits_ok_and_warns() {
+        let mut view = find_view();
+        view.report.documents = vec![find_doc_with(json!({"title": "A"}))];
+        view.sort_field = Some("priorty".to_string());
+        let global = global_args();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            render_find(view, &global, &mut presenter)
+        };
+        assert_eq!(
+            code, EXIT_OK,
+            "the query still runs; a warning never flips the exit code"
+        );
+        let stderr = String::from_utf8(err).unwrap();
+        assert_eq!(
+            stderr.matches("--sort field `priorty`").count(),
+            1,
+            "warns exactly once: {stderr:?}"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_sort_get_warns_with_the_get_warn_prefix() {
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_get(&report, Some("priorty"), &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warn: --sort field 'priorty' not present in document\n"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_sort_get_silent_for_a_present_field() {
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_get(&report, Some("title"), &mut err).unwrap();
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn warn_unknown_by_count_warns_when_grouped_is_entirely_missing() {
+        let mut groups = BTreeMap::new();
+        groups.insert(MISSING_BUCKET.to_string(), 3usize);
+        let report = CountReport::Grouped {
+            by: "priorty".to_string(),
+            total: 3,
+            groups,
+        };
+        let mut err = Vec::new();
+        warn_unknown_by_count(&report, &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --by field `priorty` not present in any matching document\n"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_by_count_silent_when_some_docs_carry_the_field() {
+        let mut groups = BTreeMap::new();
+        groups.insert("active".to_string(), 2usize);
+        groups.insert(MISSING_BUCKET.to_string(), 1usize);
+        let report = CountReport::Grouped {
+            by: "status".to_string(),
+            total: 3,
+            groups,
+        };
+        let mut err = Vec::new();
+        warn_unknown_by_count(&report, &mut err).unwrap();
+        assert!(
+            err.is_empty(),
+            "a partially-missing field is known, not unknown: {err:?}"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_by_count_silent_for_the_bare_total_variant() {
+        let report = CountReport::Total { total: 3 };
+        let mut err = Vec::new();
+        warn_unknown_by_count(&report, &mut err).unwrap();
+        assert!(err.is_empty(), "no --by field was requested: {err:?}");
+    }
+
+    #[test]
+    fn warn_unknown_by_count_checks_only_the_outermost_grouped_multi_field() {
+        let mut inner = BTreeMap::new();
+        inner.insert(MISSING_BUCKET.to_string(), GroupNode::Leaf(3));
+        let mut outer = BTreeMap::new();
+        outer.insert(MISSING_BUCKET.to_string(), GroupNode::Branch(inner));
+        let report = CountReport::GroupedMulti {
+            by: vec!["priorty".to_string(), "status".to_string()],
+            total: 3,
+            groups: outer,
+        };
+        let mut err = Vec::new();
+        warn_unknown_by_count(&report, &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --by field `priorty` not present in any matching document\n",
+            "only the first --by field is checked (a documented scoped simplification)"
+        );
+    }
+
+    #[test]
+    fn render_count_with_unknown_by_field_still_exits_ok_and_warns() {
+        let mut groups = BTreeMap::new();
+        groups.insert(MISSING_BUCKET.to_string(), 3usize);
+        let view = CountView {
+            report: CountReport::Grouped {
+                by: "priorty".to_string(),
+                total: 3,
+                groups,
+            },
+            explicit: Some(Format::Json),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            render_count(view, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(!out.is_empty(), "the count still renders its normal output");
+        assert!(String::from_utf8(err)
+            .unwrap()
+            .contains("--by field `priorty`"));
+    }
+
+    #[test]
+    fn warn_unknown_by_describe_warns_when_the_field_was_dropped() {
+        let report = describe_sample(); // data.fields carries only "type"
+        let mut err = Vec::new();
+        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --by field `priorty` not present in any matching document\n"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_by_describe_silent_when_the_field_is_present() {
+        let report = describe_sample();
+        let mut err = Vec::new();
+        warn_unknown_by_describe(&report, &["type".to_string()], &mut err).unwrap();
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn warn_unknown_by_describe_skips_when_data_mode_is_off() {
+        let mut report = describe_sample();
+        report.data = None;
+        let mut err = Vec::new();
+        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut err).unwrap();
+        assert!(err.is_empty(), "no --data/--by was requested: {err:?}");
+    }
+
+    #[test]
+    fn warn_unknown_by_describe_skips_a_zero_match_result() {
+        let mut report = describe_sample();
+        report.data.as_mut().unwrap().total = 0;
+        let mut err = Vec::new();
+        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut err).unwrap();
+        assert!(
+            err.is_empty(),
+            "a zero-match result must not warn on every field: {err:?}"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_by_describe_ignores_whitespace_only_entries() {
+        let report = describe_sample();
+        let mut err = Vec::new();
+        warn_unknown_by_describe(&report, &[" ".to_string(), "".to_string()], &mut err).unwrap();
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_describe_with_unknown_by_field_still_exits_ok_and_warns() {
+        let mut view = describe_view();
+        view.by = vec!["priorty".to_string()];
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            render_describe(view, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(!out.is_empty());
+        assert!(String::from_utf8(err)
+            .unwrap()
+            .contains("--by field `priorty`"));
     }
 
     fn sample_vault() -> RegisteredVault {
