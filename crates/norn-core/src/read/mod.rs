@@ -5,12 +5,13 @@
 //! `serve_read`; the CLI renders the returned `Report`. No IO beyond the cache
 //! read, no clock read (the current date is injected as `today`).
 //!
-//! Shipped: [`find`], [`count`], [`get`], and [`describe`].
+//! Shipped: [`find`], [`count`], [`get`], [`describe`], and [`validate`].
 
 pub mod count;
 pub mod describe;
 pub mod find;
 pub mod get;
+pub mod validate;
 
 use anyhow::Result;
 use serde_json::Value;

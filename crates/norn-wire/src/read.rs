@@ -329,6 +329,69 @@ pub enum GroupNode {
     Branch(BTreeMap<String, GroupNode>),
 }
 
+/// A `validate` request: the triage filters (each a repeatable, comma-splittable
+/// `--code`/`--severity`/… list), `--verbose`, and `--summary`. Validate is
+/// read-only; the finding set is computed against the warm graph and filtered
+/// owner-side. `summary` is sent (not a pure CLI concern) so the grouped-count
+/// JSON body — which needs the typed finding model that never crosses the wire —
+/// is computed owner-side ONLY when requested. `--format` stays a pure CLI-side
+/// presentation choice over the returned report, never sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidateParams {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub codes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub severities: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    /// Keep graph-diagnostic `detail` in findings (default trims to the concise
+    /// coded form — the donor `--verbose` gate).
+    #[serde(skip_serializing_if = "is_false")]
+    pub verbose: bool,
+    /// Compute the grouped-count summary body (`--summary`). When false the owner
+    /// skips `summarize()` entirely and leaves `ValidateReport::summary_json` `None`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub summary: bool,
+}
+
+/// A `validate` response: the post-filter findings (each a pre-serialized
+/// [`Finding`] JSON object, byte-identical to the engine's own serialization, so
+/// `--format json`/`jsonl` are pure passthroughs) plus the pre-rendered
+/// `--summary` JSON body and the run header counts. `has_errors` is the single
+/// exit-code driver (a document carried an error-severity graph diagnostic),
+/// computed over the whole index BEFORE triage filtering so a `--code` narrow
+/// never changes the exit code.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidateReport {
+    /// Each finding pre-serialized to its compact JSON (the `Finding` struct's
+    /// own field order), so `--format jsonl` is a verbatim per-line passthrough
+    /// byte-identical to the donor's `serde_json::to_string(finding)`. The CLI
+    /// parses these back to `Value` for the `--format json`/`records`/`paths`
+    /// projections (parsing yields the alphabetical key order the donor's `json!`
+    /// macro also produces, so `--format json` matches too).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<String>,
+    /// The exact `serde_json::to_string_pretty` of the grouped summary over the
+    /// filtered findings — what `--format json --summary` prints verbatim.
+    /// `Some` only when the request set `--summary`; `None` otherwise (the owner
+    /// skips the fold entirely).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_json: Option<String>,
+    pub total_docs: usize,
+    pub rules_count: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_errors: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

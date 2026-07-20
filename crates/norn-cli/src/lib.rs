@@ -141,7 +141,11 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         Command::Apply(_) => presenter.not_yet_ported("apply"),
         Command::Repair(_) => presenter.not_yet_ported("repair"),
         Command::RewriteWikilink(_) => presenter.not_yet_ported("rewrite-wikilink"),
-        Command::Validate(_) => presenter.not_yet_ported("validate"),
+        Command::Validate(args) => emit(
+            commands::validate::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Completions(_) => presenter.not_yet_ported("completions"),
         Command::Cache(_) => presenter.not_yet_ported("cache"),
         Command::Config(_) => presenter.not_yet_ported("config"),

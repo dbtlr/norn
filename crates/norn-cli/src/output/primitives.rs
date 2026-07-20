@@ -1,7 +1,8 @@
 //! Record-block line writers, ported from the donor `src/output/primitives.rs`
-//! (retired tree). Only the primitives `find --format records` needs:
-//! [`count_line`], [`record_block`], and [`separator`]. The tally / severity /
-//! note primitives port with the verbs that emit them.
+//! (retired tree). `find --format records` needs [`count_line`],
+//! [`record_block`], and [`separator`]; `validate --format records` adds
+//! [`status_headline`], [`severity_tally`], and [`tally_group`] (ported with the
+//! first verb that emits them, NRN-381).
 //!
 //! Non-tty parity note: the parity harness runs piped, so the palette is `off`
 //! (every style a no-op) and `term_width` is 80 with separators capped at 60 —
@@ -11,6 +12,130 @@ use std::io::{self, Write};
 
 use super::glyphs::{self, Glyph};
 use super::palette::Palette;
+
+/// A status headline: the text followed by an ellipsis (`…`, or `...` in
+/// ASCII mode), the whole line in `dim`, one newline. The validate records
+/// header ("running N rules across M documents…").
+pub fn status_headline(
+    out: &mut dyn Write,
+    p: &Palette,
+    text: &str,
+    ascii: bool,
+) -> io::Result<()> {
+    let ellipsis = if ascii { "..." } else { "…" };
+    write!(
+        out,
+        "{}{text}{ellipsis}{}",
+        p.dim.render(),
+        p.dim.render_reset()
+    )?;
+    writeln!(out)
+}
+
+/// Severity tally: a three-line block (pass / warn / err); zero rows elided.
+/// Right-aligned counts. If all three are zero, a single "0 {noun} pass" row is
+/// emitted so the caller still shows a "the command ran" signal.
+pub fn severity_tally(
+    out: &mut dyn Write,
+    p: &Palette,
+    pass: usize,
+    warn: usize,
+    err: usize,
+    noun: &str,
+) -> io::Result<()> {
+    let ascii = glyphs::use_ascii();
+    let max_count = pass.max(warn).max(err);
+    let w = max_count.to_string().len();
+
+    let emit_pass = pass > 0 || (warn == 0 && err == 0);
+    if emit_pass {
+        let g = glyphs::render(Glyph::Pass, ascii);
+        writeln!(
+            out,
+            "  {}{g}{}  {pass:>w$} {noun} pass",
+            p.moss.render(),
+            p.moss.render_reset(),
+        )?;
+    }
+    if warn > 0 {
+        let g = glyphs::render(Glyph::Warn, ascii);
+        let label = if warn == 1 { "warning" } else { "warnings" };
+        writeln!(
+            out,
+            "  {}{g}{}  {warn:>w$} {label}",
+            p.amber.render(),
+            p.amber.render_reset(),
+        )?;
+    }
+    if err > 0 {
+        let g = glyphs::render(Glyph::Err, ascii);
+        let label = if err == 1 { "error" } else { "errors" };
+        writeln!(
+            out,
+            "  {}{g}{}  {err:>w$} {label}",
+            p.rune.render(),
+            p.rune.render_reset(),
+        )?;
+    }
+    Ok(())
+}
+
+/// A `header` section line (4-indent, `section` style) followed by aligned
+/// `label ···· count` rows (4-indent label, `·` leaders filling to `term_width`,
+/// right-aligned count in `thread`). Header omitted when empty; the whole call is
+/// a no-op when `rows` is empty (the caller skips it).
+pub fn tally_group(
+    out: &mut dyn Write,
+    p: &Palette,
+    header: &str,
+    rows: &[(&str, usize)],
+    term_width: usize,
+    ascii: bool,
+) -> io::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if !header.is_empty() {
+        writeln!(
+            out,
+            "  {}{header}{}",
+            p.section.render(),
+            p.section.render_reset(),
+        )?;
+    }
+    let label_w = rows
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let count_w = rows
+        .iter()
+        .map(|(_, c)| c.to_string().chars().count())
+        .max()
+        .unwrap_or(1);
+
+    // Row prefix is 4-indent + label-col + count-col + 2 spaces between leader
+    // and count. Remaining width is the leader. Floor at 3 dots so narrow
+    // terminals stay legible.
+    let prefix_w = 4 + label_w + count_w + 2;
+    let leader_w = term_width.saturating_sub(prefix_w).max(3);
+    let leader: String = glyphs::render(Glyph::Sep, ascii).repeat(leader_w);
+
+    for (label, count) in rows {
+        writeln!(
+            out,
+            "    {l_start}{label:<label_w$}{l_end}{d_start}{leader}{d_end}  {t_start}{count:>count_w$}{t_end}",
+            l_start = p.label.render(),
+            l_end = p.label.render_reset(),
+            d_start = p.dim.render(),
+            d_end = p.dim.render_reset(),
+            t_start = p.thread.render(),
+            t_end = p.thread.render_reset(),
+        )?;
+    }
+    Ok(())
+}
 
 /// Count line: `"{total} {noun}"`, plus ` {·} showing {start}–{end}` when a
 /// window is shown (`0 < returned < total`). Entire line in `dim`. One newline.
@@ -199,5 +324,159 @@ mod tests {
         separator(&mut out, &Palette::off(), 200).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.chars().filter(|c| *c == '─').count(), 60);
+    }
+
+    // ── status_headline (ported from the donor primitives suite) ─────────────
+
+    #[test]
+    fn status_headline_writes_text_then_ellipsis_and_newline() {
+        let mut out = Vec::new();
+        status_headline(
+            &mut out,
+            &Palette::off(),
+            "validating .norn/config.yaml",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "validating .norn/config.yaml…\n"
+        );
+    }
+
+    #[test]
+    fn status_headline_on_palette_wraps_with_dim_ansi() {
+        let mut out = Vec::new();
+        status_headline(&mut out, &Palette::on(), "x", false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b["), "expected ANSI: {s:?}");
+        assert!(s.contains("x…"));
+    }
+
+    // ── severity_tally (ported from the donor primitives suite) ──────────────
+
+    #[test]
+    fn severity_tally_pure_pass_shows_only_check_row() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 100, 0, 0, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("100 documents pass"));
+        assert!(!s.contains("warnings"));
+        assert!(!s.contains("errors"));
+    }
+
+    #[test]
+    fn severity_tally_mixed_shows_all_nonzero_rows_in_order() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 698, 71, 11, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let pass_pos = s.find("698 documents pass").unwrap();
+        let warn_pos = s.find("71 warnings").unwrap();
+        let err_pos = s.find("11 errors").unwrap();
+        assert!(
+            pass_pos < warn_pos && warn_pos < err_pos,
+            "order pass→warn→err"
+        );
+    }
+
+    #[test]
+    fn severity_tally_elides_zero_rows() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 698, 0, 11, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("698 documents pass"));
+        assert!(!s.contains("warnings"));
+        assert!(s.contains("11 errors"));
+    }
+
+    #[test]
+    fn severity_tally_all_zero_emits_zero_pass_row() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 0, 0, 0, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("0 documents pass"));
+    }
+
+    #[test]
+    fn severity_tally_singular_warning_and_error_nouns() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 100, 1, 1, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("1 warning"));
+        assert!(!s.contains("1 warnings"));
+        assert!(s.contains("1 error"));
+        assert!(!s.contains("1 errors"));
+    }
+
+    // ── tally_group (ported from the donor primitives suite) ─────────────────
+
+    #[test]
+    fn tally_group_emits_header_and_rows() {
+        let mut out = Vec::new();
+        let rows = [("missing-required-field", 8), ("document-misrouted", 3)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80, false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines[0], "  by code");
+        assert!(lines[1].starts_with("    missing-required-field"));
+        assert!(lines[1].ends_with("  8"));
+        assert!(
+            lines[1].contains("··"),
+            "expected leader dots: {:?}",
+            lines[1]
+        );
+        assert!(lines[2].starts_with("    document-misrouted"));
+        assert!(lines[2].ends_with("  3"));
+    }
+
+    #[test]
+    fn tally_group_right_aligns_counts_to_widest() {
+        let mut out = Vec::new();
+        let rows = [("a", 5), ("b", 100), ("c", 12)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80, false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        // count_w = 3 (max of "5"=1, "100"=3, "12"=2); all right-aligned to 3.
+        assert!(lines[1].ends_with("  5"), "row 1: {:?}", lines[1]);
+        assert!(lines[2].ends_with("100"), "row 2: {:?}", lines[2]);
+        assert!(lines[3].ends_with(" 12"), "row 3: {:?}", lines[3]);
+    }
+
+    #[test]
+    fn tally_group_empty_rows_is_a_noop() {
+        let mut out = Vec::new();
+        tally_group(&mut out, &Palette::off(), "by code", &[], 80, false).unwrap();
+        assert!(out.is_empty(), "empty rows must write nothing");
+    }
+
+    #[test]
+    fn status_headline_and_leaders_honor_ascii_mode() {
+        let mut out = Vec::new();
+        status_headline(&mut out, &Palette::off(), "running 2 rules", true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("running 2 rules..."), "got: {s}");
+        assert!(
+            !s.contains('\u{2026}'),
+            "no unicode ellipsis in ascii mode: {s}"
+        );
+
+        let mut out = Vec::new();
+        let rows = vec![("frontmatter-missing", 3usize)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80, true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains(".."), "ascii dot leaders expected: {s}");
+        assert!(
+            !s.contains('\u{00b7}'),
+            "no middle-dot leaders in ascii mode: {s}"
+        );
+    }
+
+    #[test]
+    fn tally_group_uses_ansi_for_labels_and_leader_on_palette() {
+        let mut out = Vec::new();
+        let rows = [("x", 1)];
+        tally_group(&mut out, &Palette::on(), "by code", &rows, 80, false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b["), "expected ANSI: {s:?}");
     }
 }

@@ -19,6 +19,7 @@
 mod conversation;
 mod diagnostic;
 mod emit;
+mod fix_hints;
 mod format;
 mod output;
 mod presenter;
@@ -28,7 +29,7 @@ pub use conversation::Conversation;
 pub use diagnostic::Diagnostic;
 pub use emit::emit;
 pub use format::{Format, FormatSpec};
-pub use output::{CountView, DescribeView, FindView, GetView, Output, VaultListView};
+pub use output::{CountView, DescribeView, FindView, GetView, Output, ValidateView, VaultListView};
 pub use presenter::{Presenter, HINT, PROGRAM};
 pub use sink::Sink;
 

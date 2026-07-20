@@ -29,6 +29,10 @@ pub struct Palette {
     pub thread: Style,
     /// Success (ANSI 256 color 108).
     pub moss: Style,
+    /// Warning (ANSI 256 color 178) — the validate severity tally + finding glyph.
+    pub amber: Style,
+    /// Error (ANSI 256 color 167) — the validate severity tally + finding glyph.
+    pub rune: Style,
     /// Muted — ANSI 256 #244 (#808080, medium gray) per brand §2.
     pub dim: Style,
     /// Field labels in a record block (= `dim`).
@@ -52,6 +56,8 @@ impl Palette {
             bone: Style::new(),
             thread: Style::new(),
             moss: Style::new(),
+            amber: Style::new(),
+            rune: Style::new(),
             dim: Style::new(),
             label: Style::new(),
             header: Style::new(),
@@ -77,6 +83,8 @@ impl Palette {
             bone,
             thread: ansi256(67),
             moss: ansi256(108),
+            amber: ansi256(178),
+            rune: ansi256(167),
             dim,
             label: dim,
             header: bone.bold(),

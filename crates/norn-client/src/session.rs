@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use norn_wire::{
     ClientFrame, CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport,
-    GetParams, GetReport, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL,
+    GetParams, GetReport, OwnerFrame, ServingState, ValidateParams, ValidateReport, WriterProgress,
+    CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -207,6 +208,20 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected describe report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `validate` request against the owner's warm graph + retained config.
+    pub fn validate(&mut self, params: ValidateParams) -> Result<ValidateReport, ClientError> {
+        match self.request(&ClientFrame::Validate { params })? {
+            OwnerFrame::Validate { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected validate report, got {other:?}"
             ))),
         }
     }

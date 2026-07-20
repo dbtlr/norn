@@ -21,26 +21,36 @@
 //! machinery (the minimal-edit splice core already went to
 //! `norn-frontmatter::edit`).
 
+pub mod checks;
 pub mod config;
 pub mod defaults;
 pub mod duration;
+pub mod engine;
+pub mod findings;
 mod index_policy;
 pub mod path_match;
 pub mod predicates;
 pub mod substitution;
+pub mod summary;
 mod template_refs;
+pub mod validate_filter;
 
 pub use index_policy::resolved_index_set;
 
 pub use config::{
-    parse_config, parse_config_compiled, CacheConfig, CompiledConfig, CompiledRule, ConfigError,
-    FieldReferenceConstraint, FieldTypeDecl, FieldTypeSpec, RepairAction, RepairConfig, RepairRule,
-    ValidateConfig, ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION, DEFAULT_CACHE_RETENTION,
-    DEFAULT_RETENTION, DEFAULT_STRING_MAX_LENGTH, STRING_MAX_LENGTH_CEILING,
+    compile_config, parse_config, parse_config_compiled, CacheConfig, CompiledConfig, CompiledRule,
+    ConfigError, FieldReferenceConstraint, FieldTypeDecl, FieldTypeSpec, RepairAction,
+    RepairConfig, RepairRule, ValidateConfig, ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION,
+    DEFAULT_CACHE_RETENTION, DEFAULT_RETENTION, DEFAULT_STRING_MAX_LENGTH,
+    STRING_MAX_LENGTH_CEILING,
 };
 pub use defaults::{
     applicable_rules, merge_defaults, path_variables, resolve_to_fixpoint, ResolveError,
 };
 pub use duration::parse_duration;
+pub use engine::validate_with_compiled;
+pub use findings::{Finding, FindingBody};
 pub use path_match::{effective_match_glob, glob_from_target, pattern_from_target, PathPattern};
 pub use substitution::{format_datetime, render, Context, RenderError};
+pub use summary::{summarize, Summary};
+pub use validate_filter::{filter_findings, ValidateFilterOptions};
