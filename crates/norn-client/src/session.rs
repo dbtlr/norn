@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_wire::{
-    ClientFrame, CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport,
-    EditParams, EditReport, FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams,
-    NewReport, OwnerFrame, RepairParams, RepairReport, RewriteWikilinkParams, ServingState,
-    SetParams, SetReport, ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
+    ApplyParams, ClientFrame, CountParams, CountReport, DeleteParams, DescribeParams,
+    DescribeReport, EditParams, EditReport, FindParams, FindReport, GetParams, GetReport,
+    MoveParams, NewParams, NewReport, OwnerFrame, RepairParams, RepairReport,
+    RewriteWikilinkParams, ServingState, SetParams, SetReport, ValidateParams, ValidateReport,
+    WriterProgress, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -337,6 +338,24 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected rewrite-wikilink report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run an `apply` mutation — execute an already-reviewed `MigrationPlan`
+    /// (carried opaque in `params.plan`) — against the owner's warm cache. Same
+    /// send-once, never-retry contract as [`move_document`](Self::move_document);
+    /// the report is the shared `ApplyReport` as an opaque JSON value the CLI
+    /// deserializes.
+    pub fn apply(&mut self, params: ApplyParams) -> Result<serde_json::Value, ClientError> {
+        match self.request(&ClientFrame::Apply { params })? {
+            OwnerFrame::Apply { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected apply report, got {other:?}"
             ))),
         }
     }

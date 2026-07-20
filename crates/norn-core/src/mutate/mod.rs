@@ -5,6 +5,7 @@
 //! (`move`/`delete`/`rewrite_wikilink`) answer with the shared
 //! [`crate::apply::report::ApplyReport`] the donor emits, which the owner
 //! serializes onto the wire as an opaque JSON value.
+pub mod apply;
 mod coerce;
 pub mod delete;
 pub mod edit;

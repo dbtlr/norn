@@ -535,6 +535,7 @@ dependencies = [
  "norn-wire",
  "serde",
  "serde_json",
+ "serde_yaml",
  "terminal_size",
 ]
 

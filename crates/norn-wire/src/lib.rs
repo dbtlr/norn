@@ -38,7 +38,7 @@ mod read;
 pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 pub use filter::FilterParams;
 pub use mutate::{
-    CodedError, DeleteParams, EditChange, EditParams, EditReport, FrontmatterChange,
+    ApplyParams, CodedError, DeleteParams, EditChange, EditParams, EditReport, FrontmatterChange,
     FrontmatterCreated, MoveParams, MutationOutcome, MutationWarning, NewParams, NewReport,
     RewriteWikilinkParams, SetParams, SetReport, EDIT_REPORT_SCHEMA_VERSION,
 };
