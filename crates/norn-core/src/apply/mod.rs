@@ -15,6 +15,7 @@
 //! `delete`/`rewrite-wikilink`) that produce the plans it applies.
 
 pub mod preconditions;
+pub mod repair_apply;
 pub mod report;
 
 pub use preconditions::{build_owner_precondition_refusal_report, evaluate_owner_preconditions};
