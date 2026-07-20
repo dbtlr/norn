@@ -14,10 +14,13 @@
 //! the cache write-through lands with the mutation verbs (`set`/`new`/`move`/
 //! `delete`/`rewrite-wikilink`) that produce the plans it applies.
 
+pub mod envelope;
+pub mod executor;
 pub mod preconditions;
 pub mod repair_apply;
 pub mod report;
 
+pub use executor::{apply_migration_plan, ApplyContext};
 pub use preconditions::{build_owner_precondition_refusal_report, evaluate_owner_preconditions};
 pub use report::{
     ApplyError, ApplyOutcome, ApplyReport, ApplyReportOp, ApplyReportPrecondition, ApplyWarning,

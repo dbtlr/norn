@@ -23,6 +23,11 @@ use std::collections::HashMap;
 /// `ClosestMatchSuggestion` footnotes (one per change), there is a 1:1 mapping
 /// and no ambiguity. If multiple footnotes share a `change_id` in a future
 /// schema, only the last one wins — that is noted in the design archive.
+///
+/// Unused until the `repair` VERB lands (its findings→plan entry point); the
+/// intent expanders are already live via the executor. Kept live rather than
+/// deferring this adapter's port along with the verb.
+#[allow(dead_code)]
 pub(crate) fn plan_from_findings(
     vault_root: Utf8PathBuf,
     filters: RepairPlanFilters,

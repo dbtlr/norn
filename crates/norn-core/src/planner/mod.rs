@@ -9,12 +9,10 @@
 //!
 //! # Port note (ADR 0018)
 //!
-//! `intent::expand` is consumed by the pass-based executor (`crate::apply`
-//! executor, ported in this same NRN-386 task); `findings::plan_from_findings`
-//! is the `repair` VERB's findings→plan adapter, which lands with that command.
-//! Until both callers exist the entry points read as dead — allow it at the
-//! module root; the applier port narrows this to just the findings adapter.
-#![allow(dead_code)]
+//! `intent::expand` is consumed by the pass-based executor (`crate::apply::executor`,
+//! ported in this same NRN-386 task). `findings::plan_from_findings` is the
+//! `repair` VERB's findings→plan adapter, which lands with that command — it and
+//! its private helpers carry a scoped `allow(dead_code)` until then.
 
 pub mod findings;
 pub mod intent;
