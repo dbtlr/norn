@@ -27,6 +27,11 @@ use norn_wire::ApplyParams;
 pub fn run(args: &ApplyArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
     let json = matches!(args.format, ApplyFormat::Json);
 
+    // --dry-run wins over --yes; no --yes is a forecast (the shared mode ladder).
+    // Resolved BEFORE the schema branch so a pre-wire refusal reports a truthful
+    // `dry_run` (a forecast unless `--yes` was actually given).
+    let confirm = args.yes && !args.dry_run;
+
     // ── Preamble: read + format-detect + parse + schema-check (client-side) ──
     let raw = read_plan_source(&args.plan_path)?;
     let fmt = determine_input_format(&args.plan_path, args.input_format);
@@ -38,7 +43,7 @@ pub fn run(args: &ApplyArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> 
     if plan.schema_version != MIGRATION_PLAN_SCHEMA_VERSION {
         let report = ApplyReport::refused(
             plan.vault_root.clone(),
-            args.dry_run,
+            !confirm,
             "apply",
             ApplyError {
                 code: "unsupported-schema-version".into(),
@@ -56,8 +61,6 @@ pub fn run(args: &ApplyArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> 
         }));
     }
 
-    // --dry-run wins over --yes; no --yes is a forecast (the shared mode ladder).
-    let confirm = args.yes && !args.dry_run;
     let params = ApplyParams {
         plan: serde_json::to_value(&plan)
             .map_err(|e| Diagnostic::new(format!("could not encode migration plan: {e}")))?,
@@ -209,5 +212,62 @@ mod tests {
         assert!(err
             .message()
             .starts_with("failed to parse JSON migration plan from 'p.json'"));
+    }
+
+    /// The pre-wire schema-version refusal reports a TRUTHFUL `dry_run`: a
+    /// forecast unless `--yes` is actually given (and `--dry-run` wins over
+    /// `--yes`). The branch returns before any session, so this drives the real
+    /// arg → confirm-ladder → refused-report path with no owner.
+    #[test]
+    fn schema_mismatch_refusal_dry_run_tracks_confirm_ladder() {
+        use crate::display::Output;
+        use norn_core::apply::report::ApplyOutcome;
+
+        let dir = std::env::temp_dir().join(format!("norn-apply-schema-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan_path = dir.join("bad.plan.json");
+        std::fs::write(
+            &plan_path,
+            r#"{ "schema_version": 99, "vault_root": ".", "operations": [] }"#,
+        )
+        .unwrap();
+        let p = plan_path.to_str().unwrap();
+
+        let refusal_dry_run = |argv: &[&str]| -> bool {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let args = match cli.command {
+                Command::Apply(a) => a,
+                other => panic!("expected apply, got {other:?}"),
+            };
+            match run(&args, &cli.global).unwrap() {
+                Output::Apply(view) => {
+                    assert_eq!(view.report.outcome, ApplyOutcome::Refused);
+                    assert_eq!(
+                        view.report.operations[0].error.as_ref().unwrap().code,
+                        "unsupported-schema-version"
+                    );
+                    view.report.dry_run
+                }
+                _ => panic!("expected Output::Apply"),
+            }
+        };
+
+        // No --yes: a forecast — dry_run must be true (the bug reported false here).
+        assert!(
+            refusal_dry_run(&["norn", "apply", p]),
+            "no --yes is a forecast: refusal dry_run must be true"
+        );
+        // --yes: an apply — dry_run must be false.
+        assert!(
+            !refusal_dry_run(&["norn", "apply", p, "--yes"]),
+            "--yes is an apply: refusal dry_run must be false"
+        );
+        // --yes --dry-run: dry-run wins — dry_run must be true.
+        assert!(
+            refusal_dry_run(&["norn", "apply", p, "--yes", "--dry-run"]),
+            "dry-run wins over yes: refusal dry_run must be true"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
