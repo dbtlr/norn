@@ -204,3 +204,56 @@ pub(crate) fn to_wire(p: CountParams) -> WireCountParams {
 pub(crate) fn envelope(report: CountReport) -> CountEnvelope {
     CountEnvelope::from_report(report)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn total_projects_to_flat_envelope() {
+        let env = envelope(CountReport::Total { total: 7 });
+        assert_eq!(
+            serde_json::to_value(&env).unwrap(),
+            json!({"total":7,"by":null,"groups":null})
+        );
+    }
+
+    #[test]
+    fn single_by_projects_string_by_and_flat_groups() {
+        let mut groups = BTreeMap::new();
+        groups.insert("active".to_string(), 3usize);
+        let env = envelope(CountReport::Grouped {
+            by: "status".into(),
+            total: 3,
+            groups,
+        });
+        let v = serde_json::to_value(&env).unwrap();
+        assert_eq!(v["by"], json!("status"));
+        assert_eq!(v["groups"], json!({"active":3}));
+        assert_eq!(v["total"], json!(3));
+    }
+
+    #[test]
+    fn by_comma_token_splits_like_the_cli_delimiter() {
+        let wire = to_wire(CountParams {
+            by: Some("type,status".into()),
+            ..CountParams::default()
+        });
+        assert_eq!(wire.by, vec!["type".to_string(), "status".to_string()]);
+    }
+
+    #[test]
+    fn filter_fields_map_onto_the_wire_filter() {
+        let wire = to_wire(CountParams {
+            eq: vec!["type:note".into()],
+            r#in: vec!["status:a,b".into()],
+            unresolved_links: true,
+            ..CountParams::default()
+        });
+        assert_eq!(wire.filter.eq, vec!["type:note".to_string()]);
+        assert_eq!(wire.filter.r#in, vec!["status:a,b".to_string()]);
+        assert!(wire.filter.unresolved_links);
+    }
+}

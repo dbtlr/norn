@@ -212,3 +212,60 @@ pub(crate) fn envelope(p: &GetParams, report: GetReport) -> MutationResult<GetOu
     };
     MutationResult::from_flag(output, is_error)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn record(frontmatter: Option<Value>) -> GetRecord {
+        GetRecord {
+            path: "notes/alpha.md".into(),
+            stem: "alpha".into(),
+            hash: "deadbeef".into(),
+            frontmatter,
+            headings: vec![json!({"level":1,"text":"Alpha"})],
+            outgoing_links: vec![],
+            unresolved_links: vec![],
+            incoming_links: vec![],
+            body: Some("body".into()),
+            sections: None,
+        }
+    }
+
+    #[test]
+    fn default_record_is_full_facets_without_stem_hash_or_body() {
+        // The default dump omits stem/hash/body (the oracle MCP record shape) and
+        // keeps path + frontmatter + the facet arrays.
+        let v = record_json(&record(Some(json!({"title":"Alpha"}))), false, false);
+        assert_eq!(v["path"], json!("notes/alpha.md"));
+        assert_eq!(v["frontmatter"], json!({"title":"Alpha"}));
+        assert!(v.get("stem").is_none(), "stem is never in the dump");
+        assert!(v.get("document_hash").is_none());
+        assert!(v.get("body").is_none());
+        assert!(v.get("headings").is_some());
+    }
+
+    #[test]
+    fn absent_frontmatter_block_omits_the_key() {
+        // A source with no `---` block (frontmatter None) omits the key entirely,
+        // preserving the absent-vs-null distinction the donor kept.
+        let v = record_json(&record(None), false, false);
+        assert!(v.get("frontmatter").is_none());
+    }
+
+    #[test]
+    fn body_and_hash_ride_only_when_the_col_asks() {
+        let v = record_json(&record(Some(json!({}))), true, true);
+        assert_eq!(v["body"], json!("body"));
+        assert_eq!(v["document_hash"], json!("deadbeef"));
+    }
+
+    #[test]
+    fn col_wants_matches_dotted_facets() {
+        assert!(col_wants(&Some(".body,.document_hash".into()), ".body"));
+        assert!(col_wants(&Some(".document_hash".into()), ".document_hash"));
+        assert!(!col_wants(&Some("status".into()), ".body"));
+        assert!(!col_wants(&None, ".body"));
+    }
+}
