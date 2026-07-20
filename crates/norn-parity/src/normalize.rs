@@ -15,6 +15,20 @@ pub enum Normalization {
     /// lines naming the invoked binary) is deliberately NOT normalized —
     /// that is a real parity surface, not noise.
     VaultRoot,
+    /// Strip the telemetry trace id from a CONFIRMED-apply mutation report, on
+    /// both surfaces it appears: the records footer `trace: <hex>` and the JSON
+    /// `"trace_id":"<hex>"` field. Keyed precisely to the donor's two spellings
+    /// — the run of ascii-hexdigits immediately following each marker is
+    /// removed, nothing else. The pinned oracle mints a fresh random id on every
+    /// apply (empirically non-deterministic: 3 runs of one op yield 3 distinct
+    /// ids), while the rewrite emits an EMPTY id by documented contract (the
+    /// owner's discard sink does not mint a placeholder until durable telemetry
+    /// lands — see `norn-wire::mutate::SetReport::trace_id`). Normalizing the
+    /// oracle's id to empty makes a confirmed apply that is otherwise byte-equal
+    /// Match, without over-normalizing anything but the id run itself. Applied
+    /// per-case, only on the confirmed-apply cases that need it — never a read
+    /// case, and never a refusal/forecast (which carry no id on either side).
+    TraceId,
 }
 
 /// The normalization steps applied to every case today.
@@ -53,8 +67,35 @@ pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]
                     out = out.replace(&root, "<VAULT>");
                 }
             }
+            Normalization::TraceId => {
+                out = strip_hex_run_after(&out, "trace: ");
+                out = strip_hex_run_after(&out, "\"trace_id\":\"");
+            }
         }
     }
+    out
+}
+
+/// Remove the run of ascii-hexdigits immediately following each occurrence of
+/// `marker` in `text`, leaving `marker` (and everything else) intact. The
+/// donor's applied trace id is a fixed-format hex run right after a literal
+/// marker on both the records (`trace: `) and JSON (`"trace_id":"`) surfaces, so
+/// this collapses the oracle's random id to the rewrite's empty id without
+/// touching anything but the id itself. A marker followed by no hexdigit (the
+/// rewrite's already-empty id) is a no-op.
+fn strip_hex_run_after(text: &str, marker: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(marker) {
+        let after_marker = pos + marker.len();
+        out.push_str(&rest[..after_marker]);
+        let tail = &rest[after_marker..];
+        let hex_end = tail
+            .find(|c: char| !c.is_ascii_hexdigit())
+            .unwrap_or(tail.len());
+        rest = &tail[hex_end..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -83,4 +124,42 @@ pub fn normalize_output(
         stderr: normalize_text(stderr, vault_roots, steps),
         exit_code,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TRACE: &[Normalization] = &[Normalization::TraceId];
+
+    #[test]
+    fn trace_id_records_footer_hex_is_stripped_to_empty() {
+        // The oracle's applied records footer carries a random hex id; strip it
+        // to the rewrite's empty form so an otherwise byte-equal apply matches.
+        let oracle = "set notes/a.md\n  x: 1 → 2\ntrace: 30b8c28c3eafd385c63aca6850a209fa\n";
+        let rewrite = "set notes/a.md\n  x: 1 → 2\ntrace: \n";
+        assert_eq!(
+            normalize_text(oracle, &[], TRACE),
+            normalize_text(rewrite, &[], TRACE),
+            "oracle hex id and rewrite empty id normalize equal"
+        );
+        assert_eq!(normalize_text(oracle, &[], TRACE), rewrite);
+    }
+
+    #[test]
+    fn trace_id_json_field_hex_is_stripped_to_empty() {
+        let oracle = r#"{"trace_id":"e213f95a09a57088230ff09aeb0e4718","applied":true}"#;
+        let rewrite = r#"{"trace_id":"","applied":true}"#;
+        assert_eq!(normalize_text(oracle, &[], TRACE), rewrite);
+        // The rewrite's already-empty id is a no-op (idempotent).
+        assert_eq!(normalize_text(rewrite, &[], TRACE), rewrite);
+    }
+
+    #[test]
+    fn trace_id_leaves_non_trace_hex_untouched() {
+        // A hex-looking token that is not preceded by a trace marker is a real
+        // parity surface and must survive normalization.
+        let text = "target notes/deadbeef.md\nhash abcdef0123\n";
+        assert_eq!(normalize_text(text, &[], TRACE), text);
+    }
 }

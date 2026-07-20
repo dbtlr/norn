@@ -197,3 +197,41 @@ old = "a repeated scalar flag is a hard conflict: `find --limit 5 --limit 1` exi
 new = "a repeated scalar flag is last-wins (NRN-365, `args_override_self` on the root propagated to every subcommand): `find --limit 5 --limit 1` resolves to limit 1, exit 0, the single sorted path on stdout"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-388 (unified mutation-warning envelope): the donor's per-kind `--format
+# json` warning object is internally inconsistent — `new` tags an unknown field
+# `{ "field": …, "kind": "unknown-field" }` while `set` used a different member
+# set and casing for the same class — so a consumer must special-case each verb.
+# The rewrite emits ONE envelope for every warning kind, `{ code, field?, message
+# }`, so a machine parses a single shape. Documented as a deliberate divergence
+# at the type itself (`norn-wire::mutate::MutationWarning`); this entry pins the
+# first warning-bearing `--format json` parity case. The records short-forms are
+# donor-faithful (a MATCH) and are covered by the records apply cases separately.
+[[entry]]
+id = "PD-111"
+surface = "set/new --format json warning object (unified envelope)"
+cases = ["mutate-new-unknown-field-warning-json-zoo"]
+old = "the per-kind warning object is inconsistent across verbs/kinds: `new` emits `{ \"field\": \"bogus\", \"kind\": \"unknown-field\" }` (a `kind` discriminator, no message), and other kinds carried different member sets"
+new = "one unified envelope for every warning kind (NRN-388): `{ \"code\": \"unknown-field\", \"field\": \"bogus\", \"message\": \"field 'bogus' not declared in schema\" }` — a stable kebab `code`, the optional scoped `field`, and an operator-facing `message` (see `crates/norn-wire/src/mutate.rs`, `MutationWarning`)"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-371 (non-mapping frontmatter promotes): a frontmatter block that parses to
+# a YAML null — a bare `null`/`~` scalar or a comment-only block — is an
+# initializable EMPTY mapping for a field op, not a hard stop. The donor refuses
+# such a `set` (`frontmatter is not a top-level mapping`, exit 2, write-free); the
+# rewrite promotes the null block to a clean empty mapping and splices the field
+# (a comment-only block keeps its comment). This closes the `new` → `set`
+# roundtrip: `new` can leave a defaults-free doc with an empty/null block, and a
+# subsequent `set` must succeed on it — a valid input must yield a valid output.
+# The two cases are the null-scalar and comment-only forms of the one behavior,
+# isolated on the `mutate-edge` fixture. (A genuinely non-promotable block — a
+# top-level YAML sequence — still refuses.)
+[[entry]]
+id = "PD-112"
+surface = "set against a null-/comment-only frontmatter block (mapping promotion)"
+cases = ["mutate-set-null-block-promote", "mutate-set-comment-block-promote"]
+old = "a field `set` against a frontmatter block that parses to YAML null (a bare `null`/`~` scalar block, or a comment-only block) is refused: `error: frontmatter is not a top-level mapping`, exit 2, the document unchanged"
+new = "the null block promotes to an empty mapping (NRN-371) and the field splices in, exit 0, the tree mutated (a comment-only block keeps its comment and gains the field after it) — a valid input yielding a valid output, closing the new→set null-frontmatter roundtrip (see `crates/norn-frontmatter/src/frontmatter/edit.rs`)"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

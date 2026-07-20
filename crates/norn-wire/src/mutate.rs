@@ -244,6 +244,26 @@ mod tests {
         );
     }
 
+    // Pins the PD-111 unified warning envelope's exact JSON keys. A parity
+    // diverged-verdict is keyed by case id and cannot see WHICH divergence the
+    // candidate emitted — this is the independent positive assertion.
+    #[test]
+    fn warning_envelope_serializes_to_the_unified_shape() {
+        let w = MutationWarning {
+            code: "unknown-field".into(),
+            field: Some("status".into()),
+            message: "field 'status' not declared in schema".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&w).unwrap(),
+            json!({
+                "code": "unknown-field",
+                "field": "status",
+                "message": "field 'status' not declared in schema"
+            })
+        );
+    }
+
     #[test]
     fn set_report_round_trips() {
         let r = SetReport {

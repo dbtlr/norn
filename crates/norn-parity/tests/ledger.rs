@@ -37,11 +37,14 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // (Markdown-link split-then-decode + block-ref, NRN-356) and PD-108
     // (external-vs-local scheme classification, NRN-357); the presentation/errors
     // slate added PD-109 (the soft-landing diagnostic surface, NRN-361/362) and
-    // PD-110 (grammar-wide last-wins, NRN-365).
+    // PD-110 (grammar-wide last-wins, NRN-365). The confirmed-apply mutation
+    // slate (NRN-388) added PD-111 (the unified --format json warning envelope)
+    // and PD-112 (the NRN-371 null-/comment-only frontmatter mapping-promotion,
+    // two cases).
     assert_eq!(
         ledger.entries.len(),
-        10,
-        "expected exactly PD-101..PD-110, found {}",
+        12,
+        "expected exactly PD-101..PD-112, found {}",
         ledger.entries.len()
     );
 

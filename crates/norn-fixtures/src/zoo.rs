@@ -154,6 +154,27 @@ pub fn text_edge_docs() -> Vec<ZooDoc> {
     ]
 }
 
+/// The mutation-edge zoo — emitted only when `Profile::mutate_edge` is set.
+/// Two documents whose frontmatter block is a non-mapping YAML node that a
+/// field op must nonetheless be able to initialize (NRN-371):
+///
+/// - `shapes/null-block.md` — a bare `null` scalar frontmatter block. The
+///   pinned oracle refuses a `set` against it (`frontmatter is not a top-level
+///   mapping`, exit 2); the rewrite promotes the null block to an empty mapping
+///   and splices the field, so a valid input yields a valid output.
+/// - `shapes/comment-block.md` — a comment-only frontmatter block (parses to a
+///   null mapping, same as above). The oracle refuses identically; the rewrite
+///   preserves the comment and appends the field after it.
+///
+/// Isolated on a dedicated profile (mirroring `text_edge_docs`) so the decided
+/// NRN-371 divergence never perturbs a shared zoo/clean case.
+pub fn mutate_edge_docs() -> Vec<ZooDoc> {
+    vec![
+        valid_unlinkable("shapes/null-block.md", NULL_BLOCK),
+        valid_unlinkable("shapes/comment-block.md", COMMENT_BLOCK),
+    ]
+}
+
 /// The violation zoo, emitted only when `Profile::violations` is true. Each
 /// doc's `codes` are exactly what the pinned oracle reports against it.
 pub fn violation_docs() -> Vec<ViolationDoc> {
@@ -503,6 +524,19 @@ title: URL Scheme Linker
 Scheme links: [tel](tel:+15551234), [file](file:///etc/hosts),
 [proto](//example.com/x), [drive](C:/Users/x/n.md), [mixed](hTTp://example.com).
 "#;
+
+// ---- mutation-edge content -------------------------------------------------
+
+/// A bare `null` scalar frontmatter block (NRN-371). YAML parses the block to a
+/// null node — not a mapping — so the oracle refuses a field `set` against it;
+/// the rewrite promotes it to an empty mapping and splices the field.
+const NULL_BLOCK: &str = "---\nnull\n---\n\nBody under a bare-null frontmatter block.\n";
+
+/// A comment-only frontmatter block (NRN-371). The lone `#` line is a YAML
+/// comment, so the block parses to a null mapping — same refusal on the oracle;
+/// the rewrite preserves the comment and appends the field after it.
+const COMMENT_BLOCK: &str =
+    "---\n# only a comment, no keys\n---\n\nBody under a comment-only frontmatter block.\n";
 
 // ---- violation zoo content ------------------------------------------------
 
