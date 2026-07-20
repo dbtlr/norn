@@ -5,6 +5,7 @@
 //! can reorder between runs.
 
 use crate::consistency::Finding;
+use crate::mcp::FrameDiff;
 use crate::poststate::PostStateDiff;
 use crate::run::{Mode, RunReport};
 use crate::verdict::Verdict;
@@ -73,6 +74,7 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
         ));
     }
     render_post_state(&mut out, report);
+    render_mcp_diffs(&mut out, report);
     out
 }
 
@@ -109,6 +111,34 @@ fn render_post_state(out: &mut String, report: &RunReport) {
             out.push_str(&format!(
                 "    content differs: {} (oracle {} bytes, candidate {} bytes, first differs at byte {})\n",
                 delta.path, delta.oracle_len, delta.candidate_len, delta.first_diff_at
+            ));
+        }
+    }
+}
+
+/// Append a legible per-frame section for every MCP case (`crate::mcp`)
+/// whose response frames differed from the oracle after normalization: the
+/// JSON-RPC id, method, and a concise pointer to where the two responses
+/// first differ — never a full frame dump. Nothing is emitted when no MCP
+/// case diverged (every current MCP case is `ported: false`, so a gated run
+/// never even drives one; `--self-check`/`--all` can).
+fn render_mcp_diffs(out: &mut String, report: &RunReport) {
+    let diverged: Vec<(&str, &[FrameDiff])> = report
+        .outcomes
+        .iter()
+        .filter(|o| !o.mcp_diffs.is_empty())
+        .map(|o| (o.case_id, o.mcp_diffs.as_slice()))
+        .collect();
+    if diverged.is_empty() {
+        return;
+    }
+    out.push_str("mcp frame divergences (response differs after normalization):\n");
+    for (case_id, diffs) in diverged {
+        out.push_str(&format!("  {case_id}:\n"));
+        for diff in diffs {
+            out.push_str(&format!(
+                "    id={} method={}: differs at {}\n",
+                diff.id, diff.method, diff.pointer
             ));
         }
     }

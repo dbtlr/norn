@@ -9,6 +9,7 @@ use crate::cases::{self, Case, Suite};
 use crate::exec::{self, ExecError};
 use crate::fixtures::{self, FixtureCache, FixtureError, Side};
 use crate::ledger::{Ledger, LedgerError};
+use crate::mcp;
 use crate::normalize::{self, Normalization};
 use crate::poststate::{self, PostStateDiff};
 use crate::verdict::{self, Verdict};
@@ -56,6 +57,12 @@ pub struct CaseOutcome {
     /// reporting detail only: the verdict already folded the tree difference
     /// into the same match/diverged/drift decision as an output difference.
     pub post_state: Option<PostStateDiff>,
+    /// For an MCP case (`Case::stdin.is_some()`), every response frame that
+    /// differed from the oracle after normalization — empty for a Match, and
+    /// always empty for a non-MCP case. Reporting detail only, like
+    /// `post_state`: the verdict already folded this into match/diverged/
+    /// drift.
+    pub mcp_diffs: Vec<mcp::FrameDiff>,
 }
 
 pub struct RunReport {
@@ -137,6 +144,13 @@ pub enum RunError {
         side_label: &'static str,
         message: String,
     },
+    /// An MCP case (`crate::mcp`) could not be driven to a comparable
+    /// result on one side (a timeout, a premature EOF, a malformed frame) —
+    /// a runner error, never a verdict; see that module's doc for why.
+    Mcp {
+        case_id: &'static str,
+        source: mcp::McpError,
+    },
 }
 
 impl std::fmt::Display for RunError {
@@ -198,6 +212,7 @@ impl std::fmt::Display for RunError {
                 f,
                 "case `{case_id}`: failed to snapshot the {side_label} post-mutation vault tree: {message}"
             ),
+            RunError::Mcp { case_id, source } => write!(f, "case `{case_id}`: {source}"),
         }
     }
 }
@@ -418,77 +433,123 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             }
         }
 
-        let steps: Vec<Normalization> = normalize::DEFAULT
-            .iter()
-            .chain(case.normalize)
-            .copied()
-            .collect();
-
         let oracle_roots: Vec<&Path> = oracle_vault
             .spellings
             .iter()
             .map(PathBuf::as_path)
             .collect();
-        let oracle_raw =
-            exec::run_case(config.oracle, case, &oracle_vault.path).map_err(RunError::Exec)?;
-        let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps)
-            .map_err(|e| normalize_run_error(e, "oracle", case.id))?;
-
-        // Case-rot guard: the oracle side must exit exactly as declared —
-        // an error/error pair that would Match quietly is caught here first.
-        if oracle_norm.exit_code != case.expect_oracle_exit {
-            return Err(RunError::OracleExitMismatch {
-                case_id: case.id,
-                expected: case.expect_oracle_exit,
-                actual: oracle_norm.exit_code,
-            });
-        }
-
         let candidate_roots: Vec<&Path> = candidate_vault
             .spellings
             .iter()
             .map(PathBuf::as_path)
             .collect();
-        let candidate_raw = exec::run_case(candidate_binary, case, &candidate_vault.path)
-            .map_err(RunError::Exec)?;
-        let candidate_norm = normalize::normalize_output(&candidate_raw, &candidate_roots, &steps)
-            .map_err(|e| normalize_run_error(e, candidate_label, case.id))?;
 
-        // A mutating case additionally compares the two post-mutation vault
-        // trees. A tree difference folds into the SAME match/diverged/drift
-        // decision as an output difference (no fourth verdict); the diff is
-        // kept only to make a divergence legible in the report.
-        let post_state = if case.mutating {
-            let oracle_snap = poststate::snapshot(&oracle_vault.path).map_err(|e| {
-                RunError::PostStateSnapshot {
+        let (verdict, post_state, mcp_diffs) = if let Some(frames) = case.stdin {
+            // An MCP case: driven and compared frame-by-frame by `crate::mcp`,
+            // never through the ordinary argv/stdout/stderr path below (see
+            // that module's doc for the framing + timeout/EOF-early
+            // semantics).
+            let oracle_target = mcp::DriveTarget {
+                binary: config.oracle,
+                vault: &oracle_vault.path,
+                roots: &oracle_roots,
+                label: "oracle",
+            };
+            let candidate_target = mcp::DriveTarget {
+                binary: candidate_binary,
+                vault: &candidate_vault.path,
+                roots: &candidate_roots,
+                label: candidate_label,
+            };
+            let result = mcp::run_case(case.argv, frames, oracle_target, candidate_target)
+                .map_err(|source| RunError::Mcp {
                     case_id: case.id,
-                    side_label: "oracle",
-                    message: e.to_string(),
-                }
-            })?;
-            let candidate_snap = poststate::snapshot(&candidate_vault.path).map_err(|e| {
-                RunError::PostStateSnapshot {
+                    source,
+                })?;
+
+            // Case-rot guard, exactly as the non-MCP path below: the oracle
+            // side must exit exactly as declared.
+            if result.oracle_exit != case.expect_oracle_exit {
+                return Err(RunError::OracleExitMismatch {
                     case_id: case.id,
-                    side_label: candidate_label,
-                    message: e.to_string(),
-                }
-            })?;
-            poststate::compare(
-                &oracle_snap,
-                &oracle_roots,
-                &candidate_snap,
-                &candidate_roots,
-            )
+                    expected: case.expect_oracle_exit,
+                    actual: result.oracle_exit,
+                });
+            }
+
+            let matched = result.diffs.is_empty();
+            let entry_id = ledger
+                .as_ref()
+                .and_then(|l| l.entry_for_case(case.id))
+                .map(|e| e.id.as_str());
+            let verdict = verdict::classify(matched, self_check, entry_id);
+            (verdict, None, result.diffs)
         } else {
-            None
-        };
+            let steps: Vec<Normalization> = normalize::DEFAULT
+                .iter()
+                .chain(case.normalize)
+                .copied()
+                .collect();
 
-        let matched = verdict::outputs_match(&oracle_norm, &candidate_norm) && post_state.is_none();
-        let entry_id = ledger
-            .as_ref()
-            .and_then(|l| l.entry_for_case(case.id))
-            .map(|e| e.id.as_str());
-        let verdict = verdict::classify(matched, self_check, entry_id);
+            let oracle_raw =
+                exec::run_case(config.oracle, case, &oracle_vault.path).map_err(RunError::Exec)?;
+            let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps)
+                .map_err(|e| normalize_run_error(e, "oracle", case.id))?;
+
+            // Case-rot guard: the oracle side must exit exactly as declared —
+            // an error/error pair that would Match quietly is caught here first.
+            if oracle_norm.exit_code != case.expect_oracle_exit {
+                return Err(RunError::OracleExitMismatch {
+                    case_id: case.id,
+                    expected: case.expect_oracle_exit,
+                    actual: oracle_norm.exit_code,
+                });
+            }
+
+            let candidate_raw = exec::run_case(candidate_binary, case, &candidate_vault.path)
+                .map_err(RunError::Exec)?;
+            let candidate_norm =
+                normalize::normalize_output(&candidate_raw, &candidate_roots, &steps)
+                    .map_err(|e| normalize_run_error(e, candidate_label, case.id))?;
+
+            // A mutating case additionally compares the two post-mutation vault
+            // trees. A tree difference folds into the SAME match/diverged/drift
+            // decision as an output difference (no fourth verdict); the diff is
+            // kept only to make a divergence legible in the report.
+            let post_state = if case.mutating {
+                let oracle_snap = poststate::snapshot(&oracle_vault.path).map_err(|e| {
+                    RunError::PostStateSnapshot {
+                        case_id: case.id,
+                        side_label: "oracle",
+                        message: e.to_string(),
+                    }
+                })?;
+                let candidate_snap = poststate::snapshot(&candidate_vault.path).map_err(|e| {
+                    RunError::PostStateSnapshot {
+                        case_id: case.id,
+                        side_label: candidate_label,
+                        message: e.to_string(),
+                    }
+                })?;
+                poststate::compare(
+                    &oracle_snap,
+                    &oracle_roots,
+                    &candidate_snap,
+                    &candidate_roots,
+                )
+            } else {
+                None
+            };
+
+            let matched =
+                verdict::outputs_match(&oracle_norm, &candidate_norm) && post_state.is_none();
+            let entry_id = ledger
+                .as_ref()
+                .and_then(|l| l.entry_for_case(case.id))
+                .map(|e| e.id.as_str());
+            let verdict = verdict::classify(matched, self_check, entry_id);
+            (verdict, post_state, Vec::new())
+        };
 
         ran_ids.insert(case.id);
         if let Verdict::Diverged { .. } = &verdict {
@@ -499,6 +560,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             suite_name,
             verdict,
             post_state,
+            mcp_diffs,
         });
     }
 
