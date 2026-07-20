@@ -17,6 +17,12 @@
 //! (NRN-324 tracks child-process bounding generally; this timeout is scoped
 //! to MCP driving only, not a duplicate of that story.)
 //!
+//! Only stdout is compared. JSON-RPC is a stdout-only contract for `norn
+//! mcp` (every request/response frame is a stdout line; stderr carries no
+//! protocol content) — the CLI argv/stdout/stderr path already owns stderr
+//! parity for every other surface, and MCP has no stderr contract of its own
+//! to hold parity over.
+//!
 //! Both a response timeout and a premature EOF (the process exited before
 //! answering every request frame) are runner errors ([`McpError`]), never
 //! folded into a verdict — symmetrically for the oracle and the candidate
@@ -25,13 +31,25 @@
 //! side cannot be trusted to behave as declared cannot be compared
 //! meaningfully) generalized to both sides: an MCP session that cannot
 //! complete a full request/response handshake is an environment problem,
-//! not a nuanced part of the parity comparison. In practice this only
-//! matters for `--all` (never CI-gating, per `run::Mode`'s doc): every MCP
-//! case is declared `ported: false` today (the rewrite's `mcp` subcommand
-//! is `not_yet_ported`), so the default gated run — and CI — never drives
-//! the candidate side at all.
+//! not a nuanced part of the parity comparison. `run::Mode::All` (the
+//! never-CI-gating burn-down view) is the one place that softens this: it
+//! catches an [`McpError`] per case and renders a runner-error row instead
+//! of aborting the whole run, so a not-yet-ported candidate surface doesn't
+//! discard the rest of the burn-down; `Gated`/`SelfCheck` keep the hard
+//! abort (see `run::run_suites`).
+//!
+//! Beyond frame content, three more axes feed the same match/diverged/drift
+//! decision (bundled in [`McpDivergence`], never a runner error): the two
+//! sides' process EXIT codes (a rewrite that answers every frame correctly
+//! but exits non-zero is not a Match), a response id on either side that
+//! was never requested (an "extra" response), and an id either side
+//! answered more than once (a "duplicate" response — adjudicated as a
+//! divergence rather than a hard error: a repeated id is anomalous, but it
+//! is still a *behavioral difference* a rewrite could genuinely diverge on,
+//! and the ledger — not a blanket abort — is where that judgment call
+//! belongs).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -46,20 +64,21 @@ use crate::normalize;
 /// or a real bug to a few seconds instead of forever.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The two volatile fields normalized before comparison, both inside an
-/// `initialize` response: `serverInfo.version` (the crate version the
-/// running binary was built at — differs release to release, and the
-/// rewrite's own crate version will differ from the oracle's pin once it
-/// serves MCP) and `protocolVersion` (the MCP spec revision the server
-/// negotiated — a client-requested value the server may not echo verbatim,
-/// see the module's implementation notes; normalizing it is what lets a
-/// future rewrite that negotiates a different revision still compare
-/// cleanly on everything else). Both substitutions are targeted by exact
-/// object-key name, applied anywhere they occur in the response tree (not
-/// just at a hardcoded path), matching `normalize::Normalization`'s
-/// documented-substitution discipline.
+/// `serverInfo.version` (the crate version the running binary was built
+/// at — differs release to release, and the rewrite's own crate version
+/// will differ from the oracle's pin once it serves MCP) is the one
+/// substitution applied before comparison, targeted by exact object-key
+/// name wherever it occurs in the response tree.
+///
+/// `protocolVersion` is deliberately NOT normalized (dropped after review):
+/// both sides here always echo back the SAME client-requested revision (see
+/// the crate's implementation notes — the oracle only falls back to its own
+/// default when the client sends a revision it does not recognize), so
+/// every case matches without normalizing it. A future rewrite that
+/// genuinely negotiates a different MCP protocol revision than the oracle
+/// is exactly the kind of divergence the ledger exists to record — silently
+/// erasing it here would bypass that decision gate rather than serve it.
 const SERVER_VERSION_PLACEHOLDER: &str = "<MCP_SERVER_VERSION>";
-const PROTOCOL_VERSION_PLACEHOLDER: &str = "<MCP_PROTOCOL_VERSION>";
 
 /// One side to drive: the binary, its materialized vault (cwd), every
 /// absolute spelling of that vault (for `VaultRoot` normalization, mirroring
@@ -97,15 +116,67 @@ pub struct FrameDiff {
     pub pointer: String,
 }
 
+/// A response id one side echoed that was never among the case's
+/// id-bearing request frames — an unsolicited response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtraResponseId {
+    pub label: &'static str,
+    pub id: String,
+}
+
+/// A response id one side answered more than once. See the module doc for
+/// why this is adjudicated as a divergence rather than a runner error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DuplicateResponseId {
+    pub label: &'static str,
+    pub id: String,
+    pub count: usize,
+}
+
+/// Everything one MCP case's driving found different from a clean Match,
+/// bundled for reporting — mirrors `crate::poststate::PostStateDiff`'s
+/// "present (and non-empty) only on a real difference" convention.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpDivergence {
+    /// `Some((oracle, candidate))` when the two sides' process exit codes
+    /// differ. The oracle side's exit is ALSO checked against
+    /// `Case::expect_oracle_exit` by the caller (`run::RunError::
+    /// OracleExitMismatch`, a runner error/case-rot guard, unaffected by
+    /// this field) — this field instead compares the two sides' exits
+    /// against EACH OTHER, so a candidate that answers every frame
+    /// correctly but exits non-zero is not silently blessed as a Match.
+    pub exit_mismatch: Option<(i32, i32)>,
+    /// Every differing frame, in request declaration order.
+    pub diffs: Vec<FrameDiff>,
+    pub extra_response_ids: Vec<ExtraResponseId>,
+    pub duplicate_response_ids: Vec<DuplicateResponseId>,
+}
+
+impl McpDivergence {
+    pub fn is_empty(&self) -> bool {
+        self.exit_mismatch.is_none()
+            && self.diffs.is_empty()
+            && self.extra_response_ids.is_empty()
+            && self.duplicate_response_ids.is_empty()
+    }
+}
+
 /// The result of driving one MCP case against both sides.
 pub struct McpCaseResult {
     /// The oracle side's process exit code — the case-rot guard
     /// (`run::RunError::OracleExitMismatch`) checks this against
     /// `Case::expect_oracle_exit` exactly like the non-MCP path.
     pub oracle_exit: i32,
-    /// Every differing frame, in request declaration order. Empty means
-    /// every paired response matched after normalization.
-    pub diffs: Vec<FrameDiff>,
+    pub candidate_exit: i32,
+    pub divergence: McpDivergence,
+}
+
+impl McpCaseResult {
+    /// `true` when the two sides are indistinguishable on every axis this
+    /// module checks (frame content, exit code, extra/duplicate responses).
+    pub fn matched(&self) -> bool {
+        self.divergence.is_empty()
+    }
 }
 
 /// Why an MCP case could not be driven to a comparable result — a runner
@@ -205,18 +276,53 @@ fn request_metas(frames: &[&str]) -> Result<Vec<RequestMeta>, McpError> {
     Ok(out)
 }
 
+/// One side's complete, parseable MCP session: every response keyed by its
+/// canonical `id` text (last-wins on a repeated id — [`extra_and_duplicates`]
+/// is what flags the repeat as a divergence rather than silently
+/// overwriting), the process exit code, and the ids that were unsolicited
+/// or repeated.
+struct SideResult {
+    responses: BTreeMap<String, Value>,
+    exit_code: i32,
+    extra_ids: Vec<String>,
+    duplicate_ids: Vec<(String, usize)>,
+}
+
+/// Partition `counts` (every response id seen, with how many times) against
+/// `expected_ids` (the case's id-bearing request frames): ids never
+/// requested (extra), and ids seen more than once (duplicate — regardless of
+/// whether they were also requested). Both lists are in `counts`' key order
+/// (a `BTreeMap`, so already sorted — deterministic regardless of the wire
+/// order the side answered in).
+fn extra_and_duplicates(
+    counts: &BTreeMap<String, usize>,
+    expected_ids: &BTreeSet<&str>,
+) -> (Vec<String>, Vec<(String, usize)>) {
+    let extra = counts
+        .keys()
+        .filter(|id| !expected_ids.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let duplicate = counts
+        .iter()
+        .filter(|(_, &count)| count > 1)
+        .map(|(id, &count)| (id.clone(), count))
+        .collect();
+    (extra, duplicate)
+}
+
 /// Drive `target` with `frames` (newline-joined verbatim onto stdin, exactly
 /// as a real MCP client would write them) and return every response line
 /// parsed as JSON, keyed by its canonical `id` text, plus the process exit
-/// code. Errors (via [`McpError`]) if the process times out, is signaled, a
-/// response line is not valid JSON, or it ends without answering every id
-/// in `expected`.
+/// code and any extra/duplicate ids. Errors (via [`McpError`]) if the
+/// process times out, is signaled, a response line is not valid JSON, or it
+/// ends without answering every id in `expected`.
 fn collect_responses(
     target: &DriveTarget,
     argv: &[&str],
     frames: &[&str],
     expected: &[RequestMeta],
-) -> Result<(BTreeMap<String, Value>, i32), McpError> {
+) -> Result<SideResult, McpError> {
     let payload: String = frames.iter().map(|f| format!("{f}\n")).collect();
     let raw = exec::run_argv_bounded(target.binary, argv, Some(&payload), target.vault, TIMEOUT)
         .map_err(|source| McpError::Exec {
@@ -226,6 +332,7 @@ fn collect_responses(
 
     let stdout = String::from_utf8_lossy(&raw.stdout);
     let mut responses = BTreeMap::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
         let value: Value =
             serde_json::from_str(line).map_err(|e| McpError::UnparsableResponse {
@@ -234,7 +341,9 @@ fn collect_responses(
                 message: e.to_string(),
             })?;
         if let Some(id) = value.get("id") {
-            responses.insert(serde_json::to_string(id).unwrap_or_default(), value);
+            let key = serde_json::to_string(id).unwrap_or_default();
+            *counts.entry(key.clone()).or_insert(0) += 1;
+            responses.insert(key, value);
         }
     }
 
@@ -252,27 +361,33 @@ fn collect_responses(
         });
     }
 
+    let expected_ids: BTreeSet<&str> = expected.iter().map(|m| m.id_key.as_str()).collect();
+    let (extra_ids, duplicate_ids) = extra_and_duplicates(&counts, &expected_ids);
+
     let exit_code = raw.exit_code.ok_or(McpError::Signaled {
         label: target.label,
     })?;
-    Ok((responses, exit_code))
+    Ok(SideResult {
+        responses,
+        exit_code,
+        extra_ids,
+        duplicate_ids,
+    })
 }
 
 /// Recursively normalize a parsed MCP response: every string leaf gets the
 /// same `VaultRoot` substitution `normalize::normalize_text` applies to raw
 /// CLI stdout/stderr (each side stripped by its OWN vault-root spellings, so
-/// a path a tool happens to echo never registers as a divergence), plus two
-/// targeted substitutions by exact object-key name (see the module-level doc
-/// for why each is safe to normalize): `protocolVersion` and
-/// `serverInfo.version`.
+/// a path a tool happens to echo never registers as a divergence), plus one
+/// targeted substitution by exact object-key name (see the module-level doc
+/// for why it is safe to normalize, and why `protocolVersion` deliberately
+/// is NOT): `serverInfo.version`.
 fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                let normalized = if k == "protocolVersion" && v.is_string() {
-                    Value::String(PROTOCOL_VERSION_PLACEHOLDER.to_string())
-                } else if k == "serverInfo" && v.is_object() {
+                let normalized = if k == "serverInfo" && v.is_object() {
                     normalize_server_info(v)
                 } else {
                     normalize_value(v, vault_roots)
@@ -385,11 +500,10 @@ fn pointer_string(path: &[String]) -> String {
 }
 
 /// Drive `argv`/`frames` against both `oracle` and `candidate`, and compare
-/// the paired responses frame-by-frame under normalization. Errors (via
-/// [`McpError`]) before ever reaching a verdict if either side cannot
-/// produce a complete, parseable session (see the module doc); otherwise
-/// returns the oracle's exit code (for the caller's case-rot guard) plus
-/// every differing frame.
+/// the paired responses frame-by-frame under normalization, plus the two
+/// sides' exit codes and any extra/duplicate response ids (see the module
+/// doc). Errors (via [`McpError`]) before ever reaching a result if either
+/// side cannot produce a complete, parseable session.
 pub fn run_case(
     argv: &[&str],
     frames: &[&str],
@@ -398,16 +512,17 @@ pub fn run_case(
 ) -> Result<McpCaseResult, McpError> {
     let requests = request_metas(frames)?;
 
-    let (oracle_responses, oracle_exit) = collect_responses(&oracle, argv, frames, &requests)?;
-    let (candidate_responses, _candidate_exit) =
-        collect_responses(&candidate, argv, frames, &requests)?;
+    let oracle_side = collect_responses(&oracle, argv, frames, &requests)?;
+    let candidate_side = collect_responses(&candidate, argv, frames, &requests)?;
 
     let mut diffs = Vec::new();
     for req in &requests {
-        let a = oracle_responses
+        let a = oracle_side
+            .responses
             .get(&req.id_key)
             .expect("collect_responses already confirmed every expected id is present");
-        let b = candidate_responses
+        let b = candidate_side
+            .responses
             .get(&req.id_key)
             .expect("collect_responses already confirmed every expected id is present");
         let a_norm = normalize_value(a, oracle.roots);
@@ -422,7 +537,52 @@ pub fn run_case(
         }
     }
 
-    Ok(McpCaseResult { oracle_exit, diffs })
+    let extra_response_ids = oracle_side
+        .extra_ids
+        .iter()
+        .map(|id| ExtraResponseId {
+            label: oracle.label,
+            id: id.clone(),
+        })
+        .chain(candidate_side.extra_ids.iter().map(|id| ExtraResponseId {
+            label: candidate.label,
+            id: id.clone(),
+        }))
+        .collect();
+
+    let duplicate_response_ids = oracle_side
+        .duplicate_ids
+        .iter()
+        .map(|(id, count)| DuplicateResponseId {
+            label: oracle.label,
+            id: id.clone(),
+            count: *count,
+        })
+        .chain(
+            candidate_side
+                .duplicate_ids
+                .iter()
+                .map(|(id, count)| DuplicateResponseId {
+                    label: candidate.label,
+                    id: id.clone(),
+                    count: *count,
+                }),
+        )
+        .collect();
+
+    let exit_mismatch = (oracle_side.exit_code != candidate_side.exit_code)
+        .then_some((oracle_side.exit_code, candidate_side.exit_code));
+
+    Ok(McpCaseResult {
+        oracle_exit: oracle_side.exit_code,
+        candidate_exit: candidate_side.exit_code,
+        divergence: McpDivergence {
+            exit_mismatch,
+            diffs,
+            extra_response_ids,
+            duplicate_response_ids,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -466,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_value_replaces_server_version_and_protocol_version() {
+    fn normalize_value_replaces_server_version_but_leaves_protocol_version_untouched() {
         let value: Value = serde_json::from_str(
             r#"{"protocolVersion":"2024-11-05","serverInfo":{"name":"norn","version":"0.48.1"}}"#,
         )
@@ -474,7 +634,9 @@ mod tests {
         let normalized = normalize_value(&value, &[]);
         assert_eq!(
             normalized["protocolVersion"],
-            Value::String(PROTOCOL_VERSION_PLACEHOLDER.to_string())
+            Value::String("2024-11-05".to_string()),
+            "protocolVersion is deliberately not normalized (F5) — a real \
+             negotiated-revision divergence belongs in the ledger, not erased here"
         );
         assert_eq!(
             normalized["serverInfo"]["version"],
@@ -527,5 +689,72 @@ mod tests {
         let a: Value = serde_json::from_str(r#"{"result":{"total":1}}"#).unwrap();
         let b: Value = serde_json::from_str(r#"{"result":{"total":1}}"#).unwrap();
         assert_eq!(first_diff_pointer(&a, &b), None);
+    }
+
+    fn counts(pairs: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn extra_and_duplicates_flags_an_unsolicited_id() {
+        let expected: BTreeSet<&str> = ["1", "2"].into_iter().collect();
+        let (extra, duplicate) =
+            extra_and_duplicates(&counts(&[("1", 1), ("2", 1), ("99", 1)]), &expected);
+        assert_eq!(extra, vec!["99".to_string()]);
+        assert!(duplicate.is_empty());
+    }
+
+    #[test]
+    fn extra_and_duplicates_flags_a_repeated_id() {
+        let expected: BTreeSet<&str> = ["1", "2"].into_iter().collect();
+        let (extra, duplicate) = extra_and_duplicates(&counts(&[("1", 1), ("2", 2)]), &expected);
+        assert!(extra.is_empty());
+        assert_eq!(duplicate, vec![("2".to_string(), 2)]);
+    }
+
+    #[test]
+    fn extra_and_duplicates_empty_when_every_id_expected_and_seen_once() {
+        let expected: BTreeSet<&str> = ["1", "2"].into_iter().collect();
+        let (extra, duplicate) = extra_and_duplicates(&counts(&[("1", 1), ("2", 1)]), &expected);
+        assert!(extra.is_empty());
+        assert!(duplicate.is_empty());
+    }
+
+    #[test]
+    fn extra_and_duplicates_a_repeated_unsolicited_id_is_both() {
+        let expected: BTreeSet<&str> = ["1"].into_iter().collect();
+        let (extra, duplicate) = extra_and_duplicates(&counts(&[("1", 1), ("99", 2)]), &expected);
+        assert_eq!(extra, vec!["99".to_string()]);
+        assert_eq!(duplicate, vec![("99".to_string(), 2)]);
+    }
+
+    #[test]
+    fn mcp_divergence_is_empty_iff_every_axis_is_clean() {
+        assert!(McpDivergence::default().is_empty());
+        assert!(!McpDivergence {
+            exit_mismatch: Some((0, 1)),
+            ..Default::default()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn mcp_case_result_matched_delegates_to_divergence() {
+        let clean = McpCaseResult {
+            oracle_exit: 0,
+            candidate_exit: 0,
+            divergence: McpDivergence::default(),
+        };
+        assert!(clean.matched());
+
+        let dirty = McpCaseResult {
+            oracle_exit: 0,
+            candidate_exit: 1,
+            divergence: McpDivergence {
+                exit_mismatch: Some((0, 1)),
+                ..Default::default()
+            },
+        };
+        assert!(!dirty.matched());
     }
 }
