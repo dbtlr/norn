@@ -28,11 +28,20 @@
 //!   separator forgiveness, the query-family dynamic-predicate desugar
 //!   ([`grammar::normalize_argv`]), and the field-universe gate. clap-free; the
 //!   CLI injects its known-flag surface as a value.
+//! - [`plan`] — the typed-op [`plan::MigrationPlan`] model: operations, owner-set
+//!   preconditions (ADR 0015), and the content-addressed canonical hash. A
+//!   surface-neutral, serializable artifact that crosses the wire as plan bytes.
+//! - [`apply`] — the mutation apply substrate: the [`apply::ApplyReport`] output
+//!   vocabulary and outcome→exit mapping, and the ADR 0015 owner-set precondition
+//!   barrier ([`apply::evaluate_owner_preconditions`]).
+//! - [`seq_alloc`] — apply-time `{{seq}}` id allocation (filesystem max+1),
+//!   coupled to the writer boundary the owner holds.
 //!
 //! Deliberately NOT here yet (later port phases): the query/filter SQL emission
 //! (the cache-engine run side) and the post-validation finding filters (blocked
-//! on the validate engine's `Finding` model), the validate/repair engine and
-//! apply verbs, and the cache engine — see `retired/CLAUDE.md`.
+//! on the validate engine's `Finding` model), the validate/repair engine, the
+//! pass-based apply executor (fused with the mutation verbs it serves), and the
+//! mutation verbs themselves — see `retired/CLAUDE.md`.
 
 pub mod cache;
 pub mod domain;
@@ -40,6 +49,7 @@ pub mod env;
 pub mod grammar;
 pub mod graph;
 pub mod links;
+pub mod plan;
 pub mod query;
 pub mod read;
 pub mod standards;
