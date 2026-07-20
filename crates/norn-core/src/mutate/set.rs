@@ -352,14 +352,16 @@ fn synth(
         });
     }
 
-    // --push: aggregate per key for the plan, one report row per pushed element.
+    // --push: aggregate per key, append to the current array. Donor collapse
+    // (F4): the report row is the RESULTING state, not per-element intent — one
+    // `op: "set"` row per key whose `new` is the post-push array.
     let mut grouped_push: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for (k, v) in &push_typed {
         grouped_push.entry(k.clone()).or_default().push(v.clone());
     }
     for (key, values) in &grouped_push {
-        let current_val = current_obj.get(key);
-        let mut new_array = match current_val {
+        let current_val = current_obj.get(key).cloned();
+        let mut new_array = match &current_val {
             Some(Value::Array(existing)) => existing.clone(),
             None => Vec::new(),
             Some(_) => return Err(SetError::PushOnScalar { key: key.clone() }),
@@ -370,69 +372,55 @@ fn synth(
         } else {
             "add_frontmatter"
         };
+        let new_value = Value::Array(new_array);
         ops.push(FmOp {
             kind,
             field: key.clone(),
-            new_value: Some(Value::Array(new_array)),
-            expected_old: current_val.cloned(),
+            new_value: Some(new_value.clone()),
+            expected_old: current_val.clone(),
         });
-        for v in values {
-            report.push(FrontmatterChange {
-                op: "push".into(),
-                field: key.clone(),
-                old: None,
-                new: None,
-                value: Some(v.clone()),
-                found: None,
-            });
-        }
+        report.push(FrontmatterChange {
+            op: "set".into(),
+            field: key.clone(),
+            old: current_val,
+            new: Some(new_value),
+            value: None,
+            found: None,
+        });
     }
 
-    // --pop: drop matching elements; a no-op (missing/scalar/absent) emits no
-    // plan op but still reports `found: false`.
+    // --pop: drop matching elements. Donor collapse (F4): report the RESULTING
+    // state as one `op: "set"` row per key — and ONLY when the array actually
+    // changed. A no-op pop (missing key, scalar value, or nothing matched) emits
+    // NO row at all (the oracle's `frontmatter_changes` is empty).
     let mut grouped_pop: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for (k, v) in &pop_typed {
         grouped_pop.entry(k.clone()).or_default().push(v.clone());
     }
     for (key, drops) in &grouped_pop {
-        match current_obj.get(key) {
-            Some(Value::Array(existing)) => {
-                let new_array: Vec<Value> = existing
-                    .iter()
-                    .filter(|v| !drops.contains(v))
-                    .cloned()
-                    .collect();
-                if new_array.len() != existing.len() {
-                    ops.push(FmOp {
-                        kind: "set_frontmatter",
-                        field: key.clone(),
-                        new_value: Some(Value::Array(new_array)),
-                        expected_old: Some(Value::Array(existing.clone())),
-                    });
-                }
-                for d in drops {
-                    let found = existing.contains(d);
-                    report.push(FrontmatterChange {
-                        op: "pop".into(),
-                        field: key.clone(),
-                        old: None,
-                        new: None,
-                        value: Some(d.clone()),
-                        found: Some(found),
-                    });
-                }
-            }
-            _ => {
-                for d in drops {
-                    report.push(FrontmatterChange {
-                        op: "pop".into(),
-                        field: key.clone(),
-                        old: None,
-                        new: None,
-                        value: Some(d.clone()),
-                        found: Some(false),
-                    });
-                }
+        if let Some(Value::Array(existing)) = current_obj.get(key) {
+            let new_array: Vec<Value> = existing
+                .iter()
+                .filter(|v| !drops.contains(v))
+                .cloned()
+                .collect();
+            if new_array.len() != existing.len() {
+                let old = Value::Array(existing.clone());
+                let new_value = Value::Array(new_array);
+                ops.push(FmOp {
+                    kind: "set_frontmatter",
+                    field: key.clone(),
+                    new_value: Some(new_value.clone()),
+                    expected_old: Some(old.clone()),
+                });
+                report.push(FrontmatterChange {
+                    op: "set".into(),
+                    field: key.clone(),
+                    old: Some(old),
+                    new: Some(new_value),
+                    value: None,
+                    found: None,
+                });
             }
         }
     }
@@ -534,8 +522,13 @@ fn coerce_kv_slice(
             if let Some(allowed) = coerce::lookup_allowed_values(cfg, doc, &key) {
                 if !coerce::value_in_allowed(&coerced, &allowed) {
                     if !force {
+                        let value = coerced
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| coerced.to_string());
                         return Err(SetError::ValueNotAllowed {
                             field: key.clone(),
+                            value,
                             allowed: coerce::display_allowed(&allowed),
                         });
                     }
@@ -582,18 +575,22 @@ fn detect_cross_class_conflicts(params: &SetParams) -> Result<(), SetError> {
     if conflicts.is_empty() {
         return Ok(());
     }
-    let mut msg = String::from("cross-class conflict on the same key: ");
-    let parts: Vec<String> = conflicts
-        .iter()
-        .map(|(k, classes)| format!("'{k}': {}", classes.join(" + ")))
-        .collect();
-    msg.push_str(&parts.join("; "));
+    // Donor-faithful body (retired/src/set/synth.rs): a header, one indented
+    // `'key': --a + --b` line per conflict, then the trailing explainer.
+    let mut msg = String::from("cross-class conflict on the same key:\n");
+    for (k, classes) in &conflicts {
+        msg.push_str(&format!("  '{k}': {}\n", classes.join(" + ")));
+    }
+    msg.push_str(
+        "each key may be targeted by only one of --field/--field-json/--push/--pop/--remove per invocation",
+    );
     Err(SetError::FieldConflict { message: msg })
 }
 
 fn unknown_field(key: &str) -> MutationWarning {
     MutationWarning {
         code: "unknown-field".into(),
+        field: Some(key.to_string()),
         message: format!("field '{key}' not declared in schema"),
     }
 }
@@ -601,6 +598,7 @@ fn unknown_field(key: &str) -> MutationWarning {
 fn force_bypass(key: &str, what: &str) -> MutationWarning {
     MutationWarning {
         code: "force-bypass".into(),
+        field: Some(key.to_string()),
         message: format!("--force bypassed {what} for '{key}'"),
     }
 }
@@ -639,14 +637,35 @@ fn refused(
 #[derive(Debug)]
 enum SetError {
     Coerce(CoerceError),
-    ValueNotAllowed { field: String, allowed: String },
-    FieldJsonInvalid { field: String, detail: String },
-    FieldJsonTypeInvalid { field: String, field_type: String },
-    FieldJsonNotAllowed { field: String, allowed: String },
-    RequiredFieldRemoved { field: String },
-    AssignmentMalformed { raw: String },
-    FieldConflict { message: String },
-    PushOnScalar { key: String },
+    ValueNotAllowed {
+        field: String,
+        value: String,
+        allowed: String,
+    },
+    FieldJsonInvalid {
+        field: String,
+        detail: String,
+    },
+    FieldJsonTypeInvalid {
+        field: String,
+        field_type: String,
+    },
+    FieldJsonNotAllowed {
+        field: String,
+        allowed: String,
+    },
+    RequiredFieldRemoved {
+        field: String,
+    },
+    AssignmentMalformed {
+        raw: String,
+    },
+    FieldConflict {
+        message: String,
+    },
+    PushOnScalar {
+        key: String,
+    },
     FrontmatterNotMapping,
 }
 
@@ -672,9 +691,13 @@ impl std::fmt::Display for SetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SetError::Coerce(e) => write!(f, "{e}"),
-            SetError::ValueNotAllowed { field, allowed } => write!(
+            SetError::ValueNotAllowed {
+                field,
+                value,
+                allowed,
+            } => write!(
                 f,
-                "value is not allowed for '{field}' (allowed: {allowed}); use --force to override"
+                "value '{value}' is not allowed for '{field}' (allowed: {allowed}); use --force to override"
             ),
             SetError::FieldJsonInvalid { field, detail } => {
                 write!(f, "--field-json value is not valid JSON ({field}): {detail}")
@@ -993,5 +1016,110 @@ mod tests {
         assert!(set_exec.report.applied);
         let on_disk = std::fs::read_to_string(root.join("notes/fresh.md").as_std_path()).unwrap();
         assert!(on_disk.contains("status: active"));
+    }
+
+    // ── Review fixes F2/F4/F5 ────────────────────────────────────────────────
+
+    #[test]
+    fn f2_field_conflict_message_keeps_donor_body_and_explainer() {
+        let (_t, root) = synth_vault(None, &[("a.md", "---\ntags: []\n---\n")]);
+        let cache = built(&root);
+        let params = SetParams {
+            target: "a.md".into(),
+            fields: vec!["tags=foo".into()],
+            push: vec!["tags=bar".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
+        let msg = &exec.report.error.as_ref().unwrap().message;
+        assert!(
+            msg.starts_with("cross-class conflict on the same key:\n"),
+            "{msg}"
+        );
+        assert!(msg.contains("  'tags': --field + --push\n"), "{msg}");
+        assert!(
+            msg.ends_with("each key may be targeted by only one of --field/--field-json/--push/--pop/--remove per invocation"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn f2_value_not_allowed_message_includes_the_offending_value() {
+        let cfg = "validate:\n  rules:\n    - name: task-rule\n      match:\n        frontmatter:\n          type: task\n      allowed_values:\n        status: [backlog, done]\n";
+        let (_t, root) = synth_vault(
+            Some(cfg),
+            &[("a.md", "---\ntype: task\nstatus: backlog\n---\n")],
+        );
+        let cache = built(&root);
+        let config = parse_cfg(cfg);
+        let params = SetParams {
+            target: "a.md".into(),
+            fields: vec!["status=bogus".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        let err = exec.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(
+            err.message
+                .starts_with("value 'bogus' is not allowed for 'status'"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn f4_push_collapses_to_a_single_set_row_with_the_resulting_array() {
+        let (_t, root) = synth_vault(None, &[("a.md", "---\ntags:\n  - x\n---\n")]);
+        let cache = built(&root);
+        let params = SetParams {
+            target: "a.md".into(),
+            push: vec!["tags=y".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.frontmatter_changes.len(), 1);
+        let ch = &exec.report.frontmatter_changes[0];
+        assert_eq!(ch.op, "set");
+        assert_eq!(ch.field, "tags");
+        assert_eq!(ch.old, Some(serde_json::json!(["x"])));
+        assert_eq!(ch.new, Some(serde_json::json!(["x", "y"])));
+        assert!(ch.value.is_none() && ch.found.is_none());
+    }
+
+    #[test]
+    fn f4_pop_that_matches_nothing_emits_no_change_row() {
+        let (_t, root) = synth_vault(None, &[("a.md", "---\ntags:\n  - x\n---\n")]);
+        let cache = built(&root);
+        let params = SetParams {
+            target: "a.md".into(),
+            pop: vec!["tags=zzz".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
+        assert!(
+            exec.report.frontmatter_changes.is_empty(),
+            "a no-op pop reports no change row (donor: empty frontmatter_changes)"
+        );
+    }
+
+    #[test]
+    fn f5_unknown_field_warning_carries_the_structured_field_member() {
+        let (_t, root) = synth_vault(None, &[("a.md", "---\ntitle: A\n---\n")]);
+        let cache = built(&root);
+        let params = SetParams {
+            target: "a.md".into(),
+            fields: vec!["reviewer=me".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
+        let w = exec
+            .report
+            .warnings
+            .iter()
+            .find(|w| w.code == "unknown-field")
+            .expect("an undeclared field warns");
+        assert_eq!(w.field.as_deref(), Some("reviewer"));
+        assert_eq!(w.message, "field 'reviewer' not declared in schema");
     }
 }

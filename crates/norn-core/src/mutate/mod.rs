@@ -42,11 +42,13 @@ pub(crate) fn wikilink_warnings(
     match matches {
         0 => vec![norn_wire::MutationWarning {
             code: "wikilink-unresolved".into(),
+            field: Some(field.to_string()),
             message: format!("unresolved wikilink in {field}: [[{target}]]"),
         }],
         1 => Vec::new(),
         _ => vec![norn_wire::MutationWarning {
             code: "wikilink-ambiguous".into(),
+            field: Some(field.to_string()),
             message: format!("ambiguous wikilink in {field}: [[{target}]]"),
         }],
     }

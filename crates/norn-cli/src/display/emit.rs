@@ -925,12 +925,21 @@ fn mutation_exit(outcome: MutationOutcome) -> i32 {
 
 /// Render the non-fatal mutation warnings (count + the first three messages, with
 /// a `… (N more)` tail) — the donor truncation, on the stderr conversation.
-/// The mutation warning's records short form (donor-faithful): the seam sets
-/// `message` to the exact short line the donor prints (`unknown field: status`,
-/// `title-ignored: …`). The full structured JSON warning shape is a separate
-/// concern (the JSON envelope), so records reads only `message`.
-fn warning_short(w: &MutationWarning) -> &str {
-    &w.message
+/// The mutation warning's records short form — the donor `warning_label`
+/// vocabulary, computed per `code` from the unified `{ code, field, message }`
+/// envelope (the JSON shape is a deliberate divergence; see
+/// `norn_wire::MutationWarning`). Kinds whose records line differs from the
+/// message (`unknown-field`, `force-bypass`, `title-ignored`) are rebuilt from
+/// `code` + `field`; the rest print their `message` verbatim (it already equals
+/// the donor label — e.g. the wikilink warnings).
+fn warning_short(w: &MutationWarning) -> String {
+    let field = w.field.as_deref().unwrap_or("");
+    match w.code.as_str() {
+        "unknown-field" => format!("unknown field: {field}"),
+        "force-bypass" => format!("--force bypass: {field}"),
+        "title-ignored" => format!("title-ignored: {}", w.message),
+        _ => w.message.clone(),
+    }
 }
 
 fn render_set<O: Write, E: Write>(
@@ -1077,15 +1086,14 @@ fn new_kv(out: &mut dyn Write, label: &str, value: &str) -> io::Result<()> {
     writeln!(out, "{label:<9}  {value}")
 }
 
-/// The provenance detail for a created field (donor): `operator-flag` for an
-/// operator override, else `schema-default, {rule}` for a rule default.
+/// The provenance detail for a created field (donor `report.rs`): the source
+/// label as the core already set it (`operator-flag` / `operator-flag-json` /
+/// `schema-default` — one vocabulary, no remap), plus the crediting rule when a
+/// default carried one: `schema-default, task-rule`.
 fn created_detail(created: &norn_wire::FrontmatterCreated) -> String {
-    match created.source.as_str() {
-        "operator-flag" | "override" | "operator" => "operator-flag".to_string(),
-        _ => match &created.rule {
-            Some(rule) => format!("schema-default, {rule}"),
-            None => "schema-default".to_string(),
-        },
+    match &created.rule {
+        Some(rule) => format!("{}, {}", created.source, rule),
+        None => created.source.clone(),
     }
 }
 
@@ -1105,7 +1113,10 @@ fn render_new<O: Write, E: Write>(
         let _ = global;
         let result: io::Result<i32> = (|| {
             let value = serde_json::to_value(report)?;
-            writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
+            // The donor's `new --format json` emits NO trailing newline (unlike
+            // `set --format json`, which does) — a donor inconsistency mirrored
+            // faithfully with `write!`, not `writeln!`.
+            write!(out, "{}", serde_json::to_string_pretty(&value)?)?;
             Ok(mutation_exit(report.outcome))
         })();
         return render_outcome(result, conv.writer());
@@ -1139,9 +1150,17 @@ fn render_new<O: Write, E: Write>(
         if report.frontmatter_created.is_empty() {
             new_kv(out, "fields", "none")?;
         } else {
+            // Field-name sub-column padding (donor report.rs max_field_w): every
+            // `field` cell is left-padded to the widest name so the `=` aligns.
+            let field_w = report
+                .frontmatter_created
+                .iter()
+                .map(|c| c.field.len())
+                .max()
+                .unwrap_or(0);
             for (i, created) in report.frontmatter_created.iter().enumerate() {
                 let line = format!(
-                    "{} = {}  ({})",
+                    "{:<field_w$} = {}  ({})",
                     created.field,
                     value_repr(&created.value),
                     created_detail(created)
@@ -1161,7 +1180,7 @@ fn render_new<O: Write, E: Write>(
         } else {
             for (i, w) in report.warnings.iter().enumerate() {
                 if i == 0 {
-                    new_kv(out, "warnings", warning_short(w))?;
+                    new_kv(out, "warnings", &warning_short(w))?;
                 } else {
                     writeln!(out, "           {}", warning_short(w))?;
                 }
@@ -2066,5 +2085,110 @@ mod tests {
             s.contains("\x1b[38;5;167m"),
             "expected rune on the error group header: {s:?}"
         );
+    }
+
+    // ── mutation reporting (review fixes F1/F3/F5) ─────────────────────────────
+
+    use norn_wire::{FrontmatterCreated, MutationWarning, NewReport};
+
+    fn created(field: &str, value: Value, source: &str, rule: Option<&str>) -> FrontmatterCreated {
+        FrontmatterCreated {
+            field: field.into(),
+            value,
+            source: source.into(),
+            rule: rule.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn f1_created_detail_uses_the_core_vocabulary_verbatim() {
+        // No remap layer: the source label is whatever the core set, plus the
+        // crediting rule when a default carried one.
+        assert_eq!(
+            created_detail(&created(
+                "type",
+                json!("note"),
+                "schema-default",
+                Some("typed-note")
+            )),
+            "schema-default, typed-note"
+        );
+        assert_eq!(
+            created_detail(&created("title", json!("X"), "operator-flag", None)),
+            "operator-flag"
+        );
+        assert_eq!(
+            created_detail(&created("tags", json!([1]), "operator-flag-json", None)),
+            "operator-flag-json"
+        );
+    }
+
+    #[test]
+    fn f3_new_records_pads_field_names_to_the_widest() {
+        let report = NewReport {
+            schema_version: 2,
+            trace_id: String::new(),
+            operation: "new".into(),
+            path: Some("a.md".into()),
+            applied: false,
+            outcome: MutationOutcome::Applied,
+            frontmatter_created: vec![
+                created("kind", json!("note"), "schema-default", Some("r")),
+                created("verylongfield", json!("v"), "operator-flag", None),
+            ],
+            body_bytes: 0,
+            warnings: vec![],
+            predicted_path: None,
+            error: None,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            render_new(
+                NewMutationView {
+                    report,
+                    explicit: Some(Format::Records),
+                    spec: FormatSpec {
+                        tty: Format::Records,
+                        piped: Format::Records,
+                    },
+                },
+                &global_args(),
+                &mut presenter,
+            );
+        }
+        let s = String::from_utf8(out).unwrap();
+        // Both field cells are padded to the widest name (13 chars), so the `=`
+        // columns align.
+        assert!(s.contains("kind          = note"), "{s}");
+        assert!(s.contains("verylongfield = v"), "{s}");
+    }
+
+    #[test]
+    fn f5_warning_short_rebuilds_the_donor_records_labels_per_code() {
+        let uf = MutationWarning {
+            code: "unknown-field".into(),
+            field: Some("status".into()),
+            message: "field 'status' not declared in schema".into(),
+        };
+        assert_eq!(warning_short(&uf), "unknown field: status");
+
+        let ti = MutationWarning {
+            code: "title-ignored".into(),
+            field: None,
+            message: "--title 'X' has no effect with an explicit path".into(),
+        };
+        assert_eq!(
+            warning_short(&ti),
+            "title-ignored: --title 'X' has no effect with an explicit path"
+        );
+
+        let fb = MutationWarning {
+            code: "force-bypass".into(),
+            field: Some("status".into()),
+            message: "--force bypassed type validation for 'status'".into(),
+        };
+        assert_eq!(warning_short(&fb), "--force bypass: status");
     }
 }

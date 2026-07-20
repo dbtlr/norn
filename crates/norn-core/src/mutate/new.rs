@@ -111,10 +111,11 @@ pub fn execute(
         if let Some(title) = &params.title {
             built.warnings.push(MutationWarning {
                 code: "title-ignored".into(),
-                // The donor's records line carries the `title-ignored:` kind prefix.
-                message: format!(
-                    "title-ignored: --title '{title}' has no effect with an explicit path"
-                ),
+                field: None,
+                // The `title-ignored:` records prefix is added by the display layer
+                // per-code (like the donor `warning_label`); the message is the
+                // bare detail.
+                message: format!("--title '{title}' has no effect with an explicit path"),
             });
         }
     }
@@ -489,6 +490,7 @@ struct CreateBuilt {
     warnings: Vec<MutationWarning>,
 }
 
+#[derive(Clone, Copy)]
 enum OverrideSrc {
     Field,
     FieldJson,
@@ -558,7 +560,12 @@ fn build_create(
     // Schema-aware coercion of --field overrides (unless --force).
     let path_only_rules = applicable_rules(cfg, compiled, doc_path.as_str(), None);
     let mut operator_overrides: BTreeMap<String, Value> = BTreeMap::new();
+    // Track WHICH operator flag supplied each override so the report can credit
+    // the donor's three-way source vocabulary (operator-flag / operator-flag-json
+    // / schema-default) rather than a flattened two-way label (F1).
+    let mut override_src: BTreeMap<String, OverrideSrc> = BTreeMap::new();
     for (key, value, src) in raw {
+        override_src.insert(key.clone(), src);
         let coerced = if matches!(src, OverrideSrc::Field) && !params.force {
             let raw_str = value.as_str().unwrap_or("");
             let spec = path_only_rules
@@ -609,10 +616,17 @@ fn build_create(
     let mut created: Vec<FrontmatterCreated> = Vec::new();
     for (field, value) in &resolved_fm {
         if operator_overrides.contains_key(field) {
+            // Donor source vocabulary (retired/src/new/report.rs): a `--field`
+            // override is `operator-flag`, a `--field-json` override is
+            // `operator-flag-json` — the distinction the flattened label lost.
+            let source = match override_src.get(field) {
+                Some(OverrideSrc::FieldJson) => "operator-flag-json",
+                _ => "operator-flag",
+            };
             created.push(FrontmatterCreated {
                 field: field.clone(),
                 value: value.clone(),
-                source: "override".into(),
+                source: source.into(),
                 rule: None,
             });
         } else {
@@ -623,7 +637,7 @@ fn build_create(
             created.push(FrontmatterCreated {
                 field: field.clone(),
                 value: value.clone(),
-                source: "default".into(),
+                source: "schema-default".into(),
                 rule,
             });
         }
@@ -634,6 +648,7 @@ fn build_create(
     for field in unknown_fields {
         warnings.push(MutationWarning {
             code: "unknown-field".into(),
+            field: Some(field.clone()),
             message: format!("field '{field}' not declared in schema"),
         });
     }
@@ -662,6 +677,7 @@ fn build_create(
     for (field, rules) in missing {
         warnings.push(MutationWarning {
             code: "missing-required-field".into(),
+            field: Some(field.clone()),
             message: format!(
                 "missing required field '{field}' (rules: {})",
                 rules.join(", ")
@@ -679,6 +695,7 @@ fn build_create(
     if !collisions.is_empty() {
         warnings.push(MutationWarning {
             code: "stem-collision".into(),
+            field: None,
             message: format!("stem '{new_stem}' also at: {}", collisions.join(", ")),
         });
     }
@@ -860,7 +877,7 @@ validate:
             by_field.get("type").unwrap().value,
             Value::String("task".into())
         );
-        assert_eq!(by_field.get("type").unwrap().source, "default");
+        assert_eq!(by_field.get("type").unwrap().source, "schema-default");
     }
 
     #[test]
@@ -921,10 +938,34 @@ validate:
             .iter()
             .map(|c| (c.field.as_str(), c))
             .collect();
-        assert_eq!(by_field.get("type").unwrap().source, "default");
+        assert_eq!(by_field.get("type").unwrap().source, "schema-default");
         assert_eq!(by_field.get("type").unwrap().rule.as_deref(), Some("r"));
-        assert_eq!(by_field.get("title").unwrap().source, "override");
+        assert_eq!(by_field.get("title").unwrap().source, "operator-flag");
         assert!(by_field.get("title").unwrap().rule.is_none());
+    }
+
+    #[test]
+    fn f1_field_json_override_credits_operator_flag_json() {
+        // The donor's three-way source vocabulary: a --field-json override is
+        // `operator-flag-json`, distinct from --field's `operator-flag`.
+        let (_t, root) = synth_vault(None, &[]);
+        let cache = built(&root);
+        let params = NewParams {
+            path: Some("foo.md".into()),
+            fields: vec!["a=plain".into()],
+            field_json: vec!["b=[1,2]".into()],
+            confirm: false,
+            ..Default::default()
+        };
+        let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
+        let by_field: BTreeMap<_, _> = exec
+            .report
+            .frontmatter_created
+            .iter()
+            .map(|c| (c.field.as_str(), c))
+            .collect();
+        assert_eq!(by_field.get("a").unwrap().source, "operator-flag");
+        assert_eq!(by_field.get("b").unwrap().source, "operator-flag-json");
     }
 
     #[test]

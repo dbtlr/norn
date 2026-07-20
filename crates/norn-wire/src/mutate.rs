@@ -49,12 +49,28 @@ pub struct CodedError {
 }
 
 /// A non-fatal mutation warning carried in the report (unknown field, an
-/// unresolved/ambiguous wikilink, a `--force` schema bypass, a post-create
-/// validation finding). `code` is a stable kebab discriminator; `message` is the
-/// operator-facing line.
+/// unresolved/ambiguous wikilink, a `--force` schema bypass, a title ignored by
+/// an explicit-path create). `code` is a stable kebab discriminator, `field` the
+/// affected frontmatter key when the warning is scoped to one, and `message` the
+/// operator-facing detail.
+///
+/// # DELIBERATE DIVERGENCE from the donor (reason: discovered-inconsistency)
+///
+/// The donor's per-kind warning JSON is internally inconsistent — `set` tagged
+/// its unknown-field warning `kind: "unknown_field"` (snake_case) while `new`
+/// tagged the same class `"unknown-field"` (kebab), and different kinds carried
+/// different member sets (`{kind, field, message}` vs `{kind, title}`). This is
+/// donor slop, not a contract worth replicating. The rewrite emits ONE unified
+/// envelope for every warning kind — `{ code: <kebab>, field?: <key>, message }`
+/// — so a consumer parses one shape. A parity ledger entry (reason
+/// discovered-inconsistency, unified) attaches the moment a warning-bearing
+/// `--format json` parity case lands; the records short forms are donor-faithful
+/// and already covered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationWarning {
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
     pub message: String,
 }
 
@@ -101,7 +117,9 @@ pub struct SetReport {
     pub trace_id: String,
     pub operation: String,
     pub target: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Always serialized — the donor emits `"frontmatter_changes":[]` on a no-op
+    /// (e.g. a pop that matched nothing), never omits the key.
+    #[serde(default)]
     pub frontmatter_changes: Vec<FrontmatterChange>,
     pub body_changed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
