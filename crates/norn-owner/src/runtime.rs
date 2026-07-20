@@ -482,25 +482,30 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
             continue;
         }
 
-        // A warm-up config error rejects every frame and can never serve a
-        // useful one (NRN-360). Such a rejection is NOT activity worth extending
-        // the owner's life, so it neither touches the idle clock nor keeps the
-        // owner warm — instead the owner eager-reaps the moment the client has
-        // the error in hand. `warmup_error` is monotonic (set once at warm-up,
-        // never cleared), so reading it before dispatch is race-free: if set
-        // here, dispatch is guaranteed to return the Rejected below.
-        let warmup_reject = state.warmup_error().is_some();
-
         state.in_flight.fetch_add(1, Ordering::SeqCst);
-        if !warmup_reject {
-            state.touch();
-        }
-        let response = match serde_json::from_str::<ClientFrame>(trimmed) {
+        // `dispatch` reports whether it took the warm-up-config-error path
+        // (NRN-360) via its `warmup_reject` return. That single read of the
+        // monotonic `warmup_error` is the SOLE authority for both the response
+        // AND the eager-reap below. A prior design snapshotted `warmup_error`
+        // here, before dispatch's own independent read; the two could disagree
+        // when the error landed in the window between them, and dispatch would
+        // serve the client a `Rejected` (the config error is in hand) while the
+        // stale snapshot reported "not a warm-up reject" — so the owner skipped
+        // the eager-reap AND `touch`ed the idle clock, then waited out the full
+        // idle TTL (a ~30s reap-latency bug, NRN-391). Deriving the flag FROM
+        // dispatch closes that window: one read decides both.
+        let (response, warmup_reject) = match serde_json::from_str::<ClientFrame>(trimmed) {
             Ok(frame) => dispatch(&state, frame).await,
-            Err(err) => OwnerFrame::Error {
-                message: format!("malformed control frame: {err}"),
-            },
+            Err(err) => (
+                OwnerFrame::Error {
+                    message: format!("malformed control frame: {err}"),
+                },
+                false,
+            ),
         };
+        // A warm-up config rejection can never serve a useful frame and is NOT
+        // activity worth extending the owner's life, so it does not touch the
+        // idle clock; every other frame resets it.
         if !warmup_reject {
             state.touch();
         }
@@ -529,18 +534,40 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
     Ok(())
 }
 
-async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
+/// Dispatch one client frame to an owner response. The returned `bool` is the
+/// authoritative `warmup_reject` flag: `true` iff this frame took the warm-up
+/// config-error path, which `handle_connection` uses to eager-reap. Deriving it
+/// from dispatch's OWN read of `warmup_error` (rather than a separate snapshot in
+/// the caller) is load-bearing — see the race note at the call site (NRN-391).
+///
+/// CAUTION: the single-read invariant is not deterministically pinned by a test
+/// (the None→Some transition window is timing-dependent). Reintroducing a
+/// snapshot-then-dispatch split would NOT be caught by CI — it would resurface
+/// as the rare 30s-TTL lingering-owner flake this fix closed.
+async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> (OwnerFrame, bool) {
     // A warm-up that failed on an invalid config answers EVERY frame with the
     // config error as a Rejected — the user-error path (NRN-360). The owner is
     // healthy (not fatal); it simply cannot serve a vault whose `.norn/config.yaml`
     // it could not parse. The client renders this as the config error;
     // `handle_connection` then eager-reaps so a resummon re-reads the config.
     if let Some(message) = state.warmup_error() {
-        return OwnerFrame::Rejected {
-            message,
-            hints: Vec::new(),
-        };
+        return (
+            OwnerFrame::Rejected {
+                message,
+                hints: Vec::new(),
+            },
+            true,
+        );
     }
+    (dispatch_frame(state, frame).await, false)
+}
+
+/// Dispatch a frame on a HEALTHY owner — [`dispatch`] handles the warm-up
+/// config-error path (its single `warmup_error` read) before delegating here, so
+/// every frame below runs its verb. Split out so that gate reads `warmup_error`
+/// exactly once and this match's many `return not_ready()` early exits keep their
+/// plain [`OwnerFrame`] type (NRN-391).
+async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
     match frame {
         ClientFrame::Ping { protocol } => {
             if protocol != CONTROL_PROTOCOL {
@@ -1117,13 +1144,19 @@ mod tests {
             "invalid config /vault/.norn/config.yaml: unknown field `not`".to_string(),
         );
 
-        // A ping (normally a Pong) is rejected with the config message.
-        let frame = block_on(dispatch(
+        // A ping (normally a Pong) is rejected with the config message, and
+        // dispatch flags the eager-reap (`warmup_reject == true`) from its own
+        // read — the single authority `handle_connection` relies on (NRN-391).
+        let (frame, warmup_reject) = block_on(dispatch(
             &state,
             ClientFrame::Ping {
                 protocol: CONTROL_PROTOCOL,
             },
         ));
+        assert!(
+            warmup_reject,
+            "a warm-up config error must flag the eager-reap"
+        );
         match frame {
             OwnerFrame::Rejected { message, .. } => {
                 assert!(
@@ -1135,10 +1168,10 @@ mod tests {
         }
 
         // A probe is rejected too — the owner cannot serve reads under a config
-        // it could not parse.
+        // it could not parse — and likewise flags the eager-reap.
         assert!(matches!(
             block_on(dispatch(&state, ClientFrame::Probe)),
-            OwnerFrame::Rejected { .. }
+            (OwnerFrame::Rejected { .. }, true)
         ));
 
         // Recording a config error must NOT trip the fatal (exit-to-heal) latch:
