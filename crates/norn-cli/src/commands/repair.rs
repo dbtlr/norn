@@ -111,7 +111,9 @@ mod tests {
 
     #[test]
     fn active_filter_flags_quote_globs() {
-        let args = repair_args(&["norn", "repair", "--plan", "--code", "link-*", "--rule", "r1"]);
+        let args = repair_args(&[
+            "norn", "repair", "--plan", "--code", "link-*", "--rule", "r1",
+        ]);
         let flags = active_filter_flags(&args);
         assert_eq!(
             flags,

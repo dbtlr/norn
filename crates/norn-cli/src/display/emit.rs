@@ -1293,8 +1293,7 @@ fn write_repair_report(
             let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
             sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             sorted.truncate(TOP_FILES_N);
-            let rows: Vec<(&str, usize)> =
-                sorted.iter().map(|(l, c)| (l.as_str(), *c)).collect();
+            let rows: Vec<(&str, usize)> = sorted.iter().map(|(l, c)| (l.as_str(), *c)).collect();
             primitives::tally_group(out, palette, "Top affected files", &rows, width, ascii)?;
             writeln!(out)?;
         }

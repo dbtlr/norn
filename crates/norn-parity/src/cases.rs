@@ -333,6 +333,73 @@ const VALIDATE_CASES: &[Case] = &[
     },
 ];
 
+/// `repair` ports as a READ verb (NRN-382): findings → `MigrationPlan`, never
+/// applied (the donor's `norn repair` is read-only; `apply` executes the plan).
+/// Bare `norn repair` prints the findings summary (order-free: sorted by-code
+/// counts + operation/skip tallies); `--plan` emits the plan. As with
+/// `validate`, a raw `--plan --format json` over the whole zoo is NOT a case —
+/// the plan's operation order follows the oracle's raw finding order, which is
+/// not rerun-stable across multi-finding documents. Every `--plan` case here is
+/// therefore order-free: `--format paths` (sorted + deduped) or a
+/// single-per-document `--code` narrow (`frontmatter-required-field-missing`
+/// matches at most once per zoo document). The zoo carries no error-severity
+/// diagnostic, so `has_diagnostic_errors` is false → exit 0 on both sides.
+const REPAIR_CASES: &[Case] = &[
+    Case {
+        // Bare `norn repair` on a clean vault — the no-findings summary: "0
+        // findings across N documents" + "0 repairable as operations, 0
+        // skipped", no apply guidance. Order-free and write-free.
+        id: "repair-summary-clean",
+        argv: &["repair"],
+        fixture: CLEAN_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // Bare `norn repair` on the zoo — the findings summary: total findings,
+        // per-code tally (sorted), and the repairable/skipped counts. All
+        // order-free (counts, not ordered lists), so rerun-stable.
+        id: "repair-summary-zoo",
+        argv: &["repair"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--plan --format paths`: every affected document path, sorted +
+        // deduplicated — order-free even though the raw plan-op order is not.
+        // Exercises the findings → plan generation end to end.
+        id: "repair-plan-paths-zoo",
+        argv: &["repair", "--plan", "--format", "paths"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // A `--plan --format json` case is deliberately omitted: the `MigrationPlan`
+    // serializes its `operations` / `skipped` arrays in the oracle's raw finding
+    // order, which is not rerun-stable across multi-finding documents (the same
+    // limitation that keeps bare `validate --format json` out of the suite —
+    // oracle self-check DRIFTS on it). The plan's JSON shape is pinned by
+    // `norn-core`'s `read::repair` + `plan_from_findings` unit tests instead; the
+    // `--format paths` case above already exercises the findings → plan
+    // generation end to end through the parity oracle.
+];
+
 /// find + count now port for real (NRN-346): the read-surface parity anchor.
 /// Every find/count case is `ported: true` and must Match the oracle (pure
 /// byte-parity — no ledger entry). The argv matrix covers the filter surface
@@ -1775,6 +1842,10 @@ const SUITES: &[Suite] = &[
     Suite {
         name: "validate",
         cases: VALIDATE_CASES,
+    },
+    Suite {
+        name: "repair",
+        cases: REPAIR_CASES,
     },
     Suite {
         name: "read",

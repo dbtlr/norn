@@ -19,9 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport,
-    FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams, NewReport,
-    RepairParams, RepairReport, RewriteWikilinkParams, SetParams, SetReport, ValidateParams,
-    ValidateReport,
+    FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams, NewReport, RepairParams,
+    RepairReport, RewriteWikilinkParams, SetParams, SetReport, ValidateParams, ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is

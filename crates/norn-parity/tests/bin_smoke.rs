@@ -55,8 +55,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-380 adds six `mutate` cascade cases (move apply + dry-run forecast +
     // dry-run --format json, delete apply with --rewrite-to, a backlink-present
     // refusal, and a rewrite-wikilink apply), taking the total to 84; all Match.
+    // NRN-382 adds three `repair` cases (bare summary on clean + zoo, and a
+    // `--plan --format paths`), taking the total to 87; all Match (a `--plan
+    // --format json` case is intentionally omitted — the oracle's plan op order
+    // is not rerun-stable, so it DRIFTS oracle-vs-oracle).
     assert!(
-        stdout.contains("84 cases: 84 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("87 cases: 87 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -124,8 +128,11 @@ fn default_mode_gates_help_cases_exit_0() {
     // backlink-present refusal, and a rewrite-wikilink apply), all byte-exact
     // matches — the gated total grows to 82 and the match count to 65 (diverged
     // stays 17).
+    // NRN-382 adds three ported `repair` cases (bare summary on clean + zoo, and
+    // `--plan --format paths`), all byte-exact matches (no ledger entry): the
+    // gated total grows to 85 and the match count to 68 (diverged stays 17).
     assert!(
-        stdout.contains("82 cases: 65 match, 17 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("85 cases: 68 match, 17 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -160,6 +167,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "read-find-json-zoo",
         "read-count-clean",
         "validate-summary-zoo",
+        "repair-summary-zoo",
         "match",
     ] {
         assert!(

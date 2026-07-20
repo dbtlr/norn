@@ -139,12 +139,12 @@ pub fn execute(
 /// `repair::skip_reasons::code_matches_any`). A malformed glob falls back to an
 /// exact-string compare. Empty pattern list is handled by the caller (no filter).
 fn skip_reason_matches(code: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|pattern| {
-        match globset::Glob::new(pattern) {
+    patterns
+        .iter()
+        .any(|pattern| match globset::Glob::new(pattern) {
             Ok(g) => g.compile_matcher().is_match(code),
             Err(_) => code == pattern,
-        }
-    })
+        })
 }
 
 #[cfg(test)]
