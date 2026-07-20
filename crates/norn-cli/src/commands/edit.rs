@@ -10,8 +10,9 @@
 //!
 //! Apply-vs-forecast is the same client-side ladder as `set`/`new`: `--dry-run`
 //! forecasts, `--yes` applies, everything else forecasts (a safe implicit
-//! dry-run). The interactive TTY prompt the donor offered is deferred with the
-//! other mutation verbs.
+//! dry-run). A human at a TTY additionally gets the donor's preview → prompt →
+//! apply conversation (NRN-389), wired through [`run_confirm`] and
+//! `display::emit_mutation`.
 //!
 //! # A CLI-side resolution error is a coded refusal, not a `norn:` diagnostic
 //!
@@ -43,6 +44,20 @@ impl From<EditFormat> for Format {
 /// or an owner-side pre-write decline arrives as a report with `outcome =
 /// refused` the display layer renders at exit 2.
 pub fn run(args: &EditArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
+    run_confirm(args, global, args.yes && !args.dry_run)
+}
+
+/// Same as [`run`], but with `confirm` supplied rather than derived from
+/// `args` — the dispatch loop's interactive retry (NRN-389) calls this
+/// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
+/// routed request, not a replay of the cached forecast: the owner re-runs the
+/// transform and writes fresh under its lock, exactly as a direct `--yes`
+/// invocation would.
+pub(crate) fn run_confirm(
+    args: &EditArgs,
+    global: &GlobalArgs,
+    confirm: bool,
+) -> Result<Output, Diagnostic> {
     // Resolve the ops FIRST so a malformed input fails fast, before any owner
     // summon or write. A resolution error is a coded refusal (`error: <msg>`,
     // exit 2), built locally and returned as the Output.
@@ -59,8 +74,7 @@ pub fn run(args: &EditArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         target: args.target.clone(),
         edits,
         expected_hash: args.expected_hash.clone(),
-        // --dry-run wins over --yes; no --yes is a forecast.
-        confirm: args.yes && !args.dry_run,
+        confirm,
     };
 
     let mut session = crate::routed::open_session(global)?;

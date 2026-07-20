@@ -9,10 +9,10 @@
 //!
 //! The apply-vs-forecast ladder (client-side, ADR 0011 amendment): `--dry-run`
 //! forecasts; `--yes` applies; everything else forecasts (a safe implicit
-//! dry-run). The donor's interactive TTY preview→prompt→apply conversation is
-//! deferred for this first mutation-verb port — agents drive `--yes` /
-//! `--dry-run` / `--format json` and are fully served; a human at a TTY gets a
-//! forecast plus the `Apply with --yes` hint instead of a prompt.
+//! dry-run). Agents drive `--yes` / `--dry-run` / `--format json` and are
+//! fully served by that ladder alone; a human at a TTY additionally gets the
+//! donor's preview → prompt → apply conversation (NRN-389), wired through
+//! [`run_confirm`] and `display::emit_mutation`.
 
 use std::io::Read;
 
@@ -34,6 +34,20 @@ impl From<SetFormat> for Format {
 /// decline is NOT a `Diagnostic` — it arrives as a report with `outcome =
 /// refused` the display layer renders at exit 2.
 pub fn run(args: &SetArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
+    run_confirm(args, global, args.yes && !args.dry_run)
+}
+
+/// Same as [`run`], but with `confirm` supplied rather than derived from
+/// `args` — the dispatch loop's interactive retry (NRN-389) calls this
+/// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
+/// routed request, not a replay of the cached forecast: the owner re-plans
+/// and applies fresh under its lock, exactly as a direct `--yes` invocation
+/// would.
+pub(crate) fn run_confirm(
+    args: &SetArgs,
+    global: &GlobalArgs,
+    confirm: bool,
+) -> Result<Output, Diagnostic> {
     let body = if args.body_from_stdin {
         Some(read_stdin()?)
     } else {
@@ -55,8 +69,7 @@ pub fn run(args: &SetArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         remove: args.remove.clone(),
         body,
         force: args.force,
-        // --dry-run wins over --yes; no --yes is a forecast.
-        confirm: args.yes && !args.dry_run,
+        confirm,
     };
 
     let mut session = crate::routed::open_session(global)?;

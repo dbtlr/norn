@@ -39,6 +39,7 @@ use super::output::{
     GetView, MoveMutationView, NewMutationView, Output, RepairView, RewriteWikilinkView,
     SetMutationView, ValidateView, VaultListView,
 };
+use super::prompt;
 use super::sink::Sink;
 use super::{Diagnostic, Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 use crate::cli::RepairPlanFormat;
@@ -49,6 +50,14 @@ use norn_core::plan::MigrationPlan;
 /// [`FormatSpec::resolve`](super::format::FormatSpec::resolve).
 fn is_stdout_tty() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
+
+/// Whether the process stdin is a terminal — the interactive-confirm gate
+/// (NRN-389). Deliberately separate from [`is_stdout_tty`]: the confirm
+/// prompt READS from stdin, so stdin is the terminal whose ttyness actually
+/// matters, independent of whatever stdout is connected to.
+fn is_stdin_tty() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
 /// The effective terminal width for record wrapping (donor default 80).
@@ -128,6 +137,51 @@ pub fn emit<O: Write, E: Write>(
             })();
             render_outcome(result, err)
         }
+    }
+}
+
+/// Render a mutation verb's first report and, when the invocation is
+/// interactive-eligible, carry the donor's preview → prompt → apply
+/// conversation (NRN-389).
+///
+/// The first render is BYTE-IDENTICAL to today's non-interactive path in
+/// every case — forecast (with its `Apply with --yes` hint), applied, or
+/// refused — because this wraps [`emit`] rather than changing it. Only when
+/// ALL of the following hold does anything additional happen:
+///
+/// - `prompt_eligible` is true (the caller's `--dry-run`/`--yes`/
+///   `--format json` ladder decided this run was a plain, unconfirmed
+///   forecast attempt — the same ladder that decides `confirm` itself);
+/// - the first render's exit code is [`EXIT_OK`] (a clean forecast, not a
+///   refusal or an operational error — nothing to confirm on those); and
+/// - stdin is a real terminal ([`is_stdin_tty`]).
+///
+/// Then: prompt on stderr (blank line + `Proceed? [y/N] `, donor text). On a
+/// "y"/"yes" answer, call `rerun` — a SECOND routed request with `confirm`
+/// forced true, re-planned and applied fresh under the owner's lock, exactly
+/// as a direct `--yes` invocation would — and render its report as the FINAL
+/// outcome. On anything else (a declined answer, EOF, or an I/O error
+/// reading the prompt), decline: no second request, exit
+/// [`EXIT_OPERATIONAL`] (1) — the donor's `process::exit(1)` on a declined
+/// confirm, carried here as a return rather than a hard process exit.
+///
+/// Piped / non-TTY invocations never reach the prompt at all (`is_stdin_tty`
+/// is false), so today's forecast-plus-hint contract for scripts and the
+/// parity harness is unchanged byte-for-byte.
+pub fn emit_mutation<O: Write, E: Write>(
+    first: Result<Output, Diagnostic>,
+    prompt_eligible: bool,
+    rerun: impl FnOnce() -> Result<Output, Diagnostic>,
+    global: &GlobalArgs,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let exit = emit(first, global, presenter);
+    if !prompt_eligible || exit != EXIT_OK || !is_stdin_tty() {
+        return exit;
+    }
+    match prompt::confirm_interactive() {
+        Ok(true) => emit(rerun(), global, presenter),
+        Ok(false) | Err(_) => EXIT_OPERATIONAL,
     }
 }
 

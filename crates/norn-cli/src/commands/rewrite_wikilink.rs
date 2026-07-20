@@ -17,10 +17,24 @@ use norn_wire::RewriteWikilinkParams;
 /// `OLD` arrives IN the report (`outcome = refused`) the display renders at
 /// exit 2.
 pub fn run(args: &RewriteWikilinkArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
+    run_confirm(args, global, args.yes && !args.dry_run)
+}
+
+/// Same as [`run`], but with `confirm` supplied rather than derived from
+/// `args` — the dispatch loop's interactive retry (NRN-389) calls this
+/// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
+/// routed request, not a replay of the cached forecast: the owner re-resolves
+/// `old` and re-expands the per-document rewrites fresh under its lock,
+/// exactly as a direct `--yes` invocation would.
+pub(crate) fn run_confirm(
+    args: &RewriteWikilinkArgs,
+    global: &GlobalArgs,
+    confirm: bool,
+) -> Result<Output, Diagnostic> {
     let params = RewriteWikilinkParams {
         old: args.old.clone(),
         new: args.new.clone(),
-        confirm: args.yes && !args.dry_run,
+        confirm,
     };
 
     let mut session = crate::routed::open_session(global)?;

@@ -28,6 +28,20 @@ impl From<NewFormat> for Format {
 /// decline (unknown rule, destination exists, …) arrives as a report with
 /// `outcome = refused` the display layer renders at exit 2.
 pub fn run(args: &NewArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
+    run_confirm(args, global, args.yes && !args.dry_run)
+}
+
+/// Same as [`run`], but with `confirm` supplied rather than derived from
+/// `args` — the dispatch loop's interactive retry (NRN-389) calls this
+/// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
+/// routed request, not a replay of the cached forecast: the owner re-resolves
+/// defaults/`{{seq}}` and writes fresh under its lock, exactly as a direct
+/// `--yes` invocation would.
+pub(crate) fn run_confirm(
+    args: &NewArgs,
+    global: &GlobalArgs,
+    confirm: bool,
+) -> Result<Output, Diagnostic> {
     let body = if args.body_from_stdin {
         Some(read_stdin()?)
     } else {
@@ -44,7 +58,7 @@ pub fn run(args: &NewArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         body,
         parents: args.parents,
         force: args.force,
-        confirm: args.yes && !args.dry_run,
+        confirm,
     };
 
     let mut session = crate::routed::open_session(global)?;
