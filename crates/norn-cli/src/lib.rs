@@ -48,6 +48,7 @@ pub const CONTRACT: &str = "norn-cli: thin CLI adapter — parse and present onl
 pub const DEP_CONTRACTS: &[&str] = &[
     norn_client::CONTRACT,
     norn_config::CONTRACT,
+    norn_mcp::CONTRACT,
     norn_wire::CONTRACT,
 ];
 
@@ -182,7 +183,24 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         Command::Cache(_) => presenter.not_yet_ported("cache"),
         Command::Config(_) => presenter.not_yet_ported("config"),
         Command::SelfUpdate(_) => presenter.not_yet_ported("self-update"),
-        Command::Mcp(_) => presenter.not_yet_ported("mcp"),
+        // `norn mcp` speaks the MCP stdio protocol. The CLI owns vault resolution
+        // + summon (exactly like a read verb), then hands the ready session to the
+        // MCP adapter, which runs the JSON-RPC server until the client closes
+        // stdin. A resolution failure is a soft-landing diagnostic; a serve-loop
+        // failure is an operational diagnostic.
+        Command::Mcp(_) => match routed::open_session(&cli.global) {
+            Ok(session) => match norn_mcp::serve_stdio(session) {
+                Ok(()) => display::EXIT_OK,
+                Err(err) => {
+                    presenter.diagnostic(&err.to_string());
+                    display::EXIT_OPERATIONAL
+                }
+            },
+            Err(diag) => {
+                presenter.present_diagnostic(&diag);
+                display::EXIT_OPERATIONAL
+            }
+        },
         Command::Serve(_) => presenter.not_yet_ported("serve"),
         Command::Service(_) => presenter.not_yet_ported("service"),
         Command::Audit(_) => presenter.not_yet_ported("audit"),

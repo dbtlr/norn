@@ -9,6 +9,7 @@ publish = false
 norn-client = { path = "../norn-client" }
 norn-config = { path = "../norn-config" }
 norn-core = { path = "../norn-core" }
+norn-mcp = { path = "../norn-mcp" }
 norn-wire = { path = "../norn-wire" }
 clap = { version = "4.5", features = ["derive"] }
 terminal_size = "0.4"
