@@ -41,8 +41,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
         "expected exit 0, got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         output.status.code()
     );
+    // NRN-383 adds two `mcp` suite cases (initialize/tools/list handshake +
+    // a tools/call), both `ported: false` — self-check ignores `ported` and
+    // runs every case, so the total grows from 56 to 58; both must Match
+    // (oracle vs. itself).
     assert!(
-        stdout.contains("56 cases: 56 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("58 cases: 58 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
