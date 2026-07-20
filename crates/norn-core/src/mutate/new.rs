@@ -17,7 +17,7 @@ use crate::seq_alloc::{self, SEQ_TOKEN};
 use crate::standards::apply::ensure_within_vault;
 use crate::standards::{
     applicable_rules, compile_config, path_variables, render, resolve_to_fixpoint, CompiledConfig,
-    Context, VaultConfig,
+    Context, FindingBody, VaultConfig,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -213,6 +213,20 @@ pub fn execute(
     // mint a placeholder id on apply.
     let trace_id = String::new();
 
+    // NRN-390: post-create validate pass, donor-equivalent to
+    // `retired/src/new/mod.rs::post_create_validate`. Only meaningful once the
+    // file is actually on disk (a forecast writes nothing for the pass to see),
+    // so it runs only on a confirmed apply — matching the donor, which invokes
+    // it solely from `apply_and_render`, never from the dry-run preview path.
+    let mut warnings = built.warnings;
+    if applied {
+        if let Some(created_path) = path.as_deref() {
+            let extra =
+                post_create_validate(cfg, &compiled, &vault_root, config, created_path, &warnings);
+            warnings.extend(extra);
+        }
+    }
+
     Ok(MutationExecution {
         report: NewReport {
             schema_version: 2,
@@ -223,12 +237,110 @@ pub fn execute(
             outcome: MutationOutcome::Applied,
             frontmatter_created: built.created,
             body_bytes,
-            warnings: built.warnings,
+            warnings,
             predicted_path,
             error: None,
         },
         touched_paths,
     })
+}
+
+// ── Post-create validate (NRN-390) ──────────────────────────────────────────
+
+/// Run the general validate engine over a fresh, filesystem-scanned index and
+/// surface any finding for the newly-created document that `build_create`'s
+/// hand-computed warnings (missing-required/unknown-field/wikilink/
+/// stem-collision) don't already cover.
+///
+/// A plain filesystem walk (not the SQL cache) is the only way to see the new
+/// file at this point: the write already landed under `apply_migration_plan`,
+/// but the owner's cache increment for `touched_paths` commits later — mirrors
+/// the donor's `post_create_validate`, which forces a rebuild for the same
+/// reason (retired/src/new/mod.rs). Alias checks are skipped (`alias_field:
+/// None`) — the same choice the donor made for this one-shot pass.
+///
+/// Dedup: a `RequiredFrontmatterMissing` finding whose field is already covered
+/// by a synth-phase `missing-required-field` warning is dropped and every other
+/// finding surfaces once, recoded onto the `missing-required-field` family when
+/// it IS a required-field miss the synth phase didn't already catch (donor
+/// parity — `already_warned`). Every other finding kind reuses the engine's own
+/// `code`/`message` verbatim, plus the finding's own field when its body
+/// carries one (the unified `{code, field?, message}` envelope, PD-111, is
+/// richer than the donor's flat `ValidationFinding{code,message}`).
+fn post_create_validate(
+    cfg: &VaultConfig,
+    compiled: &CompiledConfig,
+    vault_root: &Utf8Path,
+    config: Option<&VaultConfig>,
+    doc_path: &str,
+    existing_warnings: &[MutationWarning],
+) -> Vec<MutationWarning> {
+    let index_options = super::owner_index_options(config);
+    let fresh_index = match crate::graph::build_index_with_options(vault_root, &index_options) {
+        Ok(idx) => idx,
+        // A post-write scan failure is a diagnostic-only miss here, not a
+        // create failure — the file is already on disk and the primary report
+        // stands regardless. Skip the extra findings rather than turning a
+        // successful create into an error.
+        Err(_) => return Vec::new(),
+    };
+
+    let findings =
+        crate::standards::validate_with_compiled(&fresh_index, &cfg.validate, compiled, None);
+
+    let already_warned: BTreeSet<&str> = existing_warnings
+        .iter()
+        .filter(|w| w.code == "missing-required-field")
+        .filter_map(|w| w.field.as_deref())
+        .collect();
+
+    let mut extra = Vec::new();
+    for finding in findings.iter().filter(|f| f.path.as_str() == doc_path) {
+        match &finding.body {
+            FindingBody::RequiredFrontmatterMissing { field, rule } => {
+                if already_warned.contains(field.as_str()) {
+                    continue;
+                }
+                let rules = rule.as_ref().map(|r| vec![r.clone()]).unwrap_or_default();
+                extra.push(MutationWarning {
+                    code: "missing-required-field".into(),
+                    field: Some(field.clone()),
+                    message: format!(
+                        "missing required field '{field}' (rules: {})",
+                        rules.join(", ")
+                    ),
+                });
+            }
+            other => {
+                extra.push(MutationWarning {
+                    code: finding.code.clone(),
+                    field: finding_field(other),
+                    message: finding.message.clone(),
+                });
+            }
+        }
+    }
+    extra
+}
+
+/// The field name a validate finding's body carries, if any — used to populate
+/// the unified warning envelope's optional `field`. `RequiredFrontmatterMissing`
+/// is handled by its own arm in the caller and never reaches here.
+fn finding_field(body: &FindingBody) -> Option<String> {
+    match body {
+        FindingBody::DisallowedValue { field, .. }
+        | FindingBody::InvalidFieldType { field, .. }
+        | FindingBody::ExceedsMaxLength { field, .. }
+        | FindingBody::ForbiddenField { field, .. }
+        | FindingBody::ReferenceType { field, .. }
+        | FindingBody::AliasMalformed { field, .. } => Some(field.clone()),
+        FindingBody::GraphDiagnostic { .. }
+        | FindingBody::LinkIssue { .. }
+        | FindingBody::DocumentMisrouted { .. }
+        | FindingBody::AliasShadowedByStem { .. }
+        | FindingBody::AliasDuplicateAcrossDocs { .. }
+        | FindingBody::RequiredFrontmatterMissing { .. } => None,
+    }
 }
 
 // ── Three-mode resolution ───────────────────────────────────────────────────
@@ -1109,6 +1221,103 @@ validate:
         assert_eq!(
             exec.report.error.as_ref().unwrap().code,
             "path-and-rule-conflict"
+        );
+    }
+
+    // ── NRN-390: post-create validate pass ──────────────────────────────────
+
+    #[test]
+    fn post_create_validate_surfaces_disallowed_value() {
+        // `allowed_values` is a validate-engine-only rule: `build_create`'s own
+        // hand-computed warnings never check it, so before this pass a
+        // `--field status=someday` that violates it produced a false-clean
+        // envelope. Confirm the general validate pass now catches it.
+        let cfg = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      allowed_values:
+        status:
+          - backlog
+          - done
+"#;
+        let (_t, root) = synth_vault(Some(cfg), &[]);
+        let cache = built(&root);
+        let config = parse_cfg(cfg);
+        let params = NewParams {
+            path: Some("foo.md".into()),
+            fields: vec!["status=someday".into()],
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        assert!(exec.report.applied);
+        let warning = exec
+            .report
+            .warnings
+            .iter()
+            .find(|w| w.code == "value-not-allowed")
+            .expect("expected a value-not-allowed warning from the post-create validate pass");
+        assert_eq!(warning.field.as_deref(), Some("status"));
+        assert!(warning.message.contains("status"));
+    }
+
+    #[test]
+    fn post_create_validate_no_findings_stays_clean() {
+        // The happy path (no rules, nothing to violate) must stay warning-free
+        // — the post-create pass is additive, not a source of noise.
+        let (_t, root) = synth_vault(None, &[]);
+        let cache = built(&root);
+        let params = NewParams {
+            path: Some("notes/foo.md".into()),
+            parents: true,
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        assert!(exec.report.warnings.is_empty());
+    }
+
+    #[test]
+    fn post_create_validate_does_not_duplicate_missing_required_warning() {
+        // `build_create` already emits `missing-required-field` for a rule's own
+        // `required_frontmatter` gap; the post-create validate pass's
+        // `RequiredFrontmatterMissing` finding for the SAME field must be
+        // deduplicated against it (donor `already_warned` parity), not doubled.
+        let cfg = r#"
+validate:
+  rules:
+    - name: r
+      match:
+        path: "**/*.md"
+      required_frontmatter:
+        - status
+"#;
+        let (_t, root) = synth_vault(Some(cfg), &[]);
+        let cache = built(&root);
+        let config = parse_cfg(cfg);
+        let params = NewParams {
+            path: Some("foo.md".into()),
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        let missing_required: Vec<_> = exec
+            .report
+            .warnings
+            .iter()
+            .filter(|w| w.code == "missing-required-field" && w.field.as_deref() == Some("status"))
+            .collect();
+        assert_eq!(
+            missing_required.len(),
+            1,
+            "missing-required-field for 'status' must appear exactly once, not duplicated \
+             by the post-create validate pass"
         );
     }
 }
