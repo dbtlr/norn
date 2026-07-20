@@ -632,6 +632,7 @@ name = "norn-parity"
 version = "0.0.0"
 dependencies = [
  "norn-fixtures",
+ "serde_json",
  "tempfile",
  "toml",
 ]

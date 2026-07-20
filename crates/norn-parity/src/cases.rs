@@ -63,9 +63,18 @@ pub struct Case {
     pub id: &'static str,
     pub argv: &'static [&'static str],
     pub fixture: Fixture,
-    /// Future MCP frame driving (phase 3, stdin-fed JSON-RPC frames). `None`
-    /// everywhere today — no case exercises `norn mcp` yet.
-    pub stdin: Option<&'static str>,
+    /// Ordered JSON-RPC request frames for an MCP case (`argv == ["mcp"]`):
+    /// each element is one single-line JSON-RPC message, fed to `norn mcp`'s
+    /// stdin newline-delimited in this declaration order. A frame with no
+    /// `id` (e.g. `notifications/initialized`) is a fire-and-forget
+    /// notification — JSON-RPC promises it no response, so
+    /// `crate::mcp::run_case` excludes it from response pairing. `None` for
+    /// every non-MCP case (the field this module long stubbed for "future
+    /// MCP frame driving" — now activated; see `crate::mcp` for the driver
+    /// and `crate::run::run_suites`, which branches on
+    /// `case.stdin.is_some()` to route an MCP case through it instead of
+    /// the ordinary argv/stdout/stderr comparison).
+    pub stdin: Option<&'static [&'static str]>,
     /// Whether this argv WRITES to the vault (`set`/`new`/`edit`/`move`/
     /// `delete`/`rewrite-wikilink`/`migrate` — arriving in later phases). A
     /// mutating case runs each side against its OWN freshly generated vault
@@ -1150,6 +1159,79 @@ const ERROR_CASES: &[Case] = &[
     },
 ];
 
+/// A dedicated zoo fixture for the MCP suite (seed 4 — the next free seed
+/// after `ERR_ZOO`'s 3), never shared with any CLI suite. `norn mcp`'s
+/// `initialize`/`tools/list` never touch the vault at all, and `tools/call`
+/// against it was empirically confirmed clean (no cache-rebuild stderr
+/// noise, rerun-stable stdout across repeated invocations on both a
+/// never-touched and an already-touched copy of the real generated `zoo`
+/// vault) — but isolation is cheap insurance matching the same discipline
+/// `HELP_FIXTURE`'s doc comment explains: a suite with any risk of
+/// first-touch-order sensitivity gets its own fixture rather than
+/// potentially interacting with another suite's warm cache state.
+const MCP_FIXTURE: Fixture = Fixture {
+    profile_name: "zoo",
+    seed: 4,
+};
+
+/// MCP frame driving (NRN-383, ADR 0018 phase 3): drive `norn mcp`'s stdio
+/// JSON-RPC surface with the ordered frames in `stdin` and compare responses
+/// frame-by-frame (see `crate::mcp`), instead of the ordinary argv/stdout/
+/// stderr comparison every other case uses. `ported: false` on both — the
+/// rewrite's `mcp` subcommand is still `not_yet_ported` (prints a diagnostic
+/// and exits, no stdio server) — so the gated default run skips these
+/// cleanly via the existing `ported` filter; `--self-check` (oracle vs.
+/// itself) still runs and must Match both.
+const MCP_CASES: &[Case] = &[
+    Case {
+        // The MCP session lifecycle anchor: `initialize` (id 1) then
+        // `tools/list` (id 2), with the standard `notifications/initialized`
+        // in between (a notification — no `id`, no response expected, so
+        // `crate::mcp::run_case` excludes it from pairing). Verified
+        // empirically against the pinned oracle (v0.48.1): newline-delimited
+        // JSON-RPC over stdio (one object per line, no LSP-style
+        // `Content-Length` framing), and the process exits cleanly (exit 0)
+        // once stdin reaches EOF — confirmed by writing exactly these frames,
+        // closing stdin, and observing the process exit on its own rather
+        // than needing to be killed.
+        id: "mcp-initialize-tools-list-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ]),
+        mutating: false,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // A `tools/call` of a read tool (`vault.get`, the MCP counterpart of
+        // `norn get`) against an existing fixture doc — proves the mechanics
+        // end to end past the handshake: a real tool invocation, structured
+        // JSON in the response's `structuredContent`, compared frame-by-frame
+        // like the initialize/tools/list case above.
+        id: "mcp-tools-call-get-alpha-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.get","arguments":{"targets":["alpha"]}}}"#,
+        ]),
+        mutating: false,
+        ported: false,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+];
+
 const SUITES: &[Suite] = &[
     Suite {
         name: "help",
@@ -1174,6 +1256,10 @@ const SUITES: &[Suite] = &[
     Suite {
         name: "describe",
         cases: DESCRIBE_CASES,
+    },
+    Suite {
+        name: "mcp",
+        cases: MCP_CASES,
     },
 ];
 

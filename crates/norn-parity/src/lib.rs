@@ -16,6 +16,7 @@ pub mod consistency;
 pub mod exec;
 pub mod fixtures;
 pub mod ledger;
+pub mod mcp;
 pub mod normalize;
 pub mod paths;
 pub mod poststate;
