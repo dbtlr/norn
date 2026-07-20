@@ -14,4 +14,5 @@ pub mod count;
 pub mod describe;
 pub mod find;
 pub mod get;
+pub mod validate;
 pub mod vault;

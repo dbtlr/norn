@@ -1,7 +1,8 @@
 //! Record-block line writers, ported from the donor `src/output/primitives.rs`
-//! (retired tree). Only the primitives `find --format records` needs:
-//! [`count_line`], [`record_block`], and [`separator`]. The tally / severity /
-//! note primitives port with the verbs that emit them.
+//! (retired tree). `find --format records` needs [`count_line`],
+//! [`record_block`], and [`separator`]; `validate --format records` adds
+//! [`status_headline`], [`severity_tally`], and [`tally_group`] (ported with the
+//! first verb that emits them, NRN-381).
 //!
 //! Non-tty parity note: the parity harness runs piped, so the palette is `off`
 //! (every style a no-op) and `term_width` is 80 with separators capped at 60 —
@@ -11,6 +12,118 @@ use std::io::{self, Write};
 
 use super::glyphs::{self, Glyph};
 use super::palette::Palette;
+
+/// A status headline: the text followed by a `…` ellipsis, the whole line in
+/// `dim`, one newline. The validate records header ("running N rules across M
+/// documents…").
+pub fn status_headline(out: &mut dyn Write, p: &Palette, text: &str) -> io::Result<()> {
+    write!(out, "{}{text}…{}", p.dim.render(), p.dim.render_reset())?;
+    writeln!(out)
+}
+
+/// Severity tally: a three-line block (pass / warn / err); zero rows elided.
+/// Right-aligned counts. If all three are zero, a single "0 {noun} pass" row is
+/// emitted so the caller still shows a "the command ran" signal.
+pub fn severity_tally(
+    out: &mut dyn Write,
+    p: &Palette,
+    pass: usize,
+    warn: usize,
+    err: usize,
+    noun: &str,
+) -> io::Result<()> {
+    let ascii = glyphs::use_ascii();
+    let max_count = pass.max(warn).max(err);
+    let w = max_count.to_string().len();
+
+    let emit_pass = pass > 0 || (warn == 0 && err == 0);
+    if emit_pass {
+        let g = glyphs::render(Glyph::Pass, ascii);
+        writeln!(
+            out,
+            "  {}{g}{}  {pass:>w$} {noun} pass",
+            p.moss.render(),
+            p.moss.render_reset(),
+        )?;
+    }
+    if warn > 0 {
+        let g = glyphs::render(Glyph::Warn, ascii);
+        let label = if warn == 1 { "warning" } else { "warnings" };
+        writeln!(
+            out,
+            "  {}{g}{}  {warn:>w$} {label}",
+            p.amber.render(),
+            p.amber.render_reset(),
+        )?;
+    }
+    if err > 0 {
+        let g = glyphs::render(Glyph::Err, ascii);
+        let label = if err == 1 { "error" } else { "errors" };
+        writeln!(
+            out,
+            "  {}{g}{}  {err:>w$} {label}",
+            p.rune.render(),
+            p.rune.render_reset(),
+        )?;
+    }
+    Ok(())
+}
+
+/// A `header` section line (4-indent, `section` style) followed by aligned
+/// `label ···· count` rows (4-indent label, `·` leaders filling to `term_width`,
+/// right-aligned count in `thread`). Header omitted when empty; the whole call is
+/// a no-op when `rows` is empty (the caller skips it).
+pub fn tally_group(
+    out: &mut dyn Write,
+    p: &Palette,
+    header: &str,
+    rows: &[(&str, usize)],
+    term_width: usize,
+) -> io::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if !header.is_empty() {
+        writeln!(
+            out,
+            "  {}{header}{}",
+            p.section.render(),
+            p.section.render_reset(),
+        )?;
+    }
+    let label_w = rows
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let count_w = rows
+        .iter()
+        .map(|(_, c)| c.to_string().chars().count())
+        .max()
+        .unwrap_or(1);
+
+    // Row prefix is 4-indent + label-col + count-col + 2 spaces between leader
+    // and count. Remaining width is the leader. Floor at 3 dots so narrow
+    // terminals stay legible.
+    let prefix_w = 4 + label_w + count_w + 2;
+    let leader_w = term_width.saturating_sub(prefix_w).max(3);
+    let leader: String = "·".repeat(leader_w);
+
+    for (label, count) in rows {
+        writeln!(
+            out,
+            "    {l_start}{label:<label_w$}{l_end}{d_start}{leader}{d_end}  {t_start}{count:>count_w$}{t_end}",
+            l_start = p.label.render(),
+            l_end = p.label.render_reset(),
+            d_start = p.dim.render(),
+            d_end = p.dim.render_reset(),
+            t_start = p.thread.render(),
+            t_end = p.thread.render_reset(),
+        )?;
+    }
+    Ok(())
+}
 
 /// Count line: `"{total} {noun}"`, plus ` {·} showing {start}–{end}` when a
 /// window is shown (`0 < returned < total`). Entire line in `dim`. One newline.

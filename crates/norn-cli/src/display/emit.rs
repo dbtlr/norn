@@ -22,16 +22,20 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::cli::GlobalArgs;
+use crate::output::glyphs::{self, Glyph};
 use crate::output::palette::{self, Palette};
-use crate::output::primitives::Field;
+use crate::output::primitives::{self, Field};
 use crate::output::projection::{
     project_json, project_pairs, split_cols, unknown_facet_message, warn_col_ignored,
     warn_section_ignored, DefaultCols, DocView, KNOWN_FACETS,
 };
 
 use super::conversation::Conversation;
+use super::fix_hints::fix_hint_for;
 use super::format::Format;
-use super::output::{CountView, DescribeView, FindView, GetView, Output, VaultListView};
+use super::output::{
+    CountView, DescribeView, FindView, GetView, Output, ValidateView, VaultListView,
+};
 use super::sink::Sink;
 use super::{Diagnostic, Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 
@@ -92,6 +96,7 @@ pub fn emit<O: Write, E: Write>(
         Output::Get(view) => render_get(view, global, presenter),
         Output::Count(view) => render_count(view, presenter),
         Output::Describe(view) => render_describe(view, presenter),
+        Output::Validate(view) => render_validate(view, global, presenter),
         Output::VaultList(view) => render_vault_list(view, presenter),
         Output::Line(line) => {
             let (out, err) = presenter.streams();
@@ -639,6 +644,252 @@ fn describe_text(report: &DescribeReport) -> String {
         }
     }
     s
+}
+
+// ── validate ─────────────────────────────────────────────────────────────────
+
+fn render_validate<O: Write, E: Write>(
+    view: ValidateView,
+    global: &GlobalArgs,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let format = view.spec.resolve(view.explicit, is_stdout_tty());
+    let palette = palette::resolve(global.color);
+    let width = term_width();
+
+    // Parse each carried finding line (compact struct-order JSON) back to a
+    // Value for the json / records / paths projections; jsonl writes the lines
+    // verbatim (so its per-line bytes stay the donor's struct field order).
+    let findings: Vec<Value> = view
+        .report
+        .findings
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    let (out, err) = presenter.streams();
+    let result: io::Result<i32> = (|| {
+        match format {
+            Format::Json => {
+                if view.summary {
+                    // `summary_json` is already pretty-printed core-side; emit it
+                    // with exactly one trailing newline.
+                    writeln!(out, "{}", view.report.summary_json.trim_end_matches('\n'))?;
+                } else {
+                    let payload = serde_json::json!({
+                        "total": findings.len(),
+                        "findings": findings,
+                    });
+                    writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;
+                }
+            }
+            Format::Jsonl => {
+                for line in &view.report.findings {
+                    writeln!(out, "{line}")?;
+                }
+            }
+            Format::Paths => {
+                let paths: std::collections::BTreeSet<&str> =
+                    findings.iter().filter_map(|f| f["path"].as_str()).collect();
+                for path in paths {
+                    writeln!(out, "{path}")?;
+                }
+            }
+            Format::Records => {
+                let mut buf: Vec<u8> = Vec::new();
+                if view.summary {
+                    render_validate_summary(
+                        &mut buf,
+                        &palette,
+                        &findings,
+                        view.report.rules_count,
+                        view.report.total_docs,
+                        width,
+                    )?;
+                } else {
+                    render_validate_full(
+                        &mut buf,
+                        &palette,
+                        &findings,
+                        view.report.rules_count,
+                        view.report.total_docs,
+                    )?;
+                }
+                out.write_all(&buf)?;
+            }
+            Format::Markdown => unreachable!("validate has no markdown format"),
+        }
+        Ok(if view.report.has_errors {
+            EXIT_OPERATIONAL
+        } else {
+            EXIT_OK
+        })
+    })();
+
+    render_outcome(result, err)
+}
+
+/// Count warning / error findings by their serialized `severity` field.
+fn count_severities(findings: &[Value]) -> (usize, usize) {
+    let mut warn = 0;
+    let mut err = 0;
+    for f in findings {
+        match f["severity"].as_str() {
+            Some("error") => err += 1,
+            _ => warn += 1,
+        }
+    }
+    (warn, err)
+}
+
+/// Distinct affected-document count (for the pass tally).
+fn unique_doc_count(findings: &[Value]) -> usize {
+    findings
+        .iter()
+        .filter_map(|f| f["path"].as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// `--summary` records: status headline, severity tally, and (when non-empty) a
+/// by-code tally group. Donor `render_records_summary`.
+fn render_validate_summary(
+    out: &mut dyn Write,
+    palette: &Palette,
+    findings: &[Value],
+    rules_count: usize,
+    total_docs: usize,
+    width: usize,
+) -> io::Result<()> {
+    primitives::status_headline(
+        out,
+        palette,
+        &format!("running {rules_count} rules across {total_docs} documents"),
+    )?;
+    writeln!(out)?;
+
+    let (warn, err) = count_severities(findings);
+    let pass = total_docs.saturating_sub(unique_doc_count(findings));
+    primitives::severity_tally(out, palette, pass, warn, err, "documents")?;
+
+    if !findings.is_empty() {
+        writeln!(out)?;
+        // by-code counts, sorted by code (donor `summarize().codes`, a BTreeMap).
+        let mut by_code: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for f in findings {
+            if let Some(code) = f["code"].as_str() {
+                *by_code.entry(code).or_insert(0) += 1;
+            }
+        }
+        let rows: Vec<(&str, usize)> = by_code.into_iter().collect();
+        primitives::tally_group(out, palette, "by code", &rows, width)?;
+    }
+    Ok(())
+}
+
+/// Full records: status headline; then per-code groups (first-occurrence order)
+/// with a severity glyph header, each finding's path + message + optional fix
+/// hint; then a pass/shown footer. Donor `render_records_full`.
+fn render_validate_full(
+    out: &mut dyn Write,
+    palette: &Palette,
+    findings: &[Value],
+    rules_count: usize,
+    total_docs: usize,
+) -> io::Result<()> {
+    primitives::status_headline(
+        out,
+        palette,
+        &format!("running {rules_count} rules across {total_docs} documents"),
+    )?;
+
+    if findings.is_empty() {
+        writeln!(out)?;
+        primitives::severity_tally(out, palette, total_docs, 0, 0, "documents")?;
+        return Ok(());
+    }
+
+    let ascii = glyphs::use_ascii();
+    for (code, group) in group_by_code(findings) {
+        writeln!(out)?;
+        let is_error = group
+            .first()
+            .and_then(|f| f["severity"].as_str())
+            .is_some_and(|s| s == "error");
+        let (glyph, style) = if is_error {
+            (glyphs::render(Glyph::Err, ascii), &palette.rune)
+        } else {
+            (glyphs::render(Glyph::Warn, ascii), &palette.amber)
+        };
+        writeln!(
+            out,
+            "{}{glyph}{} {}{code}{}",
+            style.render(),
+            style.render_reset(),
+            palette.bone.render(),
+            palette.bone.render_reset(),
+        )?;
+        for f in group {
+            writeln!(
+                out,
+                "  {}{}{}",
+                palette.bone.render(),
+                f["path"].as_str().unwrap_or(""),
+                palette.bone.render_reset(),
+            )?;
+            writeln!(
+                out,
+                "    {}{}{}",
+                palette.dim.render(),
+                f["message"].as_str().unwrap_or(""),
+                palette.dim.render_reset(),
+            )?;
+            if let Some(hint) = fix_hint_for(code) {
+                writeln!(
+                    out,
+                    "    {}fix:{} {}{hint}{}",
+                    palette.thread.render(),
+                    palette.thread.render_reset(),
+                    palette.dim.render(),
+                    palette.dim.render_reset(),
+                )?;
+            }
+        }
+    }
+
+    writeln!(out)?;
+    let pass = total_docs.saturating_sub(unique_doc_count(findings));
+    let sep = glyphs::render(Glyph::Sep, ascii);
+    writeln!(
+        out,
+        "{}{pass} documents pass {sep} {} findings shown{}",
+        palette.dim.render(),
+        findings.len(),
+        palette.dim.render_reset(),
+    )?;
+    Ok(())
+}
+
+/// Group findings by `code`, preserving first-occurrence code order (donor
+/// `group_by_code`).
+fn group_by_code(findings: &[Value]) -> Vec<(&str, Vec<&Value>)> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut map: std::collections::BTreeMap<&str, Vec<&Value>> = std::collections::BTreeMap::new();
+    for f in findings {
+        let code = f["code"].as_str().unwrap_or("");
+        if !map.contains_key(code) {
+            order.push(code);
+        }
+        map.entry(code).or_default().push(f);
+    }
+    order
+        .into_iter()
+        .map(|code| {
+            let group = map.remove(code).unwrap_or_default();
+            (code, group)
+        })
+        .collect()
 }
 
 // ── vault list ─────────────────────────────────────────────────────────────────

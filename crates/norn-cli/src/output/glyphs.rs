@@ -7,6 +7,12 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
+    /// Pass marker. UTF: `✓`. ASCII fallback: `[ok]`.
+    Pass,
+    /// Warning marker. UTF: `⚠`. ASCII fallback: `[warn]`.
+    Warn,
+    /// Error marker. UTF: `✗`. ASCII fallback: `[err]`.
+    Err,
     /// Separator dot. UTF: `·` (MIDDLE DOT). ASCII fallback: `.`.
     Sep,
     /// Live-example marker. UTF: `▸` (BLACK RIGHT-POINTING SMALL TRIANGLE).
@@ -16,6 +22,12 @@ pub enum Glyph {
 
 pub fn render(g: Glyph, ascii: bool) -> &'static str {
     match (g, ascii) {
+        (Glyph::Pass, false) => "✓",
+        (Glyph::Pass, true) => "[ok]",
+        (Glyph::Warn, false) => "⚠",
+        (Glyph::Warn, true) => "[warn]",
+        (Glyph::Err, false) => "✗",
+        (Glyph::Err, true) => "[err]",
         (Glyph::Sep, false) => "·",
         (Glyph::Sep, true) => ".",
         (Glyph::Marker, false) => "▸",

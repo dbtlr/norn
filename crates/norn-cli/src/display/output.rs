@@ -9,7 +9,7 @@
 //! the one presenter path.
 
 use norn_config::RegisteredVault;
-use norn_wire::{CountReport, DescribeReport, FindReport, GetReport};
+use norn_wire::{CountReport, DescribeReport, FindReport, GetReport, ValidateReport};
 
 use super::format::{Format, FormatSpec};
 
@@ -25,6 +25,8 @@ pub enum Output {
     Count(CountView),
     /// `describe`: the structure + optional data summary.
     Describe(DescribeView),
+    /// `validate`: the findings, summary body, and run counts.
+    Validate(ValidateView),
     /// `vault list`: the registered vaults.
     VaultList(VaultListView),
     /// A single stdout confirmation line, written verbatim plus a newline, exit 0
@@ -66,6 +68,18 @@ pub struct CountView {
 /// `describe`'s renderable report.
 pub struct DescribeView {
     pub report: DescribeReport,
+    pub explicit: Option<Format>,
+    pub spec: FormatSpec,
+}
+
+/// `validate`'s renderable report plus the `--summary` view toggle. The findings
+/// arrive pre-filtered from the owner; the renderer projects them into records /
+/// summary / json / jsonl / paths.
+pub struct ValidateView {
+    pub report: ValidateReport,
+    /// `--summary`: emit grouped counts instead of per-finding blocks (records)
+    /// or the full findings array (json).
+    pub summary: bool,
     pub explicit: Option<Format>,
     pub spec: FormatSpec,
 }
