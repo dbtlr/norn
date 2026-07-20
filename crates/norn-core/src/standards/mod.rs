@@ -16,10 +16,10 @@
 //! injected value-in), and `predicates` carries the document-matching helpers.
 //! `template_refs` holds the config-load `{{…}}` reference-scanning and the
 //! `KNOWN_TRANSFORMS` declaration list, pinned equal to the `substitution`
-//! renderer's transform table. Still deferred to the phase-3 mutation port: the
-//! validate engine, findings, repair planning, and the verb-level apply
-//! machinery (the minimal-edit splice core already went to
-//! `norn-frontmatter::edit`).
+//! renderer's transform table. The validate engine and findings model are
+//! ported (see below); repair planning ported in NRN-386. Still deferred to
+//! the mutation-verb port: the verb-level apply machinery (the minimal-edit
+//! splice core already went to `norn-frontmatter::edit`).
 
 pub mod checks;
 pub mod config;
@@ -30,6 +30,7 @@ pub mod findings;
 mod index_policy;
 pub mod path_match;
 pub mod predicates;
+pub mod repair;
 pub mod substitution;
 pub mod summary;
 mod template_refs;
@@ -51,6 +52,12 @@ pub use duration::parse_duration;
 pub use engine::validate_with_compiled;
 pub use findings::{Finding, FindingBody};
 pub use path_match::{effective_match_glob, glob_from_target, pattern_from_target, PathPattern};
+pub use repair::link_risk::{classify as classify_link_risk, AffectedLink, LinkRisk};
+pub use repair::warnings::PlanWarning;
+pub use repair::{
+    plan_repairs, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary, SkippedSummary,
+    REPAIR_PLAN_SCHEMA_VERSION,
+};
 pub use substitution::{format_datetime, render, Context, RenderError};
 pub use summary::{summarize, Summary};
 pub use validate_filter::{filter_findings, ValidateFilterOptions};
