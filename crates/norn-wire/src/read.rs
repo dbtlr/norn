@@ -330,10 +330,12 @@ pub enum GroupNode {
 }
 
 /// A `validate` request: the triage filters (each a repeatable, comma-splittable
-/// `--code`/`--severity`/… list) plus `--verbose`. Validate is read-only; the
-/// finding set is computed against the warm graph and filtered owner-side. The
-/// `--summary` and `--format` choices are pure CLI-side presentation over the
-/// returned report, never sent.
+/// `--code`/`--severity`/… list), `--verbose`, and `--summary`. Validate is
+/// read-only; the finding set is computed against the warm graph and filtered
+/// owner-side. `summary` is sent (not a pure CLI concern) so the grouped-count
+/// JSON body — which needs the typed finding model that never crosses the wire —
+/// is computed owner-side ONLY when requested. `--format` stays a pure CLI-side
+/// presentation choice over the returned report, never sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ValidateParams {
@@ -355,6 +357,10 @@ pub struct ValidateParams {
     /// coded form — the donor `--verbose` gate).
     #[serde(skip_serializing_if = "is_false")]
     pub verbose: bool,
+    /// Compute the grouped-count summary body (`--summary`). When false the owner
+    /// skips `summarize()` entirely and leaves `ValidateReport::summary_json` `None`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub summary: bool,
 }
 
 /// A `validate` response: the post-filter findings (each a pre-serialized
@@ -376,7 +382,10 @@ pub struct ValidateReport {
     pub findings: Vec<String>,
     /// The exact `serde_json::to_string_pretty` of the grouped summary over the
     /// filtered findings — what `--format json --summary` prints verbatim.
-    pub summary_json: String,
+    /// `Some` only when the request set `--summary`; `None` otherwise (the owner
+    /// skips the fold entirely).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_json: Option<String>,
     pub total_docs: usize,
     pub rules_count: usize,
     #[serde(default, skip_serializing_if = "is_false")]

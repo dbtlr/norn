@@ -82,10 +82,15 @@ pub fn execute(
     // The summary is computed core-side (it needs the typed `Finding` model,
     // which does not cross the wire) and carried as its final pretty-JSON string
     // so `--format json --summary` is a verbatim passthrough with donor-exact
-    // field order. Each finding is carried as its compact struct-order JSON — the
-    // single source the CLI renders every format from (jsonl verbatim; json /
-    // records / paths by parsing back to a value).
-    let summary_json = serde_json::to_string_pretty(&summarize(&findings))?;
+    // field order. It is folded ONLY when the request set `--summary` — an
+    // unrequested summary is never computed. Each finding is carried as its
+    // compact struct-order JSON — the single source the CLI renders every other
+    // format from (jsonl verbatim; json / records / paths by parsing back).
+    let summary_json = if params.summary {
+        Some(serde_json::to_string_pretty(&summarize(&findings))?)
+    } else {
+        None
+    };
     let finding_lines: Vec<String> = findings
         .iter()
         .map(serde_json::to_string)
@@ -193,16 +198,28 @@ mod tests {
     }
 
     #[test]
-    fn summary_json_carries_the_grouped_shape() {
+    fn summary_json_carries_the_grouped_shape_only_when_requested() {
         let cfg = "validate:\n  required_frontmatter:\n    - title\n";
         let (_t, root) = synth(Some(cfg));
         std::fs::write(root.join("a.md").as_std_path(), "body\n").unwrap();
         let config = crate::standards::parse_config(cfg, camino::Utf8Path::new("c.yaml")).unwrap();
         let cache = built(&root);
-        let report = execute(&cache, Some(&config), &ValidateParams::default(), TODAY)
+
+        // Not requested → the summary fold is skipped entirely.
+        let plain = execute(&cache, Some(&config), &ValidateParams::default(), TODAY)
             .unwrap()
             .unwrap();
-        let summary: Value = serde_json::from_str(&report.summary_json).unwrap();
+        assert!(plain.summary_json.is_none());
+
+        // Requested → the grouped shape is present.
+        let params = ValidateParams {
+            summary: true,
+            ..Default::default()
+        };
+        let report = execute(&cache, Some(&config), &params, TODAY)
+            .unwrap()
+            .unwrap();
+        let summary: Value = serde_json::from_str(report.summary_json.as_ref().unwrap()).unwrap();
         assert_eq!(summary["findings"], 1);
         assert_eq!(summary["codes"]["frontmatter-required-field-missing"], 1);
     }

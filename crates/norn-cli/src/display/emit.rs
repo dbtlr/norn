@@ -672,9 +672,11 @@ fn render_validate<O: Write, E: Write>(
         match format {
             Format::Json => {
                 if view.summary {
-                    // `summary_json` is already pretty-printed core-side; emit it
+                    // `summary_json` is pretty-printed core-side (Some whenever
+                    // `--summary` was set — the case that reaches here); emit it
                     // with exactly one trailing newline.
-                    writeln!(out, "{}", view.report.summary_json.trim_end_matches('\n'))?;
+                    let body = view.report.summary_json.as_deref().unwrap_or("{}");
+                    writeln!(out, "{}", body.trim_end_matches('\n'))?;
                 } else {
                     let payload = serde_json::json!({
                         "total": findings.len(),
@@ -1574,5 +1576,210 @@ mod tests {
             )
         };
         assert_eq!(code, EXIT_OPERATIONAL);
+    }
+
+    // ── validate records renderers (ported from the donor `validate::render`
+    // suite, adapted to the Value-fed `render_validate_full` / `_summary` seam;
+    // input order is fixed per test so the renderers are exercised
+    // deterministically despite the engine's order nondeterminism) ────────────
+
+    /// A minimal finding value — the renderers read only these four fields.
+    fn vf(code: &str, severity: &str, path: &str, message: &str) -> Value {
+        json!({
+            "code": code,
+            "severity": severity,
+            "path": path,
+            "message": message,
+        })
+    }
+
+    /// Three warning findings across three docs: two share a code (grouping),
+    /// one is a second code — the donor `sample_findings` shape.
+    fn sample_validate_findings() -> Vec<Value> {
+        vec![
+            vf(
+                "frontmatter-required-field-missing",
+                "warning",
+                "notes/welcome.md",
+                "required frontmatter field is missing: kind",
+            ),
+            vf(
+                "frontmatter-required-field-missing",
+                "warning",
+                "notes/draft.md",
+                "required frontmatter field is missing: kind",
+            ),
+            vf(
+                "document-misrouted",
+                "warning",
+                "inbox/2026-05-12.md",
+                "document path is outside allowed rule locations",
+            ),
+        ]
+    }
+
+    fn full(findings: &[Value], palette: &Palette, total_docs: usize) -> String {
+        let mut buf = Vec::new();
+        render_validate_full(&mut buf, palette, findings, 12, total_docs).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn summary(findings: &[Value], palette: &Palette, total_docs: usize) -> String {
+        let mut buf = Vec::new();
+        render_validate_summary(&mut buf, palette, findings, 12, total_docs, 80).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    // ── summary view ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_summary_emits_status_headline() {
+        let s = summary(&sample_validate_findings(), &Palette::off(), 780);
+        let first = s.lines().next().unwrap();
+        assert!(
+            first.starts_with("running 12 rules across 780 documents"),
+            "headline: {first:?}"
+        );
+        assert!(first.ends_with('…'), "headline ellipsis: {first:?}");
+    }
+
+    #[test]
+    fn validate_summary_emits_severity_tally() {
+        let s = summary(&sample_validate_findings(), &Palette::off(), 780);
+        // 3 unique docs with findings → 780 − 3 = 777 pass; all 3 are warnings.
+        assert!(s.contains("777 documents pass"), "expected pass row: {s:?}");
+        assert!(s.contains("3 warnings"), "expected warning row: {s:?}");
+    }
+
+    #[test]
+    fn validate_summary_emits_by_code_tally_group() {
+        let s = summary(&sample_validate_findings(), &Palette::off(), 780);
+        assert!(s.contains("  by code"));
+        assert!(s.contains("frontmatter-required-field-missing"));
+        assert!(s.contains("document-misrouted"));
+    }
+
+    #[test]
+    fn validate_summary_no_findings_emits_clean_tally_and_no_by_code() {
+        let s = summary(&[], &Palette::off(), 780);
+        assert!(s.contains("780 documents pass"));
+        assert!(!s.contains("by code"));
+    }
+
+    #[test]
+    fn validate_summary_color_off_no_ansi_color_on_ansi() {
+        assert!(!summary(&sample_validate_findings(), &Palette::off(), 780).contains('\u{1b}'));
+        assert!(summary(&sample_validate_findings(), &Palette::on(), 780).contains('\u{1b}'));
+    }
+
+    // ── full view ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_full_emits_status_headline() {
+        let s = full(&sample_validate_findings(), &Palette::off(), 780);
+        assert!(s
+            .lines()
+            .next()
+            .unwrap()
+            .starts_with("running 12 rules across 780 documents"));
+    }
+
+    #[test]
+    fn validate_full_groups_by_code_with_both_headers() {
+        let s = full(&sample_validate_findings(), &Palette::off(), 780);
+        assert!(
+            s.contains("frontmatter-required-field-missing") && s.contains("document-misrouted"),
+            "expected both code headers: {s:?}"
+        );
+    }
+
+    #[test]
+    fn validate_full_path_at_2_indent_message_at_4_indent() {
+        let s = full(&sample_validate_findings(), &Palette::off(), 780);
+        assert!(
+            s.contains("\n  notes/welcome.md"),
+            "expected 2-indent path: {s:?}"
+        );
+        assert!(
+            s.contains("\n    required frontmatter"),
+            "expected 4-indent message: {s:?}"
+        );
+    }
+
+    #[test]
+    fn validate_full_emits_fix_hint_for_known_codes() {
+        let s = full(&sample_validate_findings(), &Palette::off(), 780);
+        assert!(
+            s.contains("    fix: add the field"),
+            "expected fix hint for required-field-missing: {s:?}"
+        );
+        assert!(
+            s.contains("    fix: move the document"),
+            "expected fix hint for document-misrouted: {s:?}"
+        );
+    }
+
+    #[test]
+    fn validate_full_omits_fix_when_code_unknown() {
+        let s = full(
+            &[vf("not-a-real-code", "warning", "x.md", "fake")],
+            &Palette::off(),
+            780,
+        );
+        assert!(
+            !s.contains("    fix:"),
+            "unknown code has no fix hint: {s:?}"
+        );
+    }
+
+    #[test]
+    fn validate_full_footer_shows_pass_count_and_findings_shown() {
+        let s = full(&sample_validate_findings(), &Palette::off(), 780);
+        let footer = s.lines().last().unwrap();
+        assert!(
+            footer.contains("777 documents pass"),
+            "footer pass count: {footer:?}"
+        );
+        assert!(
+            footer.contains("3 findings shown"),
+            "footer findings: {footer:?}"
+        );
+    }
+
+    #[test]
+    fn validate_full_no_findings_collapses_to_clean_tally() {
+        let s = full(&[], &Palette::off(), 780);
+        assert!(s.contains("780 documents pass"));
+        assert!(!s.contains("fix:"));
+    }
+
+    #[test]
+    fn validate_full_severity_selects_glyph_color_per_group() {
+        // Under Palette::on(), a warning group header carries amber (ansi 178)
+        // and an error group header carries rune (ansi 167) — locale-independent,
+        // unlike the ✓/⚠/✗ glyph choice.
+        let findings = vec![
+            vf(
+                "link-target-missing",
+                "warning",
+                "a.md",
+                "link target not found: x",
+            ),
+            vf(
+                "frontmatter-parse-failed",
+                "error",
+                "b.md",
+                "frontmatter failed to parse",
+            ),
+        ];
+        let s = full(&findings, &Palette::on(), 780);
+        assert!(
+            s.contains("\x1b[38;5;178m"),
+            "expected amber on the warning group header: {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[38;5;167m"),
+            "expected rune on the error group header: {s:?}"
+        );
     }
 }

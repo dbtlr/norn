@@ -313,4 +313,130 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.chars().filter(|c| *c == '─').count(), 60);
     }
+
+    // ── status_headline (ported from the donor primitives suite) ─────────────
+
+    #[test]
+    fn status_headline_writes_text_then_ellipsis_and_newline() {
+        let mut out = Vec::new();
+        status_headline(&mut out, &Palette::off(), "validating .norn/config.yaml").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "validating .norn/config.yaml…\n"
+        );
+    }
+
+    #[test]
+    fn status_headline_on_palette_wraps_with_dim_ansi() {
+        let mut out = Vec::new();
+        status_headline(&mut out, &Palette::on(), "x").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b["), "expected ANSI: {s:?}");
+        assert!(s.contains("x…"));
+    }
+
+    // ── severity_tally (ported from the donor primitives suite) ──────────────
+
+    #[test]
+    fn severity_tally_pure_pass_shows_only_check_row() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 100, 0, 0, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("100 documents pass"));
+        assert!(!s.contains("warnings"));
+        assert!(!s.contains("errors"));
+    }
+
+    #[test]
+    fn severity_tally_mixed_shows_all_nonzero_rows_in_order() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 698, 71, 11, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let pass_pos = s.find("698 documents pass").unwrap();
+        let warn_pos = s.find("71 warnings").unwrap();
+        let err_pos = s.find("11 errors").unwrap();
+        assert!(
+            pass_pos < warn_pos && warn_pos < err_pos,
+            "order pass→warn→err"
+        );
+    }
+
+    #[test]
+    fn severity_tally_elides_zero_rows() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 698, 0, 11, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("698 documents pass"));
+        assert!(!s.contains("warnings"));
+        assert!(s.contains("11 errors"));
+    }
+
+    #[test]
+    fn severity_tally_all_zero_emits_zero_pass_row() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 0, 0, 0, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("0 documents pass"));
+    }
+
+    #[test]
+    fn severity_tally_singular_warning_and_error_nouns() {
+        let mut out = Vec::new();
+        severity_tally(&mut out, &Palette::off(), 100, 1, 1, "documents").unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("1 warning"));
+        assert!(!s.contains("1 warnings"));
+        assert!(s.contains("1 error"));
+        assert!(!s.contains("1 errors"));
+    }
+
+    // ── tally_group (ported from the donor primitives suite) ─────────────────
+
+    #[test]
+    fn tally_group_emits_header_and_rows() {
+        let mut out = Vec::new();
+        let rows = [("missing-required-field", 8), ("document-misrouted", 3)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines[0], "  by code");
+        assert!(lines[1].starts_with("    missing-required-field"));
+        assert!(lines[1].ends_with("  8"));
+        assert!(
+            lines[1].contains("··"),
+            "expected leader dots: {:?}",
+            lines[1]
+        );
+        assert!(lines[2].starts_with("    document-misrouted"));
+        assert!(lines[2].ends_with("  3"));
+    }
+
+    #[test]
+    fn tally_group_right_aligns_counts_to_widest() {
+        let mut out = Vec::new();
+        let rows = [("a", 5), ("b", 100), ("c", 12)];
+        tally_group(&mut out, &Palette::off(), "by code", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        // count_w = 3 (max of "5"=1, "100"=3, "12"=2); all right-aligned to 3.
+        assert!(lines[1].ends_with("  5"), "row 1: {:?}", lines[1]);
+        assert!(lines[2].ends_with("100"), "row 2: {:?}", lines[2]);
+        assert!(lines[3].ends_with(" 12"), "row 3: {:?}", lines[3]);
+    }
+
+    #[test]
+    fn tally_group_empty_rows_is_a_noop() {
+        let mut out = Vec::new();
+        tally_group(&mut out, &Palette::off(), "by code", &[], 80).unwrap();
+        assert!(out.is_empty(), "empty rows must write nothing");
+    }
+
+    #[test]
+    fn tally_group_uses_ansi_for_labels_and_leader_on_palette() {
+        let mut out = Vec::new();
+        let rows = [("x", 1)];
+        tally_group(&mut out, &Palette::on(), "by code", &rows, 80).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\x1b["), "expected ANSI: {s:?}");
+    }
 }

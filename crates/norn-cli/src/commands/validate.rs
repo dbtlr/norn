@@ -36,6 +36,7 @@ pub fn run(args: &ValidateArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
         targets: args.triage.target.clone(),
         reasons: args.triage.reason.clone(),
         verbose: global.verbose,
+        summary: args.summary,
     };
 
     let report = session
