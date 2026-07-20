@@ -1232,15 +1232,43 @@ const MCP_CASES: &[Case] = &[
     },
 ];
 
-/// The first mutation-verb parity cases (`set` / `new`, NRN-378). Every case is
-/// a FORECAST (implicit or explicit dry-run) or a clean REFUSAL — the surfaces
-/// the task derives from the oracle — so nothing is written and the
-/// non-deterministic `trace_id` / `trace:` footer (only emitted on a confirmed
-/// apply) never appears. Each is `mutating: true`, so the harness runs it against
-/// a FRESH per-case vault and asserts BOTH sides leave the tree byte-identical —
-/// i.e. a forecast/refusal is proven write-free on both binaries, not just equal
-/// on stdout. Confirmed-apply parity awaits the telemetry-trace port (the applied
-/// report's `trace:` id is non-deterministic and has no normalization step yet).
+/// The mutation-edge fixture (NRN-371): the valid zoo plus the two non-mapping
+/// frontmatter probes (`shapes/null-block.md`, `shapes/comment-block.md`),
+/// isolated on the `mutate-edge` profile so the decided mapping-promotion
+/// divergence never touches a shared zoo/clean case (the text-edge discipline).
+const MUTATE_EDGE_1: Fixture = Fixture {
+    profile_name: "mutate-edge",
+    seed: 1,
+};
+
+/// The trace-id normalization every CONFIRMED-apply case appends: the pinned
+/// oracle mints a random `trace:`/`trace_id` on apply, the rewrite emits an empty
+/// one by contract, so without this an otherwise byte-equal apply would diverge
+/// on the id alone (see [`Normalization::TraceId`]). Only on the applies that
+/// MATCH — a diverged/refused/forecast case carries no id to normalize.
+const TRACE_NORM: &[Normalization] = &[Normalization::TraceId];
+
+/// Mutation-verb parity for `set` / `new` (NRN-378 forecasts/refusals, extended
+/// by NRN-388 with the CONFIRMED-apply path and report BODIES). Each case is
+/// `mutating: true`, so the harness runs it against a FRESH per-case vault per
+/// side and folds the two post-mutation TREES into the same match/diverged/drift
+/// decision as the stdout/stderr/exit comparison — a forecast/refusal is proven
+/// write-free on BOTH binaries, and a confirmed apply is proven to write
+/// byte-identical trees on both. The confirmed-apply cases append [`TRACE_NORM`]
+/// (the oracle's random telemetry id → the rewrite's empty id); everything else
+/// in the applied report is deterministic and byte-compared as-is.
+///
+/// Three cases DIVERGE from the pinned oracle, each pinned by a ledger entry:
+/// the unified `--format json` warning envelope (PD-111) and the NRN-371 null-/
+/// comment-only frontmatter mapping-promotion (PD-112, two cases). Note the
+/// `new` post-create re-validate pass is deliberately not yet ported (a tracked
+/// follow-up), so a `new` apply whose created doc would trip a validate finding
+/// (e.g. a `missing-required-field: title` on a titleless create) still diverges
+/// on that warning — OUTSIDE this task's two adjudicated entries. The apply cases
+/// here steer clear of it (each supplies `title`); the `new`-leaves-an-empty-block
+/// half of the NRN-371 roundtrip is therefore NOT pinned as a gated case (it would
+/// need a third, unauthorized entry), and the load-bearing NRN-371 behavior is
+/// captured wholly by the set-on-null-block half below.
 const MUTATE_CASES: &[Case] = &[
     // set: a nonexistent target is a clean pre-write refusal (exit 2), write-free.
     Case {
@@ -1330,6 +1358,161 @@ const MUTATE_CASES: &[Case] = &[
         ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // ── NRN-388: confirmed applies + report bodies ───────────────────────────
+    // set: a plain confirmed apply (records). The field-change line is compared
+    // AND the mutated file is byte-compared via post-state — proving both sides
+    // wrote the same bytes, not just printed the same plan. TRACE_NORM collapses
+    // the oracle's random applied `trace:` id to the rewrite's empty one.
+    Case {
+        id: "mutate-set-apply-records-zoo",
+        argv: &["set", "alpha", "summary:hello", "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+    },
+    // new: a multi-field confirmed apply (records). Pins the padded key/value
+    // block and byte-compares the created file. `title` is supplied so the
+    // create satisfies the global `title` requirement — steering clear of the
+    // not-yet-ported post-create re-validate `missing-required-field` warning
+    // (see the suite doc); `aaa` is an unknown field, so both sides emit the
+    // donor-faithful records `unknown field` warning short-form (a MATCH).
+    Case {
+        id: "mutate-new-apply-records-zoo",
+        argv: &[
+            "new",
+            "notes/created-doc.md",
+            "--field",
+            "title:Hello",
+            "--field",
+            "aaa:1",
+            "--yes",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: TRACE_NORM,
+    },
+    // set --push --format json, confirmed apply: pins the collapsed donor op
+    // shape — a `--push` reports as `{"op":"set",...,"new":[…]}` (the whole list
+    // after the append), not a distinct push op. Byte-compares the mutated file.
+    Case {
+        id: "mutate-set-push-apply-json-zoo",
+        argv: &[
+            "set",
+            "alpha",
+            "--push",
+            "tags:newtag",
+            "--yes",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+    },
+    // new with an unknown field under --force, --format json (forecast): the one
+    // DECIDED warning-shape divergence (PD-111). The donor emits an inconsistent
+    // per-kind warning object (`{field, kind}` for new); the rewrite emits its
+    // unified envelope `{code, field?, message}`. stdout diverges on the warning
+    // object; both write nothing (forecast) so the trees match. Pinned by PD-111.
+    Case {
+        id: "mutate-new-unknown-field-warning-json-zoo",
+        argv: &[
+            "new",
+            "notes/warn-doc.md",
+            "--field",
+            "bogus:x",
+            "--force",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // set: a value-not-allowed refusal, comparing the MESSAGE BODY (not just the
+    // exit code). The offending value appears in the stderr line on both sides,
+    // exit 2, write-free. A MATCH — the refusal surface is donor-faithful.
+    Case {
+        id: "mutate-set-value-not-allowed-body-zoo",
+        argv: &["set", "task-001", "status:bogus", "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("tasks/task-001.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // set: a field-conflict refusal (same key across --field + --push). The
+    // multi-line explainer body is compared, exit 2, write-free — a MATCH.
+    Case {
+        id: "mutate-set-field-conflict-body-zoo",
+        argv: &[
+            "set", "alpha", "--field", "tags:x", "--push", "tags:y", "--yes",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // NRN-371: a `set` against a bare-`null` frontmatter block. The oracle refuses
+    // (`frontmatter is not a top-level mapping`, exit 2, write-free); the rewrite
+    // promotes the null block to an empty mapping and applies (exit 0, tree
+    // mutated). stdout + stderr + exit AND the post-state tree all diverge; pinned
+    // by PD-112. This is the load-bearing half of the new→set null-frontmatter
+    // roundtrip — a valid input that must yield a valid output.
+    Case {
+        id: "mutate-set-null-block-promote",
+        argv: &["set", "null-block", "title:Hi", "--yes"],
+        fixture: MUTATE_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("shapes/null-block.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // NRN-371 (same class as the null block): a `set` against a comment-only
+    // frontmatter block. The oracle refuses identically; the rewrite preserves
+    // the comment and appends the field. Also pinned by PD-112.
+    Case {
+        id: "mutate-set-comment-block-promote",
+        argv: &["set", "comment-block", "title:Hi", "--yes"],
+        fixture: MUTATE_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("shapes/comment-block.md"),
         requires_code: None,
         normalize: NO_NORM,
     },

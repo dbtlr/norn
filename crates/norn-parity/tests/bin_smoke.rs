@@ -44,10 +44,14 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-383 adds two `mcp` suite cases (initialize/tools/list handshake +
     // a tools/call), both `ported: false` — self-check ignores `ported` and
     // runs every case, so the total grew from 56 to 58. NRN-378 adds seven
-    // `mutate` cases (set/new forecast + refusal), taking the total to 65; all
-    // must Match (oracle vs. itself).
+    // `mutate` cases (set/new forecast + refusal), taking the total to 65.
+    // NRN-388 adds eight more `mutate` cases (confirmed applies + report bodies:
+    // two records applies, a push --format json apply, a warning-bearing json
+    // forecast, two refusal-body cases, and the two NRN-371 null-/comment-block
+    // promotions), taking the total to 73; all must Match (oracle vs. itself —
+    // the confirmed-apply cases via the per-case trace-id normalization).
     assert!(
-        stdout.contains("65 cases: 65 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("73 cases: 73 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -101,8 +105,14 @@ fn default_mode_gates_help_cases_exit_0() {
     // NRN-378 adds seven ported `mutate` cases (set/new forecast + refusal),
     // every one a byte-exact match against the oracle (no ledger entry): the
     // gated total grows from 56 to 63 and the match count from 42 to 49.
+    // NRN-388 adds eight more ported `mutate` cases — five MATCH (two records
+    // applies, a push --format json apply, a value-not-allowed and a
+    // field-conflict refusal body) and three DIVERGE with new ledger entries
+    // (the unified --format json warning envelope PD-111, and the two NRN-371
+    // null-/comment-only frontmatter mapping-promotions PD-112) — so the gated
+    // total grows to 71, the match count to 54, and the diverged count to 17.
     assert!(
-        stdout.contains("63 cases: 49 match, 14 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("71 cases: 54 match, 17 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -118,6 +128,12 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-108",
         "PD-109",
         "PD-110",
+        "PD-111",
+        "PD-112",
+        "mutate-set-apply-records-zoo",
+        "mutate-new-unknown-field-warning-json-zoo",
+        "mutate-set-null-block-promote",
+        "mutate-set-comment-block-promote",
         "text-edge-bom-doc-all-cols",
         "text-edge-code-fenced-block-id-link",
         "url-edge-decode-split-blockref",

@@ -58,6 +58,11 @@ pub struct Profile {
     /// case (NRN-361); kept off every other profile so a broken config never
     /// perturbs a real read.
     pub malformed_config: bool,
+    /// Emit the mutation-edge docs (`crate::zoo::mutate_edge_docs`) — the
+    /// isolated null-/comment-only frontmatter probes (NRN-371). Kept off every
+    /// shared profile so the decided mapping-promotion divergence never perturbs
+    /// zoo/clean parity.
+    pub mutate_edge: bool,
 }
 
 /// The named profiles, in fixed order — the single source for `by_name`,
@@ -75,6 +80,7 @@ const PROFILES: &[Profile] = &[
         violation_per_mille: 0,
         text_edge: false,
         malformed_config: false,
+        mutate_edge: false,
     },
     // Zoo without violations, plus ~60 expansion docs. Invariant: the oracle's
     // `validate` reports zero findings against this profile.
@@ -89,6 +95,7 @@ const PROFILES: &[Profile] = &[
         violation_per_mille: 0,
         text_edge: false,
         malformed_config: false,
+        mutate_edge: false,
     },
     // Zoo including violations, plus ~120 expansion docs at elevated
     // violation/broken-link ratios.
@@ -103,6 +110,7 @@ const PROFILES: &[Profile] = &[
         violation_per_mille: 50,
         text_edge: false,
         malformed_config: false,
+        mutate_edge: false,
     },
     // Zoo without violations, plus ~200 densely-linked docs across deep, wide
     // folders.
@@ -117,6 +125,7 @@ const PROFILES: &[Profile] = &[
         violation_per_mille: 0,
         text_edge: false,
         malformed_config: false,
+        mutate_edge: false,
     },
     // Zoo without violations, plus 1000 expansion docs at moderate settings.
     Profile {
@@ -130,6 +139,7 @@ const PROFILES: &[Profile] = &[
         violation_per_mille: 0,
         text_edge: false,
         malformed_config: false,
+        mutate_edge: false,
     },
     // The valid zoo plus the text-layer edge probes (NRN-349 / NRN-350) — no
     // expansion, no violations. Dedicated to the BOM / code-opacity parity cases
@@ -145,6 +155,7 @@ const PROFILES: &[Profile] = &[
         violation_per_mille: 0,
         text_edge: true,
         malformed_config: false,
+        mutate_edge: false,
     },
     // The valid zoo doc tree under a deliberately-INVALID `.norn/config.yaml`.
     // Dedicated to the malformed-config error-surface parity case (NRN-361): the
@@ -161,6 +172,24 @@ const PROFILES: &[Profile] = &[
         violation_per_mille: 0,
         text_edge: false,
         malformed_config: true,
+        mutate_edge: false,
+    },
+    // The valid zoo doc tree plus the mutation-edge probes (NRN-371) — no
+    // expansion, no violations. Dedicated to the null-/comment-only frontmatter
+    // parity cases so the decided mapping-promotion divergence stays off every
+    // shared fixture (mirrors `text-edge`).
+    Profile {
+        name: "mutate-edge",
+        violations: false,
+        expansion_docs: 0,
+        folder_depth: 0,
+        folder_width: 0,
+        max_links_per_doc: 0,
+        broken_link_per_mille: 0,
+        violation_per_mille: 0,
+        text_edge: false,
+        malformed_config: false,
+        mutate_edge: true,
     },
 ];
 
@@ -388,6 +417,23 @@ pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Mani
 
     if profile.text_edge {
         for doc in zoo::text_edge_docs() {
+            write_rel(
+                out_dir,
+                doc.path,
+                doc.content.as_bytes(),
+                &mut dirs,
+                &mut files,
+            )?;
+            docs.push(DocEntry {
+                path: doc.path.to_string(),
+                tier: doc.tier,
+                codes: &[],
+            });
+        }
+    }
+
+    if profile.mutate_edge {
+        for doc in zoo::mutate_edge_docs() {
             write_rel(
                 out_dir,
                 doc.path,
