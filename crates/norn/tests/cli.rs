@@ -77,15 +77,14 @@ fn bare_find_prints_help_and_exits_two() {
 }
 
 #[test]
-fn set_unported_exits_one_with_uniform_line() {
-    let out = norn()
-        .args(["set", "a.md", "status=done"])
-        .output()
-        .unwrap();
+fn edit_unported_exits_one_with_uniform_line() {
+    // `set` / `new` now dispatch for real (NRN-378); `edit` remains a grammar-only
+    // stub, so it carries the uniform not-yet-ported line this test pins.
+    let out = norn().args(["edit", "a.md"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(out.stderr).unwrap(),
-        "norn: `set` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
+        "norn: `edit` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
     );
 }
 

@@ -18,6 +18,9 @@ pub enum Glyph {
     /// Live-example marker. UTF: `▸` (BLACK RIGHT-POINTING SMALL TRIANGLE).
     /// ASCII fallback: `>`.
     Marker,
+    /// Change arrow (before → after). UTF: `→` (RIGHTWARDS ARROW). ASCII
+    /// fallback: `->`. First consumer: the mutation-verb change lines.
+    Arrow,
 }
 
 pub fn render(g: Glyph, ascii: bool) -> &'static str {
@@ -32,6 +35,8 @@ pub fn render(g: Glyph, ascii: bool) -> &'static str {
         (Glyph::Sep, true) => ".",
         (Glyph::Marker, false) => "▸",
         (Glyph::Marker, true) => ">",
+        (Glyph::Arrow, false) => "→",
+        (Glyph::Arrow, true) => "->",
     }
 }
 
