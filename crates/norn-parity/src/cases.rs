@@ -2309,8 +2309,18 @@ pub fn duplicate_case_id(suites: &[Suite]) -> Option<&'static str> {
 pub fn plan_argv_mismatch(suites: &[Suite]) -> Option<&'static str> {
     for suite in suites {
         for case in suite.cases {
-            let carries_placeholder = case.argv.contains(&PLAN_ARGV_PLACEHOLDER);
-            if case.plan.is_some() != carries_placeholder {
+            // Exactly-one, per the `Case::plan` contract: zero tokens with a
+            // plan is a dangling template; two or more would silently receive
+            // the same path (and a literal "{PLAN}" argv value is unsupported
+            // by design — the token is reserved).
+            let placeholders = case
+                .argv
+                .iter()
+                .filter(|a| **a == PLAN_ARGV_PLACEHOLDER)
+                .count();
+            if (case.plan.is_some() && placeholders != 1)
+                || (case.plan.is_none() && placeholders != 0)
+            {
                 return Some(case.id);
             }
         }

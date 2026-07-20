@@ -219,9 +219,15 @@ impl FixtureCache {
             path: dir.clone(),
             source,
         })?;
+        // The token sits inside a JSON string in the template, so the path is
+        // JSON-escaped before substitution — a root containing `"`, `\`, or a
+        // control character must not corrupt the plan (temp roots never do
+        // today; this keeps the harness correct if that ever changes).
+        let escaped = serde_json::to_string(&vault.display().to_string())
+            .expect("a path string always serializes");
         let content = template.replace(
             crate::cases::PLAN_VAULT_ROOT_TOKEN,
-            &vault.display().to_string(),
+            escaped.trim_matches('"'),
         );
         let path = dir.join("plan.json");
         std::fs::write(&path, content).map_err(|source| FixtureError::PlanWrite {
