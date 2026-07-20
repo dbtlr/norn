@@ -50,8 +50,10 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // forecast, two refusal-body cases, and the two NRN-371 null-/comment-block
     // promotions), taking the total to 73; all must Match (oracle vs. itself —
     // the confirmed-apply cases via the per-case trace-id normalization).
+    // NRN-379 adds five `edit` cases (a confirmed apply, a dry-run forecast, and
+    // three refusal/json-ops shapes), taking the total to 78; all Match.
     assert!(
-        stdout.contains("73 cases: 73 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("78 cases: 78 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -111,8 +113,11 @@ fn default_mode_gates_help_cases_exit_0() {
     // (the unified --format json warning envelope PD-111, and the two NRN-371
     // null-/comment-only frontmatter mapping-promotions PD-112) — so the gated
     // total grows to 71, the match count to 54, and the diverged count to 17.
+    // NRN-379 adds five ported `edit` cases, every one a byte-exact match (no
+    // ledger entry): the gated total grows to 76 and the match count to 59; the
+    // diverged count stays 17.
     assert!(
-        stdout.contains("71 cases: 54 match, 17 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("76 cases: 59 match, 17 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [

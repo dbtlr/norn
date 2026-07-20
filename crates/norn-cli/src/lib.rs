@@ -137,7 +137,11 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             &cli.global,
             presenter,
         ),
-        Command::Edit(_) => presenter.not_yet_ported("edit"),
+        Command::Edit(args) => emit(
+            commands::edit::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::New(args) => emit(
             commands::new::run(&args, &cli.global),
             &cli.global,
@@ -203,20 +207,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_edit_still_presents_not_yet_ported() {
-        // `edit` remains a grammar-only stub until its own port; the not-yet-ported
-        // outcome is exercised here now that `set`/`new` dispatch for real.
-        let cli = Cli::try_parse_from(["norn", "edit", "a.md"]).unwrap();
+    fn dispatch_edit_cli_side_refusal_renders_error_and_exits_two() {
+        // `edit` now dispatches for real. A CLI-side op-resolution failure (an
+        // empty ops array) is refused BEFORE any owner summon — so this exercises
+        // the dispatch → render_edit refusal path without touching the network:
+        // `error: <message>` on stderr, exit 2, for both formats.
+        let cli = Cli::try_parse_from(["norn", "edit", "a.md", "--edits-json", "[]"]).unwrap();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = {
             let mut p = Presenter::new(&mut out, &mut err);
             dispatch(cli, &mut p)
         };
-        assert_eq!(code, display::EXIT_OPERATIONAL);
+        assert_eq!(code, display::EXIT_USAGE);
+        assert!(out.is_empty(), "a refusal writes nothing to stdout");
         assert_eq!(
             String::from_utf8(err).unwrap(),
-            "norn: `edit` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
+            "error: edits array is empty\n"
         );
     }
 }

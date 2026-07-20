@@ -30,8 +30,8 @@ pub use diagnostic::Diagnostic;
 pub use emit::emit;
 pub use format::{Format, FormatSpec};
 pub use output::{
-    CountView, DescribeView, FindView, GetView, NewMutationView, Output, SetMutationView,
-    ValidateView, VaultListView,
+    CountView, DescribeView, EditMutationView, FindView, GetView, NewMutationView, Output,
+    SetMutationView, ValidateView, VaultListView,
 };
 pub use presenter::{Presenter, HINT, PROGRAM};
 pub use sink::Sink;

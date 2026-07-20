@@ -1,6 +1,7 @@
-//! Mutation-verb execute seams (set/new). Each builds — and, when confirmed,
+//! Mutation-verb execute seams (set/new/edit). Each builds — and, when confirmed,
 //! applies — a MigrationPlan against the warm cache, returning a wire Report.
 mod coerce;
+pub mod edit;
 pub mod new;
 pub mod set;
 

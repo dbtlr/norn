@@ -18,8 +18,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport, GetParams,
-    GetReport, NewParams, NewReport, SetParams, SetReport, ValidateParams, ValidateReport,
+    CountParams, CountReport, DescribeParams, DescribeReport, EditParams, EditReport, FindParams,
+    FindReport, GetParams, GetReport, NewParams, NewReport, SetParams, SetReport, ValidateParams,
+    ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
@@ -85,6 +86,9 @@ pub enum ClientFrame {
     /// A `new` request: create a document from a rule template / explicit path /
     /// inbox. Applies when `confirm` is set, else forecasts.
     New { params: NewParams },
+    /// An `edit` request: apply atomic content-anchored body edits to one
+    /// document. Applies when `confirm` is set, else forecasts.
+    Edit { params: EditParams },
 }
 
 /// Owner -> client. One JSON object per line.
@@ -123,6 +127,9 @@ pub enum OwnerFrame {
     /// The answer to `New`: the creation report (applied or forecast, or a coded
     /// `outcome = refused`).
     New { report: NewReport },
+    /// The answer to `Edit`: the body-edit report (applied or forecast, or a
+    /// coded `outcome = refused` on a clean pre-write decline).
+    Edit { report: EditReport },
     /// A well-formed request the owner could not carry out for a
     /// non-cache reason — a bad predicate, an unresolvable `--links-to`
     /// target. Distinct from [`Error`](OwnerFrame::Error): the owner stays

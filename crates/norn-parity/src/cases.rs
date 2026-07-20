@@ -1518,6 +1518,131 @@ const MUTATE_CASES: &[Case] = &[
     },
 ];
 
+/// Mutation-verb parity for `edit` (NRN-379): the atomic content-anchored
+/// body-edit verb. Each case is `mutating: true` — a forecast/refusal is proven
+/// write-free on BOTH binaries, and the confirmed apply is proven to write a
+/// byte-identical tree on both (post-state compared). All `ported: true` and
+/// MATCH the oracle (pure byte-parity, no ledger entry): the report shape,
+/// records/json rendering, the format-independent refusal surface, and the ops
+/// grammar (sugar desugar + `--edits-json`) were confirmed byte-identical to the
+/// pinned oracle (v0.48.1). The confirmed-apply case appends [`TRACE_NORM`] (the
+/// oracle's random applied `trace:` id → the rewrite's empty id); everything else
+/// is deterministic and byte-compared as-is.
+///
+/// The anchors below reference `notes/alpha.md`'s zoo body: the intro paragraph
+/// (`An introductory paragraph …`), `## Section One/Two/Three`, and their
+/// `Content belonging to section …` lines.
+const EDIT_CASES: &[Case] = &[
+    // A confirmed apply combining a str_replace and a section op (records). The
+    // change lines + `body: X → Y bytes` are compared AND the mutated file is
+    // byte-compared via post-state — both sides wrote the same bytes.
+    Case {
+        id: "edit-apply-str-replace-section-zoo",
+        argv: &[
+            "edit",
+            "alpha",
+            "--edits-json",
+            "[{\"op\":\"str_replace\",\"old\":\"An introductory paragraph for the alpha fixture document.\",\"new\":\"Rewritten intro.\"},{\"op\":\"append_to_section\",\"heading\":\"Section One\",\"content\":\"- appended line\"}]",
+            "--yes",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+    },
+    // A dry-run forecast (records): the plan preview (`dry-run: edit …` + the
+    // str_replace change line with its `1×` occurrence count + the `body: X → Y
+    // bytes` line + `Apply with --yes`), proven write-free on both sides. Uses
+    // `--edits-json` rather than single-op sugar deliberately: the harness runs
+    // CLI cases with a closed stdin PIPE, and the oracle's sugar path refuses a
+    // sugar op alongside a redirected-stdin fifo (its `stdin_carries_redirected_
+    // payload` F1 guard). The `--edits-json` source is stdin-agnostic, so both
+    // binaries behave identically under the harness; the sugar desugar itself is
+    // covered by the CLI command unit tests.
+    Case {
+        id: "edit-dry-run-forecast-zoo",
+        argv: &[
+            "edit",
+            "alpha",
+            "--edits-json",
+            "[{\"op\":\"str_replace\",\"old\":\"Content belonging to section two.\",\"new\":\"Replaced section two.\"}]",
+            "--dry-run",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // A bad target is a clean pre-write refusal: `error: doc not found: <t>` on
+    // stderr, exit 2, write-free (the format-independent edit refusal surface).
+    // `--edits-json` for the same harness-stdin reason as the forecast case.
+    Case {
+        id: "edit-missing-target-zoo",
+        argv: &[
+            "edit",
+            "no-such-doc-xyzzy",
+            "--edits-json",
+            "[{\"op\":\"str_replace\",\"old\":\"a\",\"new\":\"b\"}]",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // A malformed op (an unknown op discriminant in the JSON array): the CLI-side
+    // parse refuses with `error: invalid edits JSON: <serde detail>`, exit 2,
+    // write-free. The serde `unknown variant` detail (incl. the expected-variant
+    // list) is byte-identical across the two binaries.
+    Case {
+        id: "edit-malformed-op-zoo",
+        argv: &["edit", "alpha", "--edits-json", "[{\"op\":\"nope\"}]"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // The canonical JSON-ops-array source (`--edits-json`) rendered as a `--format
+    // json` forecast: pins the whole EditReport JSON shape (struct field order,
+    // the `edits` array with an omitted `occurrences` for a structural op, the
+    // empty `trace_id` on a forecast), write-free.
+    Case {
+        id: "edit-json-ops-forecast-zoo",
+        argv: &[
+            "edit",
+            "alpha",
+            "--edits-json",
+            "[{\"op\":\"delete_section\",\"heading\":\"Section Two\"}]",
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+];
+
 const SUITES: &[Suite] = &[
     Suite {
         name: "help",
@@ -1550,6 +1675,10 @@ const SUITES: &[Suite] = &[
     Suite {
         name: "mutate",
         cases: MUTATE_CASES,
+    },
+    Suite {
+        name: "edit",
+        cases: EDIT_CASES,
     },
 ];
 
