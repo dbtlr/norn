@@ -565,7 +565,19 @@ pub fn parse_config_compiled(
     source_path: &Utf8Path,
 ) -> Result<(VaultConfig, CompiledConfig), ConfigError> {
     let cfg = parse_config(yaml, source_path)?;
+    let compiled = compile_config(&cfg, source_path)?;
+    Ok((cfg, compiled))
+}
 
+/// Compile an already-parsed [`VaultConfig`]'s path patterns into a
+/// [`CompiledConfig`] — the compile half of [`parse_config_compiled`], factored
+/// out so the validate engine can pre-compile a config it holds without
+/// re-reading YAML. The single compile path (both entry points route through
+/// here), so the compiled patterns cannot drift.
+pub fn compile_config(
+    cfg: &VaultConfig,
+    source_path: &Utf8Path,
+) -> Result<CompiledConfig, ConfigError> {
     // files.ignore is not compiled to PathPatterns here: it is enforced at
     // cache-build time by the graph scan gate's segment matcher (NRN-117), not
     // by this regex-glob path. validate.ignore still compiles — it is consumed
@@ -623,13 +635,10 @@ pub fn parse_config_compiled(
         });
     }
 
-    Ok((
-        cfg,
-        CompiledConfig {
-            validate_ignore,
-            rules: compiled_rules,
-        },
-    ))
+    Ok(CompiledConfig {
+        validate_ignore,
+        rules: compiled_rules,
+    })
 }
 
 fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), ConfigError> {
