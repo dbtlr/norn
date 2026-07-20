@@ -53,6 +53,7 @@ pub mod links;
 pub mod plan;
 pub mod query;
 pub mod read;
+pub mod seq_alloc;
 pub mod standards;
 pub mod target;
 
