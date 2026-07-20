@@ -208,11 +208,10 @@ pub fn execute(
     } else {
         Vec::new()
     };
-    let trace_id = if applied {
-        sink.trace_id().to_string()
-    } else {
-        String::new()
-    };
+    // The wire contract holds `trace_id` empty on EVERY outcome until durable
+    // telemetry lands (see `mutate::set::execute`); the discard sink must not
+    // mint a placeholder id on apply.
+    let trace_id = String::new();
 
     Ok(MutationExecution {
         report: NewReport {

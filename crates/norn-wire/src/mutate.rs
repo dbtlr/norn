@@ -110,9 +110,12 @@ pub struct SetParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetReport {
     pub schema_version: u32,
-    /// The telemetry trace id (empty until the durable telemetry store lands with
-    /// the audit verb). Serialized right after `schema_version` to match the
-    /// donor's compact struct-order JSON.
+    /// The telemetry trace id. Empty on EVERY outcome — forecast, refusal, AND
+    /// applied — until the durable telemetry store lands with the audit verb; the
+    /// owner's discard sink deliberately does not mint a placeholder on apply, so
+    /// the contract holds one shape and confirmed-apply parity needs no trace
+    /// normalization. Donor-parity ids return when telemetry ports. Serialized
+    /// right after `schema_version` to match the donor's compact struct-order JSON.
     #[serde(default)]
     pub trace_id: String,
     pub operation: String,

@@ -761,19 +761,20 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
             message: "frontmatter could not be parsed".into(),
         });
     };
-    // NRN-371: a null-valued frontmatter block — an explicit `null`/`~` scalar —
-    // is an EMPTY mapping for a field op, not a refusal. Strip the bare-null
-    // token to an empty block and re-run, so a set/add PROMOTES it (the
-    // add_frontmatter insertion below then splices valid YAML rather than
-    // `null\nfield: v`). An empty or whitespace-only block already parses as an
-    // initializable empty mapping (NRN-120) and is left byte-verbatim; refusal
-    // (`CannotMinimalEdit`) is reserved for genuinely non-mapping frontmatter (a
-    // top-level sequence or bare non-null scalar). A deliberate divergence from
-    // the donor's refusal — valid input (a null block a `new` may emit) to valid
-    // output, closing the `new` -> `set` roundtrip on a defaults-free path.
-    if matches!(frontmatter_value, Value::Null)
-        && !content[frontmatter_range.clone()].trim().is_empty()
-    {
+    // NRN-371: a null-valued frontmatter block is an EMPTY mapping for a field
+    // op, not a refusal — a deliberate divergence from the donor's refusal that
+    // closes the `new` -> `set` roundtrip. But `Value::Null` also covers a
+    // COMMENT-ONLY block (pure YAML comments parse as null), whose comments are
+    // real user content the minimal-edit invariant (ADR 0008) must preserve. So
+    // ONLY a bare-null SCALAR token (`null` / `~`) is stripped to an empty block
+    // here (splicing a key after a bare scalar would be invalid YAML, and the
+    // token carries no user data). A comment-only or empty block is NOT stripped:
+    // it flows to `frontmatter_as_mapping` as the empty mapping and the
+    // add_frontmatter insertion appends the field AFTER the comment lines, leaving
+    // them byte-intact. `CannotMinimalEdit` stays for genuinely non-mapping
+    // frontmatter (a top-level sequence or a bare non-null scalar).
+    let inner = &content[frontmatter_range.clone()];
+    if matches!(frontmatter_value, Value::Null) && is_null_scalar_token(inner.trim()) {
         let mut normalized = content.to_string();
         normalized.replace_range(frontmatter_range.clone(), "");
         return apply_file_changes(&normalized, changes);
@@ -1061,15 +1062,15 @@ fn verify_post_image(
 }
 
 /// Normalizes a parsed frontmatter value to its mapping form: a mapping is
-/// itself; a YAML-null parse over an empty or whitespace-only block is the
-/// empty mapping (an initializable `---\n---\n` block, NRN-120). A bare
+/// itself; a YAML-null parse over an empty, whitespace-only, OR comment-only
+/// block is the empty mapping (an initializable block — NRN-120/NRN-371 — where
+/// a field op appends after any comment lines, preserving them). A bare
 /// `null`/`~` SCALAR yields `None` here — but `apply_file_changes`' input gate
-/// normalizes that case away first (NRN-371: it strips the null token to an
-/// empty block and re-runs), so at the input this returns `None` only for a
-/// genuinely non-mapping block (a sequence or bare non-null scalar). At the
-/// `verify_post_image` end it stays strict, so a result that somehow re-parsed
-/// to an explicit null is a mismatch, not a silent pass. Shared by both ends so
-/// they agree on what counts as a mapping.
+/// strips that token first (NRN-371), so at the input this returns `None` only
+/// for a genuinely non-mapping block (a sequence or bare non-null scalar). At the
+/// `verify_post_image` end it stays strict, so a result that somehow re-parsed to
+/// an explicit null is a mismatch, not a silent pass. Shared by both ends so they
+/// agree on what counts as a mapping.
 fn frontmatter_as_mapping<'a>(
     value: &'a Value,
     content: &str,
@@ -1078,9 +1079,25 @@ fn frontmatter_as_mapping<'a>(
 ) -> Option<&'a serde_json::Map<String, Value>> {
     match value {
         Value::Object(map) => Some(map),
-        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => Some(empty),
+        Value::Null if is_comment_or_blank_only(&content[frontmatter_range.clone()]) => Some(empty),
         _ => None,
     }
+}
+
+/// The trimmed frontmatter content is exactly a YAML null SCALAR token (`null`,
+/// any case, or `~`) — the one null shape a field op must STRIP rather than
+/// append to. Empty / whitespace / comment-only blocks are promotable in place.
+fn is_null_scalar_token(trimmed: &str) -> bool {
+    trimmed.eq_ignore_ascii_case("null") || trimmed == "~"
+}
+
+/// Every line of a frontmatter block is blank or a `#` comment — an "effectively
+/// empty" mapping a field op can initialize in place while keeping the comments.
+fn is_comment_or_blank_only(block: &str) -> bool {
+    block.lines().all(|line| {
+        let t = line.trim();
+        t.is_empty() || t.starts_with('#')
+    })
 }
 
 /// Joins frontmatter parse diagnostics into one `; `-separated message.
@@ -2221,6 +2238,35 @@ mod tests {
             matches!(err, ApplyError::CannotMinimalEdit { .. }),
             "expected CannotMinimalEdit for a top-level list, got {err:?}"
         );
+    }
+
+    #[test]
+    fn apply_preserves_comments_on_a_comment_only_block() {
+        // CodeRabbit F1: a comment-only block parses as YAML null; its comments are
+        // user content the minimal-edit apply path must preserve. The field appends
+        // after the comment lines, every comment byte intact.
+        let content = "---\n# keep me\n# and me\n---\n# body\n";
+        let change = make_change(
+            "a.md",
+            "status",
+            "h1",
+            "add_frontmatter",
+            Some(json!("draft")),
+        );
+        let out = apply_change(content, &change).unwrap();
+        assert_eq!(
+            out,
+            "---\n# keep me\n# and me\nstatus: draft\n---\n# body\n"
+        );
+    }
+
+    #[test]
+    fn apply_promotes_bare_null_and_tilde_blocks() {
+        for block in ["---\nnull\n---\nbody\n", "---\n~\n---\nbody\n"] {
+            let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+            let out = apply_change(block, &change).unwrap();
+            assert_eq!(out, "---\ntitle: X\n---\nbody\n", "block: {block:?}");
+        }
     }
 
     #[test]

@@ -200,11 +200,12 @@ pub fn execute(
         Vec::new()
     };
 
-    let trace_id = if applied {
-        sink.trace_id().to_string()
-    } else {
-        String::new()
-    };
+    // The wire contract holds `trace_id` empty on EVERY outcome (forecast,
+    // refusal, AND applied) until durable telemetry lands — the owner's discard
+    // sink would otherwise mint a placeholder id on apply that contradicts the
+    // documented shape (and would need a parity normalization step). Donor-parity
+    // trace ids return with the telemetry/audit port.
+    let trace_id = String::new();
     Ok(MutationExecution {
         report: SetReport {
             schema_version: 2,

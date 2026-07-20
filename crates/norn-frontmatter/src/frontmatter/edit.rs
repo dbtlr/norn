@@ -175,18 +175,18 @@ pub fn edit_fields(content: &str, ops: &[FieldOp]) -> Result<String, Frontmatter
             message: "frontmatter could not be parsed".into(),
         });
     };
-    // NRN-371: a null-valued frontmatter block — an explicit `null`/`~` scalar —
-    // is an EMPTY mapping for a field op, not a refusal. Strip the bare-null
-    // token to an empty block and re-run, so a set/add PROMOTES it (an Add then
-    // splices valid YAML rather than `null\nfield: v`). An empty or
-    // whitespace-only block already parses as an initializable empty mapping and
-    // is left byte-verbatim; refusal is reserved for genuinely non-mapping
-    // frontmatter (a top-level sequence or bare non-null scalar). This is a
-    // deliberate divergence from the donor's `NotAMapping` refusal — a valid
-    // input (a null block a `new` may emit) becoming a valid output.
-    if matches!(frontmatter_value, Value::Null)
-        && !content[frontmatter_range.clone()].trim().is_empty()
-    {
+    // NRN-371: a null-valued frontmatter block is an EMPTY mapping for a field
+    // op, not a refusal — a deliberate divergence from the donor's `NotAMapping`
+    // refusal that closes the `new` -> `set` roundtrip. But `Value::Null` also
+    // covers a COMMENT-ONLY block (pure YAML comments parse as null), whose
+    // comments are real user content the minimal-edit invariant (ADR 0008) must
+    // preserve. So ONLY a bare-null SCALAR token (`null` / `~`) is stripped to an
+    // empty block here — splicing a key after a bare scalar would be invalid YAML,
+    // and the token carries no user data. A comment-only or empty block is NOT
+    // stripped: it flows to `frontmatter_as_mapping` as the empty mapping and the
+    // Add appends the field AFTER the comment lines, leaving them byte-intact.
+    let inner = &content[frontmatter_range.clone()];
+    if matches!(frontmatter_value, Value::Null) && is_null_scalar_token(inner.trim()) {
         let mut normalized = content.to_string();
         normalized.replace_range(frontmatter_range.clone(), "");
         return edit_fields(&normalized, ops);
@@ -450,9 +450,30 @@ fn frontmatter_as_mapping<'a>(
 ) -> Option<&'a serde_json::Map<String, Value>> {
     match value {
         Value::Object(map) => Some(map),
-        Value::Null if content[frontmatter_range.clone()].trim().is_empty() => Some(empty),
+        // A null parse over a block that is empty, whitespace, OR comment-only is
+        // an initializable empty mapping (NRN-371): a field op appends after any
+        // comment lines, preserving them. A bare null SCALAR token never reaches
+        // here at the input gate (`edit_fields` strips it first); at the
+        // post-image gate it stays a mismatch.
+        Value::Null if is_comment_or_blank_only(&content[frontmatter_range.clone()]) => Some(empty),
         _ => None,
     }
+}
+
+/// The trimmed frontmatter content is exactly a YAML null SCALAR token (`null`,
+/// any case, or `~`) — the one null shape a field op must STRIP rather than
+/// append to. Empty / whitespace / comment-only blocks are promotable in place.
+fn is_null_scalar_token(trimmed: &str) -> bool {
+    trimmed.eq_ignore_ascii_case("null") || trimmed == "~"
+}
+
+/// Every line of a frontmatter block is blank or a `#` comment — an "effectively
+/// empty" mapping a field op can initialize in place while keeping the comments.
+fn is_comment_or_blank_only(block: &str) -> bool {
+    block.lines().all(|line| {
+        let t = line.trim();
+        t.is_empty() || t.starts_with('#')
+    })
 }
 
 fn join_diagnostics(diagnostics: &[crate::diagnostic::Diagnostic]) -> String {
@@ -717,6 +738,38 @@ mod tests {
         assert!(
             matches!(err, FrontmatterEditError::NotAMapping),
             "expected NotAMapping for a top-level list, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_preserves_comments_on_a_comment_only_block() {
+        // CodeRabbit F1: a comment-only block parses as YAML null, but its comments
+        // are user content — the minimal-edit invariant must keep them. The field
+        // appends AFTER the comment lines; every comment byte survives.
+        let content = "---\n# keep me\n# and me\n---\n# body\n";
+        let out = add_field(content, "status", &json!("draft")).unwrap();
+        assert_eq!(
+            out,
+            "---\n# keep me\n# and me\nstatus: draft\n---\n# body\n"
+        );
+        assert!(out.contains("# keep me"));
+        assert!(out.contains("# and me"));
+    }
+
+    #[test]
+    fn add_promotes_bare_null_and_tilde_and_empty_blocks() {
+        // The three promotable null shapes still initialize in place.
+        assert_eq!(
+            add_field("---\nnull\n---\n", "a", &json!(1)).unwrap(),
+            "---\na: 1\n---\n"
+        );
+        assert_eq!(
+            add_field("---\n~\n---\n", "a", &json!(1)).unwrap(),
+            "---\na: 1\n---\n"
+        );
+        assert_eq!(
+            add_field("---\n---\n", "a", &json!(1)).unwrap(),
+            "---\na: 1\n---\n"
         );
     }
 
