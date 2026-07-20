@@ -139,8 +139,21 @@ impl McpServer {
 
 #[tool_router(router = mutate_router, vis = "pub(crate)")]
 impl McpServer {
-    #[allow(unused)]
-    fn _mutate_router_anchor(&self) {}
+    /// `vault.set` — update one document's frontmatter (and optionally its body).
+    #[tool(
+        name = "vault.set",
+        description = "Update one document's frontmatter (and optionally replace its body), schema-aware. DRY-RUN by default — returns the planned change without writing. Pass confirm:true to apply.",
+        output_schema = output_schema_for::<crate::tools::set::SetOutput>()
+    )]
+    async fn set(
+        &self,
+        Parameters(p): Parameters<crate::tools::set::SetParams>,
+    ) -> Result<MutationResult<crate::tools::set::SetOutput>, rmcp::ErrorData> {
+        let confirm = p.confirm;
+        let wire = crate::tools::set::to_wire(p);
+        let report = self.call(move |s| s.set(wire)).await?;
+        Ok(crate::tools::set::envelope(confirm, report))
+    }
 }
 
 #[tool_handler(router = self.tool_router)]

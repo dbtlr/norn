@@ -12,4 +12,5 @@
 
 pub mod count;
 pub mod get;
+pub mod set;
 pub mod validate;

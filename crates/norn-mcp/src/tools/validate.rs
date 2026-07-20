@@ -81,10 +81,10 @@ pub(crate) fn to_wire(p: ValidateParams) -> WireValidateParams {
         paths: p.path,
         targets: p.target,
         reasons: p.reason,
-        // `--verbose` has no MCP twin (the concise coded form is the agent
-        // surface); the owner trims graph-diagnostic detail as it does for a
-        // non-verbose CLI run.
-        verbose: false,
+        // The MCP surface keeps full graph-diagnostic `detail` in findings — the
+        // donor's `vault.validate` ran in the verbose mode (an off-filesystem
+        // client cannot re-derive the detail), unlike the non-verbose CLI default.
+        verbose: true,
         summary: p.summary,
     }
 }
