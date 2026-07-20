@@ -1372,18 +1372,16 @@ const MCP_FIXTURE: Fixture = Fixture {
 /// lone `tools/list` case (`mcp-initialize-tools-list-zoo`) stays `ported: false`
 /// DELIBERATELY: the full catalog cannot byte-match the pinned oracle, for two
 /// structural reasons, so gating it would force ledger entries this task does not
-/// own:
-///   1. `vault.audit` — the oracle serves 14 tools; the rewrite's audit VERB is
-///      not yet ported (no `session.audit`, no durable telemetry store), so the
-///      catalog omits it (13 tools). Advertising a dead tool would violate the
-///      thin-adapter contract.
-///   2. `inputSchema` reflects the rewrite's DELIBERATE param redesigns — most
-///      visibly zero-indexed paging (NRN-332), which changes `get`'s `starts_at`
-///      default in the published schema.
-/// Both are flagged for adjudication (audit-verb port; a tools/list ledger entry
-/// or a normalization rule) rather than silently ledgered here. `--self-check`
-/// (oracle vs. itself) still runs and Matches this case, keeping the frame-driving
-/// harness exercised over the full catalog.
+/// own. First, `vault.audit` — the oracle serves 14 tools, but the rewrite's audit
+/// VERB is not yet ported (no `session.audit`, no durable telemetry store), so the
+/// catalog omits it (13 tools); advertising a dead tool would violate the
+/// thin-adapter contract. Second, the published `inputSchema` reflects the
+/// rewrite's DELIBERATE param redesigns — most visibly zero-indexed paging
+/// (NRN-332), which changes `get`'s `starts_at` default. Both are flagged for
+/// adjudication (audit-verb port; a tools/list ledger entry or a normalization
+/// rule) rather than silently ledgered here. `--self-check` (oracle vs. itself)
+/// still runs and Matches this case, keeping the frame-driving harness exercised
+/// over the full catalog.
 const MCP_CASES: &[Case] = &[
     Case {
         // The MCP session lifecycle anchor: `initialize` (id 1) then

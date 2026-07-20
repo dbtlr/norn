@@ -25,8 +25,6 @@ use rmcp::model::{CallToolResult, JsonObject};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use norn_core::apply::report::{ApplyOutcome, ApplyReport};
-
 /// The `outputSchema` a `MutationResult<T>`-returning tool must publish via its
 /// explicit `output_schema = …` attribute.
 ///
@@ -51,28 +49,6 @@ pub struct MutationResult<T> {
 }
 
 impl<T> MutationResult<T> {
-    /// Build from a cascade apply report (`apply` / `move` / `delete` /
-    /// `rewrite_wikilink`). `isError` is derived from the report itself — a
-    /// **confirm** apply that did not fully apply (`refused` / `failed`, i.e.
-    /// `exit_code() != 0`) → `isError: true`; a **dry-run** forecast → always
-    /// `isError: false`.
-    pub fn from_apply_report(value: T, report: &ApplyReport) -> Self {
-        Self {
-            value,
-            is_error: !report.dry_run && report.exit_code() != 0,
-        }
-    }
-
-    /// Build from a single-op mutator's outcome (`set` / `edit` / `new`,
-    /// NRN-220) — derives `isError` from the same outcome→exit vocabulary as
-    /// [`from_apply_report`](Self::from_apply_report).
-    pub fn from_outcome(value: T, dry_run: bool, outcome: ApplyOutcome) -> Self {
-        Self {
-            value,
-            is_error: !dry_run && outcome.exit_code() != 0,
-        }
-    }
-
     /// Build from a tool's own already-derived error flag (NRN-214) — the
     /// `vault.get` READ tool uses it to map its not-found / all-missed-section
     /// signal to `isError: true` while still returning its records.

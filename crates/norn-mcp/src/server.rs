@@ -133,7 +133,10 @@ impl McpServer {
         let summary_requested = p.summary;
         let wire = crate::tools::validate::to_wire(p);
         let report = self.call(move |s| s.validate(wire)).await?;
-        Ok(Json(crate::tools::validate::envelope(report, summary_requested)))
+        Ok(Json(crate::tools::validate::envelope(
+            report,
+            summary_requested,
+        )))
     }
 }
 
