@@ -356,7 +356,9 @@ fn collect_responses(
         return Err(McpError::EofEarly {
             label: target.label,
             expected: expected.len(),
-            received: responses.len(),
+            // Count only EXPECTED ids that arrived — an unsolicited response
+            // must not inflate this, or the message contradicts missing_ids.
+            received: expected.len() - missing.len(),
             missing_ids: missing,
         });
     }
