@@ -52,6 +52,7 @@ pub mod grammar;
 pub mod graph;
 pub mod links;
 pub mod plan;
+pub mod planner;
 pub mod query;
 pub mod read;
 pub mod seq_alloc;

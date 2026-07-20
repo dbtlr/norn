@@ -56,8 +56,8 @@ pub use path_match::{effective_match_glob, glob_from_target, pattern_from_target
 pub use repair::link_risk::{classify as classify_link_risk, AffectedLink, LinkRisk};
 pub use repair::warnings::PlanWarning;
 pub use repair::{
-    plan_repairs, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary, SkippedSummary,
-    REPAIR_PLAN_SCHEMA_VERSION,
+    plan_repairs, Confidence, FootnoteDetails, PlannedChange, RepairPlan, RepairPlanFilters,
+    RepairPlanSummary, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
 };
 pub use substitution::{format_datetime, render, Context, RenderError};
 pub use summary::{summarize, Summary};
