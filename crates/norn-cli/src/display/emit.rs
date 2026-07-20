@@ -16,7 +16,8 @@ use std::io::{self, Write};
 
 use norn_config::RegisteredVault;
 use norn_wire::{
-    CountReport, DescribeReport, FindDoc, FindReport, GetRecord, GetReport, GroupNode,
+    CountReport, DescribeReport, FindDoc, FindReport, FrontmatterChange, GetRecord, GetReport,
+    GroupNode, MutationOutcome, MutationWarning,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -34,7 +35,8 @@ use super::conversation::Conversation;
 use super::fix_hints::fix_hint_for;
 use super::format::Format;
 use super::output::{
-    CountView, DescribeView, FindView, GetView, Output, ValidateView, VaultListView,
+    CountView, DescribeView, FindView, GetView, NewMutationView, Output, SetMutationView,
+    ValidateView, VaultListView,
 };
 use super::sink::Sink;
 use super::{Diagnostic, Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
@@ -98,6 +100,8 @@ pub fn emit<O: Write, E: Write>(
         Output::Describe(view) => render_describe(view, presenter),
         Output::Validate(view) => render_validate(view, global, presenter),
         Output::VaultList(view) => render_vault_list(view, presenter),
+        Output::Set(view) => render_set(view, global, presenter),
+        Output::New(view) => render_new(view, global, presenter),
         Output::Line(line) => {
             let (out, err) = presenter.streams();
             let result: io::Result<i32> = (|| {
@@ -1046,6 +1050,303 @@ fn group_by_code(findings: &[Value]) -> Vec<(&str, Vec<&Value>)> {
             (code, group)
         })
         .collect()
+}
+
+// ── set / new (mutation reports) ─────────────────────────────────────────────
+
+/// Render a value for a change line: a bare string prints unquoted (`draft`),
+/// every other JSON value prints its compact JSON (`3`, `["a","b"]`, `null`) —
+/// the donor `value_repr`.
+fn value_repr(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The exit code a mutation report implies: a clean pre-write decline
+/// (`outcome = refused`) is exit 2 (the refusal is authoritative, nothing
+/// happened); a forecast or applied report is exit 0.
+fn mutation_exit(outcome: MutationOutcome) -> i32 {
+    match outcome {
+        MutationOutcome::Refused => EXIT_USAGE,
+        MutationOutcome::Applied => EXIT_OK,
+    }
+}
+
+/// Render the non-fatal mutation warnings (count + the first three messages, with
+/// a `… (N more)` tail) — the donor truncation, on the stderr conversation.
+/// The mutation warning's records short form — the donor `warning_label`
+/// vocabulary, computed per `code` from the unified `{ code, field, message }`
+/// envelope (the JSON shape is a deliberate divergence; see
+/// `norn_wire::MutationWarning`). Kinds whose records line differs from the
+/// message (`unknown-field`, `force-bypass`, `title-ignored`) are rebuilt from
+/// `code` + `field`; the rest print their `message` verbatim (it already equals
+/// the donor label — e.g. the wikilink warnings).
+fn warning_short(w: &MutationWarning) -> String {
+    let field = w.field.as_deref().unwrap_or("");
+    match w.code.as_str() {
+        "unknown-field" => format!("unknown field: {field}"),
+        "force-bypass" => format!("--force bypass: {field}"),
+        "title-ignored" => format!("title-ignored: {}", w.message),
+        _ => w.message.clone(),
+    }
+}
+
+fn render_set<O: Write, E: Write>(
+    view: SetMutationView,
+    global: &GlobalArgs,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let format = view.spec.resolve(view.explicit, is_stdout_tty());
+    let report = &view.report;
+    let (out, err) = presenter.streams();
+    let mut conv = Conversation::new(err);
+
+    // JSON: the compact whole-report serialization is the contract (struct field
+    // order, donor-faithful). Structured on refusal too (ADR 0016 unifies the
+    // surfaces on the structured envelope).
+    if format == Format::Json {
+        let result: io::Result<i32> = (|| {
+            writeln!(out, "{}", serde_json::to_string(report)?)?;
+            Ok(mutation_exit(report.outcome))
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    // Records. A refusal prints the coded error on stderr (exit 2).
+    if report.outcome == MutationOutcome::Refused {
+        let msg = report
+            .error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "set refused".to_string());
+        let result: io::Result<i32> = (|| {
+            conv.line(&format!("error: {msg}"))?;
+            Ok(EXIT_USAGE)
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    let palette = palette::resolve(global.color);
+    let ascii = glyphs::use_ascii();
+    let result: io::Result<i32> = (|| {
+        let verb = if report.applied {
+            "set"
+        } else {
+            "dry-run: set"
+        };
+        writeln!(
+            out,
+            "{}{verb} {}{}",
+            palette.header.render(),
+            report.target,
+            palette.header.render_reset()
+        )?;
+        for change in &report.frontmatter_changes {
+            render_frontmatter_change(out, &palette, change, ascii)?;
+        }
+        if report.body_changed {
+            let old = report.body_bytes_old.unwrap_or(0);
+            let new = report.body_bytes_new.unwrap_or(0);
+            primitives::change_line(
+                out,
+                &palette,
+                "body",
+                &format!("{old} bytes"),
+                Some(&format!("{new} bytes")),
+                ascii,
+            )?;
+        }
+        // Warnings block (donor: on STDOUT): `  warnings: N` then `    - <short>`
+        // for the first three, then `    … (K more)`.
+        if !report.warnings.is_empty() {
+            writeln!(out, "  warnings: {}", report.warnings.len())?;
+            for w in report.warnings.iter().take(3) {
+                writeln!(out, "    - {}", warning_short(w))?;
+            }
+            if report.warnings.len() > 3 {
+                writeln!(out, "    … ({} more)", report.warnings.len() - 3)?;
+            }
+        }
+        if report.applied {
+            writeln!(out, "trace: {}", report.trace_id)?;
+        } else {
+            writeln!(out)?;
+            writeln!(out, "Apply with --yes")?;
+        }
+        Ok(EXIT_OK)
+    })();
+    render_outcome(result, conv.writer())
+}
+
+/// One `set` change line, dispatched by the normalized op. An absent prior value
+/// (a field added by an upsert) renders its `before` as `<none>` (donor).
+fn render_frontmatter_change(
+    out: &mut dyn Write,
+    palette: &Palette,
+    change: &FrontmatterChange,
+    ascii: bool,
+) -> io::Result<()> {
+    let field = change.field.as_str();
+    match change.op.as_str() {
+        "set" => {
+            let before = change
+                .old
+                .as_ref()
+                .map(value_repr)
+                .unwrap_or_else(|| "<none>".to_string());
+            let after = change.new.as_ref().map(value_repr).unwrap_or_default();
+            primitives::change_line(out, palette, field, &before, Some(&after), ascii)
+        }
+        "remove" => {
+            let was = change.old.as_ref().map(value_repr).unwrap_or_default();
+            primitives::change_line(
+                out,
+                palette,
+                field,
+                &format!("remove (was {was})"),
+                None,
+                ascii,
+            )
+        }
+        "push" => {
+            let v = change.value.as_ref().map(value_repr).unwrap_or_default();
+            primitives::change_line(out, palette, field, &format!("push {v}"), None, ascii)
+        }
+        "pop" => {
+            let v = change.value.as_ref().map(value_repr).unwrap_or_default();
+            let found = change.found.unwrap_or(false);
+            primitives::change_line(
+                out,
+                palette,
+                field,
+                &format!("pop {v} (found: {found})"),
+                None,
+                ascii,
+            )
+        }
+        other => primitives::change_line(out, palette, field, other, None, ascii),
+    }
+}
+
+/// A `new`-report key/value line: `{label:<9}  {value}` (value column at 11), the
+/// donor's aligned block. Unstyled (like `count` / `describe`) so the piped /
+/// parity bytes are exact.
+fn new_kv(out: &mut dyn Write, label: &str, value: &str) -> io::Result<()> {
+    writeln!(out, "{label:<9}  {value}")
+}
+
+/// The provenance detail for a created field (donor `report.rs`): the source
+/// label as the core already set it (`operator-flag` / `operator-flag-json` /
+/// `schema-default` — one vocabulary, no remap), plus the crediting rule when a
+/// default carried one: `schema-default, task-rule`.
+fn created_detail(created: &norn_wire::FrontmatterCreated) -> String {
+    match &created.rule {
+        Some(rule) => format!("{}, {}", created.source, rule),
+        None => created.source.clone(),
+    }
+}
+
+fn render_new<O: Write, E: Write>(
+    view: NewMutationView,
+    global: &GlobalArgs,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let format = view.spec.resolve(view.explicit, is_stdout_tty());
+    let report = &view.report;
+    let (out, err) = presenter.streams();
+    let mut conv = Conversation::new(err);
+
+    // JSON: pretty-printed with ALPHABETICAL keys (the donor serialized through a
+    // `serde_json::Value`, whose map is a BTreeMap without `preserve_order`).
+    if format == Format::Json {
+        let _ = global;
+        let result: io::Result<i32> = (|| {
+            let value = serde_json::to_value(report)?;
+            // The donor's `new --format json` emits NO trailing newline (unlike
+            // `set --format json`, which does) — a donor inconsistency mirrored
+            // faithfully with `write!`, not `writeln!`.
+            write!(out, "{}", serde_json::to_string_pretty(&value)?)?;
+            Ok(mutation_exit(report.outcome))
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    if report.outcome == MutationOutcome::Refused {
+        let msg = report
+            .error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "new refused".to_string());
+        let result: io::Result<i32> = (|| {
+            conv.line(&format!("error: {msg}"))?;
+            Ok(EXIT_USAGE)
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    let result: io::Result<i32> = (|| {
+        let shown_path = report
+            .path
+            .as_deref()
+            .or(report.predicted_path.as_deref())
+            .unwrap_or("(pending)");
+        new_kv(out, "path", shown_path)?;
+        new_kv(out, "operation", "new")?;
+        new_kv(out, "applied", &report.applied.to_string())?;
+
+        // fields: `none`, or the first created field on the `fields` line with the
+        // rest aligned under the value column (11-space continuation indent).
+        if report.frontmatter_created.is_empty() {
+            new_kv(out, "fields", "none")?;
+        } else {
+            // Field-name sub-column padding (donor report.rs max_field_w): every
+            // `field` cell is left-padded to the widest name so the `=` aligns.
+            let field_w = report
+                .frontmatter_created
+                .iter()
+                .map(|c| c.field.len())
+                .max()
+                .unwrap_or(0);
+            for (i, created) in report.frontmatter_created.iter().enumerate() {
+                let line = format!(
+                    "{:<field_w$} = {}  ({})",
+                    created.field,
+                    value_repr(&created.value),
+                    created_detail(created)
+                );
+                if i == 0 {
+                    new_kv(out, "fields", &line)?;
+                } else {
+                    writeln!(out, "           {line}")?;
+                }
+            }
+        }
+
+        new_kv(out, "body", &format!("{} bytes", report.body_bytes))?;
+
+        if report.warnings.is_empty() {
+            new_kv(out, "warnings", "none")?;
+        } else {
+            for (i, w) in report.warnings.iter().enumerate() {
+                if i == 0 {
+                    new_kv(out, "warnings", &warning_short(w))?;
+                } else {
+                    writeln!(out, "           {}", warning_short(w))?;
+                }
+            }
+        }
+
+        if report.applied {
+            writeln!(out, "trace: {}", report.trace_id)?;
+        } else {
+            writeln!(out)?;
+            writeln!(out, "Apply with --yes")?;
+        }
+        Ok(EXIT_OK)
+    })();
+    render_outcome(result, conv.writer())
 }
 
 // ── vault list ─────────────────────────────────────────────────────────────────
@@ -2282,5 +2583,110 @@ mod tests {
             s.contains("\x1b[38;5;167m"),
             "expected rune on the error group header: {s:?}"
         );
+    }
+
+    // ── mutation reporting (review fixes F1/F3/F5) ─────────────────────────────
+
+    use norn_wire::{FrontmatterCreated, MutationWarning, NewReport};
+
+    fn created(field: &str, value: Value, source: &str, rule: Option<&str>) -> FrontmatterCreated {
+        FrontmatterCreated {
+            field: field.into(),
+            value,
+            source: source.into(),
+            rule: rule.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn f1_created_detail_uses_the_core_vocabulary_verbatim() {
+        // No remap layer: the source label is whatever the core set, plus the
+        // crediting rule when a default carried one.
+        assert_eq!(
+            created_detail(&created(
+                "type",
+                json!("note"),
+                "schema-default",
+                Some("typed-note")
+            )),
+            "schema-default, typed-note"
+        );
+        assert_eq!(
+            created_detail(&created("title", json!("X"), "operator-flag", None)),
+            "operator-flag"
+        );
+        assert_eq!(
+            created_detail(&created("tags", json!([1]), "operator-flag-json", None)),
+            "operator-flag-json"
+        );
+    }
+
+    #[test]
+    fn f3_new_records_pads_field_names_to_the_widest() {
+        let report = NewReport {
+            schema_version: 2,
+            trace_id: String::new(),
+            operation: "new".into(),
+            path: Some("a.md".into()),
+            applied: false,
+            outcome: MutationOutcome::Applied,
+            frontmatter_created: vec![
+                created("kind", json!("note"), "schema-default", Some("r")),
+                created("verylongfield", json!("v"), "operator-flag", None),
+            ],
+            body_bytes: 0,
+            warnings: vec![],
+            predicted_path: None,
+            error: None,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            render_new(
+                NewMutationView {
+                    report,
+                    explicit: Some(Format::Records),
+                    spec: FormatSpec {
+                        tty: Format::Records,
+                        piped: Format::Records,
+                    },
+                },
+                &global_args(),
+                &mut presenter,
+            );
+        }
+        let s = String::from_utf8(out).unwrap();
+        // Both field cells are padded to the widest name (13 chars), so the `=`
+        // columns align.
+        assert!(s.contains("kind          = note"), "{s}");
+        assert!(s.contains("verylongfield = v"), "{s}");
+    }
+
+    #[test]
+    fn f5_warning_short_rebuilds_the_donor_records_labels_per_code() {
+        let uf = MutationWarning {
+            code: "unknown-field".into(),
+            field: Some("status".into()),
+            message: "field 'status' not declared in schema".into(),
+        };
+        assert_eq!(warning_short(&uf), "unknown field: status");
+
+        let ti = MutationWarning {
+            code: "title-ignored".into(),
+            field: None,
+            message: "--title 'X' has no effect with an explicit path".into(),
+        };
+        assert_eq!(
+            warning_short(&ti),
+            "title-ignored: --title 'X' has no effect with an explicit path"
+        );
+
+        let fb = MutationWarning {
+            code: "force-bypass".into(),
+            field: Some("status".into()),
+            message: "--force bypassed type validation for 'status'".into(),
+        };
+        assert_eq!(warning_short(&fb), "--force bypass: status");
     }
 }

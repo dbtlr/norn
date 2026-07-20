@@ -132,9 +132,17 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             &cli.global,
             presenter,
         ),
-        Command::Set(_) => presenter.not_yet_ported("set"),
+        Command::Set(args) => emit(
+            commands::set::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Edit(_) => presenter.not_yet_ported("edit"),
-        Command::New(_) => presenter.not_yet_ported("new"),
+        Command::New(args) => emit(
+            commands::new::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Init(_) => presenter.not_yet_ported("init"),
         Command::Move(_) => presenter.not_yet_ported("move"),
         Command::Delete(_) => presenter.not_yet_ported("delete"),
@@ -195,8 +203,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_set_presents_not_yet_ported() {
-        let cli = Cli::try_parse_from(["norn", "set", "a.md", "status=done"]).unwrap();
+    fn dispatch_edit_still_presents_not_yet_ported() {
+        // `edit` remains a grammar-only stub until its own port; the not-yet-ported
+        // outcome is exercised here now that `set`/`new` dispatch for real.
+        let cli = Cli::try_parse_from(["norn", "edit", "a.md"]).unwrap();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let code = {
@@ -206,7 +216,7 @@ mod tests {
         assert_eq!(code, display::EXIT_OPERATIONAL);
         assert_eq!(
             String::from_utf8(err).unwrap(),
-            "norn: `set` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
+            "norn: `edit` is not yet ported in this build (rewrite in progress; see ADR 0018)\n"
         );
     }
 }

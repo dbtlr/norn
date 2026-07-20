@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use norn_wire::{
     ClientFrame, CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport,
-    GetParams, GetReport, OwnerFrame, ServingState, ValidateParams, ValidateReport, WriterProgress,
-    CONTROL_PROTOCOL,
+    GetParams, GetReport, NewParams, NewReport, OwnerFrame, ServingState, SetParams, SetReport,
+    ValidateParams, ValidateReport, WriterProgress, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -222,6 +222,39 @@ impl OwnerSession {
             OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
             other => Err(ClientError::Protocol(format!(
                 "expected validate report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `set` mutation against the owner's warm cache. A single request:
+    /// the owner serializes writes under its in-process single-writer lock, and
+    /// a post-send failure is NOT retried here (no resummon loop) — a mutation
+    /// that may have applied must not double-apply (ADR 0011). A clean pre-write
+    /// decline arrives as a report with `outcome = refused`, not an error.
+    pub fn set(&mut self, params: SetParams) -> Result<SetReport, ClientError> {
+        match self.request(&ClientFrame::Set { params })? {
+            OwnerFrame::Set { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected set report, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Run a `new` mutation against the owner's warm cache. Same send-once,
+    /// never-retry contract as [`set`](Self::set).
+    pub fn new_document(&mut self, params: NewParams) -> Result<NewReport, ClientError> {
+        match self.request(&ClientFrame::New { params })? {
+            OwnerFrame::New { report } => Ok(report),
+            OwnerFrame::Rejected { message, hints } => {
+                Err(ClientError::Rejected { message, hints })
+            }
+            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
+            other => Err(ClientError::Protocol(format!(
+                "expected new report, got {other:?}"
             ))),
         }
     }

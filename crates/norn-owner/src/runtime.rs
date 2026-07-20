@@ -32,7 +32,9 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use norn_core::cache::{Cache, VaultCacheSlot};
 use norn_core::grammar::FieldRejection;
+use norn_core::mutate::MutationExecution;
 use norn_core::standards::VaultConfig;
+use norn_core::telemetry::{Clock, EventSink, IdGen};
 use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -107,6 +109,12 @@ struct OwnerState {
     /// notification landing between `select!` iterations is not lost — the next
     /// `notified()` returns immediately from the stored permit.
     wake: tokio::sync::Notify,
+    /// The owner's in-process single-writer lock (ADR 0013/0017 — the successor
+    /// to the donor's cross-process mutation flock). Every mutation frame
+    /// (`set`/`new`/…) holds it across its whole build-plan → apply → cache-commit
+    /// critical section, so writes serialize and `{{seq}}` allocation observes
+    /// prior creates. Reads never take it, so they stay concurrent.
+    mutation_lock: tokio::sync::Mutex<()>,
 }
 
 impl OwnerState {
@@ -122,6 +130,7 @@ impl OwnerState {
             build,
             shutdown_requested: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
+            mutation_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -723,6 +732,104 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 |report| OwnerFrame::Validate { report },
                 "validate",
             )
+        }
+        ClientFrame::Set { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            // Serialize every write through the owner's single-writer lock (ADR
+            // 0013/0017). Held across the whole blocking mutation, so a second
+            // mutation waits and `{{seq}}` allocation sees prior creates.
+            let _writer = state.mutation_lock.lock().await;
+            let result = tokio::task::spawn_blocking(move || {
+                run_mutation(&slot, params.confirm, |cache, sink| {
+                    norn_core::mutate::set::execute(cache, config.as_deref(), &params, &today, sink)
+                })
+            })
+            .await;
+            classify_mutation(state, result, |report| OwnerFrame::Set { report }, "set")
+        }
+        ClientFrame::New { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            let _writer = state.mutation_lock.lock().await;
+            let result = tokio::task::spawn_blocking(move || {
+                run_mutation(&slot, params.confirm, |cache, sink| {
+                    norn_core::mutate::new::execute(cache, config.as_deref(), &params, &today, sink)
+                })
+            })
+            .await;
+            classify_mutation(state, result, |report| OwnerFrame::New { report }, "new")
+        }
+    }
+}
+
+/// Drive a mutation verb's execute seam against the warm slot and, when a
+/// CONFIRMED write landed, commit its cache increment so the next read observes
+/// it (fire-and-degrade — a stale baseline heals on the next read). The mutation
+/// runs inside `serve_read` (the write goes to the filesystem under the index
+/// root, independent of the read connection); the owner's `mutation_lock`
+/// already holds this call exclusive, so no writer races it.
+///
+/// `confirm` gates the baseline capture: a forecast (`confirm == false`) never
+/// writes and never commits. Returns the verb's report; a clean pre-write
+/// decline is carried IN the report (`outcome = refused`), so only a genuine
+/// cache/read fault is the `Err` (exit-to-heal).
+fn run_mutation<R>(
+    slot: &Arc<VaultCacheSlot>,
+    confirm: bool,
+    execute: impl FnOnce(&Cache, &mut EventSink) -> anyhow::Result<MutationExecution<R>>,
+) -> anyhow::Result<R> {
+    // Telemetry's durable store is deferred with the audit verb; the owner runs a
+    // discard sink so the executor's event emission has a home without persisting.
+    let mut sink = EventSink::discard(
+        IdGen::with_seed(0),
+        Clock::fixed("1970-01-01T00:00:00.000Z"),
+    );
+    // Capture the pre-write baseline for the increment commit BEFORE the write.
+    let baseline = if confirm {
+        Some(slot.serve_read(|cache| cache.load_graph_index())?)
+    } else {
+        None
+    };
+    let exec = slot.serve_read(|cache| execute(cache, &mut sink))?;
+    if let Some(baseline) = baseline {
+        if !exec.touched_paths.is_empty() {
+            // Fire-and-degrade: a failed increment leaves the next read's detect
+            // to heal the cache; the write itself already landed on disk.
+            let _ = slot.commit_apply_increments_fire_and_degrade(&exec.touched_paths, baseline);
+        }
+    }
+    Ok(exec.report)
+}
+
+/// Classify a routed mutation's outcome. Unlike a read, a mutation never yields a
+/// `FieldRejection` — every clean decline is a report with `outcome = refused` —
+/// so the only non-success is a cache/read fault (exit-to-heal) or a task panic.
+fn classify_mutation<R>(
+    state: &Arc<OwnerState>,
+    result: Result<anyhow::Result<R>, tokio::task::JoinError>,
+    to_frame: impl FnOnce(R) -> OwnerFrame,
+    verb: &str,
+) -> OwnerFrame {
+    match result {
+        Ok(Ok(report)) => to_frame(report),
+        Ok(Err(err)) => {
+            state.go_fatal();
+            OwnerFrame::Error {
+                message: format!("cache error (exit-to-heal): {err}"),
+            }
+        }
+        Err(join_err) => {
+            state.go_fatal();
+            OwnerFrame::Error {
+                message: format!("{verb} task panicked (exit-to-heal): {join_err}"),
+            }
         }
     }
 }

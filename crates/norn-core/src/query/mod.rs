@@ -11,14 +11,13 @@
 //!
 //! Two producers land here:
 //!
-//! - [`filter_args::build_document_query`] — the canonical path: parse the
-//!   read-verb wire vocabulary ([`norn_wire::FilterParams`]) into a
+//! - [`filter_args::build_document_query`] — the canonical (and only) path: parse
+//!   the read-verb wire vocabulary ([`norn_wire::FilterParams`]) into a
 //!   [`DocumentQuery`], applying ADR 0010 separator forgiveness and JSON value
-//!   coercion. This supersedes the older CSV adapter below.
-//! - [`document_query_from_options`] / [`rule_scope_query`] — the CLI
-//!   filter-option adapter and the validate-rule scope narrower. `rule_scope_query`
-//!   produces a *superset* scope for a rule's `match` selector (SQL-narrowable);
-//!   any caller re-checks candidates with the engine predicate.
+//!   coercion.
+//! - [`rule_scope_query`] — the validate-rule scope narrower. It produces a
+//!   *superset* scope for a rule's `match` selector (SQL-narrowable); any caller
+//!   re-checks candidates with the engine predicate.
 //!
 //! # Seams left behind (ADR 0018)
 //!
@@ -90,52 +89,6 @@ pub struct DocumentQuery {
     pub has_unresolved_links: bool,
 }
 
-/// The document-filter option set shared by the query commands — the borrowed
-/// slices a `find` / `count` / `get` invocation asked for.
-#[derive(Debug)]
-pub struct DocumentFilterOptions<'a> {
-    pub filters: &'a [String],
-    pub paths: &'a [String],
-    pub has: &'a [String],
-    pub missing: &'a [String],
-}
-
-/// Convert the CLI's document filter input into a [`DocumentQuery`].
-///
-/// CLI `filters` of the form `"field:value,value,..."` translate into one
-/// `frontmatter_eq` entry per value. Note: each entry is ALL-of with the
-/// others, which means CSV expands to "matches every value" — usually empty
-/// for single-valued frontmatter fields. The canonical
-/// [`filter_args::build_document_query`] path instead routes ANY-of through
-/// `--in`; this older adapter's CSV-as-ALL-of is a preserved parity behavior,
-/// not a fixed one (single-value filters work correctly either way).
-pub fn document_query_from_options(
-    options: &DocumentFilterOptions<'_>,
-) -> anyhow::Result<DocumentQuery> {
-    let mut query = DocumentQuery {
-        path_globs: options.paths.to_vec(),
-        frontmatter_has: options.has.to_vec(),
-        frontmatter_missing: options.missing.to_vec(),
-        ..Default::default()
-    };
-    for filter in options.filters {
-        let (field, values_csv) = filter
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("invalid filter, expected field:value: {filter}"))?;
-        let field = field.trim().to_string();
-        for value in values_csv
-            .split(',')
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            query
-                .frontmatter_eq
-                .push((field.clone(), Value::String(value.to_string())));
-        }
-    }
-    Ok(query)
-}
-
 /// Convert a validate rule's `match` predicates into a [`DocumentQuery`] so the
 /// per-rule scope can be SQL-narrowed.
 ///
@@ -161,46 +114,6 @@ pub fn rule_scope_query(rule: &ValidateRule) -> DocumentQuery {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn options_with_filter_translates_to_frontmatter_eq() {
-        let filters = vec!["type:note".to_string()];
-        let opts = DocumentFilterOptions {
-            filters: &filters,
-            paths: &[],
-            has: &[],
-            missing: &[],
-        };
-        let q = document_query_from_options(&opts).unwrap();
-        assert_eq!(q.frontmatter_eq, vec![("type".to_string(), json!("note"))]);
-    }
-
-    #[test]
-    fn options_csv_filter_expands_to_multiple_predicates() {
-        // Preserved parity behavior: CSV becomes ALL-of via repeated
-        // frontmatter_eq entries. Single-value filters are fine.
-        let filters = vec!["type:note,log".to_string()];
-        let opts = DocumentFilterOptions {
-            filters: &filters,
-            paths: &[],
-            has: &[],
-            missing: &[],
-        };
-        let q = document_query_from_options(&opts).unwrap();
-        assert_eq!(q.frontmatter_eq.len(), 2);
-    }
-
-    #[test]
-    fn options_invalid_filter_without_colon_errors() {
-        let filters = vec!["nocolon".to_string()];
-        let opts = DocumentFilterOptions {
-            filters: &filters,
-            paths: &[],
-            has: &[],
-            missing: &[],
-        };
-        assert!(document_query_from_options(&opts).is_err());
-    }
 
     #[test]
     fn rule_scope_list_predicate_maps_to_frontmatter_in() {

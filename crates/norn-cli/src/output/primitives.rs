@@ -137,6 +137,43 @@ pub fn tally_group(
     Ok(())
 }
 
+/// A per-field change line for the mutation reports (`set` today; the vocabulary
+/// `edit` / `move` / `repair` reuse). Renders `  {label}: {before}`, plus
+/// ` {→} {after}` when an `after` value is given (a set: `status: draft → done`;
+/// a remove/push/pop passes `after = None` and folds its own suffix into
+/// `before`). ASCII-mode-aware via the arrow glyph, and styled through the
+/// palette — with the palette OFF (the piped / parity path) the bytes are the
+/// plain `  {label}: {before} → {after}`, so styling never perturbs a pipeline.
+pub fn change_line(
+    out: &mut dyn Write,
+    p: &Palette,
+    label: &str,
+    before: &str,
+    after: Option<&str>,
+    ascii: bool,
+) -> io::Result<()> {
+    write!(
+        out,
+        "  {l}{label}{lr}: {d}{before}{dr}",
+        l = p.label.render(),
+        lr = p.label.render_reset(),
+        d = p.dim.render(),
+        dr = p.dim.render_reset(),
+    )?;
+    if let Some(after) = after {
+        let arrow = glyphs::render(Glyph::Arrow, ascii);
+        write!(
+            out,
+            " {d}{arrow}{dr} {b}{after}{br}",
+            d = p.dim.render(),
+            dr = p.dim.render_reset(),
+            b = p.bone.render(),
+            br = p.bone.render_reset(),
+        )?;
+    }
+    writeln!(out)
+}
+
 /// Count line: `"{total} {noun}"`, plus ` {·} showing {start}–{end}` when a
 /// window is shown (`0 < returned < total`). Entire line in `dim`. One newline.
 pub fn count_line(

@@ -30,12 +30,17 @@
 
 mod control;
 mod filter;
+mod mutate;
 mod paging;
 mod presence;
 mod read;
 
 pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 pub use filter::FilterParams;
+pub use mutate::{
+    CodedError, FrontmatterChange, FrontmatterCreated, MutationOutcome, MutationWarning, NewParams,
+    NewReport, SetParams, SetReport,
+};
 pub use paging::SortPaginateParams;
 pub use presence::Presence;
 pub use read::{

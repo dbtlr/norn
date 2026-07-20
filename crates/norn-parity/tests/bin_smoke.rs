@@ -43,10 +43,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     );
     // NRN-383 adds two `mcp` suite cases (initialize/tools/list handshake +
     // a tools/call), both `ported: false` — self-check ignores `ported` and
-    // runs every case, so the total grows from 56 to 58; both must Match
-    // (oracle vs. itself).
+    // runs every case, so the total grew from 56 to 58. NRN-378 adds seven
+    // `mutate` cases (set/new forecast + refusal), taking the total to 65; all
+    // must Match (oracle vs. itself).
     assert!(
-        stdout.contains("58 cases: 58 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("65 cases: 65 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -97,8 +98,11 @@ fn default_mode_gates_help_cases_exit_0() {
     // four shapes under PD-109, including the NRN-367 owner-side dynamic-field
     // gate's unknown-field rejection — and grammar-wide last-wins PD-110) —
     // covered divergences, not drift.
+    // NRN-378 adds seven ported `mutate` cases (set/new forecast + refusal),
+    // every one a byte-exact match against the oracle (no ledger entry): the
+    // gated total grows from 56 to 63 and the match count from 42 to 49.
     assert!(
-        stdout.contains("56 cases: 42 match, 14 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("63 cases: 49 match, 14 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [

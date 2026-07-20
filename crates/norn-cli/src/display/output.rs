@@ -9,7 +9,9 @@
 //! the one presenter path.
 
 use norn_config::RegisteredVault;
-use norn_wire::{CountReport, DescribeReport, FindReport, GetReport, ValidateReport};
+use norn_wire::{
+    CountReport, DescribeReport, FindReport, GetReport, NewReport, SetReport, ValidateReport,
+};
 
 use super::format::{Format, FormatSpec};
 
@@ -29,6 +31,10 @@ pub enum Output {
     Validate(ValidateView),
     /// `vault list`: the registered vaults.
     VaultList(VaultListView),
+    /// `set`: the frontmatter change report (forecast / applied / refused).
+    Set(SetMutationView),
+    /// `new`: the document-creation report (forecast / applied / refused).
+    New(NewMutationView),
     /// A single stdout confirmation line, written verbatim plus a newline, exit 0
     /// — `vault` register / set / unregister / no-changes.
     Line(String),
@@ -94,6 +100,23 @@ pub struct ValidateView {
 /// `vault list`'s registered vaults.
 pub struct VaultListView {
     pub vaults: Vec<RegisteredVault>,
+    pub explicit: Option<Format>,
+    pub spec: FormatSpec,
+}
+
+/// `set`'s renderable report. Only `records` and `json` are valid; the renderer
+/// maps a refused report (`outcome = refused`) to exit 2 with the coded error
+/// envelope, and an applied/forecast report to exit 0.
+pub struct SetMutationView {
+    pub report: SetReport,
+    pub explicit: Option<Format>,
+    pub spec: FormatSpec,
+}
+
+/// `new`'s renderable report. Same records/json + exit-code contract as
+/// [`SetMutationView`].
+pub struct NewMutationView {
+    pub report: NewReport,
     pub explicit: Option<Format>,
     pub spec: FormatSpec,
 }

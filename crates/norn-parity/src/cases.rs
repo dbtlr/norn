@@ -1232,6 +1232,109 @@ const MCP_CASES: &[Case] = &[
     },
 ];
 
+/// The first mutation-verb parity cases (`set` / `new`, NRN-378). Every case is
+/// a FORECAST (implicit or explicit dry-run) or a clean REFUSAL — the surfaces
+/// the task derives from the oracle — so nothing is written and the
+/// non-deterministic `trace_id` / `trace:` footer (only emitted on a confirmed
+/// apply) never appears. Each is `mutating: true`, so the harness runs it against
+/// a FRESH per-case vault and asserts BOTH sides leave the tree byte-identical —
+/// i.e. a forecast/refusal is proven write-free on both binaries, not just equal
+/// on stdout. Confirmed-apply parity awaits the telemetry-trace port (the applied
+/// report's `trace:` id is non-deterministic and has no normalization step yet).
+const MUTATE_CASES: &[Case] = &[
+    // set: a nonexistent target is a clean pre-write refusal (exit 2), write-free.
+    Case {
+        id: "mutate-set-missing-target-zoo",
+        argv: &["set", "no-such-doc-xyzzy", "status:done"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // set: plain (piped, no --yes) is an implicit dry-run — the plan preview.
+    Case {
+        id: "mutate-set-forecast-note-zoo",
+        argv: &["set", "alpha", "summary:hello"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // set: explicit --dry-run plan output.
+    Case {
+        id: "mutate-set-dry-run-note-zoo",
+        argv: &["set", "alpha", "summary:hello", "--dry-run"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // new: explicit-path forecast (Mode A) — `--title` is inert here (warns).
+    Case {
+        id: "mutate-new-explicit-forecast-zoo",
+        argv: &["new", "notes/brand-new.md", "--title", "Brand New"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // new: --as a non-creatable rule (the zoo declares no `target:`) refuses.
+    Case {
+        id: "mutate-new-by-rule-not-creatable-zoo",
+        argv: &["new", "--as", "typed-note"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // new: an existing destination without --force is a refusal (exit 2).
+    Case {
+        id: "mutate-new-exists-refusal-zoo",
+        argv: &["new", "notes/alpha.md"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    // new: --force over an existing destination, forecast (writes nothing).
+    Case {
+        id: "mutate-new-force-forecast-zoo",
+        argv: &["new", "notes/alpha.md", "--force"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+];
+
 const SUITES: &[Suite] = &[
     Suite {
         name: "help",
@@ -1260,6 +1363,10 @@ const SUITES: &[Suite] = &[
     Suite {
         name: "mcp",
         cases: MCP_CASES,
+    },
+    Suite {
+        name: "mutate",
+        cases: MUTATE_CASES,
     },
 ];
 
