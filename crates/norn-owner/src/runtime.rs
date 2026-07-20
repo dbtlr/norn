@@ -690,6 +690,31 @@ async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFrame {
                 "describe",
             )
         }
+        ClientFrame::Validate { params } => {
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
+            };
+            let config = state.vault_config();
+            let today = today_local();
+            let result = tokio::task::spawn_blocking(move || {
+                slot.serve_read(|cache| {
+                    Ok(norn_core::read::validate::execute(
+                        cache,
+                        config.as_deref(),
+                        &params,
+                        &today,
+                    )?
+                    .map_err(FieldRejection::from))
+                })
+            })
+            .await;
+            classify_read(
+                state,
+                result,
+                |report| OwnerFrame::Validate { report },
+                "validate",
+            )
+        }
     }
 }
 

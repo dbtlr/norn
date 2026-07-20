@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CountParams, CountReport, DescribeParams, DescribeReport, FindParams, FindReport, GetParams,
-    GetReport,
+    GetReport, ValidateParams, ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
@@ -75,6 +75,9 @@ pub enum ClientFrame {
     /// A `describe` request: the vault structure, plus a contents-summary with
     /// `--data`.
     Describe { params: DescribeParams },
+    /// A `validate` request: run the standards engine over the warm graph and
+    /// return the (triage-filtered) findings. Read-only.
+    Validate { params: ValidateParams },
 }
 
 /// Owner -> client. One JSON object per line.
@@ -105,6 +108,8 @@ pub enum OwnerFrame {
     Get { report: GetReport },
     /// The answer to `Describe`: the vault structure and optional data summary.
     Describe { report: DescribeReport },
+    /// The answer to `Validate`: the findings, summary body, and run counts.
+    Validate { report: ValidateReport },
     /// A well-formed request the owner could not carry out for a
     /// non-cache reason — a bad predicate, an unresolvable `--links-to`
     /// target. Distinct from [`Error`](OwnerFrame::Error): the owner stays
