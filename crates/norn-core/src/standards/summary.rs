@@ -94,7 +94,8 @@ pub fn summarize(findings: &[Finding]) -> Summary {
             FindingBody::AliasShadowedByStem { .. }
             | FindingBody::AliasDuplicateAcrossDocs { .. }
             | FindingBody::LinkIssue { .. }
-            | FindingBody::GraphDiagnostic { .. } => {}
+            | FindingBody::GraphDiagnostic { .. }
+            | FindingBody::NonportableFilename { .. } => {}
         }
 
         increment(&mut summary.path_prefixes, path_prefix_key(&finding.path));

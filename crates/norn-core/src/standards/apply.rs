@@ -596,6 +596,7 @@ fn is_orchestrator_pass_op(operation: &str) -> bool {
             | "delete_section"
             | "insert_before_heading"
             | "insert_after_heading"
+            | "strip_bom"
     )
 }
 
@@ -746,7 +747,19 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
         // backfill on legacy files). The added fields flow through the normal
         // add_frontmatter insertion path against the empty block — which is
         // exactly what `set`/`new` on a missing field routes to.
-        let synthesized = format!("---\n---\n{content}");
+        //
+        // NRN-385 banked edge: a leading UTF-8 BOM must stay the document's
+        // first byte. Synthesizing the block unconditionally in front of
+        // `content` would strand the BOM mid-document (after the block, before
+        // whatever the file used to open with) — a stray ZWNBSP no longer at
+        // offset 0, exactly the shape a BOM-aware reader stops recognizing.
+        // Strip it first and re-prepend it ahead of the synthesized block, the
+        // same relative position a BOM'd doc with recognized frontmatter
+        // already has (BOM, then `---`).
+        let synthesized = match content.strip_prefix('\u{feff}') {
+            Some(rest) => format!("\u{feff}---\n---\n{rest}"),
+            None => format!("---\n---\n{content}"),
+        };
         return apply_file_changes(&synthesized, changes);
     };
     if !diagnostics.is_empty() {
@@ -1484,6 +1497,21 @@ pub fn apply_link_rewrites(
 /// not a string.
 ///
 /// Caller is responsible for hash verification before invoking this.
+/// (NRN-385) Apply a `strip_bom` `PlannedChange`: remove a leading UTF-8
+/// byte-order mark, and nothing else — a minimal edit over the first 3 bytes,
+/// independent of every other content op (frontmatter, links, body, section
+/// edits all operate at offsets past the BOM, so removing it is safe to
+/// compose in any order relative to them). Idempotent: a `content` without the
+/// BOM (already stripped, or the finding went stale) passes through unchanged
+/// rather than erroring — the op has no field/value to validate against, so
+/// there is nothing else to check.
+pub fn apply_strip_bom(content: &str, _change: &PlannedChange) -> Result<String, ApplyError> {
+    Ok(content
+        .strip_prefix('\u{feff}')
+        .unwrap_or(content)
+        .to_string())
+}
+
 pub fn apply_replace_body(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
     let new_body = change
         .new_value
@@ -2195,6 +2223,66 @@ mod tests {
         );
         let result = apply_change(content, &change).unwrap();
         assert_eq!(result, "---\ntitle: Legacy\n---\njust a body\n");
+    }
+
+    #[test]
+    fn apply_synthesizes_frontmatter_after_bom_on_frontmatterless_document() {
+        // NRN-385 banked edge: a BOM'd doc with no recognized frontmatter must
+        // keep the BOM as the document's first byte — the synthesized block
+        // goes AFTER it, not stranding it mid-document.
+        let content = "\u{feff}just a body\n";
+        let change = make_change(
+            "a.md",
+            "title",
+            "h1",
+            "add_frontmatter",
+            Some(json!("Legacy")),
+        );
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "\u{feff}---\ntitle: Legacy\n---\njust a body\n");
+        assert!(
+            result.starts_with('\u{feff}'),
+            "BOM must stay the first byte"
+        );
+    }
+
+    #[test]
+    fn apply_add_frontmatter_on_bom_doc_with_recognized_frontmatter_stays_well_formed() {
+        // (c) pin: a BOM'd doc whose frontmatter IS recognized (NRN-349) was
+        // already exercised for `set_frontmatter` (norn-frontmatter's edit.rs
+        // tests); this pins the same shape for `add_frontmatter` through the
+        // repair-plan apply path. The BOM stays put; the new field splices into
+        // the existing block exactly as it would with no BOM.
+        let content = "\u{feff}---\ntitle: hello\n---\n# body\n";
+        let change = make_change(
+            "a.md",
+            "status",
+            "h1",
+            "add_frontmatter",
+            Some(json!("draft")),
+        );
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(
+            result,
+            "\u{feff}---\ntitle: hello\nstatus: draft\n---\n# body\n"
+        );
+        assert!(result.starts_with('\u{feff}'));
+    }
+
+    #[test]
+    fn apply_strip_bom_removes_leading_bom_only() {
+        let content = "\u{feff}---\ntitle: hello\n---\n# body\n";
+        let change = make_change("a.md", "title", "h1", "strip_bom", None);
+        let result = apply_strip_bom(content, &change).unwrap();
+        assert_eq!(result, "---\ntitle: hello\n---\n# body\n");
+    }
+
+    #[test]
+    fn apply_strip_bom_is_idempotent_without_a_bom() {
+        let content = "---\ntitle: hello\n---\n# body\n";
+        let change = make_change("a.md", "title", "h1", "strip_bom", None);
+        let result = apply_strip_bom(content, &change).unwrap();
+        assert_eq!(result, content);
     }
 
     #[test]

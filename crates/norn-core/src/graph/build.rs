@@ -209,6 +209,22 @@ fn parse_document(
     };
 
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    // NRN-385: flag a leading UTF-8 BOM as a graph diagnostic — a rewrite-only
+    // check the donor never had (the oracle silently reads a BOM'd doc as
+    // frontmatter-less; NRN-349 only recognizes the block past it, it never
+    // reports the byte itself). Detected on the RAW content before
+    // `extract_frontmatter` steps past the BOM for recognition, so this fires
+    // whether or not the document's frontmatter is recognized — the two are
+    // orthogonal facts (a BOM'd doc with no frontmatter never reaches this
+    // diagnostic any other way, since `body_text` for that shape is the whole
+    // file and would carry the byte, but a BOM'd doc WITH recognized
+    // frontmatter has nothing else in `Document` recording the leading byte).
+    if content.starts_with('\u{feff}') {
+        diagnostics.push(Diagnostic::warning(
+            "bom-marker",
+            "document begins with a UTF-8 byte-order mark (BOM)",
+        ));
+    }
     let (frontmatter, frontmatter_range, body, body_start) =
         extract_frontmatter(&content, &mut diagnostics);
     let body_text = body.to_string();
@@ -597,6 +613,52 @@ mod tests {
         assert!(png.hash.is_none());
         // Only the Markdown file becomes a document.
         assert!(!index.documents.iter().any(|d| d.path == "image.png"));
+    }
+
+    #[test]
+    fn bom_prefixed_document_gets_bom_marker_diagnostic() {
+        // NRN-385: detected on the raw file content, regardless of whether the
+        // frontmatter itself is recognized past the BOM (NRN-349).
+        let (_tmp, root) = vault();
+        write(&root, "bom.md", "\u{feff}---\ntitle: hi\n---\nbody\n");
+        let index = build_index(&root).unwrap();
+        let doc = index.documents.iter().find(|d| d.path == "bom.md").unwrap();
+        assert!(
+            doc.diagnostics.iter().any(|d| d.code == "bom-marker"),
+            "expected a bom-marker diagnostic, got: {:?}",
+            doc.diagnostics
+        );
+        // Frontmatter is still recognized past the BOM (NRN-349 unaffected).
+        assert_eq!(
+            doc.frontmatter.as_ref().and_then(|fm| fm.get("title")),
+            Some(&serde_json::json!("hi"))
+        );
+    }
+
+    #[test]
+    fn bom_prefixed_document_with_no_frontmatter_still_gets_diagnostic() {
+        let (_tmp, root) = vault();
+        write(&root, "bom-plain.md", "\u{feff}just a body\n");
+        let index = build_index(&root).unwrap();
+        let doc = index
+            .documents
+            .iter()
+            .find(|d| d.path == "bom-plain.md")
+            .unwrap();
+        assert!(doc.diagnostics.iter().any(|d| d.code == "bom-marker"));
+    }
+
+    #[test]
+    fn document_without_bom_has_no_bom_marker_diagnostic() {
+        let (_tmp, root) = vault();
+        write(&root, "clean.md", "---\ntitle: hi\n---\nbody\n");
+        let index = build_index(&root).unwrap();
+        let doc = index
+            .documents
+            .iter()
+            .find(|d| d.path == "clean.md")
+            .unwrap();
+        assert!(!doc.diagnostics.iter().any(|d| d.code == "bom-marker"));
     }
 
     #[test]

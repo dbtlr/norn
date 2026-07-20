@@ -83,6 +83,9 @@ pub enum FindingBody {
         alias_value: String,
         peer_doc_paths: Vec<Utf8PathBuf>,
     },
+    NonportableFilename {
+        issues: Vec<String>,
+    },
 }
 
 impl Finding {
@@ -365,6 +368,27 @@ impl Finding {
                 alias_value,
                 peer_doc_paths,
             },
+        }
+    }
+
+    /// (NRN-368) A document path contains a cross-platform-illegal character
+    /// (NTFS-forbidden; Obsidian refuses them; macOS half-breaks colons) or a
+    /// Windows-illegal segment shape (leading/trailing space, trailing dot) in
+    /// any path segment. `issues` names every violation across the whole path
+    /// — one finding per document even when several segments/classes are
+    /// implicated (norn diagnoses; it never renames — that would be a move
+    /// cascade, out of repair's scope).
+    pub fn nonportable_filename(path: Utf8PathBuf, issues: Vec<String>) -> Self {
+        let message = format!(
+            "document path is not portable across platforms: {}",
+            issues.join("; ")
+        );
+        Self {
+            code: "nonportable-filename".to_string(),
+            severity: Severity::Warning,
+            path,
+            message,
+            body: FindingBody::NonportableFilename { issues },
         }
     }
 }
