@@ -189,6 +189,16 @@ const HELP_CASES: &[Case] = &[
     },
 ];
 
+/// validate ports for real (NRN-381): the read-side standards engine + verb.
+/// Every case is `ported: true` and must Match the oracle (pure byte-parity — no
+/// ledger entry). The matrix covers the summary shape (json + records), the raw
+/// findings shape (json/jsonl/paths), and the triage filters (`--code` /
+/// `--severity`). Bare `validate --format json` is deliberately NOT a case: the
+/// oracle's raw finding ORDER is not rerun-stable when a document carries more
+/// than one finding (see module docs), so every raw-shape case here is either
+/// `--summary` (grouped counts, order-free), `--format paths` (sorted + deduped,
+/// order-free), or `--code frontmatter-required-field-missing` (at most one
+/// finding per document in the zoo).
 const VALIDATE_CASES: &[Case] = &[
     Case {
         id: "validate-summary-clean",
@@ -196,7 +206,7 @@ const VALIDATE_CASES: &[Case] = &[
         fixture: CLEAN_1,
         stdin: None,
         mutating: false,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
@@ -208,7 +218,36 @@ const VALIDATE_CASES: &[Case] = &[
         fixture: ZOO_1,
         stdin: None,
         mutating: false,
-        ported: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // The human `--summary` records view: status headline + severity tally +
+        // by-code group. Piped (the harness), so palette off — the tally/leader
+        // primitives render plain. Grouped counts are order-free → stable.
+        id: "validate-summary-records-zoo",
+        argv: &["validate", "--summary", "--format", "records"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--format paths`: every affected document path, sorted + deduplicated —
+        // order-free, so stable even though the raw finding order is not.
+        id: "validate-paths-zoo",
+        argv: &["validate", "--format", "paths"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
@@ -232,12 +271,55 @@ const VALIDATE_CASES: &[Case] = &[
         fixture: ZOO_1,
         stdin: None,
         mutating: false,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         // The `--code` filter is only meaningful if the zoo fixture actually
         // emits this code; tie the argv to the manifest that generates it.
         requires_code: Some("frontmatter-required-field-missing"),
+        normalize: NO_NORM,
+    },
+    Case {
+        // `--format jsonl` over the same single-per-document code: one finding
+        // per line, in document (path) order — stable — and the per-line bytes
+        // pin the `Finding` struct's own field order (distinct from `--format
+        // json`'s alphabetical `json!` order).
+        id: "validate-jsonl-code-zoo",
+        argv: &[
+            "validate",
+            "--format",
+            "jsonl",
+            "--code",
+            "frontmatter-required-field-missing",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: Some("frontmatter-required-field-missing"),
+        normalize: NO_NORM,
+    },
+    Case {
+        // The `--severity` triage filter, over the grouped summary so the output
+        // stays order-free. Exercises the filter plumbing end to end.
+        id: "validate-severity-summary-zoo",
+        argv: &[
+            "validate",
+            "--summary",
+            "--format",
+            "json",
+            "--severity",
+            "warning",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
         normalize: NO_NORM,
     },
 ];
