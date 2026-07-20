@@ -57,12 +57,19 @@ pub struct CaseOutcome {
     /// reporting detail only: the verdict already folded the tree difference
     /// into the same match/diverged/drift decision as an output difference.
     pub post_state: Option<PostStateDiff>,
-    /// For an MCP case (`Case::stdin.is_some()`), every response frame that
-    /// differed from the oracle after normalization — empty for a Match, and
-    /// always empty for a non-MCP case. Reporting detail only, like
-    /// `post_state`: the verdict already folded this into match/diverged/
-    /// drift.
-    pub mcp_diffs: Vec<mcp::FrameDiff>,
+    /// For an MCP case (`Case::stdin.is_some()`) whose driving found ANY
+    /// difference (frame content, exit code, extra/duplicate response ids —
+    /// see `crate::mcp`'s doc), the bundle describing it. `None` for a
+    /// non-MCP case, or an MCP case that matched. Reporting detail only,
+    /// like `post_state`: the verdict already folded this into match/
+    /// diverged/drift.
+    pub mcp_divergence: Option<mcp::McpDivergence>,
+    /// Set only in `Mode::All` when an MCP case could not be driven to a
+    /// comparable result at all (a timeout, a premature EOF, a malformed
+    /// frame — see `mcp::McpError`) — rendered as a runner-error row instead
+    /// of aborting the whole run (`Mode::Gated`/`SelfCheck` still abort via
+    /// `RunError::Mcp`). `None` for every other outcome.
+    pub runner_error: Option<String>,
 }
 
 pub struct RunReport {
@@ -444,7 +451,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             .map(PathBuf::as_path)
             .collect();
 
-        let (verdict, post_state, mcp_diffs) = if let Some(frames) = case.stdin {
+        let (verdict, post_state, mcp_divergence, runner_error) = if let Some(frames) = case.stdin {
             // An MCP case: driven and compared frame-by-frame by `crate::mcp`,
             // never through the ordinary argv/stdout/stderr path below (see
             // that module's doc for the framing + timeout/EOF-early
@@ -461,29 +468,54 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 roots: &candidate_roots,
                 label: candidate_label,
             };
-            let result = mcp::run_case(case.argv, frames, oracle_target, candidate_target)
-                .map_err(|source| RunError::Mcp {
-                    case_id: case.id,
-                    source,
-                })?;
+            match mcp::run_case(case.argv, frames, oracle_target, candidate_target) {
+                Ok(result) => {
+                    // Case-rot guard, exactly as the non-MCP path below: the
+                    // oracle side must exit exactly as declared. Unaffected
+                    // by mode — a broken case/fixture assumption is not
+                    // something `--all`'s burn-down leniency should paper
+                    // over either.
+                    if result.oracle_exit != case.expect_oracle_exit {
+                        return Err(RunError::OracleExitMismatch {
+                            case_id: case.id,
+                            expected: case.expect_oracle_exit,
+                            actual: result.oracle_exit,
+                        });
+                    }
 
-            // Case-rot guard, exactly as the non-MCP path below: the oracle
-            // side must exit exactly as declared.
-            if result.oracle_exit != case.expect_oracle_exit {
-                return Err(RunError::OracleExitMismatch {
-                    case_id: case.id,
-                    expected: case.expect_oracle_exit,
-                    actual: result.oracle_exit,
-                });
+                    let matched = result.matched();
+                    let entry_id = ledger
+                        .as_ref()
+                        .and_then(|l| l.entry_for_case(case.id))
+                        .map(|e| e.id.as_str());
+                    let verdict = verdict::classify(matched, self_check, entry_id);
+                    let divergence = if result.divergence.is_empty() {
+                        None
+                    } else {
+                        Some(result.divergence)
+                    };
+                    (verdict, None, divergence, None)
+                }
+                // `Mode::All` only: an MCP surface that cannot complete a
+                // session (e.g. the rewrite's `mcp` subcommand is still
+                // not_yet_ported and never answers a frame) is rendered as a
+                // runner-error row so the rest of the burn-down survives,
+                // instead of discarding the whole run — see `crate::mcp`'s
+                // doc. `Gated`/`SelfCheck` keep the hard abort below: there,
+                // an MCP case either never runs (`ported: false`, skipped by
+                // `select_cases`) or both sides are the oracle (which must
+                // never fail to drive), so this arm is unreachable in
+                // practice for those modes today.
+                Err(source) if matches!(config.mode, Mode::All) => {
+                    (Verdict::Drift, None, None, Some(source.to_string()))
+                }
+                Err(source) => {
+                    return Err(RunError::Mcp {
+                        case_id: case.id,
+                        source,
+                    });
+                }
             }
-
-            let matched = result.diffs.is_empty();
-            let entry_id = ledger
-                .as_ref()
-                .and_then(|l| l.entry_for_case(case.id))
-                .map(|e| e.id.as_str());
-            let verdict = verdict::classify(matched, self_check, entry_id);
-            (verdict, None, result.diffs)
         } else {
             let steps: Vec<Normalization> = normalize::DEFAULT
                 .iter()
@@ -548,7 +580,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 .and_then(|l| l.entry_for_case(case.id))
                 .map(|e| e.id.as_str());
             let verdict = verdict::classify(matched, self_check, entry_id);
-            (verdict, post_state, Vec::new())
+            (verdict, post_state, None, None)
         };
 
         ran_ids.insert(case.id);
@@ -560,7 +592,8 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             suite_name,
             verdict,
             post_state,
-            mcp_diffs,
+            mcp_divergence,
+            runner_error,
         });
     }
 

@@ -5,7 +5,7 @@
 //! can reorder between runs.
 
 use crate::consistency::Finding;
-use crate::mcp::FrameDiff;
+use crate::mcp::McpDivergence;
 use crate::poststate::PostStateDiff;
 use crate::run::{Mode, RunReport};
 use crate::verdict::Verdict;
@@ -44,8 +44,17 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
     let mut diverged_count = 0usize;
     let mut drift_count = 0usize;
     for outcome in &report.outcomes {
-        let entry_col = match &outcome.verdict {
-            Verdict::Diverged { entry_id } => entry_id.as_str(),
+        // A runner-error row (`Mode::All` only — see `mcp` doc) is stored as
+        // `Verdict::Drift` internally (no fourth verdict), but is labeled
+        // and captioned distinctly here so it reads as "could not compare"
+        // rather than "compared and differed".
+        let verdict_label = match &outcome.runner_error {
+            Some(_) => "error",
+            None => outcome.verdict.label(),
+        };
+        let entry_col: &str = match (&outcome.verdict, &outcome.runner_error) {
+            (_, Some(message)) => message.as_str(),
+            (Verdict::Diverged { entry_id }, None) => entry_id.as_str(),
             _ => "-",
         };
         match outcome.verdict {
@@ -55,10 +64,7 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
         }
         out.push_str(&format!(
             "{:id_width$}  {:suite_width$}  {:<8}  {}\n",
-            outcome.case_id,
-            outcome.suite_name,
-            outcome.verdict.label(),
-            entry_col
+            outcome.case_id, outcome.suite_name, verdict_label, entry_col
         ));
     }
 
@@ -74,7 +80,7 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
         ));
     }
     render_post_state(&mut out, report);
-    render_mcp_diffs(&mut out, report);
+    render_mcp_divergences(&mut out, report);
     out
 }
 
@@ -116,29 +122,46 @@ fn render_post_state(out: &mut String, report: &RunReport) {
     }
 }
 
-/// Append a legible per-frame section for every MCP case (`crate::mcp`)
-/// whose response frames differed from the oracle after normalization: the
-/// JSON-RPC id, method, and a concise pointer to where the two responses
-/// first differ — never a full frame dump. Nothing is emitted when no MCP
-/// case diverged (every current MCP case is `ported: false`, so a gated run
-/// never even drives one; `--self-check`/`--all` can).
-fn render_mcp_diffs(out: &mut String, report: &RunReport) {
-    let diverged: Vec<(&str, &[FrameDiff])> = report
+/// Append a legible per-case section for every MCP case (`crate::mcp`) whose
+/// driving found any difference: frame content (JSON-RPC id, method, and a
+/// concise pointer to where the two responses first differ — never a full
+/// frame dump), a process exit-code mismatch, and any extra/duplicate
+/// response ids. Nothing is emitted when no MCP case diverged (every
+/// current MCP case is `ported: false`, so a gated run never even drives
+/// one; `--self-check`/`--all` can).
+fn render_mcp_divergences(out: &mut String, report: &RunReport) {
+    let diverged: Vec<(&str, &McpDivergence)> = report
         .outcomes
         .iter()
-        .filter(|o| !o.mcp_diffs.is_empty())
-        .map(|o| (o.case_id, o.mcp_diffs.as_slice()))
+        .filter_map(|o| o.mcp_divergence.as_ref().map(|d| (o.case_id, d)))
         .collect();
     if diverged.is_empty() {
         return;
     }
     out.push_str("mcp frame divergences (response differs after normalization):\n");
-    for (case_id, diffs) in diverged {
+    for (case_id, divergence) in diverged {
         out.push_str(&format!("  {case_id}:\n"));
-        for diff in diffs {
+        if let Some((oracle_exit, candidate_exit)) = divergence.exit_mismatch {
+            out.push_str(&format!(
+                "    exit: oracle {oracle_exit} vs candidate {candidate_exit}\n"
+            ));
+        }
+        for diff in &divergence.diffs {
             out.push_str(&format!(
                 "    id={} method={}: differs at {}\n",
                 diff.id, diff.method, diff.pointer
+            ));
+        }
+        for extra in &divergence.extra_response_ids {
+            out.push_str(&format!(
+                "    unsolicited response id={} from {}\n",
+                extra.id, extra.label
+            ));
+        }
+        for duplicate in &divergence.duplicate_response_ids {
+            out.push_str(&format!(
+                "    duplicate response id={} from {} ({}x)\n",
+                duplicate.id, duplicate.label, duplicate.count
             ));
         }
     }
