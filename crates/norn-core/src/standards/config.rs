@@ -2120,6 +2120,28 @@ validate:
         );
     }
 
+    // NRN-352 guard: a transformed target token like {{title|slugify}} lowers to
+    // a plain `*` with no capture, so it declares nothing — referencing it as
+    // {{path.title}} in defaults must still be rejected.
+    #[test]
+    fn target_rule_rejects_path_capture_of_transformed_token() {
+        let yaml = r#"
+validate:
+  rules:
+    - name: task
+      target: "Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"
+      frontmatter_defaults:
+        title_copy: "{{path.title}}"
+"#;
+        let err = parse_config_compiled(yaml, Utf8Path::new(".norn/config.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("path.title") && err.contains("not declared"),
+            "got: {err}"
+        );
+    }
+
     #[test]
     fn inbox_block_parses() {
         let yaml = "inbox:\n  path: Inbox\n";

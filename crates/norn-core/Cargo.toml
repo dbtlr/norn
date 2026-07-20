@@ -12,7 +12,7 @@ norn-frontmatter = { path = "../norn-frontmatter" }
 anyhow = "1.0"
 blake3 = "1.5"
 camino = { version = "1.1", features = ["serde1"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 globset = "0.4"
 percent-encoding = "2"
 pulldown-cmark = "0.13"
