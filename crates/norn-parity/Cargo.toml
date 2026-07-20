@@ -15,5 +15,6 @@ path = "src/main.rs"
 
 [dependencies]
 norn-fixtures = { path = "../norn-fixtures" }
+serde_json = "1.0"
 tempfile = "3"
 toml = "0.8"
