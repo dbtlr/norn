@@ -46,6 +46,7 @@
 pub mod apply;
 pub mod cache;
 pub mod domain;
+pub mod edit;
 pub mod env;
 pub mod grammar;
 pub mod graph;
