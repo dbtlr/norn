@@ -10,6 +10,7 @@ use crate::exec::{self, ExecError};
 use crate::fixtures::{self, FixtureCache, FixtureError, Side};
 use crate::ledger::{Ledger, LedgerError};
 use crate::normalize::{self, Normalization};
+use crate::poststate::{self, PostStateDiff};
 use crate::verdict::{self, Verdict};
 
 /// The ledger/pin policy is a function of mode, stated once here:
@@ -49,6 +50,12 @@ pub struct CaseOutcome {
     pub case_id: &'static str,
     pub suite_name: &'static str,
     pub verdict: Verdict,
+    /// For a mutating case whose two post-mutation vault trees differed, the
+    /// tree diff — surfaced in the report so a divergence is legible. `None`
+    /// for a read case, or a mutating case whose trees matched. The diff is
+    /// reporting detail only: the verdict already folded the tree difference
+    /// into the same match/diverged/drift decision as an output difference.
+    pub post_state: Option<PostStateDiff>,
 }
 
 pub struct RunReport {
@@ -122,6 +129,14 @@ pub enum RunError {
         case_id: &'static str,
         requirement: fixtures::Requirement,
     },
+    /// A mutating case's post-mutation vault tree could not be read to build
+    /// the post-state snapshot — an environment/IO failure, not a verdict, so
+    /// the run aborts (exit 2) rather than guessing at a comparison.
+    PostStateSnapshot {
+        case_id: &'static str,
+        side_label: &'static str,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for RunError {
@@ -175,6 +190,14 @@ impl std::fmt::Display for RunError {
                 case_id,
                 requirement,
             } => write!(f, "case `{case_id}`: {requirement}"),
+            RunError::PostStateSnapshot {
+                case_id,
+                side_label,
+                message,
+            } => write!(
+                f,
+                "case `{case_id}`: failed to snapshot the {side_label} post-mutation vault tree: {message}"
+            ),
         }
     }
 }
@@ -370,13 +393,16 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
     };
 
     for (suite_name, case) in selected {
-        // Per-SIDE vaults: each binary gets its own freshly generated copy so
-        // neither sees the other's cache mutations (finding 5).
+        // Per-SIDE vaults: each binary gets its own copy so neither sees the
+        // other's cache mutations (finding 5). A mutating case takes that one
+        // step further — a FRESH per-case copy per side (`fresh_for`), so its
+        // writes never leak into another case and both sides start identical.
+        let fresh_for = if case.mutating { Some(case.id) } else { None };
         let oracle_vault = fixture_cache
-            .vault_for(&case.fixture, Side::Oracle)
+            .materialize(&case.fixture, Side::Oracle, fresh_for)
             .map_err(RunError::Fixture)?;
         let candidate_vault = fixture_cache
-            .vault_for(&case.fixture, Side::Candidate)
+            .materialize(&case.fixture, Side::Candidate, fresh_for)
             .map_err(RunError::Fixture)?;
 
         // Requirements: the argv depends on this doc/code actually existing in
@@ -398,10 +424,13 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             .copied()
             .collect();
 
-        let oracle_spellings = fixture_cache.vault_spellings(&case.fixture, Side::Oracle);
-        let oracle_roots: Vec<&Path> = oracle_spellings.iter().map(PathBuf::as_path).collect();
+        let oracle_roots: Vec<&Path> = oracle_vault
+            .spellings
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
         let oracle_raw =
-            exec::run_case(config.oracle, case, &oracle_vault).map_err(RunError::Exec)?;
+            exec::run_case(config.oracle, case, &oracle_vault.path).map_err(RunError::Exec)?;
         let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps)
             .map_err(|e| normalize_run_error(e, "oracle", case.id))?;
 
@@ -415,23 +444,51 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             });
         }
 
-        let candidate_spellings = fixture_cache.vault_spellings(&case.fixture, Side::Candidate);
-        let candidate_roots: Vec<&Path> =
-            candidate_spellings.iter().map(PathBuf::as_path).collect();
-        let candidate_raw =
-            exec::run_case(candidate_binary, case, &candidate_vault).map_err(RunError::Exec)?;
+        let candidate_roots: Vec<&Path> = candidate_vault
+            .spellings
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
+        let candidate_raw = exec::run_case(candidate_binary, case, &candidate_vault.path)
+            .map_err(RunError::Exec)?;
         let candidate_norm = normalize::normalize_output(&candidate_raw, &candidate_roots, &steps)
             .map_err(|e| normalize_run_error(e, candidate_label, case.id))?;
 
+        // A mutating case additionally compares the two post-mutation vault
+        // trees. A tree difference folds into the SAME match/diverged/drift
+        // decision as an output difference (no fourth verdict); the diff is
+        // kept only to make a divergence legible in the report.
+        let post_state = if case.mutating {
+            let oracle_snap = poststate::snapshot(&oracle_vault.path).map_err(|e| {
+                RunError::PostStateSnapshot {
+                    case_id: case.id,
+                    side_label: "oracle",
+                    message: e.to_string(),
+                }
+            })?;
+            let candidate_snap = poststate::snapshot(&candidate_vault.path).map_err(|e| {
+                RunError::PostStateSnapshot {
+                    case_id: case.id,
+                    side_label: candidate_label,
+                    message: e.to_string(),
+                }
+            })?;
+            poststate::compare(
+                &oracle_snap,
+                &oracle_roots,
+                &candidate_snap,
+                &candidate_roots,
+            )
+        } else {
+            None
+        };
+
+        let matched = verdict::outputs_match(&oracle_norm, &candidate_norm) && post_state.is_none();
         let entry_id = ledger
             .as_ref()
             .and_then(|l| l.entry_for_case(case.id))
             .map(|e| e.id.as_str());
-        let verdict = verdict::classify(
-            verdict::outputs_match(&oracle_norm, &candidate_norm),
-            self_check,
-            entry_id,
-        );
+        let verdict = verdict::classify(matched, self_check, entry_id);
 
         ran_ids.insert(case.id);
         if let Verdict::Diverged { .. } = &verdict {
@@ -441,6 +498,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             case_id: case.id,
             suite_name,
             verdict,
+            post_state,
         });
     }
 

@@ -50,6 +50,7 @@ static FAB_SUITES: &[Suite] = &[Suite {
         argv: &["--help"],
         fixture: CLEAN_1,
         stdin: None,
+        mutating: false,
         ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
