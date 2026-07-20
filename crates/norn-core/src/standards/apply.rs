@@ -761,6 +761,23 @@ pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<S
             message: "frontmatter could not be parsed".into(),
         });
     };
+    // NRN-371: a null-valued frontmatter block — an explicit `null`/`~` scalar —
+    // is an EMPTY mapping for a field op, not a refusal. Strip the bare-null
+    // token to an empty block and re-run, so a set/add PROMOTES it (the
+    // add_frontmatter insertion below then splices valid YAML rather than
+    // `null\nfield: v`). An empty or whitespace-only block already parses as an
+    // initializable empty mapping (NRN-120) and is left byte-verbatim; refusal
+    // (`CannotMinimalEdit`) is reserved for genuinely non-mapping frontmatter (a
+    // top-level sequence or bare non-null scalar). A deliberate divergence from
+    // the donor's refusal — valid input (a null block a `new` may emit) to valid
+    // output, closing the `new` -> `set` roundtrip on a defaults-free path.
+    if matches!(frontmatter_value, Value::Null)
+        && !content[frontmatter_range.clone()].trim().is_empty()
+    {
+        let mut normalized = content.to_string();
+        normalized.replace_range(frontmatter_range.clone(), "");
+        return apply_file_changes(&normalized, changes);
+    }
     let empty_object = serde_json::Map::new();
     let Some(current_object) = frontmatter_as_mapping(
         &frontmatter_value,
@@ -1045,12 +1062,14 @@ fn verify_post_image(
 
 /// Normalizes a parsed frontmatter value to its mapping form: a mapping is
 /// itself; a YAML-null parse over an empty or whitespace-only block is the
-/// empty mapping (an initializable `---\n---\n` block, NRN-120). Anything else
-/// — an explicit `null`/`~` scalar, a sequence, a bare scalar — is not a
-/// mapping and yields `None` (splicing keys around it would produce invalid
-/// YAML, so callers refuse). Shared by `apply_file_changes`' input gate and
-/// `verify_post_image` so both ends of an edit agree on what counts as a
-/// mapping.
+/// empty mapping (an initializable `---\n---\n` block, NRN-120). A bare
+/// `null`/`~` SCALAR yields `None` here — but `apply_file_changes`' input gate
+/// normalizes that case away first (NRN-371: it strips the null token to an
+/// empty block and re-runs), so at the input this returns `None` only for a
+/// genuinely non-mapping block (a sequence or bare non-null scalar). At the
+/// `verify_post_image` end it stays strict, so a result that somehow re-parsed
+/// to an explicit null is a mismatch, not a silent pass. Shared by both ends so
+/// they agree on what counts as a mapping.
 fn frontmatter_as_mapping<'a>(
     value: &'a Value,
     content: &str,
@@ -2180,16 +2199,27 @@ mod tests {
     }
 
     #[test]
-    fn apply_refuses_explicit_null_scalar_block() {
-        // An explicit `null` scalar block is NOT an empty block: splicing a key
-        // after it would produce invalid YAML, so it must stay a hard error
-        // rather than be treated as an empty mapping (review Finding 1).
+    fn apply_promotes_explicit_null_scalar_block_to_empty_mapping() {
+        // NRN-371 (divergence from the donor's refusal): an explicit `null`
+        // scalar block is a null/empty mapping for a field op. The bare-null
+        // token is stripped and the field splices into a clean empty block —
+        // valid input to valid output, closing the `new` -> `set` roundtrip.
         let content = "---\nnull\n---\nbody\n";
+        let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
+        let result = apply_change(content, &change).unwrap();
+        assert_eq!(result, "---\ntitle: X\n---\nbody\n");
+    }
+
+    #[test]
+    fn apply_still_refuses_a_top_level_sequence_frontmatter() {
+        // Refusal (`CannotMinimalEdit`) stays for genuinely non-mapping
+        // frontmatter: a top-level YAML sequence is not promotable.
+        let content = "---\n- one\n- two\n---\nbody\n";
         let change = make_change("a.md", "title", "h1", "add_frontmatter", Some(json!("X")));
         let err = apply_change(content, &change).unwrap_err();
         assert!(
             matches!(err, ApplyError::CannotMinimalEdit { .. }),
-            "expected CannotMinimalEdit, got {err:?}"
+            "expected CannotMinimalEdit for a top-level list, got {err:?}"
         );
     }
 

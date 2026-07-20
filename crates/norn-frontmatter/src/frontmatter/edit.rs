@@ -175,6 +175,22 @@ pub fn edit_fields(content: &str, ops: &[FieldOp]) -> Result<String, Frontmatter
             message: "frontmatter could not be parsed".into(),
         });
     };
+    // NRN-371: a null-valued frontmatter block — an explicit `null`/`~` scalar —
+    // is an EMPTY mapping for a field op, not a refusal. Strip the bare-null
+    // token to an empty block and re-run, so a set/add PROMOTES it (an Add then
+    // splices valid YAML rather than `null\nfield: v`). An empty or
+    // whitespace-only block already parses as an initializable empty mapping and
+    // is left byte-verbatim; refusal is reserved for genuinely non-mapping
+    // frontmatter (a top-level sequence or bare non-null scalar). This is a
+    // deliberate divergence from the donor's `NotAMapping` refusal — a valid
+    // input (a null block a `new` may emit) becoming a valid output.
+    if matches!(frontmatter_value, Value::Null)
+        && !content[frontmatter_range.clone()].trim().is_empty()
+    {
+        let mut normalized = content.to_string();
+        normalized.replace_range(frontmatter_range.clone(), "");
+        return edit_fields(&normalized, ops);
+    }
     let empty_object = serde_json::Map::new();
     let Some(current_object) = frontmatter_as_mapping(
         &frontmatter_value,
@@ -421,8 +437,11 @@ fn verify_post_image(
 
 /// Normalize a parsed frontmatter value to its mapping form: a mapping is itself;
 /// a YAML-null parse over an empty or whitespace-only block is the empty mapping
-/// (an initializable `---\n---\n` block). Anything else — an explicit `null`/`~`
-/// scalar, a sequence, a bare scalar — is not a mapping and yields `None`.
+/// (an initializable `---\n---\n` block). A bare `null`/`~` scalar yields `None`
+/// here — but `edit_fields`' input gate normalizes that away first (NRN-371:
+/// strip the null token to an empty block and re-run), so at the input this
+/// returns `None` only for a genuinely non-mapping block (a sequence or bare
+/// non-null scalar). At the post-image gate it stays strict.
 fn frontmatter_as_mapping<'a>(
     value: &'a Value,
     content: &str,
@@ -668,15 +687,36 @@ mod tests {
     // ---- Donor splice-path edge cases (ported from src/standards/apply.rs).
 
     #[test]
-    fn add_refuses_explicit_null_scalar_block() {
-        // An explicit `null` scalar block is NOT an empty block: splicing a key
-        // after it would produce invalid YAML, so it must stay a hard refusal
-        // rather than be treated as an empty mapping.
+    fn add_promotes_explicit_null_scalar_block_to_empty_mapping() {
+        // NRN-371 (divergence from the donor's `NotAMapping` refusal): an
+        // explicit `null` scalar block is a null/empty mapping for a field op.
+        // The bare-null token is stripped and the field splices into a clean
+        // empty block, producing valid YAML — a valid input becomes a valid
+        // output rather than a refusal.
         let content = "---\nnull\n---\nbody\n";
+        let out = add_field(content, "title", &json!("X")).unwrap();
+        assert_eq!(out, "---\ntitle: X\n---\nbody\n");
+    }
+
+    #[test]
+    fn set_upsert_over_null_block_via_add_promotes() {
+        // The `new` -> `set` roundtrip shape: a doc whose frontmatter is a bare
+        // `~` promotes to an empty mapping so an add-on-absent (set's upsert
+        // routing) succeeds.
+        let content = "---\n~\n---\n# body\n";
+        let out = add_field(content, "status", &json!("draft")).unwrap();
+        assert_eq!(out, "---\nstatus: draft\n---\n# body\n");
+    }
+
+    #[test]
+    fn add_still_refuses_a_top_level_sequence() {
+        // Refusal is reserved for genuinely non-mapping frontmatter: a top-level
+        // YAML sequence is not promotable.
+        let content = "---\n- one\n- two\n---\nbody\n";
         let err = add_field(content, "title", &json!("X")).unwrap_err();
         assert!(
             matches!(err, FrontmatterEditError::NotAMapping),
-            "expected NotAMapping, got {err:?}"
+            "expected NotAMapping for a top-level list, got {err:?}"
         );
     }
 
