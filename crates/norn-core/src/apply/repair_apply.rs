@@ -13,8 +13,8 @@ use std::time::Duration;
 use crate::domain::GraphIndex;
 use crate::standards::apply::{
     apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
-    atomic_write, changes_by_path, ensure_within_vault, validate_plan_for_apply, ApplyError,
-    CascadeRecord, CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult,
+    apply_strip_bom, atomic_write, changes_by_path, ensure_within_vault, validate_plan_for_apply,
+    ApplyError, CascadeRecord, CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult,
     LinkRewriteResult, LinkSkipResult, MoveResult, RepairApplyWarning,
 };
 use crate::standards::{PlannedChange, RepairPlan};
@@ -311,6 +311,7 @@ fn record_changed_file(report: &mut RepairApplyReport, path: &Utf8Path) {
 /// [`compose_content_ops`].
 #[derive(Default)]
 struct ContentOps<'a> {
+    strip_bom: Vec<&'a PlannedChange>,
     frontmatter: Vec<&'a PlannedChange>,
     rewrite_links: Vec<&'a PlannedChange>,
     replace_bodies: Vec<&'a PlannedChange>,
@@ -318,9 +319,14 @@ struct ContentOps<'a> {
 }
 
 /// The region class a content op mutates. Ordered as the composition chain runs:
-/// frontmatter → rewrite_link → replace_body → section-edits.
+/// strip_bom → frontmatter → rewrite_link → replace_body → section-edits.
+/// `strip_bom` (NRN-385) runs first: it only ever removes the document's
+/// leading 3 bytes, an offset every other class's edits sit past, so its
+/// position in the chain is really about intent (document-level normalization
+/// before content edits) rather than a correctness requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentClass {
+    StripBom,
     Frontmatter,
     RewriteLink,
     ReplaceBody,
@@ -332,6 +338,7 @@ enum ContentClass {
 /// vocabulary — shared by the Phase A bucketing dispatch and the vacate guard.
 fn content_class(op: &str) -> Option<ContentClass> {
     Some(match op {
+        "strip_bom" => ContentClass::StripBom,
         "set_frontmatter" | "remove_frontmatter" | "add_frontmatter" => ContentClass::Frontmatter,
         "rewrite_link" => ContentClass::RewriteLink,
         "replace_body" => ContentClass::ReplaceBody,
@@ -380,6 +387,7 @@ fn compose_content_ops<'a>(
     original: &str,
 ) -> Result<ComposedFile<'a>> {
     let ContentOps {
+        strip_bom,
         frontmatter,
         rewrite_links,
         replace_bodies,
@@ -387,6 +395,19 @@ fn compose_content_ops<'a>(
     } = ops;
     let mut content = original.to_string();
     let mut units: Vec<ComposedUnit<'a>> = Vec::new();
+
+    // strip_bom: at most one meaningful change per doc (idempotent if more —
+    // see `apply_strip_bom`), so a per-change loop composes safely either way.
+    for &change in &strip_bom {
+        let updated = apply_strip_bom(&content, change)?;
+        let changed = updated != content;
+        units.push(ComposedUnit {
+            changes: vec![change],
+            class: ContentClass::StripBom,
+            changed,
+        });
+        content = updated;
+    }
 
     // Frontmatter: one grouped transform over all set/remove/add changes.
     if !frontmatter.is_empty() {
@@ -583,6 +604,7 @@ pub fn apply_repair_plan_with_context(
         }
         let bucket = content_ops.entry(change.path.clone()).or_default();
         match class {
+            ContentClass::StripBom => bucket.strip_bom.push(change),
             ContentClass::Frontmatter => bucket.frontmatter.push(change),
             ContentClass::RewriteLink => bucket.rewrite_links.push(change),
             ContentClass::ReplaceBody => bucket.replace_bodies.push(change),
@@ -603,8 +625,9 @@ pub fn apply_repair_plan_with_context(
         // per path, so when the changes agree this is equivalent to a single
         // check — collapsing the per-pass checks is behavior-preserving.
         for change in ops
-            .frontmatter
+            .strip_bom
             .iter()
+            .chain(ops.frontmatter.iter())
             .chain(ops.rewrite_links.iter())
             .chain(ops.replace_bodies.iter())
             .chain(ops.edit_ops.iter())
@@ -664,7 +687,7 @@ pub fn apply_repair_plan_with_context(
                     }
                     report.replaced_bodies.push(change.path.clone());
                 }
-                ContentClass::Frontmatter | ContentClass::EditOps => {}
+                ContentClass::StripBom | ContentClass::Frontmatter | ContentClass::EditOps => {}
             }
         }
 
@@ -2308,6 +2331,7 @@ mod tests {
         );
         let edit = append_to_section_change("note.md", "h", "History", "- done");
         let ops = ContentOps {
+            strip_bom: Vec::new(),
             frontmatter: vec![&fm],
             rewrite_links: Vec::new(),
             replace_bodies: Vec::new(),
@@ -2351,6 +2375,7 @@ mod tests {
             serde_json::json!("done"),
         );
         let ops = ContentOps {
+            strip_bom: Vec::new(),
             frontmatter: vec![&fm],
             rewrite_links: Vec::new(),
             replace_bodies: Vec::new(),
@@ -2376,6 +2401,7 @@ mod tests {
         );
         let edit = append_to_section_change("note.md", "h", "NoSuchHeading", "- x");
         let ops = ContentOps {
+            strip_bom: Vec::new(),
             frontmatter: vec![&fm],
             rewrite_links: Vec::new(),
             replace_bodies: Vec::new(),

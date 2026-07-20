@@ -463,6 +463,47 @@ pub fn plan_repairs(
                             ));
                         }
                     }
+                } else if finding.code == "bom-marker" {
+                    // (NRN-385) Built-in, no configured rule needed — mirrors the
+                    // closest-match-stem precedent above: a user rule matching
+                    // `code: bom-marker` still wins (checked first, above), this is
+                    // only the fallback when none does.
+                    match document_hashes.get(&finding.path) {
+                        Some(document_hash) => {
+                            let occ_key =
+                                (finding.path.clone(), finding.code.clone(), String::new());
+                            let occurrence_index = *occurrence_counts
+                                .entry(occ_key)
+                                .and_modify(|n| *n += 1)
+                                .or_insert(0);
+                            let change_id = derive_change_id(
+                                &finding.path,
+                                &finding.code,
+                                None,
+                                occurrence_index,
+                            );
+                            changes.push(PlannedChange {
+                                change_id,
+                                path: finding.path.clone(),
+                                document_hash: document_hash.clone(),
+                                finding_code: finding.code.clone(),
+                                finding_rule: None,
+                                repair_rule: "built-in:strip-bom".to_string(),
+                                operation: "strip_bom".to_string(),
+                                field: None,
+                                expected_old_value: None,
+                                new_value: None,
+                                destination: None,
+                                link_risk: None,
+                                warnings: vec![],
+                                force: false,
+                                parents: false,
+                            });
+                        }
+                        None => {
+                            skipped.push(skipped_finding(finding, SkipReason::MissingHash, None));
+                        }
+                    }
                 } else {
                     let skip = skip_reason_for_body(&finding.body);
                     skipped.push(skipped_finding(finding, skip, None));
@@ -1910,6 +1951,88 @@ mod tests {
         let default = RepairPlanFilters::default();
         let default_json = serde_json::to_value(&default).unwrap();
         assert_eq!(default_json["skip_reason"], serde_json::json!([]));
+    }
+
+    fn finding_bom_marker(path: &str) -> Finding {
+        // Mirrors the graph-diagnostic-sourced finding `check_graph_diagnostics`
+        // produces from the `bom-marker` `Diagnostic` `graph::build::parse_document`
+        // pushes (NRN-385) — the built-in repair dispatches on `finding.code`,
+        // not on the body shape, so this reconstruction is representative.
+        let diagnostic = crate::domain::Diagnostic::warning(
+            "bom-marker",
+            "document begins with a UTF-8 byte-order mark (BOM)",
+        );
+        Finding::from_graph_diagnostic(path.into(), diagnostic)
+    }
+
+    #[test]
+    fn bom_marker_finding_plans_a_built_in_strip_bom_change() {
+        let finding = finding_bom_marker("bom.md");
+        let index = index_for(&["bom.md"]);
+        let plan = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &RepairConfig::default(),
+            &index,
+        );
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.skipped_findings.len(), 0);
+        let change = &plan.changes[0];
+        assert_eq!(change.operation, "strip_bom");
+        assert_eq!(change.repair_rule, "built-in:strip-bom");
+        assert_eq!(change.finding_code, "bom-marker");
+        assert_eq!(change.document_hash, "hash-bom.md");
+        assert!(change.field.is_none());
+    }
+
+    #[test]
+    fn bom_marker_finding_without_a_document_hash_is_skipped_as_missing_hash() {
+        let finding = finding_bom_marker("bom.md");
+        let index = index_for(&[]); // bom.md absent from the index
+        let plan = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &RepairConfig::default(),
+            &index,
+        );
+        assert_eq!(plan.changes.len(), 0);
+        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(
+            plan.skipped_findings[0].skip_reason,
+            SkipReason::MissingHash
+        );
+    }
+
+    #[test]
+    fn bom_marker_user_rule_overrides_the_built_in_strip() {
+        // A configured repair rule matching `code: bom-marker` wins over the
+        // built-in — same precedent as closest-match-stem being overridable.
+        let finding = finding_bom_marker("bom.md");
+        let config = RepairConfig {
+            rules: vec![make_rule(
+                "custom-bom-handling",
+                "bom-marker",
+                None,
+                None,
+                RepairAction::SetFrontmatter {
+                    field: "needs-review".into(),
+                    value: json!(true),
+                },
+            )],
+        };
+        let index = index_for(&["bom.md"]);
+        let plan = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].operation, "set_frontmatter");
+        assert_eq!(plan.changes[0].repair_rule, "custom-bom-handling");
     }
 
     fn finding_nonportable_filename(path: &str, issues: Vec<&str>) -> Finding {
