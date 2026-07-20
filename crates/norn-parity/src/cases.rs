@@ -1491,6 +1491,52 @@ const MCP_CASES: &[Case] = &[
         requires_code: None,
         normalize: NO_NORM,
     },
+    Case {
+        // A mutation `tools/call` FORECAST: `vault.set` with `confirm` absent is a
+        // dry-run — the report carries the planned `frontmatter_changes` with
+        // `applied: false` and `isError: false` (a forecast never throws in an SDK
+        // that raises on isError, NRN-220). Write-free, so `mutating: false`. The
+        // field (`project`) is a DECLARED typed-note field so the forecast is
+        // warning-free — a warning would trip the unified-envelope divergence
+        // (PD-111 covers `set --format json`; its cases list would need an MCP
+        // extension before an MCP warning frame could gate, flagged not extended).
+        id: "mcp-tools-call-set-forecast-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.set","arguments":{"target":"alpha","field":["project:myproj"]}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+    },
+    Case {
+        // A mutation `tools/call` REFUSAL: `vault.set --confirm` against a target
+        // that does not resolve. The precondition refuses BEFORE any write, so the
+        // report is `outcome: refused` + `isError: true` while the vault is
+        // byte-identical — the NRN-220 coded-refusal-as-structured-result shape on
+        // the MCP surface. A refusal writes nothing, so `mutating: false` is
+        // correct even though `confirm: true`.
+        id: "mcp-tools-call-set-confirm-refusal-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.set","arguments":{"target":"nonexistent-doc-xyz","field":["title:X"],"confirm":true}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+    },
 ];
 
 /// The mutation-edge fixture (NRN-371): the valid zoo plus the two non-mapping

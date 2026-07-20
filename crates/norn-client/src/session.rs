@@ -96,6 +96,19 @@ impl OwnerSession {
         Ok(())
     }
 
+    /// Re-establish a live, ready connection after the held owner went away — the
+    /// recovery path a long-lived session (the MCP stdio server) drives when a
+    /// call fails PRE-SEND ([`ClientError::is_owner_gone_pre_send`]). Re-runs
+    /// summon-or-connect (spawning a fresh owner if the old one idle-reaped), then
+    /// waits for it to warm up to Ready within `max_wait`. The CLI never needs
+    /// this — it opens a fresh session per invocation — but a process that HOLDS a
+    /// session across the owner's idle-TTL must resummon or every later call fails.
+    pub fn resummon(&mut self, max_wait: Duration) -> Result<(), ClientError> {
+        self.reconnect()?;
+        self.wait_until_ready(max_wait)?;
+        Ok(())
+    }
+
     /// Test-only: shrink the busy-writer sequence-stall budget so the busy-stall
     /// path is drivable without a multi-second wait.
     #[cfg(test)]
@@ -442,9 +455,12 @@ impl OwnerSession {
             .map_err(|e| ClientError::Protocol(format!("failed to encode frame: {e}")))?;
         line.push(b'\n');
         // A write to a peer that already went away fails at the connection level
-        // (BrokenPipe/ConnectionReset) — classify as OwnerGone, not raw IO.
-        self.writer.write_all(&line).map_err(classify_io)?;
-        self.writer.flush().map_err(classify_io)?;
+        // (BrokenPipe/ConnectionReset). This is the PRE-SEND shape: the frame was
+        // never delivered, so it is safe to resummon and retry (even a mutation).
+        // A held owner that idle-reaped between calls fails HERE on the first
+        // write — the recovery seam a long-lived session (MCP) heals from.
+        self.writer.write_all(&line).map_err(classify_io_pre_send)?;
+        self.writer.flush().map_err(classify_io_pre_send)?;
 
         let mut resp = String::new();
         match self.reader.read_line(&mut resp) {
@@ -470,16 +486,33 @@ fn is_timeout(e: &std::io::Error) -> bool {
     )
 }
 
-/// Map a socket IO error to [`ClientError::OwnerGone`] when it is a
-/// connection-level drop (the owner went away — the resummon signal), else to a
-/// raw [`ClientError::Io`].
-fn classify_io(e: std::io::Error) -> ClientError {
+/// Whether an IO error is a connection-level drop (the owner went away) rather
+/// than a genuine transport IO fault.
+fn is_connection_level(e: &std::io::Error) -> bool {
     use std::io::ErrorKind::*;
-    if matches!(
+    matches!(
         e.kind(),
         BrokenPipe | ConnectionReset | ConnectionAborted | UnexpectedEof | NotConnected
-    ) {
+    )
+}
+
+/// Map a READ-path socket IO error to [`ClientError::OwnerGone`] (POST-SEND — the
+/// request was already written) when it is a connection-level drop, else a raw
+/// [`ClientError::Io`]. Post-send: a caller must NOT blind-retry (ADR 0011).
+fn classify_io(e: std::io::Error) -> ClientError {
+    if is_connection_level(&e) {
         ClientError::OwnerGone(e.to_string())
+    } else {
+        ClientError::Io(e)
+    }
+}
+
+/// Map a WRITE-path socket IO error to [`ClientError::OwnerGonePreSend`] (the
+/// frame was never delivered — safe to resummon and retry) when it is a
+/// connection-level drop, else a raw [`ClientError::Io`].
+fn classify_io_pre_send(e: std::io::Error) -> ClientError {
+    if is_connection_level(&e) {
+        ClientError::OwnerGonePreSend(e.to_string())
     } else {
         ClientError::Io(e)
     }

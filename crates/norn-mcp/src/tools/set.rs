@@ -93,3 +93,70 @@ pub(crate) fn envelope(confirm: bool, report: SetReport) -> MutationResult<SetOu
     let value = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
     MutationResult::from_flag(SetOutput { report: value }, is_error)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::handler::server::tool::IntoCallToolResult;
+
+    fn report(outcome: MutationOutcome, applied: bool) -> SetReport {
+        SetReport {
+            schema_version: 2,
+            trace_id: String::new(),
+            operation: "set".into(),
+            target: "notes/alpha.md".into(),
+            frontmatter_changes: vec![],
+            body_changed: false,
+            body_bytes_new: None,
+            body_bytes_old: None,
+            applied,
+            outcome,
+            error: None,
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn dry_run_refusal_is_not_error() {
+        // A confirm:false forecast never sets isError, even on a forecasted refusal
+        // — an SDK that raises on isError must not throw on a preview (NRN-220).
+        let env = envelope(false, report(MutationOutcome::Refused, false));
+        let result = env.into_call_tool_result().unwrap();
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn confirmed_refusal_is_error_and_preserves_the_report() {
+        let env = envelope(true, report(MutationOutcome::Refused, false));
+        let result = env.into_call_tool_result().unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "a confirmed refusal is isError"
+        );
+        let sc = result
+            .structured_content
+            .expect("the structured report survives the error path");
+        assert_eq!(sc["report"]["outcome"], "refused");
+    }
+
+    #[test]
+    fn confirmed_apply_is_not_error() {
+        let env = envelope(true, report(MutationOutcome::Applied, true));
+        let result = env.into_call_tool_result().unwrap();
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn field_maps_to_wire_fields_and_confirm_carries() {
+        let wire = to_wire(SetParams {
+            target: "alpha".into(),
+            field: vec!["status:done".into()],
+            confirm: true,
+            ..SetParams::default()
+        });
+        assert_eq!(wire.target, "alpha");
+        assert_eq!(wire.fields, vec!["status:done".to_string()]);
+        assert!(wire.confirm);
+    }
+}

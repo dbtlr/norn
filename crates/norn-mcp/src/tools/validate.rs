@@ -93,24 +93,93 @@ pub(crate) fn to_wire(p: ValidateParams) -> WireValidateParams {
 /// finding strings are re-parsed to `Value` (the owner emitted them in the
 /// canonical key order) so the surface carries typed findings, never
 /// double-serialized strings.
-pub(crate) fn envelope(report: ValidateReport, summary_requested: bool) -> ValidateOutput {
+///
+/// A parse failure on this double-encoding seam is surfaced as an `Err`, NOT
+/// silently dropped: an unparseable finding string (or a bad `--summary` body)
+/// can only happen on owner/client version skew, and silently losing a finding —
+/// or turning a dirty vault's rollup into `null` — is the wrong failure mode for a
+/// validation surface. The caller maps it to a tool ERROR.
+pub(crate) fn envelope(
+    report: ValidateReport,
+    summary_requested: bool,
+) -> Result<ValidateOutput, String> {
     if summary_requested {
-        ValidateOutput {
+        let summary = match report.summary_json.as_deref() {
+            Some(s) => Some(serde_json::from_str(s).map_err(|e| {
+                format!("validate --summary body did not re-parse (owner/client skew?): {e}")
+            })?),
+            None => None,
+        };
+        Ok(ValidateOutput {
             findings: None,
-            summary: report
-                .summary_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok()),
-        }
+            summary,
+        })
     } else {
         let findings = report
             .findings
             .iter()
-            .filter_map(|s| serde_json::from_str(s).ok())
-            .collect();
-        ValidateOutput {
+            .map(|s| {
+                serde_json::from_str(s).map_err(|e| {
+                    format!("a validate finding did not re-parse (owner/client skew?): {e}")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ValidateOutput {
             findings: Some(findings),
             summary: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(findings: Vec<String>, summary_json: Option<String>) -> ValidateReport {
+        ValidateReport {
+            findings,
+            summary_json,
+            total_docs: 0,
+            rules_count: 0,
+            has_errors: false,
         }
+    }
+
+    #[test]
+    fn findings_reparse_to_typed_values() {
+        let out = envelope(
+            report(vec![r#"{"code":"x","severity":"warning"}"#.into()], None),
+            false,
+        )
+        .unwrap();
+        let findings = out.findings.expect("findings present in default mode");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0]["code"], "x");
+        assert!(out.summary.is_none());
+    }
+
+    #[test]
+    fn empty_findings_is_clean_not_null() {
+        let out = envelope(report(vec![], None), false).unwrap();
+        assert_eq!(out.findings, Some(vec![]), "clean vault is findings: []");
+    }
+
+    #[test]
+    fn an_unparseable_finding_is_a_tool_error_not_a_silent_drop() {
+        let err = envelope(report(vec!["not json".into()], None), false).unwrap_err();
+        assert!(err.contains("did not re-parse"), "got: {err}");
+    }
+
+    #[test]
+    fn summary_mode_omits_findings_and_parses_the_rollup() {
+        let out = envelope(report(vec![], Some(r#"{"findings":3}"#.into())), true).unwrap();
+        assert!(out.findings.is_none(), "summary mode omits findings");
+        assert_eq!(out.summary.unwrap()["findings"], 3);
+    }
+
+    #[test]
+    fn an_unparseable_summary_body_is_a_tool_error() {
+        let err = envelope(report(vec![], Some("{bad".into())), true).unwrap_err();
+        assert!(err.contains("did not re-parse"), "got: {err}");
     }
 }

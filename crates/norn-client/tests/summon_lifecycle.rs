@@ -78,6 +78,58 @@ fn summon_builds_serves_then_idle_reaps_deleting_db_and_socket() {
     );
 }
 
+/// NRN-384 (F1): a HELD session must survive the owner's idle-reap. A long-lived
+/// holder (the MCP stdio server) keeps one session for its whole lifetime; once
+/// the owner idle-reaps between calls, the next request fails and the session
+/// would be permanently bricked without recovery. `resummon` re-establishes a
+/// fresh, ready owner so the very next call succeeds again — proven end to end
+/// against the real owner: summon → serve → idle-reap (while still holding the
+/// session) → resummon → serve again.
+#[test]
+fn held_session_resummons_after_idle_reap() {
+    let (_vault_tmp, vault_root) = common::temp_vault(3);
+    let rt_tmp = tempfile::TempDir::new().unwrap();
+    let runtime_dir = rt_tmp.path().to_path_buf();
+
+    // Short idle TTL so the reap is observable within the test budget; the held
+    // session stays idle past it (no request in flight → the reaper fires).
+    let config = base_config(vault_root, runtime_dir.clone(), Duration::from_secs(1));
+
+    let mut session = open(&config).expect("summon");
+    session.wait_until_ready(Duration::from_secs(20)).unwrap();
+    assert_eq!(session.probe().expect("first probe serves"), 3);
+    let socket = session.socket().to_path_buf();
+
+    // Hold the session but stay idle: the owner idle-reaps, unbinding the socket
+    // and deleting its db — the session's connection is now dead.
+    let reaped = common::wait_until(Duration::from_secs(15), || {
+        !socket.exists() && common::owner_db_dirs(&runtime_dir) == 0
+    });
+    assert!(
+        reaped,
+        "the owner should idle-reap while the session is held idle"
+    );
+
+    // A request on the dead connection now fails (the owner is gone) — the bricked
+    // state the MCP server must not be stuck in.
+    assert!(
+        session.probe().is_err(),
+        "a request after the reap must fail — the held connection is dead"
+    );
+
+    // Recover: resummon a fresh owner and serve again on the SAME session handle.
+    session
+        .resummon(Duration::from_secs(20))
+        .expect("resummon must re-establish a ready owner");
+    assert_eq!(
+        session.probe().expect("the post-resummon probe serves"),
+        3,
+        "the held session serves again after resummon — never bricked"
+    );
+
+    drop(session);
+}
+
 #[test]
 fn second_open_connects_to_the_same_owner() {
     let (_vault_tmp, vault_root) = common::temp_vault(2);
