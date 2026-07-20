@@ -16,7 +16,7 @@ use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
 use crate::plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use camino::Utf8PathBuf;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Execute a `move`: forecast (`confirm == false`) or apply (`confirm == true`).
 pub fn execute(
@@ -61,13 +61,7 @@ pub fn execute(
             kind: "move_document".into(),
             id: None,
             requires: Vec::new(),
-            fields: json!({
-                "src": resolved_src,
-                "dst": params.to,
-                "parents": params.parents,
-                "force": params.force,
-                "no_link_rewrite": params.no_link_rewrite,
-            }),
+            fields: single_move_fields(&resolved_src, params),
             footnote: None,
         };
         one_op_plan(vault_root.to_string(), op)
@@ -92,6 +86,25 @@ pub fn execute(
         report: apply_report,
         touched_paths,
     })
+}
+
+/// Build the `move_document` op fields to match the donor plan byte-for-byte —
+/// the `plan_hash` is `MigrationPlan::canonical_hash()`, so the field SET is the
+/// wire contract for `--format json`. `src` (resolved) / `dst` / `parents` are
+/// ALWAYS present; `force` and `no_link_rewrite` are added ONLY when set (donor
+/// `mcp/tools/move_doc.rs`).
+fn single_move_fields(resolved_src: &camino::Utf8Path, params: &norn_wire::MoveParams) -> Value {
+    let mut fields = serde_json::Map::new();
+    fields.insert("src".into(), Value::String(resolved_src.to_string()));
+    fields.insert("dst".into(), Value::String(params.to.clone()));
+    fields.insert("parents".into(), Value::Bool(params.parents));
+    if params.force {
+        fields.insert("force".into(), Value::Bool(true));
+    }
+    if params.no_link_rewrite {
+        fields.insert("no_link_rewrite".into(), Value::Bool(true));
+    }
+    Value::Object(fields)
 }
 
 /// A coded single-file move preflight refusal — the donor `MovePreflightError`
@@ -273,6 +286,48 @@ mod tests {
             confirm,
             ..Default::default()
         }
+    }
+
+    // Field-set fidelity (donor `mcp/tools/move_doc.rs`, mirroring the donor's
+    // `route.rs:165-168` omit-when-false assertions): `src`/`dst`/`parents` always
+    // present; `force`/`no_link_rewrite` present only when set. Pins the plan_hash
+    // contract for `--format json` independent of the parity harness.
+    #[test]
+    fn move_fields_omit_false_force_and_no_link_rewrite() {
+        let p = norn_wire::MoveParams {
+            from: "b".into(),
+            to: "renamed.md".into(),
+            ..Default::default()
+        };
+        let f = single_move_fields(camino::Utf8Path::new("notes/b.md"), &p);
+        assert_eq!(
+            f,
+            serde_json::json!({"src": "notes/b.md", "dst": "renamed.md", "parents": false}),
+            "false force/no_link_rewrite must be omitted; parents always present"
+        );
+    }
+
+    #[test]
+    fn move_fields_include_set_flags() {
+        let p = norn_wire::MoveParams {
+            from: "b".into(),
+            to: "renamed.md".into(),
+            parents: true,
+            force: true,
+            no_link_rewrite: true,
+            ..Default::default()
+        };
+        let f = single_move_fields(camino::Utf8Path::new("notes/b.md"), &p);
+        assert_eq!(
+            f,
+            serde_json::json!({
+                "src": "notes/b.md",
+                "dst": "renamed.md",
+                "parents": true,
+                "force": true,
+                "no_link_rewrite": true,
+            })
+        );
     }
 
     #[test]

@@ -296,12 +296,20 @@ pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 // That report lives in `norn-core::apply::report`, and this crate depends on no
 // other norn crate by contract (lib.rs), so it cannot name the type. The report
 // therefore rides these frames as an opaque `serde_json::Value` — the core
-// `ApplyReport` serialized as-is. Carrying the value (rather than a hand-kept
-// wire twin) makes `--format json` byte-identical to the donor by construction:
-// there is no second serde definition that can drift from the engine's. The CLI
-// (which DOES link norn-core) deserializes it back into `ApplyReport` to render
-// records and derive the exit code. See `norn-owner`'s mutation dispatch and the
-// CLI `commands::{move_doc,delete,rewrite_wikilink}`.
+// `ApplyReport` serialized as-is.
+//
+// Carrying the value (rather than a hand-kept wire twin) makes the report SHELL
+// byte-faithful for free: there is no second serde definition that can drift from
+// the engine's, so every SHAPE field re-materializes identically. It does NOT by
+// itself guarantee the plan-DERIVED fields match — chiefly `plan_hash`
+// (`MigrationPlan::canonical_hash()`): that depends on the execute seam
+// constructing the plan's op FIELD SET donor-identically. See
+// `norn-core::mutate::{move_doc::single_move_fields, delete::delete_fields}`,
+// which are pinned to the donor's `mcp/tools/*` field sets (unit-tested) so the
+// hash matches. The CLI (which DOES link norn-core) deserializes the value back
+// into `ApplyReport` to render records and derive the exit code. See
+// `norn-owner`'s mutation dispatch and the CLI
+// `commands::{move_doc,delete,rewrite_wikilink}`.
 
 /// A `move` request: relocate a document (or, with `recursive`, a folder) and
 /// cascade-rewrite the backlinks. `from`/`to` are the RAW arguments (a stem, an

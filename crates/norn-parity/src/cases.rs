@@ -1248,6 +1248,10 @@ const MUTATE_EDGE_1: Fixture = Fixture {
 /// MATCH — a diverged/refused/forecast case carries no id to normalize.
 const TRACE_NORM: &[Normalization] = &[Normalization::TraceId];
 
+/// A cascade-verb `--format json` forecast normalizes only the root-dependent
+/// `plan_hash` (see [`Normalization::PlanHash`]) — no trace id on a forecast.
+const PLAN_HASH_NORM: &[Normalization] = &[Normalization::PlanHash];
+
 /// Mutation-verb parity for `set` / `new` (NRN-378 forecasts/refusals, extended
 /// by NRN-388 with the CONFIRMED-apply path and report BODIES). Each case is
 /// `mutating: true`, so the harness runs it against a FRESH per-case vault per
@@ -1553,6 +1557,34 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: NO_NORM,
+    },
+    // move: the `--dry-run --format json` forecast — the pretty `ApplyReport`
+    // serialization. Locks the full report SHAPE (operations, cascade counts,
+    // outcome, field presence) byte-exactly. `plan_hash` embeds the absolute
+    // vault_root (it is `MigrationPlan::canonical_hash()`), so it is genuinely
+    // per-side-root-dependent and normalized here (PLAN_HASH_NORM) like the
+    // sibling vault_root field — its EQUALITY given a shared root is proven
+    // out-of-band + unit-pinned by `mutate::{move_doc::single_move_fields,
+    // delete::delete_fields}` (the op FIELD SET that feeds the hash). A forecast
+    // carries no trace id.
+    Case {
+        id: "mutate-move-dry-run-json-zoo",
+        argv: &[
+            "move",
+            "cycle-b",
+            "notes/moved-b.md",
+            "--dry-run",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: PLAN_HASH_NORM,
     },
     // delete: a confirmed apply with `--rewrite-to`, redirecting the one incoming
     // backlink to `cycle-c` before deleting (records). Post-state proves the
