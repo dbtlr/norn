@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use norn_parity::cases::{Case, Fixture, Suite};
 use norn_parity::fixtures::{FixtureCache, Side};
 use norn_parity::report;
-use norn_parity::run::{self, Mode, RunConfig};
+use norn_parity::run::{self, Mode, RunConfig, RunError};
 use norn_parity::Verdict;
 
 const CLEAN_1: Fixture = Fixture {
@@ -50,6 +50,27 @@ fn mutating_stub_body(content: &str) -> String {
     format!(
         "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\nprintf '%s' '{content}' > mutation.md\nexit 0\n"
     )
+}
+
+/// The `--version` preamble every stub shares.
+const STUB_VERSION_PREAMBLE: &str =
+    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\n";
+
+/// A stub that creates an empty directory `emptied/` in its cwd (no file
+/// writes, no stdout), exit 0 — for the directory-cleanup divergence case.
+fn empty_dir_stub_body() -> String {
+    format!("{STUB_VERSION_PREAMBLE}mkdir emptied\nexit 0\n")
+}
+
+/// A stub that does nothing but answer `--version` (no writes, no stdout).
+fn noop_stub_body() -> String {
+    format!("{STUB_VERSION_PREAMBLE}exit 0\n")
+}
+
+/// A stub that deletes its own vault (its cwd) before exiting, so the
+/// post-state snapshot cannot read the tree — forcing the runner-error path.
+fn self_deleting_stub_body() -> String {
+    format!("{STUB_VERSION_PREAMBLE}d=$(pwd)\ncd /\nrm -rf \"$d\"\nexit 0\n")
 }
 
 /// A one-case catalog with the `mutating` flag set as given, running an argv
@@ -323,4 +344,92 @@ fn a_non_mutating_case_never_compares_trees() {
         "a non-mutating case never records a post-state diff"
     );
     assert_eq!(report.exit_code(), 0);
+}
+
+#[test]
+fn a_one_sided_empty_directory_diverges() {
+    // Directory cleanup asymmetry: the oracle leaves an empty `emptied/` dir,
+    // the candidate leaves none. Both produce identical (empty) stdout/stderr/
+    // exit, so only the vault TREE differs — a file-only walk would call this
+    // Match; the empty-dir marker makes it a divergence.
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let oracle = write_stub(bin_dir.path(), "oracle", &empty_dir_stub_body());
+    let candidate = write_stub(bin_dir.path(), "candidate", &noop_stub_body());
+
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    write_ledger_meta_only(&ledger_path);
+
+    let suites = one_case_suite(true);
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: &oracle,
+        rewrite: &candidate,
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    let report = run::run_suites(&config, Box::leak(suites.into_boxed_slice())).unwrap();
+
+    assert_eq!(
+        report.outcomes[0].verdict,
+        Verdict::Drift,
+        "a one-sided empty directory is a tree divergence with no ledger entry → Drift"
+    );
+    let diff = report.outcomes[0]
+        .post_state
+        .as_ref()
+        .expect("the empty-dir divergence is recorded");
+    assert_eq!(
+        diff.only_in_oracle,
+        vec!["emptied/".to_string()],
+        "the empty dir is present only on the oracle side"
+    );
+    assert_eq!(report.exit_code(), 1);
+
+    let rendered = report::render(&report, Mode::Gated);
+    assert!(
+        rendered.contains("only in oracle: emptied/"),
+        "report surfaces the one-sided empty directory, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn a_snapshot_io_failure_is_a_runner_error_not_a_verdict() {
+    // Each side deletes its own vault before exiting, so the post-state
+    // snapshot cannot read the tree. That is an environment/IO failure, not a
+    // verdict — the run aborts with `RunError::PostStateSnapshot` (the bin maps
+    // it to exit 2), never a Match/Diverged/Drift.
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let stub_body = self_deleting_stub_body();
+    let oracle = write_stub(bin_dir.path(), "oracle", &stub_body);
+    let candidate = write_stub(bin_dir.path(), "candidate", &stub_body);
+
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    write_ledger_meta_only(&ledger_path);
+
+    let suites = one_case_suite(true);
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: &oracle,
+        rewrite: &candidate,
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    // `RunReport` is not `Debug`, so match explicitly rather than `expect_err`.
+    match run::run_suites(&config, Box::leak(suites.into_boxed_slice())) {
+        Err(RunError::PostStateSnapshot {
+            case_id,
+            side_label,
+            ..
+        }) => {
+            assert_eq!(case_id, MUT_CASE_ID);
+            assert_eq!(
+                side_label, "oracle",
+                "the oracle side is snapshotted first, so its failure surfaces"
+            );
+        }
+        Err(other) => panic!("expected RunError::PostStateSnapshot, got: {other}"),
+        Ok(_) => panic!("expected a runner error, got a completed run"),
+    }
 }

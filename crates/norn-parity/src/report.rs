@@ -107,8 +107,8 @@ fn render_post_state(out: &mut String, report: &RunReport) {
         }
         for delta in &diff.content_differs {
             out.push_str(&format!(
-                "    content differs: {} (oracle {} bytes, candidate {} bytes)\n",
-                delta.path, delta.oracle_len, delta.candidate_len
+                "    content differs: {} (oracle {} bytes, candidate {} bytes, first differs at byte {})\n",
+                delta.path, delta.oracle_len, delta.candidate_len, delta.first_diff_at
             ));
         }
     }
