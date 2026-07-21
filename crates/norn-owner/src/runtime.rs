@@ -864,7 +864,7 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             classify_mutation(
                 state,
                 result,
-                apply_report_frame(|report| OwnerFrame::Move { report }),
+                |report| OwnerFrame::Move { report },
                 "move",
             )
         }
@@ -890,7 +890,7 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             classify_mutation(
                 state,
                 result,
-                apply_report_frame(|report| OwnerFrame::Delete { report }),
+                |report| OwnerFrame::Delete { report },
                 "delete",
             )
         }
@@ -916,7 +916,7 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             classify_mutation(
                 state,
                 result,
-                apply_report_frame(|report| OwnerFrame::RewriteWikilink { report }),
+                |report| OwnerFrame::RewriteWikilink { report },
                 "rewrite-wikilink",
             )
         }
@@ -942,21 +942,11 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             classify_mutation(
                 state,
                 result,
-                apply_report_frame(|report| OwnerFrame::Apply { report }),
+                |report| OwnerFrame::Apply { report },
                 "apply",
             )
         }
     }
-}
-
-/// Serialize a cascade verb's core [`ApplyReport`] onto its owner frame as an
-/// opaque JSON value (the wire cannot name the core type — see
-/// `norn_wire::mutate`). Serialization of a well-formed report cannot fail; a
-/// null fallback degrades to a client protocol error rather than a panic.
-fn apply_report_frame(
-    make: impl FnOnce(serde_json::Value) -> OwnerFrame,
-) -> impl FnOnce(norn_wire::ApplyReport) -> OwnerFrame {
-    move |report| make(serde_json::to_value(&report).unwrap_or(serde_json::Value::Null))
 }
 
 /// Drive a mutation verb's execute seam against the warm slot and, when a

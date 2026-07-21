@@ -7,10 +7,10 @@
 //! and validate its `schema_version`. A malformed plan or an unreadable source is
 //! an operational [`Diagnostic`]; a schema mismatch is a report-shaped refusal
 //! (exit 2) byte-identical to the donor's records prose. Only a parsed,
-//! schema-valid plan crosses the wire — as `serde_json::to_value(&plan)` in
-//! [`ApplyParams::plan`] — so the plan bytes reviewed are the plan bytes applied
+//! schema-valid plan crosses the wire — TYPED in [`ApplyParams::plan`] as the
+//! `MigrationPlan` itself — so the plan bytes reviewed are the plan bytes applied
 //! (ADR 0011). The owner executes it under its single-writer lock and answers with
-//! the shared `ApplyReport` (as a JSON value) the display layer renders.
+//! the shared typed [`ApplyReport`] the display layer renders.
 
 use std::io::Read;
 
@@ -74,18 +74,15 @@ pub(crate) fn run_confirm(
     }
 
     let params = ApplyParams {
-        plan: serde_json::to_value(&plan)
-            .map_err(|e| Diagnostic::new(format!("could not encode migration plan: {e}")))?,
+        plan,
         confirm,
         parents: args.parents,
     };
 
     let mut session = crate::routed::open_session(global)?;
-    let value = session
+    let report = session
         .apply(params)
         .map_err(|e| crate::routed::client_error_diagnostic(&e))?;
-    let report: ApplyReport = serde_json::from_value(value)
-        .map_err(|e| Diagnostic::new(format!("undecodable apply report: {e}")))?;
 
     Ok(Output::Apply(ApplyMutationView {
         report,

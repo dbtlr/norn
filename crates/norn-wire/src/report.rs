@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub const APPLY_REPORT_SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyReport {
     pub schema_version: u32,
     /// Trace ID shared by every telemetry event emitted for this invocation.
@@ -156,7 +156,7 @@ pub enum PreconditionStatus {
     NotRun,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyReportOp {
     pub op_id: String,
     pub kind: String,
@@ -308,7 +308,7 @@ pub struct ApplyError {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyWarning {
     pub code: String,
     pub message: String,

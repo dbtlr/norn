@@ -4,12 +4,11 @@
 //! Maps the args into the wire [`RewriteWikilinkParams`], resolves
 //! apply-vs-forecast from the shared mode ladder, and hands them to the owner.
 //! The owner resolves `old`, expands the per-document rewrites, applies under its
-//! single-writer lock, and answers with the shared `ApplyReport` (as a JSON
-//! value) the display layer renders. `--out` writes the JSON report to a file.
+//! single-writer lock, and answers with the shared typed `ApplyReport` the
+//! display layer renders. `--out` writes the JSON report to a file.
 
 use crate::cli::{GlobalArgs, RewriteWikilinkArgs};
 use crate::display::{Diagnostic, Output, RewriteWikilinkView};
-use norn_wire::ApplyReport;
 use norn_wire::RewriteWikilinkParams;
 
 /// Run a `rewrite-wikilink` mutation and return its report as an [`Output`], or a
@@ -38,11 +37,9 @@ pub(crate) fn run_confirm(
     };
 
     let mut session = crate::routed::open_session(global)?;
-    let value = session
+    let report = session
         .rewrite_wikilink(params)
         .map_err(|e| crate::routed::client_error_diagnostic(&e))?;
-    let report: ApplyReport = serde_json::from_value(value)
-        .map_err(|e| Diagnostic::new(format!("undecodable rewrite-wikilink report: {e}")))?;
 
     Ok(Output::RewriteWikilink(RewriteWikilinkView {
         report,

@@ -6,9 +6,9 @@
 //! its format, parsed it into a `MigrationPlan`, and validated its
 //! `schema_version` in the client-side preamble (a malformed plan or a schema
 //! mismatch refuses BEFORE the wire, byte-identical to the donor). The parsed plan
-//! crosses opaque in [`norn_wire::ApplyParams::plan`] (this seam's crate cannot be
-//! named by `norn-wire`); here the owner deserializes it back and hands it to the
-//! shared [`apply_migration_plan`] executor under `refuse_as_report` — so a clean
+//! crosses TYPED in [`norn_wire::ApplyParams::plan`] (the `MigrationPlan` contract
+//! type now lives in `norn-wire`); here the owner hands it straight to the shared
+//! [`apply_migration_plan`] executor under `refuse_as_report` — so a clean
 //! pre-write decline (an owner-set precondition mismatch, a containment violation,
 //! a bad create path) returns a coded `outcome = refused` [`ApplyReport`], never a
 //! bare `Err`. ADR 0011: the plan bytes reviewed are the plan bytes applied.
@@ -16,7 +16,9 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use norn_wire::MigrationPlan;
-use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
+#[cfg(test)]
+use norn_wire::ApplyOutcome;
+use norn_wire::ApplyReport;
 
 /// Execute an `apply`: forecast (`confirm == false`) or apply (`confirm == true`)
 /// the plan carried in `params`.
@@ -30,24 +32,12 @@ pub fn execute(
     let index = cache.load_graph_index()?;
     let dry_run = !params.confirm;
 
-    // The plan crossed opaque (the CLI parsed + schema-checked it before the wire).
-    // A deserialize failure here is not the malformed-input case the CLI already
-    // refuses — it is a wire-shape fault. Surface it as a coded, report-shaped
-    // refusal (never a bare Err that would exit-to-heal a healthy owner).
-    let plan: MigrationPlan = match serde_json::from_value(params.plan.clone()) {
-        Ok(plan) => plan,
-        Err(e) => {
-            return Ok(refused(
-                cache.vault_root().to_string(),
-                dry_run,
-                ApplyError {
-                    code: "malformed-plan".into(),
-                    message: format!("could not decode migration plan: {e}"),
-                    path: None,
-                },
-            ));
-        }
-    };
+    // The plan crossed TYPED (NRN-405 part b): the CLI parsed + schema-checked it
+    // before the wire, and the wire frame itself carries `MigrationPlan`, so a
+    // malformed plan can no longer reach here as a decodable-but-wrong value —
+    // a genuine wire-shape fault fails frame deserialization at the owner's read
+    // loop, not here.
+    let plan: &MigrationPlan = &params.plan;
 
     let ctx = ApplyContext {
         dry_run,
@@ -56,7 +46,7 @@ pub fn execute(
         refuse_as_report: true,
         owner_index_options: owner_index_options(config),
     };
-    let apply_report = apply_migration_plan(&plan, &index, ctx, sink)?;
+    let apply_report = apply_migration_plan(plan, &index, ctx, sink)?;
     // A forecast commits nothing (matches the sibling verbs): only a confirmed
     // apply hands the owner touched paths for the cache-increment commit.
     let touched_paths = if params.confirm {
@@ -68,17 +58,6 @@ pub fn execute(
         report: apply_report,
         touched_paths,
     })
-}
-
-/// Build a coded, report-shaped refusal (`outcome = refused`) with no touched
-/// paths — the wire-decode fallback above.
-fn refused(vault_root: String, dry_run: bool, error: ApplyError) -> MutationExecution<ApplyReport> {
-    let report = ApplyReport::refused(vault_root, dry_run, "apply", error);
-    debug_assert_eq!(report.outcome, ApplyOutcome::Refused);
-    MutationExecution {
-        report,
-        touched_paths: Vec::new(),
-    }
 }
 
 #[cfg(test)]
@@ -148,7 +127,7 @@ mod tests {
 
     fn params(plan: &MigrationPlan, confirm: bool) -> norn_wire::ApplyParams {
         norn_wire::ApplyParams {
-            plan: serde_json::to_value(plan).unwrap(),
+            plan: plan.clone(),
             confirm,
             parents: false,
         }
@@ -200,24 +179,12 @@ mod tests {
         assert!(root.join("a.md").as_std_path().exists());
     }
 
-    #[test]
-    fn undecodable_plan_refuses_as_report() {
-        let (_t, root) = synth_vault(&[("a.md", "---\ntype: note\n---\n# A\n")]);
-        let cache = built(&root);
-        // A value that is not a MigrationPlan shape (schema_version wrong type).
-        let bad = norn_wire::ApplyParams {
-            plan: json!({ "schema_version": "not-a-number" }),
-            confirm: true,
-            parents: false,
-        };
-        let exec = execute(&cache, None, &bad, TODAY, &mut sink()).unwrap();
-        assert_eq!(exec.report.outcome, ApplyOutcome::Refused);
-        assert_eq!(
-            exec.report.operations[0].error.as_ref().unwrap().code,
-            "malformed-plan"
-        );
-        assert!(exec.touched_paths.is_empty());
-    }
+    // NOTE (NRN-405 part b): the former `undecodable_plan_refuses_as_report` test
+    // is removed. `ApplyParams::plan` is now a typed `MigrationPlan`, so a
+    // "decodable-but-wrong-shape" plan value can no longer be constructed and
+    // handed to `execute`; a genuine wire-shape fault fails frame deserialization
+    // at the owner's read loop, before this seam. The client-side preamble still
+    // refuses a malformed/schema-mismatched plan source byte-identically.
 
     /// A multi-op plan with two `{{seq}}` `create_document` ops allocates
     /// sequentially under one apply (the seq-alloc fold-in machinery): with an

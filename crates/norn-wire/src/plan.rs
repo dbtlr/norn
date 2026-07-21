@@ -18,7 +18,7 @@ pub const MIGRATION_PLAN_SCHEMA_VERSION: u32 = 2;
 
 /// A reviewable, applyable set of typed operations over one vault, plus the
 /// owner-set preconditions that must hold before any of them writes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MigrationPlan {
     pub schema_version: u32,
     pub vault_root: String,
@@ -39,7 +39,7 @@ pub struct MigrationPlan {
 /// operation writes (ADR 0015). Today the only variant is an exact owner-set
 /// assertion; the `kind`-tagged enum leaves room for future precondition
 /// families without a schema break.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanPrecondition {
     OwnerSet {
@@ -60,7 +60,7 @@ impl PlanPrecondition {
 /// How an owner-set precondition selects the current owners it will compare
 /// against `expected_paths`. The three grammars are mutually exclusive
 /// (`deny_unknown_fields` + `untagged`), so a plan cannot mix `stem` with `eq`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum OwnerSelector {
     /// Every document whose filename stem matches (ASCII-case-folded).
@@ -74,7 +74,7 @@ pub enum OwnerSelector {
 
 /// One typed operation. `fields` is an untyped JSON payload the applier
 /// interprets per `kind`; typing the payloads is tracked separately (ADR 0016).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MigrationOp {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -88,7 +88,7 @@ pub struct MigrationOp {
 
 /// A finding the plan generator chose not to act on, carried forward so the
 /// apply report can surface it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkippedFinding {
     pub finding_code: String,
     pub path: String,

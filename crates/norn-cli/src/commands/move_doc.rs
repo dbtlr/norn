@@ -4,12 +4,11 @@
 //! the shared mode ladder (`--dry-run` forecasts, `--yes` applies, otherwise a
 //! safe implicit forecast), and hands them to the owner. The owner resolves the
 //! source, plans the move, drives the cascade under its single-writer lock, and
-//! answers with the shared `ApplyReport` (as a JSON value); the display layer
-//! renders it (records summary / pretty json) and derives the exit code.
+//! answers with the shared typed `ApplyReport`; the display layer renders it
+//! (records summary / pretty json) and derives the exit code.
 
 use crate::cli::{GlobalArgs, MoveArgs};
 use crate::display::{Diagnostic, MoveMutationView, Output};
-use norn_wire::ApplyReport;
 use norn_wire::MoveParams;
 
 /// Run a `move` mutation and return its report as an [`Output`], or a
@@ -42,11 +41,9 @@ pub(crate) fn run_confirm(
     };
 
     let mut session = crate::routed::open_session(global)?;
-    let value = session
+    let report = session
         .move_document(params)
         .map_err(|e| crate::routed::client_error_diagnostic(&e))?;
-    let report: ApplyReport = serde_json::from_value(value)
-        .map_err(|e| Diagnostic::new(format!("undecodable move report: {e}")))?;
 
     Ok(Output::Move(MoveMutationView {
         report,
