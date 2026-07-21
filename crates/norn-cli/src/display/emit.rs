@@ -6,10 +6,11 @@
 //! [`Conversation`], and derives the process exit code. A user error returns a
 //! [`Diagnostic`] instead, rendered through the one presenter path.
 //!
-//! The renderers here are byte-faithful to the donor CLI: the `find` / `get`
-//! projections run through the shared `output::projection` ladder; `count` /
-//! `describe` / `vault list` reproduce their bespoke text unstyled (they never
-//! resolved a palette in the donor, and are kept byte-identical).
+//! The renderers here are pinned to the donor CLI's output by the parity suite:
+//! the `find` / `get` projections run through the shared `output::projection`
+//! ladder; `count` / `describe` / `vault list` reproduce their bespoke text
+//! unstyled (they never resolved a palette in the donor, and their output is
+//! pinned by the parity cases).
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
@@ -396,9 +397,9 @@ fn warn_unknown_cols_find(
 /// zero-match result: every field would trivially "not be present" in an empty
 /// set, which is redundant with the `total: 0` signal rather than informative
 /// about the field itself. (The pre-existing `--col` warning has the identical
-/// truncation false positive — same oracle-parity-locked behavior on both
-/// sides, so it is intentionally left as-is here; a fix there is a banked
-/// ledger candidate, not part of this new-surface warning.)
+/// truncation false positive — a known defect that fires when the field is real
+/// but beyond the `--limit` page, tracked as NRN-44; the fix lands there with
+/// its ledger entry. Not part of this new-surface warning.)
 fn warn_unknown_sort_find(
     report: &FindReport,
     sort_field: Option<&str>,
@@ -1669,8 +1670,9 @@ fn render_new<O: Write, E: Write>(
         let result: io::Result<i32> = (|| {
             let value = serde_json::to_value(report)?;
             // The donor's `new --format json` emits NO trailing newline (unlike
-            // `set --format json`, which does) — a donor inconsistency mirrored
-            // faithfully with `write!`, not `writeln!`.
+            // `set --format json`, which does) — a known cross-verb JSON framing
+            // inconsistency, unified by NRN-408 (one trailing-newline rule);
+            // current behavior held here (`write!`, not `writeln!`) until then.
             write!(out, "{}", serde_json::to_string_pretty(&value)?)?;
             Ok(mutation_exit(report.outcome))
         })();

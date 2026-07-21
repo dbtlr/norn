@@ -5,8 +5,8 @@
 //! - The globals filter also drops `is_hide_set()` args. The donor had no
 //!   hidden global; the rewrite marks the new-world `--vault` global (ADR
 //!   0017) hidden so it parses but never pollutes the GLOBAL OPTIONS block —
-//!   keeping every command's help byte-identical to the oracle, which predates
-//!   `--vault`. No donor command has a hidden global, so this is a no-op there.
+//!   keeping every command's help matched per the help parity case, which
+//!   predates `--vault`. No donor command has a hidden global, so this is a no-op there.
 //! - The `live_examples_fn` extras hook is gone (see `model.rs`).
 
 use clap::Command;

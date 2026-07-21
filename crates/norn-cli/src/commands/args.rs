@@ -5,7 +5,7 @@
 //!
 //! Help text is donor-exact (NRN-329): the doc comments below reproduce the
 //! retired `src/cli.rs` `FilterArgs` / `SortPaginateArgs` verbatim so the custom
-//! help renderer emits byte-identical output to the parity oracle. clap derives
+//! help renderer's output is matched per the help parity case. clap derives
 //! the flag help from the doc comment and strips its single trailing period —
 //! the oracle relies on exactly that, so the periods here are load-bearing.
 

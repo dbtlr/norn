@@ -27,7 +27,7 @@ Mutation commands use a three-value process exit:
 |---|---|---|
 | `0` | success | every op applied (or a dry-run forecast) |
 | `1` | partial-apply failure | at least one filesystem write had already landed when a later op failed — the vault is **partially mutated** |
-| `2` | preflight / precondition refusal | a check refused before **any** write; the vault is byte-identical |
+| `2` | preflight / precondition refusal | a check refused before **any** write; the vault is untouched |
 
 The `1`-vs-`2` split is decided by a single runtime fact: **did any filesystem
 write land before the failure?** It is *not* decided by the error variant. The
@@ -50,11 +50,11 @@ Every `ApplyReport` carries a single `outcome` field:
 |---|---|---|
 | `applied` | 0 | ops `applied` / `skipped`; `failed == 0` |
 | `failed` | 1 | a write already landed, then an op failed — already-applied ops `applied`, the failing op `failed` with an `error`, the rest `not-run`; the vault is **partially mutated** |
-| `refused` | 2 | an operation is `failed`, or a first-class precondition is `failed` while every operation is `not-run`; **nothing written**, vault byte-identical |
+| `refused` | 2 | an operation is `failed`, or a first-class precondition is `failed` while every operation is `not-run`; **nothing written**, vault untouched |
 | `rebased` | 0 | **reserved** for a future auto-rebase-on-drift (NRN-152); not produced today |
 
 `outcome` is the cross-surface signal, and the `failed`-vs-`refused` distinction is
-load-bearing: `refused` promises a byte-identical vault (safe to retry or ignore),
+load-bearing: `refused` promises nothing was written (safe to retry or ignore),
 while `failed` means **the vault was partially mutated** — a consumer must re-read
 before retrying. A consumer that ported "nonzero exit = failure" logic should key
 on `outcome` instead: over MCP both a `refused` and a `failed` apply are returned as
@@ -68,7 +68,7 @@ A **clean refusal** (nothing written) is returned to an MCP caller as the
 
 - the offending operation has `status: "failed"` and an `error` envelope, or a first-class precondition has `status: "failed"` and an error while every operation is `not-run`,
 - `outcome` is `refused`,
-- the vault is byte-identical (nothing was written).
+- the vault is untouched — nothing was written.
 
 A **partial apply** (a write landed, then a later op failed) is *also* returned as
 the `ApplyReport`, but with the truthful partial state:

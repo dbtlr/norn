@@ -1,9 +1,9 @@
 //! Value canonicalization shared between the `document_fields` EAV writer and
-//! the query layer's stored-value comparisons. Both sides must agree
-//! byte-for-byte with `query_documents.rs`'s SQL-side wikilink-bracket collapse
+//! the query layer's stored-value comparisons. Both sides must agree —
+//! enforced by the canonical-encoding tests, per ADR 0004 — with
+//! `query_documents.rs`'s SQL-side wikilink-bracket collapse
 //! (`replace(replace(x, '[[', ''), ']]', '')`) and `json_value_to_sql`'s scalar
-//! type mapping — that parity is a decided invariant (ADR 0004), not a
-//! convenience.
+//! type mapping — that parity is a decided invariant, not a convenience.
 
 use rusqlite::types::Value as SqlValue;
 

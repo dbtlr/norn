@@ -33,7 +33,8 @@ pub fn execute(
     let index = cache.load_graph_index()?;
     let vault_root = cache.vault_root().to_string();
 
-    // ── Target resolution (donor-faithful refusal prose, mirrors `set`) ──────
+    // ── Target resolution (refusal prose is end-user contract, pinned by the
+    //    mutate refusal parity cases; mirrors `set`) ──────
     let target_path = match crate::target::resolve_target_path(&index, &params.target) {
         Ok(p) => p,
         Err(e) => {

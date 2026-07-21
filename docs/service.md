@@ -247,15 +247,15 @@ norn: service is a different build of v0.45.1 — restart the norn serve daemon
 
 `norn self-update` closes this gap for itself: after it swaps in a new binary, it restarts a loaded `serve` unit automatically (`kickstart -k`), so the daemon picks up the update without a manual `norn service restart`. If the restart itself fails, `self-update` still exits successfully — the binary is updated either way — and prints a stderr warning pointing back at `norn service restart` as the fallback.
 
-### Byte-identity promise
+### Routing parity guarantee
 
-Successful routed and direct execution remain byte-for-byte identical: stdout, stderr, exit code, and the on-disk result of a mutation — the telemetry `trace_id` aside, which is non-deterministic on the direct path too. Routing failures may add an operator-actionable stderr notice for version/build skew or a heartbeat-classified stall before falling back to the same trust-verified Direct path. A committing mutation that fails after send remains the deliberate `post-send-uncertain` exception described above.
+Routed and direct execution of a normally-completing request produce the same end-user output — stdout, stderr, exit code, and the on-disk result of a mutation — pinned by the routing parity suite; the telemetry `trace_id` is non-deterministic on both paths. Two documented departures sit outside that guarantee: routing failures may add an operator-actionable stderr notice for version/build skew or a heartbeat-classified stall before falling back to the same trust-verified Direct path, and a committing mutation that fails after send remains the deliberate `post-send-uncertain` exit-1 outcome described above. Any further divergence, if ever intended, surfaces via the decision-gated ledger.
 
 ## Relationship to `norn mcp`
 
 [`norn mcp`](mcp-server.md) is the one-shot stdio server: one process per vault, launched and torn down by the client's own process lifecycle, re-verifying its cache on every call. `norn serve` is the *same* MCP server and the *same* tool catalog and mutation-safety contract, made persistent and shared across vaults — the difference is entirely in how the cache is held open and verified, not in what the tools do. An MCP client that wants the warm daemon connects to it directly over the socket described above; a client that just wants a simple one-shot server per vault keeps using `norn mcp`.
 
-The `norn` CLI is itself one such client: every read and every mutation it supports routes through a live, version- and build-matched `norn serve` daemon when one is reachable, byte-identically to running direct — see [How the CLI routes to the daemon](#how-the-cli-routes-to-the-daemon) above.
+The `norn` CLI is itself one such client: every read and every mutation it supports routes through a live, version- and build-matched `norn serve` daemon when one is reachable, producing the same end-user output as running direct — see [How the CLI routes to the daemon](#how-the-cli-routes-to-the-daemon) above.
 
 ## See also
 

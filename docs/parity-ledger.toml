@@ -205,8 +205,8 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 # The rewrite emits ONE envelope for every warning kind, `{ code, field?, message
 # }`, so a machine parses a single shape. Documented as a deliberate divergence
 # at the type itself (`norn-wire::mutate::MutationWarning`); this entry pins the
-# first warning-bearing `--format json` parity case. The records short-forms are
-# donor-faithful (a MATCH) and are covered by the records apply cases separately.
+# first warning-bearing `--format json` parity case. The records short-forms
+# match the oracle (a MATCH) and are covered by the records apply cases separately.
 [[entry]]
 id = "PD-111"
 surface = "set/new --format json warning object (unified envelope)"

@@ -1026,8 +1026,9 @@ const READ_CASES: &[Case] = &[
 /// describe ports for real (NRN-347): the structure view (folders + declared
 /// rules + inbox + the full schema under `--format json`) and the contents
 /// summary (`--data`/`--stats`/`--by`). All `ported: true`, must Match the
-/// oracle. `--format json` pins the schema serialization (the full validate
-/// config) byte-for-byte forever.
+/// oracle. The `describe-json-zoo` case pins the schema serialization (the full
+/// validate config) as the end-user contract; any intended change moves through
+/// the divergence ledger.
 const DESCRIBE_CASES: &[Case] = &[
     Case {
         id: "describe-zoo",
@@ -1071,7 +1072,8 @@ const DESCRIBE_CASES: &[Case] = &[
     },
     Case {
         // The structure view in full, incl. the serialized schema (validate
-        // config) — pins the schema shape byte-for-byte.
+        // config) — this case pins the schema shape as the end-user contract;
+        // any intended change moves through the divergence ledger.
         id: "describe-json-zoo",
         argv: &["describe", "--format", "json"],
         fixture: ZOO_1,
@@ -1888,8 +1890,9 @@ const MUTATE_CASES: &[Case] = &[
         plan: None,
     },
     // move: the `--dry-run --format json` forecast — the pretty `ApplyReport`
-    // serialization. Locks the full report SHAPE (operations, cascade counts,
-    // outcome, field presence) byte-exactly. `plan_hash` embeds the absolute
+    // serialization. This case pins the full report SHAPE (operations, cascade
+    // counts, outcome, field presence) as the end-user contract; any intended
+    // change moves through the divergence ledger. `plan_hash` embeds the absolute
     // vault_root (it is `MigrationPlan::canonical_hash()`), so it is genuinely
     // per-side-root-dependent and normalized here (PLAN_HASH_NORM) like the
     // sibling vault_root field — its EQUALITY given a shared root is proven
@@ -2278,13 +2281,14 @@ const APPLY_CASES: &[Case] = &[
     // One`) and `seq/task-2.md` (`Task Two`) actually land on disk with the
     // right content, byte-identically on both binaries. Empirically confirmed
     // against the pinned oracle: the REPORT's own counters/summary lines are
-    // donor-faithful but visually confusing here — `applied: 1  skipped: 1` and
-    // BOTH ops' one-line summaries read `create seq/task-1.md` (the second op's
-    // display line never picks up its own apply-time-resolved id) — yet the
-    // actual vault tree carries both files with the correct distinct
-    // frontmatter/body, and the rewrite reproduces the identical counters and
-    // mislabeled summary text byte-for-byte, so this is real donor behavior to
-    // preserve, not a rewrite bug to route around. TRACE_NORM for the
+    // visually confusing here — `applied: 1  skipped: 1` and BOTH ops' one-line
+    // summaries read `create seq/task-1.md` (the second op's display line never
+    // picks up its own apply-time-resolved id) — yet the actual vault tree
+    // carries both files with the correct distinct frontmatter/body, and the
+    // rewrite reproduces the identical counters and mislabeled summary text.
+    // This is a REAL report-rendering defect (both create summaries print the
+    // first op's resolved path), tracked as NRN-425; the case pins current
+    // behavior until that fix lands with its ledger entry. TRACE_NORM for the
     // confirmed-apply trace id.
     Case {
         id: "apply-authored-sequenced-seq-creates-zoo",
