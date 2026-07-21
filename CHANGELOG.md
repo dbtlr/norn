@@ -12,7 +12,7 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 ### Added
 
-- **A new architecture-principles page (`docs/architecture.md`) records norn's standing invariants (NRN-422).** Eleven principles — contract types living in `norn-wire`, typed facts crossing boundaries while prose is rendering, the single render seam, single-PR crate extractions, the incremental-index cache, artifact determinism, one plan vocabulary with one applier, and the substrate bearing the trust burden among them — distilled from the decision records (ADRs 0016–0021) into a checklist a pull request can be tested against, sibling to `docs/concepts.md` and `docs/development.md`.
+- **A new architecture-principles page (`docs/architecture.md`) records norn's standing invariants (NRN-422).** Eleven principles — contract types living in `norn-wire`, typed facts crossing boundaries while prose is rendering, the single render seam, single-PR crate extractions, the incremental-index cache, artifact determinism, one plan vocabulary with one applier, and the substrate bearing the trust burden among them — distilled from the cited decision records into a checklist a pull request can be tested against, sibling to `docs/concepts.md` and `docs/development.md`.
 
 ### Changed
 
