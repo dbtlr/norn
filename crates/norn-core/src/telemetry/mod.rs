@@ -2,7 +2,7 @@
 //!
 //! This module provides the data model ([`Event`], [`Severity`]), the ID/clock
 //! seams ([`IdGen`], [`Clock`]), and the in-memory [`EventSink`] the mutation
-//! executor emits through and reads back to fold an [`crate::apply::ApplyReport`].
+//! executor emits through and reads back to fold an [`norn_wire::ApplyReport`].
 //!
 //! # Ported seam (ADR 0018)
 //!

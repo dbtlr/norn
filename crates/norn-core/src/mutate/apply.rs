@@ -14,9 +14,9 @@
 //! bare `Err`. ADR 0011: the plan bytes reviewed are the plan bytes applied.
 
 use super::{owner_index_options, MutationExecution};
-use crate::apply::report::{ApplyError, ApplyOutcome, ApplyReport};
 use crate::apply::{apply_migration_plan, ApplyContext};
-use crate::plan::MigrationPlan;
+use norn_wire::MigrationPlan;
+use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 
 /// Execute an `apply`: forecast (`confirm == false`) or apply (`confirm == true`)
 /// the plan carried in `params`.
@@ -84,8 +84,8 @@ fn refused(vault_root: String, dry_run: bool, error: ApplyError) -> MutationExec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{MigrationOp, MIGRATION_PLAN_SCHEMA_VERSION};
     use camino::Utf8PathBuf;
+    use norn_wire::{MigrationOp, MIGRATION_PLAN_SCHEMA_VERSION};
     use serde_json::json;
     use tempfile::TempDir;
 

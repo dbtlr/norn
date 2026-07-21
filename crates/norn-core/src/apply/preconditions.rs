@@ -24,12 +24,12 @@ use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
 
-use crate::apply::report::{
+use crate::domain::{Document, GraphIndex};
+use norn_wire::{
     ApplyError, ApplyOutcome, ApplyReport, ApplyReportOp, ApplyReportPrecondition, OpStatus,
     PreconditionStatus, APPLY_REPORT_SCHEMA_VERSION,
 };
-use crate::domain::{Document, GraphIndex};
-use crate::plan::{MigrationOp, MigrationPlan, OwnerSelector, PlanPrecondition};
+use norn_wire::{MigrationOp, MigrationPlan, OwnerSelector, PlanPrecondition};
 
 /// Evaluate every owner-set precondition in `plan` against `index`, returning one
 /// [`ApplyReportPrecondition`] per plan precondition (in plan order).

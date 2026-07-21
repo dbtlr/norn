@@ -813,7 +813,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "norn-client",
- "norn-core",
  "norn-wire",
  "rmcp",
  "schemars",
@@ -852,8 +851,11 @@ dependencies = [
 name = "norn-wire"
 version = "0.0.0"
 dependencies = [
+ "blake3",
+ "camino",
  "serde",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

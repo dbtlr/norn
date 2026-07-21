@@ -3,7 +3,7 @@
 //! Ported from the donor `repair::{filtered_findings, build_plan}` +
 //! `mcp/tools/repair.rs` (ADR 0018). Repair is READ-ONLY: it loads the warm
 //! graph, runs the standards engine, triage-filters the findings, and turns them
-//! into a deterministic [`MigrationPlan`](crate::plan::MigrationPlan) via
+//! into a deterministic [`MigrationPlan`](norn_wire::MigrationPlan) via
 //! [`plan_from_findings`](crate::planner::findings::plan_from_findings) — it never
 //! writes. Emitting the plan is the whole job; `apply` executes it (the donor's
 //! `norn repair --plan | norn apply -` two-step).

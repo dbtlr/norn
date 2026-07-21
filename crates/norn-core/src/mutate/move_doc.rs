@@ -11,11 +11,11 @@
 //! separate rewrite ops.
 
 use super::{owner_index_options, MutationExecution};
-use crate::apply::report::{ApplyError, ApplyOutcome, ApplyReport};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use camino::Utf8PathBuf;
+use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use serde_json::{json, Value};
 
 /// Execute a `move`: forecast (`confirm == false`) or apply (`confirm == true`).

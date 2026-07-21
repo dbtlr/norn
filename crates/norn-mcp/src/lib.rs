@@ -25,11 +25,7 @@ pub const CONTRACT: &str = "norn-mcp: thin MCP adapter — parse and present onl
 
 /// Direct-dependency contracts — the code reference that makes this
 /// crate's declared edges load-bearing rather than manifest-only.
-pub const DEP_CONTRACTS: &[&str] = &[
-    norn_client::CONTRACT,
-    norn_core::CONTRACT,
-    norn_wire::CONTRACT,
-];
+pub const DEP_CONTRACTS: &[&str] = &[norn_client::CONTRACT, norn_wire::CONTRACT];
 
 /// Serve the MCP stdio protocol over an already-resolved, ready [`OwnerSession`].
 ///

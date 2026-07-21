@@ -9,9 +9,9 @@
 //! under `refuse_as_report`, so no explicit preflight is needed here.
 
 use super::{owner_index_options, MutationExecution};
-use crate::apply::report::ApplyReport;
 use crate::apply::{apply_migration_plan, ApplyContext};
-use crate::plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
+use norn_wire::ApplyReport;
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use serde_json::json;
 
 /// Execute a `rewrite-wikilink`: forecast (`confirm == false`) or apply.
@@ -67,8 +67,8 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apply::report::ApplyOutcome;
     use camino::Utf8PathBuf;
+    use norn_wire::ApplyOutcome;
     use tempfile::TempDir;
 
     const TODAY: &str = "2026-07-20";

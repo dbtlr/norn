@@ -10,9 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::coerce;
 use super::{owner_index_options, MutationExecution};
-use crate::apply::{apply_migration_plan, ApplyContext, ApplyOutcome, OpStatus};
+use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use crate::seq_alloc::{self, SEQ_TOKEN};
 use crate::standards::apply::ensure_within_vault;
 use crate::standards::{
@@ -21,9 +20,11 @@ use crate::standards::{
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{NaiveDate, NaiveDateTime};
+use norn_wire::{ApplyOutcome, OpStatus};
 use norn_wire::{
     CodedError, FrontmatterCreated, MutationOutcome, MutationWarning, NewParams, NewReport,
 };
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use serde_json::{Map, Value};
 
 /// Internal placeholder that survives the substitution engine untouched — NUL

@@ -291,12 +291,12 @@ pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 // ── move / delete / rewrite-wikilink ──────────────────────────────────────────
 //
 // Unlike `set`/`new` — whose donor reports are compact verb-specific structs —
-// the donor `move`/`delete`/`rewrite-wikilink` verbs answer with the shared
-// `ApplyReport` (its `--format json` IS `serde_json::to_string_pretty(&report)`).
-// That report lives in `norn-core::apply::report`, and this crate depends on no
-// other norn crate by contract (lib.rs), so it cannot name the type. The report
-// therefore rides these frames as an opaque `serde_json::Value` — the core
-// `ApplyReport` serialized as-is.
+// the `move`/`delete`/`rewrite-wikilink` verbs answer with the shared
+// [`ApplyReport`](crate::ApplyReport) (its `--format json` IS
+// `serde_json::to_string_pretty(&report)`). That report now lives in this crate
+// (the end-user report contract), but these frames still ride it as an opaque
+// `serde_json::Value` — the `ApplyReport` serialized as-is — pending the
+// typed-cascade-frame follow-up (NRN-405 part b).
 //
 // Carrying the value (rather than a hand-kept wire twin) makes the report SHELL
 // byte-faithful for free: there is no second serde definition that can drift from
@@ -306,10 +306,9 @@ pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 // constructing the plan's op FIELD SET donor-identically. See
 // `norn-core::mutate::{move_doc::single_move_fields, delete::delete_fields}`,
 // which are pinned to the donor's `mcp/tools/*` field sets (unit-tested) so the
-// hash matches. The CLI (which DOES link norn-core) deserializes the value back
-// into `ApplyReport` to render records and derive the exit code. See
-// `norn-owner`'s mutation dispatch and the CLI
-// `commands::{move_doc,delete,rewrite_wikilink}`.
+// hash matches. The CLI deserializes the value back into `ApplyReport` to render
+// records and derive the exit code. See `norn-owner`'s mutation dispatch and the
+// CLI `commands::{move_doc,delete,rewrite_wikilink}`.
 
 /// A `move` request: relocate a document (or, with `recursive`, a folder) and
 /// cascade-rewrite the backlinks. `from`/`to` are the RAW arguments (a stem, an
@@ -370,11 +369,12 @@ pub struct RewriteWikilinkParams {
 /// as `plan` — `serde_json::to_value(&plan)`, the exact value the direct
 /// `--format json` serializes and exactly what `repair` emits, so a repair→apply
 /// composition round-trips (ADR 0011: the plan bytes reviewed are the plan bytes
-/// applied). This crate cannot name `norn_core::plan::MigrationPlan` (it depends on
-/// no other norn crate — see `crate::mutate`'s cascade-verb note), so the plan
-/// rides as an opaque `serde_json::Value`; the owner (which links norn-core)
-/// deserializes it back. `confirm` applies (else forecast); `parents` auto-creates
-/// missing parent directories for `create_document` ops that proceed.
+/// applied). The [`MigrationPlan`](crate::MigrationPlan) type now lives in this
+/// crate, but `apply` still carries it as an opaque `serde_json::Value` (see
+/// `crate::mutate`'s cascade-verb note) pending the typed-payload follow-up
+/// (NRN-405 part b); the owner deserializes it back. `confirm` applies (else
+/// forecast); `parents` auto-creates missing parent directories for
+/// `create_document` ops that proceed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApplyParams {

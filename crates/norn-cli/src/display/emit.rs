@@ -43,8 +43,8 @@ use super::prompt;
 use super::sink::Sink;
 use super::{Diagnostic, Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 use crate::cli::RepairPlanFormat;
-use norn_core::apply::report::{ApplyOutcome, ApplyReport};
-use norn_core::plan::MigrationPlan;
+use norn_wire::MigrationPlan;
+use norn_wire::{ApplyOutcome, ApplyReport};
 
 /// Whether the process stdout is a terminal — the one isatty read, consumed by
 /// [`FormatSpec::resolve`](super::format::FormatSpec::resolve).
@@ -1271,7 +1271,7 @@ fn emit_repair_plan(
 
 /// The vault-relative paths a single op touches — frontmatter/link ops carry
 /// `path`; structural moves carry `src`/`dst`. Donor `render::op_paths`.
-fn repair_op_paths(op: &norn_core::plan::MigrationOp) -> Vec<String> {
+fn repair_op_paths(op: &norn_wire::MigrationOp) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(obj) = op.fields.as_object() {
         for key in ["path", "src", "dst", "destination"] {

@@ -5,10 +5,10 @@
 //! passes low-level ops through with planner-filled link_risk.
 
 use crate::domain::GraphIndex;
-use crate::plan::MigrationOp;
 use crate::standards::{classify_link_risk, PlannedChange};
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
+use norn_wire::MigrationOp;
 use serde::{Deserialize, Serialize};
 
 pub mod move_folder;
@@ -318,7 +318,7 @@ mod tests {
 #[cfg(test)]
 mod expansion_tests {
     use super::*;
-    use crate::plan::MigrationOp;
+    use norn_wire::MigrationOp;
     use tempfile::TempDir;
 
     fn synth_vault() -> TempDir {

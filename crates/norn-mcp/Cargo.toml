@@ -7,7 +7,6 @@ publish = false
 
 [dependencies]
 norn-client = { path = "../norn-client" }
-norn-core = { path = "../norn-core" }
 norn-wire = { path = "../norn-wire" }
 anyhow = "1.0"
 rmcp = { version = "2.1.0", features = ["server", "transport-io", "macros"] }

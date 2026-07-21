@@ -9,7 +9,7 @@
 //! the one presenter path.
 
 use norn_config::RegisteredVault;
-use norn_core::apply::report::ApplyReport;
+use norn_wire::ApplyReport;
 use norn_wire::{
     CountReport, DescribeReport, EditReport, FindReport, GetReport, NewReport, SetReport,
     ValidateReport,

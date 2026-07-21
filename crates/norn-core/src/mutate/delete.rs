@@ -9,12 +9,12 @@
 //! reads it, cascades the redirect, then deletes.
 
 use super::{owner_index_options, MutationExecution};
-use crate::apply::report::{ApplyError, ApplyOutcome, ApplyReport};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use crate::target::{backlinks, resolve_target_path};
 use camino::Utf8PathBuf;
+use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use serde_json::{Map, Value};
 
 /// Execute a `delete`: forecast (`confirm == false`) or apply (`confirm == true`).

@@ -43,7 +43,7 @@ pub struct ApplyReport {
     pub outcome: ApplyOutcome,
     /// Every vault-relative path this apply TOUCHED on disk, populated only on the
     /// clean-commit path. The engine feeds it to the cache-increment commit
-    /// ([`crate::cache::VaultCacheSlot::commit_apply_increments`]) so the next
+    /// (`VaultCacheSlot::commit_apply_increments` in norn-core) so the next
     /// read stays cheap. NOT part of the wire contract — `#[serde(skip)]` keeps it
     /// out of `--format json` / MCP `structuredContent` and defaults it to empty
     /// on deserialize, so a refusal / partial-failure report (which never sets it)
