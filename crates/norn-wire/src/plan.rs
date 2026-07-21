@@ -118,10 +118,12 @@ impl MigrationPlan {
 // ── typed op payloads ─────────────────────────────────────────────────────────
 //
 // The typed successor to indexing `MigrationOp.fields` at execution (ADR 0016 /
-// NRN-405 part b). Each structural payload struct serializes to the SAME `fields`
-// object the on-disk plan carries — typing the vocabulary does NOT change the
-// parity-pinned plan JSON. Unknown fields are ignored (a repair-sourced op can
-// carry harmless leftover keys), matching the applier's prior tolerance.
+// NRN-405 part b). Each structural payload struct mirrors the keys of the
+// `fields` object the on-disk plan carries; [`TypedOp::try_from`] reads those
+// keys by hand with the applier's prior tolerance (unknown fields ignored — a
+// repair-sourced op can carry harmless leftover keys). The structs are a
+// construction-time view, never serialized — typing the vocabulary does NOT
+// change the parity-pinned plan JSON.
 //
 // The frontmatter/body change ops and the section/body edit ops carry payloads
 // that ARE `norn-core`'s own `PlannedChange` / `EditOp` models — types this crate
@@ -132,16 +134,15 @@ impl MigrationPlan {
 use serde_json::{Map, Value};
 
 /// `move_folder` payload: relocate a folder, cascading its documents.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MoveFolderFields {
     pub src: String,
     pub dst: String,
-    #[serde(default)]
     pub parents: bool,
 }
 
 /// `rewrite_wikilink` payload: rewrite every `[[old]]` reference to `[[new]]`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RewriteWikilinkFields {
     pub old: String,
     pub new: String,
@@ -149,24 +150,20 @@ pub struct RewriteWikilinkFields {
 
 /// `move_document` payload: relocate one document and (unless `no_link_rewrite`)
 /// cascade its backlinks.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MoveDocumentFields {
     pub src: String,
     pub dst: String,
-    #[serde(default)]
     pub parents: bool,
-    #[serde(default)]
     pub force: bool,
-    #[serde(default)]
     pub no_link_rewrite: bool,
 }
 
 /// `delete_document` payload: remove a document, optionally redirecting its
 /// incoming links to `rewrite_to`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeleteDocumentFields {
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub rewrite_to: Option<String>,
 }
 
