@@ -2058,6 +2058,75 @@ const MUTATE_CASES: &[Case] = &[
         normalize: TRACE_NORM,
         plan: None,
     },
+    // NRN-431 (delete variant, PD-116) — `delete --rewrite-to` redirects the embed
+    // backlink through the SAME cascade helpers as the move case. The oracle
+    // collapses `![[embed-target|Display]]` → `[[redirect-target]]`; the rewrite
+    // preserves `![[redirect-target|Display]]`. Pins the delete engine of PD-116's
+    // mechanism (mirroring how PD-117 pins both the cascade and the verb).
+    Case {
+        id: "wl-delete-embed-backlink-diverge",
+        argv: &[
+            "delete",
+            "embed-target",
+            "--rewrite-to",
+            "redirect-target",
+            "--yes",
+        ],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/embed-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // PD-119 (decided-better) — interior-whitespace canonicalization on rewrite.
+    // The reconstructed link emits the parser-trimmed target/alias, so a backlink
+    // with whitespace around the pipe or padding inside the brackets is rewritten
+    // to its canonical (tight) form. Byte-parity would require replicating the
+    // oracle's own inconsistency (it drops the target-side space but keeps the
+    // alias-side space); the padded-target match additionally fixes the oracle's
+    // phantom no-op (its untrimmed bare_target defeats its own match).
+    //
+    // Cascade move over a spaced-pipe aliased backlink: the oracle keeps the
+    // alias-side space (`[[spaced-moved| Display Name]]`), the rewrite trims it
+    // (`[[spaced-moved|Display Name]]`).
+    Case {
+        id: "wl-move-spaced-alias-diverge",
+        argv: &["move", "spaced-target", "wl/spaced-moved.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/spaced-alias-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // rewrite-wikilink over a padded (leading/trailing-whitespace) target link:
+    // the oracle phantom-no-ops (`[[ padded-target ]]` untouched), the rewrite
+    // matches on the trimmed target and rewrites it (`[[padded-renamed]]`).
+    Case {
+        id: "wl-rewrite-wikilink-padded-target-diverge",
+        argv: &[
+            "rewrite-wikilink",
+            "padded-target",
+            "padded-renamed",
+            "--yes",
+        ],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/padded-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
 ];
 
 /// Mutation-verb parity for `edit` (NRN-379): the atomic content-anchored

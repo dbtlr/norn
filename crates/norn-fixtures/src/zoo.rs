@@ -219,6 +219,18 @@ pub fn section_edge_docs() -> Vec<ZooDoc> {
 ///   carries a bare `^`. The oracle splits the target on `^`, so the rewrite
 ///   never matches and the file is left untouched while success is reported
 ///   (NRN-433); the rewrite splits on `#` only and rewrites `[[a^b]]`.
+/// - `wl/redirect-target.md` — the `delete --rewrite-to` redirect target for
+///   the PD-116 delete variant (same embed-marker mechanism as the move case).
+/// - `wl/spaced-target.md` + `wl/spaced-alias-src.md` — a
+///   `[[spaced-target | Display Name]]` backlink with interior whitespace around
+///   the pipe. On rewrite the reconstruction canonicalizes it: the oracle keeps
+///   the alias-side space (`[[moved| Display Name]]`), the rewrite trims it
+///   (`[[moved|Display Name]]`) — PD-119, decided-better.
+/// - `wl/padded-target.md` + `wl/padded-src.md` — a `[[ padded-target ]]`
+///   backlink with leading/trailing whitespace inside the brackets. The oracle's
+///   untrimmed `bare_target` defeats its own match, so `rewrite-wikilink`
+///   phantom-no-ops; the rewrite matches on the parser-trimmed target and
+///   rewrites it — PD-119, decided-better (the spaced-target match is a fix).
 pub fn wikilink_edge_docs() -> Vec<ZooDoc> {
     vec![
         valid_unlinkable("wl/embed-target.md", WL_EMBED_TARGET),
@@ -227,6 +239,11 @@ pub fn wikilink_edge_docs() -> Vec<ZooDoc> {
         valid_unlinkable("wl/fence-src.md", WL_FENCE_SRC),
         valid_unlinkable("wl/a^b.md", WL_CARET_TARGET),
         valid_unlinkable("wl/caret-src.md", WL_CARET_SRC),
+        valid_unlinkable("wl/redirect-target.md", WL_REDIRECT_TARGET),
+        valid_unlinkable("wl/spaced-target.md", WL_SPACED_TARGET),
+        valid_unlinkable("wl/spaced-alias-src.md", WL_SPACED_ALIAS_SRC),
+        valid_unlinkable("wl/padded-target.md", WL_PADDED_TARGET),
+        valid_unlinkable("wl/padded-src.md", WL_PADDED_SRC),
     ]
 }
 
@@ -623,6 +640,21 @@ const WL_CARET_TARGET: &str = "---\ntitle: Caret Target\n---\n\nCaret target bod
 /// A `[[a^b]]` backlink whose target stem carries a bare `^` (NRN-433): the
 /// caret is an ordinary filename character, not a block sigil.
 const WL_CARET_SRC: &str = "---\ntitle: Caret Src\n---\n\nSee [[a^b]] here.\n";
+
+const WL_REDIRECT_TARGET: &str = "---\ntitle: Redirect Target\n---\n\nRedirect target body.\n";
+
+const WL_SPACED_TARGET: &str = "---\ntitle: Spaced Target\n---\n\nSpaced target body.\n";
+/// A `[[spaced-target | Display Name]]` backlink with interior whitespace around
+/// the pipe (PD-119): the reconstruction canonicalizes it to
+/// `[[…|Display Name]]`, dropping the alias-side space the oracle keeps.
+const WL_SPACED_ALIAS_SRC: &str =
+    "---\ntitle: Spaced Alias Src\n---\n\nSee [[spaced-target | Display Name]] here.\n";
+
+const WL_PADDED_TARGET: &str = "---\ntitle: Padded Target\n---\n\nPadded target body.\n";
+/// A `[[ padded-target ]]` backlink with leading/trailing whitespace inside the
+/// brackets (PD-119): the oracle's untrimmed match fails and phantom-no-ops; the
+/// rewrite matches on the parser-trimmed target and rewrites it.
+const WL_PADDED_SRC: &str = "---\ntitle: Padded Src\n---\n\nSee [[ padded-target ]] here.\n";
 
 // ---- violation zoo content ------------------------------------------------
 

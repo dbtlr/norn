@@ -80,8 +80,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-424 adds four `mutate` wikilink-edge cases (an embed move cascade, two
     // code-fence-shadow rewrites, and a caret-stem rewrite-wikilink), taking the
     // total to 111; self-check runs oracle vs. itself, so all 111 Match.
+    // NRN-424 (review round) adds three more `mutate` wikilink-edge cases (a delete
+    // --rewrite-to embed variant, and the two PD-119 interior-whitespace cases),
+    // taking the total to 114; self-check runs oracle vs. itself, so all 114 Match.
     assert!(
-        stdout.contains("111 cases: 111 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("114 cases: 114 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -184,8 +187,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // move cascade and the rewrite-wikilink verb), and PD-118 (a caret-stem
     // rewrite-wikilink). The gated total grows to 110 and the diverged count from
     // 26 to 30; the match count stays 80.
+    // NRN-424 (review round) adds three more ported `mutate` cases: a `delete
+    // --rewrite-to` embed variant added to PD-116, and PD-119 (decided-better —
+    // interior-whitespace canonicalization on rewrite, a spaced-pipe cascade move
+    // and a padded-target rewrite-wikilink). The gated total grows to 113 and the
+    // diverged count from 30 to 33; the match count stays 80.
     assert!(
-        stdout.contains("110 cases: 80 match, 30 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("113 cases: 80 match, 33 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -209,6 +217,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-116",
         "PD-117",
         "PD-118",
+        "PD-119",
         "edit-setext-replace-section-diverge",
         "edit-setext-insert-after-heading-diverge",
         "edit-eof-heading-replace-section-diverge",
@@ -218,6 +227,9 @@ fn default_mode_gates_help_cases_exit_0() {
         "wl-move-code-fence-shadow-diverge",
         "wl-rewrite-wikilink-code-fence-shadow-diverge",
         "wl-rewrite-wikilink-caret-stem-diverge",
+        "wl-delete-embed-backlink-diverge",
+        "wl-move-spaced-alias-diverge",
+        "wl-rewrite-wikilink-padded-target-diverge",
         "apply-authored-kind-operation-mismatch-refusal-zoo",
         "apply-authored-unknown-kind-refusal-json-zoo",
         "apply-authored-missing-field-refusal-json-zoo",

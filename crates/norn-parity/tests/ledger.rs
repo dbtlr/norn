@@ -46,11 +46,12 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // two cases). NRN-437 added PD-115 (the SETEXT / heading-at-EOF section-op
     // corruption fix, five cases). NRN-424 added PD-116/117/118 (the
     // wikilink-rewriter unification: embed-marker, code-opacity, and caret-target
-    // corruptions).
+    // corruptions) and, on review, PD-119 (decided-better interior-whitespace
+    // canonicalization on rewrite).
     assert_eq!(
         ledger.entries.len(),
-        18,
-        "expected exactly PD-101..PD-118, found {}",
+        19,
+        "expected exactly PD-101..PD-119, found {}",
         ledger.entries.len()
     );
 
@@ -194,15 +195,20 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         norn_parity::ledger::Reason::DiscoveredInconsistency
     );
 
-    // The NRN-424 wikilink-rewriter divergences (PD-116/117/118): grouped by
-    // mechanism — the embed-marker drop (one move case), the code-opacity fix
-    // (two cases, move cascade + rewrite-wikilink verb), and the caret-target
-    // split (one rewrite-wikilink case).
+    // The NRN-424 wikilink-rewriter divergences: grouped by mechanism — PD-116
+    // the embed-marker drop (a move case AND a delete --rewrite-to variant, same
+    // cascade helpers), PD-117 the code-opacity fix (move cascade + rewrite-wikilink
+    // verb), PD-118 the caret-target split, and PD-119 (decided-better) the
+    // interior-whitespace canonicalization (a spaced-pipe move + a padded-target
+    // rewrite-wikilink).
     for (case, entry) in [
         ("wl-move-embed-backlink-diverge", "PD-116"),
+        ("wl-delete-embed-backlink-diverge", "PD-116"),
         ("wl-move-code-fence-shadow-diverge", "PD-117"),
         ("wl-rewrite-wikilink-code-fence-shadow-diverge", "PD-117"),
         ("wl-rewrite-wikilink-caret-stem-diverge", "PD-118"),
+        ("wl-move-spaced-alias-diverge", "PD-119"),
+        ("wl-rewrite-wikilink-padded-target-diverge", "PD-119"),
     ] {
         assert_eq!(
             ledger.entry_for_case(case).map(|e| e.id.as_str()),
@@ -221,6 +227,15 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
             "{case}'s entry is a discovered-inconsistency"
         );
     }
+    // PD-119 is the branch's first decided-better wikilink entry (the ruling).
+    assert_eq!(
+        ledger
+            .entry_for_case("wl-move-spaced-alias-diverge")
+            .unwrap()
+            .reason,
+        norn_parity::ledger::Reason::DecidedBetter,
+        "PD-119 is decided-better"
+    );
 }
 
 #[test]

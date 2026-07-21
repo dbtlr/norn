@@ -329,12 +329,14 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 # (`apply_rewrite_link` / `rewrite_one_backlink`).
 
 # PD-116 — NRN-431: the move/delete cascade dropped an embed's `!` and `|alias`.
+# Both cascade entry points are pinned: a `move` (the stem-only rewrite) and a
+# `delete --rewrite-to` (the redirect), which share the same cascade helpers.
 [[entry]]
 id = "PD-116"
-surface = "move (backlink cascade over an embed reference)"
-cases = ["wl-move-embed-backlink-diverge"]
-old = "the cascade rewrites an embed backlink with a `raw.strip_prefix(\"[[\")` that misses the leading `!` of `![[…]]`: the inner collapses and the whole embed is replaced by a bare wikilink, dropping the `!` AND the `|alias` (`![[embed-target|Display]]` → `[[embed-moved]]`)"
-new = "the cascade rebuilds the link through the parser (`reconstruct_wikilink`), preserving the embed marker and the alias: `![[embed-target|Display]]` → `![[embed-moved|Display]]`"
+surface = "move / delete --rewrite-to (backlink cascade over an embed reference)"
+cases = ["wl-move-embed-backlink-diverge", "wl-delete-embed-backlink-diverge"]
+old = "the cascade rewrites an embed backlink with a `raw.strip_prefix(\"[[\")` that misses the leading `!` of `![[…]]`: the inner collapses and the whole embed is replaced by a bare wikilink, dropping the `!` AND the `|alias` (`![[embed-target|Display]]` → `[[embed-moved]]` on a move; → `[[redirect-target]]` on a delete redirect)"
+new = "the cascade rebuilds the link through the parser (`reconstruct_wikilink`), preserving the embed marker and the alias: `![[embed-target|Display]]` → `![[embed-moved|Display]]` (move) / `![[redirect-target|Display]]` (delete redirect)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 
@@ -358,4 +360,27 @@ cases = ["wl-rewrite-wikilink-caret-stem-diverge"]
 old = "`split_target_suffix` splits the target at the first `#` OR `^`, but a bare `^` is an ordinary filename character per the parser (a block ref is `#^id`). So `rewrite-wikilink 'a^b' caret-renamed` matches the pre-`^` fragment `a` against the target `a^b`, never rewrites, and leaves `[[a^b]]` untouched while reporting success"
 new = "matching uses the parser's decomposition (split on `#` only), so the whole `a^b` target matches and `[[a^b]]` is rewritten to `[[caret-renamed]]`"
 reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-119 — NRN-424 (decided-better): interior-whitespace canonicalization on
+# rewrite. The unified rewriter reconstructs a link from the parser's decomposed
+# (trimmed) target and alias, so a backlink carrying interior whitespace — space
+# around the `|` pipe, or leading/trailing padding inside the `[[ ]]` — is
+# rewritten to its canonical tight form. This is DECIDED-BETTER, not a bug to
+# preserve: byte-parity would require replicating the oracle's OWN inconsistency
+# (its ad-hoc rewriters drop the target-side space but keep the alias-side space),
+# and the padded-target case additionally FIXES a phantom no-op — the oracle's
+# `rewrite-wikilink` compares an untrimmed `bare_target` (` padded-target `)
+# against the trimmed plan target (`padded-target`), never matches, and leaves the
+# file untouched while reporting success (the same family as the caret bug,
+# PD-118). Both cases exit 0 on both sides; the plan/report matches, the
+# post-state tree diverges. See `crates/norn-frontmatter/src/wikilink.rs`
+# (`reconstruct_wikilink`).
+[[entry]]
+id = "PD-119"
+surface = "move / rewrite-wikilink (a backlink with interior whitespace)"
+cases = ["wl-move-spaced-alias-diverge", "wl-rewrite-wikilink-padded-target-diverge"]
+old = "the ad-hoc rewriters preserve a link's interior whitespace verbatim, inconsistently: a move cascade over `[[spaced-target | Display Name]]` drops the target-side space but keeps the alias-side space (`[[spaced-moved| Display Name]]`), and `rewrite-wikilink` over `[[ padded-target ]]` matches its untrimmed `bare_target` against the trimmed plan target, so it never rewrites and leaves the link untouched while reporting success"
+new = "the reconstructed link emits the parser-trimmed target and alias, canonicalizing interior whitespace: `[[spaced-target | Display Name]]` → `[[spaced-moved|Display Name]]`, and `[[ padded-target ]]` matches on the trimmed target and rewrites to `[[padded-renamed]]` (the phantom no-op is fixed)"
+reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
