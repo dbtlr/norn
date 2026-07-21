@@ -74,11 +74,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // wrong-typed-member --format json refusals), taking the total to 102;
     // self-check ignores the divergence (oracle vs. itself always Matches), so all
     // 102 Match.
-    // NRN-437 adds four `edit` section-edge cases (SETEXT replace/insert-after +
-    // heading-at-EOF append/insert-after), taking the total to 106; self-check
-    // runs oracle vs. itself, so all 106 Match.
+    // NRN-437 adds five `edit` section-edge cases (SETEXT replace/insert-after +
+    // heading-at-EOF replace/append/insert-after), taking the total to 107;
+    // self-check runs oracle vs. itself, so all 107 Match.
     assert!(
-        stdout.contains("106 cases: 106 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("107 cases: 107 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -169,14 +169,14 @@ fn default_mode_gates_help_cases_exit_0() {
     // unknown-kind + missing-field + wrong-typed-member malformed-plan refusal
     // codes (PD-114, three cases). The gated total grows to 101 and the diverged
     // count from 17 to 21; the match count stays 80.
-    // NRN-437 adds four ported `edit` section-edge cases, all DIVERGING under one
+    // NRN-437 adds five ported `edit` section-edge cases, all DIVERGING under one
     // ledger entry (PD-115): SETEXT replace_section / insert_after_heading and
-    // heading-at-EOF append_to_section / insert_after_heading — the oracle
-    // corrupts the SETEXT underline / welds onto the EOF marker, the rewrite does
-    // not. The gated total grows to 105 and the diverged count from 21 to 25; the
-    // match count stays 80.
+    // heading-at-EOF replace_section / append_to_section / insert_after_heading —
+    // the oracle corrupts the SETEXT underline / welds onto the EOF marker, the
+    // rewrite does not. The gated total grows to 106 and the diverged count from
+    // 21 to 26; the match count stays 80.
     assert!(
-        stdout.contains("105 cases: 80 match, 25 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("106 cases: 80 match, 26 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -199,6 +199,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-115",
         "edit-setext-replace-section-diverge",
         "edit-setext-insert-after-heading-diverge",
+        "edit-eof-heading-replace-section-diverge",
         "edit-eof-heading-append-to-section-diverge",
         "edit-eof-heading-insert-after-heading-diverge",
         "apply-authored-kind-operation-mismatch-refusal-zoo",

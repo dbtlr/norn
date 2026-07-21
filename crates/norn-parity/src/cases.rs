@@ -1984,7 +1984,7 @@ const MUTATE_CASES: &[Case] = &[
 /// write-free on BOTH binaries, and the confirmed apply is proven to write a
 /// byte-identical tree on both (post-state compared). The NRN-379 cases are all
 /// `ported: true` and MATCH the oracle (pure byte-parity, no ledger entry); the
-/// four NRN-437 section-edge cases at the end DIVERGE with a ledger entry
+/// five NRN-437 section-edge cases at the end DIVERGE with a ledger entry
 /// (PD-115) — the oracle corrupts a SETEXT heading / a heading at EOF, the
 /// rewrite does not. The report shape,
 /// records/json rendering, the format-independent refusal surface, and the ops
@@ -2157,6 +2157,29 @@ const EDIT_CASES: &[Case] = &[
         ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("shapes/setext.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // EOF-no-newline replace_section: the section is empty and runs to EOF
+    // (body_start == end == len), so the replacement welds onto the marker on the
+    // oracle (`## TailNEW.`); the rewrite supplies the missing line terminator
+    // first (`## Tail\nNEW.`).
+    Case {
+        id: "edit-eof-heading-replace-section-diverge",
+        argv: &[
+            "edit",
+            "eof-heading",
+            "--edits-json",
+            "[{\"op\":\"replace_section\",\"heading\":\"Tail\",\"content\":\"NEW.\"}]",
+            "--yes",
+        ],
+        fixture: SECTION_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("shapes/eof-heading.md"),
         requires_code: None,
         normalize: TRACE_NORM,
         plan: None,

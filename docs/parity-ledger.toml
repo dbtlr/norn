@@ -291,21 +291,26 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 # to a paragraph) and `insert_after_heading` pushes text between the title and
 # its underline (dragging the inserted line under the heading). (2) A heading at
 # EOF with no trailing newline (`## Tail`): body_start == end == len, so an op
-# inserting body content welds it onto the marker (`## Tail- item`). The oracle
-# shares both bugs. The rewrite derives the body start from the parser's heading
-# construct end (which covers the SETEXT underline) and, for the EOF-no-newline
-# shape, supplies the missing line terminator before inserted content — so the
-# heading survives the edit. All four cases exit 0 on both sides; stdout (the
-# `body: X → Y bytes` line) and the post-state tree diverge. The other section
-# ops on these shapes (delete, insert_before, and append on SETEXT) already
-# agree and are covered by the in-crate regression tests, not gated here. See
-# `crates/norn-frontmatter/src/section.rs` (the resolver + `body_offset`) and
-# `crates/norn-core/src/edit/transform.rs` (the EOF separator).
+# inserting body content welds it onto the marker (`## Tail- item`) — for that
+# shape `replace_section` welds too, since the empty section runs to EOF. The
+# oracle shares both bugs. The rewrite derives the body start from the parser's
+# heading construct end (which covers the SETEXT underline) and, for the
+# EOF-no-newline shape, supplies the missing line terminator before inserted
+# content — so the heading survives the edit. All five cases exit 0 on both
+# sides; stdout (the `body: X → Y bytes` line) and the post-state tree diverge.
+# The remaining section ops on these shapes agree with the oracle and are covered
+# by the in-crate regression tests, not gated here: `delete_section` (both
+# shapes — it keys off `heading_start`/`end`, never `body_start`),
+# `insert_before_heading` (both shapes — it inserts at `heading_start`), and
+# `append_to_section` on the SETEXT shape (the underline is reinserted in place,
+# so the append happens to match). See `crates/norn-frontmatter/src/section.rs`
+# (the resolver + `body_offset`) and `crates/norn-core/src/edit/transform.rs`
+# (the EOF separator).
 [[entry]]
 id = "PD-115"
 surface = "edit (section ops on SETEXT / heading-at-EOF body shapes)"
-cases = ["edit-setext-replace-section-diverge", "edit-setext-insert-after-heading-diverge", "edit-eof-heading-append-to-section-diverge", "edit-eof-heading-insert-after-heading-diverge"]
-old = "the section body start is the byte after the heading marker's first newline: on a SETEXT heading it lands on the underline, so `replace_section` deletes the underline (`Alpha\\n-----\\nBody` → `Alpha\\nREPLACED.`) and `insert_after_heading` inserts above it (the underline then applies to the inserted line); on a heading at EOF with no trailing newline the inserted content welds onto the marker (`## Tail` + `- item` → `## Tail- item`)"
-new = "the body start is the parser's heading-construct end (past the SETEXT underline), and an op inserting body content after a heading with no trailing newline emits the missing line terminator first (NRN-437): the SETEXT underline is preserved (`Alpha\\n-----\\nREPLACED.` / the inserted line lands below the underline) and the EOF heading stays a heading (`## Tail\\n- item`) — a valid CommonMark heading survives the edit"
+cases = ["edit-setext-replace-section-diverge", "edit-setext-insert-after-heading-diverge", "edit-eof-heading-replace-section-diverge", "edit-eof-heading-append-to-section-diverge", "edit-eof-heading-insert-after-heading-diverge"]
+old = "the section body start is the byte after the heading marker's first newline: on a SETEXT heading it lands on the underline, so `replace_section` deletes the underline (`Alpha\\n-----\\nBody` → `Alpha\\nREPLACED.`) and `insert_after_heading` inserts above it (the underline then applies to the inserted line); on a heading at EOF with no trailing newline (`## Tail`) the empty section runs to EOF, so `replace_section`, `append_to_section`, and `insert_after_heading` all weld their content onto the marker (`## Tail` + `NEW.` → `## TailNEW.`; `## Tail` + `- item` → `## Tail- item`)"
+new = "the body start is the parser's heading-construct end (past the SETEXT underline), and an op inserting body content after a heading with no trailing newline emits the missing line terminator first (NRN-437): the SETEXT underline is preserved (`Alpha\\n-----\\nREPLACED.` / the inserted line lands below the underline) and the EOF heading stays a heading (`## Tail\\nNEW.` / `## Tail\\n- item`) — a valid CommonMark heading survives the edit"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

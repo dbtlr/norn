@@ -174,6 +174,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     for case in [
         "edit-setext-replace-section-diverge",
         "edit-setext-insert-after-heading-diverge",
+        "edit-eof-heading-replace-section-diverge",
         "edit-eof-heading-append-to-section-diverge",
         "edit-eof-heading-insert-after-heading-diverge",
     ] {
