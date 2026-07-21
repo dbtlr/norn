@@ -282,3 +282,30 @@ old = "every malformed-plan refusal flattens to `code: internal-error` (the type
 new = "the typed error survives to the envelope: an unknown op kind reports `code: unknown-operation-kind`, and the missing-field / non-object / kind-operation-mismatch / wrong-typed-member family reports `code: malformed-plan` — a machine-branchable signal that the plan, not norn, is at fault. Exit 2 unchanged; the unknown-kind and missing-field messages are unchanged, and a wrong-typed-member decode failure additionally names the kind (`op.fields for <kind> could not be decoded: <serde text>`)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-437 (a section edit must not corrupt valid CommonMark): the section
+# resolver derives a section's body start as "the byte after the first newline
+# following the heading marker". That corrupts two accepted CommonMark heading
+# shapes. (1) A SETEXT heading (`Alpha` underlined by `-----`): the body start
+# lands ON the underline, so `replace_section` consumes it (demoting the heading
+# to a paragraph) and `insert_after_heading` pushes text between the title and
+# its underline (dragging the inserted line under the heading). (2) A heading at
+# EOF with no trailing newline (`## Tail`): body_start == end == len, so an op
+# inserting body content welds it onto the marker (`## Tail- item`). The oracle
+# shares both bugs. The rewrite derives the body start from the parser's heading
+# construct end (which covers the SETEXT underline) and, for the EOF-no-newline
+# shape, supplies the missing line terminator before inserted content — so the
+# heading survives the edit. All four cases exit 0 on both sides; stdout (the
+# `body: X → Y bytes` line) and the post-state tree diverge. The other section
+# ops on these shapes (delete, insert_before, and append on SETEXT) already
+# agree and are covered by the in-crate regression tests, not gated here. See
+# `crates/norn-frontmatter/src/section.rs` (the resolver + `body_offset`) and
+# `crates/norn-core/src/edit/transform.rs` (the EOF separator).
+[[entry]]
+id = "PD-115"
+surface = "edit (section ops on SETEXT / heading-at-EOF body shapes)"
+cases = ["edit-setext-replace-section-diverge", "edit-setext-insert-after-heading-diverge", "edit-eof-heading-append-to-section-diverge", "edit-eof-heading-insert-after-heading-diverge"]
+old = "the section body start is the byte after the heading marker's first newline: on a SETEXT heading it lands on the underline, so `replace_section` deletes the underline (`Alpha\\n-----\\nBody` → `Alpha\\nREPLACED.`) and `insert_after_heading` inserts above it (the underline then applies to the inserted line); on a heading at EOF with no trailing newline the inserted content welds onto the marker (`## Tail` + `- item` → `## Tail- item`)"
+new = "the body start is the parser's heading-construct end (past the SETEXT underline), and an op inserting body content after a heading with no trailing newline emits the missing line terminator first (NRN-437): the SETEXT underline is preserved (`Alpha\\n-----\\nREPLACED.` / the inserted line lands below the underline) and the EOF heading stays a heading (`## Tail\\n- item`) — a valid CommonMark heading survives the edit"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

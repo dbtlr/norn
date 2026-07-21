@@ -175,6 +175,29 @@ pub fn mutate_edge_docs() -> Vec<ZooDoc> {
     ]
 }
 
+/// The section-edge zoo — emitted only when `Profile::section_edge` is set. Two
+/// documents whose BODY carries a heading shape that the NRN-437 section-op fix
+/// corrects, isolated on a dedicated profile (the text-edge / mutate-edge
+/// discipline) so the decided divergence never perturbs a shared zoo/clean case:
+///
+/// - `shapes/setext.md` — a SETEXT heading (`Alpha` underlined by `-----`). A
+///   section op that derives the body start from a manual "byte after the first
+///   newline" scan lands ON the underline and corrupts the heading (a
+///   `replace_section` consumes the underline, demoting the heading to a
+///   paragraph; an `insert_after_heading` pushes text between the title and its
+///   underline). The oracle does this; the rewrite derives the body start from
+///   the heading construct's end, keeping the underline welded to its title.
+/// - `shapes/eof-heading.md` — a heading at EOF with NO trailing newline. An op
+///   inserting body content must supply the missing line terminator first; the
+///   oracle welds the content onto the marker (`## Tail- item`), the rewrite
+///   separates it (`## Tail\n- item`).
+pub fn section_edge_docs() -> Vec<ZooDoc> {
+    vec![
+        valid_unlinkable("shapes/setext.md", SETEXT_DOC),
+        valid_unlinkable("shapes/eof-heading.md", EOF_HEADING_DOC),
+    ]
+}
+
 /// The violation zoo, emitted only when `Profile::violations` is true. Each
 /// doc's `codes` are exactly what the pinned oracle reports against it.
 pub fn violation_docs() -> Vec<ViolationDoc> {
@@ -537,6 +560,19 @@ const NULL_BLOCK: &str = "---\nnull\n---\n\nBody under a bare-null frontmatter b
 /// the rewrite preserves the comment and appends the field after it.
 const COMMENT_BLOCK: &str =
     "---\n# only a comment, no keys\n---\n\nBody under a comment-only frontmatter block.\n";
+
+// ---- section-edge content --------------------------------------------------
+
+/// A SETEXT heading (`Alpha` underlined by `-----`) followed by an ordinary ATX
+/// section (NRN-437). The underline is part of the heading; a section op must
+/// keep it welded to its title line.
+const SETEXT_DOC: &str =
+    "---\ntitle: Setext Doc\n---\n\nAlpha\n-----\n\nBody under alpha.\n\n## Beta\n\nBody under beta.\n";
+
+/// A heading at end-of-file with NO trailing newline (NRN-437). An op inserting
+/// body content must supply the missing line terminator, else the content welds
+/// onto the heading marker. Deliberately not newline-terminated.
+const EOF_HEADING_DOC: &str = "---\ntitle: EOF Heading Doc\n---\n\n## Tail";
 
 // ---- violation zoo content ------------------------------------------------
 
