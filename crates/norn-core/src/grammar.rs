@@ -837,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_find_is_byte_identical() {
+    fn canonical_find_argv_normalizes_to_itself() {
         let input = ["norn", "find", "--eq", "type:note", "--limit", "3"];
         let n = norm(&input);
         assert_eq!(

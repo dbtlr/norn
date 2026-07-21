@@ -1,5 +1,5 @@
-//! Byte-determinism: the same `(profile, seed)` must produce a
-//! byte-identical vault tree, and a different seed must change at least one
+//! Byte-determinism: the same `(profile, seed)` is pinned to the same vault
+//! tree by the determinism suite, and a different seed must change at least one
 //! byte somewhere (sanity that the seed actually matters).
 //!
 //! The cases cover both rng-consumption branch families deliberately: `zoo`
@@ -30,7 +30,7 @@ fn assert_same_tree(a: &BTreeMap<String, Vec<u8>>, b: &BTreeMap<String, Vec<u8>>
 }
 
 #[test]
-fn zoo_is_byte_deterministic() {
+fn zoo_is_deterministic_per_seed() {
     // Static zoo, no rng consumed — pins the fixed content.
     assert_same_tree(
         &tree(&Profile::zoo(), 42),
@@ -40,7 +40,7 @@ fn zoo_is_byte_deterministic() {
 }
 
 #[test]
-fn clean_seed_7_is_byte_deterministic() {
+fn clean_seed_7_is_deterministic_per_seed() {
     // Seeded expansion, non-violating arm.
     assert_same_tree(
         &tree(&Profile::clean(), 7),
@@ -50,7 +50,7 @@ fn clean_seed_7_is_byte_deterministic() {
 }
 
 #[test]
-fn violations_seed_42_is_byte_deterministic() {
+fn violations_seed_42_is_deterministic_per_seed() {
     // Seeded expansion, violating arm.
     assert_same_tree(
         &tree(&Profile::violations(), 42),

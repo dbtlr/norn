@@ -1928,7 +1928,7 @@ mod tests {
     /// vault stays byte-identical and the outcome is `refused` (exit 2) — never
     /// `failed` — on the report-on-refusal surface.
     #[test]
-    fn clean_prewrite_refusal_stays_refused_byte_identical() {
+    fn clean_prewrite_refusal_leaves_the_vault_untouched() {
         let (tmp, index) = synth_vault();
         let original = std::fs::read_to_string(tmp.path().join("a.md")).unwrap();
         let vault_root = tmp.path().to_string_lossy().to_string();
