@@ -9,7 +9,7 @@
 
 use crate::cli::{GlobalArgs, MoveArgs};
 use crate::display::{Diagnostic, MoveMutationView, Output};
-use norn_core::apply::report::ApplyReport;
+use norn_wire::ApplyReport;
 use norn_wire::MoveParams;
 
 /// Run a `move` mutation and return its report as an [`Output`], or a

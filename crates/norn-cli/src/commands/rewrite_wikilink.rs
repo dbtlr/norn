@@ -9,7 +9,7 @@
 
 use crate::cli::{GlobalArgs, RewriteWikilinkArgs};
 use crate::display::{Diagnostic, Output, RewriteWikilinkView};
-use norn_core::apply::report::ApplyReport;
+use norn_wire::ApplyReport;
 use norn_wire::RewriteWikilinkParams;
 
 /// Run a `rewrite-wikilink` mutation and return its report as an [`Output`], or a

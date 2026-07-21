@@ -28,12 +28,14 @@
 //!   separator forgiveness, the query-family dynamic-predicate desugar
 //!   ([`grammar::normalize_argv`]), and the field-universe gate. clap-free; the
 //!   CLI injects its known-flag surface as a value.
-//! - [`plan`] — the typed-op [`plan::MigrationPlan`] model: operations, owner-set
-//!   preconditions (ADR 0015), and the content-addressed canonical hash. A
-//!   surface-neutral, serializable artifact that crosses the wire as plan bytes.
-//! - [`apply`] — the mutation apply substrate: the [`apply::ApplyReport`] output
-//!   vocabulary and outcome→exit mapping, and the ADR 0015 owner-set precondition
-//!   barrier ([`apply::evaluate_owner_preconditions`]).
+//! - The typed-op [`norn_wire::MigrationPlan`] model — operations, owner-set
+//!   preconditions (ADR 0015), and the content-addressed canonical hash — lives
+//!   in norn-wire (the end-user plan contract). A surface-neutral, serializable
+//!   artifact that crosses the wire as plan bytes.
+//! - [`apply`] — the mutation apply substrate: applies the
+//!   [`norn_wire::ApplyReport`] output vocabulary and outcome→exit mapping, and
+//!   the ADR 0015 owner-set precondition barrier
+//!   ([`apply::evaluate_owner_preconditions`]).
 //! - [`seq_alloc`] — apply-time `{{seq}}` id allocation (filesystem max+1),
 //!   coupled to the writer boundary the owner holds.
 //!
@@ -52,7 +54,6 @@ pub mod grammar;
 pub mod graph;
 pub mod links;
 pub mod mutate;
-pub mod plan;
 pub mod planner;
 pub mod query;
 pub mod read;

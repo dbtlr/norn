@@ -11,13 +11,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::coerce::{self, CoerceError};
 use super::{owner_index_options, MutationExecution};
-use crate::apply::{apply_migration_plan, ApplyContext, ApplyOutcome, OpStatus};
+use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::{Document, GraphIndex};
-use crate::plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use crate::standards::VaultConfig;
+use norn_wire::{ApplyOutcome, OpStatus};
 use norn_wire::{
     CodedError, FrontmatterChange, MutationOutcome, MutationWarning, SetParams, SetReport,
 };
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use serde_json::{Map, Value};
 
 /// Execute a `set`: forecast (`confirm == false`) or apply (`confirm == true`).

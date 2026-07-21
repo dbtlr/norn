@@ -5,12 +5,12 @@
 //! into the unified `MigrationPlan` format.
 
 use crate::domain::GraphIndex;
-use crate::plan::MIGRATION_PLAN_SCHEMA_VERSION;
-use crate::plan::{MigrationOp, MigrationPlan, SkippedFinding};
 use crate::standards::{
     plan_repairs, Confidence, Finding, FootnoteDetails, RepairConfig, RepairPlanFilters,
 };
 use camino::Utf8PathBuf;
+use norn_wire::MIGRATION_PLAN_SCHEMA_VERSION;
+use norn_wire::{MigrationOp, MigrationPlan, SkippedFinding};
 use std::collections::HashMap;
 
 /// Adapter: runs `plan_repairs` and converts the resulting `RepairPlan` into

@@ -12,13 +12,14 @@
 //! `Refused` report carrying a coded error, never a bare `Err`.
 
 use super::{owner_index_options, MutationExecution};
-use crate::apply::{apply_migration_plan, ApplyContext, ApplyOutcome, OpStatus};
+use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::edit::ops::EditOp;
 use crate::edit::transform::apply_edits;
-use crate::plan::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
+use norn_wire::{ApplyOutcome, OpStatus};
 use norn_wire::{
     CodedError, EditChange, EditParams, EditReport, MutationOutcome, EDIT_REPORT_SCHEMA_VERSION,
 };
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use serde_json::{Map, Value};
 
 /// Execute an `edit`: forecast (`confirm == false`) or apply (`confirm == true`).

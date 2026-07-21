@@ -8,7 +8,7 @@
 
 use crate::cli::{DeleteArgs, GlobalArgs};
 use crate::display::{DeleteMutationView, Diagnostic, Output};
-use norn_core::apply::report::ApplyReport;
+use norn_wire::ApplyReport;
 use norn_wire::DeleteParams;
 
 /// Run a `delete` mutation and return its report as an [`Output`], or a

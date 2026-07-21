@@ -32,8 +32,10 @@ mod control;
 mod filter;
 mod mutate;
 mod paging;
+mod plan;
 mod presence;
 mod read;
+mod report;
 
 pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 pub use filter::FilterParams;
@@ -43,12 +45,21 @@ pub use mutate::{
     RewriteWikilinkParams, SetParams, SetReport, EDIT_REPORT_SCHEMA_VERSION,
 };
 pub use paging::SortPaginateParams;
+pub use plan::{
+    MigrationOp, MigrationPlan, OwnerSelector, PlanPrecondition, SkippedFinding,
+    MIGRATION_PLAN_SCHEMA_VERSION,
+};
 pub use presence::Presence;
 pub use read::{
     CountParams, CountReport, CreatableRule, DataSummary, DateBounds, DescribeParams,
     DescribeReport, FieldDistribution, FindDoc, FindParams, FindReport, GetParams, GetRecord,
     GetReport, GroupNode, PathRule, RepairParams, RepairReport, SkippedField, ValidateParams,
     ValidateReport, ValueCount,
+};
+pub use report::{
+    ApplyError, ApplyOutcome, ApplyReport, ApplyReportOp, ApplyReportPrecondition, ApplyWarning,
+    CascadeFailure, CascadeRewrite, CascadeSkip, CascadeSummary, LinkImpact, OpStatus,
+    PreconditionStatus, APPLY_REPORT_SCHEMA_VERSION,
 };
 
 /// One-line boundary contract, referenced by every dependent so each

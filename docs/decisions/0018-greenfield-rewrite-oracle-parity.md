@@ -43,3 +43,13 @@ The rewrite replaces the stable line only after: the full parity suite is green,
 
 - [0017](./0017-registered-vaults-summoned-owners.md) — execution assumptions (the *what* is unchanged).
 - The target-architecture boundary contract — crate table gains `norn-wire` and `norn-frontmatter`; the touch-by-touch migration stance is replaced by this ADR's model.
+
+## Amendment — 2026-07-21: the contract-type boundary rule
+
+The rewrite settled the crate boundary for end-user contract types, recorded here as the standing rule (aligned with `docs/architecture.md` principle 1):
+
+- **End-user contract types live in `norn-wire`.** Every shape a caller reads — plans (`MigrationPlan` and its ops/preconditions), reports (`ApplyReport`), and the warning/error envelopes — is a pure serde struct in `norn-wire`. `norn-core` constructs the values; the client and surface crates render them. `norn-wire` carries no logic and no I/O beyond the pure data/serde methods these types own.
+- **Surface and client crates never depend on `norn-core`.** They depend on the `norn-wire` vocabulary, not the engine. This keeps "the client never opens a cache" compile-enforced.
+- **A crate edge must carry real code.** A dependency declared only to reference another crate's `CONTRACT` const — with no type or function actually used across it — is a manifest lie and comes out. The `norn-mcp → norn-core` edge was exactly such a CONTRACT-const-only edge and was removed.
+
+An engine method that needs `norn-core` internals cannot ride on a `norn-wire` type; it becomes a free function or extension in `norn-core` (the coded-error envelope constructors are the example).

@@ -955,7 +955,7 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
 /// null fallback degrades to a client protocol error rather than a panic.
 fn apply_report_frame(
     make: impl FnOnce(serde_json::Value) -> OwnerFrame,
-) -> impl FnOnce(norn_core::apply::report::ApplyReport) -> OwnerFrame {
+) -> impl FnOnce(norn_wire::ApplyReport) -> OwnerFrame {
     move |report| make(serde_json::to_value(&report).unwrap_or(serde_json::Value::Null))
 }
 

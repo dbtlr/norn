@@ -16,9 +16,9 @@ use std::io::Read;
 
 use crate::cli::{ApplyArgs, ApplyFormat, GlobalArgs, InputFormat};
 use crate::display::{ApplyMutationView, Diagnostic, Output};
-use norn_core::apply::report::{ApplyError, ApplyReport};
-use norn_core::plan::{MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use norn_wire::ApplyParams;
+use norn_wire::{ApplyError, ApplyReport};
+use norn_wire::{MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 
 /// Run an `apply` and return its report as an [`Output`], or a soft-landing
 /// [`Diagnostic`] on a bad/unreadable plan or a connection/owner failure. A
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn schema_mismatch_refusal_dry_run_tracks_confirm_ladder() {
         use crate::display::Output;
-        use norn_core::apply::report::ApplyOutcome;
+        use norn_wire::ApplyOutcome;
 
         let dir = std::env::temp_dir().join(format!("norn-apply-schema-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

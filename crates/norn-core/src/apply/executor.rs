@@ -19,13 +19,7 @@ use crate::apply::preconditions::{
     build_owner_precondition_refusal_report, evaluate_owner_preconditions,
 };
 use crate::apply::repair_apply::{apply_repair_plan_with_context, CreateApplyContext};
-use crate::apply::report::{
-    ApplyReport, ApplyReportOp, ApplyReportPrecondition, ApplyWarning, CascadeFailure,
-    CascadeRewrite, CascadeSkip, CascadeSummary, LinkImpact, OpStatus, PreconditionStatus,
-    APPLY_REPORT_SCHEMA_VERSION,
-};
 use crate::domain::GraphIndex;
-use crate::plan::{MigrationOp, MigrationPlan};
 use crate::planner::intent::{expand, HIGH_LEVEL_KINDS};
 use crate::standards::apply::CascadeRecord;
 use crate::standards::apply::RepairApplyReport;
@@ -40,6 +34,12 @@ use crate::telemetry::event::{
 use crate::telemetry::Event;
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
+use norn_wire::{
+    ApplyReport, ApplyReportOp, ApplyReportPrecondition, ApplyWarning, CascadeFailure,
+    CascadeRewrite, CascadeSkip, CascadeSummary, LinkImpact, OpStatus, PreconditionStatus,
+    APPLY_REPORT_SCHEMA_VERSION,
+};
+use norn_wire::{MigrationOp, MigrationPlan};
 use std::collections::{BTreeSet, HashMap};
 
 /// Context for `apply_migration_plan`.
@@ -171,7 +171,7 @@ pub fn apply_migration_plan(
                         plan,
                         ctx.dry_run,
                         i,
-                        crate::apply::report::ApplyError::from_anyhow(&e),
+                        crate::apply::envelope::from_anyhow(&e),
                     ));
                 }
                 return Err(e);
@@ -355,8 +355,8 @@ pub fn apply_migration_plan(
                 // and which op failed, and knows to re-read rather than retry.
                 let rich = e.downcast_ref::<crate::standards::apply::ApplyError>();
                 let envelope = rich
-                    .map(crate::apply::report::ApplyError::from_rich)
-                    .unwrap_or_else(|| crate::apply::report::ApplyError::from_anyhow(&e));
+                    .map(crate::apply::envelope::from_rich)
+                    .unwrap_or_else(|| crate::apply::envelope::from_anyhow(&e));
                 let error_path = rich.and_then(|r| r.path().map(|p| p.to_path_buf()));
                 let trace_id = sink.trace_id().to_string();
                 return Ok(build_partial_failure_report(
@@ -391,8 +391,8 @@ pub fn apply_migration_plan(
             if ctx.refuse_as_report {
                 let rich = e.downcast_ref::<crate::standards::apply::ApplyError>();
                 let envelope = rich
-                    .map(crate::apply::report::ApplyError::from_rich)
-                    .unwrap_or_else(|| crate::apply::report::ApplyError::from_anyhow(&e));
+                    .map(crate::apply::envelope::from_rich)
+                    .unwrap_or_else(|| crate::apply::envelope::from_anyhow(&e));
                 let error_path = rich.and_then(|r| r.path().map(|p| p.to_path_buf()));
                 return Ok(build_refusal_report(
                     plan,
@@ -473,9 +473,9 @@ pub fn apply_migration_plan(
     // apply/dry-run succeeded (`applied`, exit 0). The `refused` outcome (exit 2)
     // is produced only by `build_refusal_report` on a precondition refusal.
     let outcome = if failed > 0 {
-        crate::apply::report::ApplyOutcome::Failed
+        norn_wire::ApplyOutcome::Failed
     } else {
-        crate::apply::report::ApplyOutcome::Applied
+        norn_wire::ApplyOutcome::Applied
     };
 
     // Dry-runs persist no log, so the trace_id correlates to nothing — emit
@@ -515,7 +515,7 @@ fn assemble_report(
     ops: Vec<ApplyReportOp>,
     preconditions: Vec<ApplyReportPrecondition>,
     warnings: Vec<ApplyWarning>,
-    outcome: crate::apply::report::ApplyOutcome,
+    outcome: norn_wire::ApplyOutcome,
     touched_paths: Vec<Utf8PathBuf>,
 ) -> ApplyReport {
     let count = |status: OpStatus| ops.iter().filter(|o| o.status == status).count();
@@ -617,11 +617,11 @@ fn build_refusal_report(
     changes: &[PlannedChange],
     provenance: &[usize],
     dry_run: bool,
-    envelope: crate::apply::report::ApplyError,
+    envelope: norn_wire::ApplyError,
     error_path: Option<&Utf8Path>,
     preconditions: Vec<ApplyReportPrecondition>,
 ) -> ApplyReport {
-    use crate::apply::report::ApplyOutcome;
+    use norn_wire::ApplyOutcome;
 
     // Index of the op to mark failed: the first change whose path matches the
     // error path; else the first op (pathless plan-level refusal).
@@ -705,7 +705,7 @@ fn refuse_plan_level(
             plan,
             dry_run,
             0,
-            crate::apply::report::ApplyError::from_anyhow(&error),
+            crate::apply::envelope::from_anyhow(&error),
         ))
     } else {
         Err(error)
@@ -716,9 +716,9 @@ fn build_plan_refusal_report(
     plan: &MigrationPlan,
     dry_run: bool,
     failed_op_idx: usize,
-    envelope: crate::apply::report::ApplyError,
+    envelope: norn_wire::ApplyError,
 ) -> ApplyReport {
-    use crate::apply::report::ApplyOutcome;
+    use norn_wire::ApplyOutcome;
 
     let mut ops: Vec<ApplyReportOp> = plan
         .operations
@@ -809,12 +809,12 @@ fn build_partial_failure_report(
     provenance: &[usize],
     span_ids: &[String],
     events: &[Event],
-    envelope: crate::apply::report::ApplyError,
+    envelope: norn_wire::ApplyError,
     error_path: Option<&Utf8Path>,
     trace_id: &str,
     preconditions: Vec<ApplyReportPrecondition>,
 ) -> ApplyReport {
-    use crate::apply::report::ApplyOutcome;
+    use norn_wire::ApplyOutcome;
 
     // Per-change: did an `applied` op-action event land under this op's span?
     // Same event-driven inference `build_report_ops` uses for the Ok path.
@@ -1361,9 +1361,9 @@ fn build_report_ops(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{MigrationOp, MigrationPlan};
     use crate::telemetry::{Clock, EventSink, IdGen};
     use camino::Utf8Path;
+    use norn_wire::{MigrationOp, MigrationPlan};
 
     /// A deterministic in-memory sink for the applier unit tests.
     fn test_sink() -> EventSink {
@@ -1454,7 +1454,7 @@ mod tests {
         assert_eq!(report.applied, 1);
         assert!(matches!(
             report.operations[0].status,
-            crate::apply::report::OpStatus::Applied
+            norn_wire::OpStatus::Applied
         ));
         // Apply: file moved
         assert!(!tmp.path().join("a.md").exists());
@@ -1901,21 +1901,15 @@ mod tests {
 
         assert_eq!(
             report.outcome,
-            crate::apply::report::ApplyOutcome::Failed,
+            norn_wire::ApplyOutcome::Failed,
             "a write landed before the abort — the outcome is failed, NOT refused"
         );
         assert_eq!(report.exit_code(), 1, "partial apply maps to exit 1");
         assert_eq!(report.applied, 1, "op0 wrote X");
         // op0: applied (X mutated).
-        assert_eq!(
-            report.operations[0].status,
-            crate::apply::report::OpStatus::Applied
-        );
+        assert_eq!(report.operations[0].status, norn_wire::OpStatus::Applied);
         // op1: failed carrying the structured code.
-        assert_eq!(
-            report.operations[1].status,
-            crate::apply::report::OpStatus::Failed
-        );
+        assert_eq!(report.operations[1].status, norn_wire::OpStatus::Failed);
         assert_eq!(
             report.operations[1].error.as_ref().map(|e| e.code.as_str()),
             Some("unknown-path"),
@@ -1969,13 +1963,10 @@ mod tests {
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink())
             .expect("a precondition refusal returns a report on the MCP surface");
 
-        assert_eq!(report.outcome, crate::apply::report::ApplyOutcome::Refused);
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
         assert_eq!(report.exit_code(), 2);
         assert_eq!(report.applied, 0);
-        assert_eq!(
-            report.operations[0].status,
-            crate::apply::report::OpStatus::Failed
-        );
+        assert_eq!(report.operations[0].status, norn_wire::OpStatus::Failed);
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("a.md")).unwrap(),
             original,
@@ -2025,11 +2016,11 @@ mod tests {
         let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink())
             .expect("a bare pre-write refusal must return a report, not Err");
 
-        assert_eq!(report.outcome, crate::apply::report::ApplyOutcome::Refused);
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
         assert_eq!(report.exit_code(), 2, "a clean refusal maps to exit 2");
         assert_eq!(report.applied, 0);
         let op = &report.operations[0];
-        assert_eq!(op.status, crate::apply::report::OpStatus::Failed);
+        assert_eq!(op.status, norn_wire::OpStatus::Failed);
         let err = op.error.as_ref().expect("failed op carries an error");
         assert_eq!(
             err.code, "internal-error",
@@ -2085,13 +2076,10 @@ mod tests {
             &mut test_sink(),
         )
         .expect("an expansion failure must return a report under refuse_as_report");
-        assert_eq!(report.outcome, crate::apply::report::ApplyOutcome::Refused);
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
         assert_eq!(report.exit_code(), 2);
         assert_eq!(report.operations.len(), 1);
-        assert_eq!(
-            report.operations[0].status,
-            crate::apply::report::OpStatus::Failed
-        );
+        assert_eq!(report.operations[0].status, norn_wire::OpStatus::Failed);
         assert!(report.operations[0]
             .error
             .as_ref()
@@ -2275,7 +2263,7 @@ mod tests {
 
         let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
             .expect("a pre-write create-path refusal must return a report, not Err");
-        assert_eq!(report.outcome, crate::apply::report::ApplyOutcome::Refused);
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
         assert_eq!(report.exit_code(), 2);
         let err = report
             .operations
@@ -2291,7 +2279,7 @@ mod tests {
         let err = apply_migration_plan(&plan, &index, refuse_report_ctx(false), &mut test_sink())
             .expect_err("the CLI surface keeps propagating the bare Err");
         assert_eq!(
-            crate::apply::report::ApplyError::from_anyhow(&err).code,
+            crate::apply::envelope::from_anyhow(&err).code,
             "containment-parent-traversal"
         );
     }
@@ -2325,7 +2313,7 @@ mod tests {
 
         let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
             .expect("a `{{seq}}`-twice refusal must return a report, not Err");
-        assert_eq!(report.outcome, crate::apply::report::ApplyOutcome::Refused);
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
         assert_eq!(report.exit_code(), 2);
         let err = report
             .operations
@@ -2358,9 +2346,9 @@ mod tests {
             vault_root,
             generator: None,
             generated_at: None,
-            preconditions: vec![crate::plan::PlanPrecondition::OwnerSet {
+            preconditions: vec![norn_wire::PlanPrecondition::OwnerSet {
                 id: "owner".into(),
-                selector: crate::plan::OwnerSelector::StemFromOperation {
+                selector: norn_wire::OwnerSelector::StemFromOperation {
                     stem_from_operation: "does-not-exist".into(),
                 },
                 expected_paths: vec![],
@@ -2381,7 +2369,7 @@ mod tests {
 
         let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
             .expect("an owner-precondition validation refusal must return a report, not Err");
-        assert_eq!(report.outcome, crate::apply::report::ApplyOutcome::Refused);
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
         assert_eq!(report.exit_code(), 2);
         let err = report
             .operations
@@ -2432,7 +2420,7 @@ mod tests {
 
         let report = apply_migration_plan(&plan, &index, refuse_report_ctx(true), &mut test_sink())
             .expect("a vault-root-mismatch must return a report, not Err");
-        assert_eq!(report.outcome, crate::apply::report::ApplyOutcome::Refused);
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
         assert_eq!(report.exit_code(), 2);
         let err = report
             .operations
@@ -2451,7 +2439,7 @@ mod tests {
         let err = apply_migration_plan(&plan, &index, refuse_report_ctx(false), &mut test_sink())
             .expect_err("the CLI surface keeps propagating the bare Err");
         assert_eq!(
-            crate::apply::report::ApplyError::from_anyhow(&err).code,
+            crate::apply::envelope::from_anyhow(&err).code,
             "vault-root-mismatch"
         );
     }
@@ -2482,9 +2470,9 @@ mod tests {
             vault_root: root.to_string_lossy().to_string(),
             generator: None,
             generated_at: None,
-            preconditions: vec![crate::plan::PlanPrecondition::OwnerSet {
+            preconditions: vec![norn_wire::PlanPrecondition::OwnerSet {
                 id: "foo-owner".into(),
-                selector: crate::plan::OwnerSelector::Stem { stem: "foo".into() },
+                selector: norn_wire::OwnerSelector::Stem { stem: "foo".into() },
                 // Author-supplied lowercase path vs the on-disk `Foo.md`.
                 expected_paths: vec!["foo.md".into()],
             }],
@@ -2497,12 +2485,12 @@ mod tests {
             .expect("apply returns a report");
         assert_eq!(
             report.outcome,
-            crate::apply::report::ApplyOutcome::Refused,
+            norn_wire::ApplyOutcome::Refused,
             "an exact-comparison case mismatch must refuse (fail-safe); report: {report:?}"
         );
         assert_eq!(
             report.preconditions[0].status,
-            crate::apply::report::PreconditionStatus::Failed
+            norn_wire::PreconditionStatus::Failed
         );
     }
 }
