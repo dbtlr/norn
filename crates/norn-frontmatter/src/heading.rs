@@ -27,6 +27,17 @@ pub struct Heading {
     pub slug: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_span: Option<SourceSpan>,
+    /// Byte offset just past the whole heading construct — where the section
+    /// body begins. For an ATX heading this is the byte after its line's `\n`;
+    /// for a SETEXT heading it is the byte after the underline's `\n` (the
+    /// underline is part of the heading, not the body). Taken from the parser's
+    /// heading source range end, so it is correct for both forms and for a
+    /// heading at EOF with no trailing newline (NRN-437). `None` on a heading
+    /// reconstructed from the cache (spans are a parse-time artifact the cache
+    /// does not persist); section resolution always re-parses the live body, so
+    /// it never observes the `None` case.
+    #[serde(skip)]
+    pub body_offset: Option<usize>,
 }
 
 /// Parse every heading in `body`. Spans are byte offsets into `body`.
@@ -48,6 +59,9 @@ pub fn parse_headings(body: &str) -> Vec<Heading> {
                         slug: slugify(&text),
                         text,
                         source_span: Some(SourceSpan::at(body, start)),
+                        // `range.end` covers the whole heading construct: the ATX
+                        // line (through its `\n`) or the SETEXT underline line.
+                        body_offset: Some(range.end),
                     });
                 }
             }

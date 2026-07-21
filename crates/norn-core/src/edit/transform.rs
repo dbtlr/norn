@@ -4,12 +4,17 @@
 //! novel core the executor's compose path delegates to; everything downstream
 //! (lock, audit, report) is reused from the frontmatter verbs.
 //!
-//! Heading resolution parses through `norn_frontmatter::heading::parse_headings`
-//! (the ported `parse_commonmark` heading pass) — fence-safe, so `#` inside a
-//! fenced code block never resolves as a heading.
+//! Section anchors resolve through the single [`norn_frontmatter::section`]
+//! resolver — the same primitive `get --section` reads through — so a section
+//! read and a section write agree on the span and the missing/ambiguous failure
+//! modes. Its [`SectionError`] is adapted here into the indexed [`EditError`]
+//! refusal shape (carrying the op index and kind). Resolution is fence-safe, so
+//! `#` inside a fenced code block never resolves as a heading.
 
-use crate::domain::Heading;
 use crate::edit::ops::EditOp;
+use norn_frontmatter::section::{
+    resolve_section as resolve_section_span, SectionError, SectionSpan,
+};
 
 /// Per-op descriptor for the success report `edits` array.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,7 +168,9 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
         }
         EditOp::ReplaceSection { heading, content } => {
             let span = resolve_section(body, heading, index, op.kind())?;
-            *body = splice(body, span.body_start..span.end, &block(content));
+            let sep = body_separator(body, &span);
+            let region = format!("{sep}{}", block(content));
+            *body = splice(body, span.body_start..span.end, &region);
             Ok(None)
         }
         EditOp::DeleteSection { heading } => {
@@ -196,6 +203,9 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
             } else {
                 format!("{head}\n{line}{tail}")
             };
+            // A heading at EOF with no trailing newline needs a separator before
+            // the appended content, else the line welds onto the marker (NRN-437).
+            let region = format!("{}{region}", body_separator(body, &span));
             *body = splice(body, span.body_start..span.end, &region);
             Ok(None)
         }
@@ -210,7 +220,9 @@ fn apply_one(body: &mut String, op: &EditOp, index: usize) -> Result<Option<usiz
         }
         EditOp::InsertAfterHeading { heading, content } => {
             let span = resolve_section(body, heading, index, op.kind())?;
-            *body = splice(body, span.body_start..span.body_start, &block(content));
+            let sep = body_separator(body, &span);
+            let region = format!("{sep}{}", block(content));
+            *body = splice(body, span.body_start..span.body_start, &region);
             Ok(None)
         }
     }
@@ -237,85 +249,45 @@ fn splice(body: &str, range: std::ops::Range<usize>, replacement: &str) -> Strin
     s
 }
 
-/// Byte ranges describing a section addressed by exact heading text.
-pub(crate) struct SectionSpan {
-    /// Start of the heading line (the `#`).
-    pub(crate) heading_start: usize,
-    /// Start of the section body (just after the heading line's `\n`).
-    pub(crate) body_start: usize,
-    /// End of the section: start of the next same-or-higher-level heading, or EOF.
-    pub(crate) end: usize,
-}
-
-/// Resolve a unique section by exact heading text against the CURRENT body.
-/// Re-parsed per op (sequential semantics) — cheap for vault-scale docs and
-/// avoids cross-op offset bookkeeping. Fence-safe: the heading parser never
-/// emits a heading for `#` inside a fenced code block.
+/// Resolve a unique section by exact heading text against the CURRENT body,
+/// adapting the shared resolver's [`SectionError`] into the indexed
+/// [`EditError`] this batch reports (the op `index` and `kind` are edit-side
+/// context the pure resolver does not carry). Re-parsed per op (sequential
+/// semantics) — cheap for vault-scale docs and avoids cross-op offset
+/// bookkeeping. Fence-safe: `#` inside a fenced code block never resolves.
 fn resolve_section(
     body: &str,
     heading: &str,
     index: usize,
     kind: &'static str,
 ) -> Result<SectionSpan, EditError> {
-    let headings = norn_frontmatter::heading::parse_headings(body);
-    resolve_section_in(&headings, body, heading, index, kind)
+    resolve_section_span(body, heading).map_err(|err| match err {
+        SectionError::HeadingNotFound { heading } => EditError::HeadingNotFound {
+            index,
+            kind,
+            heading,
+        },
+        SectionError::HeadingAmbiguous { heading, count } => EditError::HeadingAmbiguous {
+            index,
+            kind,
+            heading,
+            count,
+        },
+    })
 }
 
-/// The span-resolution core, factored out of [`resolve_section`] so a caller
-/// resolving MANY headings against one immutable body can parse the headings
-/// ONCE and reuse the list. The executor re-parses per op because each op
-/// mutates the body.
-fn resolve_section_in(
-    headings: &[Heading],
-    body: &str,
-    heading: &str,
-    index: usize,
-    kind: &'static str,
-) -> Result<SectionSpan, EditError> {
-    let matches: Vec<usize> = headings
-        .iter()
-        .enumerate()
-        .filter(|(_, h)| h.text == heading)
-        .map(|(i, _)| i)
-        .collect();
-    match matches.len() {
-        0 => Err(EditError::HeadingNotFound {
-            index,
-            kind,
-            heading: heading.to_string(),
-        }),
-        1 => {
-            let i = matches[0];
-            let level = headings[i].level;
-            let heading_start = headings[i]
-                .source_span
-                .as_ref()
-                .map(|s| s.byte_offset)
-                .unwrap_or(0);
-            // Body begins after the heading line's newline.
-            let body_start = match body[heading_start..].find('\n') {
-                Some(nl) => heading_start + nl + 1,
-                None => body.len(),
-            };
-            // Section ends at the next heading whose level <= this one.
-            let end = headings[i + 1..]
-                .iter()
-                .find(|h| h.level <= level)
-                .and_then(|h| h.source_span.as_ref())
-                .map(|s| s.byte_offset)
-                .unwrap_or(body.len());
-            Ok(SectionSpan {
-                heading_start,
-                body_start,
-                end,
-            })
-        }
-        n => Err(EditError::HeadingAmbiguous {
-            index,
-            kind,
-            heading: heading.to_string(),
-            count: n,
-        }),
+/// The separator an op that inserts body content at `span.body_start` must emit
+/// first when the heading line itself is not newline-terminated — a heading at
+/// EOF with no trailing newline (`## A`), where `body_start == end == len`.
+/// Without it the inserted content would weld onto the heading marker
+/// (`## Ax`), demoting the heading (NRN-437). A normal newline-terminated
+/// heading needs no separator (empty string), preserving byte-for-byte behavior
+/// on every ordinary shape.
+fn body_separator(body: &str, span: &SectionSpan) -> &'static str {
+    if body[span.heading_start..span.body_start].ends_with('\n') {
+        ""
+    } else {
+        "\n"
     }
 }
 
@@ -573,5 +545,126 @@ mod tests {
         ];
         let err = apply_edits(DOC, &ops).unwrap_err();
         assert!(matches!(err, EditError::HeadingNotFound { index: 1, .. }));
+    }
+
+    // ── NRN-437: SETEXT headings (`Alpha\n-----`) ────────────────────────────
+    // The underline is part of the heading, not the body. Every section op must
+    // keep the underline welded to its title line — replacing/inserting body
+    // content must never consume the underline (demoting the heading to a
+    // paragraph) nor push new text between the title and its underline (dragging
+    // the inserted line under the heading).
+    const SETEXT: &str = "Alpha\n-----\nbody under alpha.\n\n## Beta\nb1\n";
+
+    #[test]
+    fn setext_replace_section_keeps_the_underline() {
+        let op = EditOp::ReplaceSection {
+            heading: "Alpha".into(),
+            content: "NEW".into(),
+        };
+        let out = apply_edits(SETEXT, &[op]).unwrap();
+        assert_eq!(out.new_body, "Alpha\n-----\nNEW\n## Beta\nb1\n");
+    }
+
+    #[test]
+    fn setext_append_to_section_keeps_the_underline() {
+        let op = EditOp::AppendToSection {
+            heading: "Alpha".into(),
+            content: "- new".into(),
+        };
+        let out = apply_edits(SETEXT, &[op]).unwrap();
+        assert_eq!(
+            out.new_body,
+            "Alpha\n-----\nbody under alpha.\n- new\n\n## Beta\nb1\n"
+        );
+    }
+
+    #[test]
+    fn setext_delete_section_removes_title_and_underline() {
+        let op = EditOp::DeleteSection {
+            heading: "Alpha".into(),
+        };
+        let out = apply_edits(SETEXT, &[op]).unwrap();
+        assert_eq!(out.new_body, "## Beta\nb1\n");
+    }
+
+    #[test]
+    fn setext_insert_before_heading_places_content_above_title() {
+        let op = EditOp::InsertBeforeHeading {
+            heading: "Alpha".into(),
+            content: "TOP".into(),
+        };
+        let out = apply_edits(SETEXT, &[op]).unwrap();
+        assert_eq!(
+            out.new_body,
+            "TOP\nAlpha\n-----\nbody under alpha.\n\n## Beta\nb1\n"
+        );
+    }
+
+    #[test]
+    fn setext_insert_after_heading_places_content_below_underline() {
+        let op = EditOp::InsertAfterHeading {
+            heading: "Alpha".into(),
+            content: "LEAD".into(),
+        };
+        let out = apply_edits(SETEXT, &[op]).unwrap();
+        assert_eq!(
+            out.new_body,
+            "Alpha\n-----\nLEAD\nbody under alpha.\n\n## Beta\nb1\n"
+        );
+    }
+
+    // ── NRN-437: heading at EOF with no trailing newline (`## Tail`) ──────────
+    // `body_start == end == len`, so an op inserting body content must supply the
+    // missing line terminator first, else the content welds onto the marker
+    // (`## TailLEAD`). The heading line must remain a heading.
+    const EOF_HEADING: &str = "intro\n\n## Tail";
+
+    #[test]
+    fn eof_heading_replace_section_separates_from_marker() {
+        let op = EditOp::ReplaceSection {
+            heading: "Tail".into(),
+            content: "NEW".into(),
+        };
+        let out = apply_edits(EOF_HEADING, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n## Tail\nNEW\n");
+    }
+
+    #[test]
+    fn eof_heading_append_to_section_separates_from_marker() {
+        let op = EditOp::AppendToSection {
+            heading: "Tail".into(),
+            content: "- new".into(),
+        };
+        let out = apply_edits(EOF_HEADING, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n## Tail\n- new\n");
+    }
+
+    #[test]
+    fn eof_heading_delete_section_removes_the_heading() {
+        let op = EditOp::DeleteSection {
+            heading: "Tail".into(),
+        };
+        let out = apply_edits(EOF_HEADING, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n");
+    }
+
+    #[test]
+    fn eof_heading_insert_before_heading_places_content_above() {
+        let op = EditOp::InsertBeforeHeading {
+            heading: "Tail".into(),
+            content: "TOP".into(),
+        };
+        let out = apply_edits(EOF_HEADING, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\nTOP\n## Tail");
+    }
+
+    #[test]
+    fn eof_heading_insert_after_heading_separates_from_marker() {
+        let op = EditOp::InsertAfterHeading {
+            heading: "Tail".into(),
+            content: "LEAD".into(),
+        };
+        let out = apply_edits(EOF_HEADING, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n## Tail\nLEAD\n");
     }
 }

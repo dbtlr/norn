@@ -546,6 +546,7 @@ mod tests {
             text: "Existing".into(),
             slug: "existing".into(),
             source_span: None,
+            body_offset: None,
         });
         let mut link = make_wikilink("a.md", "b");
         link.anchor = Some("Missing".to_string());
@@ -630,6 +631,7 @@ mod tests {
             text: "Architecture".into(),
             slug: "architecture".into(),
             source_span: None,
+            body_offset: None,
         });
         let mut link = make_wikilink("src.md", "Vault Memory");
         link.anchor = Some("Architecture".to_string());

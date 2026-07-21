@@ -6,14 +6,11 @@
 //! offsets in [`SectionSpan`] let a caller read, replace, delete, or insert
 //! around a section while touching nothing else.
 //!
-//! ## Seam left behind
-//!
-//! The donor kept `resolve_section` next to the `norn edit` body-transform
-//! verb (`src/edit/transform.rs`), which layers the `str_replace` / section-op
-//! grammar and a content-drift compare-and-swap on top. That op grammar is a
-//! mutation verb and ports to `norn-core`; this module keeps only the pure
-//! heading → span resolution, the primitive both a section read (`get
-//! --section`) and a section write (`edit`) share.
+//! This is the single section resolver. A section READ (`get --section`) and a
+//! section WRITE (`norn edit`'s body-transform ops in `norn-core`) both consume
+//! it, so they agree on the span and on the missing/ambiguous failure modes;
+//! the edit path adapts [`SectionError`] into its own indexed refusal shape at
+//! the call site.
 
 use crate::heading::{parse_headings, Heading};
 
@@ -70,11 +67,17 @@ pub fn resolve_section_in(
                 .as_ref()
                 .map(|s| s.byte_offset)
                 .unwrap_or(0);
-            // Body begins after the heading line's newline.
-            let body_start = match body[heading_start..].find('\n') {
-                Some(nl) => heading_start + nl + 1,
-                None => body.len(),
-            };
+            // Body begins just past the whole heading construct (NRN-437): the
+            // parser's heading range end, which covers a SETEXT underline and a
+            // heading at EOF with no trailing newline. A manual "byte after the
+            // first newline" scan would land on the underline of a SETEXT
+            // heading and corrupt it. Freshly-parsed headings always carry
+            // `body_offset`; the fallback is defensive (a cache heading is never
+            // resolved) — an empty section running to EOF.
+            let body_start = headings[i]
+                .body_offset
+                .unwrap_or(body.len())
+                .min(body.len());
             // Section ends at the next heading whose level <= this one.
             let end = headings[i + 1..]
                 .iter()
@@ -166,5 +169,46 @@ mod tests {
         let b = resolve_section_in(&headings, DOC, "Beta").unwrap();
         assert_eq!(a, resolve_section(DOC, "Alpha").unwrap());
         assert_eq!(b, resolve_section(DOC, "Beta").unwrap());
+    }
+
+    // NRN-437: for a SETEXT heading, `body_start` must land AFTER the underline
+    // line — the underline is part of the heading, not the body. A read of the
+    // body (`body_start..end`) must therefore never surface the underline, and a
+    // read of the whole section (`heading_start..end`, the `get --section` shape)
+    // returns the heading, its underline, and the body intact.
+    #[test]
+    fn setext_body_start_is_after_the_underline() {
+        let doc = "Alpha\n-----\nbody under alpha.\n\n## Beta\nb\n";
+        let span = resolve_section(doc, "Alpha").unwrap();
+        // heading region is the title line PLUS the underline line.
+        assert_eq!(&doc[span.heading_start..span.body_start], "Alpha\n-----\n");
+        // the body carries no underline.
+        assert_eq!(&doc[span.body_start..span.end], "body under alpha.\n\n");
+        // the whole-section read (get --section) is lossless.
+        assert_eq!(
+            &doc[span.heading_start..span.end],
+            "Alpha\n-----\nbody under alpha.\n\n"
+        );
+    }
+
+    #[test]
+    fn setext_underline_only_section_has_empty_body() {
+        // Two same-level (H1) setext headings back to back: `Alpha` owns nothing
+        // between its underline and the next same-level heading.
+        let doc = "Alpha\n=====\nBeta\n=====\nb\n";
+        let span = resolve_section(doc, "Alpha").unwrap();
+        assert_eq!(&doc[span.heading_start..span.body_start], "Alpha\n=====\n");
+        assert_eq!(&doc[span.body_start..span.end], "");
+    }
+
+    // NRN-437: a heading at EOF with no trailing newline resolves to an empty
+    // body running to EOF — the read never refuses valid CommonMark.
+    #[test]
+    fn heading_at_eof_without_trailing_newline_reads_cleanly() {
+        let doc = "intro\n\n## Tail";
+        let span = resolve_section(doc, "Tail").unwrap();
+        assert_eq!(span.body_start, doc.len());
+        assert_eq!(span.end, doc.len());
+        assert_eq!(&doc[span.heading_start..span.end], "## Tail");
     }
 }
