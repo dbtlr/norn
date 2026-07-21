@@ -244,6 +244,8 @@ pub fn wikilink_edge_docs() -> Vec<ZooDoc> {
         valid_unlinkable("wl/spaced-alias-src.md", WL_SPACED_ALIAS_SRC),
         valid_unlinkable("wl/padded-target.md", WL_PADDED_TARGET),
         valid_unlinkable("wl/padded-src.md", WL_PADDED_SRC),
+        valid_unlinkable("wl/unrepr-target.md", WL_UNREPR_TARGET),
+        valid_unlinkable("wl/unrepr-src.md", WL_UNREPR_SRC),
     ]
 }
 
@@ -655,6 +657,15 @@ const WL_PADDED_TARGET: &str = "---\ntitle: Padded Target\n---\n\nPadded target 
 /// brackets (PD-119): the oracle's untrimmed match fails and phantom-no-ops; the
 /// rewrite matches on the parser-trimmed target and rewrites it.
 const WL_PADDED_SRC: &str = "---\ntitle: Padded Src\n---\n\nSee [[ padded-target ]] here.\n";
+
+const WL_UNREPR_TARGET: &str =
+    "---\ntitle: Unrepr Target\n---\n\nUnrepresentable-rename target body.\n";
+/// A `[[unrepr-target]]` backlink whose rename destination carries a wikilink
+/// delimiter (PD-120): the oracle emits `[[a|b]]` (which re-parses as a DIFFERENT
+/// link — target `a`, alias `b`), corrupting the backlink; the rewrite refuses
+/// (the `rewrite-wikilink` verb, exit 2) or skips (the move cascade), leaving the
+/// link intact.
+const WL_UNREPR_SRC: &str = "---\ntitle: Unrepr Src\n---\n\nSee [[unrepr-target]] here.\n";
 
 // ---- violation zoo content ------------------------------------------------
 

@@ -47,11 +47,12 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // corruption fix, five cases). NRN-424 added PD-116/117/118 (the
     // wikilink-rewriter unification: embed-marker, code-opacity, and caret-target
     // corruptions) and, on review, PD-119 (decided-better interior-whitespace
-    // canonicalization on rewrite).
+    // canonicalization on rewrite) and PD-120 (decided-better refuse/skip on a
+    // rename to an unrepresentable wikilink target).
     assert_eq!(
         ledger.entries.len(),
-        19,
-        "expected exactly PD-101..PD-119, found {}",
+        20,
+        "expected exactly PD-101..PD-120, found {}",
         ledger.entries.len()
     );
 
@@ -209,6 +210,8 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         ("wl-rewrite-wikilink-caret-stem-diverge", "PD-118"),
         ("wl-move-spaced-alias-diverge", "PD-119"),
         ("wl-rewrite-wikilink-padded-target-diverge", "PD-119"),
+        ("wl-rewrite-wikilink-unrepresentable-refusal", "PD-120"),
+        ("wl-move-unrepresentable-skip-diverge", "PD-120"),
     ] {
         assert_eq!(
             ledger.entry_for_case(case).map(|e| e.id.as_str()),
@@ -227,15 +230,17 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
             "{case}'s entry is a discovered-inconsistency"
         );
     }
-    // PD-119 is the branch's first decided-better wikilink entry (the ruling).
-    assert_eq!(
-        ledger
-            .entry_for_case("wl-move-spaced-alias-diverge")
-            .unwrap()
-            .reason,
-        norn_parity::ledger::Reason::DecidedBetter,
-        "PD-119 is decided-better"
-    );
+    // PD-119 and PD-120 are the branch's decided-better wikilink entries.
+    for case in [
+        "wl-move-spaced-alias-diverge",
+        "wl-rewrite-wikilink-unrepresentable-refusal",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).unwrap().reason,
+            norn_parity::ledger::Reason::DecidedBetter,
+            "{case}'s entry is decided-better"
+        );
+    }
 }
 
 #[test]

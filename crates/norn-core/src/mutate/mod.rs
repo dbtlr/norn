@@ -33,18 +33,19 @@ pub(crate) fn wikilink_warnings(
     value: &str,
 ) -> Vec<norn_wire::MutationWarning> {
     // NRN-412(c): the resolution stem comes from the authoritative parser, not a
-    // hand-rolled `[[..]]` strip. A bracketed value decomposes via
-    // `parse_wikilinks_in_text` (target split off `|` alias and `#` anchor by the
-    // same rules validate uses); a bare value (Obsidian permits an unbracketed
-    // target) is treated as the target text directly, preserving prior behavior.
-    let (display, canonical) = match norn_frontmatter::wikilink::parse_wikilinks_in_text(value)
-        .into_iter()
-        .next()
-    {
-        Some(token) => {
-            let canonical = token.target.to_lowercase();
-            (token.raw, canonical)
-        }
+    // hand-rolled `[[..]]` strip. The parsed-link branch applies ONLY when the
+    // value is EXACTLY one wikilink spanning the whole input (one token whose raw
+    // == value): a multi-token value like `[[a]] [[b]]` must not silently resolve
+    // on just `a`, so it falls through to the raw-value branch (which fails to
+    // resolve and warns honestly). A bare value (Obsidian permits an unbracketed
+    // target) is likewise treated as the target text directly.
+    let tokens = norn_frontmatter::wikilink::parse_wikilinks_in_text(value);
+    let single = match tokens.as_slice() {
+        [token] if token.raw == value => Some(token),
+        _ => None,
+    };
+    let (display, canonical) = match single {
+        Some(token) => (token.raw.clone(), token.target.to_lowercase()),
         None => {
             let bare = value
                 .split('#')
@@ -140,5 +141,21 @@ mod wikilink_warning_tests {
     fn bare_value_resolves_directly() {
         let (_tmp, index) = index_with_target();
         assert!(super::wikilink_warnings(&index, "related", "target").is_empty());
+    }
+
+    /// A multi-token value must NOT silently resolve on its first link: the
+    /// parsed-link branch only fires for a single full-span token, so `[[target]]
+    /// [[other]]` falls through to the raw-value branch and warns unresolved
+    /// (rather than the pre-guard bug where it resolved on `target` alone).
+    #[test]
+    fn multi_token_value_does_not_resolve_on_first_link() {
+        let (_tmp, index) = index_with_target();
+        let warnings = super::wikilink_warnings(&index, "related", "[[target]] [[other]]");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "wikilink-unresolved");
+        assert_eq!(
+            warnings[0].message,
+            "unresolved wikilink in related: [[[[target]] [[other]]]]"
+        );
     }
 }

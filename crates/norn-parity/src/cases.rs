@@ -2127,6 +2127,43 @@ const MUTATE_CASES: &[Case] = &[
         normalize: TRACE_NORM,
         plan: None,
     },
+    // PD-120 (decided-better) — a rename to an UNREPRESENTABLE wikilink target (a
+    // name carrying `|`/`#`/`[`/`]`) would re-parse as a different link shape and
+    // corrupt the backlink. The oracle emits `[[a|b]]` (target `a`, alias `b`);
+    // the rewrite refuses/skips, leaving the link intact. Both surfaces are
+    // reachable (no upstream filename-portability refusal on the destination).
+    //
+    // rewrite-wikilink verb: the oracle applies (exit 0) and corrupts; the rewrite
+    // refuses the whole op (exit 2, `unrepresentable-rewrite-target`), write-free.
+    Case {
+        id: "wl-rewrite-wikilink-unrepresentable-refusal",
+        argv: &["rewrite-wikilink", "unrepr-target", "a|b", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/unrepr-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // move cascade: both exit 0 (the file moves to `wl/a|b.md`), but the oracle
+    // corrupts the backlink to `[[a|b]]` while the rewrite skips it
+    // (`would-corrupt-wikilink`), leaving `[[unrepr-target]]` stale-but-intact.
+    Case {
+        id: "wl-move-unrepresentable-skip-diverge",
+        argv: &["move", "unrepr-target", "wl/a|b.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/unrepr-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
 ];
 
 /// Mutation-verb parity for `edit` (NRN-379): the atomic content-anchored

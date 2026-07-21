@@ -119,6 +119,18 @@ pub fn split_anchor_or_block_ref(raw: &str) -> (String, Option<String>, Option<S
     }
 }
 
+/// Whether `target` can be represented as a wikilink target — i.e. reconstructing
+/// a link with it and re-parsing yields the SAME target. The delimiter bytes a
+/// target must not contain: `|` (begins the alias), `#` (begins the anchor /
+/// block ref), and `[` / `]` (the `[[ ]]` fences). A target carrying any of them
+/// would silently re-parse as a different link shape — e.g. `a|b` becomes target
+/// `a` with alias `b` — so a rewrite to such a name must be refused, not emitted
+/// (a rename to a filename with these bytes is where this bites). Newlines and
+/// other bytes round-trip and are permitted.
+pub fn wikilink_target_is_representable(target: &str) -> bool {
+    !target.contains(['|', '#', '[', ']'])
+}
+
 /// Reconstruct a wikilink's text with `new_target` in place of its target,
 /// preserving the embed marker (`!`), the heading anchor / block-reference
 /// suffix, and the display alias. The inverse of [`parse_wikilinks`]'s
@@ -128,7 +140,14 @@ pub fn split_anchor_or_block_ref(raw: &str) -> (String, Option<String>, Option<S
 /// round-trip, so a rewriter can never drop the `!` or the `|alias` the way a
 /// `strip_prefix("[[")` hand-roll does (NRN-431), and the `#`/`^` split follows
 /// the parser (a bare `^` stays in the target — NRN-433).
-pub fn reconstruct_wikilink(link: &Wikilink, new_target: &str) -> String {
+///
+/// Returns `None` when `new_target` is not representable (see
+/// [`wikilink_target_is_representable`]): emitting it would corrupt the link into
+/// a different shape, so the caller must refuse/skip the rewrite instead.
+pub fn reconstruct_wikilink(link: &Wikilink, new_target: &str) -> Option<String> {
+    if !wikilink_target_is_representable(new_target) {
+        return None;
+    }
     let mut out = String::new();
     if link.embed {
         out.push('!');
@@ -147,7 +166,7 @@ pub fn reconstruct_wikilink(link: &Wikilink, new_target: &str) -> String {
         out.push_str(alias);
     }
     out.push_str("]]");
-    out
+    Some(out)
 }
 
 /// The single span-based wikilink rewriter (NRN-424/NRN-412). Rewrite selected
@@ -381,8 +400,8 @@ mod tests {
         ] {
             let link = only(raw);
             assert_eq!(
-                reconstruct_wikilink(&link, &link.target),
-                raw,
+                reconstruct_wikilink(&link, &link.target).as_deref(),
+                Some(raw),
                 "tight link must round-trip: {raw}"
             );
         }
@@ -392,20 +411,20 @@ mod tests {
     fn reconstruct_preserves_embed_and_alias() {
         // NRN-431: an embed's `!` and its `|alias` survive a target rewrite.
         assert_eq!(
-            reconstruct_wikilink(&only("![[old|Display]]"), "new"),
-            "![[new|Display]]"
+            reconstruct_wikilink(&only("![[old|Display]]"), "new").as_deref(),
+            Some("![[new|Display]]")
         );
     }
 
     #[test]
     fn reconstruct_preserves_anchor_and_block_ref() {
         assert_eq!(
-            reconstruct_wikilink(&only("[[old#Heading]]"), "new"),
-            "[[new#Heading]]"
+            reconstruct_wikilink(&only("[[old#Heading]]"), "new").as_deref(),
+            Some("[[new#Heading]]")
         );
         assert_eq!(
-            reconstruct_wikilink(&only("[[old#^blk]]"), "new"),
-            "[[new#^blk]]"
+            reconstruct_wikilink(&only("[[old#^blk]]"), "new").as_deref(),
+            Some("[[new#^blk]]")
         );
     }
 
@@ -415,14 +434,37 @@ mod tests {
         // it round-trips inside the target rather than being split off.
         let link = only("[[a^b]]");
         assert_eq!(link.target, "a^b");
-        assert_eq!(reconstruct_wikilink(&link, "renamed"), "[[renamed]]");
+        assert_eq!(
+            reconstruct_wikilink(&link, "renamed").as_deref(),
+            Some("[[renamed]]")
+        );
+    }
+
+    #[test]
+    fn reconstruct_refuses_unrepresentable_targets() {
+        // A `new_target` carrying a wikilink delimiter would re-parse as a
+        // different link shape (`a|b` → target `a`, alias `b`), so reconstruction
+        // refuses it rather than silently corrupt the backlink.
+        let link = only("[[old]]");
+        for bad in ["a|b", "a#b", "a]]b", "a[[b", "a]b", "a[b"] {
+            assert!(
+                reconstruct_wikilink(&link, bad).is_none(),
+                "unrepresentable target must be refused: {bad}"
+            );
+            assert!(!wikilink_target_is_representable(bad));
+        }
+        // A caret-bearing name is representable (a bare `^` is an ordinary char).
+        assert!(wikilink_target_is_representable("a^b"));
+        assert!(reconstruct_wikilink(&link, "a^b").is_some());
     }
 
     #[test]
     fn splice_rewrites_only_matching_targets() {
         let body = "[[keep]] and [[old]] and [[old|Alias]]\n";
         let out = splice_wikilinks(body, parse_wikilinks, |link| {
-            (link.target == "old").then(|| reconstruct_wikilink(link, "new"))
+            (link.target == "old")
+                .then(|| reconstruct_wikilink(link, "new"))
+                .flatten()
         });
         assert_eq!(out, "[[keep]] and [[new]] and [[new|Alias]]\n");
     }
@@ -433,7 +475,9 @@ mod tests {
         // rewritten, even though it is the first file occurrence.
         let body = "```\n[[old]]\n```\n\nprose [[old]]\n";
         let out = splice_wikilinks(body, parse_wikilinks, |link| {
-            (link.target == "old").then(|| reconstruct_wikilink(link, "new"))
+            (link.target == "old")
+                .then(|| reconstruct_wikilink(link, "new"))
+                .flatten()
         });
         assert_eq!(out, "```\n[[old]]\n```\n\nprose [[new]]\n");
     }
@@ -445,7 +489,7 @@ mod tests {
         let out = splice_wikilinks(body, parse_wikilinks, |link| {
             if !done && link.target == "old" {
                 done = true;
-                Some(reconstruct_wikilink(link, "new"))
+                reconstruct_wikilink(link, "new")
             } else {
                 None
             }

@@ -384,3 +384,24 @@ old = "the ad-hoc rewriters preserve a link's interior whitespace verbatim, inco
 new = "the reconstructed link emits the parser-trimmed target and alias, canonicalizing interior whitespace: `[[spaced-target | Display Name]]` → `[[spaced-moved|Display Name]]`, and `[[ padded-target ]]` matches on the trimmed target and rewrites to `[[padded-renamed]]` (the phantom no-op is fixed)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-120 — NRN-424 (decided-better): refuse/skip a rename to an UNREPRESENTABLE
+# wikilink target. A target carrying a wikilink delimiter (`|`/`#`/`[`/`]`) cannot
+# be emitted as `[[target]]` without re-parsing as a DIFFERENT link — `[[a|b]]`
+# reads as target `a`, alias `b` — silently corrupting the backlink on a rename to
+# such a filename. Neither move nor rewrite-wikilink refuses such a destination
+# upstream (a `|` is a legal POSIX filename byte), so this is REACHABLE, not
+# defense-in-depth. The oracle emits the corrupt link; the rewrite refuses (the
+# verb, exit 2, `unrepresentable-rewrite-target`) or skips (the cascade,
+# `would-corrupt-wikilink`, leaving the link stale-but-intact and detectable by
+# `validate`) — the same recoverable posture as would-corrupt-frontmatter. See
+# `crates/norn-frontmatter/src/wikilink.rs` (`wikilink_target_is_representable` /
+# `reconstruct_wikilink`) and `crates/norn-core/src/standards/apply.rs`.
+[[entry]]
+id = "PD-120"
+surface = "rewrite-wikilink / move (rename to an unrepresentable wikilink target)"
+cases = ["wl-rewrite-wikilink-unrepresentable-refusal", "wl-move-unrepresentable-skip-diverge"]
+old = "a rename whose new target carries a `|`/`#`/`[`/`]` is emitted verbatim, so the backlink re-parses as a different link and is silently corrupted: `[[unrepr-target]]` becomes `[[a|b]]` (which reads as target `a`, alias `b`) on both the rewrite-wikilink verb (exit 0) and the move cascade (exit 0)"
+new = "the target is checked for representability first: the rewrite-wikilink verb REFUSES the whole op (exit 2, `unrepresentable-rewrite-target`, write-free) and the move cascade SKIPS the backlink (`would-corrupt-wikilink`), leaving `[[unrepr-target]]` intact and detectable by `validate` rather than corrupted"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

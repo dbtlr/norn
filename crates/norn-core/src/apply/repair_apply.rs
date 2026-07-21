@@ -2825,6 +2825,7 @@ mod tests {
                 kind: crate::domain::LinkKind::Wikilink,
                 source_span: None,
                 rewritten: "[[new]]".into(),
+                unrepresentable: false,
             }],
             path_qualified_wikilinks: vec![],
             markdown_links: vec![],

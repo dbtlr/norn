@@ -83,8 +83,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-424 (review round) adds three more `mutate` wikilink-edge cases (a delete
     // --rewrite-to embed variant, and the two PD-119 interior-whitespace cases),
     // taking the total to 114; self-check runs oracle vs. itself, so all 114 Match.
+    // NRN-424 (CodeRabbit round) adds two more (PD-120: a rewrite-wikilink refusal
+    // and a move skip on an unrepresentable target), taking the total to 116;
+    // self-check runs oracle vs. itself, so all 116 Match.
     assert!(
-        stdout.contains("114 cases: 114 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("116 cases: 116 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -192,8 +195,12 @@ fn default_mode_gates_help_cases_exit_0() {
     // interior-whitespace canonicalization on rewrite, a spaced-pipe cascade move
     // and a padded-target rewrite-wikilink). The gated total grows to 113 and the
     // diverged count from 30 to 33; the match count stays 80.
+    // NRN-424 (CodeRabbit round) adds two more ported `mutate` cases under PD-120
+    // (decided-better — refuse/skip a rename to an unrepresentable wikilink target:
+    // a rewrite-wikilink refusal and a move cascade skip). The gated total grows to
+    // 115 and the diverged count from 33 to 35; the match count stays 80.
     assert!(
-        stdout.contains("113 cases: 80 match, 33 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("115 cases: 80 match, 35 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -218,6 +225,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-117",
         "PD-118",
         "PD-119",
+        "PD-120",
         "edit-setext-replace-section-diverge",
         "edit-setext-insert-after-heading-diverge",
         "edit-eof-heading-replace-section-diverge",
@@ -230,6 +238,8 @@ fn default_mode_gates_help_cases_exit_0() {
         "wl-delete-embed-backlink-diverge",
         "wl-move-spaced-alias-diverge",
         "wl-rewrite-wikilink-padded-target-diverge",
+        "wl-rewrite-wikilink-unrepresentable-refusal",
+        "wl-move-unrepresentable-skip-diverge",
         "apply-authored-kind-operation-mismatch-refusal-zoo",
         "apply-authored-unknown-kind-refusal-json-zoo",
         "apply-authored-missing-field-refusal-json-zoo",

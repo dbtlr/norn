@@ -55,6 +55,9 @@ pub enum ApplyError {
         operation: String,
     },
 
+    #[error("cannot rewrite links in {path}: target `{target}` is not a valid wikilink target (contains one of `|` `#` `[` `]`)")]
+    UnrepresentableRewriteTarget { path: Utf8PathBuf, target: String },
+
     #[error("cannot minimal-edit frontmatter for {path}: {reason}")]
     CannotMinimalEdit { path: Utf8PathBuf, reason: String },
 
@@ -121,6 +124,7 @@ impl ApplyError {
             ApplyError::ConflictingHashes { .. } => "conflicting-hashes",
             ApplyError::ExpectedOldValueMismatch { .. } => "expected-old-value-mismatch",
             ApplyError::UnsupportedOperation { .. } => "unsupported-operation",
+            ApplyError::UnrepresentableRewriteTarget { .. } => "unrepresentable-rewrite-target",
             ApplyError::CannotMinimalEdit { .. } => "cannot-minimal-edit",
             ApplyError::FrontmatterParseFailed { .. } => "frontmatter-parse-failed",
             ApplyError::PostImageVerificationFailed { .. } => "post-image-verification-failed",
@@ -147,6 +151,7 @@ impl ApplyError {
             | ApplyError::ConflictingHashes { path }
             | ApplyError::ExpectedOldValueMismatch { path, .. }
             | ApplyError::UnsupportedOperation { path, .. }
+            | ApplyError::UnrepresentableRewriteTarget { path, .. }
             | ApplyError::CannotMinimalEdit { path, .. }
             | ApplyError::FrontmatterParseFailed { path, .. }
             | ApplyError::PostImageVerificationFailed { path, .. }
@@ -187,6 +192,7 @@ impl ApplyError {
             | ApplyError::ConflictingHashes { .. }
             | ApplyError::ExpectedOldValueMismatch { .. }
             | ApplyError::UnsupportedOperation { .. }
+            | ApplyError::UnrepresentableRewriteTarget { .. }
             | ApplyError::CannotMinimalEdit { .. }
             | ApplyError::FrontmatterParseFailed { .. }
             | ApplyError::PostImageVerificationFailed { .. }
@@ -374,6 +380,12 @@ pub enum LinkSkipReason {
     /// — the stale link remains, detectable by `validate` and repairable — a
     /// skipped rewrite is recoverable, a corrupted document is not (NRN-141).
     WouldCorruptFrontmatter,
+    /// The new target cannot be represented as a wikilink target (it carries a
+    /// `|`/`#`/`[`/`]` delimiter), so rewriting `[[old]]` to it would re-parse as
+    /// a different link shape (`[[a|b]]` → target `a`, alias `b`) and corrupt the
+    /// backlink. Skipped — the stale link remains, detectable by `validate` — the
+    /// same recoverable posture as `WouldCorruptFrontmatter` (NRN-424).
+    WouldCorruptWikilink,
 }
 
 impl LinkSkipReason {
@@ -382,6 +394,7 @@ impl LinkSkipReason {
             LinkSkipReason::Drifted => "drifted",
             LinkSkipReason::SourceMissing => "source-missing",
             LinkSkipReason::WouldCorruptFrontmatter => "would-corrupt-frontmatter",
+            LinkSkipReason::WouldCorruptWikilink => "would-corrupt-wikilink",
         }
     }
 }
@@ -1482,6 +1495,18 @@ pub fn apply_link_rewrites(
         .chain(risk.path_qualified_wikilinks.iter())
         .chain(risk.markdown_links.iter());
     for affected in all {
+        // A link whose new target is not representable as a wikilink is skipped
+        // rather than corrupted (NRN-424): the stale link remains, detectable by
+        // `validate` — the same recoverable posture as WouldCorruptFrontmatter.
+        if affected.unrepresentable {
+            outcome.skipped.push(LinkSkipResult {
+                file: affected.source_path.clone(),
+                from: affected.raw.clone(),
+                to: affected.rewritten.clone(),
+                reason: LinkSkipReason::WouldCorruptWikilink,
+            });
+            continue;
+        }
         match rewrite_one_backlink(
             cwd,
             &affected.source_path,
@@ -1604,7 +1629,8 @@ pub fn apply_edit_ops(
 /// (NRN-431).
 pub fn apply_rewrite_link(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
     use norn_frontmatter::wikilink::{
-        parse_wikilinks, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks, Wikilink,
+        parse_wikilinks, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks,
+        wikilink_target_is_representable, Wikilink,
     };
 
     let old_target = change
@@ -1623,8 +1649,21 @@ pub fn apply_rewrite_link(content: &str, change: &PlannedChange) -> Result<Strin
             path: change.path.clone(),
         })?;
 
+    // Refuse a new target that cannot be represented as a wikilink target (it
+    // carries a `|`/`#`/`[`/`]` delimiter): emitting it would silently re-parse
+    // as a different link shape (`a|b` → target `a`, alias `b`) and corrupt every
+    // rewritten backlink. Refuse the whole op rather than corrupt.
+    if !wikilink_target_is_representable(new_target) {
+        return Err(ApplyError::UnrepresentableRewriteTarget {
+            path: change.path.clone(),
+            target: new_target.to_string(),
+        });
+    }
+
     let rewrite = |link: &Wikilink| {
-        (link.target == old_target).then(|| reconstruct_wikilink(link, new_target))
+        (link.target == old_target)
+            .then(|| reconstruct_wikilink(link, new_target))
+            .flatten()
     };
     // Split at the frontmatter/body boundary so the body is parsed code-aware and
     // the frontmatter prefix is parsed as raw text (indented YAML must not be
@@ -2924,6 +2963,37 @@ mod tests {
     }
 
     #[test]
+    fn apply_rewrite_link_refuses_unrepresentable_target() {
+        // NRN-424: a new target carrying a wikilink delimiter (`|`/`#`/`[`/`]`)
+        // would re-parse as a different link shape and corrupt every backlink, so
+        // the whole op is refused — the document is NOT touched — rather than
+        // written as `[[a|b]]` (which reads as target `a`, alias `b`).
+        let original = "See [[old]] here.\n";
+        for bad in ["a|b", "a#b", "a]]b"] {
+            let change = PlannedChange {
+                change_id: "test".into(),
+                path: "doc.md".into(),
+                document_hash: "test-hash".into(),
+                finding_code: "operator-request".into(),
+                finding_rule: None,
+                repair_rule: "operator-request".into(),
+                operation: "rewrite_link".into(),
+                field: None,
+                expected_old_value: Some(Value::String("old".into())),
+                new_value: Some(Value::String(bad.into())),
+                destination: None,
+                link_risk: None,
+                warnings: vec![],
+                force: false,
+                parents: false,
+            };
+            let err = apply_rewrite_link(original, &change).unwrap_err();
+            assert_eq!(err.code(), "unrepresentable-rewrite-target", "target {bad}");
+            assert!(err.is_precondition(), "refused before any write: {bad}");
+        }
+    }
+
+    #[test]
     fn apply_replace_body_replaces_body_preserves_frontmatter() {
         let content = "---\ntitle: Foo\n---\nold body line 1\nold body line 2\n";
         let change = PlannedChange {
@@ -3215,6 +3285,7 @@ mod tests {
                     kind: crate::domain::LinkKind::Wikilink,
                     source_span: None,
                     rewritten: "[[b]]".into(),
+                    unrepresentable: false,
                 }],
                 path_qualified_wikilinks: vec![],
                 markdown_links: vec![],
@@ -3252,6 +3323,68 @@ mod tests {
         assert_eq!(
             LinkSkipReason::WouldCorruptFrontmatter.code(),
             "would-corrupt-frontmatter"
+        );
+        assert_eq!(
+            LinkSkipReason::WouldCorruptWikilink.code(),
+            "would-corrupt-wikilink"
+        );
+    }
+
+    #[test]
+    fn cascade_skips_backlink_rewrite_to_unrepresentable_target() {
+        // NRN-424: an affected link flagged unrepresentable (its new target is not
+        // a valid wikilink target, e.g. a move to `a|b.md`) must not corrupt the
+        // backlink into `[[a|b]]` (which reads as target `a`, alias `b`).
+        // apply_link_rewrites skips it, leaving the stale link and recording the
+        // reason — the same recoverable posture as would-corrupt-frontmatter.
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-unrepr-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::write(root.join("src.md"), "see [[old]] here\n").unwrap();
+        let mut risk = crate::standards::repair::link_risk::LinkRisk {
+            stem_changed: true,
+            ..Default::default()
+        };
+        risk.stem_links
+            .push(crate::standards::repair::link_risk::AffectedLink {
+                source_path: "src.md".into(),
+                raw: "[[old]]".into(),
+                kind: crate::domain::LinkKind::Wikilink,
+                source_span: None,
+                rewritten: "[[old]]".into(),
+                unrepresentable: true,
+            });
+        let change = PlannedChange {
+            change_id: "t".into(),
+            path: "old.md".into(),
+            document_hash: "h".into(),
+            finding_code: "operator-request".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: "move_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: Some("a|b.md".into()),
+            link_risk: Some(risk),
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+        let outcome = apply_link_rewrites(root, &change).unwrap();
+        assert_eq!(
+            outcome.rewritten.len(),
+            0,
+            "unrepresentable link not rewritten"
+        );
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].reason.code(), "would-corrupt-wikilink");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src.md")).unwrap(),
+            "see [[old]] here\n",
+            "the stale link is left intact, not corrupted"
         );
     }
 
@@ -3297,6 +3430,7 @@ mod tests {
                         kind: crate::domain::LinkKind::Wikilink,
                         source_span: None,
                         rewritten: "[[Parent \"Two\"]]".into(),
+                        unrepresentable: false,
                     },
                     crate::standards::repair::link_risk::AffectedLink {
                         source_path: camino::Utf8PathBuf::from("c.md"),
@@ -3304,6 +3438,7 @@ mod tests {
                         kind: crate::domain::LinkKind::Wikilink,
                         source_span: None,
                         rewritten: "[[Parent \"Two\"]]".into(),
+                        unrepresentable: false,
                     },
                 ],
                 path_qualified_wikilinks: vec![],
@@ -3395,6 +3530,7 @@ mod tests {
                     kind: crate::domain::LinkKind::Wikilink,
                     source_span: None,
                     rewritten: rewritten.into(),
+                    unrepresentable: false,
                 }],
                 path_qualified_wikilinks: vec![],
                 markdown_links: vec![],
@@ -3720,6 +3856,7 @@ mod tests {
                         kind: crate::domain::LinkKind::Wikilink,
                         source_span: None,
                         rewritten: "[[b]]".into(),
+                        unrepresentable: false,
                     },
                     crate::standards::repair::link_risk::AffectedLink {
                         source_path: camino::Utf8PathBuf::from("good-backlinker.md"),
@@ -3727,6 +3864,7 @@ mod tests {
                         kind: crate::domain::LinkKind::Wikilink,
                         source_span: None,
                         rewritten: "[[b]]".into(),
+                        unrepresentable: false,
                     },
                 ],
                 path_qualified_wikilinks: vec![],
