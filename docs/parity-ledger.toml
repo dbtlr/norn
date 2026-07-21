@@ -259,21 +259,26 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 
 # NRN-405 (malformed-plan diagnostics): a user-authored plan that is malformed —
 # an unknown op kind, a structural op missing a required field, a non-object
-# `fields`, or a `kind`/`operation` mismatch — is a USER error, not a norn bug.
-# The oracle flattens every such typed refusal to `internal-error` ("norn has a
-# bug"), a misleading machine-branchable code: a consumer that branches on `code`
-# to tell "your plan is malformed, fix it" from "norn crashed, file a bug" is
-# misdirected. The rewrite preserves the typed error through `anyhow` so the apply
-# envelope carries a real code — `unknown-operation-kind` for an unknown kind,
-# `malformed-plan` for the missing-field / not-object / mismatch family. The
-# message and exit are unchanged; only the `code` improves (see
-# `crates/norn-core/src/apply/envelope.rs`, `from_anyhow`). Surfaces only under
-# `--format json`, where the envelope's `code` is observable.
+# `fields`, a `kind`/`operation` mismatch, or a wrong-TYPED `fields` member (e.g.
+# `"operation": 5`, a non-bool `"force"`) that fails the change-model decode — is
+# a USER error, not a norn bug. The oracle flattens every such typed refusal to
+# `internal-error` ("norn has a bug"), a misleading machine-branchable code: a
+# consumer that branches on `code` to tell "your plan is malformed, fix it" from
+# "norn crashed, file a bug" is misdirected. The rewrite preserves the typed error
+# through `anyhow` so the apply envelope carries a real code —
+# `unknown-operation-kind` for an unknown kind, `malformed-plan` for the
+# missing-field / not-object / mismatch / wrong-typed-member family. Exit 2 is
+# unchanged throughout; the message is unchanged for the unknown-kind and
+# missing-field cases and, for a wrong-typed-member decode failure, additionally
+# names the op kind alongside the underlying decode text (see
+# `crates/norn-core/src/apply/envelope.rs`, `from_anyhow`, and the
+# `TypedOpError::MalformedFields` variant in `crates/norn-wire/src/plan.rs`).
+# Surfaces only under `--format json`, where the envelope's `code` is observable.
 [[entry]]
 id = "PD-114"
 surface = "apply --format json (malformed authored-plan refusal code)"
-cases = ["apply-authored-unknown-kind-refusal-json-zoo", "apply-authored-missing-field-refusal-json-zoo"]
-old = "every malformed-plan refusal flattens to `code: internal-error` (the typed error is discarded, so the envelope cannot distinguish a malformed plan from a norn bug) — the unknown-kind and missing-field cases both report `internal-error` with their specific message"
-new = "the typed error survives to the envelope: an unknown op kind reports `code: unknown-operation-kind`, and the missing-field / non-object / kind-operation-mismatch family reports `code: malformed-plan` — a machine-branchable signal that the plan, not norn, is at fault; message and exit 2 unchanged"
+cases = ["apply-authored-unknown-kind-refusal-json-zoo", "apply-authored-missing-field-refusal-json-zoo", "apply-authored-wrong-typed-field-refusal-json-zoo"]
+old = "every malformed-plan refusal flattens to `code: internal-error` (the typed error is discarded, so the envelope cannot distinguish a malformed plan from a norn bug): the unknown-kind and missing-field cases report `internal-error` with their specific message, and a wrong-typed member (`\"operation\": 5`) reports `internal-error` with the bare serde decode text"
+new = "the typed error survives to the envelope: an unknown op kind reports `code: unknown-operation-kind`, and the missing-field / non-object / kind-operation-mismatch / wrong-typed-member family reports `code: malformed-plan` — a machine-branchable signal that the plan, not norn, is at fault. Exit 2 unchanged; the unknown-kind and missing-field messages are unchanged, and a wrong-typed-member decode failure additionally names the kind (`op.fields for <kind> could not be decoded: <serde text>`)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

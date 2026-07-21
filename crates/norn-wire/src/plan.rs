@@ -226,6 +226,12 @@ pub enum TypedOpError {
     /// — executing a different operation than its `kind` declares. Message:
     /// `op.fields.operation '{operation}' conflicts with op.kind '{kind}'`.
     OperationKindMismatch { kind: String, operation: String },
+    /// A change op's `fields` are the right SHAPE (a JSON object) but a member is
+    /// wrong-TYPED, so the payload cannot decode into the executor's change model
+    /// (e.g. `"operation": 5` or a non-bool `"force"`). Carries the underlying
+    /// decode error text. Message:
+    /// `op.fields for {kind} could not be decoded: {message}`.
+    MalformedFields { kind: String, message: String },
 }
 
 impl std::fmt::Display for TypedOpError {
@@ -241,6 +247,9 @@ impl std::fmt::Display for TypedOpError {
                     f,
                     "op.fields.operation '{operation}' conflicts with op.kind '{kind}'"
                 )
+            }
+            TypedOpError::MalformedFields { kind, message } => {
+                write!(f, "op.fields for {kind} could not be decoded: {message}")
             }
         }
     }

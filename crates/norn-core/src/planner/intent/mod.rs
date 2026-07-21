@@ -193,7 +193,18 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 .entry("repair_rule")
                 .or_insert_with(|| serde_json::Value::String("operator-request".into()));
 
-            let change: PlannedChange = serde_json::from_value(serde_json::Value::Object(fields))?;
+            // A wrong-TYPED member (e.g. `"operation": 5`, a non-bool `"force"`)
+            // slips the object-shape and mismatch guards but fails the decode into
+            // the change model. Carry it as a typed malformed-plan error so the
+            // apply envelope codes it `malformed-plan`, not `internal-error` — a
+            // wrong-typed authored field is a USER error, not a norn bug.
+            let change: PlannedChange = serde_json::from_value(serde_json::Value::Object(fields))
+                .map_err(|e| {
+                anyhow::Error::new(TypedOpError::MalformedFields {
+                    kind: kind.clone(),
+                    message: e.to_string(),
+                })
+            })?;
             Ok(vec![change])
         }
 
@@ -499,6 +510,67 @@ mod expansion_tests {
         assert_eq!(
             expanded[0].operation, "set_frontmatter",
             "an absent operation fills from kind"
+        );
+    }
+
+    #[test]
+    fn dispatch_change_non_string_operation_is_malformed_plan() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        // A non-string `operation` slips the mismatch guard (`as_str()` -> None)
+        // and the `entry().or_insert` no-op (key present), then fails the decode
+        // into the change model. It must surface as a typed MalformedFields, not a
+        // flattened serde anyhow (which would code `internal-error`).
+        let op = MigrationOp {
+            kind: "set_frontmatter".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({
+                "path": "a.md",
+                "field": "title",
+                "new_value": "Foo",
+                "operation": 5,
+            }),
+            footnote: None,
+        };
+        let err = expand(&op, &index).unwrap_err();
+        let typed = err
+            .downcast_ref::<TypedOpError>()
+            .expect("a wrong-typed field must surface the typed error");
+        assert!(
+            matches!(typed, TypedOpError::MalformedFields { kind, .. } if kind == "set_frontmatter"),
+            "expected MalformedFields for set_frontmatter, got {typed:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_change_wrong_typed_field_is_malformed_plan() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        // `force` is a bool in the change model; a string value fails the decode.
+        let op = MigrationOp {
+            kind: "set_frontmatter".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({
+                "path": "a.md",
+                "field": "title",
+                "new_value": "Foo",
+                "force": "notabool",
+            }),
+            footnote: None,
+        };
+        let err = expand(&op, &index).unwrap_err();
+        let typed = err
+            .downcast_ref::<TypedOpError>()
+            .expect("a wrong-typed field must surface the typed error");
+        assert!(
+            matches!(typed, TypedOpError::MalformedFields { .. }),
+            "expected MalformedFields, got {typed:?}"
         );
     }
 

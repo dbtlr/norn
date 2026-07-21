@@ -69,12 +69,13 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // set-forecast, set-confirm-refusal) atop the two existing handshake/get cases,
     // taking the total to 98; self-check ignores `ported`, so all seven `mcp` cases
     // Match (oracle vs. itself).
-    // NRN-405 adds three `apply` cases exercising malformed / mis-declared authored
-    // plans (a kind/operation mismatch refusal, and unknown-kind + missing-field
-    // --format json refusals), taking the total to 101; self-check ignores the
-    // divergence (oracle vs. itself always Matches), so all 101 Match.
+    // NRN-405 adds four `apply` cases exercising malformed / mis-declared authored
+    // plans (a kind/operation mismatch refusal, and unknown-kind + missing-field +
+    // wrong-typed-member --format json refusals), taking the total to 102;
+    // self-check ignores the divergence (oracle vs. itself always Matches), so all
+    // 102 Match.
     assert!(
-        stdout.contains("101 cases: 101 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("102 cases: 102 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -160,13 +161,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // tools/list case stays `ported: false` (audit-tool absence + intentional
     // schema divergences make the full catalog un-byte-matchable — see
     // `MCP_CASES`), so the gated `ported` filter skips it.
-    // NRN-405 adds three ported `apply` cases, all DIVERGING with new ledger
+    // NRN-405 adds four ported `apply` cases, all DIVERGING with new ledger
     // entries: a change-op kind/operation mismatch refusal (PD-113) and the
-    // unknown-kind + missing-field malformed-plan refusal codes (PD-114, two
-    // cases). The gated total grows to 100 and the diverged count from 17 to 20;
-    // the match count stays 80.
+    // unknown-kind + missing-field + wrong-typed-member malformed-plan refusal
+    // codes (PD-114, three cases). The gated total grows to 101 and the diverged
+    // count from 17 to 21; the match count stays 80.
     assert!(
-        stdout.contains("100 cases: 80 match, 20 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("101 cases: 80 match, 21 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -189,6 +190,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "apply-authored-kind-operation-mismatch-refusal-zoo",
         "apply-authored-unknown-kind-refusal-json-zoo",
         "apply-authored-missing-field-refusal-json-zoo",
+        "apply-authored-wrong-typed-field-refusal-json-zoo",
         "mutate-set-apply-records-zoo",
         "mutate-new-unknown-field-warning-json-zoo",
         "mutate-set-null-block-promote",

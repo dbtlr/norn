@@ -81,7 +81,8 @@ pub fn from_anyhow(e: &anyhow::Error) -> ApplyError {
             norn_wire::TypedOpError::UnknownKind(_) => "unknown-operation-kind",
             norn_wire::TypedOpError::MissingField { .. }
             | norn_wire::TypedOpError::FieldsNotObject { .. }
-            | norn_wire::TypedOpError::OperationKindMismatch { .. } => "malformed-plan",
+            | norn_wire::TypedOpError::OperationKindMismatch { .. }
+            | norn_wire::TypedOpError::MalformedFields { .. } => "malformed-plan",
         };
         return ApplyError {
             code: code.to_string(),
@@ -179,6 +180,21 @@ mod tests {
         assert_eq!(
             envelope.message,
             "op.fields.operation 'remove_frontmatter' conflicts with op.kind 'set_frontmatter'"
+        );
+    }
+
+    #[test]
+    fn from_anyhow_maps_malformed_fields_to_malformed_plan() {
+        let err: anyhow::Error = norn_wire::TypedOpError::MalformedFields {
+            kind: "set_frontmatter".into(),
+            message: "invalid type: integer `5`, expected a string".into(),
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "malformed-plan");
+        assert_eq!(
+            envelope.message,
+            "op.fields for set_frontmatter could not be decoded: invalid type: integer `5`, expected a string"
         );
     }
 

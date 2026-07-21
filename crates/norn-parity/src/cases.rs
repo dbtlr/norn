@@ -2423,6 +2423,38 @@ const APPLY_CASES: &[Case] = &[
 "##,
         ),
     },
+    // A malformed authored plan whose `fields` are the right SHAPE (an object) but
+    // carry a wrong-TYPED member — `"operation": 5` (NRN-405). It slips both the
+    // object-shape and the kind/operation-mismatch guards (a non-string
+    // `operation` is neither), then fails the decode into the change model. The
+    // oracle flattens the bare serde error to `internal-error`; the rewrite carries
+    // a typed `malformed-plan` and additionally names the kind
+    // (`op.fields for set_frontmatter could not be decoded: <serde text>`), so both
+    // the `code` and the message diverge. exit 2, write-free on both. The
+    // class-completion of PD-114 (a wrong-typed member, not just an unknown kind or
+    // missing field), pinned by the same entry.
+    Case {
+        id: "apply-authored-wrong-typed-field-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "set_frontmatter", "fields": { "path": "notes/alpha.md", "field": "priority", "new_value": "high", "operation": 5 } }
+  ]
+}
+"##,
+        ),
+    },
 ];
 
 const SUITES: &[Suite] = &[

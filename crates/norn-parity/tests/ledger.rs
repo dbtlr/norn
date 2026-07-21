@@ -141,7 +141,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
 
     // The NRN-405 authored-plan divergences (PD-113 / PD-114). PD-113 (the
     // change-op kind/operation mismatch refusal) is a decided-better safety
-    // change; PD-114 (the malformed-plan refusal codes) covers two cases and is a
+    // change; PD-114 (the malformed-plan refusal codes) covers three cases and is a
     // discovered-inconsistency (internal-error misclassified user-authored errors).
     let pd113 = ledger
         .entry_for_case("apply-authored-kind-operation-mismatch-refusal-zoo")
@@ -152,6 +152,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     for case in [
         "apply-authored-unknown-kind-refusal-json-zoo",
         "apply-authored-missing-field-refusal-json-zoo",
+        "apply-authored-wrong-typed-field-refusal-json-zoo",
     ] {
         assert_eq!(
             ledger.entry_for_case(case).map(|e| e.id.as_str()),
