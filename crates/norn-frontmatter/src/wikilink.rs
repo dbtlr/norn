@@ -363,6 +363,32 @@ mod tests {
     }
 
     #[test]
+    fn reconstruct_is_identity_for_tight_links() {
+        // Emission fidelity: for a TIGHT link (no interior whitespace),
+        // reconstructing with its own target round-trips to the exact raw across
+        // every embed / alias / anchor / block-ref combination. (Padded links do
+        // NOT round-trip — that canonicalization is the decided PD-119 behavior.)
+        for raw in [
+            "[[Target]]",
+            "![[Target]]",
+            "[[Target|Alias]]",
+            "![[Target|Alias]]",
+            "[[Target#Heading]]",
+            "![[Target#Heading]]",
+            "[[Target#Heading|Alias]]",
+            "[[Target#^blk]]",
+            "![[Target#^blk|Alias]]",
+        ] {
+            let link = only(raw);
+            assert_eq!(
+                reconstruct_wikilink(&link, &link.target),
+                raw,
+                "tight link must round-trip: {raw}"
+            );
+        }
+    }
+
+    #[test]
     fn reconstruct_preserves_embed_and_alias() {
         // NRN-431: an embed's `!` and its `|alias` survive a target rewrite.
         assert_eq!(
