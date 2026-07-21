@@ -897,8 +897,8 @@ mod tests {
 
     #[test]
     fn render_key_leaves_plain_identifiers_unquoted() {
-        // Minimal churn: an identifier-plain key must render byte-identically to
-        // the bare name (no gratuitous quoting) — the oracle passes plain for it.
+        // Minimal churn: an identifier-plain key renders as the bare name (no
+        // gratuitous quoting) — pinned by the render-key parity case.
         for name in ["status", "title", "kind", "aliases", "a_b", "field123"] {
             assert_eq!(
                 render_key(name),

@@ -37,8 +37,8 @@ pub fn execute(
         Err(refusal) => return Ok(refused(vault_root, dry_run, refusal)),
     };
 
-    // Match the donor plan byte-for-byte (the `plan_hash` is the plan's
-    // `canonical_hash()`, so the field SET is the contract): `path` is the
+    // This field set IS the wire contract, pinned by the delete plan parity
+    // case (the `plan_hash` is the plan's `canonical_hash()`): `path` is the
     // RESOLVED target, and `rewrite_to` is the RAW argument, always present as a
     // key (JSON `null` when absent) — NOT the resolved path, and never omitted
     // (donor `mcp/tools/delete.rs`). The intent expander's `as_str()` reads a
@@ -83,9 +83,9 @@ pub fn execute(
     })
 }
 
-/// Build the `delete_document` op fields to match the donor plan byte-for-byte —
-/// the `plan_hash` is `MigrationPlan::canonical_hash()`, so the field SET is the
-/// wire contract for `--format json`. Donor field set + insertion order
+/// Build the `delete_document` op fields — this field set IS the wire contract,
+/// pinned by the delete plan parity case (the `plan_hash` is
+/// `MigrationPlan::canonical_hash()`) for `--format json`. Field set + insertion order
 /// (`mcp/tools/delete.rs`): `path` (RESOLVED target), `rewrite_to` (the RAW arg,
 /// always present as a key — JSON `null` when absent, NOT the resolved path), and
 /// `allow_broken_links` (always present). `rewrite_to` as a stem-or-path does not
@@ -107,8 +107,8 @@ fn delete_fields(doc_rel: &camino::Utf8Path, params: &norn_wire::DeleteParams) -
     Value::Object(fields)
 }
 
-/// A coded delete preflight refusal — the donor `DeletePreflightError` codes +
-/// Display prose, preserved byte-for-byte.
+/// A coded delete preflight refusal — the `DeletePreflightError` codes +
+/// Display prose are the wire contract, pinned by the delete plan parity case.
 struct DeleteRefusal {
     code: &'static str,
     message: String,

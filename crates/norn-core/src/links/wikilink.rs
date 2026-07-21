@@ -38,8 +38,8 @@ pub fn parse_wikilinks(
 ///
 /// Each contributing property value is scanned as raw text (no code-span
 /// semantics). When the value's byte offset in `content` is known the span is
-/// content-absolute; when it is not (folded/quoted scalars whose offset can't be
-/// located) the [`Link`] carries no span, exactly as the donor did.
+/// content-absolute; when it is not the [`Link`] carries no span, because the
+/// span is unrecoverable for folded/quoted scalars whose offset can't be located.
 pub fn parse_frontmatter_wikilinks(
     source_path: &Utf8Path,
     content: &str,

@@ -88,9 +88,9 @@ pub fn execute(
     })
 }
 
-/// Build the `move_document` op fields to match the donor plan byte-for-byte —
-/// the `plan_hash` is `MigrationPlan::canonical_hash()`, so the field SET is the
-/// wire contract for `--format json`. `src` (resolved) / `dst` / `parents` are
+/// Build the `move_document` op fields — this field set IS the wire contract,
+/// pinned by the move plan parity case (the `plan_hash` is
+/// `MigrationPlan::canonical_hash()`) for `--format json`. `src` (resolved) / `dst` / `parents` are
 /// ALWAYS present; `force` and `no_link_rewrite` are added ONLY when set (donor
 /// `mcp/tools/move_doc.rs`).
 fn single_move_fields(resolved_src: &camino::Utf8Path, params: &norn_wire::MoveParams) -> Value {
@@ -107,8 +107,8 @@ fn single_move_fields(resolved_src: &camino::Utf8Path, params: &norn_wire::MoveP
     Value::Object(fields)
 }
 
-/// A coded single-file move preflight refusal — the donor `MovePreflightError`
-/// codes + Display prose, preserved byte-for-byte for parity.
+/// A coded single-file move preflight refusal — the `MovePreflightError`
+/// codes + Display prose are the wire contract, pinned by the move plan parity case.
 struct MoveRefusal {
     code: &'static str,
     message: String,

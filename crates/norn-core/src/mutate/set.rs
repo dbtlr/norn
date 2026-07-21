@@ -40,9 +40,9 @@ pub fn execute(
         Ok(p) => p,
         Err(e) => {
             let raw = e.to_string();
-            // Donor-faithful refusal messages (the oracle's exact prose):
-            // `doc not found: <target>` for a miss; the resolver's candidate
-            // list for an ambiguous stem.
+            // Refusal prose is end-user contract, pinned by the mutate refusal
+            // parity cases: `doc not found: <target>` for a miss; the resolver's
+            // candidate list for an ambiguous stem.
             let (code, msg) = if raw.contains("ambiguous") {
                 ("target-ambiguous", raw)
             } else {
@@ -577,8 +577,9 @@ fn detect_cross_class_conflicts(params: &SetParams) -> Result<(), SetError> {
     if conflicts.is_empty() {
         return Ok(());
     }
-    // Donor-faithful body (retired/src/set/synth.rs): a header, one indented
-    // `'key': --a + --b` line per conflict, then the trailing explainer.
+    // Refusal prose is end-user contract, pinned by the mutate refusal parity
+    // cases: a header, one indented `'key': --a + --b` line per conflict, then
+    // the trailing explainer.
     let mut msg = String::from("cross-class conflict on the same key:\n");
     for (k, classes) in &conflicts {
         msg.push_str(&format!("  '{k}': {}\n", classes.join(" + ")));
