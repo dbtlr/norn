@@ -54,7 +54,7 @@ Every `ApplyReport` carries a single `outcome` field:
 | `rebased` | 0 | **reserved** for a future auto-rebase-on-drift (NRN-152); not produced today |
 
 `outcome` is the cross-surface signal, and the `failed`-vs-`refused` distinction is
-load-bearing: `refused` promises a byte-identical vault (safe to retry or ignore),
+load-bearing: `refused` promises nothing was written (safe to retry or ignore),
 while `failed` means **the vault was partially mutated** — a consumer must re-read
 before retrying. A consumer that ported "nonzero exit = failure" logic should key
 on `outcome` instead: over MCP both a `refused` and a `failed` apply are returned as
