@@ -140,6 +140,9 @@ pub(crate) fn load_headings(
             text,
             slug,
             source_span,
+            // The cache does not persist the heading construct's end offset; a
+            // cache-reconstructed heading is display-only (never re-resolved).
+            body_offset: None,
         })
     })?;
     let mut headings = Vec::new();

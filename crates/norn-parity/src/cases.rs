@@ -1555,6 +1555,15 @@ const MUTATE_EDGE_1: Fixture = Fixture {
     seed: 1,
 };
 
+/// The section-edge fixture (NRN-437): the valid zoo plus the two body-heading
+/// probes (`shapes/setext.md`, `shapes/eof-heading.md`), isolated on the
+/// `section-edge` profile so the decided section-op corruption fix never touches
+/// a shared zoo/clean case (the text-edge / mutate-edge discipline).
+const SECTION_EDGE_1: Fixture = Fixture {
+    profile_name: "section-edge",
+    seed: 1,
+};
+
 /// The trace-id normalization every CONFIRMED-apply case appends: the pinned
 /// oracle mints a random `trace:`/`trace_id` on apply, the rewrite emits an empty
 /// one by contract, so without this an otherwise byte-equal apply would diverge
@@ -1973,8 +1982,11 @@ const MUTATE_CASES: &[Case] = &[
 /// Mutation-verb parity for `edit` (NRN-379): the atomic content-anchored
 /// body-edit verb. Each case is `mutating: true` — a forecast/refusal is proven
 /// write-free on BOTH binaries, and the confirmed apply is proven to write a
-/// byte-identical tree on both (post-state compared). All `ported: true` and
-/// MATCH the oracle (pure byte-parity, no ledger entry): the report shape,
+/// byte-identical tree on both (post-state compared). The NRN-379 cases are all
+/// `ported: true` and MATCH the oracle (pure byte-parity, no ledger entry); the
+/// five NRN-437 section-edge cases at the end DIVERGE with a ledger entry
+/// (PD-115) — the oracle corrupts a SETEXT heading / a heading at EOF, the
+/// rewrite does not. The report shape,
 /// records/json rendering, the format-independent refusal surface, and the ops
 /// grammar (sugar desugar + `--edits-json`) were confirmed byte-identical to the
 /// pinned oracle (v0.48.1). The confirmed-apply case appends [`TRACE_NORM`] (the
@@ -2096,6 +2108,123 @@ const EDIT_CASES: &[Case] = &[
         requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
+        plan: None,
+    },
+    // ── NRN-437: SETEXT / heading-at-EOF section corruption (PD-115) ──────────
+    // Confirmed applies against the section-edge fixture. The oracle shares the
+    // body_start bug, so on these two body shapes it writes DIFFERENT bytes than
+    // the fix: stdout (the `body: X → Y bytes` line) AND the post-state tree
+    // diverge. Each case exits 0 on both sides, so TRACE_NORM collapses the
+    // oracle's random applied `trace:` id to the rewrite's empty one, isolating
+    // the divergence to the corrected content. Pinned by PD-115.
+    //
+    // SETEXT replace_section: the oracle consumes the `-----` underline (demoting
+    // the heading to a paragraph); the rewrite keeps the underline.
+    Case {
+        id: "edit-setext-replace-section-diverge",
+        argv: &[
+            "edit",
+            "setext",
+            "--edits-json",
+            "[{\"op\":\"replace_section\",\"heading\":\"Alpha\",\"content\":\"REPLACED.\"}]",
+            "--yes",
+        ],
+        fixture: SECTION_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("shapes/setext.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // SETEXT insert_after_heading: the oracle inserts the line BEFORE the
+    // underline (the underline then applies to the inserted text); the rewrite
+    // inserts it after the underline, below the heading.
+    Case {
+        id: "edit-setext-insert-after-heading-diverge",
+        argv: &[
+            "edit",
+            "setext",
+            "--edits-json",
+            "[{\"op\":\"insert_after_heading\",\"heading\":\"Alpha\",\"content\":\"LEAD.\"}]",
+            "--yes",
+        ],
+        fixture: SECTION_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("shapes/setext.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // EOF-no-newline replace_section: the section is empty and runs to EOF
+    // (body_start == end == len), so the replacement welds onto the marker on the
+    // oracle (`## TailNEW.`); the rewrite supplies the missing line terminator
+    // first (`## Tail\nNEW.`).
+    Case {
+        id: "edit-eof-heading-replace-section-diverge",
+        argv: &[
+            "edit",
+            "eof-heading",
+            "--edits-json",
+            "[{\"op\":\"replace_section\",\"heading\":\"Tail\",\"content\":\"NEW.\"}]",
+            "--yes",
+        ],
+        fixture: SECTION_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("shapes/eof-heading.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // EOF-no-newline append_to_section: the oracle welds the appended line onto
+    // the heading marker (`## Tail- item`); the rewrite supplies the missing line
+    // terminator first (`## Tail\n- item`).
+    Case {
+        id: "edit-eof-heading-append-to-section-diverge",
+        argv: &[
+            "edit",
+            "eof-heading",
+            "--edits-json",
+            "[{\"op\":\"append_to_section\",\"heading\":\"Tail\",\"content\":\"- item\"}]",
+            "--yes",
+        ],
+        fixture: SECTION_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("shapes/eof-heading.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // EOF-no-newline insert_after_heading: same welding bug as append; the oracle
+    // produces `## TailLEAD.`, the rewrite `## Tail\nLEAD.`.
+    Case {
+        id: "edit-eof-heading-insert-after-heading-diverge",
+        argv: &[
+            "edit",
+            "eof-heading",
+            "--edits-json",
+            "[{\"op\":\"insert_after_heading\",\"heading\":\"Tail\",\"content\":\"LEAD.\"}]",
+            "--yes",
+        ],
+        fixture: SECTION_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("shapes/eof-heading.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
         plan: None,
     },
 ];

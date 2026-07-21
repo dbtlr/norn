@@ -43,11 +43,12 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // two cases). NRN-405 added PD-113 (the authored-plan change-op kind/operation
     // mismatch refusal) and PD-114 (the malformed authored-plan refusal codes —
     // `unknown-operation-kind` / `malformed-plan` in place of `internal-error`,
-    // two cases).
+    // two cases). NRN-437 added PD-115 (the SETEXT / heading-at-EOF section-op
+    // corruption fix, five cases).
     assert_eq!(
         ledger.entries.len(),
-        14,
-        "expected exactly PD-101..PD-114, found {}",
+        15,
+        "expected exactly PD-101..PD-115, found {}",
         ledger.entries.len()
     );
 
@@ -165,6 +166,29 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         .expect("the unknown-kind refusal case must resolve to an entry");
     assert_eq!(
         pd114.reason,
+        norn_parity::ledger::Reason::DiscoveredInconsistency
+    );
+
+    // The NRN-437 section-op divergences (PD-115): the SETEXT / heading-at-EOF
+    // corruption fix covers five `edit` cases under one entry.
+    for case in [
+        "edit-setext-replace-section-diverge",
+        "edit-setext-insert-after-heading-diverge",
+        "edit-eof-heading-replace-section-diverge",
+        "edit-eof-heading-append-to-section-diverge",
+        "edit-eof-heading-insert-after-heading-diverge",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some("PD-115"),
+            "{case} is gated by PD-115"
+        );
+    }
+    let pd115 = ledger
+        .entry_for_case("edit-setext-replace-section-diverge")
+        .expect("the SETEXT replace_section case must resolve to an entry");
+    assert_eq!(
+        pd115.reason,
         norn_parity::ledger::Reason::DiscoveredInconsistency
     );
 }
