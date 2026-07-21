@@ -1564,6 +1564,15 @@ const SECTION_EDGE_1: Fixture = Fixture {
     seed: 1,
 };
 
+/// The wikilink-edge fixture (NRN-424): the valid zoo plus the embed /
+/// code-fence-shadow / caret-stem backlink probes (`wl/*.md`), isolated on the
+/// `wikilink-edge` profile so the decided wikilink-rewriter corruption fixes
+/// never touch a shared zoo/clean case (the section-edge discipline).
+const WIKILINK_EDGE_1: Fixture = Fixture {
+    profile_name: "wikilink-edge",
+    seed: 1,
+};
+
 /// The trace-id normalization every CONFIRMED-apply case appends: the pinned
 /// oracle mints a random `trace:`/`trace_id` on apply, the rewrite emits an empty
 /// one by contract, so without this an otherwise byte-equal apply would diverge
@@ -1973,6 +1982,78 @@ const MUTATE_CASES: &[Case] = &[
         ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // ── NRN-424: the wikilink-rewriter unification divergences ────────────────
+    // Confirmed applies against the wikilink-edge fixture. The oracle shares all
+    // three rewriter bugs, so on these backlink shapes it writes DIFFERENT bytes
+    // than the fix — the post-state tree diverges (stdout matches: the plan/report
+    // is computed the same on both sides). Each exits 0, so TRACE_NORM collapses
+    // the oracle's random applied `trace:` id to the rewrite's empty one, isolating
+    // the divergence to the corrected content. Grouped by mechanism: PD-116
+    // (embed marker), PD-117 (code opacity, both engines), PD-118 (caret target).
+    //
+    // NRN-431 — move cascade drops an embed's `!` and `|alias`. The oracle rewrites
+    // `![[embed-target|Display]]` → `[[embed-moved]]`; the rewrite keeps
+    // `![[embed-moved|Display]]`.
+    Case {
+        id: "wl-move-embed-backlink-diverge",
+        argv: &["move", "embed-target", "wl/embed-moved.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/embed-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // NRN-432 (cascade) — the move cascade's first-occurrence `replacen` rewrites
+    // the code-fenced `[[fence-target]]` sample and leaves the real prose backlink
+    // dangling; the span-based rewrite skips the fence and rewrites the prose link.
+    Case {
+        id: "wl-move-code-fence-shadow-diverge",
+        argv: &["move", "fence-target", "wl/fence-moved.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/fence-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // NRN-432 (verb) — the rewrite-wikilink whole-file scan rewrites BOTH the
+    // fenced sample and the prose link; the code-aware rewrite touches only prose.
+    Case {
+        id: "wl-rewrite-wikilink-code-fence-shadow-diverge",
+        argv: &["rewrite-wikilink", "fence-target", "fence-renamed", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/fence-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // NRN-433 — a bare `^` is an ordinary target char. The oracle splits `[[a^b]]`
+    // on `^`, so the rewrite never matches and the file is left untouched (while
+    // success is reported); the rewrite splits on `#` only and rewrites `[[a^b]]`.
+    Case {
+        id: "wl-rewrite-wikilink-caret-stem-diverge",
+        argv: &["rewrite-wikilink", "a^b", "caret-renamed", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/caret-src.md"),
         requires_code: None,
         normalize: TRACE_NORM,
         plan: None,

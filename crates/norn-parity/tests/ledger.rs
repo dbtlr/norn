@@ -44,11 +44,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // mismatch refusal) and PD-114 (the malformed authored-plan refusal codes —
     // `unknown-operation-kind` / `malformed-plan` in place of `internal-error`,
     // two cases). NRN-437 added PD-115 (the SETEXT / heading-at-EOF section-op
-    // corruption fix, five cases).
+    // corruption fix, five cases). NRN-424 added PD-116/117/118 (the
+    // wikilink-rewriter unification: embed-marker, code-opacity, and caret-target
+    // corruptions).
     assert_eq!(
         ledger.entries.len(),
-        15,
-        "expected exactly PD-101..PD-115, found {}",
+        18,
+        "expected exactly PD-101..PD-118, found {}",
         ledger.entries.len()
     );
 
@@ -191,6 +193,34 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         pd115.reason,
         norn_parity::ledger::Reason::DiscoveredInconsistency
     );
+
+    // The NRN-424 wikilink-rewriter divergences (PD-116/117/118): grouped by
+    // mechanism — the embed-marker drop (one move case), the code-opacity fix
+    // (two cases, move cascade + rewrite-wikilink verb), and the caret-target
+    // split (one rewrite-wikilink case).
+    for (case, entry) in [
+        ("wl-move-embed-backlink-diverge", "PD-116"),
+        ("wl-move-code-fence-shadow-diverge", "PD-117"),
+        ("wl-rewrite-wikilink-code-fence-shadow-diverge", "PD-117"),
+        ("wl-rewrite-wikilink-caret-stem-diverge", "PD-118"),
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some(entry),
+            "{case} is gated by {entry}"
+        );
+    }
+    for case in [
+        "wl-move-embed-backlink-diverge",
+        "wl-move-code-fence-shadow-diverge",
+        "wl-rewrite-wikilink-caret-stem-diverge",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).unwrap().reason,
+            norn_parity::ledger::Reason::DiscoveredInconsistency,
+            "{case}'s entry is a discovered-inconsistency"
+        );
+    }
 }
 
 #[test]

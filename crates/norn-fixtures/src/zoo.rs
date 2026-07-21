@@ -198,6 +198,38 @@ pub fn section_edge_docs() -> Vec<ZooDoc> {
     ]
 }
 
+/// The wikilink-edge zoo — emitted only when `Profile::wikilink_edge` is set.
+/// Backlink probes for the three wikilink-rewriter corruptions (NRN-424 /
+/// NRN-431/432/433), isolated on a dedicated profile (the text-edge /
+/// mutate-edge / section-edge discipline) so the decided divergences never
+/// perturb a shared zoo/clean case. Each source doc holds a hand-authored
+/// backlink to its target; the move / rewrite-wikilink cases exercise the
+/// cascade and the verb rewriters:
+///
+/// - `wl/embed-target.md` + `wl/embed-src.md` — an embed backlink
+///   `![[embed-target|Display]]`. On a move, the oracle's cascade collapses it
+///   to `[[embed-moved]]` (a `strip_prefix("[[")` drops the `!` and the alias,
+///   NRN-431); the rewrite preserves `![[embed-moved|Display]]`.
+/// - `wl/fence-target.md` + `wl/fence-src.md` — a `[[fence-target]]` shadowed
+///   inside a code fence ABOVE the real prose backlink. The oracle rewrites the
+///   fenced sample (the move cascade's first-occurrence `replacen` hits it and
+///   leaves the prose link dangling; the rewrite-wikilink verb's whole-file scan
+///   rewrites BOTH), NRN-432; the rewrite is code-opaque and touches only prose.
+/// - `wl/a^b.md` + `wl/caret-src.md` — a `[[a^b]]` backlink whose target stem
+///   carries a bare `^`. The oracle splits the target on `^`, so the rewrite
+///   never matches and the file is left untouched while success is reported
+///   (NRN-433); the rewrite splits on `#` only and rewrites `[[a^b]]`.
+pub fn wikilink_edge_docs() -> Vec<ZooDoc> {
+    vec![
+        valid_unlinkable("wl/embed-target.md", WL_EMBED_TARGET),
+        valid_unlinkable("wl/embed-src.md", WL_EMBED_SRC),
+        valid_unlinkable("wl/fence-target.md", WL_FENCE_TARGET),
+        valid_unlinkable("wl/fence-src.md", WL_FENCE_SRC),
+        valid_unlinkable("wl/a^b.md", WL_CARET_TARGET),
+        valid_unlinkable("wl/caret-src.md", WL_CARET_SRC),
+    ]
+}
+
 /// The violation zoo, emitted only when `Profile::violations` is true. Each
 /// doc's `codes` are exactly what the pinned oracle reports against it.
 pub fn violation_docs() -> Vec<ViolationDoc> {
@@ -573,6 +605,24 @@ const SETEXT_DOC: &str =
 /// body content must supply the missing line terminator, else the content welds
 /// onto the heading marker. Deliberately not newline-terminated.
 const EOF_HEADING_DOC: &str = "---\ntitle: EOF Heading Doc\n---\n\n## Tail";
+
+// ---- wikilink-edge content -------------------------------------------------
+
+const WL_EMBED_TARGET: &str = "---\ntitle: Embed Target\n---\n\nEmbed target body.\n";
+/// An embed backlink with an alias (NRN-431): the `!` and `|Display` must
+/// survive a move-cascade rewrite.
+const WL_EMBED_SRC: &str = "---\ntitle: Embed Src\n---\n\nSee ![[embed-target|Display]] here.\n";
+
+const WL_FENCE_TARGET: &str = "---\ntitle: Fence Target\n---\n\nFence target body.\n";
+/// A `[[fence-target]]` shadowed inside a code fence, ABOVE the real prose
+/// backlink (NRN-432): the fenced sample is literal and must not be rewritten.
+const WL_FENCE_SRC: &str =
+    "---\ntitle: Fence Src\n---\n\n```\n[[fence-target]]\n```\n\nReal prose [[fence-target]] link.\n";
+
+const WL_CARET_TARGET: &str = "---\ntitle: Caret Target\n---\n\nCaret target body.\n";
+/// A `[[a^b]]` backlink whose target stem carries a bare `^` (NRN-433): the
+/// caret is an ordinary filename character, not a block sigil.
+const WL_CARET_SRC: &str = "---\ntitle: Caret Src\n---\n\nSee [[a^b]] here.\n";
 
 // ---- violation zoo content ------------------------------------------------
 

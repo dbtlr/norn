@@ -77,8 +77,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-437 adds five `edit` section-edge cases (SETEXT replace/insert-after +
     // heading-at-EOF replace/append/insert-after), taking the total to 107;
     // self-check runs oracle vs. itself, so all 107 Match.
+    // NRN-424 adds four `mutate` wikilink-edge cases (an embed move cascade, two
+    // code-fence-shadow rewrites, and a caret-stem rewrite-wikilink), taking the
+    // total to 111; self-check runs oracle vs. itself, so all 111 Match.
     assert!(
-        stdout.contains("107 cases: 107 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("111 cases: 111 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -175,8 +178,14 @@ fn default_mode_gates_help_cases_exit_0() {
     // the oracle corrupts the SETEXT underline / welds onto the EOF marker, the
     // rewrite does not. The gated total grows to 106 and the diverged count from
     // 21 to 26; the match count stays 80.
+    // NRN-424 adds four ported `mutate` wikilink-edge cases, all DIVERGING under
+    // three ledger entries grouped by mechanism: PD-116 (an embed move cascade
+    // dropping the `!`/alias), PD-117 (a code-fence-shadowed backlink, both the
+    // move cascade and the rewrite-wikilink verb), and PD-118 (a caret-stem
+    // rewrite-wikilink). The gated total grows to 110 and the diverged count from
+    // 26 to 30; the match count stays 80.
     assert!(
-        stdout.contains("106 cases: 80 match, 26 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("110 cases: 80 match, 30 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -197,11 +206,18 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-113",
         "PD-114",
         "PD-115",
+        "PD-116",
+        "PD-117",
+        "PD-118",
         "edit-setext-replace-section-diverge",
         "edit-setext-insert-after-heading-diverge",
         "edit-eof-heading-replace-section-diverge",
         "edit-eof-heading-append-to-section-diverge",
         "edit-eof-heading-insert-after-heading-diverge",
+        "wl-move-embed-backlink-diverge",
+        "wl-move-code-fence-shadow-diverge",
+        "wl-rewrite-wikilink-code-fence-shadow-diverge",
+        "wl-rewrite-wikilink-caret-stem-diverge",
         "apply-authored-kind-operation-mismatch-refusal-zoo",
         "apply-authored-unknown-kind-refusal-json-zoo",
         "apply-authored-missing-field-refusal-json-zoo",

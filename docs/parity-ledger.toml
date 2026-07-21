@@ -314,3 +314,48 @@ old = "the section body start is the byte after the heading marker's first newli
 new = "the body start is the parser's heading-construct end (past the SETEXT underline), and an op inserting body content after a heading with no trailing newline emits the missing line terminator first (NRN-437): the SETEXT underline is preserved (`Alpha\\n-----\\nREPLACED.` / the inserted line lands below the underline) and the EOF heading stays a heading (`## Tail\\nNEW.` / `## Tail\\n- item`) — a valid CommonMark heading survives the edit"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-424 (one span-based wikilink rewriter): three independent `[[..]]`
+# rewriters disagreed with the authoritative parser (`parse_wikilinks`, which is
+# code-opaque per ADR 0019 and splits a block ref only on `#^`). The rewrite
+# unifies them onto a single span-based engine driven by the parser's tokens, so
+# only real parsed links rewrite and the embed marker / alias / anchor survive by
+# construction. The oracle shares all three bugs, so each fix diverges on its
+# backlink shape (post-state tree; stdout matches — the plan/report is computed
+# the same on both sides). Grouped by mechanism below. See
+# `crates/norn-frontmatter/src/wikilink.rs` (`splice_wikilinks` /
+# `reconstruct_wikilink`), `crates/norn-core/src/standards/repair/link_risk.rs`
+# (the cascade rewrite), and `crates/norn-core/src/standards/apply.rs`
+# (`apply_rewrite_link` / `rewrite_one_backlink`).
+
+# PD-116 — NRN-431: the move/delete cascade dropped an embed's `!` and `|alias`.
+[[entry]]
+id = "PD-116"
+surface = "move (backlink cascade over an embed reference)"
+cases = ["wl-move-embed-backlink-diverge"]
+old = "the cascade rewrites an embed backlink with a `raw.strip_prefix(\"[[\")` that misses the leading `!` of `![[…]]`: the inner collapses and the whole embed is replaced by a bare wikilink, dropping the `!` AND the `|alias` (`![[embed-target|Display]]` → `[[embed-moved]]`)"
+new = "the cascade rebuilds the link through the parser (`reconstruct_wikilink`), preserving the embed marker and the alias: `![[embed-target|Display]]` → `![[embed-moved|Display]]`"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-117 — NRN-432: neither applier respected code opacity. Same mechanism (a
+# code-fenced `[[old]]` is literal sample text), two engines: the move cascade's
+# first-occurrence `replacen` and the rewrite-wikilink verb's whole-file scan.
+[[entry]]
+id = "PD-117"
+surface = "move / rewrite-wikilink (a code-fence-shadowed backlink)"
+cases = ["wl-move-code-fence-shadow-diverge", "wl-rewrite-wikilink-code-fence-shadow-diverge"]
+old = "the rewriters are not code-opaque: with a fenced `[[fence-target]]` sample ABOVE the real prose backlink, the move cascade's `replacen(raw, .., 1)` rewrites the FIRST file occurrence (the fenced sample) and leaves the real prose link dangling, and the rewrite-wikilink verb's whole-file `find(\"[[\")` scan rewrites BOTH the fenced sample and the prose link"
+new = "both route through the code-aware parser (`parse_wikilinks`), which excludes fenced / inline-code ranges (ADR 0019): the fenced sample is never touched and only the real prose backlink is rewritten"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-118 — NRN-433: the rewrite-wikilink verb split the target on a bare `^`.
+[[entry]]
+id = "PD-118"
+surface = "rewrite-wikilink (a target stem carrying a bare `^`)"
+cases = ["wl-rewrite-wikilink-caret-stem-diverge"]
+old = "`split_target_suffix` splits the target at the first `#` OR `^`, but a bare `^` is an ordinary filename character per the parser (a block ref is `#^id`). So `rewrite-wikilink 'a^b' caret-renamed` matches the pre-`^` fragment `a` against the target `a^b`, never rewrites, and leaves `[[a^b]]` untouched while reporting success"
+new = "matching uses the parser's decomposition (split on `#` only), so the whole `a^b` target matches and `[[a^b]]` is rewritten to `[[caret-renamed]]`"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
