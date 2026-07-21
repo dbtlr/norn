@@ -124,10 +124,8 @@ pub fn execute(
             .retain(|sf| skip_reason_matches(&sf.reason, &params.skip_reasons));
     }
 
-    let plan_json = serde_json::to_string_pretty(&plan)?;
-
     Ok(Ok(RepairReport {
-        plan_json,
+        plan,
         findings_by_code,
         findings_total,
         total_docs,
@@ -151,7 +149,6 @@ fn skip_reason_matches(code: &str, patterns: &[String]) -> bool {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
-    use serde_json::Value;
     use tempfile::TempDir;
 
     const TODAY: &str = "2026-07-20";
@@ -186,8 +183,7 @@ mod tests {
         assert_eq!(report.findings_total, 0);
         assert!(report.findings_by_code.is_empty());
         assert!(!report.has_diagnostic_errors);
-        let plan: Value = serde_json::from_str(&report.plan_json).unwrap();
-        assert_eq!(plan["operations"].as_array().unwrap().len(), 0);
+        assert_eq!(report.plan.operations.len(), 0);
     }
 
     #[test]
@@ -240,16 +236,16 @@ mod tests {
     }
 
     #[test]
-    fn plan_json_is_pretty_and_carries_vault_root() {
+    fn plan_is_typed_and_carries_vault_root() {
         let (_t, root) = synth(None);
         std::fs::write(root.join("a.md").as_std_path(), "---\ntitle: A\n---\n").unwrap();
         let cache = built(&root);
         let report = execute(&cache, None, &RepairParams::default(), TODAY)
             .unwrap()
             .unwrap();
-        // Pretty-printed (multi-line) and structurally a MigrationPlan.
-        assert!(report.plan_json.contains('\n'));
-        let plan: Value = serde_json::from_str(&report.plan_json).unwrap();
-        assert_eq!(plan["vault_root"].as_str().unwrap(), root.as_str());
+        // The typed plan carries the vault root, and still pretty-prints multi-line.
+        assert_eq!(report.plan.vault_root, root.as_str());
+        let plan_json = serde_json::to_string_pretty(&report.plan).unwrap();
+        assert!(plan_json.contains('\n'));
     }
 }

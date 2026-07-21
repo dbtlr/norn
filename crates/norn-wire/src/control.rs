@@ -18,10 +18,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApplyParams, CountParams, CountReport, DeleteParams, DescribeParams, DescribeReport,
-    EditParams, EditReport, FindParams, FindReport, GetParams, GetReport, MoveParams, NewParams,
-    NewReport, RepairParams, RepairReport, RewriteWikilinkParams, SetParams, SetReport,
-    ValidateParams, ValidateReport,
+    ApplyParams, ApplyReport, CountParams, CountReport, DeleteParams, DescribeParams,
+    DescribeReport, EditParams, EditReport, FindParams, FindReport, GetParams, GetReport,
+    MoveParams, NewParams, NewReport, RepairParams, RepairReport, RewriteWikilinkParams, SetParams,
+    SetReport, ValidateParams, ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
@@ -60,8 +60,9 @@ pub struct WriterProgress {
 /// Client -> owner. One JSON object per line.
 ///
 /// `PartialEq` but not `Eq`: the `Apply` variant carries an [`ApplyParams`] whose
-/// opaque `plan` is a `serde_json::Value` (not `Eq`), exactly as [`OwnerFrame`]'s
-/// cascade-report variants already are.
+/// typed `plan` ([`MigrationPlan`](crate::MigrationPlan)) embeds a
+/// `serde_json::Value` op-`fields` payload (not `Eq`), exactly as [`OwnerFrame`]'s
+/// cascade-report variants (`ApplyReport`) are.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ClientFrame {
@@ -108,7 +109,7 @@ pub enum ClientFrame {
     /// Applies when `confirm` is set, else forecasts.
     RewriteWikilink { params: RewriteWikilinkParams },
     /// An `apply` request: execute an already-parsed, schema-checked
-    /// `MigrationPlan` (carried opaque in `params.plan`). Applies when `confirm`
+    /// `MigrationPlan` (carried typed in `params.plan`). Applies when `confirm`
     /// is set, else forecasts.
     Apply { params: ApplyParams },
 }
@@ -155,35 +156,20 @@ pub enum OwnerFrame {
     /// The answer to `Edit`: the body-edit report (applied or forecast, or a
     /// coded `outcome = refused` on a clean pre-write decline).
     Edit { report: EditReport },
-    /// The answer to `Move` / `Delete` / `RewriteWikilink`: the shared
-    /// `norn-core` `ApplyReport`, serialized as an opaque JSON value (this crate
-    /// cannot name the core type — see `crate::mutate`). A refusal rides in the
-    /// value's `outcome = refused` + `operations[].error`, so it stays exit 2
-    /// without a distinct frame. Applied/forecast reports carry the cascade.
-    Move {
-        #[serde(rename = "report")]
-        report: serde_json::Value,
-    },
-    /// The answer to `Delete` — the shared `ApplyReport` as a JSON value.
-    Delete {
-        #[serde(rename = "report")]
-        report: serde_json::Value,
-    },
-    /// The answer to `RewriteWikilink` — the shared `ApplyReport` as a JSON value.
-    RewriteWikilink {
-        #[serde(rename = "report")]
-        report: serde_json::Value,
-    },
-    /// The answer to `Apply` — the shared `norn-core` `ApplyReport` for the
-    /// executed plan, serialized as an opaque JSON value (this crate cannot name
-    /// the core type — see `crate::mutate`). A refusal (malformed at the owner,
-    /// an owner-set precondition mismatch, a containment violation) rides in the
-    /// value's `outcome = refused` + `operations[]`/`preconditions[]`, so it stays
-    /// exit 2 without a distinct frame.
-    Apply {
-        #[serde(rename = "report")]
-        report: serde_json::Value,
-    },
+    /// The answer to `Move` / `Delete` / `RewriteWikilink`: the shared typed
+    /// [`ApplyReport`] (which now lives in this crate — see `crate::mutate`). A
+    /// refusal rides in `outcome = refused` + `operations[].error`, so it stays
+    /// exit 2 without a distinct frame. Applied/forecast reports carry the cascade.
+    Move { report: ApplyReport },
+    /// The answer to `Delete` — the shared typed [`ApplyReport`].
+    Delete { report: ApplyReport },
+    /// The answer to `RewriteWikilink` — the shared typed [`ApplyReport`].
+    RewriteWikilink { report: ApplyReport },
+    /// The answer to `Apply` — the shared typed [`ApplyReport`] for the executed
+    /// plan. A refusal (an owner-set precondition mismatch, a containment
+    /// violation) rides in `outcome = refused` + `operations[]`/`preconditions[]`,
+    /// so it stays exit 2 without a distinct frame.
+    Apply { report: ApplyReport },
     /// A well-formed request the owner could not carry out for a
     /// non-cache reason — a bad predicate, an unresolvable `--links-to`
     /// target. Distinct from [`Error`](OwnerFrame::Error): the owner stays

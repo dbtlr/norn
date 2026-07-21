@@ -27,6 +27,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::MigrationPlan;
+
 /// The apply outcome of a mutation — mirrors the core `ApplyOutcome` on the
 /// wire. `applied`/dry-run success is `Applied`; a clean pre-write decline is
 /// `Refused` (paired with a [`CodedError`]).
@@ -293,22 +295,20 @@ pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 // Unlike `set`/`new` — whose donor reports are compact verb-specific structs —
 // the `move`/`delete`/`rewrite-wikilink` verbs answer with the shared
 // [`ApplyReport`](crate::ApplyReport) (its `--format json` IS
-// `serde_json::to_string_pretty(&report)`). That report now lives in this crate
-// (the end-user report contract), but these frames still ride it as an opaque
-// `serde_json::Value` — the `ApplyReport` serialized as-is — pending the
-// typed-cascade-frame follow-up (NRN-405 part b).
+// `serde_json::to_string_pretty(&report)`). That report lives in this crate (the
+// end-user report contract), and the owner frames now carry it TYPED —
+// [`OwnerFrame::Move`](crate::OwnerFrame)/`Delete`/`RewriteWikilink`/`Apply`
+// name `ApplyReport` directly (NRN-405 part b), so the CLI consumes the typed
+// report with no `serde_json::Value` round-trip and a serialization fault
+// surfaces as a proper wire error rather than degrading to `Null`.
 //
-// Carrying the value (rather than a hand-kept wire twin) makes the report SHELL
-// byte-faithful for free: there is no second serde definition that can drift from
-// the engine's, so every SHAPE field re-materializes identically. It does NOT by
-// itself guarantee the plan-DERIVED fields match — chiefly `plan_hash`
-// (`MigrationPlan::canonical_hash()`): that depends on the execute seam
-// constructing the plan's op FIELD SET donor-identically. See
+// The typed frame does NOT by itself guarantee the plan-DERIVED fields match —
+// chiefly `plan_hash` (`MigrationPlan::canonical_hash()`): that depends on the
+// execute seam constructing the plan's op FIELD SET donor-identically. See
 // `norn-core::mutate::{move_doc::single_move_fields, delete::delete_fields}`,
 // which are pinned to the donor's `mcp/tools/*` field sets (unit-tested) so the
-// hash matches. The CLI deserializes the value back into `ApplyReport` to render
-// records and derive the exit code. See `norn-owner`'s mutation dispatch and the
-// CLI `commands::{move_doc,delete,rewrite_wikilink}`.
+// hash matches. See `norn-owner`'s mutation dispatch and the CLI
+// `commands::{move_doc,delete,rewrite_wikilink}`.
 
 /// A `move` request: relocate a document (or, with `recursive`, a folder) and
 /// cascade-rewrite the backlinks. `from`/`to` are the RAW arguments (a stem, an
@@ -366,19 +366,17 @@ pub struct RewriteWikilinkParams {
 /// detects its format, parses it into a `MigrationPlan`, and validates its
 /// `schema_version` BEFORE the wire (a malformed plan or a schema mismatch refuses
 /// client-side, byte-identical to the donor preamble). The parsed plan then crosses
-/// as `plan` — `serde_json::to_value(&plan)`, the exact value the direct
-/// `--format json` serializes and exactly what `repair` emits, so a repair→apply
-/// composition round-trips (ADR 0011: the plan bytes reviewed are the plan bytes
-/// applied). The [`MigrationPlan`](crate::MigrationPlan) type now lives in this
-/// crate, but `apply` still carries it as an opaque `serde_json::Value` (see
-/// `crate::mutate`'s cascade-verb note) pending the typed-payload follow-up
-/// (NRN-405 part b); the owner deserializes it back. `confirm` applies (else
+/// TYPED as `plan: MigrationPlan` — the exact plan the direct `--format json`
+/// serializes and exactly what `repair` emits, so a repair→apply composition
+/// round-trips (ADR 0011: the plan bytes reviewed are the plan bytes applied). The
+/// [`MigrationPlan`](crate::MigrationPlan) type lives in this crate (NRN-405 part b),
+/// so the owner receives it typed with no re-decode. `confirm` applies (else
 /// forecast); `parents` auto-creates missing parent directories for
 /// `create_document` ops that proceed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApplyParams {
-    pub plan: Value,
+    pub plan: MigrationPlan,
     #[serde(skip_serializing_if = "is_false")]
     pub confirm: bool,
     #[serde(skip_serializing_if = "is_false")]
@@ -502,11 +500,17 @@ mod tests {
     #[test]
     fn apply_params_omit_false_flags_and_round_trip() {
         let p = ApplyParams {
-            plan: json!({ "schema_version": 2, "vault_root": "/v", "operations": [] }),
+            plan: MigrationPlan {
+                schema_version: 2,
+                vault_root: "/v".into(),
+                ..Default::default()
+            },
             confirm: false,
             parents: false,
         };
-        // `confirm`/`parents` omitted when false; `plan` carries the opaque value.
+        // `confirm`/`parents` omitted when false; `plan` carries the typed plan,
+        // which serializes byte-compatibly with the on-disk plan JSON (empty
+        // `operations` still emitted so the applier reads a plan shape).
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
             json!({ "plan": { "schema_version": 2, "vault_root": "/v", "operations": [] } })
@@ -518,13 +522,21 @@ mod tests {
     #[test]
     fn apply_params_include_set_flags() {
         let p = ApplyParams {
-            plan: json!({ "schema_version": 2 }),
+            plan: MigrationPlan {
+                schema_version: 2,
+                vault_root: "/v".into(),
+                ..Default::default()
+            },
             confirm: true,
             parents: true,
         };
         assert_eq!(
             serde_json::to_value(&p).unwrap(),
-            json!({ "plan": { "schema_version": 2 }, "confirm": true, "parents": true })
+            json!({
+                "plan": { "schema_version": 2, "vault_root": "/v", "operations": [] },
+                "confirm": true,
+                "parents": true
+            })
         );
     }
 }

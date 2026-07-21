@@ -235,3 +235,50 @@ old = "a field `set` against a frontmatter block that parses to YAML null (a bar
 new = "the null block promotes to an empty mapping (NRN-371) and the field splices in, exit 0, the tree mutated (a comment-only block keeps its comment and gains the field after it) — a valid input yielding a valid output, closing the new→set null-frontmatter roundtrip (see `crates/norn-frontmatter/src/frontmatter/edit.rs`)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-405 (a reviewed plan must execute as declared): a change op's
+# `fields.operation` is the value that drives the executor's write dispatch. When
+# an authored plan carries an `operation` that DISAGREES with the op's `kind`, the
+# oracle silently dispatches by `operation` — executing a different operation than
+# the reviewed `kind` declares (plan-then-apply's core promise is that what was
+# reviewed is what runs). The pinned case declares `kind: set_frontmatter` but
+# carries `operation: remove_frontmatter` for `priority` (absent from
+# `notes/alpha.md`): the oracle's silent remove trips `cannot-minimal-edit`. The
+# rewrite refuses the mismatch itself, naming both values, before any dispatch —
+# closing the silent-reinterpretation hole (see
+# `crates/norn-core/src/planner/intent/mod.rs`, the `Change` arm; the typed
+# `TypedOpError::OperationKindMismatch` variant in `crates/norn-wire/src/plan.rs`).
+[[entry]]
+id = "PD-113"
+surface = "apply (authored plan: change op `kind` vs `fields.operation` mismatch)"
+cases = ["apply-authored-kind-operation-mismatch-refusal-zoo"]
+old = "a change op whose `fields.operation` disagrees with its `kind` silently dispatches by `operation`, executing a different operation than the reviewed `kind` declares — `kind: set_frontmatter` + `operation: remove_frontmatter` runs a REMOVE (here tripping `error: cannot minimal-edit frontmatter for notes/alpha.md: field priority not present in frontmatter`, exit 2)"
+new = "the mismatch is refused before any dispatch: `error: op.fields.operation 'remove_frontmatter' conflicts with op.kind 'set_frontmatter'`, exit 2, write-free — a reviewed plan must execute as its `kind` declares, so silent reinterpretation is removed"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-405 (malformed-plan diagnostics): a user-authored plan that is malformed —
+# an unknown op kind, a structural op missing a required field, a non-object
+# `fields`, a `kind`/`operation` mismatch, or a wrong-TYPED `fields` member (e.g.
+# `"operation": 5`, a non-bool `"force"`) that fails the change-model decode — is
+# a USER error, not a norn bug. The oracle flattens every such typed refusal to
+# `internal-error` ("norn has a bug"), a misleading machine-branchable code: a
+# consumer that branches on `code` to tell "your plan is malformed, fix it" from
+# "norn crashed, file a bug" is misdirected. The rewrite preserves the typed error
+# through `anyhow` so the apply envelope carries a real code —
+# `unknown-operation-kind` for an unknown kind, `malformed-plan` for the
+# missing-field / not-object / mismatch / wrong-typed-member family. Exit 2 is
+# unchanged throughout; the message is unchanged for the unknown-kind and
+# missing-field cases and, for a wrong-typed-member decode failure, additionally
+# names the op kind alongside the underlying decode text (see
+# `crates/norn-core/src/apply/envelope.rs`, `from_anyhow`, and the
+# `TypedOpError::MalformedFields` variant in `crates/norn-wire/src/plan.rs`).
+# Surfaces only under `--format json`, where the envelope's `code` is observable.
+[[entry]]
+id = "PD-114"
+surface = "apply --format json (malformed authored-plan refusal code)"
+cases = ["apply-authored-unknown-kind-refusal-json-zoo", "apply-authored-missing-field-refusal-json-zoo", "apply-authored-wrong-typed-field-refusal-json-zoo"]
+old = "every malformed-plan refusal flattens to `code: internal-error` (the typed error is discarded, so the envelope cannot distinguish a malformed plan from a norn bug): the unknown-kind and missing-field cases report `internal-error` with their specific message, and a wrong-typed member (`\"operation\": 5`) reports `internal-error` with the bare serde decode text"
+new = "the typed error survives to the envelope: an unknown op kind reports `code: unknown-operation-kind`, and the missing-field / non-object / kind-operation-mismatch / wrong-typed-member family reports `code: malformed-plan` — a machine-branchable signal that the plan, not norn, is at fault. Exit 2 unchanged; the unknown-kind and missing-field messages are unchanged, and a wrong-typed-member decode failure additionally names the kind (`op.fields for <kind> could not be decoded: <serde text>`)"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

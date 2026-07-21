@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_wire::{
-    ApplyParams, ClientFrame, CountParams, CountReport, DeleteParams, DescribeParams,
+    ApplyParams, ApplyReport, ClientFrame, CountParams, CountReport, DeleteParams, DescribeParams,
     DescribeReport, EditParams, EditReport, FindParams, FindReport, GetParams, GetReport,
     MoveParams, NewParams, NewReport, OwnerFrame, RepairParams, RepairReport,
     RewriteWikilinkParams, ServingState, SetParams, SetReport, ValidateParams, ValidateReport,
@@ -306,10 +306,9 @@ impl OwnerSession {
     }
 
     /// Run a `move` mutation against the owner's warm cache. Same send-once,
-    /// never-retry contract as [`set`](Self::set). The report is the shared
-    /// `ApplyReport` as an opaque JSON value (the wire cannot name the core type —
-    /// see `norn_wire`); the CLI, which links norn-core, deserializes it.
-    pub fn move_document(&mut self, params: MoveParams) -> Result<serde_json::Value, ClientError> {
+    /// never-retry contract as [`set`](Self::set). The report is the shared typed
+    /// [`ApplyReport`] (which lives in `norn-wire`), consumed directly by the CLI.
+    pub fn move_document(&mut self, params: MoveParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Move { params })? {
             OwnerFrame::Move { report } => Ok(report),
             OwnerFrame::Rejected { message, hints } => {
@@ -324,7 +323,7 @@ impl OwnerSession {
 
     /// Run a `delete` mutation against the owner's warm cache. Same contract as
     /// [`move_document`](Self::move_document).
-    pub fn delete(&mut self, params: DeleteParams) -> Result<serde_json::Value, ClientError> {
+    pub fn delete(&mut self, params: DeleteParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Delete { params })? {
             OwnerFrame::Delete { report } => Ok(report),
             OwnerFrame::Rejected { message, hints } => {
@@ -342,7 +341,7 @@ impl OwnerSession {
     pub fn rewrite_wikilink(
         &mut self,
         params: RewriteWikilinkParams,
-    ) -> Result<serde_json::Value, ClientError> {
+    ) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::RewriteWikilink { params })? {
             OwnerFrame::RewriteWikilink { report } => Ok(report),
             OwnerFrame::Rejected { message, hints } => {
@@ -356,11 +355,10 @@ impl OwnerSession {
     }
 
     /// Run an `apply` mutation — execute an already-reviewed `MigrationPlan`
-    /// (carried opaque in `params.plan`) — against the owner's warm cache. Same
+    /// (carried typed in `params.plan`) — against the owner's warm cache. Same
     /// send-once, never-retry contract as [`move_document`](Self::move_document);
-    /// the report is the shared `ApplyReport` as an opaque JSON value the CLI
-    /// deserializes.
-    pub fn apply(&mut self, params: ApplyParams) -> Result<serde_json::Value, ClientError> {
+    /// the report is the shared typed [`ApplyReport`] the CLI consumes directly.
+    pub fn apply(&mut self, params: ApplyParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Apply { params })? {
             OwnerFrame::Apply { report } => Ok(report),
             OwnerFrame::Rejected { message, hints } => {

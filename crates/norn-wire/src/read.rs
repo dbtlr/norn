@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::{FilterParams, SortPaginateParams};
+use crate::{FilterParams, MigrationPlan, SortPaginateParams};
 
 /// A `find` request: the shared filter + sort/paging vocabulary. The find-only
 /// `--limit` default (10) and the `--all` help-gate are applied CLI-side and
@@ -435,23 +435,24 @@ pub struct RepairParams {
     pub verbose: bool,
 }
 
-/// A `repair` response: the deterministic `MigrationPlan` the findings produced,
-/// carried as its pretty-JSON string (byte-identical to what `norn repair --plan
-/// --format json` prints — the CLI re-emits it verbatim, and parses it back to
-/// render the `report` / `paths` formats and the bare-summary counts). The
-/// bare-`norn repair` summary also needs the by-code finding tally and the run
-/// header counts, which the plan does not carry, so those ride alongside.
-/// `has_diagnostic_errors` is the single exit-code driver (an error-severity
-/// graph diagnostic anywhere in the FULL index, computed BEFORE triage filtering
-/// so a `--code` narrow never changes the exit code — the donor's
-/// `exit_code_for`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// A `repair` response: the deterministic [`MigrationPlan`](crate::MigrationPlan)
+/// the findings produced, carried TYPED (it lives in this crate — NRN-405 part b).
+/// The CLI serializes it with `serde_json::to_string_pretty` for the verbatim
+/// `--format json` passthrough (byte-identical to what `norn repair --plan
+/// --format json` prints) and reads its fields directly for the `report` / `paths`
+/// formats and the bare-summary counts. The bare-`norn repair` summary also needs
+/// the by-code finding tally and the run header counts, which the plan does not
+/// carry, so those ride alongside. `has_diagnostic_errors` is the single exit-code
+/// driver (an error-severity graph diagnostic anywhere in the FULL index, computed
+/// BEFORE triage filtering so a `--code` narrow never changes the exit code — the
+/// donor's `exit_code_for`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RepairReport {
-    /// The `MigrationPlan` as its `serde_json::to_string_pretty` bytes — the
-    /// verbatim `--format json` passthrough. `norn-wire` cannot name the core
-    /// `MigrationPlan` type (the dependency rule), so it rides as a string; the
-    /// CLI decodes it (it links `norn-core`) for the other projections.
-    pub plan_json: String,
+    /// The deterministic [`MigrationPlan`](crate::MigrationPlan) the findings
+    /// produced. The CLI `to_string_pretty`-serializes it for the verbatim
+    /// `--format json` passthrough and reads its ops/skipped for the other
+    /// projections.
+    pub plan: MigrationPlan,
     /// Sorted `(code, count)` over the triage-filtered findings — the bare
     /// summary's per-code tally (a `BTreeMap` collected in code order).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -40,11 +40,14 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // PD-110 (grammar-wide last-wins, NRN-365). The confirmed-apply mutation
     // slate (NRN-388) added PD-111 (the unified --format json warning envelope)
     // and PD-112 (the NRN-371 null-/comment-only frontmatter mapping-promotion,
+    // two cases). NRN-405 added PD-113 (the authored-plan change-op kind/operation
+    // mismatch refusal) and PD-114 (the malformed authored-plan refusal codes —
+    // `unknown-operation-kind` / `malformed-plan` in place of `internal-error`,
     // two cases).
     assert_eq!(
         ledger.entries.len(),
-        12,
-        "expected exactly PD-101..PD-112, found {}",
+        14,
+        "expected exactly PD-101..PD-114, found {}",
         ledger.entries.len()
     );
 
@@ -134,6 +137,35 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
             .map(|e| e.id.as_str()),
         Some("PD-110"),
         "the grammar-wide last-wins case is gated by PD-110"
+    );
+
+    // The NRN-405 authored-plan divergences (PD-113 / PD-114). PD-113 (the
+    // change-op kind/operation mismatch refusal) is a decided-better safety
+    // change; PD-114 (the malformed-plan refusal codes) covers three cases and is a
+    // discovered-inconsistency (internal-error misclassified user-authored errors).
+    let pd113 = ledger
+        .entry_for_case("apply-authored-kind-operation-mismatch-refusal-zoo")
+        .expect("the kind/operation mismatch case must resolve to an entry");
+    assert_eq!(pd113.id, "PD-113");
+    assert_eq!(pd113.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    for case in [
+        "apply-authored-unknown-kind-refusal-json-zoo",
+        "apply-authored-missing-field-refusal-json-zoo",
+        "apply-authored-wrong-typed-field-refusal-json-zoo",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some("PD-114"),
+            "{case} is gated by PD-114"
+        );
+    }
+    let pd114 = ledger
+        .entry_for_case("apply-authored-unknown-kind-refusal-json-zoo")
+        .expect("the unknown-kind refusal case must resolve to an entry");
+    assert_eq!(
+        pd114.reason,
+        norn_parity::ledger::Reason::DiscoveredInconsistency
     );
 }
 

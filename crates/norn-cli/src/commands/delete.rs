@@ -3,12 +3,11 @@
 //! Maps the args into the wire [`DeleteParams`], resolves apply-vs-forecast from
 //! the shared mode ladder, and hands them to the owner. The owner resolves the
 //! target, runs the backlink-policy preflight, cascades any `--rewrite-to`
-//! redirect under its single-writer lock, and answers with the shared
-//! `ApplyReport` (as a JSON value) the display layer renders.
+//! redirect under its single-writer lock, and answers with the shared typed
+//! `ApplyReport` the display layer renders.
 
 use crate::cli::{DeleteArgs, GlobalArgs};
 use crate::display::{DeleteMutationView, Diagnostic, Output};
-use norn_wire::ApplyReport;
 use norn_wire::DeleteParams;
 
 /// Run a `delete` mutation and return its report as an [`Output`], or a
@@ -38,11 +37,9 @@ pub(crate) fn run_confirm(
     };
 
     let mut session = crate::routed::open_session(global)?;
-    let value = session
+    let report = session
         .delete(params)
         .map_err(|e| crate::routed::client_error_diagnostic(&e))?;
-    let report: ApplyReport = serde_json::from_value(value)
-        .map_err(|e| Diagnostic::new(format!("undecodable delete report: {e}")))?;
 
     Ok(Output::Delete(DeleteMutationView {
         report,
