@@ -44,7 +44,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // mismatch refusal) and PD-114 (the malformed authored-plan refusal codes —
     // `unknown-operation-kind` / `malformed-plan` in place of `internal-error`,
     // two cases). NRN-437 added PD-115 (the SETEXT / heading-at-EOF section-op
-    // corruption fix, four cases).
+    // corruption fix, five cases).
     assert_eq!(
         ledger.entries.len(),
         15,
@@ -170,7 +170,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     );
 
     // The NRN-437 section-op divergences (PD-115): the SETEXT / heading-at-EOF
-    // corruption fix covers four `edit` cases under one entry.
+    // corruption fix covers five `edit` cases under one entry.
     for case in [
         "edit-setext-replace-section-diverge",
         "edit-setext-insert-after-heading-diverge",
