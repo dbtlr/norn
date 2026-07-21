@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Added
+
+- **A new architecture-principles page (`docs/architecture.md`) records norn's standing invariants (NRN-422).** Eleven principles — contract types living in `norn-wire`, typed facts crossing boundaries while prose is rendering, the single render seam, single-PR crate extractions, the incremental-index cache, artifact determinism, one plan vocabulary with one applier, and the substrate bearing the trust burden among them — distilled from the decision records (ADRs 0016–0021) into a checklist a pull request can be tested against, sibling to `docs/concepts.md` and `docs/development.md`.
+
 ### Changed
 
 - **Unknown query fields now reject with a did-you-mean instead of silently returning nothing (NRN-367).** A forgiving `--field value` predicate on `norn find` / `count` whose field the vault does not know — a typo like `find --titel foo` — now fails with a soft-landing diagnostic: ``norn: unknown field `titel``` plus a ``hint: did you mean `title`?`` (via the shared closest-match heuristic) and a `hint:` pointing at canonical `--eq`, exit 1, stdout byte-empty. Previously such a predicate desugared to `--eq titel:foo` and returned an empty result set at exit 0, hiding the typo. The gate is enforced owner-side against the vault's field universe (schema-declared fields plus every frontmatter key the cache has observed), so a VALID field that simply matches zero documents is unaffected — it still returns an empty set at exit 0. Canonical `--eq` / `--in` predicates are never gated (they are the explicit escape hatch for a field the vault has not seen yet). Only `find` and `count` are gated in this change; the same plumbing now exists for unknown `--sort` / `--by` keys, tracked separately.
