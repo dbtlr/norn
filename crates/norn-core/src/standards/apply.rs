@@ -1392,10 +1392,10 @@ pub(crate) enum LinkAttempt {
     Failed(LinkFailReason, String),
 }
 
-/// Read `source_path`, replace the first occurrence of `raw` with `rewritten`,
-/// write it back via `atomic_write` (NRN-146: temp file + rename, the same
-/// crash-atomic guarantee as every other document write). Categorizes
-/// outcomes; never panics, never aborts.
+/// Read `source_path`, replace the affected backlink with `rewritten`, write it
+/// back via `atomic_write` (NRN-146: temp file + rename, the same crash-atomic
+/// guarantee as every other document write). Categorizes outcomes; never panics,
+/// never aborts.
 /// - NotFound (read or write) -> Skipped(SourceMissing): the file moved on.
 /// - other io error on read   -> Failed(ReadFailed, detail)
 /// - other io error on write  -> Failed(WriteFailed, detail)
@@ -1403,11 +1403,19 @@ pub(crate) enum LinkAttempt {
 /// - would break the backlinker's parsing frontmatter
 ///   -> Skipped(WouldCorruptFrontmatter), unwritten
 /// - success                  -> Rewritten
+///
+/// A wikilink/embed backlink rewrites through the authoritative span-based
+/// engine (NRN-424): the first parser-recognized `[[…]]` whose raw matches — so
+/// a `[[old]]` shadowed inside a code fence is never the one rewritten (NRN-432),
+/// where the old first-file-occurrence `replacen` corrupted the code sample and
+/// left the real link dangling. A Markdown backlink (a `[text](url)` destination,
+/// not a `[[…]]` reference) still rewrites by literal first-occurrence replace.
 pub(crate) fn rewrite_one_backlink(
     cwd: &Utf8Path,
     source_path: &Utf8Path,
     raw: &str,
     rewritten: &str,
+    kind: &crate::domain::LinkKind,
 ) -> LinkAttempt {
     let abs = cwd.join(source_path);
     let original = match fs::read_to_string(abs.as_std_path()) {
@@ -1417,7 +1425,24 @@ pub(crate) fn rewrite_one_backlink(
         }
         Err(e) => return LinkAttempt::Failed(LinkFailReason::ReadFailed, e.to_string()),
     };
-    let updated = original.replacen(raw, rewritten, 1);
+    let updated = match kind {
+        crate::domain::LinkKind::Wikilink | crate::domain::LinkKind::Embed => {
+            let mut replaced = false;
+            norn_frontmatter::wikilink::splice_wikilinks(
+                &original,
+                norn_frontmatter::wikilink::parse_wikilinks,
+                |link| {
+                    if !replaced && link.raw == raw {
+                        replaced = true;
+                        Some(rewritten.to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        }
+        crate::domain::LinkKind::Markdown => original.replacen(raw, rewritten, 1),
+    };
     if updated == original {
         return LinkAttempt::Skipped(LinkSkipReason::Drifted);
     }
@@ -1462,6 +1487,7 @@ pub fn apply_link_rewrites(
             &affected.source_path,
             &affected.raw,
             &affected.rewritten,
+            &affected.kind,
         ) {
             LinkAttempt::Rewritten => outcome.rewritten.push(LinkRewriteResult {
                 file: affected.source_path.clone(),
@@ -1565,15 +1591,22 @@ pub fn apply_edit_ops(
 ///
 /// Caller is responsible for hash verification before invoking this.
 ///
-/// # Known limitation
-///
-/// The parser does not skip code-fenced content. If the same target appears
-/// both in prose (flagged by validate) and inside a ``` ... ``` block (not
-/// flagged), apply will rewrite BOTH occurrences. Validate's link extractor
-/// skips code fences via `ignored_wikilink_ranges` in vault-links, but this
-/// rewrite path does not. Reuse of `crate::links::parse_wikilinks` here would
-/// require byte-span based rewriting; deferred to a follow-up.
+/// Rewriting is span-based via the authoritative parser (NRN-424): the body
+/// routes through [`parse_wikilinks`](norn_frontmatter::wikilink::parse_wikilinks)
+/// (code-aware — a `[[old]]` inside a ``` … ``` fence or an inline-code span is
+/// literal sample text and is never rewritten, per ADR 0019, NRN-432) and the
+/// frontmatter prefix through
+/// [`parse_wikilinks_in_text`](norn_frontmatter::wikilink::parse_wikilinks_in_text)
+/// (raw text — a frontmatter wikilink value carries no Markdown code semantics,
+/// preserving today's behavior that frontmatter `[[old]]` values are rewritten
+/// too). Target matching uses the parser's decomposition, so a bare `^` stays in
+/// the target (NRN-433) and the embed marker / alias / anchor are preserved
+/// (NRN-431).
 pub fn apply_rewrite_link(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
+    use norn_frontmatter::wikilink::{
+        parse_wikilinks, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks, Wikilink,
+    };
+
     let old_target = change
         .expected_old_value
         .as_ref()
@@ -1590,65 +1623,16 @@ pub fn apply_rewrite_link(content: &str, change: &PlannedChange) -> Result<Strin
             path: change.path.clone(),
         })?;
 
-    let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(start) = rest.find("[[") {
-        // Copy chunk before this candidate.
-        out.push_str(&rest[..start]);
-        let after_open = &rest[start + 2..];
-        let Some(close) = after_open.find("]]") else {
-            // Unclosed wikilink — copy the rest verbatim and stop.
-            out.push_str(&rest[start..]);
-            return Ok(out);
-        };
-        let inner = &after_open[..close];
-
-        // Parse inner = target [| label] with optional #anchor / ^block-ref on target.
-        let (target_with_modifiers, label) = match inner.split_once('|') {
-            Some((t, l)) => (t, Some(l)),
-            None => (inner, None),
-        };
-        // Split target from suffix (#anchor or ^block-ref).
-        let (bare_target, suffix) = split_target_suffix(target_with_modifiers);
-
-        if bare_target == old_target {
-            out.push_str("[[");
-            out.push_str(new_target);
-            if let Some(s) = suffix {
-                out.push_str(s);
-            }
-            if let Some(l) = label {
-                out.push('|');
-                out.push_str(l);
-            }
-            out.push_str("]]");
-        } else {
-            // Not our match — copy verbatim.
-            out.push_str("[[");
-            out.push_str(inner);
-            out.push_str("]]");
-        }
-
-        rest = &after_open[close + 2..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-fn split_target_suffix(s: &str) -> (&str, Option<&str>) {
-    // Suffix starts at the first '#' or '^', whichever comes first.
-    let hash = s.find('#');
-    let caret = s.find('^');
-    let split_at = match (hash, caret) {
-        (Some(h), Some(c)) => Some(h.min(c)),
-        (Some(h), None) => Some(h),
-        (None, Some(c)) => Some(c),
-        (None, None) => None,
+    let rewrite = |link: &Wikilink| {
+        (link.target == old_target).then(|| reconstruct_wikilink(link, new_target))
     };
-    match split_at {
-        Some(i) => (&s[..i], Some(&s[i..])),
-        None => (s, None),
-    }
+    // Split at the frontmatter/body boundary so the body is parsed code-aware and
+    // the frontmatter prefix is parsed as raw text (indented YAML must not be
+    // mistaken for an indented code block).
+    let (prefix, body) = split_frontmatter_body(content);
+    let new_prefix = splice_wikilinks(prefix, parse_wikilinks_in_text, rewrite);
+    let new_body = splice_wikilinks(body, parse_wikilinks, rewrite);
+    Ok(format!("{new_prefix}{new_body}"))
 }
 
 #[cfg(test)]
@@ -2767,7 +2751,11 @@ mod tests {
 
     #[test]
     fn apply_rewrite_link_preserves_block_ref() {
-        let original = "See [[Norn Brand^block-id]].\n";
+        // NRN-433: a block reference is `#^id`, so the target ends at the `#`. The
+        // `#^block-id` suffix is preserved while the target is rewritten. (The
+        // former assertion pinned a bare-`^` split — the NRN-433 bug — where
+        // `[[Norn Brand^block-id]]` was rewritten as if `^` began the suffix.)
+        let original = "See [[Norn Brand#^block-id]].\n";
         let change = PlannedChange {
             change_id: "test".into(),
             path: "doc.md".into(),
@@ -2786,7 +2774,47 @@ mod tests {
             parents: false,
         };
         let updated = apply_rewrite_link(original, &change).unwrap();
-        assert!(updated.contains("[[norn-brand^block-id]]"));
+        assert!(updated.contains("[[norn-brand#^block-id]]"));
+    }
+
+    #[test]
+    fn apply_rewrite_link_treats_bare_caret_as_target_char() {
+        // NRN-433: a bare `^` is an ordinary filename character, not a block
+        // sigil. A `rewrite_link` whose expected target is the caret-bearing name
+        // matches the whole target and rewrites it; a rewrite keyed on the pre-`^`
+        // fragment does NOT match (the old split-on-`^` falsely reported success
+        // while leaving the file untouched).
+        let original = "See [[a^b]].\n";
+        let matching = PlannedChange {
+            change_id: "test".into(),
+            path: "doc.md".into(),
+            document_hash: "test-hash".into(),
+            finding_code: "link-target-missing".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: "rewrite_link".into(),
+            field: None,
+            expected_old_value: Some(Value::String("a^b".into())),
+            new_value: Some(Value::String("renamed".into())),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+        assert_eq!(
+            apply_rewrite_link(original, &matching).unwrap(),
+            "See [[renamed]].\n"
+        );
+        let non_matching = PlannedChange {
+            expected_old_value: Some(Value::String("a".into())),
+            ..matching.clone()
+        };
+        assert_eq!(
+            apply_rewrite_link(original, &non_matching).unwrap(),
+            original,
+            "a rewrite keyed on the pre-caret fragment must not match"
+        );
     }
 
     #[test]
@@ -2861,6 +2889,38 @@ mod tests {
         };
         let updated = apply_rewrite_link(original, &change).unwrap();
         assert!(updated.contains("[[norn-brand#^block-id]]"));
+    }
+
+    #[test]
+    fn apply_rewrite_link_frontmatter_boundary() {
+        // NRN-424 frontmatter boundary: a frontmatter `[[old]]` VALUE is still
+        // rewritten (today's observable behavior, preserved via a raw-text parse
+        // of the frontmatter prefix), while a `[[old]]` shadowed in a BODY code
+        // fence is code-opaque and left alone (NRN-432) — both in one call.
+        let original =
+            "---\nrelated: \"[[old]]\"\n---\n\n```\n[[old]]\n```\n\nprose [[old]] link\n";
+        let change = PlannedChange {
+            change_id: "test".into(),
+            path: "doc.md".into(),
+            document_hash: "test-hash".into(),
+            finding_code: "operator-request".into(),
+            finding_rule: None,
+            repair_rule: "operator-request".into(),
+            operation: "rewrite_link".into(),
+            field: None,
+            expected_old_value: Some(Value::String("old".into())),
+            new_value: Some(Value::String("new".into())),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+        let updated = apply_rewrite_link(original, &change).unwrap();
+        assert_eq!(
+            updated,
+            "---\nrelated: \"[[new]]\"\n---\n\n```\n[[old]]\n```\n\nprose [[new]] link\n"
+        );
     }
 
     #[test]
@@ -3387,7 +3447,13 @@ mod tests {
         std::fs::write(root.join(rel), "see [[old]] here\n").unwrap();
 
         // Success path: raw text present → Rewritten; file updated.
-        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        let result = rewrite_one_backlink(
+            root,
+            rel,
+            "[[old]]",
+            "[[new]]",
+            &crate::domain::LinkKind::Wikilink,
+        );
         assert!(
             matches!(result, LinkAttempt::Rewritten),
             "expected Rewritten, got something else"
@@ -3403,11 +3469,70 @@ mod tests {
         );
 
         // Drift path: raw text no longer present → Skipped(Drifted).
-        let result2 = rewrite_one_backlink(root, rel, "[[absent]]", "[[whatever]]");
+        let result2 = rewrite_one_backlink(
+            root,
+            rel,
+            "[[absent]]",
+            "[[whatever]]",
+            &crate::domain::LinkKind::Wikilink,
+        );
         assert!(
             matches!(result2, LinkAttempt::Skipped(LinkSkipReason::Drifted)),
             "expected Skipped(Drifted) when raw text absent"
         );
+    }
+
+    #[test]
+    fn rewrite_one_backlink_skips_code_fenced_shadow() {
+        // NRN-432: a `[[old]]` inside a code fence is literal sample text. The old
+        // first-file-occurrence `replacen` rewrote the fenced sample and left the
+        // real prose link dangling; the span-based rewrite skips the fence and
+        // hits the prose link.
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-rowb-fence-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let rel = camino::Utf8Path::new("b.md");
+        let original = "```\n[[old]]\n```\n\nreal [[old]] link\n";
+        std::fs::write(root.join(rel), original).unwrap();
+
+        let result = rewrite_one_backlink(
+            root,
+            rel,
+            "[[old]]",
+            "[[new]]",
+            &crate::domain::LinkKind::Wikilink,
+        );
+        assert!(matches!(result, LinkAttempt::Rewritten));
+        let content = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert_eq!(
+            content, "```\n[[old]]\n```\n\nreal [[new]] link\n",
+            "the fenced sample must be untouched; the prose link rewritten"
+        );
+    }
+
+    #[test]
+    fn rewrite_one_backlink_preserves_embed_marker_and_alias() {
+        // NRN-431: a `![[old|Display]]` embed backlink keeps its `!` and alias.
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-rowb-embed-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let rel = camino::Utf8Path::new("b.md");
+        std::fs::write(root.join(rel), "see ![[old|Display]] here\n").unwrap();
+
+        let result = rewrite_one_backlink(
+            root,
+            rel,
+            "![[old|Display]]",
+            "![[new|Display]]",
+            &crate::domain::LinkKind::Embed,
+        );
+        assert!(matches!(result, LinkAttempt::Rewritten));
+        let content = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert_eq!(content, "see ![[new|Display]] here\n");
     }
 
     /// (NRN-146) The backlink-cascade write is crash-atomic (temp + rename,
@@ -3425,7 +3550,13 @@ mod tests {
         let rel = camino::Utf8Path::new("b.md");
         std::fs::write(root.join(rel), "see [[old]] here\n").unwrap();
 
-        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        let result = rewrite_one_backlink(
+            root,
+            rel,
+            "[[old]]",
+            "[[new]]",
+            &crate::domain::LinkKind::Wikilink,
+        );
         assert!(
             matches!(result, LinkAttempt::Rewritten),
             "expected Rewritten, got something else"
@@ -3477,7 +3608,13 @@ mod tests {
         let before = std::fs::metadata(&full).unwrap().permissions().mode() & 0o777;
         assert_eq!(before, 0o600, "precondition: file must start at 0600");
 
-        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        let result = rewrite_one_backlink(
+            root,
+            rel,
+            "[[old]]",
+            "[[new]]",
+            &crate::domain::LinkKind::Wikilink,
+        );
         assert!(
             matches!(result, LinkAttempt::Rewritten),
             "expected Rewritten, got something else"
@@ -3525,7 +3662,13 @@ mod tests {
             return;
         }
 
-        let result = rewrite_one_backlink(root, rel, "[[old]]", "[[new]]");
+        let result = rewrite_one_backlink(
+            root,
+            rel,
+            "[[old]]",
+            "[[new]]",
+            &crate::domain::LinkKind::Wikilink,
+        );
 
         // Restore permissions so the tempdir's own cleanup can remove it.
         std::fs::set_permissions(root.as_std_path(), Permissions::from_mode(0o755)).unwrap();

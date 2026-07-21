@@ -32,18 +32,30 @@ pub(crate) fn wikilink_warnings(
     field: &str,
     value: &str,
 ) -> Vec<norn_wire::MutationWarning> {
-    let target = value
-        .strip_prefix("[[")
-        .and_then(|s| s.strip_suffix("]]"))
-        .unwrap_or(value);
-    let canonical = target
-        .split('#')
+    // NRN-412(c): the resolution stem comes from the authoritative parser, not a
+    // hand-rolled `[[..]]` strip. A bracketed value decomposes via
+    // `parse_wikilinks_in_text` (target split off `|` alias and `#` anchor by the
+    // same rules validate uses); a bare value (Obsidian permits an unbracketed
+    // target) is treated as the target text directly, preserving prior behavior.
+    let (display, canonical) = match norn_frontmatter::wikilink::parse_wikilinks_in_text(value)
+        .into_iter()
         .next()
-        .unwrap_or(target)
-        .split('|')
-        .next()
-        .unwrap_or(target)
-        .to_lowercase();
+    {
+        Some(token) => {
+            let canonical = token.target.to_lowercase();
+            (token.raw, canonical)
+        }
+        None => {
+            let bare = value
+                .split('#')
+                .next()
+                .unwrap_or(value)
+                .split('|')
+                .next()
+                .unwrap_or(value);
+            (format!("[[{value}]]"), bare.to_lowercase())
+        }
+    };
     let matches = index
         .documents
         .iter()
@@ -53,13 +65,13 @@ pub(crate) fn wikilink_warnings(
         0 => vec![norn_wire::MutationWarning {
             code: "wikilink-unresolved".into(),
             field: Some(field.to_string()),
-            message: format!("unresolved wikilink in {field}: [[{target}]]"),
+            message: format!("unresolved wikilink in {field}: {display}"),
         }],
         1 => Vec::new(),
         _ => vec![norn_wire::MutationWarning {
             code: "wikilink-ambiguous".into(),
             field: Some(field.to_string()),
-            message: format!("ambiguous wikilink in {field}: [[{target}]]"),
+            message: format!("ambiguous wikilink in {field}: {display}"),
         }],
     }
 }
@@ -77,5 +89,56 @@ pub(crate) fn owner_index_options(
             alias_field: cfg.links.alias_field.clone(),
         },
         None => crate::graph::IndexOptions::default(),
+    }
+}
+
+#[cfg(test)]
+mod wikilink_warning_tests {
+    use tempfile::TempDir;
+
+    fn index_with_target() -> (TempDir, crate::domain::GraphIndex) {
+        let tmp = tempfile::Builder::new()
+            .prefix("mutate-wikilink-warn-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("target.md"), "---\ntype: note\n---\n# Target\n").unwrap();
+        let index = crate::graph::build_index(camino::Utf8Path::from_path(root).unwrap()).unwrap();
+        (tmp, index)
+    }
+
+    /// NRN-412(c): the warn-class resolver decomposes the value through the
+    /// authoritative parser, so a bracketed value with an anchor + alias resolves
+    /// on the bare target stem — a `[[target#Heading|Alias]]` value points at the
+    /// one `target.md`, no warning. A hand-rolled strip that kept `#Heading|Alias`
+    /// in the stem would report it unresolved.
+    #[test]
+    fn bracketed_value_with_anchor_and_alias_resolves_via_parser() {
+        let (_tmp, index) = index_with_target();
+        assert!(
+            super::wikilink_warnings(&index, "related", "[[target#Heading|Alias]]").is_empty(),
+            "anchor + alias must be split off the resolution stem"
+        );
+    }
+
+    /// The unresolved message shows the parsed link's raw verbatim (brackets,
+    /// anchor, and alias intact).
+    #[test]
+    fn unresolved_message_shows_the_parsed_raw() {
+        let (_tmp, index) = index_with_target();
+        let warnings = super::wikilink_warnings(&index, "related", "[[missing#Heading|Alias]]");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "wikilink-unresolved");
+        assert_eq!(
+            warnings[0].message,
+            "unresolved wikilink in related: [[missing#Heading|Alias]]"
+        );
+    }
+
+    /// A bare (unbracketed) value is still treated as the target text directly.
+    #[test]
+    fn bare_value_resolves_directly() {
+        let (_tmp, index) = index_with_target();
+        assert!(super::wikilink_warnings(&index, "related", "target").is_empty());
     }
 }
