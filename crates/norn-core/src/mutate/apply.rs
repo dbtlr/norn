@@ -15,10 +15,10 @@
 
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
-use norn_wire::MigrationPlan;
 #[cfg(test)]
 use norn_wire::ApplyOutcome;
 use norn_wire::ApplyReport;
+use norn_wire::MigrationPlan;
 
 /// Execute an `apply`: forecast (`confirm == false`) or apply (`confirm == true`)
 /// the plan carried in `params`.

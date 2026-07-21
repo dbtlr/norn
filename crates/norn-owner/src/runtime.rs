@@ -861,12 +861,7 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                 })
             })
             .await;
-            classify_mutation(
-                state,
-                result,
-                |report| OwnerFrame::Move { report },
-                "move",
-            )
+            classify_mutation(state, result, |report| OwnerFrame::Move { report }, "move")
         }
         ClientFrame::Delete { params } => {
             let Some(slot) = ready_slot(state) else {

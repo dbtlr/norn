@@ -46,8 +46,9 @@ pub use mutate::{
 };
 pub use paging::SortPaginateParams;
 pub use plan::{
-    MigrationOp, MigrationPlan, OwnerSelector, PlanPrecondition, SkippedFinding,
-    MIGRATION_PLAN_SCHEMA_VERSION,
+    ChangeOp, DeleteDocumentFields, EditOp, MigrationOp, MigrationPlan, MoveDocumentFields,
+    MoveFolderFields, OwnerSelector, PlanPrecondition, RewriteWikilinkFields, SkippedFinding,
+    TypedOp, TypedOpError, MIGRATION_PLAN_SCHEMA_VERSION,
 };
 pub use presence::Presence;
 pub use read::{

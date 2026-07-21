@@ -8,7 +8,7 @@ use crate::domain::GraphIndex;
 use crate::standards::{classify_link_risk, PlannedChange};
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
-use norn_wire::MigrationOp;
+use norn_wire::{ChangeOp, EditOp, MigrationOp, MoveDocumentFields, TypedOp};
 use serde::{Deserialize, Serialize};
 
 pub mod move_folder;
@@ -43,62 +43,50 @@ impl IntentOp {
 /// Single dispatch entry point: converts any `MigrationOp` into a
 /// `Vec<PlannedChange>` ready for the applier.
 ///
+/// The op is first resolved to the typed [`TypedOp`] vocabulary
+/// (`TypedOp::try_from`), so no untyped `fields` indexing flows into this
+/// executor seam. A conversion failure — an **unknown kind** or a structural op
+/// missing a required field — surfaces as the same `anyhow` error the executor
+/// previously produced (the message strings are preserved by
+/// [`TypedOpError`](norn_wire::TypedOpError)), so the plan-parses-but-refused-at-
+/// execute contract is unchanged.
+///
 /// - **High-level kinds** (`move_folder`, `rewrite_wikilink`): dispatch to
 ///   the corresponding expander.
 /// - **Low-level move/delete** (`move_document`, `delete_document`): pass
 ///   through with `link_risk` populated by `classify_link_risk`.
-/// - **Other low-level kinds** (`set_frontmatter`, `add_frontmatter`,
-///   `remove_frontmatter`, `rewrite_link`, `replace_body`, `create_document`):
-///   pass through by deserializing `op.fields` into a `PlannedChange`.
-/// - **Unknown kind**: returns `Err`.
+/// - **Change ops** (`set_frontmatter`, `add_frontmatter`, `remove_frontmatter`,
+///   `rewrite_link`, `replace_body`, `create_document`): deserialize the typed
+///   op's `fields` into a `PlannedChange` (a `norn-core` model `norn-wire` may not
+///   name — hence the payload rides typed-through as a JSON object).
+/// - **Edit ops**: carry the `EditOp` payload for apply-time application.
 pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<PlannedChange>> {
-    match op.kind.as_str() {
-        "move_folder" => {
-            let src = op.fields["src"]
-                .as_str()
-                .ok_or_else(|| anyhow!("move_folder missing src"))?;
-            let dst = op.fields["dst"]
-                .as_str()
-                .ok_or_else(|| anyhow!("move_folder missing dst"))?;
-            let parents = op.fields["parents"].as_bool().unwrap_or(false);
-            move_folder::expand_move_folder(
-                &move_folder::MoveFolderOp {
-                    src: src.into(),
-                    dst: dst.into(),
-                    parents,
-                },
-                index,
-            )
-        }
+    match TypedOp::try_from(op).map_err(|e| anyhow!("{e}"))? {
+        TypedOp::MoveFolder(f) => move_folder::expand_move_folder(
+            &move_folder::MoveFolderOp {
+                src: f.src,
+                dst: f.dst,
+                parents: f.parents,
+            },
+            index,
+        ),
 
-        "rewrite_wikilink" => {
-            let old = op.fields["old"]
-                .as_str()
-                .ok_or_else(|| anyhow!("rewrite_wikilink missing old"))?;
-            let new = op.fields["new"]
-                .as_str()
-                .ok_or_else(|| anyhow!("rewrite_wikilink missing new"))?;
-            rewrite_wikilink::expand_rewrite_wikilink(
-                &rewrite_wikilink::RewriteWikilinkOp {
-                    old: old.into(),
-                    new: new.into(),
-                },
-                index,
-            )
-        }
+        TypedOp::RewriteWikilink(f) => rewrite_wikilink::expand_rewrite_wikilink(
+            &rewrite_wikilink::RewriteWikilinkOp {
+                old: f.old,
+                new: f.new,
+            },
+            index,
+        ),
 
-        "move_document" => {
-            let src = op.fields["src"]
-                .as_str()
-                .ok_or_else(|| anyhow!("move_document missing src"))?;
-            let dst = op.fields["dst"]
-                .as_str()
-                .ok_or_else(|| anyhow!("move_document missing dst"))?;
-            let parents = op.fields["parents"].as_bool().unwrap_or(false);
-            let force = op.fields["force"].as_bool().unwrap_or(false);
-            let no_link_rewrite = op.fields["no_link_rewrite"].as_bool().unwrap_or(false);
-
-            let old_path: Utf8PathBuf = src.into();
+        TypedOp::MoveDocument(MoveDocumentFields {
+            src,
+            dst,
+            parents,
+            force,
+            no_link_rewrite,
+        }) => {
+            let old_path: Utf8PathBuf = src.clone().into();
             let new_path: Utf8PathBuf = dst.into();
             let link_risk = if no_link_rewrite {
                 None
@@ -112,7 +100,7 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             };
 
             let change = PlannedChange {
-                change_id: format!("move-{}", src),
+                change_id: format!("move-{src}"),
                 path: old_path,
                 document_hash: String::new(),
                 finding_code: "operator-request".into(),
@@ -131,21 +119,17 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             Ok(vec![change])
         }
 
-        "delete_document" => {
-            let path = op.fields["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("delete_document missing path"))?;
-
-            let doc_path: Utf8PathBuf = path.into();
+        TypedOp::DeleteDocument(f) => {
+            let doc_path: Utf8PathBuf = f.path.clone().into();
 
             // Only populate link_risk when rewrite_to is present.
-            let link_risk = op.fields["rewrite_to"].as_str().map(|rewrite_to| {
+            let link_risk = f.rewrite_to.as_deref().map(|rewrite_to| {
                 let rewrite_path: Utf8PathBuf = rewrite_to.into();
                 classify_link_risk(&doc_path, &rewrite_path, &index.documents, &index.files)
             });
 
             let change = PlannedChange {
-                change_id: format!("delete-{}", path),
+                change_id: format!("delete-{}", f.path),
                 path: doc_path,
                 document_hash: String::new(),
                 finding_code: "operator-request".into(),
@@ -164,72 +148,58 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             Ok(vec![change])
         }
 
-        "set_frontmatter" | "add_frontmatter" | "remove_frontmatter" | "rewrite_link"
-        | "replace_body" | "create_document" => {
-            // Pass through: deserialize op.fields into PlannedChange.
-            // Insert required fields that have no #[serde(default)] if absent.
-            let mut map = op
-                .fields
-                .as_object()
-                .cloned()
-                .ok_or_else(|| anyhow!("op.fields for {} must be an object", op.kind))?;
-            // Insert the operation kind so PlannedChange.operation is populated.
-            map.entry("operation")
-                .or_insert_with(|| serde_json::Value::String(op.kind.clone()));
-            // Insert defaults for required non-defaulted fields when missing.
-            // Extract path first (outside the closures) to avoid borrow conflicts.
-            let path_for_id = map
+        TypedOp::Change(ChangeOp { kind, mut fields }) => {
+            // Deserialize the typed op's fields into a PlannedChange (the payload
+            // IS a PlannedChange shape). Insert required fields that have no
+            // #[serde(default)] if absent.
+            fields
+                .entry("operation")
+                .or_insert_with(|| serde_json::Value::String(kind.clone()));
+            let path_for_id = fields
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_owned();
-            let default_change_id = format!("{}-{}", op.kind, path_for_id);
-            map.entry("change_id")
+            let default_change_id = format!("{kind}-{path_for_id}");
+            fields
+                .entry("change_id")
                 .or_insert_with(|| serde_json::Value::String(default_change_id));
-            map.entry("document_hash")
+            fields
+                .entry("document_hash")
                 .or_insert_with(|| serde_json::Value::String(String::new()));
-            map.entry("finding_code")
+            fields
+                .entry("finding_code")
                 .or_insert_with(|| serde_json::Value::String("operator-request".into()));
-            map.entry("repair_rule")
+            fields
+                .entry("repair_rule")
                 .or_insert_with(|| serde_json::Value::String("operator-request".into()));
 
-            let change: PlannedChange = serde_json::from_value(serde_json::Value::Object(map))?;
+            let change: PlannedChange = serde_json::from_value(serde_json::Value::Object(fields))?;
             Ok(vec![change])
         }
 
-        "str_replace"
-        | "replace_section"
-        | "append_to_section"
-        | "delete_section"
-        | "insert_before_heading"
-        | "insert_after_heading" => {
-            // Section/body edit ops (NRN-98 / H1). The op fields ARE the
-            // `EditOp` (internally tagged on `op`); carry that payload in
-            // `new_value` so the applier can deserialize and apply it against
-            // the current body at apply time, under whole-doc CAS. Extra keys
-            // (`path`/`document_hash`) are ignored by `EditOp`'s deserializer.
-            let path = op.fields["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("{} missing path", op.kind))?;
-            let document_hash = op.fields["document_hash"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let mut edit_json = op
-                .fields
-                .as_object()
-                .cloned()
-                .ok_or_else(|| anyhow!("op.fields for {} must be an object", op.kind))?;
-            edit_json.insert("op".into(), serde_json::Value::String(op.kind.clone()));
+        TypedOp::Edit(EditOp {
+            kind,
+            id,
+            path,
+            document_hash,
+            mut fields,
+        }) => {
+            // Section/body edit ops (NRN-98 / H1). The op fields ARE the `EditOp`
+            // (internally tagged on `op`); carry that payload in `new_value` so
+            // the applier can deserialize and apply it against the current body at
+            // apply time, under whole-doc CAS. Extra keys (`path`/`document_hash`)
+            // are ignored by `EditOp`'s deserializer.
+            fields.insert("op".into(), serde_json::Value::String(kind.clone()));
 
             // change_id must be unique per op: two edits of the same kind on the
             // same document would otherwise collide and clobber each other's
             // telemetry span. Prefer the plan-supplied `op.id`; else discriminate
             // by a hash of the edit payload.
-            let change_id = op.id.clone().unwrap_or_else(|| {
-                let payload = serde_json::Value::Object(edit_json.clone()).to_string();
+            let change_id = id.unwrap_or_else(|| {
+                let payload = serde_json::Value::Object(fields.clone()).to_string();
                 let digest = blake3::hash(payload.as_bytes()).to_hex();
-                format!("{}-{}-{}", op.kind, path, &digest[..8])
+                format!("{kind}-{path}-{}", &digest[..8])
             });
 
             let change = PlannedChange {
@@ -239,10 +209,10 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 finding_code: "operator-request".into(),
                 finding_rule: None,
                 repair_rule: "operator-request".into(),
-                operation: op.kind.clone(),
+                operation: kind,
                 field: None,
                 expected_old_value: None,
-                new_value: Some(serde_json::Value::Object(edit_json)),
+                new_value: Some(serde_json::Value::Object(fields)),
                 destination: None,
                 link_risk: None,
                 warnings: Vec::new(),
@@ -251,8 +221,6 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             };
             Ok(vec![change])
         }
-
-        other => Err(anyhow!("unknown operation kind: {}", other)),
     }
 }
 
