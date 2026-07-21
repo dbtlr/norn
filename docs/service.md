@@ -249,7 +249,7 @@ norn: service is a different build of v0.45.1 — restart the norn serve daemon
 
 ### Routing parity guarantee
 
-Routed and direct execution produce the same end-user output — stdout, stderr, exit code, and the on-disk result of a mutation — pinned by the routing parity suite; the telemetry `trace_id` is the one exception, non-deterministic on the direct path too. Divergence, if any is ever intended, surfaces via the decision-gated ledger. Routing failures may add an operator-actionable stderr notice for version/build skew or a heartbeat-classified stall before falling back to the same trust-verified Direct path. A committing mutation that fails after send remains the deliberate `post-send-uncertain` exception described above.
+Routed and direct execution of a normally-completing request produce the same end-user output — stdout, stderr, exit code, and the on-disk result of a mutation — pinned by the routing parity suite; the telemetry `trace_id` is non-deterministic on both paths. Two documented departures sit outside that guarantee: routing failures may add an operator-actionable stderr notice for version/build skew or a heartbeat-classified stall before falling back to the same trust-verified Direct path, and a committing mutation that fails after send remains the deliberate `post-send-uncertain` exit-1 outcome described above. Any further divergence, if ever intended, surfaces via the decision-gated ledger.
 
 ## Relationship to `norn mcp`
 
