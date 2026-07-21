@@ -221,6 +221,11 @@ pub enum TypedOpError {
     /// A change/edit op's `fields` is not a JSON object. Message:
     /// `op.fields for {kind} must be an object`.
     FieldsNotObject { kind: String },
+    /// A change op's `fields.operation` disagrees with its `kind`. Left
+    /// unrefused, a reviewed plan would silently dispatch as `fields.operation`
+    /// — executing a different operation than its `kind` declares. Message:
+    /// `op.fields.operation '{operation}' conflicts with op.kind '{kind}'`.
+    OperationKindMismatch { kind: String, operation: String },
 }
 
 impl std::fmt::Display for TypedOpError {
@@ -230,6 +235,12 @@ impl std::fmt::Display for TypedOpError {
             TypedOpError::MissingField { kind, field } => write!(f, "{kind} missing {field}"),
             TypedOpError::FieldsNotObject { kind } => {
                 write!(f, "op.fields for {kind} must be an object")
+            }
+            TypedOpError::OperationKindMismatch { kind, operation } => {
+                write!(
+                    f,
+                    "op.fields.operation '{operation}' conflicts with op.kind '{kind}'"
+                )
             }
         }
     }

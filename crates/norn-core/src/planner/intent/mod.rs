@@ -6,9 +6,9 @@
 
 use crate::domain::GraphIndex;
 use crate::standards::{classify_link_risk, PlannedChange};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use camino::Utf8PathBuf;
-use norn_wire::{ChangeOp, EditOp, MigrationOp, MoveDocumentFields, TypedOp};
+use norn_wire::{ChangeOp, EditOp, MigrationOp, MoveDocumentFields, TypedOp, TypedOpError};
 use serde::{Deserialize, Serialize};
 
 pub mod move_folder;
@@ -49,7 +49,11 @@ impl IntentOp {
 /// missing a required field — surfaces as the same `anyhow` error the executor
 /// previously produced (the message strings are preserved by
 /// [`TypedOpError`](norn_wire::TypedOpError)), so the plan-parses-but-refused-at-
-/// execute contract is unchanged.
+/// execute contract is unchanged. The typed error rides through `anyhow`
+/// unflattened (`anyhow::Error::new`, not `anyhow!("{e}")`) so
+/// [`from_anyhow`](crate::apply::envelope::from_anyhow) can downcast it to a real
+/// refusal code (`unknown-operation-kind` / `malformed-plan`) rather than the
+/// misleading `internal-error`.
 ///
 /// - **High-level kinds** (`move_folder`, `rewrite_wikilink`): dispatch to
 ///   the corresponding expander.
@@ -61,7 +65,7 @@ impl IntentOp {
 ///   name — hence the payload rides typed-through as a JSON object).
 /// - **Edit ops**: carry the `EditOp` payload for apply-time application.
 pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<PlannedChange>> {
-    match TypedOp::try_from(op).map_err(|e| anyhow!("{e}"))? {
+    match TypedOp::try_from(op).map_err(anyhow::Error::new)? {
         TypedOp::MoveFolder(f) => move_folder::expand_move_folder(
             &move_folder::MoveFolderOp {
                 src: f.src,
@@ -149,6 +153,21 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
         }
 
         TypedOp::Change(ChangeOp { kind, mut fields }) => {
+            // `fields.operation` is the value that actually drives write dispatch
+            // (executor content-class routing). If an authored plan supplies one
+            // that disagrees with the op's `kind`, the reviewed `kind` is a lie:
+            // the plan would execute a different operation than it declares.
+            // Refuse rather than silently reinterpret. A repair-sourced op
+            // (operation == kind) and an authored op omitting `operation` are
+            // both unaffected — the latter fills from `kind` below.
+            if let Some(operation) = fields.get("operation").and_then(|v| v.as_str()) {
+                if operation != kind {
+                    return Err(anyhow::Error::new(TypedOpError::OperationKindMismatch {
+                        kind: kind.clone(),
+                        operation: operation.to_string(),
+                    }));
+                }
+            }
             // Deserialize the typed op's fields into a PlannedChange (the payload
             // IS a PlannedChange shape). Insert required fields that have no
             // #[serde(default)] if absent.
@@ -402,6 +421,85 @@ mod expansion_tests {
         assert_eq!(expanded.len(), 1);
         assert_eq!(expanded[0].operation, "set_frontmatter");
         assert_eq!(expanded[0].field.as_deref(), Some("title"));
+    }
+
+    #[test]
+    fn dispatch_change_operation_matching_kind_passes() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        let op = MigrationOp {
+            kind: "set_frontmatter".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({
+                "path": "a.md",
+                "field": "title",
+                "new_value": "Foo",
+                "operation": "set_frontmatter",
+            }),
+            footnote: None,
+        };
+        let expanded = expand(&op, &index).unwrap();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].operation, "set_frontmatter");
+    }
+
+    #[test]
+    fn dispatch_change_operation_mismatching_kind_refuses() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        let op = MigrationOp {
+            kind: "set_frontmatter".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({
+                "path": "a.md",
+                "field": "title",
+                "new_value": "Foo",
+                "operation": "remove_frontmatter",
+            }),
+            footnote: None,
+        };
+        let err = expand(&op, &index).unwrap_err();
+        let typed = err
+            .downcast_ref::<TypedOpError>()
+            .expect("mismatch must surface the typed error, not a flattened anyhow");
+        assert_eq!(
+            *typed,
+            TypedOpError::OperationKindMismatch {
+                kind: "set_frontmatter".into(),
+                operation: "remove_frontmatter".into(),
+            }
+        );
+        assert_eq!(
+            typed.to_string(),
+            "op.fields.operation 'remove_frontmatter' conflicts with op.kind 'set_frontmatter'"
+        );
+    }
+
+    #[test]
+    fn dispatch_change_operation_absent_fills_from_kind() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        let op = MigrationOp {
+            kind: "set_frontmatter".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({"path": "a.md", "field": "title", "new_value": "Foo"}),
+            footnote: None,
+        };
+        let expanded = expand(&op, &index).unwrap();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(
+            expanded[0].operation, "set_frontmatter",
+            "an absent operation fills from kind"
+        );
     }
 
     #[test]

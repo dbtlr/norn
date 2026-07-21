@@ -71,6 +71,24 @@ pub fn from_anyhow(e: &anyhow::Error) -> ApplyError {
             path: edit.path().map(str::to_string),
         };
     }
+    // A malformed AUTHORED plan (unknown kind, a structural op missing a required
+    // field, non-object `fields`, or a `kind`/`operation` mismatch) is a USER
+    // error, not a norn bug. Map each typed variant to a machine-branchable code
+    // so a consumer can distinguish "your plan is malformed" from `internal-error`
+    // ("norn has a bug"). The message is the typed error's own Display, unchanged.
+    if let Some(typed) = e.downcast_ref::<norn_wire::TypedOpError>() {
+        let code = match typed {
+            norn_wire::TypedOpError::UnknownKind(_) => "unknown-operation-kind",
+            norn_wire::TypedOpError::MissingField { .. }
+            | norn_wire::TypedOpError::FieldsNotObject { .. }
+            | norn_wire::TypedOpError::OperationKindMismatch { .. } => "malformed-plan",
+        };
+        return ApplyError {
+            code: code.to_string(),
+            message: typed.to_string(),
+            path: None,
+        };
+    }
     ApplyError {
         code: "internal-error".to_string(),
         // `{:#}` renders the full anyhow context chain.
@@ -113,6 +131,55 @@ mod tests {
         let envelope = from_anyhow(&err);
         assert_eq!(envelope.code, "containment-absolute-path");
         assert_eq!(envelope.path.as_deref(), Some("/etc/passwd"));
+    }
+
+    #[test]
+    fn from_anyhow_maps_unknown_kind_to_unknown_operation_kind() {
+        let err: anyhow::Error = norn_wire::TypedOpError::UnknownKind("no_such_kind".into()).into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "unknown-operation-kind");
+        assert_eq!(envelope.message, "unknown operation kind: no_such_kind");
+    }
+
+    #[test]
+    fn from_anyhow_maps_missing_field_to_malformed_plan() {
+        let err: anyhow::Error = norn_wire::TypedOpError::MissingField {
+            kind: "move_document".into(),
+            field: "src",
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "malformed-plan");
+        assert_eq!(envelope.message, "move_document missing src");
+    }
+
+    #[test]
+    fn from_anyhow_maps_fields_not_object_to_malformed_plan() {
+        let err: anyhow::Error = norn_wire::TypedOpError::FieldsNotObject {
+            kind: "set_frontmatter".into(),
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "malformed-plan");
+        assert_eq!(
+            envelope.message,
+            "op.fields for set_frontmatter must be an object"
+        );
+    }
+
+    #[test]
+    fn from_anyhow_maps_operation_kind_mismatch_to_malformed_plan() {
+        let err: anyhow::Error = norn_wire::TypedOpError::OperationKindMismatch {
+            kind: "set_frontmatter".into(),
+            operation: "remove_frontmatter".into(),
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "malformed-plan");
+        assert_eq!(
+            envelope.message,
+            "op.fields.operation 'remove_frontmatter' conflicts with op.kind 'set_frontmatter'"
+        );
     }
 
     #[test]

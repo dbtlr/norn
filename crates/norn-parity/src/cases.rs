@@ -2329,6 +2329,100 @@ const APPLY_CASES: &[Case] = &[
 "##,
         ),
     },
+    // ── NRN-405: authored-plan safety + diagnostic divergences ────────────────
+    // A change op whose `fields.operation` DISAGREES with its `kind` (NRN-405).
+    // `fields.operation` is the value that drives the executor's write dispatch,
+    // so on the oracle a reviewed `kind: set_frontmatter` op carrying
+    // `operation: remove_frontmatter` silently dispatches as a REMOVE — executing
+    // a different operation than the reviewed plan declares. `priority` is absent
+    // from `notes/alpha.md`, so the oracle's silent remove trips
+    // `cannot-minimal-edit` ("field priority not present"), exit 2. The rewrite
+    // refuses the mismatch outright — `error: op.fields.operation
+    // 'remove_frontmatter' conflicts with op.kind 'set_frontmatter'`, exit 2 —
+    // before any dispatch: a reviewed plan must execute as its `kind` declares.
+    // stderr diverges; both write nothing. Pinned by PD-113.
+    Case {
+        id: "apply-authored-kind-operation-mismatch-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    {
+      "kind": "set_frontmatter",
+      "fields": { "path": "notes/alpha.md", "field": "priority", "new_value": "high", "operation": "remove_frontmatter" }
+    }
+  ]
+}
+"##,
+        ),
+    },
+    // A malformed authored plan with an UNKNOWN op kind, `--format json` (NRN-405).
+    // Both binaries refuse at plan expansion, exit 2, write-free, with the SAME
+    // message (`unknown operation kind: no_such_kind`) — only the machine-branchable
+    // `code` diverges: the oracle flattens the typed error to `internal-error`
+    // ("norn has a bug"), the rewrite carries the diagnostic `unknown-operation-kind`
+    // ("your plan names a kind norn doesn't know"). `--format json` is required to
+    // surface the `code` — the records refusal prints only the (identical) message.
+    // Pinned by PD-114.
+    Case {
+        id: "apply-authored-unknown-kind-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "no_such_kind", "fields": { "path": "notes/alpha.md" } }
+  ]
+}
+"##,
+        ),
+    },
+    // A malformed authored plan with a structural op MISSING a required field
+    // (`move_document` with no `dst`), `--format json` (NRN-405). Same shape as the
+    // unknown-kind case: both refuse at expansion, exit 2, write-free, identical
+    // message (`move_document missing dst`); the oracle codes it `internal-error`,
+    // the rewrite codes it `malformed-plan`. Pinned by PD-114.
+    Case {
+        id: "apply-authored-missing-field-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "move_document", "fields": { "src": "notes/alpha.md" } }
+  ]
+}
+"##,
+        ),
+    },
 ];
 
 const SUITES: &[Suite] = &[
