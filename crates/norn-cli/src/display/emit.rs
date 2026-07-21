@@ -1171,22 +1171,15 @@ fn render_repair<O: Write, E: Write>(
 
     let (out, err) = presenter.streams();
 
-    // The owner produced `plan_json` via `to_string_pretty` of a valid
-    // MigrationPlan, so this parse cannot realistically fail; a corrupt frame is
-    // an operational failure, not a panic.
-    let plan: MigrationPlan = match serde_json::from_str(&view.report.plan_json) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = writeln!(err, "norn: undecodable repair plan: {e}");
-            return EXIT_OPERATIONAL;
-        }
-    };
+    // The plan now crosses the wire TYPED (NRN-405 part b) — no parse, no
+    // undecodable-frame branch.
+    let plan = &view.report.plan;
 
     let result: io::Result<i32> = (|| {
         if view.plan {
-            emit_repair_plan(out, &palette, &plan, &view, width, ascii)?;
+            emit_repair_plan(out, &palette, plan, &view, width, ascii)?;
         } else {
-            write_repair_summary(out, &view.report, &plan)?;
+            write_repair_summary(out, &view.report, plan)?;
         }
         Ok(if view.report.has_diagnostic_errors {
             EXIT_OPERATIONAL
@@ -1237,10 +1230,16 @@ fn emit_repair_plan(
     width: usize,
     ascii: bool,
 ) -> io::Result<()> {
-    // --out: always writes JSON (the pretty plan bytes the owner already
-    // produced), independent of --format.
+    // The verbatim `--format json` / `--out` bytes: the plan crosses typed now, so
+    // the CLI serializes it here (byte-identical to the owner's former
+    // `to_string_pretty`, same function over the same plan). Serialization of an
+    // in-memory MigrationPlan cannot fail.
+    let plan_json = serde_json::to_string_pretty(plan)
+        .expect("MigrationPlan must always serialize (matches canonical_hash)");
+
+    // --out: always writes JSON (the pretty plan bytes), independent of --format.
     if let Some(path) = &view.out {
-        std::fs::write(path, format!("{}\n", view.report.plan_json))?;
+        std::fs::write(path, format!("{plan_json}\n"))?;
     }
 
     let stdout_format = if view.format.is_none() && view.out.is_some() {
@@ -1260,8 +1259,8 @@ fn emit_repair_plan(
             write_repair_report(out, palette, plan, &view.filter_flags, width, ascii)?
         }
         Some(RepairPlanFormat::Json) => {
-            // The owner's `to_string_pretty` bytes, verbatim, with one newline.
-            writeln!(out, "{}", view.report.plan_json)?;
+            // The plan's `to_string_pretty` bytes, verbatim, with one newline.
+            writeln!(out, "{plan_json}")?;
         }
         Some(RepairPlanFormat::Paths) => write_repair_paths(out, plan)?,
         None => {}
