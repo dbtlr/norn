@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::coerce;
 use super::{owner_index_options, MutationExecution};
+use crate::apply::fsops::ensure_within_vault;
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
 use crate::seq_alloc::{self, SEQ_TOKEN};
-use crate::standards::apply::ensure_within_vault;
 use crate::standards::{
     applicable_rules, compile_config, path_variables, render, resolve_to_fixpoint, CompiledConfig,
     Context, VaultConfig,

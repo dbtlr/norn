@@ -11,6 +11,13 @@
 //! - [`preconditions`] — the ADR 0015 owner-set barrier: evaluate a plan's
 //!   exact-owner-set preconditions against a fresh graph index before any write,
 //!   and build the byte-identical-vault refusal report on a mismatch.
+//! - [`fsops`] — the narrow, named filesystem write primitives (atomic
+//!   durable write, move, delete, create-document materialization, and the
+//!   vault-root containment gate). Every disk effect the passes cause lands
+//!   through one of these.
+//! - [`transaction`] — the per-file fingerprint → shadow → verify → swap unit:
+//!   a file-bytes CAS and a swap re-read that catch external modification the
+//!   old two-phase applier could miss.
 //!
 //! The pass-based executor that expands typed ops into file mutations and drives
 //! the cache write-through lands with the mutation verbs (`set`/`new`/`move`/
@@ -18,8 +25,10 @@
 
 pub mod envelope;
 pub mod executor;
+pub mod fsops;
 pub mod preconditions;
 pub mod repair_apply;
+pub mod transaction;
 
 pub use executor::{apply_migration_plan, ApplyContext};
 pub use preconditions::{build_owner_precondition_refusal_report, evaluate_owner_preconditions};

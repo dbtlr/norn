@@ -10,12 +10,13 @@
 use std::fs;
 use std::time::Duration;
 
+use crate::apply::fsops::{self, apply_delete, apply_move, ensure_within_vault};
+use crate::apply::transaction::{self, Composition, DriftPolicy};
 use crate::domain::GraphIndex;
 use crate::standards::apply::{
-    apply_delete, apply_file_changes, apply_link_rewrites, apply_move, apply_rewrite_link,
-    apply_strip_bom, atomic_write, changes_by_path, ensure_within_vault, validate_plan_for_apply,
-    ApplyError, CascadeRecord, CreateDocumentResult, DeleteResult, LinkAttempt, LinkFailResult,
-    LinkRewriteResult, LinkSkipResult, MoveResult, RepairApplyWarning,
+    apply_file_changes, apply_link_rewrites, apply_rewrite_link, apply_strip_bom, changes_by_path,
+    validate_plan_for_apply, ApplyError, CascadeRecord, CreateDocumentResult, DeleteResult,
+    LinkAttempt, LinkFailResult, LinkRewriteResult, LinkSkipResult, MoveResult, RepairApplyWarning,
 };
 use crate::standards::{PlannedChange, RepairPlan};
 use anyhow::{Context, Result};
@@ -82,23 +83,60 @@ pub(crate) fn build_op_spans(
     spans
 }
 
-fn check_hash(
+/// Refuse a plan whose target is not tracked in the index. The whole-document
+/// hash CAS itself now happens against the file's ACTUAL bytes inside the
+/// transaction engine (`transaction::fingerprint_cas`), not against the
+/// GraphIndex snapshot — the index can be stale relative to the file, so the
+/// file-bytes CAS strictly catches more staleness. This retains only the
+/// index-membership half of the old `check_hash`: a plan targeting a path the
+/// index never saw is an `unknown-path` refusal.
+fn ensure_known_path(
     current_hashes: &std::collections::BTreeMap<Utf8PathBuf, String>,
     change: &PlannedChange,
 ) -> Result<()> {
-    let current_hash = current_hashes.get(&change.path).ok_or_else(|| {
-        anyhow::anyhow!(ApplyError::UnknownPath {
+    if !current_hashes.contains_key(&change.path) {
+        return Err(anyhow::anyhow!(ApplyError::UnknownPath {
             path: change.path.clone(),
-        })
-    })?;
-    if current_hash != &change.document_hash {
-        return Err(anyhow::anyhow!(ApplyError::StaleDocumentHash {
-            path: change.path.clone(),
-            expected: change.document_hash.clone(),
-            actual: current_hash.clone(),
         }));
     }
     Ok(())
+}
+
+/// The plan `document_hash` shared by every content op for one path
+/// (`changes_by_path` already rejects divergent same-path hashes, so any op's
+/// hash represents them all). Empty string when operator-originated (no CAS).
+fn content_plan_hash<'a>(ops: &ContentOps<'a>) -> &'a str {
+    ops.strip_bom
+        .iter()
+        .chain(ops.frontmatter.iter())
+        .chain(ops.rewrite_links.iter())
+        .chain(ops.replace_bodies.iter())
+        .chain(ops.edit_ops.iter())
+        .map(|c| c.document_hash.as_str())
+        .next()
+        .unwrap_or("")
+}
+
+/// Whether every content op for a file is declarative (frontmatter set/add/
+/// remove, strip_bom) — the auto-retry-on-drift class. A single content-anchored
+/// op (rewrite_link, replace_body, or a section/heading edit) makes the whole
+/// file content-anchored: re-landing on drifted bytes could destroy an external
+/// edit, so it refuses on drift instead.
+fn is_declarative_only(ops: &ContentOps<'_>) -> bool {
+    ops.rewrite_links.is_empty() && ops.replace_bodies.is_empty() && ops.edit_ops.is_empty()
+}
+
+/// Clone the per-file op buckets (cheap: the vectors hold `&PlannedChange`) so
+/// the transaction engine can re-run composition on a retry round without
+/// consuming the originals.
+fn clone_ops<'a>(ops: &ContentOps<'a>) -> ContentOps<'a> {
+    ContentOps {
+        strip_bom: ops.strip_bom.clone(),
+        frontmatter: ops.frontmatter.clone(),
+        rewrite_links: ops.rewrite_links.clone(),
+        replace_bodies: ops.replace_bodies.clone(),
+        edit_ops: ops.edit_ops.clone(),
+    }
 }
 
 fn count_planned_links(change: &PlannedChange) -> usize {
@@ -612,44 +650,80 @@ pub fn apply_repair_plan_with_context(
         }
     }
 
-    // A1: compute every file's composed content up front.
-    let mut composed: Vec<(Utf8PathBuf, ComposedFile)> = Vec::with_capacity(content_order.len());
+    // Per-file transactions (NRN-406 step 3): each file runs its OWN complete
+    // transaction — fingerprint (file-bytes CAS) → shadow (compose) → verify →
+    // swap — to completion before the next file starts. This replaces the old
+    // compute-all-then-write-all split: it shrinks the drift window (a file is
+    // read and written back-to-back rather than read early and written late) and
+    // makes the per-file unit real. Op ordering within the plan is otherwise
+    // unchanged; a transform or CAS failure still aborts the remaining plan (a
+    // partial write of earlier files is a truthful partial-apply, gated by
+    // `wrote_any`).
+    //
+    // `phase_a_wrote` records the paths this phase actually rewrote, so the later
+    // delete pass can SKIP its file-bytes CAS for a path we ourselves just wrote:
+    // its bytes no longer match the plan's pre-apply hash BY DESIGN (a legitimate
+    // edit-then-delete of the same path). The old index-based check tolerated
+    // this because it compared against the pre-apply index snapshot; the
+    // file-bytes CAS must too.
+    let mut phase_a_wrote: std::collections::BTreeSet<Utf8PathBuf> =
+        std::collections::BTreeSet::new();
+
     for path in &content_order {
-        // Drain the bucket so its `Vec<&PlannedChange>`s move into the composed
-        // units instead of being cloned.
         let ops = content_ops
             .remove(path)
             .expect("content_order paths are keys of content_ops");
-        // Hash-check EVERY content change for this path (not just the first): a
-        // divergent same-path hash must abort. There is exactly one current hash
-        // per path, so when the changes agree this is equivalent to a single
-        // check — collapsing the per-pass checks is behavior-preserving.
-        for change in ops
-            .strip_bom
-            .iter()
-            .chain(ops.frontmatter.iter())
-            .chain(ops.rewrite_links.iter())
-            .chain(ops.replace_bodies.iter())
-            .chain(ops.edit_ops.iter())
-            .copied()
-        {
-            check_hash(&current_hashes, change)?;
+        // A plan targeting a path the index never saw is unknown-path, exactly as
+        // the old per-op hash check refused before comparing hashes.
+        if !current_hashes.contains_key(path) {
+            return Err(anyhow::anyhow!(ApplyError::UnknownPath {
+                path: path.clone()
+            }));
         }
+        let plan_hash = content_plan_hash(&ops);
+        let declarative_only = is_declarative_only(&ops);
         let absolute_path = cwd.join(path);
-        let original =
-            fs::read_to_string(&absolute_path).with_context(|| format!("read {absolute_path}"))?;
-        let file = compose_content_ops(path, ops, &original)?;
-        composed.push((path.clone(), file));
-    }
 
-    // A2: write every changed file (one write per document) and record report +
-    // telemetry. All computation/validation already succeeded, so no partial
-    // write is possible.
-    for (path, file) in &composed {
+        // The shadow: compose all of this file's transforms over the content it is
+        // handed. Called once per attempt, so it clones the ref-buckets rather
+        // than consuming them (a retry round re-composes against fresh content).
+        let compose = |content: &str| -> Result<Composition<ComposedFile>> {
+            let file = compose_content_ops(path, clone_ops(&ops), content)?;
+            let changed = file.units.iter().any(|u| u.changed);
+            Ok(Composition {
+                content: file.content.clone(),
+                changed,
+                payload: file,
+            })
+        };
+
+        // Dry-run still fingerprints (a preview must refuse exactly where the real
+        // apply would) and composes for the forecast, but never swaps/writes.
+        // Apply runs the full transaction: the engine does the swap re-read, drift
+        // handling, and the atomic write.
+        let (file, wrote) = if dry_run {
+            let original = transaction::fingerprint_cas(&absolute_path, path, plan_hash)?;
+            let composition = compose(&original)?;
+            (composition.payload, false)
+        } else {
+            let policy = if declarative_only {
+                DriftPolicy::RetryDeclarative { max_attempts: 3 }
+            } else {
+                DriftPolicy::RefuseContentAnchored
+            };
+            let committed = transaction::run_content_transaction(
+                &absolute_path,
+                path,
+                plan_hash,
+                policy,
+                compose,
+            )?;
+            (committed.payload, committed.wrote)
+        };
+
         let overall_changed = file.units.iter().any(|u| u.changed);
 
-        // changed_files: the union of the prior passes' pushes — present once iff
-        // the composed file actually changed.
+        // changed_files: present once iff the composed file actually changed.
         if overall_changed {
             record_changed_file(&mut report, path);
         }
@@ -691,22 +765,18 @@ pub fn apply_repair_plan_with_context(
             }
         }
 
-        if dry_run || !overall_changed {
-            continue;
-        }
-
-        let absolute_path = cwd.join(path);
-        atomic_write(&absolute_path, &file.content)
-            .with_context(|| format!("write {absolute_path}"))?;
-        mark_wrote!();
-        // One action per contributing change_id: a unit that was a byte-identical
-        // no-op emits nothing.
-        for unit in &file.units {
-            if !unit.changed {
-                continue;
-            }
-            for change in unit.changes.iter().copied() {
-                emit_op_action(sink, spans, change, Severity::Info, Vec::new());
+        if wrote {
+            phase_a_wrote.insert(path.clone());
+            mark_wrote!();
+            // One action per contributing change_id: a unit that was a
+            // byte-identical no-op emits nothing.
+            for unit in &file.units {
+                if !unit.changed {
+                    continue;
+                }
+                for change in unit.changes.iter().copied() {
+                    emit_op_action(sink, spans, change, Severity::Info, Vec::new());
+                }
             }
         }
     }
@@ -726,7 +796,21 @@ pub fn apply_repair_plan_with_context(
         .iter()
         .filter(|c| c.operation == "delete_document")
     {
-        check_hash(&current_hashes, change)?;
+        // Refuse a delete of a path the index never saw, then fingerprint the
+        // file itself against the plan's document_hash (NRN-406): the file-bytes
+        // CAS catches an external modification the pre-apply index snapshot would
+        // miss. Skip the CAS when Phase A already rewrote this path in THIS plan
+        // (edit-then-delete): its bytes intentionally no longer match the
+        // pre-apply hash. A missing/unreadable file falls through to
+        // `apply_delete`'s precise `delete-source-missing` refusal.
+        ensure_known_path(&current_hashes, change)?;
+        if !phase_a_wrote.contains(&change.path) {
+            transaction::fingerprint_delete(
+                &cwd.join(&change.path),
+                &change.path,
+                &change.document_hash,
+            )?;
+        }
 
         // Apply link rewrites if link_risk is attached (--rewrite-to case). This
         // runs BEFORE the delete so links can be rewritten in source docs.
@@ -920,9 +1004,22 @@ pub fn apply_repair_plan_with_context(
             mark_wrote!();
         }
 
-        // Atomic write: write to a sibling temp file, then rename into place.
-        atomic_write(&full, &contents)
-            .with_context(|| format!("create_document: write {resolved_path}"))?;
+        // Materialize the document (NRN-160): unless `--force`, this must NOT
+        // clobber a file that appeared between the exists-precheck above and now
+        // (the create TOCTOU window). `create_document_file` uses an
+        // atomic-exclusive `hard_link` for the no-force case; an `AlreadyExists`
+        // there is the same "destination already exists" refusal the precheck
+        // gives for the common no-race case. `--force` keeps overwrite semantics.
+        fsops::create_document_file(&full, &contents, change.force).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!(
+                    "create_document: destination already exists (use --force to overwrite): {}",
+                    resolved_path
+                )
+            } else {
+                anyhow::Error::new(e).context(format!("create_document: write {resolved_path}"))
+            }
+        })?;
         mark_wrote!();
 
         report.created_documents.push(CreateDocumentResult {

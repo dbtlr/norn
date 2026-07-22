@@ -570,7 +570,7 @@ fn resolve_create_paths(
             continue;
         }
         let path = change.path.clone();
-        crate::standards::apply::ensure_within_vault(&index.root, canonical_root, &path)?;
+        crate::apply::fsops::ensure_within_vault(&index.root, canonical_root, &path)?;
         let resolved = if crate::seq_alloc::has_seq(&path) {
             crate::seq_alloc::resolve_seq_create(&index.root, &path, &allocated_this_plan)?
         } else {
