@@ -2671,6 +2671,45 @@ mod tests {
         );
     }
 
+    /// A requirement on a LATER-pass op conservatively blocks the dependent
+    /// (the required op is unrecorded at evaluation time, reading as not_run) —
+    /// fail-safe: nothing writes against the author's declared dependency.
+    /// Deliberate, pinned behavior: no planner emits `requires` today; if
+    /// forward references should ever be honored, the DAG must gain
+    /// cross-pass ordering, not silently weaker gating.
+    #[test]
+    fn forward_requirement_conservatively_blocks_the_dependent() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![
+                // A delete (delete pass) requiring a create that only runs in
+                // the LATER create pass: unsatisfiable forward reference.
+                MigrationOp {
+                    kind: "delete_document".into(),
+                    id: Some("del".into()),
+                    requires: vec!["mk".into()],
+                    fields: serde_json::json!({ "path": "alpha.md" }),
+                    footnote: None,
+                },
+                create_op("later.md", Some("mk"), &[]),
+            ],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+
+        assert_eq!(
+            report.operations[0].status,
+            OpStatus::NotRun,
+            "a forward requirement reads as unsatisfied and blocks the delete"
+        );
+        assert_eq!(report.operations[1].status, OpStatus::Applied);
+        assert!(
+            tmp.path().join("a.md").exists(),
+            "the blocked delete must not remove its target"
+        );
+    }
+
     /// A `requires` edge to an unknown op id refuses the WHOLE plan before any
     /// write: `malformed-plan`, exit 2, every op not_run except the offender.
     #[test]

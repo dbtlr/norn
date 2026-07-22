@@ -170,9 +170,12 @@ impl OpTracker {
 /// The declared `requires` DAG (ADR 0024), projected onto interior change ids.
 /// `requires` constrains outcome propagation WITHIN the fixed kind-ordered
 /// passes: an op whose required op did not fully apply records `not_run`. It does
-/// not reorder passes, so a requirement on a later-pass op — not yet recorded —
-/// never blocks (it reads as un-run, not failed). A plan declaring no `requires`
-/// yields an empty map and behaves exactly as before.
+/// not reorder passes — so a requirement on a LATER-pass op can never be
+/// satisfied at evaluation time (the required op is still unrecorded, which
+/// reads as `not_run`) and conservatively blocks the dependent. Fail-safe by
+/// design: a forward requirement yields a `not_run` dependent, never a write
+/// ordered against the author's declared dependency. A plan declaring no
+/// `requires` yields an empty map and behaves exactly as before.
 #[derive(Default)]
 pub(crate) struct DependencyMap {
     change_requires: HashMap<String, Vec<String>>,
