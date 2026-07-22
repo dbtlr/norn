@@ -214,10 +214,13 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             // `EditFields` into the `op`-tagged JSON the transform engine
             // deserializes into its own `EditOp` at apply time (under whole-doc
             // CAS), carried in `new_value`. `path`/`document_hash` ride along
-            // (ignored by that deserializer) so the reconstructed payload — and the
-            // `change_id` digest derived from it — matches the on-disk op byte for
-            // byte. `Value::Object` is a `BTreeMap`, so member insertion order does
-            // not affect the serialized bytes.
+            // (ignored by that deserializer) so for a well-formed op the
+            // reconstructed payload — and the internal `change_id` span-correlation
+            // digest derived from it — matches the on-disk op. Unknown extra keys
+            // and a `document_hash: null` are dropped by the typed decode and so
+            // shift the digest; `change_id` never crosses a wire, so only telemetry
+            // correlation is affected. `Value::Object` is a `BTreeMap`, so member
+            // insertion order does not affect the serialized bytes.
             let mut payload = serde_json::Map::new();
             payload.insert("path".into(), serde_json::Value::String(path.clone()));
             if let Some(dh) = &fields.document_hash {
