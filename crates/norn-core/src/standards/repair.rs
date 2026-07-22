@@ -2044,6 +2044,35 @@ mod tests {
             }),
         );
 
+        // `strip_bom` is the minimal shape: no field/value payload, no move keys.
+        let bom_op = ApplyOp {
+            change_id: "id4".into(),
+            path: "notes/d.md".into(),
+            document_hash: "h4".into(),
+            finding_code: Some("bom-marker".into()),
+            finding_rule: None,
+            repair_rule: Some("strip-bom".into()),
+            operation: "strip_bom".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+        assert_eq!(
+            op_fields_from_change(&bom_op),
+            json!({
+                "change_id": "id4",
+                "path": "notes/d.md",
+                "document_hash": "h4",
+                "finding_code": "bom-marker",
+                "repair_rule": "strip-bom",
+            }),
+        );
+
         // A `None` finding_rule omits the key entirely.
         let rewrite_op = ApplyOp {
             change_id: "id2".into(),

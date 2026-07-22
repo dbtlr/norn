@@ -167,19 +167,17 @@ pub struct DeleteDocumentFields {
     pub rewrite_to: Option<String>,
 }
 
-/// The decoded `fields` of a frontmatter/body change op — the wire-owned mirror
-/// of the authored subset of `norn-core`'s `PlannedChange`. Decoded strictly: a
+/// The decoded `fields` of a frontmatter/body change op. Decoded strictly: a
 /// wrong-typed member refuses (`MalformedFields`), never coerces. `path` is
 /// required; every other member is optional and defaults at the
 /// [`planner::intent`](../../norn_core/planner/intent/index.html) adapter boundary
-/// where the `PlannedChange` is built.
+/// where the interior apply op is built.
 ///
 /// Finding linkage (`finding_code` / `repair_rule`) rides here as optional
 /// provenance: authored ops omit it (decoding to `None`); repair-sourced ops carry
-/// the real codes. The `operator-request` sentinel the interior model uses when
-/// linkage is absent is filled at that adapter boundary, not fabricated on the
-/// wire. `expected_old_value` / `new_value` stay `Value` — a frontmatter value is
-/// arbitrary JSON, the same leaf type `PlannedChange` carries.
+/// the real codes. Absence stays `None` end-to-end — nothing fabricates a
+/// placeholder on either side of the wire. `expected_old_value` / `new_value`
+/// stay `Value` — a frontmatter value is arbitrary JSON.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ChangeFields {
     pub path: String,
