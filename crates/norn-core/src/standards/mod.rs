@@ -57,7 +57,8 @@ pub use repair::link_risk::{classify as classify_link_risk, AffectedLink, LinkRi
 pub use repair::warnings::PlanWarning;
 pub use repair::{
     plan_repairs, Confidence, ConfidenceFilter, FootnoteDetails, PlannedChange, RepairPlan,
-    RepairPlanFilters, RepairPlanSummary, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
+    RepairPlanFilters, RepairPlanResult, RepairPlanSummary, SkippedSummary,
+    REPAIR_PLAN_SCHEMA_VERSION,
 };
 pub use substitution::{format_datetime, render, Context, RenderError};
 pub use summary::{summarize, Summary};

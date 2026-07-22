@@ -1,28 +1,23 @@
 //! Finding-derived MigrationPlan generation.
 //!
-//! `plan_from_findings` is the entry point for the findings intent source of
-//! the shared planner. It adapts today's `plan_repairs` output (a `RepairPlan`)
-//! into the unified `MigrationPlan` format.
+//! `plan_from_findings` is the findings intent source of the shared planner. The
+//! planner ([`plan_repairs`](crate::standards::plan_repairs)) emits the
+//! `MigrationPlan` of typed ops NATIVELY now (ADR 0024 — a repair plan IS a
+//! migration plan); this entry point only stamps the run provenance
+//! (`generator`/`generated_at`) the pure planner leaves unset, and forwards the
+//! rich skip detail for the report. There is no `RepairPlan`→`MigrationPlan` serde
+//! round trip — repair constructs the wire ops at each planning site.
 
 use crate::domain::GraphIndex;
-use crate::standards::{
-    plan_repairs, Confidence, Finding, FootnoteDetails, RepairConfig, RepairPlanFilters,
-};
+use crate::standards::{plan_repairs, Finding, RepairConfig, RepairPlanFilters, RepairPlanResult};
 use camino::Utf8PathBuf;
-use norn_wire::MIGRATION_PLAN_SCHEMA_VERSION;
-use norn_wire::{MigrationOp, MigrationPlan, SkippedFinding};
-use std::collections::HashMap;
 
-/// Adapter: runs `plan_repairs` and converts the resulting `RepairPlan` into
-/// a `MigrationPlan`. This is the findings-intent-source entry point of the
-/// shared planner — the counterpart to `planner::intent::expand`.
-///
-/// Footnotes are mapped per-op by `change_id`. Any footnote whose `change_id`
-/// matches a `PlannedChange` is attached as the `MigrationOp.footnote` for
-/// that op. Because today's `RepairPlan` only ever emits
-/// `ClosestMatchSuggestion` footnotes (one per change), there is a 1:1 mapping
-/// and no ambiguity. If multiple footnotes share a `change_id` in a future
-/// schema, only the last one wins — that is noted in the design archive.
+/// The findings-intent-source entry point of the shared planner — the counterpart
+/// to `planner::intent::expand`. Runs [`plan_repairs`](crate::standards::plan_repairs)
+/// (which builds the wire ops directly) and stamps the `generator`/`generated_at`
+/// provenance the pure planner leaves unset. Returns the full
+/// [`RepairPlanResult`] so the `repair` verb can surface the rich skip detail on
+/// its report.
 ///
 /// The `repair` VERB's findings→plan entry point (`crate::read::repair`); the
 /// intent expanders are the other intent source, live via the executor.
@@ -32,92 +27,8 @@ pub(crate) fn plan_from_findings(
     findings: Vec<Finding>,
     config: &RepairConfig,
     index: &GraphIndex,
-) -> MigrationPlan {
-    let repair_plan = plan_repairs(vault_root.clone(), filters, findings, config, index);
-
-    // Build a change_id → footnote description map for per-op attachment.
-    let footnote_by_change_id: HashMap<String, String> = repair_plan
-        .footnotes
-        .iter()
-        .map(|f| {
-            let desc = match &f.details {
-                FootnoteDetails::ClosestMatch(d) => {
-                    let confidence_label = match f.confidence {
-                        Confidence::High => "high",
-                        Confidence::Medium => "medium",
-                    };
-                    format!(
-                        "closest-match suggestion (confidence: {}): \"{}\" → \"{}\" (edit distance: {})",
-                        confidence_label,
-                        d.original_target,
-                        d.candidate_stem,
-                        d.normalized_distance,
-                    )
-                }
-            };
-            (f.change_id.clone(), desc)
-        })
-        .collect();
-
-    // Convert each PlannedChange → MigrationOp.
-    let operations: Vec<MigrationOp> = repair_plan
-        .changes
-        .into_iter()
-        .map(|change| {
-            let footnote = footnote_by_change_id.get(&change.change_id).cloned();
-            let kind = change.operation.clone();
-
-            // Serialize the full PlannedChange into fields, then remove the
-            // `operation` key since it becomes `MigrationOp.kind`.
-            let mut fields =
-                serde_json::to_value(&change).expect("PlannedChange must always serialize");
-            if let Some(obj) = fields.as_object_mut() {
-                obj.remove("operation");
-
-                // `move_document` ops must speak the unified planner vocabulary
-                // (`src`/`dst`) so they apply through `norn apply`. The repair
-                // PlannedChange uses `path`/`destination` (Plan Task 16 renamed
-                // the intent-source path); remap here so the findings-source and
-                // intent-source converge on the same on-disk op shape. The
-                // applier's `expand` move_document arm recomputes link_risk/hash,
-                // so the leftover repair-specific keys are harmless passengers.
-                if kind == "move_document" {
-                    if let Some(path) = obj.remove("path") {
-                        obj.insert("src".to_string(), path);
-                    }
-                    if let Some(dest) = obj.remove("destination") {
-                        obj.insert("dst".to_string(), dest);
-                    }
-                }
-            }
-
-            MigrationOp {
-                kind,
-                id: None,
-                requires: vec![],
-                fields,
-                footnote,
-            }
-        })
-        .collect();
-
-    // Convert repair::SkippedFinding → migration_plan::SkippedFinding.
-    //
-    // `reason` carries the kebab-case skip-reason CODE (e.g. "missing-default"),
-    // not the prose. The CLI's `--skip-reason` filter matches against this code,
-    // and the report renderer derives human prose from it via
-    // `repair::skip_reasons::prose_for`. `finding_code` carries the underlying
-    // validation finding code (e.g. "link-target-missing").
-    let skipped: Vec<SkippedFinding> = repair_plan
-        .skipped_findings
-        .into_iter()
-        .map(|sf| SkippedFinding {
-            finding_code: sf.code,
-            path: sf.path.to_string(),
-            reason: sf.skip_reason.code().to_string(),
-            footnote: None,
-        })
-        .collect();
+) -> RepairPlanResult {
+    let mut result = plan_repairs(vault_root, filters, findings, config, index);
 
     // `generated_at` is non-load-bearing provenance metadata. Read the wall clock
     // via `SystemTime` and format through chrono's timestamp constructor so
@@ -135,16 +46,9 @@ pub(crate) fn plan_from_findings(
         .to_rfc3339()
     };
 
-    MigrationPlan {
-        schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
-        vault_root: vault_root.to_string(),
-        generator: Some("norn-repair".to_string()),
-        generated_at: Some(generated_at),
-        preconditions: Vec::new(),
-        operations,
-        skipped,
-        plan_footnote: None,
-    }
+    result.plan.generator = Some("norn-repair".to_string());
+    result.plan.generated_at = Some(generated_at);
+    result
 }
 
 #[cfg(test)]
@@ -152,6 +56,7 @@ mod tests {
     use super::*;
     use crate::domain::{Link, LinkKind, LinkStatus, UnresolvedReason};
     use crate::standards::Finding;
+    use norn_wire::MIGRATION_PLAN_SCHEMA_VERSION;
 
     fn vault_root() -> Utf8PathBuf {
         "/vault".into()
@@ -225,7 +130,8 @@ mod tests {
             vec![finding],
             &repair_config,
             &index,
-        );
+        )
+        .plan;
 
         assert_eq!(plan.schema_version, MIGRATION_PLAN_SCHEMA_VERSION);
         assert_eq!(plan.generator.as_deref(), Some("norn-repair"));
@@ -246,7 +152,8 @@ mod tests {
             vec![finding],
             &repair_config,
             &index,
-        );
+        )
+        .plan;
 
         assert_eq!(plan.operations.len(), 1);
         let op = &plan.operations[0];
@@ -276,7 +183,8 @@ mod tests {
             vec![finding],
             &repair_config,
             &index,
-        );
+        )
+        .plan;
 
         assert_eq!(plan.operations.len(), 1);
         let op = &plan.operations[0];
@@ -315,7 +223,8 @@ mod tests {
             vec![finding],
             &repair_config,
             &index,
-        );
+        )
+        .plan;
 
         assert_eq!(plan.operations.len(), 0);
         assert_eq!(plan.skipped.len(), 1);
@@ -335,7 +244,8 @@ mod tests {
             vec![],
             &repair_config,
             &index,
-        );
+        )
+        .plan;
 
         assert_eq!(plan.schema_version, MIGRATION_PLAN_SCHEMA_VERSION);
         assert_eq!(plan.generator.as_deref(), Some("norn-repair"));
@@ -357,7 +267,8 @@ mod tests {
             vec![finding],
             &repair_config,
             &index,
-        );
+        )
+        .plan;
 
         assert_eq!(plan.operations.len(), 0);
         assert_eq!(plan.skipped.len(), 1);

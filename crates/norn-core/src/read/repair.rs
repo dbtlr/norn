@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 
-use norn_wire::{RepairParams, RepairReport};
+use norn_wire::{RepairParams, RepairReport, RepairSkipDetail};
 
 use crate::cache::Cache;
 use crate::graph::{concise_diagnostics, has_errors};
@@ -108,13 +108,30 @@ pub fn execute(
         },
         ..Default::default()
     };
-    let mut plan = plan_from_findings(
+    let result = plan_from_findings(
         cache.vault_root().to_path_buf(),
         filters,
         findings,
         &config.repair,
         &index,
     );
+    let mut plan = result.plan;
+
+    // The rich skip detail (candidates / next actions / reason code) rides the
+    // REPORT, sibling to the lean plan `skipped` (ADR 0024). It mirrors
+    // `plan.skipped` one-for-one, so the same `--skip-reason` narrowing applies to
+    // both, keeping them in lockstep.
+    let mut skipped_detail: Vec<RepairSkipDetail> = result
+        .skipped
+        .iter()
+        .map(|sf| RepairSkipDetail {
+            finding_code: sf.code.clone(),
+            path: sf.path.to_string(),
+            reason_code: sf.skip_reason.code().to_string(),
+            candidates: sf.candidates.iter().map(|p| p.to_string()).collect(),
+            next_actions: sf.next_actions.clone(),
+        })
+        .collect();
 
     // `--skip-reason` narrows the plan's skipped list only (the planner does not
     // apply it) — the `MigrationPlan::skipped` `reason` carries the kebab-case
@@ -122,10 +139,12 @@ pub fn execute(
     if !params.skip_reasons.is_empty() {
         plan.skipped
             .retain(|sf| skip_reason_matches(&sf.reason, &params.skip_reasons));
+        skipped_detail.retain(|d| skip_reason_matches(&d.reason_code, &params.skip_reasons));
     }
 
     Ok(Ok(RepairReport {
         plan,
+        skipped_detail,
         findings_by_code,
         findings_total,
         total_docs,
