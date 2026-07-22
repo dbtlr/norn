@@ -15,7 +15,10 @@
 //! which wrap the executor. This module downcasts only the types the mutation
 //! engine itself raises ([`standards::apply::ApplyError`](crate::standards::apply::ApplyError),
 //! [`ContainmentError`](crate::standards::apply::ContainmentError), the planner's
-//! `RewriteWikilinkError`, and the section-edit [`EditError`](crate::edit::transform::EditError)),
+//! `RewriteWikilinkError`, the section-edit [`EditError`](crate::edit::transform::EditError),
+//! and the authored-plan-fault families
+//! [`PreconditionError`](crate::apply::preconditions::PreconditionError) and
+//! [`PlanStructureError`](crate::standards::apply::PlanStructureError), NRN-436),
 //! falling back to a generic `internal-error` for anything unrecognized so a
 //! refusal report always carries a coded envelope.
 
@@ -69,6 +72,26 @@ pub fn from_anyhow(e: &anyhow::Error) -> ApplyError {
             code: edit.code().to_string(),
             message: edit.to_string(),
             path: edit.path().map(str::to_string),
+        };
+    }
+    // Owner-set precondition-validation faults (duplicate id, empty stem/eq
+    // selector, missing named op, unparseable eq predicate) — a malformed AUTHORED
+    // precondition, coded `invalid-precondition`, not a norn bug (NRN-436).
+    if let Some(precondition) = e.downcast_ref::<crate::apply::preconditions::PreconditionError>() {
+        return ApplyError {
+            code: precondition.code().to_string(),
+            message: precondition.to_string(),
+            path: None,
+        };
+    }
+    // Plan-structure faults (duplicate op id, create path with no stem, edit
+    // payload missing/undecodable) — a malformed AUTHORED plan, coded
+    // `malformed-plan`, not a norn bug (NRN-436).
+    if let Some(structure) = e.downcast_ref::<crate::standards::apply::PlanStructureError>() {
+        return ApplyError {
+            code: structure.code().to_string(),
+            message: structure.to_string(),
+            path: None,
         };
     }
     // A malformed AUTHORED plan (unknown kind, a structural op missing a required
@@ -196,6 +219,104 @@ mod tests {
             envelope.message,
             "op.fields for set_frontmatter could not be decoded: invalid type: integer `5`, expected a string"
         );
+    }
+
+    #[test]
+    fn from_anyhow_codes_create_destination_exists() {
+        let err: anyhow::Error = crate::standards::apply::ApplyError::CreateDestinationExists {
+            path: camino::Utf8PathBuf::from("seq/task-1.md"),
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "create-destination-exists");
+        assert_eq!(envelope.path.as_deref(), Some("seq/task-1.md"));
+        assert_eq!(
+            envelope.message,
+            "create_document: destination already exists (use --force to overwrite): seq/task-1.md"
+        );
+    }
+
+    #[test]
+    fn from_anyhow_codes_create_parent_missing() {
+        let err: anyhow::Error = crate::standards::apply::ApplyError::CreateParentMissing {
+            path: camino::Utf8PathBuf::from("seq/task-1.md"),
+        }
+        .into();
+        assert_eq!(from_anyhow(&err).code, "create-parent-missing");
+    }
+
+    #[test]
+    fn from_anyhow_codes_create_ignored_path() {
+        let err: anyhow::Error = crate::standards::apply::ApplyError::CreateIgnoredPath {
+            path: camino::Utf8PathBuf::from("logs/1.md"),
+        }
+        .into();
+        assert_eq!(from_anyhow(&err).code, "create-ignored-path");
+    }
+
+    #[test]
+    fn from_anyhow_codes_create_malformed_frontmatter_as_malformed_plan() {
+        let err: anyhow::Error =
+            crate::standards::apply::ApplyError::CreateFrontmatterMalformed.into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "malformed-plan");
+        assert!(envelope.path.is_none());
+        assert_eq!(
+            envelope.message,
+            "create_document: missing or non-object frontmatter in new_value"
+        );
+    }
+
+    #[test]
+    fn from_anyhow_codes_create_serialize_failed_as_malformed_plan() {
+        let err: anyhow::Error = crate::standards::apply::ApplyError::CreateSerializeFailed {
+            message: "boom".into(),
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "malformed-plan");
+        assert_eq!(envelope.message, "create_document: serialize failed: boom");
+    }
+
+    #[test]
+    fn from_anyhow_codes_precondition_faults_as_invalid_precondition() {
+        for err in [
+            crate::apply::preconditions::PreconditionError::DuplicateId { id: "p".into() },
+            crate::apply::preconditions::PreconditionError::EmptyStemSelector { id: "p".into() },
+            crate::apply::preconditions::PreconditionError::EmptyEqSelector { id: "p".into() },
+            crate::apply::preconditions::PreconditionError::MissingOperation {
+                id: "p".into(),
+                operation: "op1".into(),
+            },
+            crate::apply::preconditions::PreconditionError::EqPredicateParse {
+                message: "bad".into(),
+            },
+        ] {
+            let envelope = from_anyhow(&err.into());
+            assert_eq!(envelope.code, "invalid-precondition");
+            assert!(envelope.path.is_none());
+        }
+    }
+
+    #[test]
+    fn from_anyhow_codes_plan_structure_faults_as_malformed_plan() {
+        for err in [
+            crate::standards::apply::PlanStructureError::DuplicateOperationId { id: "op1".into() },
+            crate::standards::apply::PlanStructureError::CreatePathNoStem {
+                path: camino::Utf8PathBuf::from(".md"),
+            },
+            crate::standards::apply::PlanStructureError::EditPayloadMissing {
+                path: camino::Utf8PathBuf::from("a.md"),
+            },
+            crate::standards::apply::PlanStructureError::EditPayloadDecode {
+                path: camino::Utf8PathBuf::from("a.md"),
+                message: "bad".into(),
+            },
+        ] {
+            let envelope = from_anyhow(&err.into());
+            assert_eq!(envelope.code, "malformed-plan");
+            assert!(envelope.path.is_none());
+        }
     }
 
     #[test]

@@ -560,7 +560,10 @@ fn resolve_create_paths(
     for operation in &plan.operations {
         if let Some(id) = operation.id.as_ref() {
             if !operation_ids.insert(id) {
-                anyhow::bail!("duplicate operation id in MigrationPlan: {id}");
+                return Err(crate::standards::apply::PlanStructureError::DuplicateOperationId {
+                    id: id.clone(),
+                }
+                .into());
             }
         }
     }
@@ -579,9 +582,11 @@ fn resolve_create_paths(
         allocated_this_plan.push(resolved.clone());
         change.path = resolved.clone();
 
-        let stem = resolved
-            .file_stem()
-            .ok_or_else(|| anyhow::anyhow!("create_document path has no file stem: {resolved}"))?;
+        let stem = resolved.file_stem().ok_or_else(|| {
+            anyhow::Error::from(crate::standards::apply::PlanStructureError::CreatePathNoStem {
+                path: resolved.clone(),
+            })
+        })?;
         create_changes_by_stem
             .entry(stem.to_ascii_lowercase())
             .or_default()
@@ -2157,9 +2162,9 @@ mod tests {
                 kind: "create_document".into(),
                 id: None,
                 requires: vec![],
-                // new_value with a body but NO frontmatter object → the bare
-                // `anyhow!("create_document: missing or non-object frontmatter …")`
-                // raised in Phase B BEFORE any write.
+                // new_value with a body but NO frontmatter object → the typed
+                // `ApplyError::CreateFrontmatterMalformed` (code `malformed-plan`,
+                // NRN-436) raised in Phase B BEFORE any write.
                 fields: serde_json::json!({
                     "path": "new.md",
                     "new_value": { "body": "# New\n" }
@@ -2186,13 +2191,13 @@ mod tests {
         assert_eq!(op.status, norn_wire::OpStatus::Failed);
         let err = op.error.as_ref().expect("failed op carries an error");
         assert_eq!(
-            err.code, "internal-error",
-            "a bare anyhow falls back to internal-error, matching the CLI Err path"
+            err.code, "malformed-plan",
+            "a non-object frontmatter is a typed malformed-plan fault (NRN-436), not internal-error"
         );
         assert!(
             err.message
                 .contains("create_document: missing or non-object frontmatter"),
-            "the message carries the bare error prose: {}",
+            "the message carries the (unchanged) error prose: {}",
             err.message
         );
         // Byte-identical: nothing was created.
@@ -2497,9 +2502,10 @@ mod tests {
     }
 
     /// (iii) A `stem_from_operation` selector referencing an op id no create
-    /// operation carries is an owner-precondition VALIDATION refusal (bare anyhow
-    /// → `internal-error`). Routed: `Ok(refused)`; CLI: bare `Err`. (The owner-set
-    /// MISMATCH path is already `Ok(refused)` on both surfaces.)
+    /// operation carries is an owner-precondition VALIDATION refusal (typed
+    /// `PreconditionError` → `invalid-precondition`, NRN-436). Routed:
+    /// `Ok(refused)`; CLI: bare `Err`. (The owner-set MISMATCH path is already
+    /// `Ok(refused)` on both surfaces.)
     #[test]
     fn owner_precondition_bad_op_ref_refuses_as_report_under_refuse_as_report() {
         let (tmp, index) = synth_vault();
@@ -2539,10 +2545,10 @@ mod tests {
             .iter()
             .find_map(|o| o.error.as_ref())
             .expect("refused report carries a coded error");
-        assert_eq!(err.code, "internal-error");
+        assert_eq!(err.code, "invalid-precondition");
         assert!(
             err.message.contains("missing or non-create operation"),
-            "message carries the bare error prose: {}",
+            "message carries the (unchanged) error prose: {}",
             err.message
         );
         // Byte-identical: no doc was created.

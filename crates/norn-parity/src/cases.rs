@@ -2963,6 +2963,150 @@ const APPLY_CASES: &[Case] = &[
 "##,
         ),
     },
+    // ── NRN-436: coded refusals for the bare-anyhow user-fault families ─────────
+    // Each of these authored-plan refusals was a bare `anyhow::bail!` invisible to
+    // the apply envelope's downcast ladder, so the oracle flattens every one to
+    // `code: internal-error` ("norn has a bug") — a misleading machine-branchable
+    // code for what is a malformed AUTHORED plan (a user fault). The rewrite gives
+    // each family a typed error carrying a precise code. Exit 2 and the message
+    // text are UNCHANGED on both sides; only the `code` (and, for the create-guard
+    // family, an added `path`) diverges. `--format json` surfaces the envelope's
+    // `code`; the records refusal prints only the (identical) message. All are
+    // forecasts (`--format json`, no `--yes`) — the refusals are all pre-write, so
+    // a forecast refuses exactly where a confirmed apply would, write-free on both.
+    //
+    // F3 create-guard — a `create_document` whose destination already exists and
+    // no `force`. `notes/alpha.md` is a real zoo doc. Oracle: `internal-error`;
+    // rewrite: `create-destination-exists` AND an added `path` echo. Pinned by
+    // PD-125.
+    Case {
+        id: "apply-authored-create-destination-exists-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "create_document", "fields": { "path": "notes/alpha.md", "new_value": { "frontmatter": { "type": "note" }, "body": "x" }, "force": false } }
+  ]
+}
+"##,
+        ),
+    },
+    // F3 create-guard — a `create_document` into a parent directory that does not
+    // exist, without `--parents`. `nope/` is absent from the zoo fixture. Oracle:
+    // `internal-error`; rewrite: `create-parent-missing` AND an added `path`.
+    // Pinned by PD-125.
+    Case {
+        id: "apply-authored-create-parent-missing-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "create_document", "fields": { "path": "nope/new.md", "new_value": { "frontmatter": { "type": "note" }, "body": "x" }, "force": false } }
+  ]
+}
+"##,
+        ),
+    },
+    // F3 create-guard — a `create_document` whose `new_value.frontmatter` is not a
+    // JSON object (a string). A fault in the AUTHORED plan CONTENT, coded
+    // `malformed-plan` (no path), not a create-family code. Oracle: `internal-error`;
+    // rewrite: `malformed-plan`. Pinned by PD-125.
+    Case {
+        id: "apply-authored-create-nonobject-frontmatter-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "create_document", "fields": { "path": "newdoc.md", "new_value": { "frontmatter": "notanobject", "body": "x" } } }
+  ]
+}
+"##,
+        ),
+    },
+    // F1 precondition-validation — an owner-set precondition with an EMPTY stem
+    // selector. The owner-set barrier evaluates before any write. Oracle:
+    // `internal-error`; rewrite: `invalid-precondition`. Pinned by PD-125.
+    Case {
+        id: "apply-authored-empty-stem-precondition-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "preconditions": [
+    { "id": "p", "kind": "owner_set", "selector": { "stem": "" }, "expected_paths": [] }
+  ],
+  "operations": [
+    { "kind": "set_frontmatter", "fields": { "path": "notes/alpha.md", "field": "summary", "new_value": "x" } }
+  ]
+}
+"##,
+        ),
+    },
+    // F4 plan-structure — two operations sharing the same `id` (`dup`). The plan's
+    // structure is malformed; refused at create-path resolution before any write.
+    // Oracle: `internal-error`; rewrite: `malformed-plan`. Pinned by PD-125.
+    Case {
+        id: "apply-authored-duplicate-op-id-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "create_document", "id": "dup", "fields": { "path": "x.md", "new_value": { "frontmatter": {}, "body": "x" } } },
+    { "kind": "create_document", "id": "dup", "fields": { "path": "y.md", "new_value": { "frontmatter": {}, "body": "y" } } }
+  ]
+}
+"##,
+        ),
+    },
 ];
 
 const SUITES: &[Suite] = &[

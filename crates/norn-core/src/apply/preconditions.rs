@@ -31,6 +31,41 @@ use norn_wire::{
 };
 use norn_wire::{MigrationOp, MigrationPlan, OwnerSelector, PlanPrecondition};
 
+/// (NRN-436) Structural faults in an AUTHORED plan's owner-set preconditions —
+/// a duplicate precondition id, an empty stem/eq selector, a `stem_from_operation`
+/// naming a missing/non-create op, or an unparseable `eq` predicate. Every
+/// variant is a USER error (the plan's precondition is malformed), so all code to
+/// `invalid-precondition`; formerly bare `anyhow::bail!`/`anyhow!`, which the
+/// apply envelope flattened to `internal-error`. Messages preserved verbatim.
+#[derive(Debug, thiserror::Error)]
+pub enum PreconditionError {
+    #[error("duplicate owner-set precondition id in MigrationPlan: {id}")]
+    DuplicateId { id: String },
+
+    #[error("owner-set precondition '{id}' has an empty stem selector")]
+    EmptyStemSelector { id: String },
+
+    #[error("owner-set precondition '{id}' has an empty eq selector")]
+    EmptyEqSelector { id: String },
+
+    #[error("owner-set precondition '{id}' references missing or non-create operation id '{operation}'")]
+    MissingOperation { id: String, operation: String },
+
+    /// An `eq` predicate that `filter_args::parse_field_value` rejected. The
+    /// underlying message is preserved verbatim so the diagnostic prose is
+    /// unchanged; only the envelope `code` moves off `internal-error`.
+    #[error("{message}")]
+    EqPredicateParse { message: String },
+}
+
+impl PreconditionError {
+    /// Every owner-set precondition-validation fault is an invalid precondition
+    /// in the authored plan (NRN-436).
+    pub fn code(&self) -> &'static str {
+        "invalid-precondition"
+    }
+}
+
 /// Evaluate every owner-set precondition in `plan` against `index`, returning one
 /// [`ApplyReportPrecondition`] per plan precondition (in plan order).
 ///
@@ -55,10 +90,10 @@ pub fn evaluate_owner_preconditions(
     let mut precondition_ids = BTreeSet::new();
     for precondition in &plan.preconditions {
         if !precondition_ids.insert(precondition.id()) {
-            anyhow::bail!(
-                "duplicate owner-set precondition id in MigrationPlan: {}",
-                precondition.id()
-            );
+            return Err(PreconditionError::DuplicateId {
+                id: precondition.id().to_string(),
+            }
+            .into());
         }
     }
 
@@ -78,10 +113,10 @@ pub fn evaluate_owner_preconditions(
                     let mut actual_paths = match selector {
                         OwnerSelector::Stem { stem } => {
                             if stem.is_empty() {
-                                anyhow::bail!(
-                                    "owner-set precondition '{}' has an empty stem selector",
-                                    precondition.id()
-                                );
+                                return Err(PreconditionError::EmptyStemSelector {
+                                    id: precondition.id().to_string(),
+                                }
+                                .into());
                             }
                             scan_by_stem(index, stem)
                         }
@@ -89,20 +124,19 @@ pub fn evaluate_owner_preconditions(
                             stem_from_operation,
                         } => {
                             let stem = operation_stems.get(stem_from_operation).ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "owner-set precondition '{}' references missing or non-create operation id '{}'",
-                                    precondition.id(),
-                                    stem_from_operation
-                                )
+                                anyhow::Error::from(PreconditionError::MissingOperation {
+                                    id: precondition.id().to_string(),
+                                    operation: stem_from_operation.clone(),
+                                })
                             })?;
                             scan_by_stem(index, stem)
                         }
                         OwnerSelector::Eq { eq } => {
                             if eq.is_empty() {
-                                anyhow::bail!(
-                                    "owner-set precondition '{}' has an empty eq selector",
-                                    precondition.id()
-                                );
+                                return Err(PreconditionError::EmptyEqSelector {
+                                    id: precondition.id().to_string(),
+                                }
+                                .into());
                             }
                             // Parse each `field:value` predicate ONCE, before the
                             // document scan, rather than re-parsing the strings per
@@ -114,8 +148,11 @@ pub fn evaluate_owner_preconditions(
                                         predicate,
                                         "owner_set.eq",
                                     )
+                                    .map_err(|e| PreconditionError::EqPredicateParse {
+                                        message: e.to_string(),
+                                    })
                                 })
-                                .collect::<Result<Vec<_>>>()?;
+                                .collect::<Result<Vec<_>, _>>()?;
                             index
                                 .documents
                                 .iter()
