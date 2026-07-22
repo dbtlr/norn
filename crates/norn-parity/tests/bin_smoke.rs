@@ -90,8 +90,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // wrong-typed op field (move `force`, delete `rewrite_to`, str_replace
     // `document_hash`), taking the total to 119; self-check ignores the divergence
     // (oracle vs. itself always Matches), so all 119 Match.
+    // NRN-427/NRN-428 (ADR 0023) add two `find` cases (a non-ISO date value and a
+    // malformed `--path` glob), taking the total to 121; self-check runs oracle
+    // vs. itself, so both Match.
     assert!(
-        stdout.contains("119 cases: 119 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("121 cases: 121 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -217,8 +220,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // per-variant fields; the rewrite emits the flat closed contract. The gated
     // total stays 118; the match count drops from 80 to 77 and the diverged count
     // grows from 38 to 41.
+    // NRN-427/NRN-428 (ADR 0023) add two `find` cases that DIVERGE under one
+    // ledger entry (PD-123): the oracle accepts a non-ISO date value and a
+    // malformed `--path` glob silently at exit 0 (a wrong result / an empty set),
+    // the rewrite refuses at exit 2. The gated total grows to 120 and the diverged
+    // count from 41 to 43; the match count stays 77.
     assert!(
-        stdout.contains("118 cases: 77 match, 41 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("120 cases: 77 match, 43 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
