@@ -93,8 +93,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-427/NRN-428 (ADR 0023) add two `find` cases (a non-ISO date value and a
     // malformed `--path` glob), taking the total to 121; self-check runs oracle
     // vs. itself, so both Match.
+    // NRN-426 (ADR 0023 amendment) adds three `find` predicate-typing cases (a
+    // numeric-looking `--eq` and `--not-eq` on a quoted stored value, and a
+    // declared-date value-operator refusal), taking the total to 124; self-check
+    // runs oracle vs. itself, so all three Match.
     assert!(
-        stdout.contains("121 cases: 121 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("124 cases: 124 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -225,8 +229,15 @@ fn default_mode_gates_help_cases_exit_0() {
     // malformed `--path` glob silently at exit 0 (a wrong result / an empty set),
     // the rewrite refuses at exit 2. The gated total grows to 120 and the diverged
     // count from 41 to 43; the match count stays 77.
+    // NRN-426 (ADR 0023 amendment) adds three `find` cases that DIVERGE under one
+    // ledger entry (PD-124): the oracle eager-coerces a numeric-looking value so
+    // `--eq zip:07030` misses the quoted "07030" (empty) and `--not-eq zip:07030`
+    // returns it (the corrupting direction), and a value operator on the declared
+    // `due` date accepts a non-ISO value silently; the rewrite dual-types (match /
+    // exclude) and refuses the declared-date value at exit 2. The gated total grows
+    // to 123 and the diverged count from 43 to 46; the match count stays 77.
     assert!(
-        stdout.contains("120 cases: 77 match, 43 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("123 cases: 77 match, 46 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -254,6 +265,10 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-120",
         "PD-121",
         "PD-122",
+        "PD-124",
+        "read-find-eq-numeric-quoted-value-zoo",
+        "read-find-not-eq-numeric-quoted-value-zoo",
+        "read-find-declared-date-eq-refuses-zoo",
         "validate-code-filter-zoo",
         "validate-jsonl-code-zoo",
         "mcp-tools-call-validate-code-zoo",

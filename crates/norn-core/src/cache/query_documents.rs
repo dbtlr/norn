@@ -1365,6 +1365,46 @@ mod tests {
         }
     }
 
+    // ── NRN-426: dual-eq routes to a mixed string+number membership. At scale
+    //    the shape drives the kv index (no per-row `document_fields` scan) — the
+    //    fallback `--eq zip:07030` stays sane, and the routed result equals the
+    //    scan result for both stored representations. ────────────────────────
+    #[test]
+    fn dual_type_membership_string_and_number_no_scan() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        // A representative table (SQLite picks a full scan for a handful of rows
+        // regardless of the index, so scale past that cost threshold to observe
+        // the real plan the shape supports).
+        for i in 0..200 {
+            let body = match i % 3 {
+                0 => "---\nzip: \"07030\"\n---\n".to_string(), // stored as string
+                1 => "---\nzip: 7030\n---\n".to_string(),      // stored as number
+                _ => format!("---\nzip: \"{:05}\"\n---\n", 10000 + i), // unrelated
+            };
+            std::fs::write(root.join(format!("d{i:04}.md")).as_std_path(), body).unwrap();
+        }
+        let cache = open_authoritative(&root, &["zip"]);
+        // The exact shape `build_document_query` emits for the fallback
+        // `--eq zip:07030`: a two-value membership over the string and number.
+        let query = DocumentQuery {
+            frontmatter_in: vec![(
+                "zip".into(),
+                vec![serde_json::json!("07030"), serde_json::json!(7030)],
+            )],
+            ..Default::default()
+        };
+        let (_where_sql, rows) = plan_for(&cache, &query);
+        drives_kv(&rows);
+        no_scan(&rows);
+        // 67 string "07030" (i%3==0) + 67 numeric 7030 (i%3==1) = 134 matches.
+        assert_eq!(cache.documents_matching(&query).unwrap().len(), 134);
+        assert_routed_matches_scan(&cache, &query);
+    }
+
     #[test]
     fn agree_date_ops_before_after_on() {
         let tmp = TempDir::new().unwrap();

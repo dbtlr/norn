@@ -479,3 +479,23 @@ old = "an unparseable predicate value is accepted silently at exit 0: a non-`tod
 new = "each unparseable predicate input refuses at `build_document_query` with exit 2: a date value that is neither `today` nor a valid ISO 8601 date/datetime reports `invalid --before date value 'yesterday': expected \\`today\\`, an ISO 8601 date (YYYY-MM-DD), or an ISO 8601 datetime`, and a malformed `--path` glob reports `invalid --path glob '{unclosed': <reason>` — no silently-wrong or silently-empty result set"
 reason = "decided-better"
 decision = "docs/decisions/0023-query-predicate-strictness.md"
+
+# NRN-426 (ADR 0023 amendment 2026-07-22): predicate value TYPING. The pinned
+# oracle eagerly types every parseable `--eq`/`--not-eq`/`--in`/`--not-in` value
+# (`true`/`false`/i64/f64) before SQL, so a numeric-looking token never equals a
+# quoted stored value: `--eq zip:07030` silently returns zero, and `--not-eq
+# zip:07030` RETURNS the doc the user meant to exclude (the corrupting
+# direction). The rewrite makes the schema the type authority where declared and
+# dual-types undeclared/disagreeing fields (match either representation); a
+# value-comparison predicate on a declared date/datetime field with a non-ISO
+# value refuses (exit 2), extending the ADR 0023 strictness class. The zoo fixture
+# alpha doc carries `zip: "07030"` (a quoted, zero-padded value) to exercise the
+# match/exclude divergence; `due` is schema-declared `date` and drives the refusal.
+[[entry]]
+id = "PD-124"
+surface = "find value-comparison predicate typing (--eq/--not-eq on quoted numeric; declared-date refusal)"
+cases = ["read-find-eq-numeric-quoted-value-zoo", "read-find-not-eq-numeric-quoted-value-zoo", "read-find-declared-date-eq-refuses-zoo"]
+old = "value-comparison predicates eager-type the token before SQL: `--eq zip:07030` coerces to the integer 7030, which never equals the stored string \"07030\" (zero results, exit 0 — a silent miss); `--not-eq zip:07030` likewise finds \"07030\" != 7030 and returns the doc the user meant to exclude; a non-ISO value on a value operator against a declared-date field lexically compares as a string (zero results, exit 0)"
+new = "the schema is the type authority where declared and undeclared/disagreeing fields dual-type: `--eq zip:07030` matches either the string \"07030\" or the number 7030 (returns alpha); `--not-eq zip:07030` excludes either representation (returns nothing); a value-comparison predicate on the declared-date `due` field with a non-ISO value refuses at exit 2 naming the field, the declared type, and the value"
+reason = "decided-better"
+decision = "docs/decisions/0023-query-predicate-strictness.md"

@@ -73,3 +73,52 @@ precision** —
   (NRN-426) are separate and untouched. Other operators' exit-code alignment is
   NRN-108's scope; these two refusals simply land in the already-correct
   bad-invocation class (exit 2).
+
+## Amendment (2026-07-22): predicate value typing (NRN-426)
+
+The original decision covered date-operator values and `--path` globs. The same
+"a silently-wrong result at exit 0 is a defect" principle extends to the
+VALUE-comparison operators (`--eq` / `--not-eq` / `--in` / `--not-in`). The
+pinned oracle eagerly types every parseable predicate token (`true`/`false`,
+i64, f64) before SQL, and SQLite never equates an INTEGER/REAL with TEXT. So
+`--eq zip:07030` against a stored `zip: "07030"` returned zero matches silently,
+and — the corrupting direction — `--not-eq zip:07030` RETURNED the very document
+the user meant to exclude. It bit quoted zips, phones, versions, and zero-padded
+ids.
+
+**Decision (rules):**
+
+1. **Schema is the type authority where declared.** When compiling a
+   value-comparison predicate on field F, if EVERY validate rule declaring F
+   agrees on one type vault-wide, the predicate compiles as that type.
+   Disagreement between rules, or no declaration at all, falls back to (2). The
+   declarable vocabulary carries no numeric or boolean type, so a declared field
+   is string-shaped (`string`/`text`/`list_of_strings`/`wikilink`/
+   `wikilink_or_list`) or temporal (`date`/`datetime`).
+2. **Dual-type comparison fallback** for undeclared/disagreeing fields: a
+   numeric-/bool-looking token matches EITHER representation — `--eq zip:07030`
+   matches the numeric `7030` AND the string `"07030"`; `--not-eq` excludes a
+   document matching either (De Morgan). The leading-zero overmatch (`07030`
+   parses to `7030`) is accepted — strictly better than the silent miss.
+3. **Declared-type-unparseable values refuse (exit 2)** naming the field, the
+   declared type, and the value. A declared `date`/`datetime` field reuses the
+   NRN-427 `is_iso_date_or_datetime` grammar (one refusal shape — no second date
+   parser), so `--eq due:someday` on a declared-date `due` refuses.
+4. **`--in` CSV** types each element independently by the same rules; a fallback
+   element fans both representations into the one membership value set.
+5. **Bools under fallback**: `--eq draft:true` matches YAML `true` AND the string
+   `"true"`.
+6. **No new CLI syntax** (no force-string quoting) and no zero-match warning.
+
+**Compilation.** A fallback dual predicate compiles to the existing array-aware
+membership shape — `--eq x:07030` ⇒ `x IN ["07030", 7030]`, and `--not-eq` to
+`x NOT IN [...]` — so no new SQL is introduced and the EAV planner-guard
+invariant (a single SCAN/SEARCH, no per-row subquery) holds. Type resolution is
+computed once per query build from the loaded schema (owner side), never per row.
+
+**Consequences.** The pinned 0.48.1 oracle keeps the old eager-coercion, so
+matching-semantics cases diverge by design; ledgered `decided-better` under
+`PD-124`. The read verbs (`find`/`count`/`describe`) now thread the vault schema
+into `build_document_query`; the apply owner-set precondition path deliberately
+keeps the historical eager coercion (it is a mutation gate, not the read query
+surface).
