@@ -335,6 +335,61 @@ mod tests {
     }
 
     #[test]
+    fn malformed_path_glob_is_a_user_error() {
+        // NRN-428: an unparseable `--path` glob refuses (user error) instead of
+        // silently filtering out every doc and returning an empty set at exit 0.
+        let (_tmp, root) = vault();
+        let cache = built(&root);
+        let params = FindParams {
+            filter: FilterParams {
+                path: vec!["{unclosed".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = execute(&cache, &params, TODAY).unwrap();
+        assert!(
+            outcome.is_err(),
+            "malformed --path glob must be a user error"
+        );
+        assert!(outcome.unwrap_err().contains("--path"));
+    }
+
+    #[test]
+    fn bad_date_value_is_a_user_error() {
+        // NRN-427: a non-ISO date value on a date operator refuses.
+        let (_tmp, root) = vault();
+        let cache = built(&root);
+        let params = FindParams {
+            filter: FilterParams {
+                before: vec!["created:yesterday".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = execute(&cache, &params, TODAY).unwrap();
+        assert!(
+            outcome.is_err(),
+            "non-ISO --before value must be a user error"
+        );
+    }
+
+    #[test]
+    fn valid_path_glob_runs() {
+        let (_tmp, root) = vault();
+        let cache = built(&root);
+        let params = FindParams {
+            filter: FilterParams {
+                path: vec!["*.md".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        assert_eq!(report.total, 3, "a valid glob still matches every doc");
+    }
+
+    #[test]
     fn unresolvable_links_to_is_a_user_error() {
         let (_tmp, root) = vault();
         let cache = built(&root);

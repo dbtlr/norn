@@ -28,6 +28,7 @@ use norn_wire::FilterParams;
 
 use super::DocumentQuery;
 use crate::grammar::split_field_value;
+use crate::standards::path_match::PathPattern;
 
 /// Translate the parsed filter vocabulary into a [`DocumentQuery`]. `today` is
 /// the injected current date (`%Y-%m-%d`), used only to resolve `--on today`.
@@ -73,6 +74,17 @@ pub fn build_document_query(params: &FilterParams, today: &str) -> Result<Docume
     let mut date_on = Vec::new();
     for spec in &params.on {
         date_on.push(parse_field_date(spec, "--on", today)?);
+    }
+
+    // NRN-428: an unparseable `--path` glob is refused up front — a single seam
+    // covering find (`find_documents`) and count/describe (`documents_matching`).
+    // Left unvalidated, the downstream post-pass `.ok()`-discards the parse error
+    // and silently filters out every document (empty result, exit 0 — a real
+    // no-match is indistinguishable from a typo'd glob). See ADR 0023.
+    for pattern in &params.path {
+        if let Err(e) = PathPattern::parse(pattern) {
+            return Err(anyhow!("invalid --path glob '{pattern}': {e}"));
+        }
     }
 
     Ok(DocumentQuery {
@@ -159,8 +171,13 @@ fn parse_field_text(spec: &str, flag: &str) -> Result<(String, String)> {
 }
 
 /// Parse a `field:DATE` token. `today` (an injected `%Y-%m-%d` string) is
-/// substituted for the literal `today`; every other value passes through
-/// verbatim (trimmed).
+/// substituted for the literal `today`; every other value must be a valid ISO
+/// 8601 date or datetime (NRN-427, ADR 0023) — an unrecognized value refuses
+/// rather than passing verbatim into a TEXT lexical compare (where e.g.
+/// `--before due:yesterday` would match essentially every stored ISO date, and
+/// `--on created:2026-13-45` would compare as a literal string). This validates
+/// the predicate VALUE the user typed; it does not touch how valid ISO values
+/// compare against stored frontmatter (that lexical compare is unchanged).
 fn parse_field_date(spec: &str, flag: &str, today: &str) -> Result<(String, String)> {
     let (field, raw) = split_field_value(spec)
         .ok_or_else(|| anyhow!("invalid {} value, expected field:DATE: {}", flag, spec))?;
@@ -175,10 +192,32 @@ fn parse_field_date(spec: &str, flag: &str, today: &str) -> Result<(String, Stri
     }
     let date = if raw == "today" {
         today.to_string()
-    } else {
+    } else if is_iso_date_or_datetime(raw) {
         raw.to_string()
+    } else {
+        return Err(anyhow!(
+            "invalid {flag} date value '{raw}': expected `today`, \
+             an ISO 8601 date (YYYY-MM-DD), or an ISO 8601 datetime"
+        ));
     };
     Ok((field, date))
+}
+
+/// True when `value` is a valid ISO 8601 date (`YYYY-MM-DD`) or datetime at
+/// second OR minute precision — a naive datetime (`YYYY-MM-DDThh:mm[:ss]`) or an
+/// offset-bearing datetime (`YYYY-MM-DDThh:mm[:ss]±hh:mm`, and `Z` at second
+/// precision via RFC 3339). Minute precision (`YYYY-MM-DDThh:mm`) is a valid ISO
+/// 8601 reduced-precision form and the dominant stored-frontmatter shape, so it
+/// must validate — dropping it would refuse a value that previously compared
+/// correctly. chrono rejects impossible dates (`2026-13-45`) and non-date
+/// garbage.
+fn is_iso_date_or_datetime(value: &str) -> bool {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime};
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
+        || DateTime::parse_from_rfc3339(value).is_ok()
+        || DateTime::parse_from_str(value, "%Y-%m-%dT%H:%M%z").is_ok()
+        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").is_ok()
+        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M").is_ok()
 }
 
 fn coerce_value(s: &str) -> Value {
@@ -376,6 +415,107 @@ mod tests {
         assert_eq!(
             q.date_before,
             vec![("created".to_string(), "2026-05-01".to_string())]
+        );
+    }
+
+    // ── NRN-427: date-operator values validate or refuse ──────────────────
+
+    #[test]
+    fn date_operator_accepts_iso_date_datetime_and_today() {
+        // Accepted forms round-trip unchanged (today → injected date).
+        for (value, expected) in [
+            ("2026-05-01", "2026-05-01"),                               // ISO date
+            ("2026-05-01T12:30", "2026-05-01T12:30"),                   // naive, minute precision
+            ("2026-05-01T12:30:00", "2026-05-01T12:30:00"),             // naive, second precision
+            ("2026-05-01T12:30:00Z", "2026-05-01T12:30:00Z"),           // RFC 3339 UTC
+            ("2026-05-01T12:30+02:00", "2026-05-01T12:30+02:00"),       // offset, minute precision
+            ("2026-05-01T12:30:00+02:00", "2026-05-01T12:30:00+02:00"), // offset, second precision
+            // Fractional seconds accept deliberately (real vaults store them;
+            // they lexically order correctly) — pinned so the contract wording
+            // ("minute, second, or fractional-second precision") stays true.
+            ("2026-05-01T12:30:00.123Z", "2026-05-01T12:30:00.123Z"), // RFC 3339 fractional
+            (
+                "2026-05-01T12:30:00.123+02:00",
+                "2026-05-01T12:30:00.123+02:00",
+            ), // offset fractional
+            ("today", TODAY),
+        ] {
+            for flag_setter in [
+                |a: &mut FilterParams, s: String| a.before = vec![s],
+                |a: &mut FilterParams, s: String| a.after = vec![s],
+                |a: &mut FilterParams, s: String| a.on = vec![s],
+            ] {
+                let mut a = empty();
+                flag_setter(&mut a, format!("created:{value}"));
+                let q = build_document_query(&a, TODAY)
+                    .unwrap_or_else(|e| panic!("value {value:?} should parse, got {e}"));
+                let got = q
+                    .date_before
+                    .iter()
+                    .chain(&q.date_after)
+                    .chain(&q.date_on)
+                    .next()
+                    .expect("one date predicate");
+                assert_eq!(got, &("created".to_string(), expected.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn date_operator_refuses_non_iso_values() {
+        // `yesterday` (a relative word promising nothing), an impossible date,
+        // and pure garbage all refuse rather than lexically comparing verbatim.
+        for value in ["yesterday", "2026-13-45", "not-a-date", "2026/05/01"] {
+            let mut a = empty();
+            a.before = vec![format!("due:{value}")];
+            let err =
+                build_document_query(&a, TODAY).expect_err(&format!("value {value:?} must refuse"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--before"),
+                "message names the operator: {msg}"
+            );
+            assert!(msg.contains(value), "message names the value: {msg}");
+            assert!(
+                msg.contains("ISO 8601"),
+                "message names accepted forms: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn date_operator_refusal_covers_each_flag() {
+        for setter in [
+            |a: &mut FilterParams| a.before = vec!["d:yesterday".into()],
+            |a: &mut FilterParams| a.after = vec!["d:yesterday".into()],
+            |a: &mut FilterParams| a.on = vec!["d:yesterday".into()],
+        ] {
+            let mut a = empty();
+            setter(&mut a);
+            assert!(build_document_query(&a, TODAY).is_err());
+        }
+    }
+
+    // ── NRN-428: `--path` globs parse or refuse ───────────────────────────
+
+    #[test]
+    fn valid_path_glob_passes_through() {
+        let mut a = empty();
+        a.path = vec!["Workspaces/**/*.md".into()];
+        let q = build(&a);
+        assert_eq!(q.path_globs, vec!["Workspaces/**/*.md".to_string()]);
+    }
+
+    #[test]
+    fn malformed_path_glob_refuses() {
+        let mut a = empty();
+        a.path = vec!["{unclosed".into()];
+        let err = build_document_query(&a, TODAY).expect_err("malformed glob must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("--path"), "message names the flag: {msg}");
+        assert!(
+            msg.contains("{unclosed"),
+            "message names the bad pattern: {msg}"
         );
     }
 }

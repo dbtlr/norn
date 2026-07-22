@@ -53,11 +53,15 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // refuses `malformed-plan` instead of silently coercing, three cases) and
     // PD-122 (decided-better flat finding contract: `validate --format
     // json`/`jsonl` and `vault.validate` serialize one flat closed struct with
-    // no leaked internal link/diagnostic model, three cases).
+    // no leaked internal link/diagnostic model, three cases). NRN-427/NRN-428
+    // (ADR 0023) added PD-123 (decided-better query predicate input strictness:
+    // a non-ISO date-operator value and a malformed `--path` glob each refuse at
+    // exit 2 instead of returning a silently-wrong or silently-empty result set,
+    // two cases).
     assert_eq!(
         ledger.entries.len(),
-        22,
-        "expected exactly PD-101..PD-122, found {}",
+        23,
+        "expected exactly PD-101..PD-123, found {}",
         ledger.entries.len()
     );
 

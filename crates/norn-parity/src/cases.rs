@@ -645,6 +645,41 @@ const READ_CASES: &[Case] = &[
         plan: None,
     },
     Case {
+        // NRN-427 (ADR 0023): a non-ISO date value on a date operator. The
+        // pinned oracle substitutes only `today` and passes `yesterday` verbatim
+        // into a TEXT lexical compare — `created < 'yesterday'` matches every
+        // stored ISO date (exit 0, a match). The rewrite refuses (exit 2). The
+        // divergence is ledgered decided-better (PD-123).
+        id: "read-find-bad-date-value-refuses-clean",
+        argv: &["find", "--before", "created:yesterday", "--format", "json"],
+        fixture: CLEAN_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // NRN-428 (ADR 0023): a malformed `--path` glob. The pinned oracle
+        // `.ok()`-discards the parse error and filters out every doc — an empty
+        // result at exit 0, indistinguishable from a real no-match. The rewrite
+        // refuses (exit 2). Ledgered decided-better (PD-123).
+        id: "read-find-malformed-path-glob-refuses-clean",
+        argv: &["find", "--path", "{unclosed", "--format", "json"],
+        fixture: CLEAN_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
         id: "read-find-sort-limit-json-zoo",
         argv: &[
             "find",

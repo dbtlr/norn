@@ -453,3 +453,29 @@ old = "each finding serializes an untagged per-variant body flattened onto `{cod
 new = "each finding serializes the flat closed contract `{ path, code, severity, message, rule?, field?, target?, candidates?, next_actions? }`: `path`-first field order, absent optionals omitted rather than `null`, `candidates` as plain vault-path strings, no internal `link` / diagnostic model and no variant-specific frontmatter fields — the detail that carried fix-vs-skip value folded into `message`, the rest dropped"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
+
+# NRN-427 / NRN-428 (ADR 0023, decided-better): query predicate input strictness.
+# The pinned oracle accepts two unparseable predicate inputs silently, both at
+# exit 0. (1) A date-operator value substitutes only the literal `today`;
+# everything else passes verbatim into a TEXT lexical compare, so `--before
+# created:yesterday` becomes `created < 'yesterday'` — and since 'y' sorts after
+# any '2026-…' ISO date, it matches every stored date (a wrong result, not an
+# error). (2) A `--path` glob is never validated: `PathPattern::parse` errors are
+# `.ok()`-discarded in the per-document post-pass, so `{unclosed` filters out
+# every doc — an empty result indistinguishable from a real no-match. The rewrite
+# refuses both at the single `build_document_query` seam (covering find / count /
+# describe, direct + owner-routed) with exit 2: the date refusal names the
+# operator, the value, and the accepted forms (`today` / ISO 8601 date / ISO 8601
+# datetime); the glob refusal names the bad pattern and why. One entry, one
+# surface: query predicate input that cannot be parsed refuses rather than
+# silently computing a wrong or empty result set. See
+# `crates/norn-core/src/query/filter_args.rs` (`parse_field_date` +
+# `is_iso_date_or_datetime`, and the up-front `--path` glob validation).
+[[entry]]
+id = "PD-123"
+surface = "find/count query predicate input validation (date value + --path glob)"
+cases = ["read-find-bad-date-value-refuses-clean", "read-find-malformed-path-glob-refuses-clean"]
+old = "an unparseable predicate value is accepted silently at exit 0: a non-`today` date value passes verbatim into a TEXT lexical compare (`--before created:yesterday` → `created < 'yesterday'`, which matches every stored ISO date), and a malformed `--path` glob (`{unclosed`) has its parse error discarded so it filters out every document (an empty result set, indistinguishable from a real no-match)"
+new = "each unparseable predicate input refuses at `build_document_query` with exit 2: a date value that is neither `today` nor a valid ISO 8601 date/datetime reports `invalid --before date value 'yesterday': expected \\`today\\`, an ISO 8601 date (YYYY-MM-DD), or an ISO 8601 datetime`, and a malformed `--path` glob reports `invalid --path glob '{unclosed': <reason>` — no silently-wrong or silently-empty result set"
+reason = "decided-better"
+decision = "docs/decisions/0023-query-predicate-strictness.md"
