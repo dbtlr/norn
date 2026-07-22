@@ -39,7 +39,8 @@ guess, at the single point where raw predicate strings become the typed query.
 ## Invariants
 
 - **Date values validate or refuse.** Accepted: `today`, an ISO 8601 date
-  (`YYYY-MM-DD`), or an ISO 8601 datetime at **minute or second precision** —
+  (`YYYY-MM-DD`), or an ISO 8601 datetime at **minute, second, or fractional-second
+precision** —
   naive (`YYYY-MM-DDThh:mm` / `YYYY-MM-DDThh:mm:ss`) or offset-bearing
   (`YYYY-MM-DDThh:mm±hh:mm` / `YYYY-MM-DDThh:mm:ss±hh:mm`, and `Z` at second
   precision). Minute precision is a valid ISO 8601 reduced-precision form and the

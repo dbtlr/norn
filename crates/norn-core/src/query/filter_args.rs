@@ -430,6 +430,14 @@ mod tests {
             ("2026-05-01T12:30:00Z", "2026-05-01T12:30:00Z"),           // RFC 3339 UTC
             ("2026-05-01T12:30+02:00", "2026-05-01T12:30+02:00"),       // offset, minute precision
             ("2026-05-01T12:30:00+02:00", "2026-05-01T12:30:00+02:00"), // offset, second precision
+            // Fractional seconds accept deliberately (real vaults store them;
+            // they lexically order correctly) — pinned so the contract wording
+            // ("minute, second, or fractional-second precision") stays true.
+            ("2026-05-01T12:30:00.123Z", "2026-05-01T12:30:00.123Z"), // RFC 3339 fractional
+            (
+                "2026-05-01T12:30:00.123+02:00",
+                "2026-05-01T12:30:00.123+02:00",
+            ), // offset fractional
             ("today", TODAY),
         ] {
             for flag_setter in [
