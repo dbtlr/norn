@@ -68,11 +68,16 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // PD-126 (decided-better true per-op tracking: a multi-seq-create report tells
     // the truth — `applied: 2` with distinct resolved paths — instead of the
     // oracle's event-reconstruction under-count) and PD-127 (decided-better partial
-    // apply: independent files proceed past a per-op failure).
+    // apply: independent files proceed past a per-op failure). NRN-151 (ADR
+    // 0024) added PD-128 (decided-better: a hand-authored hash-less
+    // `delete_document` refuses `delete-hash-required` fail-closed where the
+    // oracle proceeds) and PD-129 (decided-better: a present-but-stale
+    // `document_hash` on a `move_document` refuses `stale-document-hash` before
+    // the rename — the optional move CAS the donor never had).
     assert_eq!(
         ledger.entries.len(),
-        27,
-        "expected exactly PD-101..PD-127, found {}",
+        29,
+        "expected exactly PD-101..PD-129, found {}",
         ledger.entries.len()
     );
 
@@ -306,6 +311,19 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         norn_parity::ledger::Reason::DecidedBetter,
         "PD-122 is decided-better"
     );
+
+    // The NRN-151 structural-CAS divergences (PD-128 / PD-129), both
+    // decided-better.
+    let pd128 = ledger
+        .entry_for_case("apply-authored-delete-hash-required-refusal-json-zoo")
+        .expect("the hash-less delete refusal case must resolve to an entry");
+    assert_eq!(pd128.id, "PD-128");
+    assert_eq!(pd128.reason, norn_parity::ledger::Reason::DecidedBetter);
+    let pd129 = ledger
+        .entry_for_case("apply-authored-move-stale-hash-refusal-json-zoo")
+        .expect("the move stale-hash refusal case must resolve to an entry");
+    assert_eq!(pd129.id, "PD-129");
+    assert_eq!(pd129.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]

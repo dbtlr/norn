@@ -3168,6 +3168,70 @@ const APPLY_CASES: &[Case] = &[
 "##,
         ),
     },
+    // ── NRN-151 / ADR 0024: plan-time structural CAS on move/delete ───────────
+    // A hand-authored `delete_document` op with NO `document_hash` refuses
+    // fail-closed. A delete without a plan-time hash cannot compare-and-swap the
+    // file before removing it (a fail-OPEN removal), so the rewrite refuses
+    // `delete-hash-required` (exit 2) at a plan-level barrier before any write.
+    // The oracle has no such requirement and forecasts the delete (exit 0). The
+    // verbs and repair always stamp a hash, so only a hand-authored hash-less
+    // delete newly refuses; there is no compatibility shim in the pre-1.0 break
+    // window. Dry-run `--format json`: exit + output diverge, both write-free.
+    // `plan_hash` is root-dependent (normalized). Pinned by PD-128.
+    Case {
+        id: "apply-authored-delete-hash-required-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: PLAN_HASH_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "delete_document", "fields": { "path": "notes/alpha.md" } }
+  ]
+}
+"##,
+        ),
+    },
+    // A `move_document` op carrying a STALE `document_hash` (one that no longer
+    // matches the source bytes) now refuses `stale-document-hash` before the
+    // rename — the pre-rename move CAS the donor never had (move was unchecked).
+    // The rewrite refuses (exit 2, write-free); the oracle, which does not
+    // fingerprint a move, forecasts it (exit 0). Move CAS stays OPTIONAL — a
+    // present-but-stale hash is what refuses here; an absent hash proceeds. The
+    // all-zero hash is a deterministic placeholder that cannot match any real
+    // document. `no_link_rewrite` keeps the oracle's forecast a bare move (no
+    // cascade). Dry-run `--format json`: exit + output diverge, both write-free.
+    // `plan_hash` is root-dependent (normalized). Pinned by PD-129.
+    Case {
+        id: "apply-authored-move-stale-hash-refusal-json-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: PLAN_HASH_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "move_document", "fields": { "src": "notes/alpha.md", "dst": "notes/alpha-moved.md", "no_link_rewrite": true, "document_hash": "0000000000000000000000000000000000000000000000000000000000000000" } }
+  ]
+}
+"##,
+        ),
+    },
 ];
 
 const SUITES: &[Suite] = &[

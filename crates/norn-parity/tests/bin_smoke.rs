@@ -104,8 +104,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-406 (ADR 0024) adds one `apply` case exercising independent-files-proceed
     // partial apply, taking the total to 130; self-check runs oracle vs. itself,
     // so all 130 Match.
+    // NRN-151 (ADR 0024) adds two `apply` cases (a hand-authored hash-less
+    // `delete_document` refusal and a `move_document` stale-hash refusal), taking
+    // the total to 132; self-check runs oracle vs. itself, so all 132 Match.
     assert!(
-        stdout.contains("130 cases: 130 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("132 cases: 132 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -254,8 +257,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // under-count) and adds one DIVERGING case (PD-127:
     // apply-authored-independent-files-proceed-zoo). The gated total grows to 129,
     // the match count drops to 76, and the diverged count grows from 51 to 53.
+    // NRN-151 (ADR 0024) adds two DIVERGING `apply` cases: PD-128 (a hand-authored
+    // hash-less `delete_document` refuses `delete-hash-required` where the oracle
+    // forecasts) and PD-129 (a `move_document` stale-hash refuses
+    // `stale-document-hash` — the new optional move CAS the donor lacked). The
+    // gated total grows to 131, the diverged count from 53 to 55; match stays 76.
     assert!(
-        stdout.contains("129 cases: 76 match, 53 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("131 cases: 76 match, 55 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [

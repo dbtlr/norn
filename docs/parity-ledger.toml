@@ -570,3 +570,44 @@ old = "the applier aborts the whole plan at the first per-op failure: op0 `appli
 new = "the failed op is recorded and INDEPENDENT ops still run: op0 `applied`, op1 `failed`, op2 `applied` — `applied: 2  remaining: 0`, exit 1 — and both `nrn406-first.md` and `nrn406-third.md` land on disk (a truthful partial apply)"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
+
+# NRN-151 (ADR 0024, decided-better): destructive/structural ops carry a
+# plan-time compare-and-swap hash, and a delete's hash is REQUIRED. A
+# hand-authored `delete_document` op with no `document_hash` cannot fingerprint
+# the file before removing it — a fail-open removal — so the rewrite refuses it
+# `delete-hash-required` (exit 2) at a plan-level barrier before any write. The
+# oracle has no such requirement: a hash-less authored delete forecasts (and,
+# confirmed, would apply). Only hand-authored hash-less deletes newly refuse —
+# the verbs and repair always stamp the hash — and there is no compatibility
+# shim in the pre-1.0 break window. Surfaces on a dry-run `apply --format json`:
+# exit code and output diverge, both write-free. See
+# `crates/norn-core/src/apply/executor.rs` (`first_delete_missing_hash`) and
+# `crates/norn-core/src/standards/apply.rs` (`PlanStructureError::DeleteHashRequired`).
+[[entry]]
+id = "PD-128"
+surface = "apply --format json (hand-authored hash-less delete refusal)"
+cases = ["apply-authored-delete-hash-required-refusal-json-zoo"]
+old = "a `delete_document` op with no `document_hash` is accepted: the delete forecasts `outcome: applied` (exit 0) and, confirmed, removes the file with no compare-and-swap against its bytes"
+new = "the op is refused fail-closed: `code: delete-hash-required` naming the offending path (exit 2), at a plan-level barrier before any write — a delete must carry the plan-time hash it will compare-and-swap"
+reason = "decided-better"
+decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
+
+# NRN-151 (ADR 0024, decided-better): a `move_document` op now carries an
+# OPTIONAL plan-time `document_hash`, and when present it is a pre-rename
+# compare-and-swap. A stale hash (one that no longer matches the source bytes)
+# refuses `stale-document-hash` before the move lands — the move CAS the donor
+# never had (the donor fingerprints deletes and content ops but never a move, so
+# a move against a drifted source proceeded silently). Move CAS stays optional:
+# an absent hash proceeds unchecked; only a present-but-stale hash refuses.
+# Surfaces on a dry-run `apply --format json`: exit code and output diverge, both
+# write-free. See `crates/norn-core/src/apply/passes.rs` (`move_pass` pre-rename
+# `fingerprint_vacate`) and `crates/norn-core/src/mutate/move_doc.rs` (plan-time
+# hash stamping).
+[[entry]]
+id = "PD-129"
+surface = "apply --format json (move stale-hash refusal — the new optional move CAS)"
+cases = ["apply-authored-move-stale-hash-refusal-json-zoo"]
+old = "a `move_document` op is never fingerprinted, so a plan-time `document_hash` that no longer matches the source is ignored: the move forecasts `outcome: applied` (exit 0) and, confirmed, renames the drifted file anyway"
+new = "a present `document_hash` is a pre-rename compare-and-swap: a stale hash refuses `stale-document-hash` (exit 2) before the rename, the same drift-refusal class the delete and content paths already enforce (an absent hash still proceeds unchecked)"
+reason = "decided-better"
+decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
