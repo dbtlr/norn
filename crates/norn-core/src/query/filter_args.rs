@@ -395,9 +395,14 @@ fn type_value(
                     .resolved(field)
                     .map(|r| r.declared.iter().cloned().collect::<Vec<_>>().join("/"))
                     .unwrap_or_else(|| "date".to_string());
+                let today_hint = if raw == "today" {
+                    format!(" — for \"due today\" comparisons use `--on {field}:today`")
+                } else {
+                    String::new()
+                };
                 Err(anyhow!(
                     "invalid {flag} value for field '{field}': '{raw}' is not a valid \
-                     {declared} value (expected an ISO 8601 date (YYYY-MM-DD) or datetime)"
+                     {declared} value (expected an ISO 8601 date (YYYY-MM-DD) or datetime){today_hint}"
                 ))
             }
         }
@@ -702,6 +707,22 @@ mod tests {
             );
             assert!(msg.contains("not-a-date"), "message names the value: {msg}");
         }
+    }
+
+    #[test]
+    fn declared_date_field_refuses_today_with_an_on_hint() {
+        // Ruled 2026-07-22: value operators keep refusing `today` (exact values
+        // only), but the refusal steers the user to the date operator that DOES
+        // substitute it.
+        let mut a = empty();
+        a.eq = vec!["due:today".into()];
+        let err = build_document_query(&a, TODAY, &declared("due", "date"))
+            .expect_err("declared-date field refuses `today` on a value operator");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--on due:today"),
+            "refusal hints the substituting operator: {msg}"
+        );
     }
 
     #[test]
