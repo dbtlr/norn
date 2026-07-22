@@ -48,11 +48,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // wikilink-rewriter unification: embed-marker, code-opacity, and caret-target
     // corruptions) and, on review, PD-119 (decided-better interior-whitespace
     // canonicalization on rewrite) and PD-120 (decided-better refuse/skip on a
-    // rename to an unrepresentable wikilink target).
+    // rename to an unrepresentable wikilink target). NRN-406 (ADR 0022) added
+    // PD-121 (decided-better strict op-payload decode: a wrong-typed op field
+    // refuses `malformed-plan` instead of silently coercing, three cases).
     assert_eq!(
         ledger.entries.len(),
-        20,
-        "expected exactly PD-101..PD-120, found {}",
+        21,
+        "expected exactly PD-101..PD-121, found {}",
         ledger.entries.len()
     );
 
@@ -241,6 +243,28 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
             "{case}'s entry is decided-better"
         );
     }
+
+    // The NRN-406 (ADR 0022) strict-decode divergences: three wrong-typed-op-field
+    // refusals under one decided-better entry (PD-121).
+    for case in [
+        "apply-authored-wrong-typed-bool-refusal-zoo",
+        "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
+        "apply-authored-wrong-typed-document-hash-refusal-zoo",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some("PD-121"),
+            "{case} is gated by PD-121"
+        );
+    }
+    assert_eq!(
+        ledger
+            .entry_for_case("apply-authored-wrong-typed-bool-refusal-zoo")
+            .unwrap()
+            .reason,
+        norn_parity::ledger::Reason::DecidedBetter,
+        "PD-121 is decided-better"
+    );
 }
 
 #[test]

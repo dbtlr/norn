@@ -2775,6 +2775,100 @@ const APPLY_CASES: &[Case] = &[
 "##,
         ),
     },
+    // ── ADR 0022: strict op-payload decode (F5 — refuse coercion) ──────────────
+    // A structural op with a WRONG-TYPED boolean: `move_document` carrying
+    // `"force": "true"` (a string, not a bool). The oracle's `.and_then(as_bool)
+    // .unwrap_or(false)` silently coerces it to `false`, then proceeds to the
+    // apply-time destination check — `notes/beta.md` already exists and `force` is
+    // (silently) off, so it refuses `move destination already exists` (exit 2).
+    // The rewrite refuses the malformed field itself, at plan decode, before any
+    // dispatch: `op.fields for move_document could not be decoded: field `force`
+    // must be a boolean` (`malformed-plan`, exit 2). Both write nothing; the
+    // refusal reason (and message) diverges. Pinned by PD-121.
+    Case {
+        id: "apply-authored-wrong-typed-bool-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/beta.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "move_document", "fields": { "src": "notes/alpha.md", "dst": "notes/beta.md", "force": "true" } }
+  ]
+}
+"##,
+        ),
+    },
+    // A `delete_document` with a wrong-typed `rewrite_to` (`5`, a number). The
+    // oracle's `.and_then(as_str)` drops the malformed value indistinguishably from
+    // absent, so it deletes `notes/cycle-c.md` with NO redirect — silently applying
+    // a destructive op the author fat-fingered (exit 0, the file is gone, leaving
+    // `cycle-b`'s `[[cycle-c]]` backlink broken). The rewrite refuses the malformed
+    // field at plan decode — `op.fields for delete_document could not be decoded:
+    // field `rewrite_to` must be a string` (`malformed-plan`, exit 2), write-free.
+    // The starkest F5 case: silent coercion turns a typo into data loss on the
+    // oracle; the rewrite refuses. Exit codes AND the post-state tree diverge.
+    // Pinned by PD-121. TRACE_NORM for the oracle's confirmed-apply trace id.
+    Case {
+        id: "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-c.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "delete_document", "fields": { "path": "notes/cycle-c.md", "rewrite_to": 5 } }
+  ]
+}
+"##,
+        ),
+    },
+    // A section-edit op (`str_replace`) with a wrong-typed `document_hash` (`5`, a
+    // number). The oracle's `.and_then(as_str).unwrap_or("")` coerces it to the
+    // empty string (no compare-and-swap), then runs the replace — `old` names text
+    // absent from `notes/alpha.md`, so it refuses `string not found` (exit 2). The
+    // rewrite refuses the malformed field at plan decode — `op.fields for
+    // str_replace could not be decoded: invalid type: integer `5`, expected a
+    // string` (`malformed-plan`, exit 2), before the body is ever touched. Both
+    // write nothing; the refusal reason diverges. Pinned by PD-121.
+    Case {
+        id: "apply-authored-wrong-typed-document-hash-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "str_replace", "fields": { "path": "notes/alpha.md", "old": "NONEXISTENT_ZZZ", "new": "x", "document_hash": 5 } }
+  ]
+}
+"##,
+        ),
+    },
 ];
 
 const SUITES: &[Suite] = &[

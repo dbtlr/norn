@@ -10,8 +10,13 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Breaking changes
+
+- **A migration-plan op with a wrong-typed field now refuses instead of silently coercing it (NRN-406, ADR 0022).** Every op payload is decoded once into a typed struct, strictly: a present-but-wrong-typed field is refused with `code: malformed-plan` (exit 2, write-free) and a message naming the field, rather than coerced to a default. This closes a class of silent-coercion defects — `move_document`'s `"force": "true"` (a string) previously became `false`; `delete_document`'s `"rewrite_to": 5` (a number) was dropped to *no redirect*, silently **deleting** the document and leaving its backlinks broken; `str_replace`'s `"document_hash": 5` became `""`, dropping the compare-and-swap guard. Absence is unchanged — an omitted field (or an explicit `null`, the mutation verbs' unset sentinel) still takes its documented default. Well-formed plans are unaffected: their serialized bytes and apply behavior are identical. This is a pre-1.0 break with no compatibility shim.
+
 ### Added
 
+- **Apply-report ops now echo the finding provenance of the op that produced them (NRN-406, ADR 0022).** A repair-generated op carries the validation `finding_code` and `repair_rule` it is resolving; the per-op record in the apply report (`ApplyReport.operations[]`) now echoes both as optional fields, so a consumer can trace an applied change back to the finding that motivated it. The fields are provenance only — the applier never reads them for behavior — and are omitted entirely when absent, so verb-synthesized and authored plans that declare no linkage produce byte-identical report output to before.
 - **A new architecture-principles page (`docs/architecture.md`) records norn's standing invariants (NRN-422).** Eleven principles — contract types living in `norn-wire`, typed facts crossing boundaries while prose is rendering, the single render seam, single-PR crate extractions, the incremental-index cache, artifact determinism, one plan vocabulary with one applier, and the substrate bearing the trust burden among them — distilled from the cited decision records into a checklist a pull request can be tested against, sibling to `docs/concepts.md` and `docs/development.md`.
 
 ### Changed
