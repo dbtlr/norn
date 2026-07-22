@@ -56,8 +56,8 @@ pub use presence::Presence;
 pub use read::{
     CountParams, CountReport, CreatableRule, DataSummary, DateBounds, DescribeParams,
     DescribeReport, FieldDistribution, FindDoc, FindParams, FindReport, GetParams, GetRecord,
-    GetReport, GroupNode, PathRule, RepairParams, RepairReport, SkippedField, ValidateParams,
-    ValidateReport, ValueCount,
+    GetReport, GroupNode, PathRule, RepairParams, RepairReport, RepairSkipDetail, SkippedField,
+    ValidateParams, ValidateReport, ValueCount,
 };
 pub use report::{
     ApplyError, ApplyOutcome, ApplyReport, ApplyReportOp, ApplyReportPrecondition, ApplyWarning,

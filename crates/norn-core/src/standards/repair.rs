@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::Severity;
 use camino::Utf8PathBuf;
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -156,6 +157,113 @@ pub struct RepairPlanSummary {
     pub findings: usize,
     pub planned_changes: usize,
     pub skipped: SkippedSummary,
+}
+
+/// What the repair planner emits: a `MigrationPlan` of typed ops built natively
+/// (ADR 0024 — a repair plan IS a migration plan), plus the two carriage roles the
+/// former `RepairPlan` served that the wire plan does not — the rich `skipped`
+/// findings (candidate paths, next actions, skip-reason code) the planner's REPORT
+/// surfaces, and the run `summary` tallies. Repair no longer produces
+/// `PlannedChange`/`RepairPlan` as its output contract; the ops carry finding
+/// linkage (`finding_code`/`repair_rule`) and per-op footnotes directly.
+///
+/// `plan.generator`/`plan.generated_at` are left unset here (the planner is a pure
+/// function of its inputs, so its unit tests stay wall-clock-free); the findings
+/// entry point [`plan_from_findings`](crate::planner::findings::plan_from_findings)
+/// stamps that provenance.
+pub struct RepairPlanResult {
+    pub plan: MigrationPlan,
+    /// The rich skip detail (a superset of the wire plan's lean `skipped`) for the
+    /// planner report — mirrors `plan.skipped` one-for-one, in the same order.
+    pub(crate) skipped: Vec<SkippedFinding>,
+    pub summary: RepairPlanSummary,
+}
+
+/// Build a wire op's `fields` object from an interior `PlannedChange`, natively —
+/// the byte-for-byte successor to the former `serde_json::to_value(&change)` round
+/// trip (which serialized the whole struct, dropped `operation`, and remapped
+/// `path`/`destination`→`src`/`dst` for moves). `serde_json`'s `Map` is a
+/// `BTreeMap`, so the emitted key ORDER is the sorted set regardless of insertion
+/// order; only the key set and values are load-bearing for plan bytes. `operation`
+/// is intentionally omitted — it becomes the [`MigrationOp::kind`].
+fn op_fields_from_change(change: &PlannedChange) -> Value {
+    let is_move = change.operation == "move_document";
+    let mut fields = serde_json::Map::new();
+    fields.insert("change_id".into(), Value::String(change.change_id.clone()));
+    // move_document speaks the unified `src`/`dst` vocabulary; every other op
+    // keeps `path`.
+    let path_key = if is_move { "src" } else { "path" };
+    fields.insert(path_key.into(), Value::String(change.path.to_string()));
+    fields.insert(
+        "document_hash".into(),
+        Value::String(change.document_hash.clone()),
+    );
+    fields.insert(
+        "finding_code".into(),
+        Value::String(change.finding_code.clone()),
+    );
+    if let Some(finding_rule) = &change.finding_rule {
+        fields.insert("finding_rule".into(), Value::String(finding_rule.clone()));
+    }
+    fields.insert(
+        "repair_rule".into(),
+        Value::String(change.repair_rule.clone()),
+    );
+    if let Some(field) = &change.field {
+        fields.insert("field".into(), Value::String(field.clone()));
+    }
+    if let Some(expected) = &change.expected_old_value {
+        fields.insert("expected_old_value".into(), expected.clone());
+    }
+    if let Some(new_value) = &change.new_value {
+        fields.insert("new_value".into(), new_value.clone());
+    }
+    if let Some(destination) = &change.destination {
+        // The `dst` remap belongs to move ops alone; a non-move op carrying a
+        // destination (none exists today) must keep the retired serde path's
+        // literal `destination` key rather than silently borrowing the move
+        // vocabulary.
+        let key = if is_move { "dst" } else { "destination" };
+        fields.insert(key.into(), Value::String(destination.to_string()));
+    }
+    if let Some(link_risk) = &change.link_risk {
+        fields.insert(
+            "link_risk".into(),
+            serde_json::to_value(link_risk).expect("LinkRisk must serialize"),
+        );
+    }
+    if !change.warnings.is_empty() {
+        fields.insert(
+            "warnings".into(),
+            serde_json::to_value(&change.warnings).expect("PlanWarnings must serialize"),
+        );
+    }
+    if change.force {
+        fields.insert("force".into(), Value::Bool(true));
+    }
+    if change.parents {
+        fields.insert("parents".into(), Value::Bool(true));
+    }
+    Value::Object(fields)
+}
+
+/// The per-op footnote STRING for a closest-match suggestion. The former
+/// `plan_from_findings` built this off the `RepairPlan.footnotes` list keyed by
+/// `change_id`; it now attaches directly to the op at construction. Preserved
+/// verbatim — its bytes ride the plan (`repair --plan --format report` renders it).
+fn closest_match_footnote(footnote: &PlanFootnote) -> String {
+    match &footnote.details {
+        FootnoteDetails::ClosestMatch(d) => {
+            let confidence_label = match footnote.confidence {
+                Confidence::High => "high",
+                Confidence::Medium => "medium",
+            };
+            format!(
+                "closest-match suggestion (confidence: {}): \"{}\" → \"{}\" (edit distance: {})",
+                confidence_label, d.original_target, d.candidate_stem, d.normalized_distance,
+            )
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -392,7 +500,7 @@ pub fn plan_repairs(
     findings: Vec<Finding>,
     config: &RepairConfig,
     index: &crate::domain::GraphIndex,
-) -> RepairPlan {
+) -> RepairPlanResult {
     let document_hashes: BTreeMap<Utf8PathBuf, String> = index
         .documents
         .iter()
@@ -525,19 +633,62 @@ pub fn plan_repairs(
     }
 
     let skipped_summary = SkippedSummary::from_skipped(&skipped);
+    let summary = RepairPlanSummary {
+        findings: findings.len(),
+        planned_changes: changes.len(),
+        skipped: skipped_summary,
+    };
 
-    RepairPlan {
-        schema_version: REPAIR_PLAN_SCHEMA_VERSION,
-        vault_root,
-        source_filters: filters,
-        summary: RepairPlanSummary {
-            findings: findings.len(),
-            planned_changes: changes.len(),
-            skipped: skipped_summary,
-        },
-        changes,
-        skipped_findings: skipped,
-        footnotes,
+    // Emit wire ops natively (ADR 0024). Each interior `PlannedChange` becomes a
+    // `MigrationOp`: `operation` → `kind`, the remaining fields → the `fields`
+    // object (byte-identical to the former serde round trip), and the 1:1
+    // closest-match footnote — keyed by `change_id`, the only footnote family — is
+    // resolved to its string and attached to the op.
+    let footnote_by_change_id: std::collections::HashMap<&str, &PlanFootnote> = footnotes
+        .iter()
+        .map(|f| (f.change_id.as_str(), f))
+        .collect();
+    let operations: Vec<MigrationOp> = changes
+        .iter()
+        .map(|change| MigrationOp {
+            kind: change.operation.clone(),
+            id: None,
+            requires: Vec::new(),
+            fields: op_fields_from_change(change),
+            footnote: footnote_by_change_id
+                .get(change.change_id.as_str())
+                .map(|f| closest_match_footnote(f)),
+        })
+        .collect();
+
+    // The wire plan's lean `skipped` (finding_code / path / reason-code / footnote)
+    // — the rich detail (candidates, next actions) rides `RepairPlanResult.skipped`
+    // for the planner report, one-for-one and in the same order.
+    let wire_skipped: Vec<norn_wire::SkippedFinding> = skipped
+        .iter()
+        .map(|sf| norn_wire::SkippedFinding {
+            finding_code: sf.code.clone(),
+            path: sf.path.to_string(),
+            reason: sf.skip_reason.code().to_string(),
+            footnote: None,
+        })
+        .collect();
+
+    let plan = MigrationPlan {
+        schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
+        vault_root: vault_root.to_string(),
+        generator: None,
+        generated_at: None,
+        preconditions: Vec::new(),
+        operations,
+        skipped: wire_skipped,
+        plan_footnote: None,
+    };
+
+    RepairPlanResult {
+        plan,
+        skipped,
+        summary,
     }
 }
 
@@ -899,6 +1050,28 @@ mod tests {
         "/vault".into()
     }
 
+    /// A native op's `fields` value by key — the emission path now pins op fields
+    /// where the tests once read `PlannedChange` members.
+    fn op_field<'a>(result: &'a RepairPlanResult, i: usize, key: &str) -> Option<&'a Value> {
+        result.plan.operations[i].fields.get(key)
+    }
+
+    /// A native op's `fields` string value by key.
+    fn op_str<'a>(result: &'a RepairPlanResult, i: usize, key: &str) -> Option<&'a str> {
+        op_field(result, i, key).and_then(Value::as_str)
+    }
+
+    /// How many emitted ops carry a footnote — the closest-match footnote count the
+    /// tests once read off `RepairPlan.footnotes`.
+    fn footnote_count(result: &RepairPlanResult) -> usize {
+        result
+            .plan
+            .operations
+            .iter()
+            .filter(|op| op.footnote.is_some())
+            .count()
+    }
+
     fn finding_disallowed_value(path: &str, field: &str, value: serde_json::Value) -> Finding {
         Finding::frontmatter_disallowed_value(
             path.into(),
@@ -1072,20 +1245,23 @@ mod tests {
             )],
         };
         let index = index_for(&["task.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
             &index,
         );
-        assert_eq!(plan.changes.len(), 1);
-        assert_eq!(plan.skipped_findings.len(), 0);
-        assert_eq!(plan.changes[0].operation, "set_frontmatter");
-        assert_eq!(plan.changes[0].field.as_deref(), Some("status"));
-        assert_eq!(plan.changes[0].new_value, Some(json!("backlog")));
-        assert_eq!(plan.changes[0].expected_old_value, Some(json!("someday")));
-        assert_eq!(plan.changes[0].document_hash, "hash-task.md");
+        assert_eq!(result.plan.operations.len(), 1);
+        assert_eq!(result.skipped.len(), 0);
+        assert_eq!(result.plan.operations[0].kind, "set_frontmatter");
+        assert_eq!(op_str(&result, 0, "field"), Some("status"));
+        assert_eq!(op_field(&result, 0, "new_value"), Some(&json!("backlog")));
+        assert_eq!(
+            op_field(&result, 0, "expected_old_value"),
+            Some(&json!("someday"))
+        );
+        assert_eq!(op_str(&result, 0, "document_hash"), Some("hash-task.md"));
     }
 
     #[test]
@@ -1117,7 +1293,7 @@ mod tests {
             )],
         };
         let index = index_for(&["task.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
@@ -1125,17 +1301,14 @@ mod tests {
             &index,
         );
         assert_eq!(
-            plan.changes.len(),
+            result.plan.operations.len(),
             0,
             "reference-type findings must never plan changes: {:?}",
-            plan.changes
+            result.plan.operations
         );
-        assert_eq!(plan.skipped_findings.len(), 1);
-        assert_eq!(
-            plan.skipped_findings[0].skip_reason,
-            SkipReason::NoRuleMatched
-        );
-        assert_eq!(plan.skipped_findings[0].field.as_deref(), Some("parent"));
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].skip_reason, SkipReason::NoRuleMatched);
+        assert_eq!(result.skipped[0].field.as_deref(), Some("parent"));
     }
 
     #[test]
@@ -1143,24 +1316,24 @@ mod tests {
         let finding = finding_disallowed_value("task.md", "status", json!("someday"));
         let config = RepairConfig { rules: vec![] };
         let index = index_for(&["task.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
             &index,
         );
-        assert_eq!(plan.changes.len(), 0);
-        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(result.plan.operations.len(), 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].skip_reason, SkipReason::NoRuleMatched);
         assert_eq!(
-            plan.skipped_findings[0].skip_reason,
-            SkipReason::NoRuleMatched
-        );
-        assert_eq!(
-            plan.summary.skipped.by_reason.get("no-rule-matched"),
+            result.summary.skipped.by_reason.get("no-rule-matched"),
             Some(&1)
         );
-        assert_eq!(plan.summary.skipped.by_reason.get("ambiguous-target"), None);
+        assert_eq!(
+            result.summary.skipped.by_reason.get("ambiguous-target"),
+            None
+        );
     }
 
     #[test]
@@ -1172,24 +1345,24 @@ mod tests {
         );
         let config = RepairConfig { rules: vec![] };
         let index = index_for(&["note.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
             &index,
         );
-        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].skip_reason, SkipReason::AmbiguousTarget);
+        assert_eq!(result.skipped[0].candidates.len(), 2);
         assert_eq!(
-            plan.skipped_findings[0].skip_reason,
-            SkipReason::AmbiguousTarget
-        );
-        assert_eq!(plan.skipped_findings[0].candidates.len(), 2);
-        assert_eq!(
-            plan.summary.skipped.by_reason.get("ambiguous-target"),
+            result.summary.skipped.by_reason.get("ambiguous-target"),
             Some(&1)
         );
-        assert_eq!(plan.summary.skipped.by_reason.get("no-rule-matched"), None);
+        assert_eq!(
+            result.summary.skipped.by_reason.get("no-rule-matched"),
+            None
+        );
     }
 
     #[test]
@@ -1197,7 +1370,7 @@ mod tests {
         let finding = finding_link_unresolved("note.md", "missing");
         let config = RepairConfig { rules: vec![] };
         let index = index_for(&["note.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
@@ -1205,11 +1378,11 @@ mod tests {
             &index,
         );
         assert_eq!(
-            plan.skipped_findings[0].skip_reason,
+            result.skipped[0].skip_reason,
             SkipReason::LinkDecisionNeeded
         );
         assert_eq!(
-            plan.summary.skipped.by_reason.get("link-decision-needed"),
+            result.summary.skipped.by_reason.get("link-decision-needed"),
             Some(&1)
         );
     }
@@ -1231,22 +1404,22 @@ mod tests {
         };
         // Empty index (no documents) → triggers MissingHash for the finding.
         let index = index_for(&[]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
             &index,
         );
-        assert_eq!(plan.changes.len(), 0);
-        assert_eq!(plan.skipped_findings.len(), 1);
-        assert_eq!(
-            plan.skipped_findings[0].skip_reason,
-            SkipReason::MissingHash
-        );
+        assert_eq!(result.plan.operations.len(), 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].skip_reason, SkipReason::MissingHash);
         // The reason text reflects the new clearer message.
-        assert!(plan.skipped_findings[0].reason.contains("hash not present"));
-        assert_eq!(plan.summary.skipped.by_reason.get("missing-hash"), Some(&1));
+        assert!(result.skipped[0].reason.contains("hash not present"));
+        assert_eq!(
+            result.summary.skipped.by_reason.get("missing-hash"),
+            Some(&1)
+        );
     }
 
     fn finding_required_missing(path: &str, field: &str, rule: Option<&str>) -> Finding {
@@ -1269,21 +1442,20 @@ mod tests {
             )],
         };
         let index = index_for(&["task.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
             &index,
         );
-        assert_eq!(plan.changes.len(), 1);
-        assert_eq!(plan.skipped_findings.len(), 0);
-        let change = &plan.changes[0];
-        assert_eq!(change.operation, "add_frontmatter");
-        assert_eq!(change.field.as_deref(), Some("kind"));
-        assert_eq!(change.new_value, Some(json!("research")));
-        assert_eq!(change.expected_old_value, None);
-        assert_eq!(change.document_hash, "hash-task.md");
+        assert_eq!(result.plan.operations.len(), 1);
+        assert_eq!(result.skipped.len(), 0);
+        assert_eq!(result.plan.operations[0].kind, "add_frontmatter");
+        assert_eq!(op_str(&result, 0, "field"), Some("kind"));
+        assert_eq!(op_field(&result, 0, "new_value"), Some(&json!("research")));
+        assert_eq!(op_field(&result, 0, "expected_old_value"), None);
+        assert_eq!(op_str(&result, 0, "document_hash"), Some("hash-task.md"));
     }
 
     #[test]
@@ -1292,28 +1464,25 @@ mod tests {
         // No rules → the planner cannot find a deterministic default for this field.
         let config = RepairConfig { rules: vec![] };
         let index = index_for(&["task.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
             &index,
         );
-        assert_eq!(plan.changes.len(), 0);
-        assert_eq!(plan.skipped_findings.len(), 1);
-        assert_eq!(
-            plan.skipped_findings[0].skip_reason,
-            SkipReason::MissingDefault
-        );
+        assert_eq!(result.plan.operations.len(), 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].skip_reason, SkipReason::MissingDefault);
         assert!(
-            plan.skipped_findings[0]
+            result.skipped[0]
                 .reason
                 .contains("missing field has no configured deterministic default"),
             "unexpected reason text: {}",
-            plan.skipped_findings[0].reason
+            result.skipped[0].reason
         );
         assert_eq!(
-            plan.summary.skipped.by_reason.get("missing-default"),
+            result.summary.skipped.by_reason.get("missing-default"),
             Some(&1)
         );
     }
@@ -1338,25 +1507,25 @@ mod tests {
             )],
         };
         let index = index_for(&["task1.md", "note.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             findings,
             &config,
             &index,
         );
-        assert_eq!(plan.summary.findings, 3);
-        assert_eq!(plan.summary.planned_changes, 1);
-        assert_eq!(plan.summary.skipped.total, 2);
+        assert_eq!(result.summary.findings, 3);
+        assert_eq!(result.summary.planned_changes, 1);
+        assert_eq!(result.summary.skipped.total, 2);
         assert_eq!(
-            plan.summary.skipped.by_reason.get("link-decision-needed"),
+            result.summary.skipped.by_reason.get("link-decision-needed"),
             Some(&1)
         );
         assert_eq!(
-            plan.summary.skipped.by_reason.get("ambiguous-target"),
+            result.summary.skipped.by_reason.get("ambiguous-target"),
             Some(&1)
         );
-        assert_eq!(plan.summary.skipped.by_reason.get("missing-hash"), None);
+        assert_eq!(result.summary.skipped.by_reason.get("missing-hash"), None);
     }
 
     #[test]
@@ -1423,7 +1592,7 @@ mod tests {
         let index =
             test_index_with_stems(&[("source.md", "source"), ("norn-brand.md", "norn-brand")]);
 
-        let plan = plan_repairs(
+        let result = plan_repairs(
             "/tmp/v".into(),
             RepairPlanFilters::default(),
             vec![finding],
@@ -1431,32 +1600,29 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.changes.len(), 1, "expected exactly one PlannedChange");
-        let change = &plan.changes[0];
-        assert_eq!(change.operation, "rewrite_link");
-        assert_eq!(change.finding_code, "link-target-missing");
+        assert_eq!(result.plan.operations.len(), 1, "expected exactly one op");
+        assert_eq!(result.plan.operations[0].kind, "rewrite_link");
         assert_eq!(
-            change.expected_old_value,
-            Some(Value::String("Norn Brand".into()))
+            op_str(&result, 0, "finding_code"),
+            Some("link-target-missing")
         );
-        assert_eq!(change.new_value, Some(Value::String("norn-brand".into())));
+        assert_eq!(
+            op_field(&result, 0, "expected_old_value"),
+            Some(&json!("Norn Brand"))
+        );
+        assert_eq!(
+            op_field(&result, 0, "new_value"),
+            Some(&json!("norn-brand"))
+        );
 
-        assert_eq!(plan.footnotes.len(), 1, "expected exactly one PlanFootnote");
-        let footnote = &plan.footnotes[0];
-        assert_eq!(footnote.change_id, change.change_id);
-        assert!(matches!(
-            footnote.kind,
-            FootnoteKind::ClosestMatchSuggestion
-        ));
-        assert!(matches!(footnote.confidence, Confidence::High));
-        match &footnote.details {
-            FootnoteDetails::ClosestMatch(d) => {
-                assert_eq!(d.original_target, "Norn Brand");
-                assert_eq!(d.candidate_stem, "norn-brand");
-                assert!(d.slug_normalized_identity);
-                assert_eq!(d.normalized_distance, 0);
-            }
-        }
+        // The closest-match footnote now rides the op as its rendered string.
+        assert_eq!(footnote_count(&result), 1, "expected exactly one footnote");
+        assert_eq!(
+            result.plan.operations[0].footnote.as_deref(),
+            Some(
+                "closest-match suggestion (confidence: high): \"Norn Brand\" → \"norn-brand\" (edit distance: 0)"
+            )
+        );
     }
 
     #[test]
@@ -1468,7 +1634,7 @@ mod tests {
         let index =
             test_index_with_stems(&[("source.md", "source"), ("norn-brand.md", "norn-brand")]);
 
-        let plan = plan_repairs(
+        let result = plan_repairs(
             "/tmp/v".into(),
             RepairPlanFilters::default(),
             vec![finding],
@@ -1476,31 +1642,25 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.changes.len(), 1, "expected exactly one PlannedChange");
-        let change = &plan.changes[0];
-        assert_eq!(change.operation, "rewrite_link");
+        assert_eq!(result.plan.operations.len(), 1, "expected exactly one op");
+        assert_eq!(result.plan.operations[0].kind, "rewrite_link");
         assert_eq!(
-            change.expected_old_value,
-            Some(Value::String("norn-brnd".into()))
+            op_field(&result, 0, "expected_old_value"),
+            Some(&json!("norn-brnd"))
         );
-        assert_eq!(change.new_value, Some(Value::String("norn-brand".into())));
+        assert_eq!(
+            op_field(&result, 0, "new_value"),
+            Some(&json!("norn-brand"))
+        );
 
-        assert_eq!(plan.footnotes.len(), 1, "expected exactly one PlanFootnote");
-        let footnote = &plan.footnotes[0];
-        assert_eq!(footnote.change_id, change.change_id);
-        assert!(matches!(
-            footnote.kind,
-            FootnoteKind::ClosestMatchSuggestion
-        ));
-        assert!(matches!(footnote.confidence, Confidence::Medium));
-        match &footnote.details {
-            FootnoteDetails::ClosestMatch(d) => {
-                assert_eq!(d.original_target, "norn-brnd");
-                assert_eq!(d.candidate_stem, "norn-brand");
-                assert!(!d.slug_normalized_identity);
-                assert_eq!(d.normalized_distance, 1);
-            }
-        }
+        // Medium-band footnote string (edit distance 1, not a slug-normalize identity).
+        assert_eq!(footnote_count(&result), 1, "expected exactly one footnote");
+        assert_eq!(
+            result.plan.operations[0].footnote.as_deref(),
+            Some(
+                "closest-match suggestion (confidence: medium): \"norn-brnd\" → \"norn-brand\" (edit distance: 1)"
+            )
+        );
     }
 
     #[test]
@@ -1515,7 +1675,7 @@ mod tests {
             ("archive/Norn-Brand.md", "Norn-Brand"),
         ]);
 
-        let plan = plan_repairs(
+        let result = plan_repairs(
             "/tmp/v".into(),
             RepairPlanFilters::default(),
             vec![finding],
@@ -1523,10 +1683,10 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.changes.len(), 0);
-        assert_eq!(plan.footnotes.len(), 0);
-        assert_eq!(plan.skipped_findings.len(), 1);
-        let skipped = &plan.skipped_findings[0];
+        assert_eq!(result.plan.operations.len(), 0);
+        assert_eq!(footnote_count(&result), 0);
+        assert_eq!(result.skipped.len(), 1);
+        let skipped = &result.skipped[0];
         assert_eq!(skipped.skip_reason, SkipReason::AmbiguousTarget);
         assert_eq!(skipped.candidates.len(), 2);
         // Candidates should be the actual doc paths (subdirs preserved), not synthesized.
@@ -1546,7 +1706,7 @@ mod tests {
         let index =
             test_index_with_stems(&[("source.md", "source"), ("norn-brand.md", "norn-brand")]);
 
-        let plan = plan_repairs(
+        let result = plan_repairs(
             "/tmp/v".into(),
             RepairPlanFilters::default(),
             vec![finding],
@@ -1554,11 +1714,11 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.changes.len(), 0);
-        assert_eq!(plan.footnotes.len(), 0);
-        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(result.plan.operations.len(), 0);
+        assert_eq!(footnote_count(&result), 0);
+        assert_eq!(result.skipped.len(), 1);
         assert_eq!(
-            plan.skipped_findings[0].skip_reason,
+            result.skipped[0].skip_reason,
             SkipReason::LinkDecisionNeeded
         );
     }
@@ -1578,7 +1738,7 @@ mod tests {
             confidence: Some(ConfidenceFilter::High),
             ..Default::default()
         };
-        let plan = plan_repairs(
+        let result = plan_repairs(
             "/tmp/v".into(),
             filters,
             vec![high_finding, medium_finding],
@@ -1588,16 +1748,21 @@ mod tests {
 
         // Only the high-confidence proposal survives.
         assert_eq!(
-            plan.changes.len(),
+            result.plan.operations.len(),
             1,
             "expected only high-confidence change"
         );
         assert_eq!(
-            plan.footnotes.len(),
+            footnote_count(&result),
             1,
             "expected only high-confidence footnote"
         );
-        assert!(matches!(plan.footnotes[0].confidence, Confidence::High));
+        // The surviving op's footnote is the high-confidence band.
+        assert!(result.plan.operations[0]
+            .footnote
+            .as_deref()
+            .unwrap()
+            .contains("confidence: high"));
     }
 
     #[test]
@@ -1611,7 +1776,7 @@ mod tests {
         ]);
 
         // Default filters: no confidence filter set.
-        let plan = plan_repairs(
+        let result = plan_repairs(
             "/tmp/v".into(),
             RepairPlanFilters::default(),
             vec![high_finding, medium_finding],
@@ -1619,8 +1784,8 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.changes.len(), 2);
-        assert_eq!(plan.footnotes.len(), 2);
+        assert_eq!(result.plan.operations.len(), 2);
+        assert_eq!(footnote_count(&result), 2);
     }
 
     #[test]
@@ -1636,7 +1801,7 @@ mod tests {
             ("source.md", "source"),
         ]);
 
-        let plan = plan_repairs(
+        let result = plan_repairs(
             "/tmp/v".into(),
             RepairPlanFilters::default(),
             vec![finding],
@@ -1644,8 +1809,8 @@ mod tests {
             &index,
         );
 
-        assert_eq!(plan.skipped_findings.len(), 1);
-        let skipped = &plan.skipped_findings[0];
+        assert_eq!(result.skipped.len(), 1);
+        let skipped = &result.skipped[0];
         assert_eq!(skipped.skip_reason, SkipReason::AmbiguousTarget);
         // Two distinct doc paths, not four.
         assert_eq!(
@@ -1768,8 +1933,9 @@ mod tests {
             "skipped_findings": [],
             "footnotes": []
         }"#;
-        let plan: RepairPlan = serde_json::from_str(plan_json).expect("plan should deserialize");
-        assert_eq!(plan.changes[0].operation, "replace_body");
+        let repair_plan: RepairPlan =
+            serde_json::from_str(plan_json).expect("plan should deserialize");
+        assert_eq!(repair_plan.changes[0].operation, "replace_body");
     }
 
     #[test]
@@ -1916,40 +2082,39 @@ mod tests {
     fn bom_marker_finding_plans_a_built_in_strip_bom_change() {
         let finding = finding_bom_marker("bom.md");
         let index = index_for(&["bom.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &RepairConfig::default(),
             &index,
         );
-        assert_eq!(plan.changes.len(), 1);
-        assert_eq!(plan.skipped_findings.len(), 0);
-        let change = &plan.changes[0];
-        assert_eq!(change.operation, "strip_bom");
-        assert_eq!(change.repair_rule, "built-in:strip-bom");
-        assert_eq!(change.finding_code, "bom-marker");
-        assert_eq!(change.document_hash, "hash-bom.md");
-        assert!(change.field.is_none());
+        assert_eq!(result.plan.operations.len(), 1);
+        assert_eq!(result.skipped.len(), 0);
+        assert_eq!(result.plan.operations[0].kind, "strip_bom");
+        assert_eq!(
+            op_str(&result, 0, "repair_rule"),
+            Some("built-in:strip-bom")
+        );
+        assert_eq!(op_str(&result, 0, "finding_code"), Some("bom-marker"));
+        assert_eq!(op_str(&result, 0, "document_hash"), Some("hash-bom.md"));
+        assert!(op_field(&result, 0, "field").is_none());
     }
 
     #[test]
     fn bom_marker_finding_without_a_document_hash_is_skipped_as_missing_hash() {
         let finding = finding_bom_marker("bom.md");
         let index = index_for(&[]); // bom.md absent from the index
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &RepairConfig::default(),
             &index,
         );
-        assert_eq!(plan.changes.len(), 0);
-        assert_eq!(plan.skipped_findings.len(), 1);
-        assert_eq!(
-            plan.skipped_findings[0].skip_reason,
-            SkipReason::MissingHash
-        );
+        assert_eq!(result.plan.operations.len(), 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].skip_reason, SkipReason::MissingHash);
     }
 
     #[test]
@@ -1970,16 +2135,19 @@ mod tests {
             )],
         };
         let index = index_for(&["bom.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &config,
             &index,
         );
-        assert_eq!(plan.changes.len(), 1);
-        assert_eq!(plan.changes[0].operation, "set_frontmatter");
-        assert_eq!(plan.changes[0].repair_rule, "custom-bom-handling");
+        assert_eq!(result.plan.operations.len(), 1);
+        assert_eq!(result.plan.operations[0].kind, "set_frontmatter");
+        assert_eq!(
+            op_str(&result, 0, "repair_rule"),
+            Some("custom-bom-handling")
+        );
     }
 
     fn finding_nonportable_filename(path: &str, issues: Vec<&str>) -> Finding {
@@ -1993,25 +2161,128 @@ mod tests {
             vec!["segment 'weird:name.md' contains illegal character ':'"],
         );
         let index = index_for(&["weird:name.md"]);
-        let plan = plan_repairs(
+        let result = plan_repairs(
             vault_root(),
             RepairPlanFilters::default(),
             vec![finding],
             &RepairConfig::default(),
             &index,
         );
-        assert_eq!(plan.changes.len(), 0);
-        assert_eq!(plan.skipped_findings.len(), 1);
+        assert_eq!(result.plan.operations.len(), 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].skip_reason, SkipReason::NoRuleMatched);
         assert_eq!(
-            plan.skipped_findings[0].skip_reason,
-            SkipReason::NoRuleMatched
-        );
-        assert_eq!(
-            plan.summary.skipped.by_reason.get("no-rule-matched"),
+            result.summary.skipped.by_reason.get("no-rule-matched"),
             Some(&1)
         );
-        assert!(plan.skipped_findings[0]
+        assert!(result.skipped[0]
             .reason
             .contains("diagnosed, not auto-repaired"));
+    }
+
+    #[test]
+    fn native_op_fields_match_the_former_serde_conversion() {
+        // Byte-identity guard (ADR 0024): the native `op_fields_from_change` must
+        // produce the EXACT `fields` the retired `serde_json::to_value(&change)` +
+        // drop-`operation` + move-remap round trip produced. `serde_json`'s `Map`
+        // is a `BTreeMap`, so equal `Value`s serialize to equal bytes — proving the
+        // planner's native emission keeps the plan bytes unchanged.
+        let move_link_risk = crate::standards::repair::link_risk::classify(
+            camino::Utf8Path::new("notes/c.md"),
+            camino::Utf8Path::new("archive/c.md"),
+            &[],
+            &[],
+        );
+        let cases = vec![
+            PlannedChange {
+                change_id: "id1".into(),
+                path: "notes/a.md".into(),
+                document_hash: "h1".into(),
+                finding_code: "value-not-allowed".into(),
+                finding_rule: Some("task-status".into()),
+                repair_rule: "fix-status".into(),
+                operation: "set_frontmatter".into(),
+                field: Some("status".into()),
+                expected_old_value: Some(json!("someday")),
+                new_value: Some(json!("backlog")),
+                destination: None,
+                link_risk: None,
+                warnings: vec![],
+                force: false,
+                parents: false,
+            },
+            PlannedChange {
+                change_id: "id2".into(),
+                path: "notes/b.md".into(),
+                document_hash: "h2".into(),
+                finding_code: "link-target-missing".into(),
+                finding_rule: None,
+                repair_rule: "built-in:closest-match-stem".into(),
+                operation: "rewrite_link".into(),
+                field: None,
+                expected_old_value: Some(json!("Norn Brand")),
+                new_value: Some(json!("norn-brand")),
+                destination: None,
+                link_risk: None,
+                warnings: vec![],
+                force: false,
+                parents: false,
+            },
+            PlannedChange {
+                change_id: "id3".into(),
+                path: "notes/c.md".into(),
+                document_hash: "h3".into(),
+                finding_code: "document-misrouted".into(),
+                finding_rule: Some("route".into()),
+                repair_rule: "move-it".into(),
+                operation: "move_document".into(),
+                field: None,
+                expected_old_value: None,
+                new_value: None,
+                destination: Some("archive/c.md".into()),
+                link_risk: Some(move_link_risk),
+                warnings: vec![],
+                force: true,
+                parents: true,
+            },
+            PlannedChange {
+                change_id: "id4".into(),
+                path: "notes/d.md".into(),
+                document_hash: "h4".into(),
+                finding_code: "bom-marker".into(),
+                finding_rule: None,
+                repair_rule: "built-in:strip-bom".into(),
+                operation: "strip_bom".into(),
+                field: None,
+                expected_old_value: None,
+                new_value: None,
+                destination: None,
+                link_risk: None,
+                warnings: vec![],
+                force: false,
+                parents: false,
+            },
+        ];
+        for change in &cases {
+            // The retired conversion, reproduced verbatim from the former
+            // `plan_from_findings`.
+            let mut expected = serde_json::to_value(change).unwrap();
+            let obj = expected.as_object_mut().unwrap();
+            obj.remove("operation");
+            if change.operation == "move_document" {
+                if let Some(p) = obj.remove("path") {
+                    obj.insert("src".to_string(), p);
+                }
+                if let Some(d) = obj.remove("destination") {
+                    obj.insert("dst".to_string(), d);
+                }
+            }
+            assert_eq!(
+                op_fields_from_change(change),
+                expected,
+                "native fields diverged for op kind {}",
+                change.operation
+            );
+        }
     }
 }

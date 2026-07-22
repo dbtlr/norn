@@ -449,6 +449,14 @@ pub struct RepairReport {
     /// `--format json` passthrough and reads its ops/skipped for the other
     /// projections.
     pub plan: MigrationPlan,
+    /// The rich skip detail for the findings the planner chose not to act on —
+    /// a sibling to the plan, mirroring `plan.skipped` one-for-one and in the same
+    /// order, but carrying the candidate paths and next actions the LEAN plan
+    /// `SkippedFinding` deliberately omits (ADR 0024: rich skip detail is a
+    /// planner-REPORT output, not an apply output — the plan stays lean). Additive
+    /// and omitted-when-empty, so a report with no skips is byte-unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_detail: Vec<RepairSkipDetail>,
     /// Sorted `(code, count)` over the triage-filtered findings — the bare
     /// summary's per-code tally (a `BTreeMap` collected in code order).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -459,10 +467,88 @@ pub struct RepairReport {
     pub has_diagnostic_errors: bool,
 }
 
+/// Rich detail for one skipped finding on the [`RepairReport`] — the candidate
+/// paths and operator next-actions the planner computed but the LEAN plan
+/// `SkippedFinding` does not carry (ADR 0024). `finding_code` + `path` +
+/// `reason_code` correlate it back to the matching `plan.skipped` entry; the two
+/// nested lists are omitted when empty so a detail with neither adds only the
+/// three scalar keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairSkipDetail {
+    /// The underlying validation finding code (e.g. `link-target-missing`).
+    pub finding_code: String,
+    /// The skipped document's vault-relative path.
+    pub path: String,
+    /// The kebab-case skip-reason code (e.g. `ambiguous-target`) — identical to
+    /// the correlated `plan.skipped` entry's `reason`.
+    pub reason_code: String,
+    /// Candidate resolution paths (plain vault-path strings) the operator can pick
+    /// from — populated e.g. for an ambiguous link target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    /// Suggested operator next actions for resolving the skipped finding by hand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repair_report_omits_skip_detail_when_empty() {
+        // Additive contract (ADR 0024): a report with no skips is byte-unchanged —
+        // the `skipped_detail` key is absent, exactly as before the field existed.
+        let report = RepairReport {
+            findings_total: 3,
+            total_docs: 10,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&report).unwrap();
+        assert!(
+            value.get("skipped_detail").is_none(),
+            "empty skip detail must be omitted, got {value}"
+        );
+    }
+
+    #[test]
+    fn repair_report_skip_detail_round_trips_and_omits_empty_lists() {
+        let report = RepairReport {
+            skipped_detail: vec![
+                RepairSkipDetail {
+                    finding_code: "link-ambiguous".into(),
+                    path: "notes/a.md".into(),
+                    reason_code: "ambiguous-target".into(),
+                    candidates: vec!["x/Daily.md".into(), "y/Daily.md".into()],
+                    next_actions: vec!["change the link to an explicit path".into()],
+                },
+                RepairSkipDetail {
+                    finding_code: "value-not-allowed".into(),
+                    path: "notes/b.md".into(),
+                    reason_code: "no-rule-matched".into(),
+                    candidates: vec![],
+                    next_actions: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&report).unwrap();
+        // The rich detail is present, candidates are plain path strings.
+        assert_eq!(
+            value["skipped_detail"][0]["reason_code"],
+            "ambiguous-target"
+        );
+        assert_eq!(value["skipped_detail"][0]["candidates"][1], "y/Daily.md");
+        // A detail carrying neither list omits both keys (only the three scalars).
+        let second = &value["skipped_detail"][1];
+        assert!(second.get("candidates").is_none());
+        assert!(second.get("next_actions").is_none());
+        assert_eq!(second.as_object().unwrap().len(), 3);
+        // Round-trips.
+        let back: RepairReport = serde_json::from_value(value).unwrap();
+        assert_eq!(back, report);
+    }
 
     #[test]
     fn default_find_params_serialize_empty() {
