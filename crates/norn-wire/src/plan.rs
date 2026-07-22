@@ -401,6 +401,10 @@ impl TryFrom<&MigrationOp> for TypedOp {
                 // Non-object `fields` refuses identically on every arm (FieldsNotObject
                 // BEFORE any member decode).
                 let obj = object()?;
+                // Required `path` refuses `MissingField` like the edit and delete
+                // arms (a non-string `path` is treated as missing, matching them),
+                // rather than surfacing as serde's generic missing-field text.
+                str_field("path")?;
                 let fields: ChangeFields =
                     serde_json::from_value(Value::Object(obj)).map_err(|e| {
                         TypedOpError::MalformedFields {
@@ -718,6 +722,27 @@ operations:
                 field: "path"
             }
         );
+    }
+
+    #[test]
+    fn change_missing_path_is_missing_field_not_malformed() {
+        // The change arm keeps the same `{kind} missing path` contract as the
+        // edit and delete arms — not serde's generic missing-field text wrapped
+        // in MalformedFields. A non-string `path` is treated as missing, like
+        // the edit arm.
+        for fields in [
+            serde_json::json!({"field": "status", "new_value": "done"}),
+            serde_json::json!({"path": 5, "field": "status", "new_value": "done"}),
+        ] {
+            let err = TypedOp::try_from(&op("set_frontmatter", fields)).unwrap_err();
+            assert_eq!(
+                err,
+                TypedOpError::MissingField {
+                    kind: "set_frontmatter".into(),
+                    field: "path"
+                }
+            );
+        }
     }
 
     #[test]

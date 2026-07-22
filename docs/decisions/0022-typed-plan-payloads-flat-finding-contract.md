@@ -14,7 +14,7 @@ echoed verbatim on the corresponding apply-report op and ignored by the applier.
 Validation findings cross every surface — CLI JSON, the daemon wire, MCP — as
 one flat struct:
 
-```
+```json
 { path, code, severity, message,
   rule?, field?, target?, candidates?: [path], next_actions?: [string] }
 ```
