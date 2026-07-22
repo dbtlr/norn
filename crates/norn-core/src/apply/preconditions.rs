@@ -325,6 +325,10 @@ pub fn build_owner_precondition_refusal_report(
             footnote: operation.footnote.clone(),
             cascade: None,
             link_impact: None,
+            // A precondition refusal writes nothing and carries no provenance
+            // echo — the coded error is the whole output.
+            finding_code: None,
+            repair_rule: None,
         })
         .collect::<Vec<_>>();
     ApplyReport {
