@@ -576,10 +576,12 @@ fn resolve_create_paths(
     for operation in &plan.operations {
         if let Some(id) = operation.id.as_ref() {
             if !operation_ids.insert(id) {
-                return Err(crate::standards::apply::PlanStructureError::DuplicateOperationId {
-                    id: id.clone(),
-                }
-                .into());
+                return Err(
+                    crate::standards::apply::PlanStructureError::DuplicateOperationId {
+                        id: id.clone(),
+                    }
+                    .into(),
+                );
             }
         }
     }
@@ -599,9 +601,11 @@ fn resolve_create_paths(
         change.path = resolved.clone();
 
         let stem = resolved.file_stem().ok_or_else(|| {
-            anyhow::Error::from(crate::standards::apply::PlanStructureError::CreatePathNoStem {
-                path: resolved.clone(),
-            })
+            anyhow::Error::from(
+                crate::standards::apply::PlanStructureError::CreatePathNoStem {
+                    path: resolved.clone(),
+                },
+            )
         })?;
         create_changes_by_stem
             .entry(stem.to_ascii_lowercase())

@@ -48,7 +48,9 @@ pub enum PreconditionError {
     #[error("owner-set precondition '{id}' has an empty eq selector")]
     EmptyEqSelector { id: String },
 
-    #[error("owner-set precondition '{id}' references missing or non-create operation id '{operation}'")]
+    #[error(
+        "owner-set precondition '{id}' references missing or non-create operation id '{operation}'"
+    )]
     MissingOperation { id: String, operation: String },
 
     /// An `eq` predicate that `filter_args::parse_field_value` rejected. The
@@ -123,12 +125,13 @@ pub fn evaluate_owner_preconditions(
                         OwnerSelector::StemFromOperation {
                             stem_from_operation,
                         } => {
-                            let stem = operation_stems.get(stem_from_operation).ok_or_else(|| {
-                                anyhow::Error::from(PreconditionError::MissingOperation {
-                                    id: precondition.id().to_string(),
-                                    operation: stem_from_operation.clone(),
-                                })
-                            })?;
+                            let stem =
+                                operation_stems.get(stem_from_operation).ok_or_else(|| {
+                                    anyhow::Error::from(PreconditionError::MissingOperation {
+                                        id: precondition.id().to_string(),
+                                        operation: stem_from_operation.clone(),
+                                    })
+                                })?;
                             scan_by_stem(index, stem)
                         }
                         OwnerSelector::Eq { eq } => {
@@ -148,8 +151,10 @@ pub fn evaluate_owner_preconditions(
                                         predicate,
                                         "owner_set.eq",
                                     )
-                                    .map_err(|e| PreconditionError::EqPredicateParse {
-                                        message: e.to_string(),
+                                    .map_err(|e| {
+                                        PreconditionError::EqPredicateParse {
+                                            message: e.to_string(),
+                                        }
                                     })
                                 })
                                 .collect::<Result<Vec<_>, _>>()?;

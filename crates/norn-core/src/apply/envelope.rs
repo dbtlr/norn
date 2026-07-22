@@ -227,7 +227,8 @@ mod tests {
                 "empty-anchor",
             ),
             (
-                crate::apply::preconditions::PreconditionError::DuplicateId { id: "p".into() }.into(),
+                crate::apply::preconditions::PreconditionError::DuplicateId { id: "p".into() }
+                    .into(),
                 "invalid-precondition",
             ),
             (
