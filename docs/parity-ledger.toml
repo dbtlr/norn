@@ -499,3 +499,33 @@ old = "value-comparison predicates eager-type the token before SQL: `--eq zip:07
 new = "the schema is the type authority where declared and undeclared/disagreeing fields dual-type: `--eq zip:07030` matches either the string \"07030\" or the number 7030 (returns alpha); `--not-eq zip:07030` excludes either representation (drops alpha, returns every other doc; docs missing the field stay included); a value-comparison predicate on the declared-date `due` field with a non-ISO value refuses at exit 2 naming the field, the declared type, and the value"
 reason = "decided-better"
 decision = "docs/decisions/0023-query-predicate-strictness.md"
+
+# NRN-436 (ADR 0022 amendment, discovered-inconsistency): coded refusals across
+# the apply envelope. Several authored-plan refusals were bare `anyhow::bail!`
+# invisible to the apply envelope's downcast ladder, so the oracle flattens every
+# one to `code: internal-error` ("norn has a bug") — a misleading machine-branchable
+# signal for what is a malformed AUTHORED plan (a user fault). The rewrite gives
+# each user-fault family a typed error carrying a precise code: the create-guard
+# family reports `create-destination-exists` / `create-parent-missing` (and adds a
+# `path` echo), a `new_value.frontmatter` that is not an object reports
+# `malformed-plan`, an owner-set precondition-validation fault (empty selector,
+# duplicate id, missing named op, unparseable eq predicate) reports
+# `invalid-precondition`, and a plan-structure fault (duplicate op id, create path
+# with no stem, edit payload missing/undecodable) reports `malformed-plan`. Exit 2
+# and the message text are UNCHANGED on both sides; only the `code` (and, for the
+# create-guard family, an added `path`) diverges. `internal-error` is now reserved
+# for genuine norn defects, and the families register once behind a guard test
+# (`crate::apply::envelope`). Surfaces only under `--format json`, where the
+# envelope `code` is observable. See `crates/norn-core/src/standards/apply.rs`
+# (`ApplyError` create-guard variants + `PlanStructureError`),
+# `crates/norn-core/src/apply/preconditions.rs` (`PreconditionError`), and
+# `crates/norn-core/src/apply/envelope.rs` (`from_anyhow` / the `CodedError`
+# registry).
+[[entry]]
+id = "PD-125"
+surface = "apply --format json (bare-anyhow user-fault refusal codes)"
+cases = ["apply-authored-create-destination-exists-refusal-json-zoo", "apply-authored-create-parent-missing-refusal-json-zoo", "apply-authored-create-nonobject-frontmatter-refusal-json-zoo", "apply-authored-empty-stem-precondition-refusal-json-zoo", "apply-authored-duplicate-op-id-refusal-json-zoo"]
+old = "every one of these refusals flattens to `code: internal-error` (the bare `anyhow` carries no typed code, so the apply envelope cannot distinguish a malformed plan from a norn bug): a create into an existing destination, a create into a missing parent dir, a create with a non-object `new_value.frontmatter`, an owner-set precondition with an empty stem selector, and two ops sharing an id all report `internal-error` with their specific message and no `path`"
+new = "each refusal carries a typed, machine-branchable code: `create-destination-exists` and `create-parent-missing` (both additionally echoing the offending vault-relative `path`), `malformed-plan` for the non-object frontmatter and the duplicate op id, and `invalid-precondition` for the empty stem selector — `internal-error` is reserved for genuine norn defects. Exit 2 and every message are unchanged"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"

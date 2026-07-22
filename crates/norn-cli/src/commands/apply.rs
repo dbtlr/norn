@@ -3,22 +3,23 @@
 //! Ported from the donor `apply::{preamble, run_direct, route}` (ADR 0018). The
 //! client-side PREAMBLE runs before any wire activity: read the plan source (file
 //! or stdin `-`), detect its format (`.yaml`/`.yml` → YAML, else JSON; stdin
-//! defaults JSON; `--input-format` overrides), parse it into a `MigrationPlan`,
-//! and validate its `schema_version`. A malformed plan or an unreadable source is
-//! an operational [`Diagnostic`]; a schema mismatch is a report-shaped refusal
-//! (exit 2) byte-identical to the donor's records prose. Only a parsed,
-//! schema-valid plan crosses the wire — TYPED in [`ApplyParams::plan`] as the
-//! `MigrationPlan` itself — so the plan bytes reviewed are the plan bytes applied
-//! (ADR 0011). The owner executes it under its single-writer lock and answers with
-//! the shared typed [`ApplyReport`] the display layer renders.
+//! defaults JSON; `--input-format` overrides), and parse it into a
+//! `MigrationPlan`. A malformed plan or an unreadable source is an operational
+//! [`Diagnostic`]. The parsed plan crosses the wire — TYPED in
+//! [`ApplyParams::plan`] as the `MigrationPlan` itself — so the plan bytes
+//! reviewed are the plan bytes applied (ADR 0011). The owner executes it under its
+//! single-writer lock and answers with the shared typed `ApplyReport` the display
+//! layer renders. The `schema_version` gate lives ONCE in the shared engine
+//! (`apply_migration_plan`, audit-F3), not here: a mismatch returns a coded
+//! `unsupported-schema-version` refused report (exit 2) from the owner, so the
+//! routed/MCP surface is guarded on the same path as the CLI.
 
 use std::io::Read;
 
 use crate::cli::{ApplyArgs, ApplyFormat, GlobalArgs, InputFormat};
 use crate::display::{ApplyMutationView, Diagnostic, Output};
 use norn_wire::ApplyParams;
-use norn_wire::{ApplyError, ApplyReport};
-use norn_wire::{MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
+use norn_wire::MigrationPlan;
 
 /// Run an `apply` and return its report as an [`Output`], or a soft-landing
 /// [`Diagnostic`] on a bad/unreadable plan or a connection/owner failure. A
@@ -44,34 +45,14 @@ pub(crate) fn run_confirm(
 ) -> Result<Output, Diagnostic> {
     let json = matches!(args.format, ApplyFormat::Json);
 
-    // ── Preamble: read + format-detect + parse + schema-check (client-side) ──
+    // ── Preamble: read + format-detect + parse (client-side) ──
+    // The `schema_version` gate lives ONCE in the shared engine
+    // (`apply_migration_plan`, audit-F3), so the routed/MCP surface is guarded too;
+    // a mismatch returns a coded `unsupported-schema-version` refused report (exit
+    // 2) from the owner, rendered through the one apply-report path.
     let raw = read_plan_source(&args.plan_path)?;
     let fmt = determine_input_format(&args.plan_path, args.input_format);
     let plan = parse_plan(&raw, fmt, &args.plan_path)?;
-
-    // A schema mismatch refuses BEFORE the wire (exit 2), byte-identical to the
-    // donor's records prose. Carried as a refused `ApplyReport` so it renders
-    // through the one apply-report path (records `error:` line / json envelope).
-    if plan.schema_version != MIGRATION_PLAN_SCHEMA_VERSION {
-        let report = ApplyReport::refused(
-            plan.vault_root.clone(),
-            !confirm,
-            "apply",
-            ApplyError {
-                code: "unsupported-schema-version".into(),
-                message: format!(
-                    "unsupported plan schema_version {}; this norn build supports v{}",
-                    plan.schema_version, MIGRATION_PLAN_SCHEMA_VERSION
-                ),
-                path: None,
-            },
-        );
-        return Ok(Output::Apply(ApplyMutationView {
-            report,
-            json,
-            out: args.out.clone(),
-        }));
-    }
 
     let params = ApplyParams {
         plan,
@@ -223,60 +204,14 @@ mod tests {
             .starts_with("failed to parse JSON migration plan from 'p.json'"));
     }
 
-    /// The pre-wire schema-version refusal reports a TRUTHFUL `dry_run`: a
-    /// forecast unless `--yes` is actually given (and `--dry-run` wins over
-    /// `--yes`). The branch returns before any session, so this drives the real
-    /// arg → confirm-ladder → refused-report path with no owner.
-    #[test]
-    fn schema_mismatch_refusal_dry_run_tracks_confirm_ladder() {
-        use crate::display::Output;
-        use norn_wire::ApplyOutcome;
-
-        let dir = std::env::temp_dir().join(format!("norn-apply-schema-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let plan_path = dir.join("bad.plan.json");
-        std::fs::write(
-            &plan_path,
-            r#"{ "schema_version": 99, "vault_root": ".", "operations": [] }"#,
-        )
-        .unwrap();
-        let p = plan_path.to_str().unwrap();
-
-        let refusal_dry_run = |argv: &[&str]| -> bool {
-            let cli = Cli::try_parse_from(argv).unwrap();
-            let args = match cli.command {
-                Command::Apply(a) => a,
-                other => panic!("expected apply, got {other:?}"),
-            };
-            match run(&args, &cli.global).unwrap() {
-                Output::Apply(view) => {
-                    assert_eq!(view.report.outcome, ApplyOutcome::Refused);
-                    assert_eq!(
-                        view.report.operations[0].error.as_ref().unwrap().code,
-                        "unsupported-schema-version"
-                    );
-                    view.report.dry_run
-                }
-                _ => panic!("expected Output::Apply"),
-            }
-        };
-
-        // No --yes: a forecast — dry_run must be true (the bug reported false here).
-        assert!(
-            refusal_dry_run(&["norn", "apply", p]),
-            "no --yes is a forecast: refusal dry_run must be true"
-        );
-        // --yes: an apply — dry_run must be false.
-        assert!(
-            !refusal_dry_run(&["norn", "apply", p, "--yes"]),
-            "--yes is an apply: refusal dry_run must be false"
-        );
-        // --yes --dry-run: dry-run wins — dry_run must be true.
-        assert!(
-            refusal_dry_run(&["norn", "apply", p, "--yes", "--dry-run"]),
-            "dry-run wins over yes: refusal dry_run must be true"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    // NOTE (NRN-406, audit-F3): the former
+    // `schema_mismatch_refusal_dry_run_tracks_confirm_ladder` CLI test is removed.
+    // The `schema_version` gate moved out of the client-side preamble into the
+    // shared engine (`apply_migration_plan`), so the refusal no longer originates
+    // "before any session" — it now returns from the owner as a coded refused
+    // report. The refused report's `dry_run`-tracks-`confirm` behavior it pinned is
+    // covered engine-side by
+    // `crate::mutate::apply::tests::unsupported_schema_version_refuses_with_zero_ops_examined`
+    // (which loops `confirm` over both values), and the `confirm`-ladder derivation
+    // itself is covered by the `confirm` unit tests above.
 }

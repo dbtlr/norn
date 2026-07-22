@@ -516,12 +516,21 @@ fn compose_content_ops<'a>(
         let decoded: Vec<crate::edit::ops::EditOp> = edit_ops
             .iter()
             .map(|c| {
-                let payload = c
-                    .new_value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("edit op missing payload for {}", c.path))?;
-                serde_json::from_value::<crate::edit::ops::EditOp>(payload.clone())
-                    .map_err(|e| anyhow::anyhow!("edit op decode for {}: {e}", c.path))
+                let payload = c.new_value.as_ref().ok_or_else(|| {
+                    anyhow::Error::from(
+                        crate::standards::apply::PlanStructureError::EditPayloadMissing {
+                            path: c.path.clone(),
+                        },
+                    )
+                })?;
+                serde_json::from_value::<crate::edit::ops::EditOp>(payload.clone()).map_err(|e| {
+                    anyhow::Error::from(
+                        crate::standards::apply::PlanStructureError::EditPayloadDecode {
+                            path: c.path.clone(),
+                            message: e.to_string(),
+                        },
+                    )
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         let updated = crate::standards::apply::apply_edit_ops(&content, &decoded, path)?;
@@ -935,10 +944,10 @@ pub fn apply_repair_plan_with_context(
         // this is the first check the resolved filename ever sees, since
         // `{{seq}}` only becomes concrete here. Must run BEFORE any write.
         if crate::graph::is_ignored(&resolved_path, &ctx.ignore) {
-            return Err(anyhow::anyhow!(
-                "create_document: resolved path {} matches `files.ignore` — refusing to create",
-                resolved_path
-            ));
+            return Err(ApplyError::CreateIgnoredPath {
+                path: resolved_path.clone(),
+            }
+            .into());
         }
 
         let nv = change.new_value.as_ref().ok_or_else(|| {
@@ -949,27 +958,25 @@ pub fn apply_repair_plan_with_context(
         let fm_obj = nv
             .get("frontmatter")
             .and_then(|v| v.as_object())
-            .ok_or_else(|| {
-                anyhow::anyhow!("create_document: missing or non-object frontmatter in new_value")
-            })?;
+            .ok_or_else(|| anyhow::Error::from(ApplyError::CreateFrontmatterMalformed))?;
         let body = nv.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
         let full = cwd.join(&resolved_path);
 
         // Pre-flight (defense in depth — preflight/synth should have caught these).
         if full.as_std_path().exists() && !change.force {
-            return Err(anyhow::anyhow!(
-                "create_document: destination already exists (use --force to overwrite): {}",
-                resolved_path
-            ));
+            return Err(ApplyError::CreateDestinationExists {
+                path: resolved_path.clone(),
+            }
+            .into());
         }
         let parent_to_create = match full.parent() {
             Some(parent) if !parent.as_std_path().exists() => {
                 if !ctx.parents {
-                    return Err(anyhow::anyhow!(
-                        "create_document: parent directory does not exist (use -p / --parents to auto-create): {}",
-                        resolved_path
-                    ));
+                    return Err(ApplyError::CreateParentMissing {
+                        path: resolved_path.clone(),
+                    }
+                    .into());
                 }
                 Some(parent.to_path_buf())
             }
@@ -980,7 +987,11 @@ pub fn apply_repair_plan_with_context(
         let fm_btree: std::collections::BTreeMap<String, serde_json::Value> =
             fm_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let contents = norn_frontmatter::frontmatter::serialize_new_document(&fm_btree, body)
-            .map_err(|e| anyhow::anyhow!("create_document: serialize failed: {e}"))?;
+            .map_err(|e| {
+                anyhow::Error::from(ApplyError::CreateSerializeFailed {
+                    message: e.to_string(),
+                })
+            })?;
 
         // NRN-142 create-path gate: this is the one frontmatter-write path with
         // no post-image verification, so re-parse the fresh document through the
@@ -1020,10 +1031,9 @@ pub fn apply_repair_plan_with_context(
         // gives for the common no-race case. `--force` keeps overwrite semantics.
         fsops::create_document_file(&full, &contents, change.force).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                anyhow::anyhow!(
-                    "create_document: destination already exists (use --force to overwrite): {}",
-                    resolved_path
-                )
+                anyhow::Error::from(ApplyError::CreateDestinationExists {
+                    path: resolved_path.clone(),
+                })
             } else {
                 anyhow::Error::new(e).context(format!("create_document: write {resolved_path}"))
             }

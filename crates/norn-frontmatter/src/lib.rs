@@ -6,11 +6,12 @@
 //! # Surface
 //!
 //! - [`frontmatter`] — extract the YAML block ([`frontmatter::parse`]), locate
-//!   top-level property spans, style-preserving serialization, and the ADR 0008
-//!   minimal-edit field operations ([`frontmatter::set_field`],
-//!   [`frontmatter::remove_field`], [`frontmatter::add_field`],
-//!   [`frontmatter::edit_fields`]). Editing one field leaves every other byte of
-//!   the document untouched — the crate's defining invariant.
+//!   top-level property spans ([`frontmatter::top_level_property_spans`]), and the
+//!   ADR 0008 style-preserving splice primitives
+//!   ([`frontmatter::serialize_value_preserving_style`], [`frontmatter::render_key`],
+//!   …) that `norn-core`'s `standards::apply` composes into minimal-edit field
+//!   operations. Editing one field leaves every other byte of the document
+//!   untouched — the crate's defining invariant.
 //! - [`heading`] — Markdown heading parsing and slugs.
 //! - [`section`] — heading-delimited section byte ranges.
 //! - [`wikilink`] — `[[…]]` token syntax (recognition only; resolution is a

@@ -22,6 +22,13 @@ pub enum ApplyError {
     #[error("unsupported repair plan schema version: expected {expected}, got {got}; regenerate with `norn repair --plan`")]
     UnsupportedSchemaVersion { expected: u32, got: u32 },
 
+    // The MIGRATION-plan schema gate (audit-F3), promoted from the `norn-cli`
+    // apply preamble into the shared engine. Message preserved byte-for-byte from
+    // that preamble so the refusal is unchanged; shares the `unsupported-schema-version`
+    // code with the repair-plan variant above.
+    #[error("unsupported plan schema_version {got}; this norn build supports v{expected}")]
+    UnsupportedMigrationPlanSchemaVersion { expected: u32, got: u32 },
+
     #[error("repair plan vault root does not match effective cwd: plan {plan}, cwd {cwd}")]
     VaultRootMismatch { plan: Utf8PathBuf, cwd: Utf8PathBuf },
 
@@ -105,6 +112,31 @@ pub enum ApplyError {
         earlier_change_id: String,
     },
 
+    // ── create_document guards (NRN-436) ──────────────────────────────────────
+    // User-fault refusals raised by the authored-plan create path before any
+    // write. Formerly bare `anyhow::bail!`, so the apply envelope flattened them
+    // to `internal-error` ("norn has a bug"); typed here so a consumer can
+    // branch on a precise code — the create-family siblings of the move/delete
+    // guards above. Messages are preserved verbatim from the former bare errors.
+    #[error("create_document: destination already exists (use --force to overwrite): {path}")]
+    CreateDestinationExists { path: Utf8PathBuf },
+
+    #[error("create_document: parent directory does not exist (use -p / --parents to auto-create): {path}")]
+    CreateParentMissing { path: Utf8PathBuf },
+
+    #[error("create_document: resolved path {path} matches `files.ignore` — refusing to create")]
+    CreateIgnoredPath { path: Utf8PathBuf },
+
+    // A `new_value` whose `frontmatter` is missing or not a JSON object, and a
+    // serializer failure on the author's own frontmatter values, are both faults
+    // in the AUTHORED plan content — coded `malformed-plan`, not a create-family
+    // code. Neither carries a path in its message (preserved verbatim).
+    #[error("create_document: missing or non-object frontmatter in new_value")]
+    CreateFrontmatterMalformed,
+
+    #[error("create_document: serialize failed: {message}")]
+    CreateSerializeFailed { message: String },
+
     #[error(transparent)]
     Containment(#[from] ContainmentError),
 }
@@ -119,7 +151,10 @@ impl ApplyError {
     /// rename an existing code without a CHANGELOG breaking-change entry.
     pub fn code(&self) -> &'static str {
         match self {
-            ApplyError::UnsupportedSchemaVersion { .. } => "unsupported-schema-version",
+            ApplyError::UnsupportedSchemaVersion { .. }
+            | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. } => {
+                "unsupported-schema-version"
+            }
             ApplyError::VaultRootMismatch { .. } => "vault-root-mismatch",
             ApplyError::UnknownPath { .. } => "unknown-path",
             ApplyError::StaleDocumentHash { .. } => "stale-document-hash",
@@ -141,6 +176,12 @@ impl ApplyError {
             ApplyError::DeleteSourceMissing { .. } => "delete-source-missing",
             ApplyError::DeleteSourceIsSymlink { .. } => "delete-source-is-symlink",
             ApplyError::ContentOpAfterVacate { .. } => "content-op-after-vacate",
+            ApplyError::CreateDestinationExists { .. } => "create-destination-exists",
+            ApplyError::CreateParentMissing { .. } => "create-parent-missing",
+            ApplyError::CreateIgnoredPath { .. } => "create-ignored-path",
+            ApplyError::CreateFrontmatterMalformed | ApplyError::CreateSerializeFailed { .. } => {
+                "malformed-plan"
+            }
             ApplyError::Containment(inner) => inner.code(),
         }
     }
@@ -167,12 +208,19 @@ impl ApplyError {
             | ApplyError::MoveSourceIsSymlink { path }
             | ApplyError::DeleteSourceMissing { path }
             | ApplyError::DeleteSourceIsSymlink { path }
-            | ApplyError::ContentOpAfterVacate { path, .. } => Some(path.as_path()),
+            | ApplyError::ContentOpAfterVacate { path, .. }
+            | ApplyError::CreateDestinationExists { path }
+            | ApplyError::CreateParentMissing { path }
+            | ApplyError::CreateIgnoredPath { path } => Some(path.as_path()),
             ApplyError::MoveDestinationExists { destination } => Some(destination.as_path()),
             ApplyError::Containment(inner) => Some(inner.target()),
-            ApplyError::UnsupportedSchemaVersion { .. } | ApplyError::VaultRootMismatch { .. } => {
-                None
-            }
+            // The `malformed-plan` create faults carry no path (their messages
+            // name none), matching the rest of the `malformed-plan` family.
+            ApplyError::CreateFrontmatterMalformed
+            | ApplyError::CreateSerializeFailed { .. }
+            | ApplyError::UnsupportedSchemaVersion { .. }
+            | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. }
+            | ApplyError::VaultRootMismatch { .. } => None,
         }
     }
 
@@ -190,6 +238,7 @@ impl ApplyError {
     pub fn is_precondition(&self) -> bool {
         match self {
             ApplyError::UnsupportedSchemaVersion { .. }
+            | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. }
             | ApplyError::VaultRootMismatch { .. }
             | ApplyError::UnknownPath { .. }
             | ApplyError::StaleDocumentHash { .. }
@@ -204,6 +253,10 @@ impl ApplyError {
             | ApplyError::EditFailed { .. }
             | ApplyError::FieldAlreadyPresent { .. }
             | ApplyError::ContentOpAfterVacate { .. }
+            // Authored-plan-content validation, raised before any write.
+            | ApplyError::CreateIgnoredPath { .. }
+            | ApplyError::CreateFrontmatterMalformed
+            | ApplyError::CreateSerializeFailed { .. }
             | ApplyError::Containment(_) => true,
             ApplyError::MissingNewValue { .. }
             | ApplyError::MoveSourceMissing { .. }
@@ -211,6 +264,10 @@ impl ApplyError {
             | ApplyError::MoveDestinationExists { .. }
             | ApplyError::DeleteSourceMissing { .. }
             | ApplyError::DeleteSourceIsSymlink { .. }
+            // Filesystem-state checks (a file appeared / a dir is missing), the
+            // create-family analogues of the move/delete guards above.
+            | ApplyError::CreateDestinationExists { .. }
+            | ApplyError::CreateParentMissing { .. }
             // A runtime drift caught mid-apply, not a static plan precondition.
             | ApplyError::ConcurrentModification { .. } => false,
         }
@@ -256,6 +313,39 @@ impl ContainmentError {
             | ContainmentError::EscapesVault { target }
             | ContainmentError::Unresolvable { target, .. } => target.as_path(),
         }
+    }
+}
+
+/// (NRN-436) Structural faults in an AUTHORED `MigrationPlan` — a duplicate
+/// operation id, a `create_document` path with no file stem, or an edit op whose
+/// payload is missing or undecodable. Every variant is a USER error (the plan is
+/// malformed), so all code to `malformed-plan`; formerly bare `anyhow::bail!`,
+/// which the apply envelope flattened to `internal-error`. Messages preserved
+/// verbatim from the former bare errors.
+#[derive(Debug, Error)]
+pub enum PlanStructureError {
+    #[error("duplicate operation id in MigrationPlan: {id}")]
+    DuplicateOperationId { id: String },
+
+    #[error("create_document path has no file stem: {path}")]
+    CreatePathNoStem { path: Utf8PathBuf },
+
+    #[error(
+        "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {path}"
+    )]
+    SeqMisplaced { path: Utf8PathBuf },
+
+    #[error("edit op missing payload for {path}")]
+    EditPayloadMissing { path: Utf8PathBuf },
+
+    #[error("edit op decode for {path}: {message}")]
+    EditPayloadDecode { path: Utf8PathBuf, message: String },
+}
+
+impl PlanStructureError {
+    /// Every plan-structure fault is a malformed authored plan (NRN-436).
+    pub fn code(&self) -> &'static str {
+        "malformed-plan"
     }
 }
 

@@ -39,7 +39,7 @@ use norn_wire::{
     CascadeRewrite, CascadeSkip, CascadeSummary, LinkImpact, OpStatus, PreconditionStatus,
     APPLY_REPORT_SCHEMA_VERSION,
 };
-use norn_wire::{MigrationOp, MigrationPlan};
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use std::collections::{BTreeSet, HashMap};
 
 /// Context for `apply_migration_plan`.
@@ -116,6 +116,22 @@ pub fn apply_migration_plan(
     ctx: ApplyContext,
     sink: &mut crate::telemetry::EventSink,
 ) -> Result<ApplyReport> {
+    // Schema gate (audit-F3): the ENGINE is the single owner of the plan-schema
+    // contract. A plan whose `schema_version` this build does not support is
+    // refused here, before any work — vault-root canonicalization, expansion,
+    // owner-set evaluation, or a write — so zero operations are examined. This was
+    // formerly a client-side preamble check in `norn-cli`; promoting it engine-side
+    // means the routed/MCP surface (which never ran the CLI preamble) is guarded
+    // too, and the check exists exactly once. `unsupported-schema-version`, exit 2.
+    if plan.schema_version != MIGRATION_PLAN_SCHEMA_VERSION {
+        let error = anyhow::Error::from(
+            crate::standards::apply::ApplyError::UnsupportedMigrationPlanSchemaVersion {
+                expected: MIGRATION_PLAN_SCHEMA_VERSION,
+                got: plan.schema_version,
+            },
+        );
+        return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
+    }
     let vault_root = Utf8PathBuf::from(&plan.vault_root);
     // The index root is the vault actually being operated on, so it always
     // exists; a canonicalize failure here is a genuine internal error. Like every
@@ -560,7 +576,12 @@ fn resolve_create_paths(
     for operation in &plan.operations {
         if let Some(id) = operation.id.as_ref() {
             if !operation_ids.insert(id) {
-                anyhow::bail!("duplicate operation id in MigrationPlan: {id}");
+                return Err(
+                    crate::standards::apply::PlanStructureError::DuplicateOperationId {
+                        id: id.clone(),
+                    }
+                    .into(),
+                );
             }
         }
     }
@@ -572,6 +593,16 @@ fn resolve_create_paths(
         let path = change.path.clone();
         crate::apply::fsops::ensure_within_vault(&index.root, canonical_root, &path)?;
         let resolved = if crate::seq_alloc::has_seq(&path) {
+            // A `{{seq}}` outside the file name, or a second occurrence, is the
+            // author's plan-structure fault — refuse typed (`malformed-plan`)
+            // rather than letting seq_alloc's backstop launder it to
+            // `internal-error`.
+            if crate::seq_alloc::seq_misplaced(&path) {
+                return Err(crate::standards::apply::PlanStructureError::SeqMisplaced {
+                    path: path.clone(),
+                }
+                .into());
+            }
             crate::seq_alloc::resolve_seq_create(&index.root, &path, &allocated_this_plan)?
         } else {
             path
@@ -579,9 +610,13 @@ fn resolve_create_paths(
         allocated_this_plan.push(resolved.clone());
         change.path = resolved.clone();
 
-        let stem = resolved
-            .file_stem()
-            .ok_or_else(|| anyhow::anyhow!("create_document path has no file stem: {resolved}"))?;
+        let stem = resolved.file_stem().ok_or_else(|| {
+            anyhow::Error::from(
+                crate::standards::apply::PlanStructureError::CreatePathNoStem {
+                    path: resolved.clone(),
+                },
+            )
+        })?;
         create_changes_by_stem
             .entry(stem.to_ascii_lowercase())
             .or_default()
@@ -2157,9 +2192,9 @@ mod tests {
                 kind: "create_document".into(),
                 id: None,
                 requires: vec![],
-                // new_value with a body but NO frontmatter object → the bare
-                // `anyhow!("create_document: missing or non-object frontmatter …")`
-                // raised in Phase B BEFORE any write.
+                // new_value with a body but NO frontmatter object → the typed
+                // `ApplyError::CreateFrontmatterMalformed` (code `malformed-plan`,
+                // NRN-436) raised in Phase B BEFORE any write.
                 fields: serde_json::json!({
                     "path": "new.md",
                     "new_value": { "body": "# New\n" }
@@ -2186,13 +2221,13 @@ mod tests {
         assert_eq!(op.status, norn_wire::OpStatus::Failed);
         let err = op.error.as_ref().expect("failed op carries an error");
         assert_eq!(
-            err.code, "internal-error",
-            "a bare anyhow falls back to internal-error, matching the CLI Err path"
+            err.code, "malformed-plan",
+            "a non-object frontmatter is a typed malformed-plan fault (NRN-436), not internal-error"
         );
         assert!(
             err.message
                 .contains("create_document: missing or non-object frontmatter"),
-            "the message carries the bare error prose: {}",
+            "the message carries the (unchanged) error prose: {}",
             err.message
         );
         // Byte-identical: nothing was created.
@@ -2483,10 +2518,13 @@ mod tests {
             .iter()
             .find_map(|o| o.error.as_ref())
             .expect("refused report carries a coded error");
-        assert_eq!(err.code, "internal-error");
+        assert_eq!(
+            err.code, "malformed-plan",
+            "a misplaced/doubled {{{{seq}}}} is the author's plan-structure fault (NRN-436)"
+        );
         assert!(
             err.message.contains("only supported once"),
-            "message carries the bare error prose: {}",
+            "message text preserved from the old bare error: {}",
             err.message
         );
 
@@ -2497,9 +2535,10 @@ mod tests {
     }
 
     /// (iii) A `stem_from_operation` selector referencing an op id no create
-    /// operation carries is an owner-precondition VALIDATION refusal (bare anyhow
-    /// → `internal-error`). Routed: `Ok(refused)`; CLI: bare `Err`. (The owner-set
-    /// MISMATCH path is already `Ok(refused)` on both surfaces.)
+    /// operation carries is an owner-precondition VALIDATION refusal (typed
+    /// `PreconditionError` → `invalid-precondition`, NRN-436). Routed:
+    /// `Ok(refused)`; CLI: bare `Err`. (The owner-set MISMATCH path is already
+    /// `Ok(refused)` on both surfaces.)
     #[test]
     fn owner_precondition_bad_op_ref_refuses_as_report_under_refuse_as_report() {
         let (tmp, index) = synth_vault();
@@ -2539,10 +2578,10 @@ mod tests {
             .iter()
             .find_map(|o| o.error.as_ref())
             .expect("refused report carries a coded error");
-        assert_eq!(err.code, "internal-error");
+        assert_eq!(err.code, "invalid-precondition");
         assert!(
             err.message.contains("missing or non-create operation"),
-            "message carries the bare error prose: {}",
+            "message carries the (unchanged) error prose: {}",
             err.message
         );
         // Byte-identical: no doc was created.

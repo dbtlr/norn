@@ -79,3 +79,37 @@ not by design.
 - Repair's plan-time skip detail (skip reasons, candidates, next actions)
   remains on the planner report, sibling to the plan — the flat finding
   contract is the read-side vocabulary, not a carrier for planner internals.
+
+## Amendment (2026-07-22): coded refusals across the apply envelope
+
+NRN-436 / NRN-236 extend this decision's "malformed plans refuse with a real
+code" stance across the whole apply envelope, and harden the mechanism that
+enforces it.
+
+- **User-fault families carry precise typed codes.** Several authored-plan
+  refusals raised while executing a `MigrationPlan` — the `create_document`
+  guards (destination already exists, parent directory missing, resolved path
+  ignored, non-object frontmatter, serialize failure), the owner-set
+  precondition-validation faults (empty/invalid selector, duplicate id, missing
+  named op, unparseable `eq` predicate), and the plan-structure faults
+  (duplicate operation id, create path with no stem, missing/undecodable edit
+  payload) — were bare `anyhow` errors invisible to the envelope's downcast
+  ladder, so they flattened to `code: internal-error`. Each family now carries a
+  typed error and a precise code: `create-destination-exists` /
+  `create-parent-missing` / `create-ignored-path` (echoing `path`),
+  `malformed-plan` (non-object frontmatter, serialize, plan-structure), and
+  `invalid-precondition` (owner-set validation). Exit codes and messages are
+  unchanged.
+- **`internal-error` is reserved for genuine norn defects.** It is the fallback
+  for an unrecognized error only. A consumer branching on `code` can now
+  distinguish "your plan is malformed, fix it" from "norn crashed, file a bug".
+- **Families register once, enforced by a guard test.** Recognizing a family
+  used to mean editing three lockstep seams (the variant, its `code()` arm, and
+  a bespoke `from_anyhow` downcast arm) with nothing checking all three landed —
+  which is how these families were missed. A `CodedError` trait plus a single
+  `REGISTRY` list collapse the third seam to one line, and a guard test
+  constructs one instance of every registered family and asserts none maps to
+  `internal-error`, so a half-landed family cannot ship.
+
+Divergences from the pinned 0.48.1 oracle (which still reports `internal-error`
+for these families) are deliberate and ledgered against this decision (PD-125).

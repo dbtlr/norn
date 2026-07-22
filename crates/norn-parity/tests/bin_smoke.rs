@@ -97,8 +97,13 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // numeric-looking `--eq` and `--not-eq` on a quoted stored value, and a
     // declared-date value-operator refusal), taking the total to 124; self-check
     // runs oracle vs. itself, so all three Match.
+    // NRN-436 adds five `apply` cases exercising the bare-anyhow user-fault
+    // families now given typed codes (create-destination-exists,
+    // create-parent-missing, non-object frontmatter, empty-stem precondition,
+    // duplicate op id), taking the total to 129; self-check runs oracle vs. itself,
+    // so all 129 Match.
     assert!(
-        stdout.contains("124 cases: 124 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("129 cases: 129 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -236,8 +241,14 @@ fn default_mode_gates_help_cases_exit_0() {
     // `due` date accepts a non-ISO value silently; the rewrite dual-types (match /
     // exclude) and refuses the declared-date value at exit 2. The gated total grows
     // to 123 and the diverged count from 43 to 46; the match count stays 77.
+    // NRN-436 adds five ported `apply` cases, all DIVERGING under one ledger entry
+    // (PD-125): the oracle flattens each bare-anyhow user fault to `internal-error`,
+    // the rewrite carries a typed code (create-destination-exists /
+    // create-parent-missing / malformed-plan / invalid-precondition). The gated
+    // total grows to 128 and the diverged count from 46 to 51; the match count
+    // stays 77.
     assert!(
-        stdout.contains("123 cases: 77 match, 46 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("128 cases: 77 match, 51 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -267,9 +278,15 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-122",
         "PD-123",
         "PD-124",
+        "PD-125",
         "read-find-eq-numeric-quoted-value-zoo",
         "read-find-not-eq-numeric-quoted-value-zoo",
         "read-find-declared-date-eq-refuses-zoo",
+        "apply-authored-create-destination-exists-refusal-json-zoo",
+        "apply-authored-create-parent-missing-refusal-json-zoo",
+        "apply-authored-create-nonobject-frontmatter-refusal-json-zoo",
+        "apply-authored-empty-stem-precondition-refusal-json-zoo",
+        "apply-authored-duplicate-op-id-refusal-json-zoo",
         "validate-code-filter-zoo",
         "validate-jsonl-code-zoo",
         "mcp-tools-call-validate-code-zoo",

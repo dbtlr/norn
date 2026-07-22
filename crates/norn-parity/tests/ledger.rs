@@ -61,11 +61,14 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // predicate value typing: a numeric-looking `--eq`/`--not-eq` value dual-types
     // against quoted stored values instead of eager-coercing to a miss/inverted
     // exclusion, and a value operator on a declared-date field refuses a non-ISO
-    // value, three cases).
+    // value, three cases). NRN-436 added PD-125 (discovered-inconsistency: the
+    // bare-anyhow user-fault refusal families carry typed codes instead of
+    // `internal-error` — create-destination-exists / create-parent-missing /
+    // malformed-plan / invalid-precondition, five cases).
     assert_eq!(
         ledger.entries.len(),
-        24,
-        "expected exactly PD-101..PD-124, found {}",
+        25,
+        "expected exactly PD-101..PD-125, found {}",
         ledger.entries.len()
     );
 
