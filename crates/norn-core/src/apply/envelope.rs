@@ -29,89 +29,150 @@ use norn_wire::ApplyError;
 // be inherent impls on the wire type; they are free functions in this module
 // (NRN-405). Call sites reach them as `crate::apply::envelope::from_anyhow` etc.
 
+/// A typed engine error that carries a stable, machine-branchable [`ApplyError`]
+/// `code` (and, when the fault is about a specific document, a `path`).
+///
+/// # Single registration (NRN-236)
+///
+/// Registering a new error family with the apply envelope used to mean editing
+/// THREE lockstep seams — the variant, its `code()` arm, and a bespoke
+/// `downcast_ref` arm in [`from_anyhow`] — with nothing enforcing that all three
+/// landed. A family that missed the third seam silently flattened to
+/// `internal-error` (exactly the NRN-436 bug). This trait collapses the third
+/// seam: a family implements `CodedError`, adds ONE line to [`REGISTRY`], and
+/// [`from_anyhow`] recovers it uniformly. The
+/// `every_registered_family_maps_off_internal_error` guard test constructs one
+/// instance of every registered family and asserts none flattens to
+/// `internal-error`, so a half-landed family cannot ship.
+pub trait CodedError {
+    /// The stable kebab code for this fault (the `code` of the envelope).
+    fn code(&self) -> &'static str;
+    /// The vault-relative path this fault is about, when it carries one. Feeds the
+    /// envelope's `path`; defaults to `None`.
+    fn error_path(&self) -> Option<String> {
+        None
+    }
+}
+
+impl CodedError for crate::standards::apply::ApplyError {
+    fn code(&self) -> &'static str {
+        crate::standards::apply::ApplyError::code(self)
+    }
+    fn error_path(&self) -> Option<String> {
+        self.path().map(|p| p.to_string())
+    }
+}
+
+impl CodedError for crate::standards::apply::ContainmentError {
+    fn code(&self) -> &'static str {
+        crate::standards::apply::ContainmentError::code(self)
+    }
+    fn error_path(&self) -> Option<String> {
+        Some(self.target().to_string())
+    }
+}
+
+impl CodedError for crate::planner::intent::rewrite_wikilink::RewriteWikilinkError {
+    fn code(&self) -> &'static str {
+        crate::planner::intent::rewrite_wikilink::RewriteWikilinkError::code(self)
+    }
+}
+
+impl CodedError for crate::edit::transform::EditError {
+    fn code(&self) -> &'static str {
+        crate::edit::transform::EditError::code(self)
+    }
+    fn error_path(&self) -> Option<String> {
+        self.path().map(str::to_string)
+    }
+}
+
+impl CodedError for crate::apply::preconditions::PreconditionError {
+    fn code(&self) -> &'static str {
+        crate::apply::preconditions::PreconditionError::code(self)
+    }
+}
+
+impl CodedError for crate::standards::apply::PlanStructureError {
+    fn code(&self) -> &'static str {
+        crate::standards::apply::PlanStructureError::code(self)
+    }
+}
+
+// A malformed AUTHORED op payload (unknown kind, a structural op missing a
+// required field, non-object `fields`, a `kind`/`operation` mismatch, or a
+// wrong-typed `fields` member) is a USER error, not a norn bug (NRN-405).
+impl CodedError for norn_wire::TypedOpError {
+    fn code(&self) -> &'static str {
+        match self {
+            norn_wire::TypedOpError::UnknownKind(_) => "unknown-operation-kind",
+            norn_wire::TypedOpError::MissingField { .. }
+            | norn_wire::TypedOpError::FieldsNotObject { .. }
+            | norn_wire::TypedOpError::OperationKindMismatch { .. }
+            | norn_wire::TypedOpError::MalformedFields { .. } => "malformed-plan",
+        }
+    }
+}
+
+/// One registered downcast attempt: recover `E` from an opaque `anyhow::Error`
+/// and project it onto the [`ApplyError`] envelope through its [`CodedError`]
+/// impl. `REGISTRY` is a list of these, one per family.
+fn recover<E>(e: &anyhow::Error) -> Option<ApplyError>
+where
+    E: CodedError + std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
+{
+    e.downcast_ref::<E>().map(|typed| ApplyError {
+        code: typed.code().to_string(),
+        message: typed.to_string(),
+        path: typed.error_path(),
+    })
+}
+
+/// Every engine-owned error family the apply envelope recognizes. Adding a family
+/// is ONE line here (plus its `CodedError` impl); the guard test enforces that no
+/// registered family flattens to `internal-error`. Order matters only for the one
+/// nesting case: [`ApplyError`](crate::standards::apply::ApplyError) is tried
+/// before [`ContainmentError`](crate::standards::apply::ContainmentError) so a
+/// `ApplyError::Containment` wrapper is projected through the outer type (it
+/// delegates to the inner code/path), never shadowed.
+#[allow(clippy::type_complexity)]
+const REGISTRY: &[fn(&anyhow::Error) -> Option<ApplyError>] = &[
+    recover::<crate::standards::apply::ApplyError>,
+    recover::<crate::standards::apply::ContainmentError>,
+    recover::<crate::planner::intent::rewrite_wikilink::RewriteWikilinkError>,
+    recover::<crate::edit::transform::EditError>,
+    recover::<crate::apply::preconditions::PreconditionError>,
+    recover::<crate::standards::apply::PlanStructureError>,
+    recover::<norn_wire::TypedOpError>,
+];
+
 /// Build the envelope from the rich apply-time error (NRN-150).
 pub fn from_rich(e: &crate::standards::apply::ApplyError) -> ApplyError {
     ApplyError {
-        code: e.code().to_string(),
+        code: CodedError::code(e).to_string(),
         message: e.to_string(),
-        path: e.path().map(|p| p.to_string()),
+        path: e.error_path(),
     }
 }
 
 /// Build the envelope from a containment error (path escaped the vault root).
 pub fn from_containment(e: &crate::standards::apply::ContainmentError) -> ApplyError {
     ApplyError {
-        code: e.code().to_string(),
+        code: CodedError::code(e).to_string(),
         message: e.to_string(),
-        path: Some(e.target().to_string()),
+        path: e.error_path(),
     }
 }
 
 /// Build the envelope from an opaque `anyhow::Error`, recovering structure by
-/// downcasting through the ENGINE-OWNED failure types. Falls back to a generic
+/// walking the [`REGISTRY`] of engine-owned families. Falls back to a generic
 /// `internal-error` code for anything unrecognized so a report consumer ALWAYS
 /// gets `{ code, message }`, never a bare exit + prose.
 pub fn from_anyhow(e: &anyhow::Error) -> ApplyError {
-    if let Some(rich) = e.downcast_ref::<crate::standards::apply::ApplyError>() {
-        return from_rich(rich);
-    }
-    if let Some(containment) = e.downcast_ref::<crate::standards::apply::ContainmentError>() {
-        return from_containment(containment);
-    }
-    if let Some(rewrite) =
-        e.downcast_ref::<crate::planner::intent::rewrite_wikilink::RewriteWikilinkError>()
-    {
-        return ApplyError {
-            code: rewrite.code().to_string(),
-            message: rewrite.to_string(),
-            path: None,
-        };
-    }
-    if let Some(edit) = e.downcast_ref::<crate::edit::transform::EditError>() {
-        return ApplyError {
-            code: edit.code().to_string(),
-            message: edit.to_string(),
-            path: edit.path().map(str::to_string),
-        };
-    }
-    // Owner-set precondition-validation faults (duplicate id, empty stem/eq
-    // selector, missing named op, unparseable eq predicate) — a malformed AUTHORED
-    // precondition, coded `invalid-precondition`, not a norn bug (NRN-436).
-    if let Some(precondition) = e.downcast_ref::<crate::apply::preconditions::PreconditionError>() {
-        return ApplyError {
-            code: precondition.code().to_string(),
-            message: precondition.to_string(),
-            path: None,
-        };
-    }
-    // Plan-structure faults (duplicate op id, create path with no stem, edit
-    // payload missing/undecodable) — a malformed AUTHORED plan, coded
-    // `malformed-plan`, not a norn bug (NRN-436).
-    if let Some(structure) = e.downcast_ref::<crate::standards::apply::PlanStructureError>() {
-        return ApplyError {
-            code: structure.code().to_string(),
-            message: structure.to_string(),
-            path: None,
-        };
-    }
-    // A malformed AUTHORED plan (unknown kind, a structural op missing a required
-    // field, non-object `fields`, or a `kind`/`operation` mismatch) is a USER
-    // error, not a norn bug. Map each typed variant to a machine-branchable code
-    // so a consumer can distinguish "your plan is malformed" from `internal-error`
-    // ("norn has a bug"). The message is the typed error's own Display, unchanged.
-    if let Some(typed) = e.downcast_ref::<norn_wire::TypedOpError>() {
-        let code = match typed {
-            norn_wire::TypedOpError::UnknownKind(_) => "unknown-operation-kind",
-            norn_wire::TypedOpError::MissingField { .. }
-            | norn_wire::TypedOpError::FieldsNotObject { .. }
-            | norn_wire::TypedOpError::OperationKindMismatch { .. }
-            | norn_wire::TypedOpError::MalformedFields { .. } => "malformed-plan",
-        };
-        return ApplyError {
-            code: code.to_string(),
-            message: typed.to_string(),
-            path: None,
-        };
+    for recover in REGISTRY {
+        if let Some(envelope) = recover(e) {
+            return envelope;
+        }
     }
     ApplyError {
         code: "internal-error".to_string(),
@@ -124,6 +185,77 @@ pub fn from_anyhow(e: &anyhow::Error) -> ApplyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The single-registration guard (NRN-236): one instance of EVERY family in
+    /// [`REGISTRY`] must recover to its own code through [`from_anyhow`] — none may
+    /// flatten to `internal-error`. A family added to `REGISTRY` (or a new family
+    /// added WITHOUT registering it) is caught here the moment its representative
+    /// is listed, so a half-landed family (the NRN-436 bug — a typed error the
+    /// envelope silently flattens) cannot ship. Keep one entry per registered
+    /// family; the `assert_ne` is the load-bearing check, the `assert_eq` documents
+    /// the code each family lands.
+    #[test]
+    fn every_registered_family_maps_off_internal_error() {
+        let cases: Vec<(anyhow::Error, &str)> = vec![
+            (
+                crate::standards::apply::ApplyError::UnknownPath {
+                    path: camino::Utf8PathBuf::from("missing.md"),
+                }
+                .into(),
+                "unknown-path",
+            ),
+            (
+                crate::standards::apply::ContainmentError::AbsolutePath {
+                    target: camino::Utf8PathBuf::from("/etc/passwd"),
+                }
+                .into(),
+                "containment-absolute-path",
+            ),
+            (
+                crate::planner::intent::rewrite_wikilink::RewriteWikilinkError::OldUnresolved(
+                    "ghost".into(),
+                )
+                .into(),
+                "target-not-found",
+            ),
+            (
+                crate::edit::transform::EditError::InvalidOp {
+                    index: 0,
+                    kind: "str_replace",
+                }
+                .into(),
+                "empty-anchor",
+            ),
+            (
+                crate::apply::preconditions::PreconditionError::DuplicateId { id: "p".into() }.into(),
+                "invalid-precondition",
+            ),
+            (
+                crate::standards::apply::PlanStructureError::DuplicateOperationId {
+                    id: "op1".into(),
+                }
+                .into(),
+                "malformed-plan",
+            ),
+            (
+                norn_wire::TypedOpError::UnknownKind("no_such_kind".into()).into(),
+                "unknown-operation-kind",
+            ),
+        ];
+        assert_eq!(
+            cases.len(),
+            REGISTRY.len(),
+            "the guard must list one representative per registered family"
+        );
+        for (err, expected_code) in cases {
+            let envelope = from_anyhow(&err);
+            assert_ne!(
+                envelope.code, "internal-error",
+                "a registered family flattened to internal-error: {err:?}"
+            );
+            assert_eq!(envelope.code, expected_code, "for {err:?}");
+        }
+    }
 
     #[test]
     fn from_rich_carries_code_and_path() {
