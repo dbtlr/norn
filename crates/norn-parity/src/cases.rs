@@ -703,7 +703,8 @@ const READ_CASES: &[Case] = &[
         // oracle compares the stored string "07030" against the integer 7030,
         // finds them unequal, and RETURNS the doc the user meant to exclude. The
         // rewrite excludes either representation (De Morgan over the dual). The
-        // oracle wrongly returns alpha; the rewrite returns nothing. PD-124.
+        // oracle wrongly returns alpha; the rewrite drops alpha and returns the
+        // rest (field-missing docs stay included). PD-124.
         id: "read-find-not-eq-numeric-quoted-value-zoo",
         argv: &["find", "--not-eq", "zip:07030", "--format", "json"],
         fixture: ZOO_1,
