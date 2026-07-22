@@ -6,9 +6,9 @@ description: "Architectural decision that a query date-operator value validates 
 # 0023 — query predicate input strictness
 
 A read query's predicate input is trusted to mean what the user typed.
-**Decision:** a date-operator value (`--before` / `--on` / `--after` /
-`--not-before` / `--not-after`) is either the literal `today` or a valid ISO
-8601 date (`YYYY-MM-DD`) / datetime, else the invocation refuses (exit 2) with a
+**Decision:** a date-operator value (`--before` / `--on` / `--after`) is either
+the literal `today` or a valid ISO 8601 date (`YYYY-MM-DD`) / datetime, else the
+invocation refuses (exit 2) with a
 message naming the operator, the value, and the accepted forms. A `--path` glob
 parses through `PathPattern` or the invocation refuses (exit 2) naming the bad
 pattern and why. Both refusals surface on the same user-error path as any other
@@ -39,8 +39,12 @@ guess, at the single point where raw predicate strings become the typed query.
 ## Invariants
 
 - **Date values validate or refuse.** Accepted: `today`, an ISO 8601 date
-  (`YYYY-MM-DD`), an RFC 3339 datetime (`Z` / `±hh:mm` offset), or a naive
-  datetime (`YYYY-MM-DDThh:mm:ss`). chrono rejects impossible dates and garbage.
+  (`YYYY-MM-DD`), or an ISO 8601 datetime at **minute or second precision** —
+  naive (`YYYY-MM-DDThh:mm` / `YYYY-MM-DDThh:mm:ss`) or offset-bearing
+  (`YYYY-MM-DDThh:mm±hh:mm` / `YYYY-MM-DDThh:mm:ss±hh:mm`, and `Z` at second
+  precision). Minute precision is a valid ISO 8601 reduced-precision form and the
+  dominant stored-frontmatter shape, so it must validate. chrono rejects
+  impossible dates and garbage.
   This validates the predicate VALUE the user typed; it does **not** change how a
   valid ISO value compares against stored frontmatter — the lexical compare of
   valid ISO strings is unchanged (that comparison model is NRN-110, out of

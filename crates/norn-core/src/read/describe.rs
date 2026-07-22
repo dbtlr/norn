@@ -494,6 +494,39 @@ mod tests {
     }
 
     #[test]
+    fn data_mode_refuses_bad_predicate_input() {
+        // NRN-427/NRN-428: `describe` is the third `build_document_query`
+        // consumer (data mode), so it must refuse a non-ISO date value and a
+        // malformed `--path` glob identically to find/count — a user error, not a
+        // silent empty/wrong summary.
+        let (_t, root) = vault();
+        let cache = built(&root);
+
+        let bad_date = DescribeParams {
+            data: true,
+            filter: FilterParams {
+                before: vec!["created:yesterday".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = execute(&cache, None, &bad_date, TODAY).unwrap();
+        assert!(outcome.is_err(), "non-ISO --before value must refuse");
+
+        let bad_glob = DescribeParams {
+            data: true,
+            filter: FilterParams {
+                path: vec!["{unclosed".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = execute(&cache, None, &bad_glob, TODAY).unwrap();
+        assert!(outcome.is_err(), "malformed --path glob must refuse");
+        assert!(outcome.unwrap_err().contains("--path"));
+    }
+
+    #[test]
     fn referenced_vars_collects_var_and_path_tokens() {
         assert_eq!(
             referenced_vars("Workspaces/{{var.workspace}}/tasks/{{title|slugify}}.md"),

@@ -203,15 +203,21 @@ fn parse_field_date(spec: &str, flag: &str, today: &str) -> Result<(String, Stri
     Ok((field, date))
 }
 
-/// True when `value` is a valid ISO 8601 date (`YYYY-MM-DD`) or datetime —
-/// either an RFC 3339 datetime (with a `Z`/`±hh:mm` offset) or a naive
-/// datetime (`YYYY-MM-DDThh:mm:ss`). chrono rejects impossible dates
-/// (`2026-13-45`) and non-date garbage.
+/// True when `value` is a valid ISO 8601 date (`YYYY-MM-DD`) or datetime at
+/// second OR minute precision — a naive datetime (`YYYY-MM-DDThh:mm[:ss]`) or an
+/// offset-bearing datetime (`YYYY-MM-DDThh:mm[:ss]±hh:mm`, and `Z` at second
+/// precision via RFC 3339). Minute precision (`YYYY-MM-DDThh:mm`) is a valid ISO
+/// 8601 reduced-precision form and the dominant stored-frontmatter shape, so it
+/// must validate — dropping it would refuse a value that previously compared
+/// correctly. chrono rejects impossible dates (`2026-13-45`) and non-date
+/// garbage.
 fn is_iso_date_or_datetime(value: &str) -> bool {
     use chrono::{DateTime, NaiveDate, NaiveDateTime};
     NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
         || DateTime::parse_from_rfc3339(value).is_ok()
+        || DateTime::parse_from_str(value, "%Y-%m-%dT%H:%M%z").is_ok()
         || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").is_ok()
+        || NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M").is_ok()
 }
 
 fn coerce_value(s: &str) -> Value {
@@ -419,9 +425,11 @@ mod tests {
         // Accepted forms round-trip unchanged (today → injected date).
         for (value, expected) in [
             ("2026-05-01", "2026-05-01"),                               // ISO date
-            ("2026-05-01T12:30:00", "2026-05-01T12:30:00"),             // naive datetime
+            ("2026-05-01T12:30", "2026-05-01T12:30"),                   // naive, minute precision
+            ("2026-05-01T12:30:00", "2026-05-01T12:30:00"),             // naive, second precision
             ("2026-05-01T12:30:00Z", "2026-05-01T12:30:00Z"),           // RFC 3339 UTC
-            ("2026-05-01T12:30:00+02:00", "2026-05-01T12:30:00+02:00"), // offset
+            ("2026-05-01T12:30+02:00", "2026-05-01T12:30+02:00"),       // offset, minute precision
+            ("2026-05-01T12:30:00+02:00", "2026-05-01T12:30:00+02:00"), // offset, second precision
             ("today", TODAY),
         ] {
             for flag_setter in [
