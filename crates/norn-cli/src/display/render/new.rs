@@ -111,20 +111,11 @@ pub(crate) fn render_new(
             &format!("{} bytes", report.body_bytes),
         )?;
 
-        if report.warnings.is_empty() {
-            new_kv(sink.writer(), "warnings", "none")?;
-        } else {
-            for (i, w) in report.warnings.iter().enumerate() {
-                if i == 0 {
-                    new_kv(sink.writer(), "warnings", &warning_short(w))?;
-                } else {
-                    writeln!(sink.writer(), "           {}", warning_short(w))?;
-                }
-            }
-        }
+        let shorts: Vec<String> = report.warnings.iter().map(warning_short).collect();
+        sink.mutation_warnings_aligned(&shorts)?;
 
         if report.applied {
-            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
+            sink.trace_footer(&report.trace_id)?;
         } else {
             writeln!(sink.writer())?;
             writeln!(sink.writer(), "Apply with --yes")?;

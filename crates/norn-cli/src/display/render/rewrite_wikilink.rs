@@ -16,7 +16,7 @@ use crate::display::emit::render_outcome;
 use crate::display::output::RewriteWikilinkView;
 use crate::display::sink::Sink;
 
-use super::shared::{apply_report_exit, emit_cascade_failure_warnings, render_apply_refusal};
+use super::shared::{apply_report_exit, render_apply_refusal};
 
 pub(crate) fn render_rewrite_wikilink(
     view: RewriteWikilinkView,
@@ -32,7 +32,7 @@ pub(crate) fn render_rewrite_wikilink(
         return render_apply_refusal(report, view.json, sink.writer(), conv);
     }
 
-    emit_cascade_failure_warnings(report, conv.writer());
+    conv.cascade_failure_warnings(report);
     let exit = apply_report_exit(report);
 
     // `--out`: write the (always-JSON, pretty) report to the file, silence stdout.
@@ -56,7 +56,7 @@ pub(crate) fn render_rewrite_wikilink(
     let result: io::Result<i32> = (|| {
         render_rewrite_records(sink.writer(), report, &view.old, &view.new)?;
         if !report.dry_run {
-            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
+            sink.trace_footer(&report.trace_id)?;
         }
         Ok(exit)
     })();

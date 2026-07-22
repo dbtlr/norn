@@ -17,7 +17,7 @@ use crate::display::output::DeleteMutationView;
 use crate::display::sink::Sink;
 use crate::output::glyphs::{self, Glyph};
 
-use super::shared::{apply_report_exit, emit_cascade_failure_warnings, noun, render_apply_refusal};
+use super::shared::{apply_report_exit, noun, render_apply_refusal};
 
 pub(crate) fn render_delete(
     view: DeleteMutationView,
@@ -30,7 +30,7 @@ pub(crate) fn render_delete(
         return render_apply_refusal(report, view.json, sink.writer(), conv);
     }
 
-    emit_cascade_failure_warnings(report, conv.writer());
+    conv.cascade_failure_warnings(report);
     let exit = apply_report_exit(report);
 
     if view.json {
@@ -45,6 +45,9 @@ pub(crate) fn render_delete(
     let dry_run = report.dry_run;
     let result: io::Result<i32> = (|| {
         render_delete_records(sink.writer(), report, &view.doc, dry_run, exit, ascii)?;
+        if !dry_run {
+            sink.trace_footer(&report.trace_id)?;
+        }
         Ok(exit)
     })();
     render_outcome(result, conv.writer())
@@ -86,9 +89,6 @@ fn render_delete_records(
         applied,
         ascii,
     )?;
-    if !dry_run {
-        writeln!(out, "trace: {}", report.trace_id)?;
-    }
     Ok(())
 }
 

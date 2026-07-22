@@ -1,6 +1,6 @@
 //! `validate` (NRN-409).
 
-use std::io::{self, Write};
+use std::io;
 
 use serde_json::Value;
 
@@ -12,8 +12,6 @@ use crate::display::output::ValidateView;
 use crate::display::sink::Sink;
 use crate::display::{EXIT_OK, EXIT_OPERATIONAL};
 use crate::output::glyphs::{self, Glyph};
-use crate::output::palette::Palette;
-use crate::output::primitives;
 
 pub(crate) fn render_validate(
     view: ValidateView,
@@ -61,26 +59,21 @@ pub(crate) fn render_validate(
                 }
             }
             Format::Records => {
-                let mut buf: Vec<u8> = Vec::new();
                 if view.summary {
                     render_validate_summary(
-                        &mut buf,
-                        sink.palette(),
+                        sink,
                         &findings,
                         view.report.rules_count,
                         view.report.total_docs,
-                        sink.width(),
                     )?;
                 } else {
                     render_validate_full(
-                        &mut buf,
-                        sink.palette(),
+                        sink,
                         &findings,
                         view.report.rules_count,
                         view.report.total_docs,
                     )?;
                 }
-                sink.writer().write_all(&buf)?;
             }
             Format::Markdown => unreachable!("validate has no markdown format"),
         }
@@ -119,28 +112,24 @@ fn unique_doc_count(findings: &[Value]) -> usize {
 /// `--summary` records: status headline, severity tally, and (when non-empty) a
 /// by-code tally group. Donor `render_records_summary`.
 fn render_validate_summary(
-    out: &mut dyn Write,
-    palette: &Palette,
+    sink: &mut Sink<'_>,
     findings: &[Value],
     rules_count: usize,
     total_docs: usize,
-    width: usize,
 ) -> io::Result<()> {
     let ascii = glyphs::use_ascii();
-    primitives::status_headline(
-        out,
-        palette,
+    sink.status_headline(
         &format!("running {rules_count} rules across {total_docs} documents"),
         ascii,
     )?;
-    writeln!(out)?;
+    writeln!(sink.writer())?;
 
     let (warn, err) = count_severities(findings);
     let pass = total_docs.saturating_sub(unique_doc_count(findings));
-    primitives::severity_tally(out, palette, pass, warn, err, "documents")?;
+    sink.severity_tally(pass, warn, err, "documents")?;
 
     if !findings.is_empty() {
-        writeln!(out)?;
+        writeln!(sink.writer())?;
         // by-code counts, sorted by code (donor `summarize().codes`, a BTreeMap).
         let mut by_code: std::collections::BTreeMap<&str, usize> =
             std::collections::BTreeMap::new();
@@ -150,7 +139,7 @@ fn render_validate_summary(
             }
         }
         let rows: Vec<(&str, usize)> = by_code.into_iter().collect();
-        primitives::tally_group(out, palette, "by code", &rows, width, ascii)?;
+        sink.tally_group("by code", &rows, ascii)?;
     }
     Ok(())
 }
@@ -159,28 +148,26 @@ fn render_validate_summary(
 /// with a severity glyph header, each finding's path + message + optional fix
 /// hint; then a pass/shown footer. Donor `render_records_full`.
 fn render_validate_full(
-    out: &mut dyn Write,
-    palette: &Palette,
+    sink: &mut Sink<'_>,
     findings: &[Value],
     rules_count: usize,
     total_docs: usize,
 ) -> io::Result<()> {
+    let palette = *sink.palette();
     let ascii = glyphs::use_ascii();
-    primitives::status_headline(
-        out,
-        palette,
+    sink.status_headline(
         &format!("running {rules_count} rules across {total_docs} documents"),
         ascii,
     )?;
 
     if findings.is_empty() {
-        writeln!(out)?;
-        primitives::severity_tally(out, palette, total_docs, 0, 0, "documents")?;
+        writeln!(sink.writer())?;
+        sink.severity_tally(total_docs, 0, 0, "documents")?;
         return Ok(());
     }
 
     for (code, group) in group_by_code(findings) {
-        writeln!(out)?;
+        writeln!(sink.writer())?;
         let is_error = group
             .first()
             .and_then(|f| f["severity"].as_str())
@@ -191,7 +178,7 @@ fn render_validate_full(
             (glyphs::render(Glyph::Warn, ascii), &palette.amber)
         };
         writeln!(
-            out,
+            sink.writer(),
             "{}{glyph}{} {}{code}{}",
             style.render(),
             style.render_reset(),
@@ -200,14 +187,14 @@ fn render_validate_full(
         )?;
         for f in group {
             writeln!(
-                out,
+                sink.writer(),
                 "  {}{}{}",
                 palette.bone.render(),
                 f["path"].as_str().unwrap_or(""),
                 palette.bone.render_reset(),
             )?;
             writeln!(
-                out,
+                sink.writer(),
                 "    {}{}{}",
                 palette.dim.render(),
                 f["message"].as_str().unwrap_or(""),
@@ -215,7 +202,7 @@ fn render_validate_full(
             )?;
             if let Some(hint) = fix_hint_for(code) {
                 writeln!(
-                    out,
+                    sink.writer(),
                     "    {}fix:{} {}{hint}{}",
                     palette.thread.render(),
                     palette.thread.render_reset(),
@@ -226,11 +213,11 @@ fn render_validate_full(
         }
     }
 
-    writeln!(out)?;
+    writeln!(sink.writer())?;
     let pass = total_docs.saturating_sub(unique_doc_count(findings));
     let sep = glyphs::render(Glyph::Sep, ascii);
     writeln!(
-        out,
+        sink.writer(),
         "{}{pass} documents pass {sep} {} findings shown{}",
         palette.dim.render(),
         findings.len(),
@@ -263,6 +250,7 @@ fn group_by_code(findings: &[Value]) -> Vec<(&str, Vec<&Value>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::palette::Palette;
     use serde_json::json;
 
     // ── validate records renderers (ported from the donor `validate::render`
@@ -307,13 +295,19 @@ mod tests {
 
     fn full(findings: &[Value], palette: &Palette, total_docs: usize) -> String {
         let mut buf = Vec::new();
-        render_validate_full(&mut buf, palette, findings, 12, total_docs).unwrap();
+        {
+            let mut sink = Sink::new(&mut buf, palette, 80);
+            render_validate_full(&mut sink, findings, 12, total_docs).unwrap();
+        }
         String::from_utf8(buf).unwrap()
     }
 
     fn summary(findings: &[Value], palette: &Palette, total_docs: usize) -> String {
         let mut buf = Vec::new();
-        render_validate_summary(&mut buf, palette, findings, 12, total_docs, 80).unwrap();
+        {
+            let mut sink = Sink::new(&mut buf, palette, 80);
+            render_validate_summary(&mut sink, findings, 12, total_docs).unwrap();
+        }
         String::from_utf8(buf).unwrap()
     }
 

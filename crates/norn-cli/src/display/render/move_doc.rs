@@ -17,9 +17,7 @@ use crate::display::output::MoveMutationView;
 use crate::display::sink::Sink;
 use crate::output::glyphs::{self, Glyph};
 
-use super::shared::{
-    apply_report_exit, emit_cascade_failure_warnings, plural, render_apply_refusal,
-};
+use super::shared::{apply_report_exit, plural, render_apply_refusal};
 
 pub(crate) fn render_move(
     view: MoveMutationView,
@@ -32,7 +30,7 @@ pub(crate) fn render_move(
         return render_apply_refusal(report, view.json, sink.writer(), conv);
     }
 
-    emit_cascade_failure_warnings(report, conv.writer());
+    conv.cascade_failure_warnings(report);
     let exit = apply_report_exit(report);
 
     if view.json {
@@ -70,7 +68,7 @@ pub(crate) fn render_move(
             )?;
         }
         if !dry_run {
-            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
+            sink.trace_footer(&report.trace_id)?;
         }
         Ok(exit)
     })();

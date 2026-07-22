@@ -138,6 +138,7 @@ mod tests {
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
     use crate::output::palette::Palette;
+    use crate::test_support::FailingWriter;
     use std::collections::BTreeMap;
 
     /// Drive `render_count` through the same resolution `emit` performs — count
@@ -226,18 +227,6 @@ mod tests {
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
-    }
-
-    /// A `Write` that fails every write with a fixed [`io::ErrorKind`].
-    struct FailingWriter(io::ErrorKind);
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::from(self.0))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     #[test]

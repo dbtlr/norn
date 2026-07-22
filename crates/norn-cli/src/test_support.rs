@@ -2,6 +2,39 @@
 //!
 //! Compiled only under `#[cfg(test)]`.
 
+use std::io::{self, Write};
+
+use crate::cli::{ColorWhen, GlobalArgs};
+
+/// A [`Write`] that fails every write with a fixed [`io::ErrorKind`] — the
+/// render IO-error-policy fixture shared by every `display` test module (the
+/// `BrokenPipe`-is-success vs. everything-else-is-operational split, NRN-372).
+pub(crate) struct FailingWriter(pub(crate) io::ErrorKind);
+
+impl Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::from(self.0))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A minimal non-styling [`GlobalArgs`] (`--color never`) for renderer tests —
+/// the palette resolves off, so asserted bytes stay plain.
+pub(crate) fn global_args() -> GlobalArgs {
+    GlobalArgs {
+        cwd: None,
+        verbose: false,
+        no_cache_refresh: false,
+        color: ColorWhen::Never,
+        vault: None,
+        help_short: false,
+        help_long: false,
+        dynamic_fields: Vec::new(),
+    }
+}
+
 /// Serializes env-mutating tests and restores every touched variable on drop —
 /// so parallel tests never observe a half-set environment and nothing leaks
 /// past the test, **even if the test body panics** (the restore runs in `Drop`,

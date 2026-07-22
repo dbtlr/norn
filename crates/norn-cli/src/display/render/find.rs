@@ -224,36 +224,12 @@ fn find_doc_view(doc: &FindDoc) -> DocView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{ColorWhen, GlobalArgs};
+    use crate::cli::GlobalArgs;
     use crate::display::format::FormatSpec;
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
+    use crate::test_support::{global_args, FailingWriter};
     use serde_json::json;
-
-    /// A `Write` that fails every write with a fixed [`io::ErrorKind`].
-    struct FailingWriter(io::ErrorKind);
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::from(self.0))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn global_args() -> GlobalArgs {
-        GlobalArgs {
-            cwd: None,
-            verbose: false,
-            no_cache_refresh: false,
-            color: ColorWhen::Never,
-            vault: None,
-            help_short: false,
-            help_long: false,
-            dynamic_fields: Vec::new(),
-        }
-    }
 
     /// Drive `render_find` through the same resolution `emit` performs: a
     /// non-tty format, the `--color`-resolved palette, an 80-col sink.

@@ -1,6 +1,6 @@
 //! `set` (mutation report) (NRN-409).
 
-use std::io::{self, Write};
+use std::io;
 
 use norn_wire::{FrontmatterChange, MutationOutcome};
 
@@ -10,8 +10,6 @@ use crate::display::format::Format;
 use crate::display::output::SetMutationView;
 use crate::display::sink::Sink;
 use crate::output::glyphs;
-use crate::output::palette::Palette;
-use crate::output::primitives;
 
 use super::shared::{mutation_exit, value_repr, warning_short};
 
@@ -64,14 +62,12 @@ pub(crate) fn render_set(
             palette.header.render_reset()
         )?;
         for change in &report.frontmatter_changes {
-            render_frontmatter_change(sink.writer(), &palette, change, ascii)?;
+            render_frontmatter_change(sink, change, ascii)?;
         }
         if report.body_changed {
             let old = report.body_bytes_old.unwrap_or(0);
             let new = report.body_bytes_new.unwrap_or(0);
-            primitives::change_line(
-                sink.writer(),
-                &palette,
+            sink.change_line(
                 "body",
                 &format!("{old} bytes"),
                 Some(&format!("{new} bytes")),
@@ -81,17 +77,11 @@ pub(crate) fn render_set(
         // Warnings block (donor: on STDOUT): `  warnings: N` then `    - <short>`
         // for the first three, then `    … (K more)`.
         if !report.warnings.is_empty() {
-            let out = sink.writer();
-            writeln!(out, "  warnings: {}", report.warnings.len())?;
-            for w in report.warnings.iter().take(3) {
-                writeln!(out, "    - {}", warning_short(w))?;
-            }
-            if report.warnings.len() > 3 {
-                writeln!(out, "    … ({} more)", report.warnings.len() - 3)?;
-            }
+            let shorts: Vec<String> = report.warnings.iter().map(warning_short).collect();
+            sink.mutation_warnings_block(&shorts)?;
         }
         if report.applied {
-            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
+            sink.trace_footer(&report.trace_id)?;
         } else {
             writeln!(sink.writer())?;
             writeln!(sink.writer(), "Apply with --yes")?;
@@ -104,8 +94,7 @@ pub(crate) fn render_set(
 /// One `set` change line, dispatched by the normalized op. An absent prior value
 /// (a field added by an upsert) renders its `before` as `<none>` (donor).
 fn render_frontmatter_change(
-    out: &mut dyn Write,
-    palette: &Palette,
+    sink: &mut Sink<'_>,
     change: &FrontmatterChange,
     ascii: bool,
 ) -> io::Result<()> {
@@ -118,35 +107,21 @@ fn render_frontmatter_change(
                 .map(value_repr)
                 .unwrap_or_else(|| "<none>".to_string());
             let after = change.new.as_ref().map(value_repr).unwrap_or_default();
-            primitives::change_line(out, palette, field, &before, Some(&after), ascii)
+            sink.change_line(field, &before, Some(&after), ascii)
         }
         "remove" => {
             let was = change.old.as_ref().map(value_repr).unwrap_or_default();
-            primitives::change_line(
-                out,
-                palette,
-                field,
-                &format!("remove (was {was})"),
-                None,
-                ascii,
-            )
+            sink.change_line(field, &format!("remove (was {was})"), None, ascii)
         }
         "push" => {
             let v = change.value.as_ref().map(value_repr).unwrap_or_default();
-            primitives::change_line(out, palette, field, &format!("push {v}"), None, ascii)
+            sink.change_line(field, &format!("push {v}"), None, ascii)
         }
         "pop" => {
             let v = change.value.as_ref().map(value_repr).unwrap_or_default();
             let found = change.found.unwrap_or(false);
-            primitives::change_line(
-                out,
-                palette,
-                field,
-                &format!("pop {v} (found: {found})"),
-                None,
-                ascii,
-            )
+            sink.change_line(field, &format!("pop {v} (found: {found})"), None, ascii)
         }
-        other => primitives::change_line(out, palette, field, other, None, ascii),
+        other => sink.change_line(field, other, None, ascii),
     }
 }

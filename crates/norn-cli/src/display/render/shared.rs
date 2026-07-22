@@ -107,41 +107,6 @@ pub(super) fn render_apply_refusal(
     }
 }
 
-/// Emit the cascade-failure warnings (real FS errors that left backlinks
-/// dangling) on stderr — the donor `emit_cascade_failure_warnings`. A no-op on
-/// the common (failure-free) path.
-pub(super) fn emit_cascade_failure_warnings(report: &ApplyReport, w: &mut dyn Write) {
-    for op in &report.operations {
-        let Some(cascade) = op.cascade.as_ref() else {
-            continue;
-        };
-        if cascade.failed == 0 {
-            continue;
-        }
-        let _ = writeln!(
-            w,
-            "warning: {} backlink{} could not be rewritten after retries and now dangle{}:",
-            cascade.failed,
-            if cascade.failed == 1 { "" } else { "s" },
-            if cascade.failed == 1 { "s" } else { "" },
-        );
-        for f in &cascade.failures {
-            let _ = match &f.detail {
-                Some(d) => writeln!(
-                    w,
-                    "  {}: {} → {} ({}: {})",
-                    f.file, f.from, f.to, f.reason, d
-                ),
-                None => writeln!(w, "  {}: {} → {} ({})", f.file, f.from, f.to, f.reason),
-            };
-        }
-        let _ = writeln!(
-            w,
-            "  fix manually, or run `norn validate` to list dangling links."
-        );
-    }
-}
-
 /// The truncation note both `paths` and `jsonl` emit on stderr (donor parity).
 pub(super) fn truncation_note(report: &FindReport) -> String {
     format!(

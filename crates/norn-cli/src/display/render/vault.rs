@@ -108,6 +108,7 @@ mod tests {
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
     use crate::output::palette::Palette;
+    use crate::test_support::FailingWriter;
     use std::io::Write;
 
     /// Drive `render_vault_list` through the same resolution `emit` performs —
@@ -119,18 +120,6 @@ mod tests {
         let mut sink = Sink::new(out, &palette, 80);
         let mut conv = Conversation::new(err);
         render_vault_list(view, format, &mut sink, &mut conv)
-    }
-
-    /// A `Write` that fails every write with a fixed [`io::ErrorKind`].
-    struct FailingWriter(io::ErrorKind);
-
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::from(self.0))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     fn sample_vault() -> RegisteredVault {

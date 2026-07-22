@@ -71,7 +71,7 @@ pub(crate) fn render_edit(
         // (records only; JSON carries `trace_id` as a field). A forecast prints
         // the blank line + `Apply with --yes` hint instead.
         if report.applied {
-            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
+            sink.trace_footer(&report.trace_id)?;
         } else {
             writeln!(sink.writer())?;
             writeln!(sink.writer(), "Apply with --yes")?;
