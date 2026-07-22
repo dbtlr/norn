@@ -1,11 +1,13 @@
-//! Unified applier: planner expansion pre-pass + delegation to today's
-//! pass-based apply_repair_plan_with_context.
+//! The one applier: plan-load + validation + report assembly around the named
+//! passes (ADR 0024).
 //!
-//! This module is the integration point that wires the MigrationPlan →
-//! ApplyOp expansion to the existing pass-based apply orchestrator
-//! (repair_apply.rs). Every document-mutation command (move, delete,
-//! rewrite-wikilink, apply) builds a MigrationPlan and applies it here,
-//! emitting a single ApplyReport envelope.
+//! This module owns the plan-level orchestration — schema gate, expansion,
+//! hash hydration, owner-set + `requires`-DAG validation, and assembling the
+//! [`ApplyReport`] from the per-op outcomes the passes record — while the named
+//! passes ([`crate::apply::passes::run_apply_passes`]) own the ordered
+//! disk-touching work. Every document-mutation command (move, delete,
+//! rewrite-wikilink, apply) builds a MigrationPlan and applies it here, emitting
+//! a single ApplyReport envelope.
 //!
 //! # Provenance tracking
 //!
@@ -15,22 +17,16 @@
 //!   high-level expansions (move_folder → N move_document ops)
 //! - propagate the parent MigrationOp's `footnote` to each child ApplyReportOp
 
+use crate::apply::passes::{run_apply_passes, ApplyOutcomes, CreateApplyContext, DependencyMap};
 use crate::apply::preconditions::{
     build_owner_precondition_refusal_report, evaluate_owner_preconditions,
 };
-use crate::apply::repair_apply::{apply_repair_plan_with_context, CreateApplyContext};
 use crate::domain::GraphIndex;
 use crate::planner::intent::{expand, HIGH_LEVEL_KINDS};
 use crate::standards::apply::CascadeRecord;
-use crate::standards::apply::RepairApplyReport;
 use crate::standards::{
     ApplyBatch, ApplyOp, PlanWarning, RepairPlanSummary, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
 };
-use crate::telemetry::event::{
-    action_event_name, ATTR_LINK_FROM, ATTR_LINK_TO, ATTR_REASON_CODE, ATTR_REASON_MESSAGE,
-    ATTR_STATUS, ATTR_TARGET,
-};
-use crate::telemetry::Event;
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 use norn_wire::{
@@ -93,18 +89,19 @@ pub struct ApplyContext {
 /// move_document hashes are NOT checked by the existing orchestrator, so an
 /// empty hash there is fine.
 ///
-/// # Phase 3 — Delegation
+/// # Phase 3 — Passes
 ///
-/// A synthetic `ApplyBatch` is built from the expanded changes and handed to
-/// `apply_repair_plan_with_context`. That function owns all the pass sequencing.
+/// An `ApplyBatch` is built from the expanded changes and handed to
+/// [`run_apply_passes`], which runs the named passes and records each op's
+/// outcome into a tracker.
 ///
 /// # Phase 4 — Conversion
 ///
-/// The `RepairApplyReport` is converted to an `ApplyReport` with per-op status,
+/// The recorded [`ApplyOutcomes`] are assembled into an `ApplyReport` with per-op status,
 /// provenance (`from`), footnote propagation, and summary lines.
 /// On a clean COMMIT, the returned [`ApplyReport`] carries the changed-file set
 /// on its `touched_paths` field (NRN-252 / NRN-158) — populated from
-/// `RepairApplyReport::touched_paths`. The MCP warm mutation tools (`move` /
+/// [`ApplyOutcomes::touched_paths`]. The MCP warm mutation tools (`move` /
 /// `delete` / `rewrite_wikilink` / `apply`) feed it to their cache-increment
 /// commit; the CLI ignores it (and it is `#[serde(skip)]`, so it never touches
 /// the wire report). A refusal writes nothing (empty set) and a partial failure
@@ -249,6 +246,15 @@ pub fn apply_migration_plan(
         ));
     }
 
+    // Ordering is a constrained DAG (ADR 0024): validate `requires` before any
+    // write. An edge referencing an unknown op id, or a cycle, is a `malformed-plan`
+    // whole-plan refusal — crossed like every other pre-write barrier so the routed/
+    // MCP surface reconstructs the exit-2 refusal too. A plan declaring no `requires`
+    // passes trivially.
+    if let Err(error) = validate_requires_dag(plan) {
+        return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
+    }
+
     // Emit one `op_planned` per expanded change, collecting the returned span
     // ids into a parallel vec (indexed like `all_changes`). `from` references
     // the parent op index when that parent is a high-level (multi-expansion)
@@ -306,10 +312,10 @@ pub fn apply_migration_plan(
         .collect();
 
     // ------------------------------------------------------------------
-    // Phase 3: delegation to today's applier
+    // Phase 3: the one applier (ADR 0024)
     // ------------------------------------------------------------------
 
-    let repair_plan = ApplyBatch {
+    let batch = ApplyBatch {
         schema_version: REPAIR_PLAN_SCHEMA_VERSION,
         vault_root: vault_root.clone(),
         summary: RepairPlanSummary {
@@ -324,82 +330,38 @@ pub fn apply_migration_plan(
         parents: ctx.parents,
         // NRN-265: every `{{seq}}` create was already resolved to a concrete
         // path by `resolve_create_paths` above (which rewrote `change.path`
-        // under the owner-set barrier). Declare it so the delegate's Pass-1e
-        // seq branch — unreachable on this path — fails closed if a `{{seq}}`
-        // token ever survives, i.e. this pre-resolution step was skipped and
-        // the owner-set barrier validated different paths than would be
-        // written.
+        // under the owner-set barrier). Declare it so the create pass's seq
+        // branch — unreachable on this path — fails closed if a `{{seq}}` token
+        // ever survives.
         creates_preresolved: true,
         // NRN-138 ignore re-check applies to `new`-synthesized create_document
-        // changes (already guarded at plan time by synth::build_plan); the
-        // migration-plan create_document ops routed through here have no such
+        // changes; the migration-plan create ops routed through here have no such
         // guard to backstop, so leave this empty.
         ..Default::default()
     };
 
-    // Runtime write-state fact (NRN-150/183): flipped to `true` by the delegate
-    // the instant its FIRST filesystem write lands. This — NOT the per-variant
-    // `ApplyError::is_precondition()` flag — is the refused-vs-failed gate below,
-    // because the same variant (`stale-document-hash`, `unknown-path`) is raised
-    // from both a pre-write site (Phase A1 content CAS) and a
-    // post-write-possible site (the Phase B delete pass, after Phase A2 already
-    // wrote), so a variant flag structurally cannot answer "was the vault
-    // mutated?".
-    let mut wrote_any = false;
-    let apply_result = match apply_repair_plan_with_context(
+    // The `requires` DAG, projected onto the expanded interior change ids.
+    let deps = build_dependency_map(plan, &hydrated, &provenance);
+
+    // Run the one applier. Per-op failures are recorded in `outcomes.tracker`;
+    // an `Err` here is a plan-level barrier (schema, vault-root, vacate,
+    // duplicate-field, containment) — a byte-identical whole-plan refusal, raised
+    // before the first write.
+    let mut outcomes = match run_apply_passes(
         &vault_root,
         index,
-        &repair_plan,
+        &batch,
         ctx.dry_run,
         &create_ctx,
         sink,
         &spans,
-        Some(&mut wrote_any),
+        &deps,
     ) {
-        Ok(r) => r,
+        Ok(o) => o,
         Err(e) => {
-            if wrote_any {
-                // PARTIAL APPLY: disk was already mutated before the abort. Emit
-                // the TRUTHFUL failed report (outcome = failed, exit 1) on BOTH
-                // surfaces — already-applied ops `applied`, the failing op
-                // `failed` + `error.code`, the rest `not_run`. This must NEVER
-                // imply a byte-identical vault; a consumer sees the partial state
-                // and which op failed, and knows to re-read rather than retry.
-                let rich = e.downcast_ref::<crate::standards::apply::ApplyError>();
-                let envelope = rich
-                    .map(crate::apply::envelope::from_rich)
-                    .unwrap_or_else(|| crate::apply::envelope::from_anyhow(&e));
-                let error_path = rich.and_then(|r| r.path().map(|p| p.to_path_buf()));
-                let trace_id = sink.trace_id().to_string();
-                return Ok(build_partial_failure_report(
-                    plan,
-                    &hydrated,
-                    &provenance,
-                    &span_ids,
-                    sink.events(),
-                    envelope,
-                    error_path.as_deref(),
-                    &trace_id,
-                    preconditions.clone(),
-                ));
-            }
-            // CLEAN REFUSAL: nothing written yet (`wrote_any == false`), the vault
-            // is byte-identical. Return-report-on-refusal (NRN-150/MMR-202) when
-            // the caller opted in (`refuse_as_report`); otherwise (CLI) propagate
-            // the `Err` so the structured stdout envelope renders and the arm
-            // exits 2.
-            //
-            // NRN-231 review F1: this covers the WHOLE pre-write error class, not
-            // just typed rich `ApplyError`s. A bare `anyhow` raised before any
-            // write (create_document frontmatter/serialize validation, the
-            // `{{seq}}`/ignore/exists guards, the up-front validation gates) is
-            // also byte-identical here, so under `refuse_as_report` it too crosses
-            // as a coded, report-shaped refusal — `internal-error` + the `{e:#}`
-            // message, exactly what the CLI's `Err` path renders — instead of
-            // escaping as a bare MCP error that a routed apply would misreport as
-            // post-send-uncertain. Because the gate is the runtime write-state
-            // (`wrote_any`), a bare error raised MID-apply took the `if wrote_any`
-            // partial-failure branch above and never reaches here.
+            // A barrier refusal is pre-write: nothing landed, the vault is
+            // byte-identical. Return-report-on-refusal (NRN-150/MMR-202) when the
+            // caller opted in; otherwise (CLI) propagate the `Err`.
             if ctx.refuse_as_report {
                 let rich = e.downcast_ref::<crate::standards::apply::ApplyError>();
                 let envelope = rich
@@ -420,23 +382,54 @@ pub fn apply_migration_plan(
         }
     };
 
-    // The apply COMMITTED cleanly — capture the touched-file set to carry on the
-    // projected report for the caller's increment commit (NRN-252 / NRN-158).
-    let touched_paths = apply_result.touched_paths();
+    // ------------------------------------------------------------------
+    // Refused-vs-partial (ADR 0024): the runtime write-state, tracked truly.
+    // ------------------------------------------------------------------
+    // A per-op failure with NO write landed is a CLEAN REFUSAL (a single-op
+    // precondition, a stale-hash delete, a create guard): byte-identical to the
+    // old wrote-nothing abort. Once any write has landed, a failure is a truthful
+    // PARTIAL FAILURE assembled below (`outcome = failed`, exit 1), never a
+    // byte-identical `refused`.
+    if outcomes.tracker.failed_count() > 0 && !outcomes.tracker.wrote_any() {
+        let representative = outcomes
+            .tracker
+            .first_failure()
+            .expect("failed_count > 0 guarantees a representative failure");
+        let rich = representative.downcast_ref::<crate::standards::apply::ApplyError>();
+        let envelope = rich
+            .map(crate::apply::envelope::from_rich)
+            .unwrap_or_else(|| crate::apply::envelope::from_anyhow(representative));
+        let error_path = rich.and_then(|r| r.path().map(|p| p.to_path_buf()));
+        if ctx.refuse_as_report {
+            return Ok(build_refusal_report(
+                plan,
+                &hydrated,
+                &provenance,
+                ctx.dry_run,
+                envelope,
+                error_path.as_deref(),
+                preconditions.clone(),
+            ));
+        }
+        // CLI: re-raise the representative rich error so the arm renders its own
+        // structured envelope and exits 2 — byte-identical to the pre-fold path.
+        return Err(outcomes
+            .tracker
+            .take_first_failure()
+            .expect("first_failure was Some"));
+    }
 
     // ------------------------------------------------------------------
-    // Phase 4: convert RepairApplyReport → ApplyReport
+    // Phase 4: assemble the ApplyReport from the recorded per-op outcomes.
     // ------------------------------------------------------------------
 
     let ops = build_report_ops(
         &hydrated,
         &provenance,
         &plan.operations,
-        &apply_result,
+        &outcomes,
         ctx.dry_run,
         ctx.verbose,
-        &span_ids,
-        sink.events(),
         index,
     );
 
@@ -447,7 +440,16 @@ pub fn apply_migration_plan(
         .filter(|o| matches!(o.status, OpStatus::Failed))
         .count();
 
-    let warnings: Vec<ApplyWarning> = apply_result
+    // A clean commit carries the touched-file set for the caller's increment
+    // commit (NRN-252 / NRN-158); a partial failure carries none (the next read's
+    // `detect` heals the cache).
+    let touched_paths = if failed > 0 {
+        Vec::new()
+    } else {
+        outcomes.touched_paths()
+    };
+
+    let warnings: Vec<ApplyWarning> = outcomes
         .warnings
         .iter()
         .map(|w| {
@@ -854,114 +856,105 @@ fn op_display_path(op: &MigrationOp) -> String {
         .to_string()
 }
 
-/// Build the TRUTHFUL partial-failure report (NRN-150/183) for an apply that
-/// ABORTED after at least one filesystem write already landed. Unlike
-/// [`build_refusal_report`] (which asserts a byte-identical vault), this must NOT
-/// imply that nothing changed: every op that emitted an `applied` op-action
-/// event is `applied`, the op that raised the abort is `failed` carrying the
-/// structured `error` envelope, and every op that never ran is `not_run`.
-/// `outcome = failed` (exit 1) on BOTH the CLI (`report.exit_code()`) and MCP
-/// (`Ok(report)`) surfaces, so a consumer sees the partial state and which op
-/// failed and knows to re-read rather than blindly retry.
-#[allow(clippy::too_many_arguments)]
-fn build_partial_failure_report(
+/// Validate the plan's `requires` DAG (ADR 0024) before any write: every edge
+/// must reference an existing op id, and the edges must be acyclic. Either fault
+/// is a `malformed-plan` whole-plan refusal ([`PlanStructureError`] family).
+/// `requires` constrains outcome propagation within the fixed kind-ordered passes;
+/// this only rejects a structurally broken DAG — it does not reorder anything.
+fn validate_requires_dag(plan: &MigrationPlan) -> Result<()> {
+    use crate::standards::apply::PlanStructureError;
+    let ids: BTreeSet<&str> = plan
+        .operations
+        .iter()
+        .filter_map(|op| op.id.as_deref())
+        .collect();
+    // Unknown-reference check across every op (named or not).
+    for op in &plan.operations {
+        for req in &op.requires {
+            if !ids.contains(req.as_str()) {
+                return Err(PlanStructureError::RequiresUnknownOp {
+                    op: op.id.clone().unwrap_or_default(),
+                    requires: req.clone(),
+                }
+                .into());
+            }
+        }
+    }
+    // Cycle detection over the op-id graph (op -> each of its requires), via
+    // iterative DFS with white/gray/black coloring.
+    let by_id: HashMap<&str, &MigrationOp> = plan
+        .operations
+        .iter()
+        .filter_map(|op| op.id.as_deref().map(|id| (id, op)))
+        .collect();
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let mut color: HashMap<&str, Color> = by_id.keys().map(|k| (*k, Color::White)).collect();
+    for start in by_id.keys().copied() {
+        if color[start] != Color::White {
+            continue;
+        }
+        color.insert(start, Color::Gray);
+        let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+        while let Some(&(node, idx)) = stack.last() {
+            let reqs = &by_id[node].requires;
+            if idx < reqs.len() {
+                stack.last_mut().unwrap().1 += 1;
+                let next = reqs[idx].as_str();
+                match color.get(next).copied().unwrap_or(Color::Black) {
+                    Color::White => {
+                        color.insert(next, Color::Gray);
+                        stack.push((next, 0));
+                    }
+                    Color::Gray => {
+                        return Err(PlanStructureError::RequiresCycle {
+                            op: next.to_string(),
+                        }
+                        .into());
+                    }
+                    Color::Black => {}
+                }
+            } else {
+                color.insert(node, Color::Black);
+                stack.pop();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Project the plan's `requires` DAG onto the expanded interior change ids so the
+/// passes propagate outcomes: `change_requires[cid]` is the op ids the change's
+/// parent op requires; `op_changes[op_id]` is the change ids that op expanded to.
+fn build_dependency_map(
     plan: &MigrationPlan,
     changes: &[ApplyOp],
     provenance: &[usize],
-    span_ids: &[String],
-    events: &[Event],
-    envelope: norn_wire::ApplyError,
-    error_path: Option<&Utf8Path>,
-    trace_id: &str,
-    preconditions: Vec<ApplyReportPrecondition>,
-) -> ApplyReport {
-    use norn_wire::ApplyOutcome;
-
-    // Per-change: did an `applied` op-action event land under this op's span?
-    // Same event-driven inference `build_report_ops` uses for the Ok path.
-    let applied_flags: Vec<bool> = changes
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let span = span_ids.get(i).map(|s| s.as_str());
-            let name = action_event_name(&c.operation);
-            span.is_some()
-                && events.iter().any(|e| {
-                    e.span_id.as_deref() == span
-                        && e.name == name
-                        && attr(e, ATTR_STATUS) == Some("applied")
-                })
-        })
-        .collect();
-
-    // The failing op: the first NOT-yet-applied change whose path matches the
-    // error path (falls back to the first un-applied op, then op 0). Preferring
-    // an un-applied match keeps an edit-then-delete on the SAME path from
-    // mislabelling the already-applied edit as the failure.
-    let failed_idx = changes
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| error_path.is_none_or(|ep| c.path == ep))
-        .find(|(i, _)| !applied_flags[*i])
-        .map(|(i, _)| i)
-        .or_else(|| applied_flags.iter().position(|a| !a))
-        .unwrap_or(0);
-
-    let ops: Vec<ApplyReportOp> = changes
-        .iter()
-        .enumerate()
-        .map(|(i, change)| {
-            let parent_op = &plan.operations[provenance[i]];
-            let from = if is_high_level_op(parent_op) {
-                Some(provenance[i].to_string())
-            } else {
-                None
-            };
-            let (status, error) = if i == failed_idx {
-                (OpStatus::Failed, Some(envelope.clone()))
-            } else if applied_flags[i] {
-                (OpStatus::Applied, None)
-            } else {
-                (OpStatus::NotRun, None)
-            };
-            let (finding_code, repair_rule) = op_finding_linkage(parent_op);
-            ApplyReportOp {
-                op_id: i.to_string(),
-                kind: change.operation.clone(),
-                status,
-                from,
-                path: None,
-                stem: None,
-                summary: build_summary(change, /*dry_run=*/ false, None),
-                error,
-                footnote: parent_op.footnote.clone(),
-                cascade: None,
-                // A partial-failure report is the abort/error surface, not the
-                // records success renderer; link-impact is unused here.
-                link_impact: None,
-                finding_code,
-                repair_rule,
-            }
-        })
-        .collect();
-
-    // A write landed → not a dry run; a partial failure leaves the next read's
-    // `detect` to heal the cache (no touched paths). Tallies via `assemble_report`.
-    assemble_report(
-        plan,
-        /* dry_run = */ false,
-        trace_id.to_string(),
-        ops,
-        preconditions,
-        Vec::new(),
-        ApplyOutcome::Failed,
-        Vec::new(),
-    )
+) -> DependencyMap {
+    let mut change_requires: HashMap<String, Vec<String>> = HashMap::new();
+    let mut op_changes: HashMap<String, Vec<String>> = HashMap::new();
+    for (i, change) in changes.iter().enumerate() {
+        let parent = &plan.operations[provenance[i]];
+        if let Some(id) = parent.id.as_ref() {
+            op_changes
+                .entry(id.clone())
+                .or_default()
+                .push(change.change_id.clone());
+        }
+        if !parent.requires.is_empty() {
+            change_requires.insert(change.change_id.clone(), parent.requires.clone());
+        }
+    }
+    DependencyMap::new(change_requires, op_changes)
 }
 
-/// Returns true for operation kinds that the existing apply orchestrator
-/// hash-checks. Operations not listed here (e.g. move_document, create_document)
-/// are not subject to hash checks and can safely have an empty document_hash.
+/// Returns true for operation kinds that the apply passes hash-check. Operations
+/// not listed here (e.g. move_document, create_document) are not subject to hash
+/// checks and can safely have an empty document_hash.
 fn needs_hash_check(operation: &str) -> bool {
     matches!(
         operation,
@@ -1115,97 +1108,6 @@ fn build_cascade_summary(rec: Option<&CascadeRecord>, verbose: bool) -> CascadeS
     }
 }
 
-/// Find an attribute value on an event by key.
-fn attr<'a>(e: &'a Event, key: &str) -> Option<&'a str> {
-    e.attributes
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v.as_str())
-}
-
-/// Fold a cascade summary for a move/delete op out of the in-memory event log.
-///
-/// Every `norn.action.rewrite_link` event under the op's `span` is a cascade
-/// entry (each affected backlink produces exactly one terminal event). We
-/// partition them by status into applied / skipped / failed, reproducing the
-/// same counts the old `RepairApplyReport`-derived path produced.
-fn fold_cascade_from_events(events: &[Event], span: Option<&str>, verbose: bool) -> CascadeSummary {
-    let cascade_events: Vec<&Event> = events
-        .iter()
-        .filter(|e| e.span_id.as_deref() == span && e.name == action_event_name("rewrite_link"))
-        .collect();
-
-    let applied_events: Vec<&Event> = cascade_events
-        .iter()
-        .copied()
-        .filter(|e| attr(e, ATTR_STATUS) == Some("applied"))
-        .collect();
-    let skipped_events: Vec<&Event> = cascade_events
-        .iter()
-        .copied()
-        .filter(|e| attr(e, ATTR_STATUS) == Some("skipped"))
-        .collect();
-    let failed_events: Vec<&Event> = cascade_events
-        .iter()
-        .copied()
-        .filter(|e| attr(e, ATTR_STATUS) == Some("failed"))
-        .collect();
-
-    let files: BTreeSet<&str> = applied_events
-        .iter()
-        .map(|e| attr(e, ATTR_TARGET).unwrap_or(""))
-        .collect();
-
-    let rewrites = if verbose {
-        applied_events
-            .iter()
-            .map(|e| CascadeRewrite {
-                file: attr(e, ATTR_TARGET).unwrap_or("").to_string(),
-                from: attr(e, ATTR_LINK_FROM).unwrap_or("").to_string(),
-                to: attr(e, ATTR_LINK_TO).unwrap_or("").to_string(),
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let skips = if verbose {
-        skipped_events
-            .iter()
-            .map(|e| CascadeSkip {
-                file: attr(e, ATTR_TARGET).unwrap_or("").to_string(),
-                from: attr(e, ATTR_LINK_FROM).unwrap_or("").to_string(),
-                to: attr(e, ATTR_LINK_TO).unwrap_or("").to_string(),
-                reason: attr(e, ATTR_REASON_CODE).unwrap_or("").to_string(),
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let failures = failed_events
-        .iter()
-        .map(|e| CascadeFailure {
-            file: attr(e, ATTR_TARGET).unwrap_or("").to_string(),
-            from: attr(e, ATTR_LINK_FROM).unwrap_or("").to_string(),
-            to: attr(e, ATTR_LINK_TO).unwrap_or("").to_string(),
-            reason: attr(e, ATTR_REASON_CODE).unwrap_or("").to_string(),
-            detail: attr(e, ATTR_REASON_MESSAGE).map(|s| s.to_string()),
-        })
-        .collect();
-
-    CascadeSummary {
-        planned: applied_events.len() + skipped_events.len() + failed_events.len(),
-        applied: applied_events.len(),
-        skipped: skipped_events.len(),
-        failed: failed_events.len(),
-        files: files.len(),
-        rewrites,
-        skips,
-        failures,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 /// Compute the [`LinkImpact`] for a `delete_document` change from the graph
 /// index (NRN-237) — the single source of truth for the records renderer's
@@ -1275,23 +1177,20 @@ fn build_link_impact(change: &ApplyOp, parent_op: &MigrationOp, index: &GraphInd
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_report_ops(
     changes: &[ApplyOp],
     provenance: &[usize],
     plan_ops: &[MigrationOp],
-    apply_result: &RepairApplyReport, // still used for the dry-run cascade forecast
+    outcomes: &ApplyOutcomes,
     dry_run: bool,
     verbose: bool,
-    span_ids: &[String],
-    events: &[Event],
     index: &GraphIndex,
 ) -> Vec<ApplyReportOp> {
     // NRN-101: create_document ops are recorded in `created_documents` in the
     // same order they appear here, each carrying its apply-time-resolved
     // `{{seq}}` path. Walk that list in lockstep so summaries show the real
     // (or dry-run predicted) id, not the unresolved template.
-    let mut created_iter = apply_result.created_documents.iter();
+    let mut created_iter = outcomes.created_documents.iter();
     changes
         .iter()
         .enumerate()
@@ -1307,38 +1206,33 @@ fn build_report_ops(
                 None
             };
 
-            let span = span_ids.get(i).map(|s| s.as_str());
-
+            // True per-op status (ADR 0024): read directly from the tracker the
+            // passes recorded into, not reconstructed from the event log. A
+            // dry-run previews nothing, so every op renders `not_run`.
             let status = if dry_run {
                 OpStatus::NotRun
             } else {
-                // An op is Applied iff an op-action event for THIS op's kind
-                // exists under its span with status "applied"; otherwise
-                // Skipped (processed, no realization) — matching the previous
-                // infer_status semantics.
-                let op_action_name = action_event_name(&change.operation);
-                let applied = span.is_some()
-                    && events.iter().any(|e| {
-                        e.span_id.as_deref() == span
-                            && e.name == op_action_name
-                            && attr(e, ATTR_STATUS) == Some("applied")
-                    });
-                if applied {
-                    OpStatus::Applied
-                } else {
-                    OpStatus::Skipped
-                }
+                outcomes.tracker.status(&change.change_id)
+            };
+
+            // A failed op carries its coded error envelope; the representative op
+            // of a multi-op file failure holds the rich error, its siblings none.
+            let error = if status == OpStatus::Failed {
+                outcomes.tracker.error(&change.change_id).map(|e| {
+                    e.downcast_ref::<crate::standards::apply::ApplyError>()
+                        .map(crate::apply::envelope::from_rich)
+                        .unwrap_or_else(|| crate::apply::envelope::from_anyhow(e))
+                })
+            } else {
+                None
             };
 
             // Lockstep invariant (NRN-175 / F6): `created_documents` holds one
             // entry per create_document that actually PRODUCED a file — every
             // applied create in a real apply, and every predicted create in a
-            // dry-run. Consume the iterator ONLY for such ops. If a create ever
-            // reached here Skipped/Failed (not constructible today — the apply
-            // loop aborts with `Err` on any create failure before build_report_ops
-            // runs — but guarded defensively), consuming would misattribute a
-            // sibling's created path to it. Not consuming leaves path/stem ABSENT
-            // (absent-not-stale) instead.
+            // dry-run. Consume the iterator ONLY for such ops; a create that
+            // failed or was not_run leaves path/stem ABSENT (absent-not-stale)
+            // rather than misattributing a sibling's created path to it.
             let create_realized = dry_run || status == OpStatus::Applied;
             let create_display = if change.operation == "create_document" && create_realized {
                 created_iter.next().map(|c| c.path.as_path())
@@ -1369,17 +1263,19 @@ fn build_report_ops(
                 .and_then(|p| p.file_stem())
                 .map(str::to_string);
 
+            // Cascades are DERIVED at apply and recorded per source path (ADR
+            // 0024): the summary folds directly from the recorded `CascadeRecord`
+            // — its post-retry settled `rewritten`/`skipped`/`failed` — on both
+            // dry-run (forecast) and apply, never from the event log. A move/delete
+            // with no cascade record (no backlinks) folds to an all-zero summary.
             let cascade = match change.operation.as_str() {
-                "move_document" | "delete_document" => Some(if dry_run {
-                    // Keep today's forecast cascade from the RepairApplyReport.
-                    let rec = apply_result
+                "move_document" | "delete_document" => {
+                    let rec = outcomes
                         .cascades
                         .iter()
                         .find(|c| c.source_path == change.path);
-                    build_cascade_summary(rec, verbose)
-                } else {
-                    fold_cascade_from_events(events, span, verbose)
-                }),
+                    Some(build_cascade_summary(rec, verbose))
+                }
                 _ => None,
             };
 
@@ -1407,7 +1303,7 @@ fn build_report_ops(
                 path,
                 stem,
                 summary,
-                error: None, // see note below
+                error,
                 footnote: parent_op.footnote.clone(),
                 cascade,
                 link_impact,
@@ -1417,13 +1313,6 @@ fn build_report_ops(
         })
         .collect()
 }
-
-// Note on error field: the existing `apply_repair_plan_with_context` returns
-// `Err(anyhow::Error)` for any failure and aborts the whole apply — there is
-// no per-change error tracking. If the call returns `Ok`, all changes succeeded
-// (or were no-ops, mapped to Skipped). The `error` field in ApplyReportOp is
-// therefore always `None` in the current implementation. Per-change error
-// tracking is a future enhancement (post Plan Task 20 when we own the apply loop).
 
 #[cfg(test)]
 mod tests {
@@ -1789,11 +1678,9 @@ mod tests {
     /// invariant that the defensive `create_realized` guard enforces.
     #[test]
     fn build_report_ops_skipped_create_gets_absent_not_stale_path() {
-        // OpStatus, RepairApplyReport, SkippedSummary, ApplyOp,
-        // MigrationOp, Event, action_event_name, ATTR_STATUS, Utf8PathBuf are all
-        // already in scope via `super::*`; import only what is not.
-        use crate::standards::apply::{CreateDocumentResult, RepairApplyPlanContext};
-        use crate::telemetry::Severity;
+        // OpStatus, ApplyOutcomes, ApplyOp, MigrationOp, Utf8PathBuf are all in
+        // scope via `super::*`; import only what is not.
+        use crate::standards::apply::CreateDocumentResult;
 
         // Minimal create_document ApplyOp (path/stem for a create come from
         // `created_documents`, not from the change itself, so `path` is a filler).
@@ -1826,43 +1713,22 @@ mod tests {
             }
         }
 
-        // Two create ops. Only op1 realized: `created_documents` holds exactly
-        // ONE entry (op1's resolved path), and only span "s1" has an applied
-        // op-action event, so op0 computes to Skipped, op1 to Applied.
+        // Two create ops. Only op1 (change_id "c1") realized: the tracker records
+        // c0 `skipped` and c1 `applied`, and `created_documents` holds exactly ONE
+        // entry (op1's resolved path).
         let changes = vec![create_change("c0"), create_change("c1")];
         let provenance = vec![0usize, 1usize];
         let plan_ops = vec![create_op(), create_op()];
-        let span_ids = vec!["s0".to_string(), "s1".to_string()];
-        let events = vec![Event {
-            trace_id: String::new(),
-            span_id: Some("s1".into()),
-            severity: Severity::Info,
-            name: action_event_name("create_document"),
-            body: String::new(),
-            attributes: vec![(ATTR_STATUS, "applied".into())],
-            timestamp: String::new(),
-        }];
-        let apply_result = RepairApplyReport {
-            schema_version: 1,
-            dry_run: false,
-            changed_files: vec![],
-            applied_changes: 1,
-            moved_files: vec![],
-            deleted_documents: vec![],
+
+        let mut tracker = crate::apply::passes::OpTracker::default();
+        tracker.skipped("c0");
+        tracker.applied("c1");
+        let outcomes = ApplyOutcomes {
             created_documents: vec![CreateDocumentResult {
                 path: Utf8PathBuf::from("tasks/created-b.md"),
             }],
-            rewritten_links: vec![],
-            cascades: vec![],
-            replaced_bodies: vec![],
-            warnings: vec![],
-            plan_context: RepairApplyPlanContext {
-                skipped: SkippedSummary {
-                    by_reason: Default::default(),
-                    total: 0,
-                },
-            },
-            verification: None,
+            tracker,
+            ..Default::default()
         };
 
         // The ops under test are all create_document (no link_impact), so an empty
@@ -1877,11 +1743,9 @@ mod tests {
             &changes,
             &provenance,
             &plan_ops,
-            &apply_result,
+            &outcomes,
             false, // not dry-run
             false, // not verbose
-            &span_ids,
-            &events,
             &empty_index,
         );
 
@@ -2691,5 +2555,201 @@ mod tests {
             report.preconditions[0].status,
             norn_wire::PreconditionStatus::Failed
         );
+    }
+
+    // ── NRN-406 (ADR 0024): partial apply + requires DAG ──────────────────────
+
+    /// A create op whose `path` parent dir is missing and no `-p` — a create that
+    /// fails at apply. `id`/`requires` are author-declared.
+    fn create_op(path: &str, id: Option<&str>, requires: &[&str]) -> MigrationOp {
+        MigrationOp {
+            kind: "create_document".into(),
+            id: id.map(str::to_string),
+            requires: requires.iter().map(|s| s.to_string()).collect(),
+            fields: serde_json::json!({
+                "path": path,
+                "new_value": { "frontmatter": { "type": "note" }, "body": "# x\n" },
+            }),
+            footnote: None,
+        }
+    }
+
+    fn confirm_ctx() -> ApplyContext {
+        ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+            refuse_as_report: true,
+            owner_index_options: Default::default(),
+        }
+    }
+
+    fn plan_of(vault_root: &str, operations: Vec<MigrationOp>) -> MigrationPlan {
+        MigrationPlan {
+            schema_version: 2,
+            vault_root: vault_root.to_string(),
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations,
+            skipped: vec![],
+            plan_footnote: None,
+        }
+    }
+
+    /// Independent files proceed (the ONE deliberate behavior change, ADR 0024):
+    /// op0 writes, op1 fails (missing parent), and the INDEPENDENT op2 still
+    /// applies — where the old abort-at-first-failure left it not_run.
+    #[test]
+    fn independent_op_failure_does_not_abort_remaining_plan() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![
+                create_op("first.md", None, &[]),
+                create_op("missing/second.md", None, &[]), // parent missing → fails
+                create_op("third.md", None, &[]),          // independent → proceeds
+            ],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Failed);
+        assert_eq!(report.exit_code(), 1, "a write landed → partial failure");
+        assert_eq!(report.operations[0].status, OpStatus::Applied);
+        assert_eq!(report.operations[1].status, OpStatus::Failed);
+        assert_eq!(
+            report.operations[1].error.as_ref().map(|e| e.code.as_str()),
+            Some("create-parent-missing")
+        );
+        assert_eq!(
+            report.operations[2].status,
+            OpStatus::Applied,
+            "the independent op proceeds past the failure"
+        );
+        assert_eq!(report.applied, 2);
+        assert_eq!(report.remaining, 0);
+        assert!(tmp.path().join("first.md").exists());
+        assert!(tmp.path().join("third.md").exists());
+    }
+
+    /// A `requires` edge to a FAILED op propagates: the dependent records
+    /// not_run (never runs), while the plan otherwise proceeds — cross-kind (a
+    /// create requiring a delete).
+    #[test]
+    fn failed_requirement_propagates_not_run_cross_kind() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![
+                create_op("landed.md", None, &[]), // writes → wrote_any = true
+                MigrationOp {
+                    kind: "delete_document".into(),
+                    id: Some("del".into()),
+                    requires: vec![],
+                    fields: serde_json::json!({ "path": "ghost.md" }), // unknown-path → fails
+                    footnote: None,
+                },
+                create_op("dependent.md", None, &["del"]), // requires the failed delete
+            ],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Failed);
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.operations[0].status, OpStatus::Applied);
+        assert_eq!(report.operations[1].status, OpStatus::Failed);
+        assert_eq!(
+            report.operations[2].status,
+            OpStatus::NotRun,
+            "the create requiring the failed delete must not run"
+        );
+        assert!(
+            !tmp.path().join("dependent.md").exists(),
+            "a not_run op writes nothing"
+        );
+    }
+
+    /// A `requires` edge to an unknown op id refuses the WHOLE plan before any
+    /// write: `malformed-plan`, exit 2, every op not_run except the offender.
+    #[test]
+    fn requires_unknown_op_refuses_whole_plan() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![create_op("a-new.md", Some("mk"), &["does-not-exist"])],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        let err = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .expect("refusal carries a coded error");
+        assert_eq!(err.code, "malformed-plan");
+        assert!(err.message.contains("unknown operation id"));
+        assert!(
+            !tmp.path().join("a-new.md").exists(),
+            "refusal writes nothing"
+        );
+    }
+
+    /// A `requires` CYCLE refuses the whole plan: `malformed-plan`, exit 2.
+    #[test]
+    fn requires_cycle_refuses_whole_plan() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![
+                create_op("cyc-a.md", Some("a"), &["b"]),
+                create_op("cyc-b.md", Some("b"), &["a"]),
+            ],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        let err = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .expect("refusal carries a coded error");
+        assert_eq!(err.code, "malformed-plan");
+        assert!(err.message.contains("cycle"));
+        assert!(!tmp.path().join("cyc-a.md").exists());
+        assert!(!tmp.path().join("cyc-b.md").exists());
+    }
+
+    /// Refusal is still TOTAL: a plan-level validation failure (a duplicate op id)
+    /// leaves every op not_run except the offender, byte-identically to today.
+    #[test]
+    fn plan_level_refusal_is_total() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![
+                create_op("dup-a.md", Some("dup"), &[]),
+                create_op("dup-b.md", Some("dup"), &[]),
+            ],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        assert_eq!(report.applied, 0);
+        assert_eq!(
+            report
+                .operations
+                .iter()
+                .filter(|o| o.status == OpStatus::Failed)
+                .count(),
+            1,
+            "exactly the offending op is failed"
+        );
+        assert!(!tmp.path().join("dup-a.md").exists());
+        assert!(!tmp.path().join("dup-b.md").exists());
     }
 }

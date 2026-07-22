@@ -26,8 +26,8 @@
 pub mod envelope;
 pub mod executor;
 pub mod fsops;
+pub mod passes;
 pub mod preconditions;
-pub mod repair_apply;
 pub mod transaction;
 
 pub use executor::{apply_migration_plan, ApplyContext};
