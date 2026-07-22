@@ -209,8 +209,16 @@ fn default_mode_gates_help_cases_exit_0() {
     // silently coerces each (in the delete case, applying a destructive delete),
     // the rewrite refuses `malformed-plan`. The gated total grows to 118 and the
     // diverged count from 35 to 38; the match count stays 80.
+    // NRN-406 (ADR 0022 flat finding contract) RE-ANCHORS three already-gated
+    // cases from MATCH to DIVERGE under one ledger entry (PD-122): the two CLI
+    // finding shapes (`validate-code-filter-zoo` json, `validate-jsonl-code-zoo`
+    // jsonl) and the MCP `mcp-tools-call-validate-code-zoo` structuredContent that
+    // follows them — the oracle leaks the internal link/diagnostic model and
+    // per-variant fields; the rewrite emits the flat closed contract. The gated
+    // total stays 118; the match count drops from 80 to 77 and the diverged count
+    // grows from 38 to 41.
     assert!(
-        stdout.contains("118 cases: 80 match, 38 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("118 cases: 77 match, 41 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -237,6 +245,10 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-119",
         "PD-120",
         "PD-121",
+        "PD-122",
+        "validate-code-filter-zoo",
+        "validate-jsonl-code-zoo",
+        "mcp-tools-call-validate-code-zoo",
         "apply-authored-wrong-typed-bool-refusal-zoo",
         "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
         "apply-authored-wrong-typed-document-hash-refusal-zoo",

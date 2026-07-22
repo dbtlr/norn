@@ -51,7 +51,7 @@ pub use defaults::{
 };
 pub use duration::parse_duration;
 pub use engine::validate_with_compiled;
-pub use findings::{Finding, FindingBody};
+pub use findings::Finding;
 pub use path_match::{effective_match_glob, glob_from_target, pattern_from_target, PathPattern};
 pub use repair::link_risk::{classify as classify_link_risk, AffectedLink, LinkRisk};
 pub use repair::warnings::PlanWarning;

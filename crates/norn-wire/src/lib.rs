@@ -30,6 +30,7 @@
 
 mod control;
 mod filter;
+mod finding;
 mod mutate;
 mod paging;
 mod plan;
@@ -39,6 +40,7 @@ mod report;
 
 pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 pub use filter::FilterParams;
+pub use finding::{Finding, Severity};
 pub use mutate::{
     ApplyParams, CodedError, DeleteParams, EditChange, EditParams, EditReport, FrontmatterChange,
     FrontmatterCreated, MoveParams, MutationOutcome, MutationWarning, NewParams, NewReport,

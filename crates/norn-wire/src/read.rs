@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::{FilterParams, MigrationPlan, SortPaginateParams};
+use crate::{FilterParams, Finding, MigrationPlan, SortPaginateParams};
 
 /// A `find` request: the shared filter + sort/paging vocabulary. The find-only
 /// `--limit` default (10) and the `--all` help-gate are applied CLI-side and
@@ -372,23 +372,19 @@ pub struct ValidateParams {
     pub summary: bool,
 }
 
-/// A `validate` response: the post-filter findings (each a pre-serialized
-/// [`Finding`] JSON object, byte-identical to the engine's own serialization, so
-/// `--format json`/`jsonl` are pure passthroughs) plus the pre-rendered
-/// `--summary` JSON body and the run header counts. `has_errors` is the single
-/// exit-code driver (a document carried an error-severity graph diagnostic),
-/// computed over the whole index BEFORE triage filtering so a `--code` narrow
-/// never changes the exit code.
+/// A `validate` response: the post-filter findings as the typed flat
+/// [`Finding`] contract (ADR 0022 — no pre-serialized string tunnel), plus the
+/// pre-rendered `--summary` JSON body and the run header counts. `has_errors` is
+/// the single exit-code driver (a document carried an error-severity graph
+/// diagnostic), computed over the whole index BEFORE triage filtering so a
+/// `--code` narrow never changes the exit code.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidateReport {
-    /// Each finding pre-serialized to its compact JSON (the `Finding` struct's
-    /// own field order), so `--format jsonl` is a verbatim per-line passthrough
-    /// byte-identical to the donor's `serde_json::to_string(finding)`. The CLI
-    /// parses these back to `Value` for the `--format json`/`records`/`paths`
-    /// projections (parsing yields the alphabetical key order the donor's `json!`
-    /// macro also produces, so `--format json` matches too).
+    /// The post-filter findings. Renderers serialize these at the edge:
+    /// `--format jsonl` writes one finding per line, `--format json` wraps them
+    /// in `{total, findings}`, and `records`/`paths` read the typed fields.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub findings: Vec<String>,
+    pub findings: Vec<Finding>,
     /// The exact `serde_json::to_string_pretty` of the grouped summary over the
     /// filtered findings — what `--format json --summary` prints verbatim.
     /// `Some` only when the request set `--summary`; `None` otherwise (the owner

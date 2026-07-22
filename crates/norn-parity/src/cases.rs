@@ -305,7 +305,9 @@ const VALIDATE_CASES: &[Case] = &[
     // carries more than one finding. `frontmatter-required-field-missing`
     // matches at most once per document in the zoo fixture, so this stays
     // deterministic while still exercising the raw (non-summary) findings
-    // shape.
+    // shape. DIVERGES under PD-122 (ADR 0022): the oracle flattens an untagged
+    // per-variant body onto the finding; the rewrite emits the flat closed
+    // contract (`path`-first, absent optionals omitted, no leaked models).
     Case {
         id: "validate-code-filter-zoo",
         argv: &[
@@ -329,9 +331,10 @@ const VALIDATE_CASES: &[Case] = &[
     },
     Case {
         // `--format jsonl` over the same single-per-document code: one finding
-        // per line, in document (path) order — stable — and the per-line bytes
-        // pin the `Finding` struct's own field order (distinct from `--format
-        // json`'s alphabetical `json!` order).
+        // per line, in document (path) order — stable. DIVERGES under PD-122
+        // (ADR 0022): the per-line bytes are now the flat closed contract's field
+        // order (`path`-first, `rule` omitted when absent rather than `null`),
+        // not the oracle's untagged-body order.
         id: "validate-jsonl-code-zoo",
         argv: &[
             "validate",
@@ -1476,10 +1479,10 @@ const MCP_CASES: &[Case] = &[
         // class. The narrow is deliberate: a bare full-vault validate on the zoo
         // trips a finding-ORDER divergence between the oracle and the rewrite
         // (visible at the CLI level too — the reason bare `validate --format json`
-        // is not a gated CLI case either), which is out of this task's scope. The
-        // single-code filter yields a path-ordered, byte-identical finding set,
-        // proving the wire's pre-serialized finding strings re-parse into typed
-        // `structuredContent` correctly (verbose detail kept, PD-111-adjacent).
+        // is not a gated CLI case either), which is out of this task's scope.
+        // DIVERGES under PD-122 (ADR 0022): the structuredContent findings follow
+        // the flat closed contract, so the leaked internal link/diagnostic model
+        // and per-variant fields the oracle emitted are gone.
         id: "mcp-tools-call-validate-code-zoo",
         argv: &["mcp"],
         fixture: MCP_FIXTURE,

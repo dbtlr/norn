@@ -2,14 +2,12 @@
 //! findings.
 //!
 //! The param struct mirrors `norn validate`'s triage filters; the handler routes
-//! to the owner and projects the wire [`ValidateReport`] (whose findings cross as
-//! pre-serialized JSON strings — the owner's byte-identical `serde_json` of each
-//! `Finding`) into the typed [`ValidateOutput`] envelope: the strings are parsed
-//! back to `Value` (the owner already produced the canonical key order), so the
-//! MCP `structuredContent` carries typed findings rather than double-serialized
-//! strings.
+//! to the owner and projects the wire [`ValidateReport`] into the typed
+//! [`ValidateOutput`] envelope. Findings cross as the flat [`norn_wire::Finding`]
+//! contract (ADR 0022 — no pre-serialized string tunnel), so the MCP
+//! `structuredContent` carries them directly, schema and all, with no re-parse.
 
-use norn_wire::{ValidateParams as WireValidateParams, ValidateReport};
+use norn_wire::{Finding, ValidateParams as WireValidateParams, ValidateReport};
 use serde::{Deserialize, Serialize};
 
 /// Parameters for `vault.validate` — the agent-relevant triage filters. All
@@ -53,16 +51,16 @@ pub struct ValidateParams {
 }
 
 /// Structured output for `vault.validate` — a `type: object` root wrapping the
-/// per-finding payload as generic `Value` (a `Finding` carries a path type with
-/// no `JsonSchema` impl).
+/// per-finding payload as the typed, schema-bearing [`Finding`] contract (ADR
+/// 0022: the flat wire type is nameable and closed, so the tool exposes a schema
+/// instead of opaque values).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ValidateOutput {
-    /// Validation findings, filtered by any supplied triage predicates. Each
-    /// entry is the JSON form of a `Finding`. **Absent** in `summary` mode (the
-    /// findings are rolled up into `summary` instead), so `findings: []`
-    /// unambiguously means CLEAN.
+    /// Validation findings, filtered by any supplied triage predicates.
+    /// **Absent** in `summary` mode (the findings are rolled up into `summary`
+    /// instead), so `findings: []` unambiguously means CLEAN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub findings: Option<Vec<serde_json::Value>>,
+    pub findings: Option<Vec<Finding>>,
 
     /// The grouped finding-count rollup, present only when `summary: true` was
     /// requested — byte-for-byte the same shape `norn validate --summary --format
@@ -89,16 +87,13 @@ pub(crate) fn to_wire(p: ValidateParams) -> WireValidateParams {
     }
 }
 
-/// Project the wire report into the typed output envelope. The pre-serialized
-/// finding strings are re-parsed to `Value` (the owner emitted them in the
-/// canonical key order) so the surface carries typed findings, never
-/// double-serialized strings.
-///
-/// A parse failure on this double-encoding seam is surfaced as an `Err`, NOT
-/// silently dropped: an unparseable finding string (or a bad `--summary` body)
-/// can only happen on owner/client version skew, and silently losing a finding —
-/// or turning a dirty vault's rollup into `null` — is the wrong failure mode for a
-/// validation surface. The caller maps it to a tool ERROR.
+/// Project the wire report into the typed output envelope. Findings are already
+/// the typed flat [`Finding`] contract (ADR 0022), so they move straight into
+/// `structuredContent` — no string re-parse, no owner/client double-encoding
+/// seam. The `--summary` body is still a pre-rendered JSON string (the grouped
+/// rollup's exact `--format json --summary` bytes), so it alone can fail to
+/// re-parse on owner/client skew; that surfaces as an `Err`, never a silent
+/// `null` rollup, and the caller maps it to a tool ERROR.
 pub(crate) fn envelope(
     report: ValidateReport,
     summary_requested: bool,
@@ -115,17 +110,8 @@ pub(crate) fn envelope(
             summary,
         })
     } else {
-        let findings = report
-            .findings
-            .iter()
-            .map(|s| {
-                serde_json::from_str(s).map_err(|e| {
-                    format!("a validate finding did not re-parse (owner/client skew?): {e}")
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(ValidateOutput {
-            findings: Some(findings),
+            findings: Some(report.findings),
             summary: None,
         })
     }
@@ -134,8 +120,9 @@ pub(crate) fn envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use norn_wire::Severity;
 
-    fn report(findings: Vec<String>, summary_json: Option<String>) -> ValidateReport {
+    fn report(findings: Vec<Finding>, summary_json: Option<String>) -> ValidateReport {
         ValidateReport {
             findings,
             summary_json,
@@ -145,16 +132,32 @@ mod tests {
         }
     }
 
+    fn finding(code: &str) -> Finding {
+        Finding {
+            path: "notes/a.md".into(),
+            code: code.into(),
+            severity: Severity::Warning,
+            message: "m".into(),
+            rule: None,
+            field: None,
+            target: None,
+            candidates: vec![],
+            next_actions: vec![],
+        }
+    }
+
     #[test]
-    fn findings_reparse_to_typed_values() {
-        let out = envelope(
-            report(vec![r#"{"code":"x","severity":"warning"}"#.into()], None),
-            false,
-        )
-        .unwrap();
+    fn typed_findings_pass_through_to_structured_content() {
+        // ADR 0022: the wire already carries the typed flat contract, so the
+        // envelope moves findings straight through — no re-parse seam remains.
+        let out = envelope(report(vec![finding("x")], None), false).unwrap();
         let findings = out.findings.expect("findings present in default mode");
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0]["code"], "x");
+        assert_eq!(findings[0].code, "x");
+        // The typed finding serializes cleanly into structuredContent.
+        let v = serde_json::to_value(&findings[0]).unwrap();
+        assert_eq!(v["code"], "x");
+        assert_eq!(v["severity"], "warning");
         assert!(out.summary.is_none());
     }
 
@@ -162,12 +165,6 @@ mod tests {
     fn empty_findings_is_clean_not_null() {
         let out = envelope(report(vec![], None), false).unwrap();
         assert_eq!(out.findings, Some(vec![]), "clean vault is findings: []");
-    }
-
-    #[test]
-    fn an_unparseable_finding_is_a_tool_error_not_a_silent_drop() {
-        let err = envelope(report(vec!["not json".into()], None), false).unwrap_err();
-        assert!(err.contains("did not re-parse"), "got: {err}");
     }
 
     #[test]
@@ -179,6 +176,8 @@ mod tests {
 
     #[test]
     fn an_unparseable_summary_body_is_a_tool_error() {
+        // The summary rollup is still a pre-rendered JSON string, so it is the
+        // one seam that can fail to re-parse on owner/client skew.
         let err = envelope(report(vec![], Some("{bad".into())), true).unwrap_err();
         assert!(err.contains("did not re-parse"), "got: {err}");
     }

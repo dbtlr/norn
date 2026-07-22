@@ -16,7 +16,7 @@ use crate::seq_alloc::{self, SEQ_TOKEN};
 use crate::standards::apply::ensure_within_vault;
 use crate::standards::{
     applicable_rules, compile_config, path_variables, render, resolve_to_fixpoint, CompiledConfig,
-    Context, FindingBody, VaultConfig,
+    Context, VaultConfig,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -297,52 +297,35 @@ fn post_create_validate(
 
     let mut extra = Vec::new();
     for finding in findings.iter().filter(|f| f.path.as_str() == doc_path) {
-        match &finding.body {
-            FindingBody::RequiredFrontmatterMissing { field, rule } => {
-                if already_warned.contains(field.as_str()) {
-                    continue;
-                }
-                let rules = rule.as_ref().map(|r| vec![r.clone()]).unwrap_or_default();
-                extra.push(MutationWarning {
-                    code: "missing-required-field".into(),
-                    field: Some(field.clone()),
-                    message: format!(
-                        "missing required field '{field}' (rules: {})",
-                        rules.join(", ")
-                    ),
-                });
+        if finding.code == "frontmatter-required-field-missing" {
+            let Some(field) = finding.field.as_deref() else {
+                continue;
+            };
+            if already_warned.contains(field) {
+                continue;
             }
-            other => {
-                extra.push(MutationWarning {
-                    code: finding.code.clone(),
-                    field: finding_field(other),
-                    message: finding.message.clone(),
-                });
-            }
+            let rules = finding
+                .rule
+                .as_ref()
+                .map(|r| vec![r.clone()])
+                .unwrap_or_default();
+            extra.push(MutationWarning {
+                code: "missing-required-field".into(),
+                field: Some(field.to_string()),
+                message: format!(
+                    "missing required field '{field}' (rules: {})",
+                    rules.join(", ")
+                ),
+            });
+        } else {
+            extra.push(MutationWarning {
+                code: finding.code.clone(),
+                field: finding.field.clone(),
+                message: finding.message.clone(),
+            });
         }
     }
     extra
-}
-
-/// The field name a validate finding's body carries, if any — used to populate
-/// the unified warning envelope's optional `field`. `RequiredFrontmatterMissing`
-/// is handled by its own arm in the caller and never reaches here.
-fn finding_field(body: &FindingBody) -> Option<String> {
-    match body {
-        FindingBody::DisallowedValue { field, .. }
-        | FindingBody::InvalidFieldType { field, .. }
-        | FindingBody::ExceedsMaxLength { field, .. }
-        | FindingBody::ForbiddenField { field, .. }
-        | FindingBody::ReferenceType { field, .. }
-        | FindingBody::AliasMalformed { field, .. } => Some(field.clone()),
-        FindingBody::GraphDiagnostic { .. }
-        | FindingBody::LinkIssue { .. }
-        | FindingBody::DocumentMisrouted { .. }
-        | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. }
-        | FindingBody::NonportableFilename { .. }
-        | FindingBody::RequiredFrontmatterMissing { .. } => None,
-    }
 }
 
 // ── Three-mode resolution ───────────────────────────────────────────────────

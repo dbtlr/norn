@@ -914,14 +914,14 @@ fn render_validate<O: Write, E: Write>(
     let palette = palette::resolve(global.color);
     let width = term_width();
 
-    // Parse each carried finding line (compact struct-order JSON) back to a
-    // Value for the json / records / paths projections; jsonl writes the lines
-    // verbatim (so its per-line bytes stay the donor's struct field order).
+    // The findings arrive as the typed flat contract (ADR 0022). Serialize each
+    // to a `Value` for the json / records / paths projections that read fields
+    // by name; jsonl serializes each finding directly, one per line.
     let findings: Vec<Value> = view
         .report
         .findings
         .iter()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .map(|f| serde_json::to_value(f).unwrap_or(Value::Null))
         .collect();
 
     let (out, err) = presenter.streams();
@@ -943,8 +943,8 @@ fn render_validate<O: Write, E: Write>(
                 }
             }
             Format::Jsonl => {
-                for line in &view.report.findings {
-                    writeln!(out, "{line}")?;
+                for finding in &view.report.findings {
+                    writeln!(out, "{}", serde_json::to_string(finding)?)?;
                 }
             }
             Format::Paths => {
