@@ -9,8 +9,9 @@
 //! - [`commands`] — one module per command (clap `Args` + `to_params` + `run`). The
 //!   read verbs (`find` / `count` / `get` / `describe` / `validate` / `repair`), the
 //!   mutation verbs (`set` / `new` / `edit` / `move` / `delete` / `rewrite_wikilink`
-//!   / `apply`), and the `vault` registry namespace execute for real; the
-//!   still-unported surfaces (`init`, `completions`, `cache`, `config`,
+//!   / `apply`), the `vault` registry namespace, and `mcp` (which resolves and
+//!   summons a session like a read verb, then runs the MCP stdio server) execute
+//!   for real; the still-unported surfaces (`init`, `completions`, `cache`, `config`,
 //!   `self-update`, `serve`, `service`, `audit`, `manpage`) route to the uniform
 //!   not-yet-ported outcome by name (NRN-329).
 //! - [`display`] — the presentation layer: the output-format vocabulary, the stderr
