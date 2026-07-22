@@ -2508,6 +2508,33 @@ const EDIT_CASES: &[Case] = &[
         normalize: TRACE_NORM,
         plan: None,
     },
+    // ── NRN-164: forgiving ATX-prefixed heading anchor (PD-130) ───────────────
+    // A confirmed `replace_section` whose anchor is passed in its natural
+    // markdown form (`## Section One`) rather than the bare heading text. The
+    // oracle's resolver requires the bare text, so it REFUSES `heading not
+    // found: "## Section One"` (exit 2, write-free); the rewrite tries the anchor
+    // exactly, then — on the miss — strips the ATX prefix and resolves on the
+    // heading TEXT, applying the edit (exit 0). stdout, exit, AND the post-state
+    // tree diverge (only the rewrite writes). Pinned by PD-130.
+    Case {
+        id: "edit-atx-prefixed-heading-anchor-diverge",
+        argv: &[
+            "edit",
+            "alpha",
+            "--edits-json",
+            "[{\"op\":\"replace_section\",\"heading\":\"## Section One\",\"content\":\"Forgiving anchor landed.\"}]",
+            "--yes",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
 ];
 
 /// Authored-plan parity for `apply` (NRN-394): the gap the verb's own port

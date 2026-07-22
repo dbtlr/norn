@@ -107,8 +107,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-151 (ADR 0024) adds two `apply` cases (a hand-authored hash-less
     // `delete_document` refusal and a `move_document` stale-hash refusal), taking
     // the total to 132; self-check runs oracle vs. itself, so all 132 Match.
+    // NRN-164 adds one `edit` case (a `replace_section` anchored on the ATX-
+    // prefixed `## Section One` form) taking the total to 133; self-check runs
+    // oracle vs. itself (both refuse the markdown form), so all 133 Match.
     assert!(
-        stdout.contains("132 cases: 132 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("133 cases: 133 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -262,8 +265,14 @@ fn default_mode_gates_help_cases_exit_0() {
     // forecasts) and PD-129 (a `move_document` stale-hash refuses
     // `stale-document-hash` — the new optional move CAS the donor lacked). The
     // gated total grows to 131, the diverged count from 53 to 55; match stays 76.
+    // NRN-164 adds one DIVERGING `edit` case under ledger entry PD-130
+    // (decided-better): a `replace_section` anchored on the natural markdown form
+    // `## Section One` — the oracle's resolver requires the bare heading text and
+    // refuses `heading not found` (exit 2, write-free), the rewrite strips the ATX
+    // prefix and applies (exit 0); stdout, exit, and post-state all diverge. The
+    // gated total grows to 132, the diverged count from 55 to 56; match stays 76.
     assert!(
-        stdout.contains("131 cases: 76 match, 55 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("132 cases: 76 match, 56 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
