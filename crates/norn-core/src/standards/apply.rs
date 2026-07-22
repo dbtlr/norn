@@ -330,6 +330,11 @@ pub enum PlanStructureError {
     #[error("create_document path has no file stem: {path}")]
     CreatePathNoStem { path: Utf8PathBuf },
 
+    #[error(
+        "create_document: `{{{{seq}}}}` is only supported once, in the file name of a rule target: {path}"
+    )]
+    SeqMisplaced { path: Utf8PathBuf },
+
     #[error("edit op missing payload for {path}")]
     EditPayloadMissing { path: Utf8PathBuf },
 

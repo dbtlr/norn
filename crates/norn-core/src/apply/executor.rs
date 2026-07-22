@@ -593,6 +593,16 @@ fn resolve_create_paths(
         let path = change.path.clone();
         crate::apply::fsops::ensure_within_vault(&index.root, canonical_root, &path)?;
         let resolved = if crate::seq_alloc::has_seq(&path) {
+            // A `{{seq}}` outside the file name, or a second occurrence, is the
+            // author's plan-structure fault — refuse typed (`malformed-plan`)
+            // rather than letting seq_alloc's backstop launder it to
+            // `internal-error`.
+            if crate::seq_alloc::seq_misplaced(&path) {
+                return Err(crate::standards::apply::PlanStructureError::SeqMisplaced {
+                    path: path.clone(),
+                }
+                .into());
+            }
             crate::seq_alloc::resolve_seq_create(&index.root, &path, &allocated_this_plan)?
         } else {
             path
@@ -2508,10 +2518,13 @@ mod tests {
             .iter()
             .find_map(|o| o.error.as_ref())
             .expect("refused report carries a coded error");
-        assert_eq!(err.code, "internal-error");
+        assert_eq!(
+            err.code, "malformed-plan",
+            "a misplaced/doubled {{{{seq}}}} is the author's plan-structure fault (NRN-436)"
+        );
         assert!(
             err.message.contains("only supported once"),
-            "message carries the bare error prose: {}",
+            "message text preserved from the old bare error: {}",
             err.message
         );
 
